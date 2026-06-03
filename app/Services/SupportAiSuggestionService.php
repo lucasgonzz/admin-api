@@ -12,8 +12,9 @@ use Illuminate\Support\Facades\Log;
  * Genera sugerencias de respuesta de soporte vía Anthropic (Claude) con tool use.
  *
  * Claude puede consultar el repositorio de documentación de ComercioCity
- * (lucasgonzz/comerciocity-manual-sistema) de forma autónoma usando las tools
- * `list_manual_files` y `get_manual_file` antes de formular su respuesta.
+ * (lucasgonzz/comerciocity-manual-sistema) usando la tool `get_manual_file`
+ * antes de formular su respuesta. La lista de archivos disponibles se inyecta
+ * en el system prompt en cada request.
  */
 class SupportAiSuggestionService
 {
@@ -213,17 +214,80 @@ Respondé SOLO en JSON con este formato exacto:
 
     /**
      * Arma el system prompt indicando a Claude cómo usar las tools del repositorio.
+     * Incluye la lista de archivos .md obtenida de GitHub en cada request.
      *
      * @return string
      */
     protected function build_system_prompt(): string
     {
+        // Lista de archivos del manual inyectada en el prompt (no como tool).
+        $file_list = $this->fetch_manual_file_list();
+
         return <<<SYSTEM
 Sos un asistente de soporte técnico de ComercioCity, una plataforma de operación comercial para distribuidoras y comercios argentinos.
-Tu tarea es sugerir respuestas para que el operador las revise y apruebe antes de enviar. Respondé siempre en español rioplatense, de forma clara, cordial y concisa.
+Tu tarea es sugerir al operador la respuesta más útil para el cliente.
+Respondé siempre en español rioplatense.
 
-Tenés acceso a herramientas para consultar el repositorio de documentación de ComercioCity. Antes de responder cualquier duda técnica o funcional del cliente, usá list_manual_files para ver qué archivos están disponibles y luego get_manual_file para leer el contenido relevante. El repositorio está organizado por módulo y funcionalidad. Cada archivo tiene un frontmatter con modulo, tema y keywords que te ayudan a inferir cuál leer.
+ESTILO:
+- Escribí como una persona real escribiría por WhatsApp: texto plano, sin asteriscos,
+  sin guiones como viñetas, sin negritas, sin ningún símbolo de formato markdown.
+- Sé claro y directo. No uses frases de relleno ni cierres genéricos del tipo
+  "¿hay algo más en lo que te pueda ayudar?" o similares.
+- Respondé lo que el cliente preguntó, sin agregar información que no pidió.
+- No uses la palabra "toggle". Reemplazala siempre por "check".
+
+CUÁNDO HACER UNA PREGUNTA:
+- Si el mensaje del cliente es ambiguo o incompleto y necesitás más contexto
+  para dar una respuesta útil, sugerí una pregunta como respuesta en lugar de
+  asumir. Esto es preferible a dar una respuesta genérica que no resuelve nada.
+- No hagas preguntas de cortesía ni de cierre. Solo preguntás cuando la respuesta
+  depende de información que el cliente no dio.
+
+Tenés acceso a la herramienta get_manual_file para leer archivos del repositorio de documentación de ComercioCity.
+Antes de responder cualquier duda técnica o funcional del cliente, leé el archivo relevante usando get_manual_file.
+Si no sabés cuál leer, empezá por README.md que contiene el índice y casos de uso frecuentes.
+
+Archivos disponibles en el repositorio:
+{$file_list}
 SYSTEM;
+    }
+
+    /**
+     * Obtiene desde GitHub la lista de archivos .md del repositorio del manual,
+     * formateada como texto para inyectar en el system prompt.
+     *
+     * @return string Lista con prefijo "- " por línea, o mensaje de fallback si falla la API.
+     */
+    protected function fetch_manual_file_list(): string
+    {
+        try {
+            $url = self::GITHUB_API_BASE.'/repos/'.self::GITHUB_REPO.'/git/trees/'.self::GITHUB_BRANCH.'?recursive=1';
+            $response = $this->build_github_http_client()->get($url);
+
+            if ($response->failed()) {
+                return '(Lista de archivos no disponible temporalmente.)';
+            }
+
+            $tree = $response->json('tree') ?? [];
+            $paths = [];
+
+            foreach ($tree as $node) {
+                if (is_array($node) && ($node['type'] ?? '') === 'blob' && str_ends_with((string) ($node['path'] ?? ''), '.md')) {
+                    $paths[] = '- '.(string) $node['path'];
+                }
+            }
+
+            return empty($paths)
+                ? '(No se encontraron archivos .md en el repositorio.)'
+                : implode("\n", $paths);
+
+        } catch (\Throwable $e) {
+            Log::warning('SupportAiSuggestionService: no se pudo obtener lista de archivos del manual.', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return '(Lista de archivos no disponible temporalmente.)';
+        }
     }
 
     /**
@@ -299,7 +363,7 @@ USER;
 
     /**
      * Devuelve el array de tools para la API de Anthropic (tool use / function calling).
-     * Las dos tools permiten a Claude explorar el repositorio del manual antes de responder.
+     * Solo expone get_manual_file; la lista de archivos va en el system prompt.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -318,15 +382,6 @@ USER;
                         ],
                     ],
                     'required' => ['path'],
-                ],
-            ],
-            [
-                'name'        => 'list_manual_files',
-                'description' => 'Lista todos los archivos disponibles en el repositorio de documentación con sus rutas. Usá esta herramienta primero si no sabés en qué archivo buscar la respuesta.',
-                'input_schema' => [
-                    'type'       => 'object',
-                    'properties' => new \stdClass(),
-                    'required'   => [],
                 ],
             ],
         ];
@@ -354,9 +409,7 @@ USER;
             $tool_input = $block['input'] ?? [];
 
             try {
-                if ($tool_name === 'list_manual_files') {
-                    $content = $this->github_list_files();
-                } elseif ($tool_name === 'get_manual_file') {
+                if ($tool_name === 'get_manual_file') {
                     $path = (string) ($tool_input['path'] ?? '');
                     $content = $this->github_get_file($path);
                 } else {
@@ -442,42 +495,6 @@ USER;
         }
 
         return 'Error Anthropic HTTP '.$status.'.';
-    }
-
-    /**
-     * Llama a la GitHub API y devuelve la lista de rutas .md del repositorio.
-     *
-     * @return string Lista de rutas separadas por salto de línea.
-     *
-     * @throws \RuntimeException Si la API responde con error.
-     */
-    protected function github_list_files(): string
-    {
-        $url      = self::GITHUB_API_BASE.'/repos/'.self::GITHUB_REPO.'/git/trees/'.self::GITHUB_BRANCH.'?recursive=1';
-        $response = $this->build_github_http_client()->get($url);
-
-        if ($response->failed()) {
-            throw new \RuntimeException('GitHub API error '.$response->status().' al listar archivos.');
-        }
-
-        $tree = $response->json('tree') ?? [];
-        $paths = [];
-
-        foreach ($tree as $node) {
-            if (! is_array($node)) {
-                continue;
-            }
-            // Solo blobs (archivos) con extensión .md.
-            if (($node['type'] ?? '') === 'blob' && str_ends_with((string) ($node['path'] ?? ''), '.md')) {
-                $paths[] = (string) $node['path'];
-            }
-        }
-
-        if (empty($paths)) {
-            return '(No se encontraron archivos .md en el repositorio.)';
-        }
-
-        return implode("\n", $paths);
     }
 
     /**
