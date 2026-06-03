@@ -199,6 +199,9 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/support-alert-minutes', [\App\Http\Controllers\Api\SupportAlertSettingsController::class, 'show']);
         Route::put('settings/support-alert-minutes', [\App\Http\Controllers\Api\SupportAlertSettingsController::class, 'update']);
 
+        Route::get('settings/support-ai', [\App\Http\Controllers\Api\SupportAiSettingsController::class, 'show']);
+        Route::put('settings/support-ai', [\App\Http\Controllers\Api\SupportAiSettingsController::class, 'update']);
+
         Route::get('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'show']);
         Route::put('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'update']);
 

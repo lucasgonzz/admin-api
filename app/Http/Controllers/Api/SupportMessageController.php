@@ -29,6 +29,11 @@ class SupportMessageController extends BaseController
             return response()->json(['error' => 'ticket closed'], 422);
         }
 
+        // Respuesta manual del operador: cancela envío automático de sugerencia IA pendiente.
+        $ticket->ai_pending_suggestion = null;
+        $ticket->ai_suggestion_send_at = null;
+        $ticket->save();
+
         // Tipo de contenido recibido desde frontend.
         $kind = $request->input('kind', 'text');
         // Cuerpo textual del mensaje.

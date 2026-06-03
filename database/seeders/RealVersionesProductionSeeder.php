@@ -1352,6 +1352,43 @@ class RealVersionesProductionSeeder extends Seeder
                     ],
                 ],
             ],
+
+            // -----------------------------------------------------------------
+            // 2.0.7 — Columna Imagen en PDF tabla de artículos
+            // -----------------------------------------------------------------
+            [
+                'version'     => '2.0.7',
+                'title'       => 'Versión 2.0.7',
+                'description' => 'Catálogo PDF: columna Imágenes (primera imagen del artículo) en plantillas article.',
+                'seeders' => [
+                    ['seeder_class' => 'PdfColumnOptionSeeder', 'execution_order' => 1, 'run_scope' => 'per_database'],
+                ],
+                'notifications' => [
+                    [
+                        'title' => 'Columna Imagen en PDF de artículos',
+                        'body'  => "En perfiles PDF de artículos podés activar la columna Imágenes: muestra la primera foto del artículo en el listado PDF.\n\nConfigurala en Configuración → Generales → Perfiles de columnas PDF (modelo Artículo).",
+                    ],
+                ],
+            ],
+
+            // -----------------------------------------------------------------
+            // 2.0.6 — PDF tabla de artículos con plantillas
+            // -----------------------------------------------------------------
+            [
+                'version'     => '2.0.6',
+                'title'       => 'Versión 2.0.6',
+                'description' => 'Plantillas PDF tabulares para listado de artículos (PdfColumnProfile model_name article).',
+                'seeders' => [
+                    ['seeder_class' => 'PdfColumnOptionSeeder', 'execution_order' => 1, 'run_scope' => 'per_database'],
+                    ['seeder_class' => 'PdfColumnProfileArticleSeeder', 'execution_order' => 2, 'run_scope' => 'per_user'],
+                ],
+                'notifications' => [
+                    [
+                        'title' => 'PDF tabla de artículos con plantillas',
+                        'body'  => "En Configuración → Generales → Perfiles de columnas PDF podés crear plantillas para el modelo Artículo: columnas visibles, orden, ancho, pie de página e imagen de cabecera.\n\nEn el listado, dentro del menú de seleccionados o filtrados, aparece la sección \"PDF tabla (plantillas)\" para generar el PDF con los artículos elegidos o con todos los que devuelve el filtro activo.",
+                    ],
+                ],
+            ],
         ];
     }
 }

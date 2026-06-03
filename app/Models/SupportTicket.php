@@ -29,6 +29,7 @@ class SupportTicket extends Model
         'closed_at' => 'datetime',
         'last_client_message_at' => 'datetime',
         'alert_sent_at' => 'datetime',
+        'ai_suggestion_send_at' => 'datetime',
     ];
 
     /**

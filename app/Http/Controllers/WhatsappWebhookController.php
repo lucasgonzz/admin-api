@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Events\SupportMessageReceived;
 use App\Helpers\WhatsappNormalizer;
+use App\Jobs\SendSupportAiSuggestion;
+use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\ClientEmployee;
 use App\Models\Lead;
@@ -463,7 +465,17 @@ class WhatsappWebhookController extends Controller
         ?ClientEmployee $client_employee,
         SupportTicketAssignmentService $assignment_service
     ): void {
-        DB::transaction(function () use ($parsed, $client, $client_employee, $assignment_service) {
+        $ticket_for_ai_dispatch = null;
+        $inbound_message_id = null;
+
+        DB::transaction(function () use (
+            $parsed,
+            $client,
+            $client_employee,
+            $assignment_service,
+            &$ticket_for_ai_dispatch,
+            &$inbound_message_id
+        ) {
             $normalized_phone = $parsed['from'];
             $delivered_at = $this->resolve_message_datetime($parsed['timestamp']);
 
@@ -537,9 +549,38 @@ class WhatsappWebhookController extends Controller
             $ticket->last_client_message_at = $delivered_at;
             $ticket->save();
 
-            $message = SupportMessage::where('id', $message->id)->withAll()->first();
-            event(new SupportMessageReceived($message->id));
+            $ticket_for_ai_dispatch = $ticket;
+            $inbound_message_id = (int) $message->id;
         });
+
+        if ($inbound_message_id !== null) {
+            event(new SupportMessageReceived($inbound_message_id));
+        }
+
+        if ($ticket_for_ai_dispatch !== null) {
+            $this->dispatch_ai_suggestion_if_enabled($ticket_for_ai_dispatch);
+        }
+    }
+
+    /**
+     * Encola generación de sugerencia IA si la configuración global está activa.
+     *
+     * @param SupportTicket $ticket Ticket recién actualizado con mensaje del cliente.
+     *
+     * @return void
+     */
+    private function dispatch_ai_suggestion_if_enabled(SupportTicket $ticket): void
+    {
+        $enabled = filter_var(
+            AdminSetting::get('support_ai_suggestions_enabled', false),
+            FILTER_VALIDATE_BOOLEAN
+        );
+        if (! $enabled) {
+            return;
+        }
+
+        // Demora base para que admin-spa reciba el mensaje entrante antes de la sugerencia.
+        SendSupportAiSuggestion::dispatch((int) $ticket->id)->delay(now()->addSeconds(5));
     }
 
     /**
