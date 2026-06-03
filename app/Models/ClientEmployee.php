@@ -1,0 +1,57 @@
+<?php
+
+namespace App\Models;
+
+use App\ModelProperties\ClientEmployeeProperties;
+use App\Models\Concerns\HasUuid;
+use Illuminate\Database\Eloquent\Model;
+
+/**
+ * Empleado o contacto operativo de un cliente (soporte vía WhatsApp).
+ *
+ * @property int         $client_id Cliente dueño del registro.
+ * @property string      $name      Nombre visible en bandeja de soporte.
+ * @property string      $phone     Teléfono de contacto (formato libre).
+ * @property string|null $notes     Notas internas opcionales.
+ */
+class ClientEmployee extends Model
+{
+    use HasUuid;
+
+    /**
+     * Meta declarativa consumida por admin-spa (MetaController).
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function properties()
+    {
+        return ClientEmployeeProperties::all();
+    }
+
+    /**
+     * @var array<int, string>
+     */
+    protected $guarded = [];
+
+    /**
+     * Eager load del cliente asociado.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeWithAll($query)
+    {
+        $query->with('client');
+    }
+
+    /**
+     * Cliente dueño de este empleado.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function client()
+    {
+        return $this->belongsTo(Client::class);
+    }
+}
