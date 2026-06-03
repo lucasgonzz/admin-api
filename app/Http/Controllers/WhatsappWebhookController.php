@@ -4,8 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Events\SupportMessageReceived;
 use App\Helpers\WhatsappNormalizer;
-use App\Jobs\SendSupportAiSuggestion;
-use App\Models\AdminSetting;
+use App\Services\SupportAiSettings;
+use App\Services\SupportAiSuggestionScheduler;
 use App\Models\Client;
 use App\Models\ClientEmployee;
 use App\Models\Lead;
@@ -571,16 +571,11 @@ class WhatsappWebhookController extends Controller
      */
     private function dispatch_ai_suggestion_if_enabled(SupportTicket $ticket): void
     {
-        $enabled = filter_var(
-            AdminSetting::get('support_ai_suggestions_enabled', false),
-            FILTER_VALIDATE_BOOLEAN
-        );
-        if (! $enabled) {
+        if (! SupportAiSettings::is_suggestions_enabled()) {
             return;
         }
 
-        // Demora base para que admin-spa reciba el mensaje entrante antes de la sugerencia.
-        SendSupportAiSuggestion::dispatch((int) $ticket->id)->delay(now()->addSeconds(5));
+        (new SupportAiSuggestionScheduler())->schedule_after_client_inbound((int) $ticket->id);
     }
 
     /**

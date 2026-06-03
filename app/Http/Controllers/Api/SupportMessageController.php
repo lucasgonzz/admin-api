@@ -8,6 +8,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
+use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
@@ -30,9 +31,7 @@ class SupportMessageController extends BaseController
         }
 
         // Respuesta manual del operador: cancela envío automático de sugerencia IA pendiente.
-        $ticket->ai_pending_suggestion = null;
-        $ticket->ai_suggestion_send_at = null;
-        $ticket->save();
+        (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
 
         // Tipo de contenido recibido desde frontend.
         $kind = $request->input('kind', 'text');

@@ -207,7 +207,7 @@ Route::prefix('admin')->group(function () {
 
 
 
-        Route::get('task_template', [\App\Http\Controllers\Api\TaskTemplateController::class, 'index_json']);
+        Route::get('task-template', [TaskTemplateController::class, 'index_json']);
 
     });
 });

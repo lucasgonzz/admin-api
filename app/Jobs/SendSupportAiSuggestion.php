@@ -2,11 +2,14 @@
 
 namespace App\Jobs;
 
+use App\Events\SupportAiSuggestionGenerating;
 use App\Events\SupportAiSuggestionPending;
-use App\Models\AdminSetting;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
+use App\Services\SupportAiSettings;
+use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportAiSuggestionDeliveryService;
+use App\Services\SupportAiSuggestionScheduler;
 use App\Services\SupportAiSuggestionService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -28,11 +31,18 @@ class SendSupportAiSuggestion implements ShouldQueue
     private $ticket_id;
 
     /**
-     * @param int $ticket_id
+     * @var int Token de programación; debe coincidir con caché al ejecutar.
      */
-    public function __construct(int $ticket_id)
+    private $schedule_token;
+
+    /**
+     * @param int $ticket_id
+     * @param int $schedule_token
+     */
+    public function __construct(int $ticket_id, int $schedule_token)
     {
         $this->ticket_id = $ticket_id;
+        $this->schedule_token = $schedule_token;
     }
 
     /**
@@ -40,13 +50,25 @@ class SendSupportAiSuggestion implements ShouldQueue
      *
      * @param SupportAiSuggestionService         $suggestion_service
      * @param SupportAiSuggestionDeliveryService $delivery_service
+     * @param SupportAiSuggestionScheduler       $scheduler
      *
      * @return void
      */
     public function handle(
         SupportAiSuggestionService $suggestion_service,
-        SupportAiSuggestionDeliveryService $delivery_service
+        SupportAiSuggestionDeliveryService $delivery_service,
+        SupportAiSuggestionScheduler $scheduler,
+        SupportAiSuggestionDraftService $draft_service
     ): void {
+        if (! $scheduler->is_schedule_token_current($this->ticket_id, $this->schedule_token)) {
+            Log::channel('daily')->debug('SendSupportAiSuggestion: omitido (token de debounce obsoleto).', [
+                'ticket_id'        => $this->ticket_id,
+                'schedule_token'   => $this->schedule_token,
+            ]);
+
+            return;
+        }
+
         $ticket = SupportTicket::query()->with('client')->find($this->ticket_id);
         if ($ticket === null) {
             return;
@@ -60,7 +82,19 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
+        event(new SupportAiSuggestionGenerating($ticket->id));
+
         $result = $suggestion_service->generate($ticket);
+
+        if (! $scheduler->is_schedule_token_current($this->ticket_id, $this->schedule_token)) {
+            Log::channel('daily')->info('SendSupportAiSuggestion: sugerencia descartada (mensajes nuevos del cliente durante la API).', [
+                'ticket_id'      => $ticket->id,
+                'schedule_token' => $this->schedule_token,
+            ]);
+
+            return;
+        }
+
         $suggested_message = trim((string) ($result['suggested_message'] ?? ''));
         if ($suggested_message === '') {
             Log::channel('daily')->info('SendSupportAiSuggestion: sugerencia vacía, no se envía.', [
@@ -77,7 +111,7 @@ class SendSupportAiSuggestion implements ShouldQueue
             $ticket->save();
         }
 
-        $delay = (int) AdminSetting::get('support_ai_auto_send_delay', 0);
+        $delay = SupportAiSettings::get_auto_send_delay_seconds();
 
         if ($delay <= 0) {
             $delivery_service->deliver_text_reply($ticket, $suggested_message);
@@ -85,14 +119,14 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
-        $ticket->ai_pending_suggestion = $suggested_message;
-        $ticket->ai_suggestion_send_at = now()->addSeconds($delay);
-        $ticket->save();
+        $draft_message = $draft_service->create_draft($ticket, $suggested_message, $delay);
 
         event(new SupportAiSuggestionPending($ticket->id));
 
-        AutoSendPendingSupportSuggestion::dispatch($ticket->id)
-            ->delay($ticket->ai_suggestion_send_at);
+        if ($draft_message->ai_auto_send_at !== null) {
+            AutoSendPendingSupportSuggestion::dispatch($ticket->id)
+                ->delay($draft_message->ai_auto_send_at);
+        }
     }
 
     /**
@@ -106,6 +140,7 @@ class SendSupportAiSuggestion implements ShouldQueue
     {
         $last_message = SupportMessage::query()
             ->where('support_ticket_id', $ticket_id)
+            ->where('is_ai_suggestion_draft', false)
             ->orderBy('id', 'desc')
             ->first();
 

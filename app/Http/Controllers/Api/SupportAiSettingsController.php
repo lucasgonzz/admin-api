@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AdminSetting;
+use App\Services\SupportAiSettings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -13,31 +14,17 @@ use Illuminate\Http\Request;
 class SupportAiSettingsController extends Controller
 {
     /**
-     * Devuelve si las sugerencias automáticas están activas y el delay de envío (segundos).
+     * Devuelve activación, demora antes de consultar a Claude y demora antes del envío automático.
      *
      * @return JsonResponse
      */
     public function show(): JsonResponse
     {
-        $suggestions_enabled = filter_var(
-            AdminSetting::get('support_ai_suggestions_enabled', false),
-            FILTER_VALIDATE_BOOLEAN
-        );
-
-        $delay_raw = AdminSetting::get('support_ai_auto_send_delay', null);
-        $auto_send_delay = 0;
-        if ($delay_raw !== null && $delay_raw !== '') {
-            $auto_send_delay = (int) $delay_raw;
-        }
-
-        return response()->json([
-            'suggestions_enabled' => $suggestions_enabled,
-            'auto_send_delay'     => $auto_send_delay,
-        ], 200);
+        return response()->json(SupportAiSettings::to_array(), 200);
     }
 
     /**
-     * Persiste activación de sugerencias automáticas y demora antes del envío automático.
+     * Persiste activación, debounce previo a Claude y demora antes del envío automático.
      *
      * @param Request $request
      *
@@ -47,20 +34,35 @@ class SupportAiSettingsController extends Controller
     {
         $validated = $request->validate([
             'suggestions_enabled' => 'required|boolean',
-            'auto_send_delay'     => 'nullable|integer|min:0|max:3600',
+            'suggestion_delay'    => 'nullable|integer|min:'.SupportAiSettings::SUGGESTION_DELAY_MIN_SECONDS.'|max:'.SupportAiSettings::SUGGESTION_DELAY_MAX_SECONDS,
+            'auto_send_delay'     => 'nullable|integer|min:'.SupportAiSettings::AUTO_SEND_DELAY_MIN_SECONDS.'|max:'.SupportAiSettings::AUTO_SEND_DELAY_MAX_SECONDS,
         ]);
 
         AdminSetting::set(
-            'support_ai_suggestions_enabled',
+            SupportAiSettings::KEY_SUGGESTIONS_ENABLED,
             $validated['suggestions_enabled'] ? '1' : '0'
         );
 
-        $delay = $validated['auto_send_delay'] ?? 0;
-        AdminSetting::set('support_ai_auto_send_delay', (string) (int) $delay);
+        $suggestion_delay = SupportAiSettings::clamp_suggestion_delay(
+            (int) ($validated['suggestion_delay'] ?? SupportAiSettings::get_suggestion_delay_seconds())
+        );
+        AdminSetting::set(
+            SupportAiSettings::KEY_SUGGESTION_DELAY_SECONDS,
+            (string) $suggestion_delay
+        );
+
+        $auto_send_delay = SupportAiSettings::clamp_auto_send_delay(
+            (int) ($validated['auto_send_delay'] ?? SupportAiSettings::get_auto_send_delay_seconds())
+        );
+        AdminSetting::set(
+            SupportAiSettings::KEY_AUTO_SEND_DELAY_SECONDS,
+            (string) $auto_send_delay
+        );
 
         return response()->json([
             'suggestions_enabled' => (bool) $validated['suggestions_enabled'],
-            'auto_send_delay'     => (int) $delay,
+            'suggestion_delay'    => $suggestion_delay,
+            'auto_send_delay'     => $auto_send_delay,
         ], 200);
     }
 }

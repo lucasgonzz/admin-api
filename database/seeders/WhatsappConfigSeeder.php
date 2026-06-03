@@ -25,7 +25,7 @@ class WhatsappConfigSeeder extends Seeder
         WhatsappConfig::create([
             'kapso_api_key'   => 'cebf2e65f32f92f8437cce4e5582ba9a21ed4cc318d8fbef548c2e8d35271357',
             'phone_number_id' => '1135644799636575',
-            'webhook_secret'  => '5507a23d8c7807e883ec45ebce03b5ecd119691efd629eb360780df975a2b79c',
+            'webhook_secret'  => 'ffb6e70a95b832e0dddfb84adfb4c20e22d74dac1cf02c0c438d7d9bc04bb20b',
             'is_active'       => true,
         ]);
     }

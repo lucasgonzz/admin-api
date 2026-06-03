@@ -23,9 +23,11 @@ class SupportMessage extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'delivered_at' => 'datetime',
-        'read_at' => 'datetime',
-        'synced_to_client_at' => 'datetime',
+        'delivered_at'            => 'datetime',
+        'read_at'                 => 'datetime',
+        'synced_to_client_at'     => 'datetime',
+        'is_ai_suggestion_draft'  => 'boolean',
+        'ai_auto_send_at'         => 'datetime',
     ];
 
     /**

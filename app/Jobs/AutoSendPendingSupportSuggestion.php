@@ -56,6 +56,28 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
             return;
         }
 
+        $draft_message = SupportMessage::query()
+            ->where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->orderBy('id', 'desc')
+            ->first();
+
+        if ($draft_message !== null) {
+            if ($draft_message->ai_auto_send_at !== null && now()->lt($draft_message->ai_auto_send_at)) {
+                return;
+            }
+
+            $delivery_service->deliver_draft_message($draft_message, $ticket);
+            $this->clear_pending_fields($ticket);
+
+            Log::channel('daily')->info('AutoSendPendingSupportSuggestion: sugerencia enviada automáticamente.', [
+                'ticket_id'  => $ticket->id,
+                'message_id' => $draft_message->id,
+            ]);
+
+            return;
+        }
+
         $pending_text = trim((string) ($ticket->ai_pending_suggestion ?? ''));
         if ($pending_text === '') {
             return;
@@ -98,6 +120,7 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
     {
         $last_message = SupportMessage::query()
             ->where('support_ticket_id', $ticket_id)
+            ->where('is_ai_suggestion_draft', false)
             ->orderBy('id', 'desc')
             ->first();
 

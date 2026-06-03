@@ -85,6 +85,11 @@ return [
         'composer_bin' => env('DEPLOY_COMPOSER_BIN', 'composer'),
     ],
 
+    // GitHub API: token para acceder al repositorio de documentación de ComercioCity.
+    'github' => [
+        'token' => env('GITHUB_PROTOCOL_TOKEN'),
+    ],
+
     // API Anthropic (Claude) para sugerencias de mensajes en conversaciones de leads.
     'anthropic' => [
         'api_key' => env('ANTHROPIC_API_KEY'),
