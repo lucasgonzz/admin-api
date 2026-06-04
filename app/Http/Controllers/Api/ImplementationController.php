@@ -100,8 +100,8 @@ class ImplementationController extends Controller
 
         $implementation->save();
 
-        // Acciones automáticas al activar etapas con lógica de conversación (2, 3 y 4).
-        if ($next_stage >= 2 && $next_stage <= 4) {
+        // Acciones automáticas al activar etapas con lógica de conversación (2 a 7).
+        if ($next_stage >= 2 && $next_stage <= 7) {
             $conversation_service = new ImplementationConversationService();
             $conversation_service->handle_stage_advance($implementation, $next_stage);
         }

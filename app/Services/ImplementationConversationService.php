@@ -76,8 +76,23 @@ class ImplementationConversationService
             return;
         }
 
-        // Etapas 5–7: aún no implementadas; registrar para depuración.
-        Log::channel('daily')->info('ImplementationConversationService: etapa no implementada aún.', [
+        if ($current_stage === 5) {
+            $this->handle_stage_5($implementation, $parsed);
+            return;
+        }
+
+        if ($current_stage === 6) {
+            $this->handle_stage_6($implementation, $parsed);
+            return;
+        }
+
+        if ($current_stage === 7) {
+            $this->handle_stage_7($implementation, $parsed);
+            return;
+        }
+
+        // Etapas fuera de rango esperado: registrar para depuración.
+        Log::channel('daily')->info('ImplementationConversationService: etapa fuera del rango implementado.', [
             'implementation_id' => $implementation->id,
             'current_stage'     => $current_stage,
         ]);
@@ -353,10 +368,10 @@ class ImplementationConversationService
      * Envía el primer mensaje de la etapa indicada sin esperar un mensaje entrante del cliente.
      *
      * Usado desde el controller al avanzar manualmente a una etapa que necesita
-     * iniciar la conversación de forma proactiva (etapas 2 y 4).
+     * iniciar la conversación de forma proactiva (etapas 2, 4, 5, 6 y 7).
      *
      * @param Implementation $implementation Implementación activa.
-     * @param int            $stage          Número de etapa a abrir (2 o 4).
+     * @param int            $stage          Número de etapa a abrir.
      *
      * @return void
      */
@@ -372,6 +387,21 @@ class ImplementationConversationService
             return;
         }
 
+        if ($stage === 5) {
+            $this->send_stage_5_opening($implementation);
+            return;
+        }
+
+        if ($stage === 6) {
+            $this->send_stage_6_opening($implementation);
+            return;
+        }
+
+        if ($stage === 7) {
+            $this->send_stage_7_opening($implementation);
+            return;
+        }
+
         Log::channel('daily')->warning('ImplementationConversationService: send_stage_opening_message sin apertura implementada para esta etapa.', [
             'implementation_id' => $implementation->id,
             'stage'             => $stage,
@@ -384,6 +414,9 @@ class ImplementationConversationService
      * - Etapa 2: envía el primer mensaje al cliente (dueño).
      * - Etapa 3: notifica al admin asignado que debe ejecutar la instalación.
      * - Etapa 4: envía el primer mensaje al responsable de migración.
+     * - Etapa 5: envía credenciales a empleados y mensaje al dueño.
+     * - Etapa 6: envía la pregunta sobre acceso AFIP al dueño.
+     * - Etapa 7: envía la pregunta de disponibilidad para videollamada al dueño.
      *
      * @param Implementation $implementation Implementación que acaba de avanzar de etapa.
      * @param int            $new_stage      Número de la nueva etapa activa.
@@ -409,6 +442,21 @@ class ImplementationConversationService
 
         if ($new_stage === 4) {
             $this->send_stage_opening_message($implementation, 4);
+            return;
+        }
+
+        if ($new_stage === 5) {
+            $this->send_stage_opening_message($implementation, 5);
+            return;
+        }
+
+        if ($new_stage === 6) {
+            $this->send_stage_opening_message($implementation, 6);
+            return;
+        }
+
+        if ($new_stage === 7) {
+            $this->send_stage_opening_message($implementation, 7);
             return;
         }
     }
@@ -692,6 +740,583 @@ class ImplementationConversationService
 
         // Evento Pusher para notificar al panel en tiempo real.
         event(new ImplementationStageCompleted($implementation->id, 2, $client_name));
+    }
+
+    // -------------------------------------------------------------------------
+    // Etapa 5 — Capacitación: envío de credenciales a empleados
+    // -------------------------------------------------------------------------
+
+    /**
+     * Envía el primer mensaje de la Etapa 5 al dueño del cliente y notifica a cada empleado.
+     *
+     * Acciones:
+     * 1. Enviar a cada empleado con teléfono cargado sus credenciales de acceso y link al centro
+     *    de recursos de ComercioCity.
+     * 2. Guardar en data['employees_notified'] la lista de nombres que recibieron el mensaje.
+     * 3. Enviar al dueño un mensaje informando que las credenciales ya fueron enviadas al equipo.
+     *
+     * Es idempotente: si data ya contiene 'employees_notified', no reenvía.
+     *
+     * @param Implementation $implementation
+     *
+     * @return void
+     */
+    private function send_stage_5_opening(Implementation $implementation): void
+    {
+        // Stage 5 de esta implementación.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 5)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: stage 5 no encontrado para apertura.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Data actual del stage.
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        // Idempotente: si ya se ejecutó la apertura, no repetir.
+        if (array_key_exists('employees_notified', $data)) {
+            return;
+        }
+
+        // Cargar cliente con sus empleados y la api activa para obtener la url del sistema.
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+
+        if ($client === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: cliente no encontrado para apertura de Etapa 5.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Nombre del cliente para los mensajes.
+        $client_name = $client->resolve_display_name();
+
+        // Nombre del admin asignado para el saludo en primera persona.
+        $admin_name = $this->resolve_assigned_admin_name($implementation);
+
+        // Teléfono del dueño para el mensaje de cierre.
+        $owner_phone = trim((string) ($client->phone ?? ''));
+
+        // URL del sistema del cliente: intentar spa_url primero, luego url.
+        $client->loadMissing('active_client_api');
+        $client_api  = $client->active_client_api;
+        $system_url  = '';
+        if ($client_api !== null) {
+            $system_url = trim((string) ($client_api->spa_url ?? $client_api->url ?? ''));
+        }
+
+        // URL del centro de recursos (hardcodeada por ahora).
+        $resources_url = 'https://recursos.comerciocity.com';
+
+        // Cargar empleados del cliente.
+        $client->loadMissing('client_employees');
+        $employees = $client->client_employees;
+
+        // Lista de nombres de empleados a los que se les envió el mensaje.
+        $notified_names = [];
+
+        // Enviar a cada empleado que tenga teléfono cargado.
+        foreach ($employees as $employee) {
+            $employee_phone = trim((string) ($employee->phone ?? ''));
+            if ($employee_phone === '') {
+                // Sin teléfono: omitir este empleado.
+                continue;
+            }
+
+            // Nombre del empleado para el saludo personalizado.
+            $employee_name = trim((string) ($employee->name ?? 'empleado'));
+
+            // Construir el mensaje de credenciales para el empleado.
+            $employee_message = "Hola {$employee_name}! Soy {$admin_name} de ComercioCity. Tu acceso al sistema de {$client_name} ya está listo 🎉\n\n";
+            if ($system_url !== '') {
+                $employee_message .= "Podés ingresar desde: {$system_url}\n\n";
+            }
+            $employee_message .= "Para aprender a usarlo, te compartimos el centro de recursos con videos por módulo: {$resources_url}\n\n";
+            $employee_message .= "Cualquier duda escribinos por acá. ¡Éxitos!";
+
+            $this->send_outbound($implementation, 5, $employee_phone, $employee_message);
+
+            $notified_names[] = $employee_name;
+        }
+
+        // Persistir la lista de empleados notificados en el data del stage.
+        $data['employees_notified'] = $notified_names;
+        $stage->data                = $data;
+        $stage->save();
+
+        // Mensaje al dueño informando que las credenciales fueron enviadas al equipo.
+        if ($owner_phone !== '') {
+            $this->send_outbound(
+                $implementation,
+                5,
+                $owner_phone,
+                'Ya le enviamos las credenciales a tu equipo. Cuando hayan podido ingresar y recorrido el sistema, avanzamos con el siguiente paso.'
+            );
+        }
+    }
+
+    /**
+     * Maneja un mensaje entrante durante la Etapa 5.
+     *
+     * Esta etapa avanza manualmente desde el admin. Cualquier mensaje del cliente
+     * recibe una respuesta indicando que espere a que el equipo ingrese al sistema.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed         Mensaje entrante.
+     *
+     * @return void
+     */
+    private function handle_stage_5(Implementation $implementation, array $parsed): void
+    {
+        // Teléfono del remitente para enviar la respuesta de espera.
+        $phone = (string) $parsed['from'];
+
+        $this->send_outbound(
+            $implementation,
+            5,
+            $phone,
+            '¡Perfecto! Cuando tu equipo haya podido ingresar al sistema y lo haya recorrido un poco, avisanos para avanzar al siguiente paso.'
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Etapa 6 — Vinculación AFIP/ARCA
+    // -------------------------------------------------------------------------
+
+    /**
+     * Envía el primer mensaje de la Etapa 6 al dueño del cliente.
+     *
+     * Pregunta quién tiene los datos de acceso al AFIP de la empresa para coordinar
+     * la vinculación con ARCA. Es idempotente: si data ya tiene 'current_question', no reenvía.
+     *
+     * @param Implementation $implementation
+     *
+     * @return void
+     */
+    private function send_stage_6_opening(Implementation $implementation): void
+    {
+        // Stage 6 de esta implementación.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 6)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: stage 6 no encontrado para apertura.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Data actual del stage.
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        // Idempotente: si ya se registró current_question, no reenviar la apertura.
+        if (array_key_exists('current_question', $data)) {
+            return;
+        }
+
+        // Teléfono del dueño del negocio (cliente).
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $owner_phone = trim((string) ($client->phone ?? ''));
+
+        if ($owner_phone === '') {
+            Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 6.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $implementation->client_id,
+            ]);
+            return;
+        }
+
+        // Registrar la primera pregunta pendiente y persistir.
+        $data['current_question'] = 'afip_contact_name';
+        $stage->data              = $data;
+        $stage->save();
+
+        $this->send_outbound(
+            $implementation,
+            6,
+            $owner_phone,
+            'Para poder emitir facturas electrónicas, necesitamos vincular el sistema con ARCA (antes AFIP). ¿Quién tiene los datos de acceso al AFIP de la empresa? ¿Lo manejás vos o hay un contador/encargado?'
+        );
+    }
+
+    /**
+     * Maneja un mensaje entrante durante la Etapa 6.
+     *
+     * Secuencia en data['current_question']:
+     * 1. afip_contact_name  — recibe el nombre del responsable de AFIP.
+     * 2. afip_contact_phone — solo si es otra persona; pide el teléfono de WhatsApp.
+     * 3. afip_steps_sent    — al tener el teléfono, envía los pasos al responsable y notifica.
+     *
+     * También maneja mensajes del responsable de AFIP (si es distinto al dueño) mientras
+     * la etapa está activa pero ya completada para el flujo bot.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed         Mensaje entrante.
+     *
+     * @return void
+     */
+    private function handle_stage_6(Implementation $implementation, array $parsed): void
+    {
+        // Stage 6 de esta implementación concreta.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 6)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: stage 6 no encontrado.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Data actual: array con respuestas acumuladas y current_question.
+        $data  = is_array($stage->data) ? $stage->data : [];
+        $phone = (string) $parsed['from'];
+        $body  = trim((string) ($parsed['body'] ?? ''));
+
+        // Cliente dueño de la implementación.
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $owner_phone = trim((string) ($client->phone ?? ''));
+
+        // Nombre del admin asignado para los mensajes.
+        $admin_name  = $this->resolve_assigned_admin_name($implementation);
+        $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
+
+        // Si no hay current_question → enviar la apertura como fallback.
+        if (! array_key_exists('current_question', $data)) {
+            $this->send_stage_6_opening($implementation);
+            return;
+        }
+
+        $current_question = (string) $data['current_question'];
+
+        // Si la etapa ya fue completada bot-side, verificar si el mensaje viene del responsable AFIP.
+        if ($current_question === 'completed') {
+            $afip_phone = trim((string) ($data['afip_contact_phone'] ?? ''));
+
+            // Si el mensaje viene del responsable de AFIP (y es distinto al dueño), acusar recibo.
+            if ($afip_phone !== '' && $phone === $afip_phone) {
+                $this->send_outbound(
+                    $implementation,
+                    6,
+                    $phone,
+                    "Gracias, {$admin_name} va a revisar los archivos y te avisa."
+                );
+            }
+            return;
+        }
+
+        if ($current_question === 'afip_contact_name') {
+            if ($body === '') {
+                $this->send_outbound($implementation, 6, $phone, '¿Quién tiene los datos de acceso al AFIP de la empresa?');
+                return;
+            }
+
+            // Detectar si el dueño indicó que él mismo maneja el AFIP.
+            $is_self = $this->is_self_referential_response($body, $client);
+
+            if ($is_self) {
+                // El dueño se encarga: usar su nombre y teléfono directamente.
+                $afip_name  = $client ? $client->resolve_display_name() : $body;
+                $afip_phone = $owner_phone;
+
+                $data['afip_contact_name']  = $afip_name;
+                $data['afip_contact_phone'] = $afip_phone;
+                $data['current_question']   = 'afip_steps_sent';
+                $stage->data                = $data;
+                $stage->save();
+
+                // Avanzar directamente al envío de pasos.
+                $this->execute_afip_steps_sent($implementation, $stage, $data, $phone, $client_name, $admin_name);
+                return;
+            }
+
+            // Tercera persona: guardar nombre y preguntar teléfono.
+            $data['afip_contact_name'] = $body;
+            $data['current_question']  = 'afip_contact_phone';
+            $stage->data               = $data;
+            $stage->save();
+
+            $this->send_outbound(
+                $implementation,
+                6,
+                $phone,
+                "¿Cuál es el número de WhatsApp de {$body} para coordinar esto?"
+            );
+            return;
+        }
+
+        if ($current_question === 'afip_contact_phone') {
+            if ($body === '') {
+                $afip_name = (string) ($data['afip_contact_name'] ?? 'el responsable');
+                $this->send_outbound($implementation, 6, $phone, "¿Cuál es el número de WhatsApp de {$afip_name}?");
+                return;
+            }
+
+            // Guardar teléfono del responsable y avanzar al paso de envío.
+            $data['afip_contact_phone'] = $body;
+            $data['current_question']   = 'afip_steps_sent';
+            $stage->data                = $data;
+            $stage->save();
+
+            $this->execute_afip_steps_sent($implementation, $stage, $data, $owner_phone, $client_name, $admin_name);
+            return;
+        }
+    }
+
+    /**
+     * Ejecuta el paso de envío de pasos AFIP al responsable y notificaciones al admin y dueño.
+     *
+     * Separa esta lógica de handle_stage_6 para evitar duplicación entre el flujo de "yo mismo"
+     * y el flujo de "tercero con teléfono ya cargado".
+     *
+     * @param Implementation       $implementation
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data           Data ya actualizada con afip_contact_phone.
+     * @param string               $owner_phone    Teléfono del dueño para el mensaje final.
+     * @param string               $client_name    Nombre resuelto del cliente.
+     * @param string               $admin_name     Nombre del admin asignado.
+     *
+     * @return void
+     */
+    private function execute_afip_steps_sent(
+        Implementation $implementation,
+        ImplementationStage $stage,
+        array $data,
+        string $owner_phone,
+        string $client_name,
+        string $admin_name
+    ): void {
+        // Nombre y teléfono del responsable de AFIP.
+        $afip_name  = (string) ($data['afip_contact_name'] ?? 'responsable');
+        $afip_phone = (string) ($data['afip_contact_phone'] ?? '');
+
+        // Link a la guía de AFIP (hardcodeado por ahora).
+        $afip_guide_url = 'https://recursos.comerciocity.com/afip';
+
+        // Mensaje al responsable de AFIP con los pasos a seguir.
+        if ($afip_phone !== '') {
+            $this->send_outbound(
+                $implementation,
+                6,
+                $afip_phone,
+                "Hola {$afip_name}! Soy {$admin_name} de ComercioCity. Para vincular el sistema de {$client_name} con AFIP necesitamos que completes estos pasos: {$afip_guide_url}. Cuando los tengas listos, avisanos por acá."
+            );
+        }
+
+        // Marcar pasos enviados y completar el lado bot de la etapa.
+        $data['afip_steps_sent'] = true;
+        $data['completed']       = true;
+        $data['current_question'] = 'completed';
+        $stage->data              = $data;
+        $stage->save();
+
+        // Notificación al admin asignado para que haga la vinculación manualmente en ARCA.
+        $admin_message = "📋 {$client_name} — Etapa 6: pasos de AFIP enviados a {$afip_name} ({$afip_phone}). Cuando el cliente complete los pasos, entrá al ARCA y hacé la vinculación.";
+        $this->notify_assigned_admin($implementation, $admin_message);
+
+        // Mensaje al dueño informando que se enviaron los pasos.
+        if ($owner_phone !== '') {
+            $this->send_outbound(
+                $implementation,
+                6,
+                $owner_phone,
+                "Le envié los pasos a {$afip_name}. Cuando los complete, nos encargamos de la vinculación desde nuestro lado y te avisamos cuando esté lista."
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Etapa 7 — Videollamada de capacitación
+    // -------------------------------------------------------------------------
+
+    /**
+     * Envía el primer mensaje de la Etapa 7 al dueño del cliente.
+     *
+     * Coordina disponibilidad para la videollamada de cierre de implementación.
+     * Es idempotente: si data ya tiene 'current_question', no reenvía.
+     *
+     * @param Implementation $implementation
+     *
+     * @return void
+     */
+    private function send_stage_7_opening(Implementation $implementation): void
+    {
+        // Stage 7 de esta implementación.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 7)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: stage 7 no encontrado para apertura.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Data actual del stage.
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        // Idempotente: si ya se registró current_question, no reenviar la apertura.
+        if (array_key_exists('current_question', $data)) {
+            return;
+        }
+
+        // Teléfono del dueño del negocio (cliente).
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $owner_phone = trim((string) ($client->phone ?? ''));
+
+        if ($owner_phone === '') {
+            Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 7.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $implementation->client_id,
+            ]);
+            return;
+        }
+
+        // Registrar la primera pregunta pendiente y persistir.
+        $data['current_question'] = 'availability';
+        $stage->data              = $data;
+        $stage->save();
+
+        $this->send_outbound(
+            $implementation,
+            7,
+            $owner_phone,
+            '¡Ya estamos en la última etapa! Para cerrar la implementación, nos gustaría hacer una videollamada corta (20-30 minutos) con vos y tu equipo para despejar cualquier duda del sistema. ¿Tenés disponibilidad esta semana? Indicame días y horarios que te vengan bien.'
+        );
+    }
+
+    /**
+     * Maneja un mensaje entrante durante la Etapa 7.
+     *
+     * Secuencia en data['current_question']:
+     * 1. availability — espera texto libre con la disponibilidad del cliente.
+     *    - Si el cliente quiere omitir la videollamada (detección por frases negativas), se marca skip.
+     *    - Cualquier otro texto no vacío se acepta como disponibilidad.
+     * 2. completed — ignorar mensajes posteriores.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed         Mensaje entrante.
+     *
+     * @return void
+     */
+    private function handle_stage_7(Implementation $implementation, array $parsed): void
+    {
+        // Stage 7 de esta implementación concreta.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 7)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: stage 7 no encontrado.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Data actual: array con respuestas acumuladas y current_question.
+        $data  = is_array($stage->data) ? $stage->data : [];
+        $phone = (string) $parsed['from'];
+        $body  = trim((string) ($parsed['body'] ?? ''));
+
+        // Nombre del admin asignado y del cliente para los mensajes.
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $admin_name  = $this->resolve_assigned_admin_name($implementation);
+        $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
+
+        // Si no hay current_question → enviar la apertura como fallback.
+        if (! array_key_exists('current_question', $data)) {
+            $this->send_stage_7_opening($implementation);
+            return;
+        }
+
+        $current_question = (string) $data['current_question'];
+
+        // Si la etapa ya fue completada, ignorar mensajes adicionales.
+        if ($current_question === 'completed') {
+            return;
+        }
+
+        if ($current_question === 'availability') {
+            if ($body === '') {
+                $this->send_outbound($implementation, 7, $phone, '¿Cuándo tenés disponibilidad para la videollamada?');
+                return;
+            }
+
+            // Detectar si el cliente quiere omitir la videollamada.
+            if ($this->is_skip_videocall_response($body)) {
+                $data['skip_videocall']   = true;
+                $data['completed']        = true;
+                $data['current_question'] = 'completed';
+                $stage->data              = $data;
+                $stage->save();
+
+                $this->send_outbound(
+                    $implementation,
+                    7,
+                    $phone,
+                    '¡Perfecto, sin problema! Si en algún momento tenés dudas, escribinos por acá. ¡Mucho éxito con el sistema! 🚀'
+                );
+
+                // Avisar al admin que el cliente no quiere la videollamada.
+                $this->notify_assigned_admin(
+                    $implementation,
+                    "ℹ️ {$client_name} decidió no hacer la videollamada. Podés marcar la implementación como completada."
+                );
+                return;
+            }
+
+            // El cliente envió su disponibilidad: guardar y notificar al admin.
+            $data['availability']     = $body;
+            $data['completed']        = true;
+            $data['current_question'] = 'completed';
+            $stage->data              = $data;
+            $stage->save();
+
+            $this->send_outbound(
+                $implementation,
+                7,
+                $phone,
+                "Perfecto, le paso tu disponibilidad a {$admin_name} para que confirme el horario. Te avisamos a la brevedad."
+            );
+
+            // Notificar al admin asignado con la disponibilidad del cliente.
+            $this->notify_assigned_admin(
+                $implementation,
+                "📅 {$client_name} — Etapa 7: disponibilidad para videollamada: {$body}. Confirmá el horario y avisale al cliente."
+            );
+            return;
+        }
+    }
+
+    /**
+     * Detecta si el mensaje indica que el cliente no quiere hacer la videollamada.
+     *
+     * @param string $body Texto del mensaje recibido.
+     *
+     * @return bool true si el cliente quiere omitir la videollamada.
+     */
+    private function is_skip_videocall_response(string $body): bool
+    {
+        // Normalizar: minúsculas y sin tildes para comparación robusta.
+        $normalized = strtolower(trim($this->remove_accents($body)));
+
+        // Frases que indican rechazo o innecesidad de la videollamada.
+        $skip_signals = ['no quiero', 'no hace falta', 'no es necesario', 'no necesito', 'no gracias', 'no thank'];
+        foreach ($skip_signals as $signal) {
+            if (str_contains($normalized, $signal)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // -------------------------------------------------------------------------
