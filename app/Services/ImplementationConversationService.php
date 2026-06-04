@@ -194,6 +194,34 @@ class ImplementationConversationService
             return;
         }
 
+        // Caso especial: cuando se responde use_deposits, intentar extraer los nombres en el mismo mensaje.
+        // Si el cliente confirma el uso de depósitos Y menciona al menos dos nombres en el mismo mensaje,
+        // guardamos ambos datos y saltamos directamente a payment_discounts.
+        if ($current_question === 'use_deposits') {
+            $body_raw        = trim((string) ($parsed['body'] ?? ''));
+            $extracted_names = $this->try_extract_deposit_names_from_message($body_raw);
+
+            if ($extracted_names !== null) {
+                // Verificar que el mensaje también confirme el uso de depósitos.
+                $deposits_value = $this->process_stage1_response('use_deposits', $parsed, $data);
+
+                if ($deposits_value === true) {
+                    // Guardar ambos campos y saltar deposit_names → ir directo a payment_discounts.
+                    $data['use_deposits']     = true;
+                    $data['deposit_names']    = $extracted_names;
+                    $data['current_question'] = 'payment_discounts';
+                    $stage->data              = $data;
+                    $stage->save();
+
+                    // Mensaje combinado: confirma los depósitos recibidos + hace la siguiente pregunta.
+                    $next_question_text = $this->build_question_text('payment_discounts', $data, $client, $implementation);
+                    $outbound_text      = $this->build_acknowledgement() . " Anotado que vas a trabajar con {$extracted_names}. " . $next_question_text;
+                    $this->send_outbound($implementation, 1, $phone, $outbound_text);
+                    return;
+                }
+            }
+        }
+
         // Procesamiento genérico para el resto de preguntas.
         $response_value = $this->process_stage1_response($current_question, $parsed, $data);
 
@@ -255,10 +283,15 @@ class ImplementationConversationService
             $client = Client::find($implementation->client_id);
         }
 
-        if ($this->is_employees_done_signal($body)) {
+        // Rama 1: señal de fin detectada → intentar avanzar.
+        // Rama 2: acumulación → guardar y acusar recibo.
+        // Las ramas son explícitamente excluyentes: cada una termina con return.
+        if ($this->is_employees_done_signal($body, $data)) {
             // Verificar que haya algo acumulado antes de avanzar.
             $accumulated = trim((string) ($data['employees'] ?? ''));
+
             if ($accumulated === '') {
+                // Sin datos acumulados: no se puede avanzar; pedir el primero.
                 $this->send_outbound(
                     $implementation,
                     1,
@@ -272,6 +305,7 @@ class ImplementationConversationService
             $next_question = $this->get_next_stage1_key('employees', $data);
 
             if ($next_question === null) {
+                // No hay más preguntas: finalizar etapa 1.
                 $data['current_question'] = 'completed';
                 $data['completed']        = true;
                 $stage->data              = $data;
@@ -280,6 +314,7 @@ class ImplementationConversationService
                 return;
             }
 
+            // Persistir la pregunta siguiente y enviar acuse + pregunta.
             $data['current_question'] = $next_question;
             $stage->data              = $data;
             $stage->save();
@@ -292,19 +327,15 @@ class ImplementationConversationService
             return;
         }
 
-        // Acumular el texto en el campo employees.
-        $existing           = trim((string) ($data['employees'] ?? ''));
-        $data['employees']  = $existing !== '' ? $existing . "\n" . $body : $body;
-        $stage->data        = $data;
+        // Rama 2: acumular el texto recibido en el campo employees.
+        $existing          = trim((string) ($data['employees'] ?? ''));
+        $data['employees'] = $existing !== '' ? $existing . "\n" . $body : $body;
+        $stage->data       = $data;
         $stage->save();
 
-        // Acuse de recibo para que el cliente sepa que se recibió el mensaje.
-        $this->send_outbound(
-            $implementation,
-            1,
-            $phone,
-            "Anotado 👍 Seguí mandando los datos o escribí *listo* cuando hayas terminado."
-        );
+        // Acuse de recibo breve y aleatorio para que el cliente sepa que se recibió el mensaje.
+        $this->send_outbound($implementation, 1, $phone, $this->build_acknowledgement());
+        return;
     }
 
     /**
@@ -1636,20 +1667,52 @@ class ImplementationConversationService
     /**
      * Detecta si el mensaje es una señal de fin para la acumulación de empleados.
      *
-     * @param string $body Texto del mensaje (sin normalizar).
+     * Dos modos de detección:
+     * 1. Señal explícita: el cuerpo contiene "listo", "terminé", "es todo", etc.
+     * 2. Señal implícita: el cliente ya envió más de 3 mensajes acumulados y el
+     *    último es muy corto (menos de 4 palabras) y no contiene números → se interpreta
+     *    como fin de la carga. Si hay duda → NO avanzar (acumular). Solo avanzar cuando
+     *    la señal es explícita o cuando la heurística es confiable.
+     *
+     * @param string               $body Texto del mensaje (sin normalizar).
+     * @param array<string, mixed> $data Data actual del stage (para contar mensajes acumulados).
      *
      * @return bool
      */
-    private function is_employees_done_signal(string $body): bool
+    private function is_employees_done_signal(string $body, array $data = []): bool
     {
         // Texto normalizado para comparar frases de cierre comunes.
         $normalized = strtolower(trim($this->remove_accents($body)));
+
+        // Señales explícitas de finalización.
         $done_signals = ['listo', 'ya esta', 'ya listo', 'eso es todo', 'termine', 'es todo', 'fin', 'finalice', 'listo ya'];
         foreach ($done_signals as $signal) {
             if ($normalized === $signal || str_contains($normalized, $signal)) {
                 return true;
             }
         }
+
+        // Detección implícita: solo si hay más de 3 mensajes acumulados.
+        // Se cuenta por la cantidad de líneas en el campo employees.
+        $accumulated = trim((string) ($data['employees'] ?? ''));
+        if ($accumulated !== '') {
+            // Cada mensaje acumulado ocupa al menos una línea.
+            $message_count = substr_count($accumulated, "\n") + 1;
+
+            if ($message_count > 3) {
+                // Contar palabras del mensaje entrante.
+                $words      = preg_split('/\s+/', $body) ?: [];
+                $word_count = count(array_filter($words, fn($w) => $w !== ''));
+
+                // Sin números y con menos de 4 palabras: interpretarlo como señal de fin.
+                $has_numbers = (bool) preg_match('/\d/', $body);
+
+                if ($word_count < 4 && ! $has_numbers) {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
@@ -1748,18 +1811,18 @@ class ImplementationConversationService
             case 'deposit_names':
                 return "Indicame los nombres de cada sucursal o depósito tal como querés que aparezcan en el sistema.";
             case 'payment_discounts':
-                return "¿Aplicás descuentos o recargos según el método de pago? Si es así, indicame los porcentajes. Ejemplo:\n- Efectivo: 10% descuento\n- Transferencia: 10% recargo\nSi cobrás igual independientemente del método, respondé No.";
+                return "¿Manejás algún descuento o recargo según cómo te pagan? Por ejemplo efectivo con descuento, transferencia con recargo, o algo por el estilo.";
             case 'company_name':
                 return "¿Cuál es el nombre de tu empresa tal como debe figurar en los comprobantes?";
             case 'employees':
-                // Texto actualizado con aclaración de permisos iniciales.
-                return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento y de qué área se va a encargar (por ejemplo: ventas, stock, administración).\nEsa info nos sirve para asignarle permisos iniciales a cada uno — los permisos se pueden ajustar más adelante cuando el sistema esté en marcha.\nPodés mandarlo en varios mensajes si querés, y cuando termines escribí listo.";
+                // Sin instrucción de "escribí listo": el sistema detecta el fin de forma inteligente.
+                return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento y de qué área se va a encargar (por ejemplo: ventas, stock, administración).\nEsa info nos sirve para asignarle permisos iniciales a cada uno — los permisos se pueden ajustar más adelante cuando el sistema esté en marcha.";
             case 'logo_received':
                 return "Por último, enviame el logo de tu empresa en formato cuadrado. Lo vamos a usar en los comprobantes.";
             case 'ask_amount_in_vender':
-                return "Cuando cargás una venta, ¿preferís que el sistema te pregunte la cantidad a vender de cada producto, o que agregue 1 unidad automáticamente y vos la modificás si hace falta? (respondé Preguntar cantidad o Agregar 1 unidad)";
+                return "Cuando cargás una venta, ¿preferís que el sistema te pregunte cuántas unidades querés vender de cada producto, o que agregue una unidad automáticamente y vos la cambiás si hace falta?";
             case 'default_cuenta_corriente':
-                return "Por último: cuando asignás un cliente a una venta, ¿querés que por defecto vaya a cuenta corriente, o preferís indicarlo manualmente cada vez? (respondé Por defecto sí o Por defecto no)";
+                return "Cuando asignás un cliente a una venta, ¿querés que quede en cuenta corriente automáticamente, o preferís indicarlo manualmente cada vez?";
             default:
                 return '';
         }
@@ -2044,6 +2107,70 @@ class ImplementationConversationService
         }
 
         return false;
+    }
+
+    /**
+     * Intenta extraer nombres de depósitos/sucursales desde el mismo mensaje de confirmación.
+     *
+     * Solo retorna nombres si el cuerpo contiene al menos dos segmentos que parecen
+     * nombres de lugares (separados por "y" o ",") y que no sean palabras de confirmación.
+     * Si hay duda o menos de 2 nombres reales → retorna null para seguir el flujo normal.
+     *
+     * Ejemplo: "sí, entre ríos y santa fe" → "Entre Ríos, Santa Fe"
+     *
+     * @param string $body Texto del mensaje tal como llegó (sin normalizar).
+     *
+     * @return string|null Nombres formateados (ucwords), separados por ", ", o null si no se pudo extraer.
+     */
+    private function try_extract_deposit_names_from_message(string $body): ?string
+    {
+        // Versión normalizada para detectar si hay confirmación en el mensaje.
+        $normalized = strtolower(trim($this->remove_accents($body)));
+
+        // Palabras que son señales de confirmación, NO son nombres de lugares.
+        $confirmation_only_words = [
+            'si', 'sí', 'claro', 'dale', 'ok', 'yes', 'exacto', 'correcto',
+            'afirmativo', 'varias', 'sucursales', 'depositos', 'depósitos',
+            'varios depositos', 'varias sucursales',
+        ];
+
+        // Dividir el mensaje por "y" (con espacios) y por comas.
+        $raw_parts = preg_split('/\s+y\s+|,/', $body) ?: [];
+
+        // Acumular partes que parecen nombres reales de lugares.
+        $names = [];
+
+        foreach ($raw_parts as $part) {
+            // Limpiar espacios y puntuación circundante.
+            $clean = trim($part, " \t\n\r.,!?");
+
+            if ($clean === '') {
+                continue;
+            }
+
+            // Versión normalizada de esta parte para comparar contra palabras de confirmación.
+            $clean_normalized = strtolower(trim($this->remove_accents($clean)));
+
+            // Descartar si es solo una palabra de confirmación.
+            if (in_array($clean_normalized, $confirmation_only_words, true)) {
+                continue;
+            }
+
+            // Descartar si es demasiado corto (menos de 3 caracteres).
+            if (mb_strlen($clean) < 3) {
+                continue;
+            }
+
+            // Capitalizar cada palabra del nombre y agregar a la lista.
+            $names[] = ucwords(strtolower($clean));
+        }
+
+        // Retornar solo si se encontraron al menos 2 nombres distintos.
+        if (count($names) < 2) {
+            return null;
+        }
+
+        return implode(', ', $names);
     }
 
     /**
