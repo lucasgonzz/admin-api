@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\ImplementationStageCompleted;
 use App\Models\Admin;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
@@ -76,8 +77,12 @@ class ImplementationConversationService
      * 1. Cargar stage 1 y su data actual.
      * 2. Si no hay `current_question` en data → enviar la primera pregunta.
      * 3. Procesar la respuesta del cliente para `current_question`.
-     * 4. Si válida → guardar, avanzar a la siguiente pregunta.
+     * 4. Si válida → guardar, enviar confirmación breve + siguiente pregunta.
      * 5. Si inválida → reenviar la misma pregunta con mensaje de aclaración.
+     *
+     * Caso especial de arranque: si el lead ya confirmó `use_price_lists = true`,
+     * se pre-configura ese valor y la primera pregunta pide directamente los nombres
+     * de las listas, saltando la pregunta de confirmación sí/no.
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $parsed
@@ -112,9 +117,27 @@ class ImplementationConversationService
 
         // Si aún no se envió ninguna pregunta → enviar la primera y registrar el estado.
         if (! array_key_exists('current_question', $data)) {
-            $first_question = $this->build_question_use_price_lists($client);
+            // Verificar si el lead ya confirmó uso de listas de precios.
+            $promoted_lead               = $client ? $this->find_promoted_lead($client) : null;
+            $lead_confirmed_price_lists  = $promoted_lead !== null
+                && isset($promoted_lead->use_price_lists)
+                && $promoted_lead->use_price_lists === true;
+
+            if ($lead_confirmed_price_lists) {
+                /**
+                 * Lead confirmado con listas de precios: pre-configurar use_price_lists=true
+                 * y saltar directamente a recolectar los nombres de listas (price_lists).
+                 * La primera pregunta incluye el saludo y pide los nombres directamente.
+                 */
+                $data['use_price_lists']    = true;
+                $data['current_question']   = 'price_lists';
+            } else {
+                // Flujo normal: preguntar primero si usa listas de precios.
+                $data['current_question'] = 'use_price_lists';
+            }
+
+            $first_question = $this->build_question_use_price_lists($implementation, $client);
             $this->send_outbound($implementation, 1, $phone, $first_question);
-            $data['current_question'] = 'use_price_lists';
             $stage->data = $data;
             $stage->save();
             return;
@@ -144,7 +167,7 @@ class ImplementationConversationService
 
         if ($response_value === null) {
             // Respuesta ambigua: reenviar la misma pregunta con aclaración.
-            $retry_text = $this->build_question_text($current_question, $data, $client);
+            $retry_text = $this->build_question_text($current_question, $data, $client, $implementation);
             $this->send_outbound($implementation, 1, $phone, 'No entendí bien tu respuesta. ' . $retry_text);
             return;
         }
@@ -160,17 +183,20 @@ class ImplementationConversationService
             $data['completed']        = true;
             $stage->data              = $data;
             $stage->save();
-            $this->finish_stage_1($implementation, $phone);
+            $this->finish_stage_1($implementation, $phone, $client);
             return;
         }
 
-        // Persistir la respuesta y enviar la siguiente pregunta.
+        // Persistir la respuesta y enviar confirmación breve + siguiente pregunta.
         $data['current_question'] = $next_question;
         $stage->data              = $data;
         $stage->save();
 
-        $next_question_text = $this->build_question_text($next_question, $data, $client);
-        $this->send_outbound($implementation, 1, $phone, $next_question_text);
+        $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
+
+        // Anteponer acuse de recibo antes de la siguiente pregunta.
+        $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
+        $this->send_outbound($implementation, 1, $phone, $outbound_text);
     }
 
     /**
@@ -205,7 +231,7 @@ class ImplementationConversationService
                     $implementation,
                     1,
                     $phone,
-                    'Todavía no recibí ningún dato. ' . $this->build_question_text('employees', $data, $client)
+                    'Todavía no recibí ningún dato. ' . $this->build_question_text('employees', $data, $client, $implementation)
                 );
                 return;
             }
@@ -218,7 +244,7 @@ class ImplementationConversationService
                 $data['completed']        = true;
                 $stage->data              = $data;
                 $stage->save();
-                $this->finish_stage_1($implementation, $phone);
+                $this->finish_stage_1($implementation, $phone, $client);
                 return;
             }
 
@@ -226,8 +252,11 @@ class ImplementationConversationService
             $stage->data              = $data;
             $stage->save();
 
-            $next_question_text = $this->build_question_text($next_question, $data, $client);
-            $this->send_outbound($implementation, 1, $phone, $next_question_text);
+            $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
+
+            // Acuse de recibo antes de la siguiente pregunta al completar employees.
+            $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
+            $this->send_outbound($implementation, 1, $phone, $outbound_text);
             return;
         }
 
@@ -270,7 +299,7 @@ class ImplementationConversationService
 
         if ($message_type !== 'image') {
             // No es imagen: reenviar la pregunta.
-            $retry_text = $this->build_question_text('logo_received', $data, $client);
+            $retry_text = $this->build_question_text('logo_received', $data, $client, $implementation);
             $this->send_outbound($implementation, 1, $phone, 'No entendí bien tu respuesta. ' . $retry_text);
             return;
         }
@@ -284,7 +313,7 @@ class ImplementationConversationService
             $data['completed']        = true;
             $stage->data              = $data;
             $stage->save();
-            $this->finish_stage_1($implementation, $phone);
+            $this->finish_stage_1($implementation, $phone, $client);
             return;
         }
 
@@ -292,8 +321,11 @@ class ImplementationConversationService
         $stage->data              = $data;
         $stage->save();
 
-        $next_question_text = $this->build_question_text($next_question, $data, $client);
-        $this->send_outbound($implementation, 1, $phone, $next_question_text);
+        $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
+
+        // Acuse de recibo al recibir el logo y avanzar a la siguiente pregunta.
+        $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
+        $this->send_outbound($implementation, 1, $phone, $outbound_text);
     }
 
     // -------------------------------------------------------------------------
@@ -526,17 +558,18 @@ class ImplementationConversationService
     /**
      * Retorna el texto de la pregunta para la clave dada.
      *
-     * @param string               $key    Clave de la pregunta.
-     * @param array<string, mixed> $data   Data actual del stage (puede ser necesaria para contexto).
-     * @param Client|null          $client Cliente para personalizar saludos.
+     * @param string               $key            Clave de la pregunta.
+     * @param array<string, mixed> $data           Data actual del stage (puede ser necesaria para contexto).
+     * @param Client|null          $client         Cliente para personalizar saludos.
+     * @param Implementation|null  $implementation Implementación activa (para resolver admin asignado).
      *
      * @return string
      */
-    private function build_question_text(string $key, array $data, ?Client $client): string
+    private function build_question_text(string $key, array $data, ?Client $client, ?Implementation $implementation = null): string
     {
         switch ($key) {
             case 'use_price_lists':
-                return $this->build_question_use_price_lists($client);
+                return $this->build_question_use_price_lists($implementation, $client);
             case 'price_lists':
                 return "Perfecto. Indicame los nombres de tus listas de precios y el margen de ganancia por defecto de cada una. Ejemplo:\n1. Minorista 30%\n2. Mayorista 20%\n(Si no tenés margen fijo, decime solo los nombres)";
             case 'use_deposits':
@@ -548,7 +581,8 @@ class ImplementationConversationService
             case 'company_name':
                 return "¿Cuál es el nombre de tu empresa tal como debe figurar en los comprobantes?";
             case 'employees':
-                return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento y de qué área se va a encargar (por ejemplo: ventas, stock, administración). Podés mandarlo en varios mensajes si querés.";
+                // Texto actualizado con aclaración de permisos iniciales.
+                return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento y de qué área se va a encargar (por ejemplo: ventas, stock, administración).\nEsa info nos sirve para asignarle permisos iniciales a cada uno — los permisos se pueden ajustar más adelante cuando el sistema esté en marcha.\nPodés mandarlo en varios mensajes si querés, y cuando termines escribí listo.";
             case 'logo_received':
                 return "Por último, enviame el logo de tu empresa en formato cuadrado. Lo vamos a usar en los comprobantes.";
             case 'ask_amount_in_vender':
@@ -561,28 +595,37 @@ class ImplementationConversationService
     }
 
     /**
-     * Construye el texto de la pregunta sobre listas de precios.
+     * Construye el texto de la primera pregunta (listas de precios / arranque).
      *
-     * Si el lead de origen tiene `use_price_lists` definido → confirmar con variante A.
-     * Si no hay dato previo → variante B (opción abierta).
+     * Si el lead de origen tiene `use_price_lists = true` → enviar saludo y pedir
+     * directamente los nombres de las listas (saltar la confirmación sí/no).
+     * Si no hay dato previo → preguntar la opción (Precio único / Listas de precios).
      *
-     * @param Client|null $client
+     * El admin asignado a la implementación se usa para personalizar el saludo en
+     * primera persona; fallback: "el equipo de ComercioCity".
+     *
+     * @param Implementation|null $implementation Implementación activa para resolver el admin asignado.
+     * @param Client|null         $client         Cliente para personalizar el saludo.
      *
      * @return string
      */
-    private function build_question_use_price_lists(?Client $client): string
+    private function build_question_use_price_lists(?Implementation $implementation, ?Client $client): string
     {
         // Nombre del cliente para el saludo.
         $display_name = $client ? $client->resolve_display_name() : 'cliente';
+
+        // Nombre del admin asignado para presentarse en primera persona.
+        $admin_name = $implementation ? $this->resolve_assigned_admin_name($implementation) : 'el equipo de ComercioCity';
 
         // Buscar el lead promovido para leer la preferencia del proceso de venta.
         $promoted_lead = $client ? $this->find_promoted_lead($client) : null;
 
         if ($promoted_lead !== null && isset($promoted_lead->use_price_lists) && $promoted_lead->use_price_lists === true) {
-            return "Hola {$display_name}! Para arrancar con la configuración, te confirmo que en la demo usaste listas de precios. ¿Es así como vas a trabajar? (respondé Sí o No)";
+            // Lead confirmado con listas de precios: pedir directamente los nombres.
+            return "Hola {$display_name}! Soy {$admin_name}. Para arrancar con la configuración: en la demo trabajaste con listas de precios. Indicame los nombres de tus listas y el margen de ganancia por defecto de cada una. Ejemplo:\n\nMinorista 30%\nMayorista 20%\n(Si no tenés margen fijo, decime solo los nombres)";
         }
 
-        return "Hola {$display_name}! Para arrancar con la configuración: ¿vas a manejar un único precio de venta por producto, o necesitás varias listas de precios con distintos márgenes? (respondé Precio único o Listas de precios)";
+        return "Hola {$display_name}! Soy {$admin_name}. Para arrancar con la configuración: ¿vas a manejar un único precio de venta por producto, o necesitás varias listas de precios con distintos márgenes? (respondé Precio único o Listas de precios)";
     }
 
     /**
@@ -607,68 +650,97 @@ class ImplementationConversationService
         return "¿Cómo querés manejar el stock? ¿Todo en un único lugar, o tenés más de una sucursal o depósito? (respondé Un lugar o Varias sucursales)";
     }
 
+    /**
+     * Genera un acuse de recibo breve y aleatorio para anteponer a la siguiente pregunta.
+     *
+     * Las variantes evitan que el flujo suene repetitivo al confirmar cada respuesta.
+     *
+     * @return string
+     */
+    private function build_acknowledgement(): string
+    {
+        // Opciones de confirmación corta variadas para naturalidad conversacional.
+        $options = ['Ok, anotado.', 'Perfecto.', 'Genial, gracias.', 'Listo.', 'Anotado 👍'];
+        return $options[array_rand($options)];
+    }
+
     // -------------------------------------------------------------------------
     // Finalización de Etapa 1
     // -------------------------------------------------------------------------
 
     /**
-     * Cierra la Etapa 1: envía confirmación al cliente y avisa a Martín.
+     * Cierra la Etapa 1: envía confirmación al cliente, dispara evento Pusher
+     * y notifica al admin asignado por WhatsApp.
      *
-     * NO avanza el current_stage de la implementación; eso lo hace Martín desde el admin.
+     * NO avanza el current_stage de la implementación; eso lo hace el admin desde el panel.
      *
      * @param Implementation $implementation
-     * @param string         $phone Teléfono del cliente para la confirmación.
+     * @param string         $phone   Teléfono del cliente para la confirmación.
+     * @param Client|null    $client  Cliente para personalizar el cierre.
      *
      * @return void
      */
-    private function finish_stage_1(Implementation $implementation, string $phone): void
+    private function finish_stage_1(Implementation $implementation, string $phone, ?Client $client = null): void
     {
-        // Mensaje de confirmación para el cliente.
-        $client_message = "¡Perfecto, tenemos todo! Martín va a revisar la información y te avisa cuando el sistema esté listo para el siguiente paso.";
+        // Nombre del cliente para personalizar el mensaje de cierre.
+        $client_name = $client
+            ? $client->resolve_display_name()
+            : "Cliente #{$implementation->client_id}";
+
+        // Mensaje de confirmación en primera persona (firmado implícitamente por el admin asignado).
+        $client_message = "¡Perfecto, tenemos todo lo que necesito! Voy a revisar la información y te aviso cuando el sistema esté listo para el siguiente paso. ¡Gracias {$client_name}!";
         $this->send_outbound($implementation, 1, $phone, $client_message);
 
-        // Notificación a Martín.
-        $this->notify_martin_stage1_complete($implementation);
+        // Evento Pusher al canal private-admin para notificar en tiempo real al panel.
+        event(new ImplementationStageCompleted(
+            $implementation->id,
+            1,
+            $client_name
+        ));
+
+        // Notificación WhatsApp al admin asignado.
+        $this->notify_assigned_admin_stage1_complete($implementation, $client_name);
     }
 
     /**
-     * Envía notificación a Martín indicando que el cliente completó la Etapa 1.
+     * Envía notificación WhatsApp al admin asignado indicando que el cliente completó la Etapa 1.
      *
-     * Si el admin "Martin" no existe o no tiene campo phone, registra un aviso en logs.
+     * Usa `assigned_admin_id` de la implementación en lugar de buscar por nombre hardcodeado.
+     * Si el admin no existe o no tiene campo phone, registra un aviso en logs.
      *
      * @param Implementation $implementation
+     * @param string         $client_name Nombre ya resuelto del cliente para el mensaje.
      *
      * @return void
      */
-    private function notify_martin_stage1_complete(Implementation $implementation): void
+    private function notify_assigned_admin_stage1_complete(Implementation $implementation, string $client_name): void
     {
-        // Buscar el admin por nombre.
-        $martin = Admin::where('name', 'Martin')->first();
+        // Buscar el admin asignado por su ID registrado en la implementación.
+        $assigned_admin = $implementation->assigned_admin_id
+            ? Admin::find($implementation->assigned_admin_id)
+            : null;
 
-        if ($martin === null) {
-            Log::channel('daily')->warning('ImplementationConversationService: admin Martin no encontrado; no se envió notificación.', [
-                'implementation_id' => $implementation->id,
+        if ($assigned_admin === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: admin asignado no encontrado; no se envió notificación.', [
+                'implementation_id'  => $implementation->id,
+                'assigned_admin_id'  => $implementation->assigned_admin_id,
             ]);
             return;
         }
 
-        // El campo `phone` no existe en admins aún; se obtiene con acceso dinámico.
-        $martin_phone = trim((string) ($martin->phone ?? ''));
+        // El campo `phone` puede no existir en todos los admins; acceso dinámico seguro.
+        $admin_phone = trim((string) ($assigned_admin->phone ?? ''));
 
-        if ($martin_phone === '') {
-            Log::channel('daily')->warning('ImplementationConversationService: admin Martin sin campo phone; no se envió notificación.', [
+        if ($admin_phone === '') {
+            Log::channel('daily')->warning('ImplementationConversationService: admin asignado sin campo phone; no se envió notificación.', [
                 'implementation_id' => $implementation->id,
-                'admin_id'          => $martin->id,
+                'admin_id'          => $assigned_admin->id,
             ]);
             return;
         }
-
-        // Nombre del cliente para el mensaje.
-        $client       = $implementation->client;
-        $client_name  = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
         $body = "✅ {$client_name} completó la Etapa 1 de implementación. Podés revisar los datos en el admin.";
-        $this->whatsapp_send_service->send_text($martin_phone, $body);
+        $this->whatsapp_send_service->send_text($admin_phone, $body);
     }
 
     // -------------------------------------------------------------------------
@@ -708,6 +780,31 @@ class ImplementationConversationService
     // -------------------------------------------------------------------------
     // Helpers de modelos y normalización
     // -------------------------------------------------------------------------
+
+    /**
+     * Resuelve el nombre del admin asignado a la implementación.
+     *
+     * Busca el Admin por assigned_admin_id y retorna su nombre.
+     * Si no hay asignado o no se encuentra, retorna el fallback institucional.
+     *
+     * @param Implementation $implementation
+     *
+     * @return string Nombre del admin o fallback "el equipo de ComercioCity".
+     */
+    private function resolve_assigned_admin_name(Implementation $implementation): string
+    {
+        if (! $implementation->assigned_admin_id) {
+            return 'el equipo de ComercioCity';
+        }
+
+        $admin = Admin::find($implementation->assigned_admin_id);
+
+        if ($admin === null || empty($admin->name)) {
+            return 'el equipo de ComercioCity';
+        }
+
+        return $admin->name;
+    }
 
     /**
      * Busca el Lead desde el cual fue promovido el cliente dado.

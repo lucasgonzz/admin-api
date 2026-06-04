@@ -206,7 +206,16 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'show']);
         Route::put('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'update']);
 
+        // Implementaciones: listado, detalle y avance manual de etapa.
+        Route::get('implementation', [\App\Http\Controllers\Api\ImplementationController::class, 'index']);
+        Route::get('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'show']);
+        Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
+
         Route::post('client/{client}/implementation/start', [\App\Http\Controllers\Api\ImplementationController::class, 'start']);
+
+        // Configuración de implementaciones: admin asignado por defecto.
+        Route::get('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show']);
+        Route::put('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update']);
 
         Route::get('task-template', [TaskTemplateController::class, 'index_json']);
 

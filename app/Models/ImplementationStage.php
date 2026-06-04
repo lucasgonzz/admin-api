@@ -40,4 +40,15 @@ class ImplementationStage extends Model
     {
         return $this->belongsTo(Implementation::class);
     }
+
+    /**
+     * Configuración maestra de esta etapa (catálogo por stage_number).
+     * Permite mostrar el nombre y descripción desde ImplementationStageConfig.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function config()
+    {
+        return $this->belongsTo(ImplementationStageConfig::class, 'stage_number', 'stage_number');
+    }
 }

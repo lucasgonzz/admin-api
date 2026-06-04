@@ -33,6 +33,8 @@ class DatabaseSeeder extends Seeder
             ImplementationStageConfigSeeder::class,
             AiSystemPromptSeeder::class,
             AdminSettingSeeder::class,
+            // Admin por defecto asignado a nuevas implementaciones (requiere AdminUserSeeder).
+            ImplementationDefaultAdminSeeder::class,
         ]);
 
         // Configuración placeholder de Kapso solo en entornos de desarrollo.
