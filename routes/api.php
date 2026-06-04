@@ -103,6 +103,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/promote-to-client', [LeadController::class, 'promote_to_client_json']);
         Route::post('lead/{id}/run-user-setup', [LeadController::class, 'run_user_setup_json']);
         Route::post('lead/{id}/send-demo-mail', [LeadController::class, 'send_demo_mail_json']);
+        Route::post('lead/{id}/generate-contract', [LeadController::class, 'generate_contract_json']);
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
@@ -211,6 +212,7 @@ Route::prefix('admin')->group(function () {
         Route::get('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'show']);
         Route::get('implementation/{implementation}/stage4-data', [\App\Http\Controllers\Api\ImplementationController::class, 'get_stage4_data']);
         Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
+        Route::delete('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'destroy']);
 
         Route::post('client/{client}/implementation/start', [\App\Http\Controllers\Api\ImplementationController::class, 'start']);
 

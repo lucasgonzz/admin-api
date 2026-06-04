@@ -18,6 +18,7 @@ use App\Services\LeadSuggestionSendService;
 use App\Services\LeadWhatsAppPasteCleaner;
 use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
+use App\Services\LeadContractPdfService;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
 use Illuminate\Http\Request;
@@ -492,6 +493,39 @@ class LeadController extends Controller
         $lead->delete();
 
         return response()->json(null, 204);
+    }
+
+    /**
+     * Genera y descarga el PDF del contrato ComercioCity para el lead.
+     *
+     * Lee los campos `contract_*` del lead y delega en {@see LeadContractPdfService}.
+     *
+     * @param int|string $id Identificador del lead.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function generate_contract_json($id)
+    {
+        // Lead con datos de contrato persistidos en la tabla.
+        $lead = Lead::findOrFail($id);
+
+        try {
+            // Contenido binario del PDF generado con dompdf.
+            $pdf_content = LeadContractPdfService::generate($lead);
+        } catch (\Throwable $error) {
+            Log::error('LeadController@generate_contract_json error: ' . $error->getMessage(), [
+                'lead_id' => $lead->id,
+            ]);
+
+            return response()->json([
+                'message' => 'No se pudo generar el contrato: ' . $error->getMessage(),
+            ], 422);
+        }
+
+        return response($pdf_content, 200, [
+            'Content-Type'        => 'application/pdf',
+            'Content-Disposition' => 'attachment; filename="contrato_' . $lead->id . '.pdf"',
+        ]);
     }
 
     /**

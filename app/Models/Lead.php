@@ -108,6 +108,9 @@ class Lead extends Model
 
         // Flag de recordatorio pre-demo: evita generar el mensaje más de una vez por demo agendada.
         'recordatorio_demo_enviado'    => 'boolean',
+
+        // Cuotas del contrato PDF: [{monto, fecha}]
+        'contract_financiacion'        => 'array',
     ];
 
     /**
