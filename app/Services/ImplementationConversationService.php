@@ -9,6 +9,7 @@ use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
 use App\Models\Client;
 use App\Models\Lead;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -1518,10 +1519,43 @@ class ImplementationConversationService
             return;
         }
 
+        // El cliente ya confirmó que terminó de enviar archivos: no re-detectar ni acumular contexto.
+        if (! empty($data['files_confirmed_complete'])) {
+            $this->send_stage_4_outbound(
+                $implementation,
+                'Estamos procesando tus archivos, ¡ya casi!'
+            );
+
+            return;
+        }
+
         // Confirmación del mapeo de columnas tras el análisis con IA.
         $current_question = trim((string) ($data['current_question'] ?? ''));
         if ($current_question === 'confirm_analysis') {
             $this->handle_stage_4_confirm_analysis($stage, $data, $body, $implementation, $client);
+            return;
+        }
+
+        // Detección semántica: el cliente indica que ya envió todos los archivos Excel.
+        if ($this->detect_files_complete_intent($body)) {
+            $data['files_confirmed_complete'] = true;
+            $stage->data                      = $data;
+            $stage->save();
+
+            $this->send_stage_4_outbound(
+                $implementation,
+                '¡Perfecto! Ya tengo todos los archivos. Voy a analizarlos y en unos minutos te cuento cómo quedó la detección de columnas. 📊'
+            );
+
+            $scheduler = new ImplementationStage4Scheduler();
+            $scheduler->schedule_after_file_received($implementation->id);
+
+            $client_name = $client
+                ? $client->resolve_display_name()
+                : "Cliente #{$implementation->client_id}";
+
+            event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
+
             return;
         }
 
@@ -1573,6 +1607,111 @@ class ImplementationConversationService
         $data['last_text_context'] = $body;
         $stage->data               = $data;
         $stage->save();
+    }
+
+    /**
+     * Detecta con Claude si el mensaje indica que el cliente terminó de enviar todos los archivos Excel.
+     *
+     * @param string $body Texto del mensaje entrante.
+     *
+     * @return bool true si Claude interpreta intención de cierre de envío de archivos.
+     */
+    private function detect_files_complete_intent(string $body): bool
+    {
+        $body = trim($body);
+
+        if ($body === '') {
+            return false;
+        }
+
+        $api_key = (string) config('services.anthropic.api_key');
+
+        if ($api_key === '') {
+            return false;
+        }
+
+        $model = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+
+        $system_prompt = 'Sos un clasificador de intención para implementaciones de software. '
+            . 'El cliente está en una etapa donde debe enviar por WhatsApp archivos Excel (artículos, clientes, proveedores). '
+            . 'Respondé ÚNICAMENTE con un JSON válido de una línea: {"complete": true} o {"complete": false}. '
+            . 'complete=true solo si el mensaje indica claramente que ya terminó de pasar/enviar todos los archivos '
+            . '(ej. "listo", "ya mandé todo", "no tengo más archivos", "eso es todo"). '
+            . 'complete=false si pide algo, envía un archivo, dice que falta algo, o el mensaje es ambiguo.';
+
+        try {
+            $http = Http::withHeaders([
+                'x-api-key'         => $api_key,
+                'anthropic-version' => '2023-06-01',
+                'content-type'      => 'application/json',
+            ])->timeout(10);
+
+            $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
+            $ca_bundle  = config('services.anthropic.ca_bundle');
+
+            if (! $verify_ssl) {
+                $http = $http->withoutVerifying();
+            } elseif (is_string($ca_bundle) && $ca_bundle !== '' && is_file($ca_bundle)) {
+                $http = $http->withOptions(['verify' => $ca_bundle]);
+            }
+
+            $response = $http->post('https://api.anthropic.com/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => 32,
+                'system'     => $system_prompt,
+                'messages'   => [
+                    [
+                        'role'    => 'user',
+                        'content' => 'Mensaje del cliente: ' . $body,
+                    ],
+                ],
+            ]);
+
+            if (! $response->successful()) {
+                Log::channel('daily')->warning('ImplementationConversationService::detect_files_complete_intent: error Anthropic.', [
+                    'status' => $response->status(),
+                ]);
+
+                return false;
+            }
+
+            $raw_text = '';
+
+            $content_blocks = $response->json('content', []);
+
+            if (is_array($content_blocks)) {
+                foreach ($content_blocks as $block) {
+                    if (is_array($block) && isset($block['text'])) {
+                        $raw_text .= (string) $block['text'];
+                    }
+                }
+            }
+
+            $raw_text = trim($raw_text);
+
+            if ($raw_text === '') {
+                return false;
+            }
+
+            // Extraer JSON aunque Claude agregue texto alrededor.
+            if (preg_match('/\{[^}]+\}/', $raw_text, $matches)) {
+                $raw_text = $matches[0];
+            }
+
+            $parsed = json_decode($raw_text, true);
+
+            if (! is_array($parsed)) {
+                return false;
+            }
+
+            return ! empty($parsed['complete']);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('ImplementationConversationService::detect_files_complete_intent: excepción.', [
+                'message' => $exception->getMessage(),
+            ]);
+
+            return false;
+        }
     }
 
     /**

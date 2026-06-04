@@ -37,6 +37,8 @@ class DatabaseSeeder extends Seeder
             ImplementationDefaultAdminSeeder::class,
             // Tiempo de espera antes de procesar archivos recibidos en la Etapa 4.
             ImplementationFileWaitSeeder::class,
+            // Documentación de import_status en stage.data (Etapa 4); no ejecutar en run() — ver seeder.
+            // ImplementationStage4ImportStatusSeeder::class,
         ]);
 
         // Configuración placeholder de Kapso solo en entornos de desarrollo.

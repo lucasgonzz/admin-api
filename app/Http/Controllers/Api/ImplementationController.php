@@ -51,6 +51,28 @@ class ImplementationController extends Controller
     }
 
     /**
+     * Devuelve el JSON `data` del stage 4 de una implementación (archivos, análisis, import_status).
+     *
+     * @param Implementation $implementation Implementación cargada por route model binding.
+     *
+     * @return JsonResponse { data: object|null }
+     */
+    public function get_stage4_data(Implementation $implementation): JsonResponse
+    {
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 4)
+            ->first();
+
+        if ($stage === null) {
+            return response()->json(['data' => null], 200);
+        }
+
+        $stage_data = is_array($stage->data) ? $stage->data : null;
+
+        return response()->json(['data' => $stage_data], 200);
+    }
+
+    /**
      * Avanza manualmente a la siguiente etapa de la implementación.
      *
      * Flujo:

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\ImplementationImportStatusUpdated;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\Implementation;
@@ -172,6 +173,38 @@ class ImplementationImportService
 
             return;
         }
+
+        /** Inicializar import_status en pending para categorías con archivos (no skipped). */
+        $import_status = is_array($data['import_status'] ?? null) ? $data['import_status'] : [];
+
+        foreach (self::CATEGORY_CONFIG as $category => $config) {
+            $files_key   = $config['files_key'];
+            $files_value = $data[$files_key] ?? null;
+
+            if ($files_value === 'skipped') {
+                continue;
+            }
+
+            if (! is_array($files_value) || count($files_value) === 0) {
+                continue;
+            }
+
+            if (! isset($import_status[$category]) || ! is_array($import_status[$category])) {
+                $import_status[$category] = [
+                    'status'      => 'pending',
+                    'error'       => null,
+                    'imported_at' => null,
+                ];
+            } else {
+                $import_status[$category]['status']      = 'pending';
+                $import_status[$category]['error']       = null;
+                $import_status[$category]['imported_at'] = null;
+            }
+        }
+
+        $data['import_status'] = $import_status;
+        $stage->data           = $data;
+        $stage->save();
 
         /** Resultado acumulado del análisis por categoría. */
         $analysis_result = [];
@@ -476,6 +509,8 @@ class ImplementationImportService
 
             $columns = $this->build_columns_payload($column_mapping);
 
+            $this->set_import_status($stage, $implementation, $data, $category, 'importing');
+
             try {
                 $response = Http::withHeaders([
                         'X-Admin-Api-Key' => $client->api_key,
@@ -500,6 +535,16 @@ class ImplementationImportService
                     $record_count = (int) ($category_analysis['record_count'] ?? 0);
                     $imported_counts[$category] = $record_count > 0 ? $record_count : 1;
 
+                    $this->set_import_status(
+                        $stage,
+                        $implementation,
+                        $data,
+                        $category,
+                        'success',
+                        null,
+                        now()->toISOString()
+                    );
+
                     Log::channel('daily')->info('ImplementationImportService::execute_import: importación OK.', [
                         'implementation_id' => $implementation->id,
                         'category'          => $category,
@@ -507,6 +552,9 @@ class ImplementationImportService
                     ]);
                     continue;
                 }
+
+                $error_message = 'Error HTTP ' . $response->status() . ' al importar ' . $config['label'];
+                $this->set_import_status($stage, $implementation, $data, $category, 'failed', $error_message);
 
                 $this->handle_http_error(
                     $implementation,
@@ -516,10 +564,13 @@ class ImplementationImportService
                     $import_url
                 );
             } catch (\Throwable $exception) {
+                $error_message = $exception->getMessage();
+                $this->set_import_status($stage, $implementation, $data, $category, 'failed', $error_message);
+
                 Log::channel('daily')->error('ImplementationImportService::execute_import: excepción.', [
                     'implementation_id' => $implementation->id,
                     'category'          => $category,
-                    'message'           => $exception->getMessage(),
+                    'message'           => $error_message,
                 ]);
                 $this->conversation_service->notify_assigned_admin_for_implementation(
                     $implementation,
@@ -528,7 +579,7 @@ class ImplementationImportService
                     . ') en implementación #'
                     . $implementation->id
                     . ': '
-                    . $exception->getMessage()
+                    . $error_message
                 );
             }
         }
@@ -546,6 +597,60 @@ class ImplementationImportService
         $stage->save();
 
         $this->conversation_service->finish_stage_4_after_import($implementation, $data);
+    }
+
+    /**
+     * Actualiza import_status en stage.data, persiste y emite evento Pusher.
+     *
+     * @param ImplementationStage       $stage
+     * @param Implementation            $implementation
+     * @param array<string, mixed>      $data           Data del stage (se actualiza por referencia).
+     * @param string                    $category       articles | clients | suppliers.
+     * @param string                    $status         pending | importing | success | failed.
+     * @param string|null               $error          Mensaje de error si aplica.
+     * @param string|null               $imported_at    ISO8601 al completar con éxito.
+     *
+     * @return void
+     */
+    protected function set_import_status(
+        ImplementationStage $stage,
+        Implementation $implementation,
+        array &$data,
+        string $category,
+        string $status,
+        ?string $error = null,
+        ?string $imported_at = null
+    ): void {
+        $import_status = is_array($data['import_status'] ?? null) ? $data['import_status'] : [];
+
+        $category_entry = is_array($import_status[$category] ?? null)
+            ? $import_status[$category]
+            : [
+                'status'      => 'pending',
+                'error'       => null,
+                'imported_at' => null,
+            ];
+
+        $category_entry['status'] = $status;
+        $category_entry['error']  = $error;
+
+        if ($imported_at !== null) {
+            $category_entry['imported_at'] = $imported_at;
+        } elseif ($status !== 'success') {
+            $category_entry['imported_at'] = null;
+        }
+
+        $import_status[$category] = $category_entry;
+        $data['import_status']    = $import_status;
+        $stage->data              = $data;
+        $stage->save();
+
+        event(new ImplementationImportStatusUpdated(
+            $implementation->id,
+            $category,
+            $status,
+            $error
+        ));
     }
 
     /**
