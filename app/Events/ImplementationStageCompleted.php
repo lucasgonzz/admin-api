@@ -9,7 +9,7 @@ use Illuminate\Foundation\Events\Dispatchable;
 /**
  * Evento emitido cuando un cliente completa una etapa del flujo de implementación vía WhatsApp.
  *
- * Se difunde al canal `private-admin` para notificar en tiempo real al panel de admin-spa.
+ * Se difunde al canal `admin-implementations` para notificar en tiempo real al panel de admin-spa.
  * El operador recibe un toast con el nombre del cliente y la etapa completada.
  */
 class ImplementationStageCompleted implements ShouldBroadcast
@@ -57,7 +57,7 @@ class ImplementationStageCompleted implements ShouldBroadcast
     public function broadcastOn(): array
     {
         return [
-            new Channel('private-admin'),
+            new Channel('admin-implementations'),
         ];
     }
 
