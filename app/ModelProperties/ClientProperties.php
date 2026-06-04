@@ -57,6 +57,7 @@ class ClientProperties
                 'value' => '',
                 'use_to_filter_in_search' => true,
                 'width' => 140,
+                'show'  => true,
             ],
             [
                 'key' => 'client_employees',
