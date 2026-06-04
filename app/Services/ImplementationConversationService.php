@@ -1444,11 +1444,18 @@ class ImplementationConversationService
         $body_context = trim((string) ($parsed['body'] ?? ''));
         $last_context = trim((string) ($data['last_text_context'] ?? ''));
 
+        // URL de Kapso para descargar el archivo en el procesamiento con IA.
+        $media_url = trim((string) ($parsed['inbound_media']['url'] ?? ''));
+
         // Registro del archivo para guardar en el data del stage.
         $file_record = [
             'filename' => $filename,
             'type'     => $mime_type,
         ];
+
+        if ($media_url !== '') {
+            $file_record['url'] = $media_url;
+        }
 
         // Inferir categoría por contexto textual o nombre del archivo.
         $category = $this->infer_file_category($body_context, $last_context, $filename);
@@ -1508,6 +1515,13 @@ class ImplementationConversationService
         ?Client $client
     ): void {
         if ($body === '') {
+            return;
+        }
+
+        // Confirmación del mapeo de columnas tras el análisis con IA.
+        $current_question = trim((string) ($data['current_question'] ?? ''));
+        if ($current_question === 'confirm_analysis') {
+            $this->handle_stage_4_confirm_analysis($stage, $data, $body, $implementation, $client);
             return;
         }
 
@@ -1693,24 +1707,186 @@ class ImplementationConversationService
             ? $client->resolve_display_name()
             : "Cliente #{$implementation->client_id}";
 
-        // Mensaje de cierre al responsable de migración.
-        $this->send_outbound(
-            $implementation,
-            4,
-            $contact_phone,
-            '¡Listo, recibí todo! Vamos a procesar los archivos y te avisamos cuando estén cargados en el sistema.'
-        );
+        // Mensaje de cierre al responsable (omitido si execute_import ya notificó el éxito).
+        if (empty($data['import_success_notified'])) {
+            $this->send_outbound(
+                $implementation,
+                4,
+                $contact_phone,
+                '¡Listo, recibí todo! Vamos a procesar los archivos y te avisamos cuando estén cargados en el sistema.'
+            );
+        }
 
         // Icono de estado por tipo de archivo: ✅ si se recibió o enviaron varios, — si fue omitido.
         $articles_icon  = $this->is_stage4_category_resolved($data, 'articles') ? '✅' : '—';
         $clients_icon   = $this->is_stage4_category_resolved($data, 'clients') ? '✅' : '—';
         $suppliers_icon = $this->is_stage4_category_resolved($data, 'suppliers') ? '✅' : '—';
 
-        $admin_message = "✅ {$client_name} completó la Etapa 4. Archivos recibidos: artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}. Podés proceder con la importación.";
+        if (! empty($data['import_success_notified'])) {
+            $admin_message = "✅ {$client_name} completó la Etapa 4 con importación IA. Artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}.";
+        } else {
+            $admin_message = "✅ {$client_name} completó la Etapa 4. Archivos recibidos: artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}. Podés proceder con la importación.";
+        }
         $this->notify_assigned_admin($implementation, $admin_message);
 
         // Evento Pusher para notificar al panel en tiempo real.
         event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
+    }
+
+    /**
+     * Procesa la respuesta del cliente cuando `current_question` es confirm_analysis.
+     *
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data
+     * @param string               $body
+     * @param Implementation       $implementation
+     * @param Client|null          $client
+     *
+     * @return void
+     */
+    private function handle_stage_4_confirm_analysis(
+        ImplementationStage $stage,
+        array $data,
+        string $body,
+        Implementation $implementation,
+        ?Client $client
+    ): void {
+        $normalized = strtolower($this->remove_accents(trim($body)));
+
+        // Confirmación afirmativa: ejecutar importación en empresa-api.
+        $yes_no = $this->parse_yes_no($normalized);
+        if ($yes_no === true) {
+            $import_service = new ImplementationImportService(null, $this);
+            $import_service->execute_import($implementation);
+
+            return;
+        }
+
+        // Corrección de columnas o duda: derivar al admin asignado.
+        if ($this->is_stage_4_analysis_correction_message($normalized)) {
+            $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
+
+            if ($contact_phone !== '') {
+                $admin_name = $this->resolve_assigned_admin_name($implementation);
+                $this->send_outbound(
+                    $implementation,
+                    4,
+                    $contact_phone,
+                    "Entendido. {$admin_name} va a revisar el mapeo de columnas y te avisamos cuando esté listo."
+                );
+            }
+
+            $client_name = $client
+                ? $client->resolve_display_name()
+                : "Cliente #{$implementation->client_id}";
+
+            $this->notify_assigned_admin(
+                $implementation,
+                "⚠️ {$client_name} solicitó corrección del mapeo de columnas en Etapa 4. Mensaje: \"{$body}\""
+            );
+
+            return;
+        }
+
+        // Respuesta ambigua: re-preguntar de forma breve.
+        $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
+        if ($contact_phone !== '') {
+            $this->send_outbound(
+                $implementation,
+                4,
+                $contact_phone,
+                '¿Confirmás que el mapeo de columnas es correcto? Respondé sí para continuar o indicá qué columna hay que corregir.'
+            );
+        }
+    }
+
+    /**
+     * Detecta si el mensaje indica correcciones al mapeo de columnas (no es un sí simple).
+     *
+     * @param string $normalized_body Texto sin tildes y en minúsculas.
+     *
+     * @return bool
+     */
+    private function is_stage_4_analysis_correction_message(string $normalized_body): bool
+    {
+        if ($normalized_body === '') {
+            return false;
+        }
+
+        $correction_signals = [
+            'columna',
+            'mal',
+            'incorrect',
+            'correg',
+            'cambiar',
+            'no es',
+            'equivoc',
+            'error',
+            'falta',
+            'otra',
+        ];
+
+        foreach ($correction_signals as $signal) {
+            if (str_contains($normalized_body, $signal)) {
+                return true;
+            }
+        }
+
+        // "no" explícito sin ser confirmación.
+        return $this->parse_yes_no($normalized_body) === false
+            && in_array($normalized_body, ['no', 'n', 'nop', 'nope', 'negativo'], true);
+    }
+
+    /**
+     * Envía un mensaje outbound al responsable de migración en la Etapa 4.
+     *
+     * @param Implementation $implementation
+     * @param string         $body
+     *
+     * @return void
+     */
+    public function send_stage_4_outbound(Implementation $implementation, string $body): void
+    {
+        $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
+
+        if ($contact_phone === '') {
+            Log::channel('daily')->warning('ImplementationConversationService::send_stage_4_outbound: teléfono vacío.', [
+                'implementation_id' => $implementation->id,
+            ]);
+
+            return;
+        }
+
+        $this->send_outbound($implementation, 4, $contact_phone, $body);
+    }
+
+    /**
+     * Notifica al admin asignado (público para servicios auxiliares como importación IA).
+     *
+     * @param Implementation $implementation
+     * @param string         $message
+     *
+     * @return void
+     */
+    public function notify_assigned_admin_for_implementation(Implementation $implementation, string $message): void
+    {
+        $this->notify_assigned_admin($implementation, $message);
+    }
+
+    /**
+     * Cierra la Etapa 4 tras una importación exitosa (Pusher + aviso al admin, sin mensaje duplicado al cliente).
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $data
+     *
+     * @return void
+     */
+    public function finish_stage_4_after_import(Implementation $implementation, array $data): void
+    {
+        $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
+        $client        = $implementation->client ?? Client::find($implementation->client_id);
+
+        $this->finish_stage_4($implementation, $contact_phone, $client, $data);
     }
 
     // -------------------------------------------------------------------------
@@ -1773,20 +1949,27 @@ class ImplementationConversationService
             return;
         }
 
-        // Verificar si hay archivos sin clasificar: pedir aclaración antes de seguir.
+        // Archivos sin clasificar: pedir aclaración antes de seguir el flujo secuencial.
         $unclassified = is_array($data['unclassified_files'] ?? null) ? $data['unclassified_files'] : [];
 
         if (count($unclassified) > 0) {
-            // Mensaje natural indicando que se recibieron archivos pero se necesita saber de qué son.
             $count = count($unclassified);
-            $label = $count === 1 ? 'un archivo' : "{$count} archivos";
+            $label = $count === 1 ? '1 archivo' : "{$count} archivos";
 
             $this->send_outbound(
                 $implementation,
                 4,
                 $contact_phone,
-                "Recibí {$label} pero no quedó claro si son de productos, clientes o proveedores. ¿Me podés aclarar?"
+                "Recibí {$label} pero no me quedó claro si son de productos, clientes o proveedores. "
+                . '¿Me podés aclarar de qué es cada uno?'
             );
+
+            return;
+        }
+
+        // Esperando confirmación del mapeo: no reprocesar archivos hasta nueva respuesta del cliente.
+        $current_question = trim((string) ($data['current_question'] ?? ''));
+        if ($current_question === 'confirm_analysis') {
             return;
         }
 
@@ -1795,14 +1978,11 @@ class ImplementationConversationService
         $clients_done   = $this->is_stage4_category_resolved($data, 'clients');
         $suppliers_done = $this->is_stage4_category_resolved($data, 'suppliers');
 
-        // Todas las categorías resueltas: completar la etapa.
+        // Todas las categorías resueltas: analizar con IA y pedir confirmación de columnas.
         if ($articles_done && $clients_done && $suppliers_done) {
-            $data['current_question'] = 'completed';
-            $data['completed']        = true;
-            $stage->data              = $data;
-            $stage->save();
+            $import_service = new ImplementationImportService(null, $this);
+            $import_service->process_files($implementation);
 
-            $this->finish_stage_4($implementation, $contact_phone, $client, $data);
             return;
         }
 
