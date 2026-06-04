@@ -587,24 +587,17 @@ class ImplementationConversationService
             return;
         }
 
-        // Nombre del responsable: leerlo del data de la Etapa 2.
-        $stage_2      = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 2)
-            ->first();
-        $stage_2_data     = ($stage_2 !== null && is_array($stage_2->data)) ? $stage_2->data : [];
-        $responsible_name = (string) ($stage_2_data['migration_responsible_name'] ?? 'responsable');
-
-        // Nombre del cliente y del admin para personalizar el saludo.
+        // Nombre del cliente para personalizar el mensaje de apertura.
         $client      = $implementation->client ?? Client::find($implementation->client_id);
         $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
-        $admin_name  = $this->resolve_assigned_admin_name($implementation);
 
         // Registrar la primera pregunta pendiente y persistir.
         $data['current_question'] = 'articles_excel';
         $stage->data              = $data;
         $stage->save();
 
-        $question_text = "Hola {$responsible_name}! Soy {$admin_name} de ComercioCity. Arrancamos con la migración de datos para {$client_name}. Primero necesito el archivo Excel con los *productos o artículos*. Podés enviarlo directamente por acá.";
+        // Mensaje directo al punto, sin presentación del agente.
+        $question_text = "Arrancamos con la migración de datos para {$client_name}. Primero necesito los archivos Excel con los productos o artículos. Podés enviarlos directamente por acá.";
         $this->send_outbound($implementation, 4, $contact_phone, $question_text);
     }
 
@@ -691,7 +684,8 @@ class ImplementationConversationService
                 $stage->data                         = $data;
                 $stage->save();
 
-                $this->finish_stage_2($implementation, $phone, $client, $responsible_name, $responsible_phone);
+                // El responsable es el mismo dueño: pasar is_self=true para ajustar el mensaje de cierre.
+                $this->finish_stage_2($implementation, $phone, $client, $responsible_name, $responsible_phone, true);
                 return;
             }
 
@@ -739,6 +733,7 @@ class ImplementationConversationService
      * @param Client|null    $client
      * @param string         $responsible_name  Nombre del responsable de migración resuelto.
      * @param string         $responsible_phone Teléfono del responsable de migración.
+     * @param bool           $is_self           true si el responsable es el mismo dueño del negocio.
      *
      * @return void
      */
@@ -747,7 +742,8 @@ class ImplementationConversationService
         string $owner_phone,
         ?Client $client,
         string $responsible_name,
-        string $responsible_phone
+        string $responsible_phone,
+        bool $is_self = false
     ): void {
         // Persistir el teléfono de contacto en la implementación para uso en etapas posteriores.
         $implementation->migration_contact_phone = $responsible_phone;
@@ -757,13 +753,13 @@ class ImplementationConversationService
             ? $client->resolve_display_name()
             : "Cliente #{$implementation->client_id}";
 
-        // Mensaje de cierre al dueño indicando que se contactará al responsable.
-        $this->send_outbound(
-            $implementation,
-            2,
-            $owner_phone,
-            "¡Perfecto! Le voy a escribir a {$responsible_name} para coordinar el envío de los archivos."
-        );
+        // Mensaje de cierre según si el responsable es el mismo dueño o una tercera persona.
+        // Si es el mismo dueño, no tiene sentido decirle "le voy a escribir a vos mismo".
+        $closing_message = $is_self
+            ? 'Perfecto, entonces te voy a contactar por acá cuando arranquemos con la migración de archivos.'
+            : "Perfecto, le voy a escribir a {$responsible_name} para coordinar el envío de los archivos.";
+
+        $this->send_outbound($implementation, 2, $owner_phone, $closing_message);
 
         // Notificación al admin asignado con los datos del responsable de migración.
         $admin_message = "✅ {$client_name} completó la Etapa 2. Responsable de migración: {$responsible_name} ({$responsible_phone}).";
@@ -1360,11 +1356,14 @@ class ImplementationConversationService
      * Los mensajes van dirigidos al responsable de migración (migration_contact_phone),
      * que puede ser distinto al dueño del negocio.
      *
-     * Flujo de preguntas en `data['current_question']`:
-     * 1. articles_excel: solicitar Excel de artículos (type = document).
-     * 2. clients_excel: solicitar Excel de clientes (document o "no tengo").
-     * 3. suppliers_excel: solicitar Excel de proveedores (document o "no tengo").
-     * 4. Al completar los tres → mensaje de cierre, notificar admin, disparar evento.
+     * Modelo de acumulación con debounce:
+     * - Al recibir un documento: inferir categoría (artículos / clientes / proveedores) por
+     *   contexto textual o nombre de archivo, acumular en el array correspondiente en `data`,
+     *   y programar el procesamiento diferido via ImplementationStage4Scheduler.
+     * - Al recibir texto: si es "no tengo" aplicar a la categoría esperada (waiting_for_category)
+     *   o inferirla por palabras clave; si es otro texto, guardarlo como contexto futuro.
+     * - El procesamiento efectivo ocurre en process_stage4_pending_files() una vez que
+     *   el timer del scheduler expira sin recibir más mensajes.
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $parsed         Mensaje entrante.
@@ -1385,11 +1384,11 @@ class ImplementationConversationService
             return;
         }
 
+        // Data actual del stage con archivos acumulados y estado de categorías.
         $data = is_array($stage->data) ? $stage->data : [];
 
         // Teléfono destino: el responsable de migración (puede ser distinto al dueño).
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
-        $body          = trim((string) ($parsed['body'] ?? ''));
         $message_type  = (string) ($parsed['type'] ?? 'text');
 
         $client = $implementation->client ?? Client::find($implementation->client_id);
@@ -1400,93 +1399,277 @@ class ImplementationConversationService
             return;
         }
 
-        // Pregunta actualmente pendiente.
-        $current_question = (string) $data['current_question'];
-
         // Si la etapa ya fue completada, ignorar mensajes adicionales.
+        $current_question = (string) $data['current_question'];
         if ($current_question === 'completed') {
             return;
         }
 
-        if ($current_question === 'articles_excel') {
-            if ($message_type === 'document') {
-                // Archivo de artículos recibido: avanzar a clientes.
-                $data['articles_excel']   = true;
-                $data['current_question'] = 'clients_excel';
-                $stage->data              = $data;
-                $stage->save();
-
-                $next_text = "Perfecto, recibí el archivo de productos. Ahora necesito el Excel con los *clientes* (nombre, teléfono, deuda si tienen cuenta corriente). Si no tenés ese archivo o no manejás cuentas corrientes, respondé *no tengo*.";
-                $this->send_outbound($implementation, 4, $contact_phone, $this->build_acknowledgement() . ' ' . $next_text);
-                return;
-            }
-
-            // No es un archivo adjunto: pedir el Excel.
-            $this->send_outbound($implementation, 4, $contact_phone, 'Necesito el archivo Excel adjunto, no el texto. ¿Podés enviarlo como archivo?');
+        if ($message_type === 'document') {
+            // Documento recibido: acumular en la categoría inferida y programar debounce.
+            $this->handle_stage_4_document($stage, $data, $parsed, $implementation);
             return;
         }
 
-        if ($current_question === 'clients_excel') {
-            if ($message_type === 'document') {
-                // Archivo de clientes recibido: avanzar a proveedores.
-                $data['clients_excel']    = true;
-                $data['current_question'] = 'suppliers_excel';
-                $stage->data              = $data;
-                $stage->save();
+        // Texto recibido: procesar como "no tengo" o guardar como contexto futuro.
+        $body = trim((string) ($parsed['body'] ?? ''));
+        $this->handle_stage_4_text($stage, $data, $body, $contact_phone, $implementation, $client);
+    }
 
-                $next_text = "Bien. Por último, el Excel de *proveedores* (nombre, contacto, productos que proveen). Si no tenés ese archivo, respondé *no tengo*.";
-                $this->send_outbound($implementation, 4, $contact_phone, $this->build_acknowledgement() . ' ' . $next_text);
-                return;
-            }
+    /**
+     * Acumula un documento recibido en la Etapa 4 y programa el procesamiento diferido.
+     *
+     * Infiere la categoría del archivo usando el texto del mensaje actual, el contexto
+     * guardado del último texto recibido, y el nombre del archivo (en ese orden de prioridad).
+     * Si no se puede inferir, el archivo queda en 'unclassified_files' y se pedirá aclaración.
+     *
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data           Data actual del stage.
+     * @param array<string, mixed> $parsed         Mensaje entrante.
+     * @param Implementation       $implementation
+     *
+     * @return void
+     */
+    private function handle_stage_4_document(
+        ImplementationStage $stage,
+        array $data,
+        array $parsed,
+        Implementation $implementation
+    ): void {
+        // Datos del archivo recibido.
+        $filename  = (string) ($parsed['inbound_media']['filename'] ?? '');
+        $mime_type = (string) ($parsed['inbound_media']['mime'] ?? '');
 
-            // Verificar si respondió "no tengo" o equivalente.
-            $normalized_body = strtolower($this->remove_accents($body));
-            if (str_contains($normalized_body, 'no tengo') || $normalized_body === 'no') {
-                $data['clients_excel']    = 'skipped';
-                $data['current_question'] = 'suppliers_excel';
-                $stage->data              = $data;
-                $stage->save();
+        // Contextos para inferir la categoría: texto del mensaje actual y contexto previo guardado.
+        $body_context = trim((string) ($parsed['body'] ?? ''));
+        $last_context = trim((string) ($data['last_text_context'] ?? ''));
 
-                $next_text = "Anotado. Por último, el Excel de *proveedores* (nombre, contacto, productos que proveen). Si no tenés ese archivo, respondé *no tengo*.";
-                $this->send_outbound($implementation, 4, $contact_phone, $next_text);
-                return;
-            }
+        // Registro del archivo para guardar en el data del stage.
+        $file_record = [
+            'filename' => $filename,
+            'type'     => $mime_type,
+        ];
 
-            // Respuesta no reconocida: pedir el archivo o confirmación de ausencia.
-            $this->send_outbound($implementation, 4, $contact_phone, 'Necesito el archivo Excel de clientes adjunto, o respondé *no tengo* si no lo tenés.');
+        // Inferir categoría por contexto textual o nombre del archivo.
+        $category = $this->infer_file_category($body_context, $last_context, $filename);
+
+        if ($category !== null) {
+            // Agregar el archivo al array de la categoría inferida.
+            $category_key         = $category . '_files';
+            $existing_files       = is_array($data[$category_key] ?? null) ? $data[$category_key] : [];
+            $existing_files[]     = $file_record;
+            $data[$category_key]  = $existing_files;
+
+            // Limpiar el contexto de texto anterior ya utilizado para la inferencia.
+            $data['last_text_context'] = '';
+        } else {
+            // Sin contexto suficiente: acumular en no clasificados para pedir aclaración.
+            $unclassified     = is_array($data['unclassified_files'] ?? null) ? $data['unclassified_files'] : [];
+            $unclassified[]   = $file_record;
+            $data['unclassified_files'] = $unclassified;
+        }
+
+        // Marcar que estamos en modo acumulación (no secuencial como antes).
+        $data['current_question'] = 'collecting_files';
+
+        // Persistir el estado acumulado.
+        $stage->data = $data;
+        $stage->save();
+
+        // Programar el procesamiento diferido con debounce: si llegan más archivos
+        // antes de que expire el timer, el token anterior queda obsoleto y solo
+        // el último job encolado ejecutará el procesamiento efectivo.
+        $scheduler = new ImplementationStage4Scheduler();
+        $scheduler->schedule_after_file_received($implementation->id);
+    }
+
+    /**
+     * Procesa un mensaje de texto recibido en la Etapa 4.
+     *
+     * Si el texto es "no tengo" (o equivalente), aplica el skip a la categoría
+     * correspondiente (esperada o inferida por palabras clave) y programa el scheduler.
+     * Si no es "no tengo", guarda el texto como contexto para el próximo archivo recibido.
+     *
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data           Data actual del stage.
+     * @param string               $body           Texto del mensaje recibido.
+     * @param string               $contact_phone  Teléfono del responsable de migración.
+     * @param Implementation       $implementation
+     * @param Client|null          $client
+     *
+     * @return void
+     */
+    private function handle_stage_4_text(
+        ImplementationStage $stage,
+        array $data,
+        string $body,
+        string $contact_phone,
+        Implementation $implementation,
+        ?Client $client
+    ): void {
+        if ($body === '') {
             return;
         }
 
-        if ($current_question === 'suppliers_excel') {
-            if ($message_type === 'document') {
-                // Archivo de proveedores recibido: completar etapa.
-                $data['suppliers_excel']  = true;
-                $data['current_question'] = 'completed';
-                $data['completed']        = true;
-                $stage->data              = $data;
+        // Normalizar para detectar variantes de "no tengo".
+        $normalized = strtolower($this->remove_accents($body));
+
+        // Detectar si el cliente indica que no tiene un archivo específico.
+        $is_no_tengo = str_contains($normalized, 'no tengo')
+            || str_contains($normalized, 'no tenemos')
+            || str_contains($normalized, 'no tenemos ese')
+            || $normalized === 'no';
+
+        if ($is_no_tengo) {
+            // Determinar a qué categoría aplica el "no tengo": usar la categoría
+            // que el sistema estaba esperando (waiting_for_category) o inferirla por palabras clave.
+            $waiting_category = trim((string) ($data['waiting_for_category'] ?? ''));
+
+            if ($waiting_category !== '') {
+                // Hay una categoría esperada explícita: aplicar el skip a esa categoría.
+                $data[$waiting_category . '_files'] = 'skipped';
+                $data['waiting_for_category']       = '';
+                $data['current_question']           = 'collecting_files';
+                $stage->data                        = $data;
                 $stage->save();
 
-                $this->finish_stage_4($implementation, $contact_phone, $client, $data);
+                // Programar el procesamiento diferido para evaluar el estado completo.
+                $scheduler = new ImplementationStage4Scheduler();
+                $scheduler->schedule_after_file_received($implementation->id);
                 return;
             }
 
-            // Verificar si respondió "no tengo" o equivalente.
-            $normalized_body = strtolower($this->remove_accents($body));
-            if (str_contains($normalized_body, 'no tengo') || $normalized_body === 'no') {
-                $data['suppliers_excel']  = 'skipped';
-                $data['current_question'] = 'completed';
-                $data['completed']        = true;
-                $stage->data              = $data;
+            // Sin categoría esperada: intentar inferirla por palabras clave en el texto.
+            $inferred_category = $this->infer_no_tengo_category($normalized);
+
+            if ($inferred_category !== null) {
+                $data[$inferred_category . '_files'] = 'skipped';
+                $data['current_question']            = 'collecting_files';
+                $stage->data                         = $data;
                 $stage->save();
 
-                $this->finish_stage_4($implementation, $contact_phone, $client, $data);
+                $scheduler = new ImplementationStage4Scheduler();
+                $scheduler->schedule_after_file_received($implementation->id);
                 return;
             }
-
-            // Respuesta no reconocida: pedir el archivo o confirmación de ausencia.
-            $this->send_outbound($implementation, 4, $contact_phone, 'Necesito el archivo Excel de proveedores adjunto, o respondé *no tengo* si no lo tenés.');
-            return;
         }
+
+        // No es "no tengo" reconocible: guardar como contexto para inferir la categoría
+        // del próximo archivo que llegue. No responder nada al cliente.
+        $data['last_text_context'] = $body;
+        $stage->data               = $data;
+        $stage->save();
+    }
+
+    /**
+     * Infiere la categoría de un archivo recibido en la Etapa 4.
+     *
+     * Orden de prioridad:
+     * 1. Texto del mensaje actual (body) — el cliente puede indicar de qué es el archivo.
+     * 2. Contexto previo guardado (último texto recibido antes del documento).
+     * 3. Nombre del archivo.
+     *
+     * @param string $body         Texto del mensaje actual.
+     * @param string $last_context Último texto recibido (guardado en data['last_text_context']).
+     * @param string $filename     Nombre del archivo recibido.
+     *
+     * @return string|null 'articles' | 'clients' | 'suppliers' | null si no se puede inferir.
+     */
+    private function infer_file_category(string $body, string $last_context, string $filename): ?string
+    {
+        // Revisar los contextos disponibles en orden de prioridad.
+        // El cuerpo del mensaje actual tiene más peso que el contexto guardado.
+        $contexts = [];
+        if ($body !== '') {
+            $contexts[] = $body;
+        }
+        if ($last_context !== '') {
+            $contexts[] = $last_context;
+        }
+        if ($filename !== '') {
+            $contexts[] = $filename;
+        }
+
+        foreach ($contexts as $ctx) {
+            $normalized = strtolower($this->remove_accents($ctx));
+
+            // Palabras clave de artículos/productos.
+            if (str_contains($normalized, 'articulo') || str_contains($normalized, 'producto')) {
+                return 'articles';
+            }
+
+            // Palabras clave de clientes.
+            if (str_contains($normalized, 'cliente')) {
+                return 'clients';
+            }
+
+            // Palabras clave de proveedores.
+            if (str_contains($normalized, 'proveedor') || str_contains($normalized, 'prov')) {
+                return 'suppliers';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Infiere a qué categoría pertenece un mensaje de tipo "no tengo" basándose en palabras clave.
+     *
+     * @param string $normalized_body Texto ya normalizado (sin tildes, minúsculas).
+     *
+     * @return string|null 'articles' | 'clients' | 'suppliers' | null si no se puede inferir.
+     */
+    private function infer_no_tengo_category(string $normalized_body): ?string
+    {
+        if (str_contains($normalized_body, 'articulo') || str_contains($normalized_body, 'producto')) {
+            return 'articles';
+        }
+
+        if (str_contains($normalized_body, 'cliente')) {
+            return 'clients';
+        }
+
+        if (str_contains($normalized_body, 'proveedor')) {
+            return 'suppliers';
+        }
+
+        return null;
+    }
+
+    /**
+     * Verifica si una categoría de la Etapa 4 está resuelta (tiene archivos o fue omitida).
+     *
+     * Soporta tanto la nueva estructura (articles_files array / 'skipped') como la
+     * estructura anterior (articles_excel true / 'skipped') para compatibilidad con
+     * implementaciones que comenzaron con la versión previa del flujo.
+     *
+     * @param array<string, mixed> $data     Data del stage 4.
+     * @param string               $category 'articles' | 'clients' | 'suppliers'.
+     *
+     * @return bool true si la categoría tiene archivos o fue marcada como omitida.
+     */
+    private function is_stage4_category_resolved(array $data, string $category): bool
+    {
+        // Nueva estructura: array de archivos recibidos o string 'skipped'.
+        $new_key   = $category . '_files';
+        $new_value = $data[$new_key] ?? null;
+
+        if ($new_value === 'skipped') {
+            return true;
+        }
+        if (is_array($new_value) && count($new_value) > 0) {
+            return true;
+        }
+
+        // Estructura anterior (compatibilidad): articles_excel / clients_excel / suppliers_excel.
+        $old_key   = $category . '_excel';
+        $old_value = $data[$old_key] ?? null;
+
+        if ($old_value === true || $old_value === 'skipped') {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -1518,16 +1701,149 @@ class ImplementationConversationService
             '¡Listo, recibí todo! Vamos a procesar los archivos y te avisamos cuando estén cargados en el sistema.'
         );
 
-        // Icono de estado por tipo de archivo: ✅ si se recibió, — si fue omitido.
-        $articles_icon  = '✅';
-        $clients_icon   = ($data['clients_excel'] ?? '') === true ? '✅' : '—';
-        $suppliers_icon = ($data['suppliers_excel'] ?? '') === true ? '✅' : '—';
+        // Icono de estado por tipo de archivo: ✅ si se recibió o enviaron varios, — si fue omitido.
+        $articles_icon  = $this->is_stage4_category_resolved($data, 'articles') ? '✅' : '—';
+        $clients_icon   = $this->is_stage4_category_resolved($data, 'clients') ? '✅' : '—';
+        $suppliers_icon = $this->is_stage4_category_resolved($data, 'suppliers') ? '✅' : '—';
 
         $admin_message = "✅ {$client_name} completó la Etapa 4. Archivos recibidos: artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}. Podés proceder con la importación.";
         $this->notify_assigned_admin($implementation, $admin_message);
 
         // Evento Pusher para notificar al panel en tiempo real.
         event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
+    }
+
+    // -------------------------------------------------------------------------
+    // Etapa 4 — Procesamiento diferido de archivos acumulados (llamado desde Job)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Procesa los archivos acumulados en la Etapa 4 una vez que el timer de debounce expira.
+     *
+     * Llamado desde ProcessImplementationStage4Files cuando el token de programación
+     * sigue siendo vigente, es decir, el cliente no envió más archivos dentro del período
+     * de espera configurado.
+     *
+     * Lógica:
+     * 1. Si hay archivos sin clasificar: preguntar de qué son.
+     * 2. Si todas las categorías están resueltas: llamar a finish_stage_4().
+     * 3. Si solo artículos están resueltos: preguntar por clientes.
+     * 4. Si artículos y clientes están resueltos: preguntar por proveedores.
+     * 5. Si artículos no están resueltos y no hay nada: solo esperar (el timer solo
+     *    se activa cuando llega algo, así que en este caso hubo texto sin archivos).
+     *
+     * @param int $implementation_id ID de la implementación a procesar.
+     *
+     * @return void
+     */
+    public function process_stage4_pending_files(int $implementation_id): void
+    {
+        // Cargar la implementación y su stage 4.
+        $implementation = Implementation::find($implementation_id);
+
+        if ($implementation === null) {
+            Log::channel('daily')->warning('process_stage4_pending_files: implementación no encontrada.', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        $stage = ImplementationStage::where('implementation_id', $implementation_id)
+            ->where('stage_number', 4)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('process_stage4_pending_files: stage 4 no encontrado.', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        // Data actual con el estado de archivos acumulados por categoría.
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        // Teléfono del responsable de migración y cliente para mensajes.
+        $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
+        $client        = $implementation->client ?? Client::find($implementation->client_id);
+
+        if ($contact_phone === '') {
+            Log::channel('daily')->warning('process_stage4_pending_files: contact_phone vacío, no se puede enviar mensaje.', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        // Verificar si hay archivos sin clasificar: pedir aclaración antes de seguir.
+        $unclassified = is_array($data['unclassified_files'] ?? null) ? $data['unclassified_files'] : [];
+
+        if (count($unclassified) > 0) {
+            // Mensaje natural indicando que se recibieron archivos pero se necesita saber de qué son.
+            $count = count($unclassified);
+            $label = $count === 1 ? 'un archivo' : "{$count} archivos";
+
+            $this->send_outbound(
+                $implementation,
+                4,
+                $contact_phone,
+                "Recibí {$label} pero no quedó claro si son de productos, clientes o proveedores. ¿Me podés aclarar?"
+            );
+            return;
+        }
+
+        // Evaluar el estado de resolución de cada categoría.
+        $articles_done  = $this->is_stage4_category_resolved($data, 'articles');
+        $clients_done   = $this->is_stage4_category_resolved($data, 'clients');
+        $suppliers_done = $this->is_stage4_category_resolved($data, 'suppliers');
+
+        // Todas las categorías resueltas: completar la etapa.
+        if ($articles_done && $clients_done && $suppliers_done) {
+            $data['current_question'] = 'completed';
+            $data['completed']        = true;
+            $stage->data              = $data;
+            $stage->save();
+
+            $this->finish_stage_4($implementation, $contact_phone, $client, $data);
+            return;
+        }
+
+        // Artículos no resueltos: aún no llegó el archivo principal; solo esperar.
+        // (El timer solo se activa cuando llega algo, así que puede haber llegado un texto
+        // de contexto antes del archivo. En ese caso, no hay nada que preguntar todavía.)
+        if (! $articles_done) {
+            return;
+        }
+
+        // Artículos recibidos, falta clientes: preguntar de forma natural.
+        if (! $clients_done) {
+            // Registrar que el sistema está esperando la respuesta sobre clientes.
+            $data['waiting_for_category'] = 'clients';
+            $stage->data                  = $data;
+            $stage->save();
+
+            $this->send_outbound(
+                $implementation,
+                4,
+                $contact_phone,
+                '¿También tenés los datos de tus clientes para migrar?'
+            );
+            return;
+        }
+
+        // Artículos y clientes resueltos, falta proveedores: preguntar de forma natural.
+        if (! $suppliers_done) {
+            // Registrar que el sistema está esperando la respuesta sobre proveedores.
+            $data['waiting_for_category'] = 'suppliers';
+            $stage->data                  = $data;
+            $stage->save();
+
+            $this->send_outbound(
+                $implementation,
+                4,
+                $contact_phone,
+                '¿Manejás proveedores registrados? ¿Tenés un Excel con esa info?'
+            );
+            return;
+        }
     }
 
     // -------------------------------------------------------------------------

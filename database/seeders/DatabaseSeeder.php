@@ -35,6 +35,8 @@ class DatabaseSeeder extends Seeder
             AdminSettingSeeder::class,
             // Admin por defecto asignado a nuevas implementaciones (requiere AdminUserSeeder).
             ImplementationDefaultAdminSeeder::class,
+            // Tiempo de espera antes de procesar archivos recibidos en la Etapa 4.
+            ImplementationFileWaitSeeder::class,
         ]);
 
         // Configuración placeholder de Kapso solo en entornos de desarrollo.
