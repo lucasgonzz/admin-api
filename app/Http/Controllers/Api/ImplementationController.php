@@ -7,6 +7,7 @@ use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\Implementation;
 use App\Models\ImplementationStage;
+use App\Services\ImplementationConversationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 
@@ -98,6 +99,12 @@ class ImplementationController extends Controller
         }
 
         $implementation->save();
+
+        // Acciones automáticas al activar etapas con lógica de conversación (2, 3 y 4).
+        if ($next_stage >= 2 && $next_stage <= 4) {
+            $conversation_service = new ImplementationConversationService();
+            $conversation_service->handle_stage_advance($implementation, $next_stage);
+        }
 
         // Devolver modelo fresco con todas las relaciones del panel de detalle.
         return response()->json([
