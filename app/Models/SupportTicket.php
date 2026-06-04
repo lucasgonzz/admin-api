@@ -30,6 +30,8 @@ class SupportTicket extends Model
         'last_client_message_at' => 'datetime',
         'alert_sent_at' => 'datetime',
         'ai_suggestion_send_at' => 'datetime',
+        /* Momento en que Claude escaló el ticket a revisión humana. */
+        'escalated_at' => 'datetime',
     ];
 
     /**

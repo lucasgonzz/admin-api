@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\CommonLaravel\BaseController;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Services\SyncClientEmployeesFromEmpresaService;
 use Illuminate\Http\Request;
 
 /**
@@ -162,6 +163,35 @@ class ClientEmployeeController extends BaseController
         $client_employee->delete();
 
         return response()->json(null, 204);
+    }
+
+    /**
+     * Importa empleados desde el empresa-api del cliente (nombre, teléfono, empresa_employee_id).
+     * No modifica contactos creados manualmente en admin (sin empresa_employee_id).
+     *
+     * @param int|string $clientId id numérico del Client padre
+     * @param SyncClientEmployeesFromEmpresaService $sync_service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function sync_from_empresa_json($clientId, SyncClientEmployeesFromEmpresaService $sync_service)
+    {
+        /** Cliente dueño de los empleados a sincronizar. */
+        $client = $this->find_client_by_id($clientId);
+
+        /** Resultado de la importación remota. */
+        $result = $sync_service->sync($client);
+
+        if ($result['error'] !== null) {
+            return response()->json(['message' => $result['error']], 422);
+        }
+
+        return response()->json([
+            'created'           => $result['created'],
+            'updated'           => $result['updated'],
+            'client_employees'  => $result['employees'],
+            'model'             => $this->fullModel('client', $client->id),
+        ], 200);
     }
 
     /**

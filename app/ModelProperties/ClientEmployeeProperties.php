@@ -43,6 +43,15 @@ class ClientEmployeeProperties
                 'wrap_content' => true,
                 'width' => 220,
             ],
+            [
+                'key' => 'empresa_employee_id',
+                'text' => 'ID empresa',
+                'type' => 'number',
+                'value' => null,
+                'only_show' => true,
+                'not_show_on_table' => true,
+                'exclude_on_update' => true,
+            ],
         ];
     }
 }

@@ -30,6 +30,7 @@ class DatabaseSeeder extends Seeder
             ProtocolEntriesSeeder::class,
             // Plantillas de tareas automáticas para procesos internos.
             TaskTemplateSeeder::class,
+            ImplementationStageConfigSeeder::class,
             AiSystemPromptSeeder::class,
             AdminSettingSeeder::class,
         ]);

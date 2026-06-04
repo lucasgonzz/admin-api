@@ -86,6 +86,7 @@ Route::prefix('admin')->group(function () {
 
         // Empleados del cliente (rutas anidadas por uuid, usadas desde admin-spa has_many).
         Route::post('client/{clientId}/employees', [ClientEmployeeController::class, 'store_for_client_json']);
+        Route::post('client/{clientId}/employees/sync-from-empresa', [ClientEmployeeController::class, 'sync_from_empresa_json']);
         Route::put('client/{clientId}/employees/{employeeId}', [ClientEmployeeController::class, 'update_for_client_json']);
         Route::delete('client/{clientId}/employees/{employeeId}', [ClientEmployeeController::class, 'destroy_for_client_json']);
 
@@ -205,7 +206,7 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'show']);
         Route::put('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'update']);
 
-
+        Route::post('client/{client}/implementation/start', [\App\Http\Controllers\Api\ImplementationController::class, 'start']);
 
         Route::get('task-template', [TaskTemplateController::class, 'index_json']);
 

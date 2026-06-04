@@ -307,6 +307,9 @@ class SupportTicketController extends BaseController
         // Gestiona fecha de cierre según estado final.
         if ($ticket->status === 'closed') {
             $ticket->closed_at = now();
+            /* Resuelto: ya no requiere supervisión; limpia marca de escalado en bandeja. */
+            $ticket->escalated_at = null;
+            $ticket->escalation_reason = null;
         }
         if ($ticket->status === 'open') {
             $ticket->closed_at = null;

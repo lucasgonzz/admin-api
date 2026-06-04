@@ -34,7 +34,7 @@ class Client extends Model
     ];
 
     function scopeWithAll($query) {
-        $query->with('current_version', 'active_client_api', 'client_apis', 'client_employees');
+        $query->with('current_version', 'active_client_api', 'client_apis', 'client_employees', 'implementation');
     }
 
     /**
@@ -77,5 +77,14 @@ class Client extends Model
      */
     public function client_employees() {
         return $this->hasMany(ClientEmployee::class);
+    }
+
+    /**
+     * Proceso de implementación guiada (como máximo uno por cliente).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne
+     */
+    public function implementation() {
+        return $this->hasOne(Implementation::class);
     }
 }

@@ -76,6 +76,10 @@ class ClientProperties
                     'api_create_path' => 'client/{parent}/employees',
                     'api_update_path' => 'client/{parent}/employees/{child}',
                     'api_delete_path' => 'client/{parent}/employees/{child}',
+                    'sync_from_empresa' => [
+                        'button_text' => 'Sincronizar desde empresa',
+                        'api_path' => 'client/{parent}/employees/sync-from-empresa',
+                    ],
                 ],
             ],
             // [
@@ -162,6 +166,16 @@ class ClientProperties
                 'value' => true,
                 // 'show' => true,
                 'width' => 80,
+            ],
+            [
+                'key' => 'implementation',
+                'text' => 'Implementación',
+                'type' => 'custom',
+                'custom_component' => 'client_implementation',
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+                'full_width' => true,
+                'value' => null,
             ],
         ];
     }

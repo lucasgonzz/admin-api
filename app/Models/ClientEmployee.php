@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property string      $name      Nombre visible en bandeja de soporte.
  * @property string      $phone     Teléfono de contacto (formato libre).
  * @property string|null $notes     Notas internas opcionales.
+ * @property int|null    $empresa_employee_id Id del User empleado en empresa-api cuando proviene de sincronización.
  */
 class ClientEmployee extends Model
 {

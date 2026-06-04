@@ -89,6 +89,8 @@ class SupportTicketUpdated implements ShouldBroadcastNow
                 'whatsapp_phone',
                 'last_client_message_at',
                 'alert_sent_at',
+                'escalated_at',
+                'escalation_reason',
                 'opened_at',
                 'closed_at',
                 'created_at',

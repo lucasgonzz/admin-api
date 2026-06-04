@@ -43,9 +43,14 @@ class SupportAiSuggestionService
      * consultar el manual de ComercioCity. Si el ticket no tiene nombre, puede incluir
      * suggested_title en la respuesta.
      *
+     * Además de la respuesta, Claude puede indicar:
+     * - should_close: el caso está resuelto y el ticket puede cerrarse.
+     * - should_escalate: Claude no puede resolver el caso y requiere revisión humana.
+     * - escalation_reason: motivo corto del escalado (solo cuando should_escalate es true).
+     *
      * @param SupportTicket $ticket Ticket abierto con relación client cargada si es posible.
      *
-     * @return array{suggested_message: string, reasoning: string, suggested_title?: string}
+     * @return array{suggested_message: string, reasoning: string, should_close: bool, should_escalate: bool, escalation_reason: string|null, suggested_title?: string}
      */
     public function generate(SupportTicket $ticket): array
     {
@@ -58,6 +63,9 @@ class SupportAiSuggestionService
                 return [
                     'suggested_message' => '',
                     'reasoning'         => 'ANTHROPIC_API_KEY no está configurada.',
+                    'should_close'      => false,
+                    'should_escalate'   => false,
+                    'escalation_reason' => null,
                 ];
             }
 
@@ -103,6 +111,9 @@ class SupportAiSuggestionService
                     return [
                         'suggested_message' => '',
                         'reasoning'         => $error_message,
+                        'should_close'      => false,
+                        'should_escalate'   => false,
+                        'escalation_reason' => null,
                     ];
                 }
 
@@ -151,14 +162,34 @@ class SupportAiSuggestionService
                 return [
                     'suggested_message' => '',
                     'reasoning'         => 'Claude no generó respuesta después de '.$iterations.' iteraciones.',
+                    'should_close'      => false,
+                    'should_escalate'   => false,
+                    'escalation_reason' => null,
                 ];
             }
 
             $parsed = $this->parse_json_response($final_text);
 
+            /* Valores de escalado y cierre con fallback seguro. */
+            $should_close    = (bool) ($parsed['should_close'] ?? false);
+            $should_escalate = (bool) ($parsed['should_escalate'] ?? false);
+
+            /* Mutua exclusión: si Claude devuelve ambos en true, escalar tiene prioridad. */
+            if ($should_escalate) {
+                $should_close = false;
+            }
+
+            /* Motivo del escalado: solo relevante cuando should_escalate es true. */
+            $escalation_reason = $should_escalate
+                ? trim((string) ($parsed['escalation_reason'] ?? ''))
+                : null;
+
             $result = [
                 'suggested_message' => trim((string) ($parsed['suggested_message'] ?? '')),
                 'reasoning'         => trim((string) ($parsed['reasoning'] ?? '')),
+                'should_close'      => $should_close,
+                'should_escalate'   => $should_escalate,
+                'escalation_reason' => $escalation_reason,
             ];
 
             if ($ticket_needs_title) {
@@ -178,6 +209,9 @@ class SupportAiSuggestionService
             return [
                 'suggested_message' => '',
                 'reasoning'         => $exception->getMessage(),
+                'should_close'      => false,
+                'should_escalate'   => false,
+                'escalation_reason' => null,
             ];
         }
     }
@@ -195,7 +229,10 @@ class SupportAiSuggestionService
         $standard_json_block = 'Generá una respuesta sugerida para el operador y explicá brevemente tu razonamiento. Respondé SOLO en JSON con este formato exacto:
 {
   "suggested_message": "...",
-  "reasoning": "..."
+  "reasoning": "...",
+  "should_close": false,
+  "should_escalate": false,
+  "escalation_reason": null
 }';
 
         $title_json_block = 'Generá una respuesta sugerida para el operador y explicá brevemente tu razonamiento.
@@ -206,7 +243,10 @@ Respondé SOLO en JSON con este formato exacto:
 {
   "suggested_message": "...",
   "suggested_title": "...",
-  "reasoning": "..."
+  "reasoning": "...",
+  "should_close": false,
+  "should_escalate": false,
+  "escalation_reason": null
 }';
 
         return str_replace($standard_json_block, $title_json_block, $user_content);
@@ -222,6 +262,9 @@ Respondé SOLO en JSON con este formato exacto:
     {
         // Lista de archivos del manual inyectada en el prompt (no como tool).
         $file_list = $this->fetch_manual_file_list();
+
+        // Protocolo de escalado y cierre leído directamente desde el repositorio.
+        $escalation_rules = $this->fetch_escalation_rules();
 
         return <<<SYSTEM
 Sos un asistente de soporte técnico de ComercioCity, una plataforma de operación comercial para distribuidoras y comercios argentinos.
@@ -249,7 +292,35 @@ Si no sabés cuál leer, empezá por README.md que contiene el índice y casos d
 
 Archivos disponibles en el repositorio:
 {$file_list}
+
+{$escalation_rules}
 SYSTEM;
+    }
+
+    /**
+     * Lee el archivo escalation_rules.md del repositorio para inyectarlo en el system prompt.
+     * Si la lectura falla, retorna una cadena vacía (fallback silencioso).
+     *
+     * @return string Bloque "PROTOCOLO DE ESCALADO Y CIERRE:" con el contenido del archivo,
+     *                o cadena vacía si no está disponible.
+     */
+    protected function fetch_escalation_rules(): string
+    {
+        try {
+            $content = $this->github_get_file('escalation_rules.md');
+
+            if (trim($content) === '') {
+                return '';
+            }
+
+            return "PROTOCOLO DE ESCALADO Y CIERRE:\n".$content;
+        } catch (\Throwable $e) {
+            Log::warning('SupportAiSuggestionService: no se pudo leer escalation_rules.md.', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return '';
+        }
     }
 
     /**
@@ -317,8 +388,18 @@ Historial de la conversación:
 Generá una respuesta sugerida para el operador y explicá brevemente tu razonamiento. Respondé SOLO en JSON con este formato exacto:
 {
   "suggested_message": "...",
-  "reasoning": "..."
+  "reasoning": "...",
+  "should_close": false,
+  "should_escalate": false,
+  "escalation_reason": null
 }
+
+Reglas para should_close y should_escalate:
+- should_close y should_escalate son mutuamente excluyentes: nunca ambos en true al mismo tiempo.
+- Usá should_close: true solo cuando el caso está completamente resuelto y el cliente no necesita más ayuda.
+- Usá should_escalate: true solo cuando no podés resolver el caso con la información disponible y es necesaria la intervención de un operador humano.
+- Si should_escalate es true, completá escalation_reason con un texto corto explicando por qué escalás.
+- Si should_escalate es true, usá como suggested_message el mensaje de espera definido en el protocolo de escalado.
 USER;
     }
 
