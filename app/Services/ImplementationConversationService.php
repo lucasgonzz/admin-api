@@ -368,7 +368,7 @@ class ImplementationConversationService
                     $implementation,
                     1,
                     $phone,
-                    'Ok, esperá a que termines y avisame cuando estés listo.'
+                    'Ok, espero a que termines y avisame cuando estés listo.'
                 );
                 return;
             }
