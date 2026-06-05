@@ -35,11 +35,20 @@ class ImplementationConversationService
     private $whatsapp_send_service;
 
     /**
-     * @param WhatsappSendService|null $whatsapp_send_service Inyección opcional para tests.
+     * @var ImplementationAiInterpreter Intérprete semántico de respuestas del cliente via Claude.
      */
-    public function __construct(?WhatsappSendService $whatsapp_send_service = null)
-    {
+    private $ai_interpreter;
+
+    /**
+     * @param WhatsappSendService|null        $whatsapp_send_service Inyección opcional para tests.
+     * @param ImplementationAiInterpreter|null $ai_interpreter        Inyección opcional para tests.
+     */
+    public function __construct(
+        ?WhatsappSendService $whatsapp_send_service = null,
+        ?ImplementationAiInterpreter $ai_interpreter = null
+    ) {
         $this->whatsapp_send_service = $whatsapp_send_service ?? new WhatsappSendService();
+        $this->ai_interpreter        = $ai_interpreter ?? new ImplementationAiInterpreter();
     }
 
     /**
@@ -208,7 +217,7 @@ class ImplementationConversationService
 
             if ($extracted_names !== null) {
                 // Verificar que el mensaje también confirme el uso de depósitos.
-                $deposits_value = $this->process_stage1_response('use_deposits', $parsed, $data);
+                $deposits_value = $this->process_stage1_response('use_deposits', $parsed, $data, $client, $implementation);
 
                 if ($deposits_value === true) {
                     // Guardar ambos campos y saltar deposit_names → ir directo a payment_discounts.
@@ -228,7 +237,7 @@ class ImplementationConversationService
         }
 
         // Procesamiento genérico para el resto de preguntas.
-        $response_value = $this->process_stage1_response($current_question, $parsed, $data);
+        $response_value = $this->process_stage1_response($current_question, $parsed, $data, $client, $implementation);
 
         if ($response_value === null) {
             // Respuesta ambigua: reenviar la misma pregunta con aclaración.
@@ -309,10 +318,20 @@ class ImplementationConversationService
 
         // --- Rama de confirmación: el cliente responde si terminó la lista ---
         if ($current_question === 'employees_confirm') {
-            // Parsear respuesta Sí/No del cliente.
-            $yes_no = $this->parse_yes_no($normalized);
+            // Texto de la pregunta que se le envió al cliente al pasar a este estado.
+            $employees_confirm_question = '¿Terminaste de pasar la lista de empleados?';
 
-            if ($yes_no === true) {
+            // Interpretar la respuesta usando Claude con la clave específica employees_confirm.
+            $interpretation = $this->ai_interpreter->interpret(
+                'employees_confirm',
+                $employees_confirm_question,
+                $body
+            );
+
+            // Valor interpretado: true = terminó, false = no terminó, null = mandó otro empleado.
+            $confirm_value = $interpretation['value'] ?? null;
+
+            if ($confirm_value === true) {
                 // El cliente confirmó que terminó: avanzar a la siguiente pregunta.
                 $next_question = $this->get_next_stage1_key('employees', $data);
 
@@ -339,7 +358,7 @@ class ImplementationConversationService
                 return;
             }
 
-            if ($yes_no === false) {
+            if ($confirm_value === false) {
                 // El cliente indicó que aún no terminó: volver a modo acumulación y esperar.
                 $data['current_question'] = 'employees';
                 $stage->data              = $data;
@@ -354,16 +373,16 @@ class ImplementationConversationService
                 return;
             }
 
-            // Respuesta ambigua o nuevo empleado: el cliente probablemente mandó otro dato.
-            // Tratar como acumulación, volver a modo employees y reiniciar el timer.
+            // null: el cliente probablemente mandó otro empleado en lugar de responder sí/no.
+            // Acumular el texto sin enviar ningún mensaje (el acuse lo maneja la rama de acumulación
+            // normal — aquí no se envía nada para no duplicar el acuse de recibo).
             $existing          = trim((string) ($data['employees'] ?? ''));
-            $data['employees'] = $existing !== '' ? $existing . "
-" . $body : $body;
+            $data['employees'] = $existing !== '' ? $existing . "\n" . $body : $body;
             $data['current_question'] = 'employees';
             $stage->data              = $data;
             $stage->save();
 
-            $this->send_outbound($implementation, 1, $phone, $this->build_acknowledgement());
+            // Reiniciar el timer de debounce para que el scheduler vuelva a preguntar después.
             (new ImplementationStage1EmployeesScheduler())->schedule_after_employee_message($implementation->id);
             return;
         }
@@ -1371,24 +1390,22 @@ class ImplementationConversationService
     /**
      * Detecta si el mensaje indica que el cliente no quiere hacer la videollamada.
      *
+     * Delega a Claude para cubrir variantes naturales como "no hace falta",
+     * "no quiero", "no es necesario", "me la salteo", etc.
+     *
      * @param string $body Texto del mensaje recibido.
      *
      * @return bool true si el cliente quiere omitir la videollamada.
      */
     private function is_skip_videocall_response(string $body): bool
     {
-        // Normalizar: minúsculas y sin tildes para comparación robusta.
-        $normalized = strtolower(trim($this->remove_accents($body)));
+        // Texto de la pregunta enviada al cliente en la etapa 7.
+        $question_text = '¿Cuándo tenés disponibilidad para la videollamada?';
 
-        // Frases que indican rechazo o innecesidad de la videollamada.
-        $skip_signals = ['no quiero', 'no hace falta', 'no es necesario', 'no necesito', 'no gracias', 'no thank'];
-        foreach ($skip_signals as $signal) {
-            if (str_contains($normalized, $signal)) {
-                return true;
-            }
-        }
+        // Delegar la interpretación semántica a Claude.
+        $result = $this->ai_interpreter->interpret('skip_videocall', $question_text, $body);
 
-        return false;
+        return $result['value'] === true;
     }
 
     // -------------------------------------------------------------------------
@@ -1759,14 +1776,12 @@ class ImplementationConversationService
     }
 
     /**
-     * Infiere la categoría de un archivo recibido en la Etapa 4.
+     * Infiere la categoría de un archivo recibido en la Etapa 4 usando Claude.
      *
-     * Orden de prioridad:
-     * 1. Texto del mensaje actual (body) — el cliente puede indicar de qué es el archivo.
-     * 2. Contexto previo guardado (último texto recibido antes del documento).
-     * 3. Nombre del archivo.
+     * Combina el texto del mensaje actual, el contexto previo y el nombre del archivo
+     * en un único input para que Claude determine la categoría más probable.
      *
-     * @param string $body         Texto del mensaje actual.
+     * @param string $body         Texto del mensaje actual (puede estar vacío).
      * @param string $last_context Último texto recibido (guardado en data['last_text_context']).
      * @param string $filename     Nombre del archivo recibido.
      *
@@ -1774,60 +1789,56 @@ class ImplementationConversationService
      */
     private function infer_file_category(string $body, string $last_context, string $filename): ?string
     {
-        // Revisar los contextos disponibles en orden de prioridad.
-        // El cuerpo del mensaje actual tiene más peso que el contexto guardado.
-        $contexts = [];
+        // Combinar los tres contextos disponibles en un único texto para el intérprete.
+        $parts = [];
         if ($body !== '') {
-            $contexts[] = $body;
+            $parts[] = "Mensaje actual: {$body}";
         }
         if ($last_context !== '') {
-            $contexts[] = $last_context;
+            $parts[] = "Contexto previo: {$last_context}";
         }
         if ($filename !== '') {
-            $contexts[] = $filename;
+            $parts[] = "Nombre del archivo: {$filename}";
         }
 
-        foreach ($contexts as $ctx) {
-            $normalized = strtolower($this->remove_accents($ctx));
+        // Si no hay ningún contexto disponible, no hay forma de inferir la categoría.
+        if (empty($parts)) {
+            return null;
+        }
 
-            // Palabras clave de artículos/productos.
-            if (str_contains($normalized, 'articulo') || str_contains($normalized, 'producto')) {
-                return 'articles';
-            }
+        // Construir el texto combinado para enviar al intérprete.
+        $combined_context = implode('. ', $parts);
 
-            // Palabras clave de clientes.
-            if (str_contains($normalized, 'cliente')) {
-                return 'clients';
-            }
+        // Delegar la inferencia semántica a Claude.
+        $result = $this->ai_interpreter->interpret('file_category', '', $combined_context);
 
-            // Palabras clave de proveedores.
-            if (str_contains($normalized, 'proveedor') || str_contains($normalized, 'prov')) {
-                return 'suppliers';
-            }
+        // Validar que el valor devuelto sea una categoría válida.
+        $value = $result['value'] ?? null;
+
+        if (in_array($value, ['articles', 'clients', 'suppliers'], true)) {
+            return (string) $value;
         }
 
         return null;
     }
 
     /**
-     * Infiere a qué categoría pertenece un mensaje de tipo "no tengo" basándose en palabras clave.
+     * Infiere a qué categoría pertenece un mensaje de tipo "no tengo" usando Claude.
      *
-     * @param string $normalized_body Texto ya normalizado (sin tildes, minúsculas).
+     * @param string $normalized_body Texto del mensaje (puede estar normalizado o no).
      *
      * @return string|null 'articles' | 'clients' | 'suppliers' | null si no se puede inferir.
      */
     private function infer_no_tengo_category(string $normalized_body): ?string
     {
-        if (str_contains($normalized_body, 'articulo') || str_contains($normalized_body, 'producto')) {
-            return 'articles';
-        }
+        // Delegar la inferencia semántica a Claude para cubrir variantes naturales.
+        $result = $this->ai_interpreter->interpret('no_tengo_category', '', $normalized_body);
 
-        if (str_contains($normalized_body, 'cliente')) {
-            return 'clients';
-        }
+        // Validar que el valor devuelto sea una categoría válida.
+        $value = $result['value'] ?? null;
 
-        if (str_contains($normalized_body, 'proveedor')) {
-            return 'suppliers';
+        if (in_array($value, ['articles', 'clients', 'suppliers'], true)) {
+            return (string) $value;
         }
 
         return null;
@@ -2015,9 +2026,9 @@ class ImplementationConversationService
             }
         }
 
-        // "no" explícito sin ser confirmación.
-        return $this->parse_yes_no($normalized_body) === false
-            && in_array($normalized_body, ['no', 'n', 'nop', 'nope', 'negativo'], true);
+        // "no" explícito sin señales de corrección: rechazo directo del mapeo propuesto.
+        // Se usa comparación directa para evitar una llamada AI en este check secundario.
+        return in_array($normalized_body, ['no', 'n', 'nop', 'nope', 'negativo'], true);
     }
 
     /**
@@ -2305,23 +2316,30 @@ class ImplementationConversationService
      * Retorna el valor a guardar en data, null si la respuesta es inválida,
      * o RESPONSE_ACCUMULATING para el campo employees en modo acumulación.
      *
-     * @param string               $question Clave de la pregunta actual.
-     * @param array<string, mixed> $parsed   Mensaje entrante.
-     * @param array<string, mixed> $data     Data actual del stage.
+     * @param string               $question       Clave de la pregunta actual.
+     * @param array<string, mixed> $parsed         Mensaje entrante.
+     * @param array<string, mixed> $data           Data actual del stage.
+     * @param Client|null          $client         Cliente para personalizar el texto de la pregunta.
+     * @param Implementation|null  $implementation Implementación activa (para resolver admin y lead).
      *
      * @return mixed null = inválida | self::RESPONSE_ACCUMULATING = acumulando | valor a guardar.
      */
-    private function process_stage1_response(string $question, array $parsed, array $data)
-    {
+    private function process_stage1_response(
+        string $question,
+        array $parsed,
+        array $data,
+        ?Client $client = null,
+        ?Implementation $implementation = null
+    ) {
         $body = trim((string) ($parsed['body'] ?? ''));
 
         switch ($question) {
-            // Preguntas booleanas: Sí/No o variantes de opciones.
+            // Preguntas booleanas: interpretadas por Claude en lugar de palabras clave.
             case 'use_price_lists':
             case 'use_deposits':
             case 'ask_amount_in_vender':
             case 'default_cuenta_corriente':
-                return $this->parse_bool_response($question, $body);
+                return $this->parse_bool_response($question, $body, $data, $client, $implementation);
 
             // Preguntas de texto libre: cualquier respuesta no vacía es válida.
             case 'price_lists':
@@ -2344,88 +2362,72 @@ class ImplementationConversationService
     }
 
     /**
-     * Normaliza y parsea una respuesta de tipo booleano según la pregunta.
+     * Interpreta una respuesta booleana del cliente usando Claude.
      *
-     * Acepta variantes comunes en español para no requerir texto exacto.
+     * Delega al `ImplementationAiInterpreter` para que comprenda el lenguaje natural
+     * del cliente en lugar de comparar contra palabras clave hardcodeadas.
      *
-     * @param string $question Clave de la pregunta.
-     * @param string $body     Texto de la respuesta normalizado.
+     * @param string               $question       Clave de la pregunta (ej: 'use_price_lists').
+     * @param string               $body           Texto crudo de la respuesta del cliente.
+     * @param array<string, mixed> $data           Data actual del stage (para construir el texto de la pregunta).
+     * @param Client|null          $client         Cliente (para personalizar el texto de la pregunta).
+     * @param Implementation|null  $implementation Implementación activa (para resolver admin y lead).
      *
-     * @return bool|null true/false si reconocida, null si ambigua.
+     * @return bool|null true/false según la interpretación, null si ambigua o no interpretable.
      */
-    private function parse_bool_response(string $question, string $body): ?bool
-    {
-        // Normalizar: minúsculas, sin tildes, sin puntuación final.
-        $normalized = strtolower(trim($body));
-        $normalized = $this->remove_accents($normalized);
-        $normalized = rtrim($normalized, '.!?');
+    private function parse_bool_response(
+        string $question,
+        string $body,
+        array $data = [],
+        ?Client $client = null,
+        ?Implementation $implementation = null
+    ): ?bool {
+        // Obtener el texto exacto que se le envió al cliente para esta pregunta.
+        $question_text = $this->build_question_text($question, $data, $client, $implementation);
 
-        if ($question === 'ask_amount_in_vender') {
-            // "Preguntar cantidad" → true | "Agregar 1 unidad" → false.
-            if (str_contains($normalized, 'preguntar')) {
-                return true;
-            }
-            if (str_contains($normalized, 'agregar') || str_contains($normalized, '1 unidad')) {
-                return false;
-            }
-            // Fallback sí/no por si el cliente responde directamente.
-            return $this->parse_yes_no($normalized);
+        // Delegar la interpretación semántica a Claude.
+        $result = $this->ai_interpreter->interpret($question, $question_text, $body);
+
+        // El valor puede ser true, false o null; convertir a ?bool.
+        $value = $result['value'] ?? null;
+
+        if ($value === true) {
+            return true;
         }
 
-        if ($question === 'default_cuenta_corriente') {
-            // "Por defecto sí" → true | "Por defecto no" → false.
-            if (str_contains($normalized, 'por defecto si') || $normalized === 'si' || $normalized === 's') {
-                return true;
-            }
-            if (str_contains($normalized, 'por defecto no') || $normalized === 'no' || $normalized === 'n') {
-                return false;
-            }
-            return $this->parse_yes_no($normalized);
+        if ($value === false) {
+            return false;
         }
 
-        if ($question === 'use_price_lists') {
-            // Opciones: "Precio único" → false | "Listas de precios" → true.
-            if (str_contains($normalized, 'precio unico') || str_contains($normalized, 'unico')) {
-                return false;
-            }
-            if (str_contains($normalized, 'lista') || str_contains($normalized, 'varios')) {
-                return true;
-            }
-            return $this->parse_yes_no($normalized);
-        }
-
-        if ($question === 'use_deposits') {
-            // Opciones: "Un lugar" → false | "Varias sucursales" → true.
-            if (str_contains($normalized, 'un lugar') || str_contains($normalized, 'unico')) {
-                return false;
-            }
-            if (str_contains($normalized, 'varias') || str_contains($normalized, 'sucursal') || str_contains($normalized, 'deposito')) {
-                return true;
-            }
-            return $this->parse_yes_no($normalized);
-        }
-
-        // Caso genérico.
-        return $this->parse_yes_no($normalized);
+        return null;
     }
 
     /**
-     * Parsea una respuesta genérica Sí/No.
+     * Interpreta una respuesta genérica de Sí/No usando Claude.
      *
-     * @param string $normalized Texto ya normalizado (sin tildes, minúsculas).
+     * Recibe el texto ya normalizado (o no) del cliente y delega la interpretación
+     * semántica al `ImplementationAiInterpreter` con la clave genérica 'yes_no'.
      *
-     * @return bool|null
+     * @param string $normalized Texto del cliente (puede estar ya normalizado o no).
+     *
+     * @return bool|null true = sí, false = no, null = ambiguo.
      */
     private function parse_yes_no(string $normalized): ?bool
     {
-        // Acepta variantes comunes: "sí", "si", "s", "yes" → true.
-        if (in_array($normalized, ['si', 's', 'yes', 'sip', 'dale', 'claro', 'correcto', 'exacto', 'afirmativo'], true)) {
+        // Delegar al intérprete con la clave genérica yes_no.
+        // No se pasa question_text ya que el contexto genérico en el intérprete es suficiente.
+        $result = $this->ai_interpreter->interpret('yes_no', '', $normalized);
+
+        $value = $result['value'] ?? null;
+
+        if ($value === true) {
             return true;
         }
-        // "no", "n", "nop", "nope" → false.
-        if (in_array($normalized, ['no', 'n', 'nop', 'nope', 'negativo'], true)) {
+
+        if ($value === false) {
             return false;
         }
+
         return null;
     }
 
@@ -2801,45 +2803,33 @@ class ImplementationConversationService
     }
 
     /**
-     * Determina si la respuesta del dueño indica que él mismo se encargará de la migración.
+     * Determina si la respuesta del dueño indica que él mismo se encargará de la tarea.
      *
-     * Compara el texto recibido con frases de primera persona ("yo", "yo mismo", etc.)
-     * y con el nombre propio del cliente. Usado en la Etapa 2 para decidir si
-     * saltar la pregunta del teléfono del responsable.
+     * Delega la interpretación a Claude para cubrir variantes naturales como
+     * "yo", "yo mismo", "yo me encargo", o el propio nombre del cliente.
      *
      * @param string      $body   Texto de la respuesta recibida.
-     * @param Client|null $client Cliente para comparar con su nombre propio.
+     * @param Client|null $client Cliente asociado (se incluye el nombre en el contexto si está disponible).
      *
      * @return bool true si el dueño se designó a sí mismo.
      */
     private function is_self_referential_response(string $body, ?Client $client): bool
     {
-        // Normalizar: minúsculas y sin tildes para comparación robusta.
-        $normalized = strtolower(trim($this->remove_accents($body)));
-
-        // Frases que indican que el propio dueño se hará cargo.
-        $self_signals = ['yo', 'yo mismo', 'yo misma', 'yo lo hago', 'lo hago yo', 'soy yo', 'yo me encargo', 'me encargo yo'];
-        foreach ($self_signals as $signal) {
-            if ($normalized === $signal || str_contains($normalized, $signal)) {
-                return true;
-            }
-        }
-
-        // Comparar con el nombre de display del cliente para detectar auto-referencia en tercera persona.
+        // Construir contexto de respuesta: incluir el nombre del cliente si está disponible
+        // para que Claude pueda detectar auto-referencia en tercera persona ("lo hago Juan").
+        $context = $body;
         if ($client !== null) {
-            $display_name_normalized = strtolower(trim($this->remove_accents($client->resolve_display_name())));
-            if ($display_name_normalized !== '' && str_contains($normalized, $display_name_normalized)) {
-                return true;
-            }
-
-            // También comparar con el campo name si es distinto al display name.
-            $client_name_normalized = strtolower(trim($this->remove_accents((string) ($client->name ?? ''))));
-            if ($client_name_normalized !== '' && str_contains($normalized, $client_name_normalized)) {
-                return true;
-            }
+            $display_name = $client->resolve_display_name();
+            $context .= " [nombre del cliente: {$display_name}]";
         }
 
-        return false;
+        // Texto genérico que representa la pregunta de responsabilidad.
+        $question_text = '¿Quién se va a encargar de esta tarea?';
+
+        // Delegar la interpretación semántica a Claude.
+        $result = $this->ai_interpreter->interpret('is_self', $question_text, $context);
+
+        return $result['value'] === true;
     }
 
     /**
