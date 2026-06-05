@@ -10,8 +10,9 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 /**
- * Configuración del flujo de implementaciones: admin asignado por defecto
- * y tiempo de espera para procesar archivos recibidos (Etapa 4).
+ * Configuración del flujo de implementaciones: admin asignado por defecto,
+ * tiempo de espera para confirmar lista de empleados (Etapa 1) y tiempo de
+ * espera para procesar archivos recibidos (Etapa 4).
  *
  * Expone endpoints para que el panel de Account pueda leer y actualizar
  * los settings de implementación almacenados en admin_settings.
@@ -89,6 +90,43 @@ class ImplementationSettingsController extends Controller
 
         // Persistir o actualizar el setting con el nuevo valor.
         AdminSetting::set('implementation_file_wait_seconds', (string) $validated['seconds']);
+
+        return response()->json(['seconds' => (int) $validated['seconds']], 200);
+    }
+
+    /**
+     * Retorna la cantidad de segundos de espera configurada para preguntar al cliente
+     * si terminó de pasar empleados en la Etapa 1 (debounce de confirmación).
+     *
+     * @return JsonResponse
+     */
+    public function get_employees_wait(): JsonResponse
+    {
+        // Leer el valor actual del setting; ImplementationSettings aplica el fallback a 30.
+        $seconds = ImplementationSettings::get_employees_wait_seconds();
+
+        return response()->json(['seconds' => $seconds], 200);
+    }
+
+    /**
+     * Actualiza la cantidad de segundos de espera antes de preguntar al cliente
+     * si terminó de pasar empleados en la Etapa 1.
+     *
+     * Valida que el valor esté entre 1 y 120 segundos para evitar configuraciones extremas.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse
+     */
+    public function update_employees_wait(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // Mínimo 1 segundo para que el debounce tenga sentido; máximo 120 para no bloquear demasiado.
+            'seconds' => 'required|integer|min:1|max:120',
+        ]);
+
+        // Persistir o actualizar el setting con el nuevo valor.
+        AdminSetting::set('implementation_employees_wait_seconds', (string) $validated['seconds']);
 
         return response()->json(['seconds' => (int) $validated['seconds']], 200);
     }

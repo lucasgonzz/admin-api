@@ -228,6 +228,10 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show']);
         Route::put('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update']);
 
+        // Configuración de implementaciones: tiempo de espera para confirmar lista de empleados (Etapa 1).
+        Route::get('settings/implementation-employees-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_employees_wait']);
+        Route::put('settings/implementation-employees-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_employees_wait']);
+
         // Configuración de implementaciones: tiempo de espera para procesar archivos (Etapa 4).
         Route::get('settings/implementation-file-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_file_wait']);
         Route::put('settings/implementation-file-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_file_wait']);
