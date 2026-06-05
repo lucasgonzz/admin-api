@@ -854,6 +854,17 @@ class ImplementationConversationService
         $admin_message = "✅ {$client_name} completó la Etapa 2. Responsable de migración: {$responsible_name} ({$responsible_phone}).";
         $this->notify_assigned_admin($implementation, $admin_message);
 
+        // Marcar la etapa 2 como completada en la base de datos.
+        $stage_2_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 2)
+            ->first();
+
+        if ($stage_2_record !== null) {
+            $stage_2_record->status       = 'completed';
+            $stage_2_record->completed_at = now();
+            $stage_2_record->save();
+        }
+
         // Evento Pusher para notificar al panel en tiempo real.
         event(new ImplementationStageCompleted($implementation->id, 2, $client_name));
     }
@@ -1211,6 +1222,17 @@ class ImplementationConversationService
         // Mensaje al admin con resumen de la importación.
         $admin_message = "✅ {$client_name} completó la Etapa 5 con importación IA. Artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}.";
         $this->notify_assigned_admin($implementation, $admin_message);
+
+        // Marcar la etapa 5 como completada en la base de datos.
+        $stage_5_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 5)
+            ->first();
+
+        if ($stage_5_record !== null) {
+            $stage_5_record->status       = 'completed';
+            $stage_5_record->completed_at = now();
+            $stage_5_record->save();
+        }
 
         // Evento Pusher para notificar al panel admin en tiempo real.
         event(new ImplementationStageCompleted($implementation->id, 5, $client_name));
@@ -1838,6 +1860,17 @@ class ImplementationConversationService
         }
         $this->notify_assigned_admin($implementation, $admin_message);
 
+        // Marcar la etapa 4 como completada en la base de datos.
+        $stage_4_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 4)
+            ->first();
+
+        if ($stage_4_record !== null) {
+            $stage_4_record->status       = 'completed';
+            $stage_4_record->completed_at = now();
+            $stage_4_record->save();
+        }
+
         // Evento Pusher para notificar al panel en tiempo real.
         event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
     }
@@ -2353,6 +2386,17 @@ class ImplementationConversationService
         // El análisis IA se dispara cuando el admin avanza manualmente a la Etapa 5.
         $client      = $implementation->client ?? Client::find($implementation->client_id);
         $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
+        // Marcar la etapa 4 como completada en la base de datos.
+        $stage_4b_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 4)
+            ->first();
+
+        if ($stage_4b_record !== null) {
+            $stage_4b_record->status       = 'completed';
+            $stage_4b_record->completed_at = now();
+            $stage_4b_record->save();
+        }
+
         event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
     }
 
