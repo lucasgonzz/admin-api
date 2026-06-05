@@ -28,4 +28,22 @@ class ImplementationSettings
 
         return $value > 0 ? $value : 15;
     }
+
+    /**
+     * Retorna la cantidad de segundos de inactividad que el sistema aguarda
+     * tras el último mensaje de empleados antes de preguntarle al cliente si
+     * terminó la carga (debounce de confirmación de Etapa 1).
+     *
+     * El valor se lee desde admin_settings con key 'implementation_employees_wait_seconds'.
+     * Si no existe el registro, devuelve 30 como valor por defecto.
+     *
+     * @return int Segundos de espera (mínimo 1).
+     */
+    public static function get_employees_wait_seconds(): int
+    {
+        // Leer el valor guardado; fallback a 30 si no existe o es 0.
+        $value = (int) AdminSetting::where('key', 'implementation_employees_wait_seconds')->value('value');
+
+        return $value > 0 ? $value : 30;
+    }
 }

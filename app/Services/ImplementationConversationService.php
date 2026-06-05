@@ -187,8 +187,9 @@ class ImplementationConversationService
             return;
         }
 
-        // Campos con lógica especial de acumulación/auto-detección.
-        if ($current_question === 'employees') {
+        // Campos con lógica especial de acumulación y confirmación de empleados.
+        // Ambos estados ('employees' y 'employees_confirm') se manejan en el mismo método.
+        if ($current_question === 'employees' || $current_question === 'employees_confirm') {
             $this->handle_stage_1_employees($stage, $data, $parsed, $phone, $implementation);
             return;
         }
@@ -274,6 +275,21 @@ class ImplementationConversationService
      *
      * @return void
      */
+    /**
+     * Maneja los mensajes de la pregunta 'employees' con sistema de debounce y confirmación explícita.
+     *
+     * Dos ramas según el valor de current_question:
+     * - 'employees':         acumulación → acusar recibo breve y reiniciar timer de debounce.
+     * - 'employees_confirm': el cliente responde si terminó → avanzar, esperar o repreguntar.
+     *
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data
+     * @param array<string, mixed> $parsed
+     * @param string               $phone
+     * @param Implementation       $implementation
+     *
+     * @return void
+     */
     private function handle_stage_1_employees(
         ImplementationStage $stage,
         array $data,
@@ -281,96 +297,86 @@ class ImplementationConversationService
         string $phone,
         Implementation $implementation
     ): void {
-        $body = trim((string) ($parsed['body'] ?? ''));
+        // Texto del mensaje entrante y cliente asociado.
+        $body           = trim((string) ($parsed['body'] ?? ''));
+        $normalized     = strtolower(trim($this->remove_accents($body)));
+        $current_question = (string) ($data['current_question'] ?? 'employees');
+
         $client = $implementation->client;
         if ($client === null) {
             $client = Client::find($implementation->client_id);
         }
 
-        // Rama 1: señal de fin detectada → intentar avanzar.
-        // Rama 2: acumulación → guardar y acusar recibo.
-        // Las ramas son explícitamente excluyentes: cada una termina con return.
-        if ($this->is_employees_done_signal($body, $data)) {
-            // Verificar que haya algo acumulado antes de avanzar.
-            $accumulated = trim((string) ($data['employees'] ?? ''));
+        // --- Rama de confirmación: el cliente responde si terminó la lista ---
+        if ($current_question === 'employees_confirm') {
+            // Parsear respuesta Sí/No del cliente.
+            $yes_no = $this->parse_yes_no($normalized);
 
-            if ($accumulated === '') {
-                // Sin datos acumulados: no se puede avanzar; pedir el primero.
+            if ($yes_no === true) {
+                // El cliente confirmó que terminó: avanzar a la siguiente pregunta.
+                $next_question = $this->get_next_stage1_key('employees', $data);
+
+                if ($next_question === null) {
+                    // No hay más preguntas: finalizar etapa 1.
+                    $data['current_question'] = 'completed';
+                    $data['completed']        = true;
+                    $stage->data              = $data;
+                    $stage->save();
+                    $this->finish_stage_1($implementation, $phone, $client);
+                    return;
+                }
+
+                // Persistir la siguiente pregunta y enviar acuse + pregunta.
+                $data['current_question'] = $next_question;
+                $stage->data              = $data;
+                $stage->save();
+
+                $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
+
+                // Acuse de recibo antes de la siguiente pregunta al confirmar employees.
+                $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
+                $this->send_outbound($implementation, 1, $phone, $outbound_text);
+                return;
+            }
+
+            if ($yes_no === false) {
+                // El cliente indicó que aún no terminó: volver a modo acumulación y esperar.
+                $data['current_question'] = 'employees';
+                $stage->data              = $data;
+                $stage->save();
+
                 $this->send_outbound(
                     $implementation,
                     1,
                     $phone,
-                    'Todavía no recibí ningún dato. ' . $this->build_question_text('employees', $data, $client, $implementation)
+                    'Ok, esperá a que termines y avisame cuando estés listo.'
                 );
                 return;
             }
 
-            // Avanzar a la siguiente pregunta.
-            $next_question = $this->get_next_stage1_key('employees', $data);
-
-            if ($next_question === null) {
-                // No hay más preguntas: finalizar etapa 1.
-                $data['current_question'] = 'completed';
-                $data['completed']        = true;
-                $stage->data              = $data;
-                $stage->save();
-                $this->finish_stage_1($implementation, $phone, $client);
-                return;
-            }
-
-            // Persistir la pregunta siguiente y enviar acuse + pregunta.
-            $data['current_question'] = $next_question;
-            $stage->data              = $data;
-            $stage->save();
-
-            $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
-
-            // Acuse de recibo antes de la siguiente pregunta al completar employees.
-            $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
-            $this->send_outbound($implementation, 1, $phone, $outbound_text);
+            // Respuesta ambigua: repreguntar.
+            $this->send_outbound(
+                $implementation,
+                1,
+                $phone,
+                '¿Terminaste de pasar todos los empleados? Respondé Sí o No.'
+            );
             return;
         }
 
-        // Rama 2: acumular el texto recibido en el campo employees.
+        // --- Rama de acumulación: guardar el mensaje y reiniciar timer de debounce ---
+
+        // Acumular el texto recibido en el campo employees.
         $existing          = trim((string) ($data['employees'] ?? ''));
         $data['employees'] = $existing !== '' ? $existing . "\n" . $body : $body;
         $stage->data       = $data;
         $stage->save();
 
-        // Verificar si la data recién acumulada ya dispara la señal de fin implícita.
-        // Esto evita que el cliente vea un acuse suelto ("Perfecto.") seguido de la
-        // siguiente pregunta en el mensaje inmediato posterior: si la señal se activa
-        // ahora mismo, avanzamos directamente sin enviar el acuse de acumulación.
-        if ($this->is_employees_done_signal($body, $data)) {
-            // Avanzar a la siguiente pregunta (misma lógica que Rama 1).
-            $next_question = $this->get_next_stage1_key('employees', $data);
-
-            if ($next_question === null) {
-                // No hay más preguntas: finalizar etapa 1.
-                $data['current_question'] = 'completed';
-                $data['completed']        = true;
-                $stage->data              = $data;
-                $stage->save();
-                $this->finish_stage_1($implementation, $phone, $client);
-                return;
-            }
-
-            // Persistir la pregunta siguiente y enviar acuse + pregunta.
-            $data['current_question'] = $next_question;
-            $stage->data              = $data;
-            $stage->save();
-
-            $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
-
-            // Acuse de recibo al avanzar desde la acumulación implícita.
-            $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
-            $this->send_outbound($implementation, 1, $phone, $outbound_text);
-            return;
-        }
-
-        // Sin señal de fin: acuse de recibo breve para que el cliente sepa que se recibió el mensaje.
+        // Acuse de recibo breve para que el cliente sepa que se recibió el mensaje.
         $this->send_outbound($implementation, 1, $phone, $this->build_acknowledgement());
-        return;
+
+        // Reiniciar el timer de debounce: cuando expire preguntará si terminó la lista.
+        (new ImplementationStage1EmployeesScheduler())->schedule_after_employee_message($implementation->id);
     }
 
     /**
@@ -2199,6 +2205,91 @@ class ImplementationConversationService
         }
     }
 
+    /**
+     * Invocado por el job de debounce cuando expiró la espera tras el último mensaje de empleados.
+     *
+     * Si la implementación aún está esperando más empleados (current_question === 'employees')
+     * y hay datos acumulados, cambia el estado a 'employees_confirm' y envía la pregunta
+     * de confirmación al cliente. Si ya avanzó o no hay datos, no hace nada.
+     *
+     * @param int $implementation_id ID de la implementación a procesar.
+     *
+     * @return void
+     */
+    public function process_stage1_employees_debounce(int $implementation_id): void
+    {
+        // Cargar la implementación.
+        $implementation = Implementation::find($implementation_id);
+
+        if ($implementation === null) {
+            Log::channel('daily')->warning('process_stage1_employees_debounce: implementación no encontrada.', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        // Cargar el stage 1.
+        $stage = ImplementationStage::where('implementation_id', $implementation_id)
+            ->where('stage_number', 1)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('process_stage1_employees_debounce: stage 1 no encontrado.', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        // Data actual del stage 1.
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        // Solo actuar si la pregunta sigue siendo 'employees': si ya avanzó o está en
+        // 'employees_confirm' (otro debounce ya disparó), ignorar.
+        $current_question = (string) ($data['current_question'] ?? '');
+
+        if ($current_question !== 'employees') {
+            Log::channel('daily')->debug('process_stage1_employees_debounce: ignorado (current_question no es employees).', [
+                'implementation_id' => $implementation_id,
+                'current_question'  => $current_question,
+            ]);
+            return;
+        }
+
+        // Verificar que haya datos acumulados; si está vacío no hay nada que confirmar.
+        $accumulated = trim((string) ($data['employees'] ?? ''));
+
+        if ($accumulated === '') {
+            Log::channel('daily')->debug('process_stage1_employees_debounce: ignorado (employees vacío).', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        // Teléfono del contacto para enviar el mensaje de confirmación.
+        $contact_phone = trim((string) ($implementation->contact_phone ?? ''));
+
+        if ($contact_phone === '') {
+            Log::channel('daily')->warning('process_stage1_employees_debounce: contact_phone vacío, no se puede enviar mensaje.', [
+                'implementation_id' => $implementation_id,
+            ]);
+            return;
+        }
+
+        // Cambiar el estado a 'employees_confirm' para que el próximo mensaje
+        // del cliente sea procesado como respuesta a la confirmación.
+        $data['current_question'] = 'employees_confirm';
+        $stage->data              = $data;
+        $stage->save();
+
+        // Preguntar al cliente si terminó de pasar la lista.
+        $this->send_outbound(
+            $implementation,
+            1,
+            $contact_phone,
+            '¿Terminaste de pasar la lista de empleados?'
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Procesamiento de respuestas
     // -------------------------------------------------------------------------
@@ -2331,58 +2422,6 @@ class ImplementationConversationService
             return false;
         }
         return null;
-    }
-
-    /**
-     * Detecta si el mensaje es una señal de fin para la acumulación de empleados.
-     *
-     * Dos modos de detección:
-     * 1. Señal explícita: el cuerpo contiene "listo", "terminé", "es todo", etc.
-     * 2. Señal implícita: el cliente ya envió más de 3 mensajes acumulados y el
-     *    último es muy corto (menos de 4 palabras) y no contiene números → se interpreta
-     *    como fin de la carga. Si hay duda → NO avanzar (acumular). Solo avanzar cuando
-     *    la señal es explícita o cuando la heurística es confiable.
-     *
-     * @param string               $body Texto del mensaje (sin normalizar).
-     * @param array<string, mixed> $data Data actual del stage (para contar mensajes acumulados).
-     *
-     * @return bool
-     */
-    private function is_employees_done_signal(string $body, array $data = []): bool
-    {
-        // Texto normalizado para comparar frases de cierre comunes.
-        $normalized = strtolower(trim($this->remove_accents($body)));
-
-        // Señales explícitas de finalización.
-        $done_signals = ['listo', 'ya esta', 'ya listo', 'eso es todo', 'termine', 'es todo', 'fin', 'finalice', 'listo ya'];
-        foreach ($done_signals as $signal) {
-            if ($normalized === $signal || str_contains($normalized, $signal)) {
-                return true;
-            }
-        }
-
-        // Detección implícita: solo si hay más de 3 mensajes acumulados.
-        // Se cuenta por la cantidad de líneas en el campo employees.
-        $accumulated = trim((string) ($data['employees'] ?? ''));
-        if ($accumulated !== '') {
-            // Cada mensaje acumulado ocupa al menos una línea.
-            $message_count = substr_count($accumulated, "\n") + 1;
-
-            if ($message_count > 3) {
-                // Contar palabras del mensaje entrante.
-                $words      = preg_split('/\s+/', $body) ?: [];
-                $word_count = count(array_filter($words, fn($w) => $w !== ''));
-
-                // Sin números y con menos de 4 palabras: interpretarlo como señal de fin.
-                $has_numbers = (bool) preg_match('/\d/', $body);
-
-                if ($word_count < 4 && ! $has_numbers) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     // -------------------------------------------------------------------------
