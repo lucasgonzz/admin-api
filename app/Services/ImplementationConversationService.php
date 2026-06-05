@@ -157,11 +157,8 @@ class ImplementationConversationService
                 && $promoted_lead->use_price_lists === true;
 
             if ($lead_confirmed_price_lists) {
-                /**
-                 * Lead confirmado con listas de precios: pre-configurar use_price_lists=true
-                 * y saltar directamente a recolectar los nombres de listas (price_lists).
-                 * La primera pregunta incluye el saludo y pide los nombres directamente.
-                 */
+                // Lead confirmado con listas de precios: pre-configurar use_price_lists=true
+                // y saltar directamente a recolectar los nombres de listas (price_lists).
                 $data['use_price_lists']    = true;
                 $data['current_question']   = 'price_lists';
             } else {
@@ -169,8 +166,14 @@ class ImplementationConversationService
                 $data['current_question'] = 'use_price_lists';
             }
 
+            // Mensaje 1: presentación del admin (se envía siempre antes de la primera pregunta).
+            $greeting = $this->build_stage_1_greeting($implementation, $client);
+            $this->send_outbound($implementation, 1, $phone, $greeting);
+
+            // Mensaje 2: primera pregunta de configuración (sin saludo incluido).
             $first_question = $this->build_question_use_price_lists($implementation, $client);
             $this->send_outbound($implementation, 1, $phone, $first_question);
+
             $stage->data = $data;
             $stage->save();
             return;
@@ -214,9 +217,9 @@ class ImplementationConversationService
                     $stage->data              = $data;
                     $stage->save();
 
-                    // Mensaje combinado: confirma los depósitos recibidos + hace la siguiente pregunta.
+                    // Acuse de recibo + siguiente pregunta (sin repetir los nombres que el cliente acaba de decir).
                     $next_question_text = $this->build_question_text('payment_discounts', $data, $client, $implementation);
-                    $outbound_text      = $this->build_acknowledgement() . " Anotado que vas a trabajar con {$extracted_names}. " . $next_question_text;
+                    $outbound_text      = $this->build_acknowledgement() . ' ' . $next_question_text;
                     $this->send_outbound($implementation, 1, $phone, $outbound_text);
                     return;
                 }
@@ -334,7 +337,38 @@ class ImplementationConversationService
         $stage->data       = $data;
         $stage->save();
 
-        // Acuse de recibo breve y aleatorio para que el cliente sepa que se recibió el mensaje.
+        // Verificar si la data recién acumulada ya dispara la señal de fin implícita.
+        // Esto evita que el cliente vea un acuse suelto ("Perfecto.") seguido de la
+        // siguiente pregunta en el mensaje inmediato posterior: si la señal se activa
+        // ahora mismo, avanzamos directamente sin enviar el acuse de acumulación.
+        if ($this->is_employees_done_signal($body, $data)) {
+            // Avanzar a la siguiente pregunta (misma lógica que Rama 1).
+            $next_question = $this->get_next_stage1_key('employees', $data);
+
+            if ($next_question === null) {
+                // No hay más preguntas: finalizar etapa 1.
+                $data['current_question'] = 'completed';
+                $data['completed']        = true;
+                $stage->data              = $data;
+                $stage->save();
+                $this->finish_stage_1($implementation, $phone, $client);
+                return;
+            }
+
+            // Persistir la pregunta siguiente y enviar acuse + pregunta.
+            $data['current_question'] = $next_question;
+            $stage->data              = $data;
+            $stage->save();
+
+            $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
+
+            // Acuse de recibo al avanzar desde la acumulación implícita.
+            $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
+            $this->send_outbound($implementation, 1, $phone, $outbound_text);
+            return;
+        }
+
+        // Sin señal de fin: acuse de recibo breve para que el cliente sepa que se recibió el mensaje.
         $this->send_outbound($implementation, 1, $phone, $this->build_acknowledgement());
         return;
     }
@@ -2464,37 +2498,52 @@ class ImplementationConversationService
     }
 
     /**
-     * Construye el texto de la primera pregunta (listas de precios / arranque).
+     * Construye el mensaje de presentación inicial de la Etapa 1.
      *
-     * Si el lead de origen tiene `use_price_lists = true` → enviar saludo y pedir
-     * directamente los nombres de las listas (saltar la confirmación sí/no).
-     * Si no hay dato previo → preguntar la opción (Precio único / Listas de precios).
-     *
-     * El admin asignado a la implementación se usa para personalizar el saludo en
-     * primera persona; fallback: "el equipo de ComercioCity".
+     * Se envía como primer mensaje separado, antes de la primera pregunta de
+     * configuración. Presenta al admin asignado y explica el propósito del flujo.
      *
      * @param Implementation|null $implementation Implementación activa para resolver el admin asignado.
      * @param Client|null         $client         Cliente para personalizar el saludo.
      *
      * @return string
      */
-    private function build_question_use_price_lists(?Implementation $implementation, ?Client $client): string
+    private function build_stage_1_greeting(?Implementation $implementation, ?Client $client): string
     {
-        // Nombre del cliente para el saludo.
+        // Nombre del cliente para el saludo personalizado.
         $display_name = $client ? $client->resolve_display_name() : 'cliente';
 
         // Nombre del admin asignado para presentarse en primera persona.
         $admin_name = $implementation ? $this->resolve_assigned_admin_name($implementation) : 'el equipo de ComercioCity';
 
+        return "Hola {$display_name}! Soy {$admin_name}, te voy a hacer unas preguntas para dar de alta tu perfil en la plataforma y comenzar con la migración de tu información.";
+    }
+
+    /**
+     * Construye el texto de la primera pregunta de configuración (listas de precios).
+     *
+     * No incluye saludo — ese se envía por separado mediante `build_stage_1_greeting()`.
+     *
+     * Si el lead de origen tiene `use_price_lists = true` → pedir directamente los
+     * nombres de las listas (saltar la confirmación sí/no).
+     * Si no hay dato previo → preguntar la opción (Precio único / Listas de precios).
+     *
+     * @param Implementation|null $implementation Implementación activa para resolver el lead promovido.
+     * @param Client|null         $client         Cliente para buscar el lead promovido.
+     *
+     * @return string
+     */
+    private function build_question_use_price_lists(?Implementation $implementation, ?Client $client): string
+    {
         // Buscar el lead promovido para leer la preferencia del proceso de venta.
         $promoted_lead = $client ? $this->find_promoted_lead($client) : null;
 
         if ($promoted_lead !== null && isset($promoted_lead->use_price_lists) && $promoted_lead->use_price_lists === true) {
             // Lead confirmado con listas de precios: pedir directamente los nombres.
-            return "Hola {$display_name}! Soy {$admin_name}. Para arrancar con la configuración: en la demo trabajaste con listas de precios. Indicame los nombres de tus listas y el margen de ganancia por defecto de cada una. Ejemplo:\n\nMinorista 30%\nMayorista 20%\n(Si no tenés margen fijo, decime solo los nombres)";
+            return "Para arrancar con la configuración: en la demo trabajaste con listas de precios. Indicame los nombres de tus listas y el margen de ganancia por defecto de cada una. Ejemplo:\n\nMinorista 30%\nMayorista 20%\n(Si no tenés margen fijo, decime solo los nombres)";
         }
 
-        return "Hola {$display_name}! Soy {$admin_name}. Para arrancar con la configuración: ¿vas a manejar un único precio de venta por producto, o necesitás varias listas de precios con distintos márgenes? (respondé Precio único o Listas de precios)";
+        return "Para arrancar con la configuración: ¿vas a manejar un único precio de venta por producto, o necesitás varias listas de precios con distintos márgenes? (respondé Precio único o Listas de precios)";
     }
 
     /**
