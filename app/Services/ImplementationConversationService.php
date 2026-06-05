@@ -1429,6 +1429,18 @@ class ImplementationConversationService
      *
      * @return void
      */
+    /**
+     * Maneja un mensaje entrante durante la Etapa 4 (recepción de archivos de migración).
+     *
+     * Principio: acumulación libre. Todo mensaje (archivo o texto) se acumula en silencio
+     * en `pending_files` o `pending_texts`, y se reinicia el timer de debounce. Cuando el
+     * timer expira, Claude analiza el lote completo y genera la respuesta al cliente.
+     *
+     * @param Implementation       $implementation Implementación activa.
+     * @param array<string, mixed> $parsed         Mensaje entrante parseado.
+     *
+     * @return void
+     */
     private function handle_stage_4(Implementation $implementation, array $parsed): void
     {
         // Stage 4 de esta implementación concreta.
@@ -1446,12 +1458,6 @@ class ImplementationConversationService
         // Data actual del stage con archivos acumulados y estado de categorías.
         $data = is_array($stage->data) ? $stage->data : [];
 
-        // Teléfono destino: el responsable de migración (puede ser distinto al dueño).
-        $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
-        $message_type  = (string) ($parsed['type'] ?? 'text');
-
-        $client = $implementation->client ?? Client::find($implementation->client_id);
-
         // Si no hay current_question → la apertura no fue enviada aún; enviarla como fallback.
         if (! array_key_exists('current_question', $data)) {
             $this->send_stage_4_opening($implementation);
@@ -1464,381 +1470,49 @@ class ImplementationConversationService
             return;
         }
 
-        if ($message_type === 'document') {
-            // Documento recibido: acumular en la categoría inferida y programar debounce.
-            $this->handle_stage_4_document($stage, $data, $parsed, $implementation);
-            return;
-        }
-
-        // Texto recibido: procesar como "no tengo" o guardar como contexto futuro.
-        $body = trim((string) ($parsed['body'] ?? ''));
-        $this->handle_stage_4_text($stage, $data, $body, $contact_phone, $implementation, $client);
-    }
-
-    /**
-     * Acumula un documento recibido en la Etapa 4 y programa el procesamiento diferido.
-     *
-     * Infiere la categoría del archivo usando el texto del mensaje actual, el contexto
-     * guardado del último texto recibido, y el nombre del archivo (en ese orden de prioridad).
-     * Si no se puede inferir, el archivo queda en 'unclassified_files' y se pedirá aclaración.
-     *
-     * @param ImplementationStage  $stage
-     * @param array<string, mixed> $data           Data actual del stage.
-     * @param array<string, mixed> $parsed         Mensaje entrante.
-     * @param Implementation       $implementation
-     *
-     * @return void
-     */
-    private function handle_stage_4_document(
-        ImplementationStage $stage,
-        array $data,
-        array $parsed,
-        Implementation $implementation
-    ): void {
-        // Datos del archivo recibido.
-        $filename  = (string) ($parsed['inbound_media']['filename'] ?? '');
-        $mime_type = (string) ($parsed['inbound_media']['mime'] ?? '');
-
-        // Contextos para inferir la categoría: texto del mensaje actual y contexto previo guardado.
-        $body_context = trim((string) ($parsed['body'] ?? ''));
-        $last_context = trim((string) ($data['last_text_context'] ?? ''));
-
-        // URL de Kapso para descargar el archivo en el procesamiento con IA.
-        $media_url = trim((string) ($parsed['inbound_media']['url'] ?? ''));
-
-        // Registro del archivo para guardar en el data del stage.
-        $file_record = [
-            'filename' => $filename,
-            'type'     => $mime_type,
-        ];
-
-        if ($media_url !== '') {
-            $file_record['url'] = $media_url;
-        }
-
-        // Inferir categoría por contexto textual o nombre del archivo.
-        $category = $this->infer_file_category($body_context, $last_context, $filename);
-
-        if ($category !== null) {
-            // Agregar el archivo al array de la categoría inferida.
-            $category_key         = $category . '_files';
-            $existing_files       = is_array($data[$category_key] ?? null) ? $data[$category_key] : [];
-            $existing_files[]     = $file_record;
-            $data[$category_key]  = $existing_files;
-
-            // Limpiar el contexto de texto anterior ya utilizado para la inferencia.
-            $data['last_text_context'] = '';
-        } else {
-            // Sin contexto suficiente: acumular en no clasificados para pedir aclaración.
-            $unclassified     = is_array($data['unclassified_files'] ?? null) ? $data['unclassified_files'] : [];
-            $unclassified[]   = $file_record;
-            $data['unclassified_files'] = $unclassified;
-        }
-
-        // Marcar que estamos en modo acumulación (no secuencial como antes).
-        $data['current_question'] = 'collecting_files';
-
-        // Persistir el estado acumulado.
-        $stage->data = $data;
-        $stage->save();
-
-        // Programar el procesamiento diferido con debounce: si llegan más archivos
-        // antes de que expire el timer, el token anterior queda obsoleto y solo
-        // el último job encolado ejecutará el procesamiento efectivo.
-        $scheduler = new ImplementationStage4Scheduler();
-        $scheduler->schedule_after_file_received($implementation->id);
-    }
-
-    /**
-     * Procesa un mensaje de texto recibido en la Etapa 4.
-     *
-     * Si el texto es "no tengo" (o equivalente), aplica el skip a la categoría
-     * correspondiente (esperada o inferida por palabras clave) y programa el scheduler.
-     * Si no es "no tengo", guarda el texto como contexto para el próximo archivo recibido.
-     *
-     * @param ImplementationStage  $stage
-     * @param array<string, mixed> $data           Data actual del stage.
-     * @param string               $body           Texto del mensaje recibido.
-     * @param string               $contact_phone  Teléfono del responsable de migración.
-     * @param Implementation       $implementation
-     * @param Client|null          $client
-     *
-     * @return void
-     */
-    private function handle_stage_4_text(
-        ImplementationStage $stage,
-        array $data,
-        string $body,
-        string $contact_phone,
-        Implementation $implementation,
-        ?Client $client
-    ): void {
-        if ($body === '') {
-            return;
-        }
-
-        // El cliente ya confirmó que terminó de enviar archivos: no re-detectar ni acumular contexto.
-        if (! empty($data['files_confirmed_complete'])) {
-            $this->send_stage_4_outbound(
-                $implementation,
-                'Estamos procesando tus archivos, ¡ya casi!'
-            );
-
-            return;
-        }
-
-        // Confirmación del mapeo de columnas tras el análisis con IA.
-        $current_question = trim((string) ($data['current_question'] ?? ''));
+        // Esperando confirmación del mapeo de columnas: delegar al handler correspondiente.
         if ($current_question === 'confirm_analysis') {
+            $body   = trim((string) ($parsed['body'] ?? ''));
+            $client = $implementation->client ?? Client::find($implementation->client_id);
             $this->handle_stage_4_confirm_analysis($stage, $data, $body, $implementation, $client);
             return;
         }
 
-        // Detección semántica: el cliente indica que ya envió todos los archivos Excel.
-        if ($this->detect_files_complete_intent($body)) {
-            $data['files_confirmed_complete'] = true;
-            $stage->data                      = $data;
-            $stage->save();
+        // Tipo de mensaje entrante: 'document' o texto libre.
+        $message_type = (string) ($parsed['type'] ?? 'text');
 
-            $this->send_stage_4_outbound(
-                $implementation,
-                '¡Perfecto! Ya tengo todos los archivos. Voy a analizarlos y en unos minutos te cuento cómo quedó la detección de columnas. 📊'
-            );
+        if ($message_type === 'document') {
+            // Construir registro del archivo recibido con metadatos disponibles.
+            $file_record = [
+                'filename'    => (string) ($parsed['inbound_media']['filename'] ?? ''),
+                'type'        => (string) ($parsed['inbound_media']['mime'] ?? ''),
+                'url'         => (string) ($parsed['inbound_media']['url'] ?? ''),
+                'received_at' => now()->toISOString(),
+            ];
 
-            $scheduler = new ImplementationStage4Scheduler();
-            $scheduler->schedule_after_file_received($implementation->id);
-
-            $client_name = $client
-                ? $client->resolve_display_name()
-                : "Cliente #{$implementation->client_id}";
-
-            event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
-
-            return;
-        }
-
-        // Normalizar para detectar variantes de "no tengo".
-        $normalized = strtolower($this->remove_accents($body));
-
-        // Detectar si el cliente indica que no tiene un archivo específico.
-        $is_no_tengo = str_contains($normalized, 'no tengo')
-            || str_contains($normalized, 'no tenemos')
-            || str_contains($normalized, 'no tenemos ese')
-            || $normalized === 'no';
-
-        if ($is_no_tengo) {
-            // Determinar a qué categoría aplica el "no tengo": usar la categoría
-            // que el sistema estaba esperando (waiting_for_category) o inferirla por palabras clave.
-            $waiting_category = trim((string) ($data['waiting_for_category'] ?? ''));
-
-            if ($waiting_category !== '') {
-                // Hay una categoría esperada explícita: aplicar el skip a esa categoría.
-                $data[$waiting_category . '_files'] = 'skipped';
-                $data['waiting_for_category']       = '';
-                $data['current_question']           = 'collecting_files';
-                $stage->data                        = $data;
-                $stage->save();
-
-                // Programar el procesamiento diferido para evaluar el estado completo.
-                $scheduler = new ImplementationStage4Scheduler();
-                $scheduler->schedule_after_file_received($implementation->id);
-                return;
-            }
-
-            // Sin categoría esperada: intentar inferirla por palabras clave en el texto.
-            $inferred_category = $this->infer_no_tengo_category($normalized);
-
-            if ($inferred_category !== null) {
-                $data[$inferred_category . '_files'] = 'skipped';
-                $data['current_question']            = 'collecting_files';
-                $stage->data                         = $data;
-                $stage->save();
-
-                $scheduler = new ImplementationStage4Scheduler();
-                $scheduler->schedule_after_file_received($implementation->id);
-                return;
+            // Acumular en pending_files para que Claude los clasifique al expirar el timer.
+            $pending_files   = is_array($data['pending_files'] ?? null) ? $data['pending_files'] : [];
+            $pending_files[] = $file_record;
+            $data['pending_files'] = $pending_files;
+        } else {
+            // Texto libre: acumular en pending_texts como contexto para Claude.
+            $body = trim((string) ($parsed['body'] ?? ''));
+            if ($body !== '') {
+                $pending_texts   = is_array($data['pending_texts'] ?? null) ? $data['pending_texts'] : [];
+                $pending_texts[] = ['body' => $body, 'received_at' => now()->toISOString()];
+                $data['pending_texts'] = $pending_texts;
             }
         }
 
-        // No es "no tengo" reconocible: guardar como contexto para inferir la categoría
-        // del próximo archivo que llegue. No responder nada al cliente.
-        $data['last_text_context'] = $body;
-        $stage->data               = $data;
+        // Marcar estado de acumulación activa.
+        $data['current_question'] = 'collecting_files';
+
+        // Persistir el estado acumulado antes de reiniciar el timer.
+        $stage->data = $data;
         $stage->save();
-    }
 
-    /**
-     * Detecta con Claude si el mensaje indica que el cliente terminó de enviar todos los archivos Excel.
-     *
-     * @param string $body Texto del mensaje entrante.
-     *
-     * @return bool true si Claude interpreta intención de cierre de envío de archivos.
-     */
-    private function detect_files_complete_intent(string $body): bool
-    {
-        $body = trim($body);
-
-        if ($body === '') {
-            return false;
-        }
-
-        $api_key = (string) config('services.anthropic.api_key');
-
-        if ($api_key === '') {
-            return false;
-        }
-
-        $model = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
-
-        $system_prompt = 'Sos un clasificador de intención para implementaciones de software. '
-            . 'El cliente está en una etapa donde debe enviar por WhatsApp archivos Excel (artículos, clientes, proveedores). '
-            . 'Respondé ÚNICAMENTE con un JSON válido de una línea: {"complete": true} o {"complete": false}. '
-            . 'complete=true solo si el mensaje indica claramente que ya terminó de pasar/enviar todos los archivos '
-            . '(ej. "listo", "ya mandé todo", "no tengo más archivos", "eso es todo"). '
-            . 'complete=false si pide algo, envía un archivo, dice que falta algo, o el mensaje es ambiguo.';
-
-        try {
-            $http = Http::withHeaders([
-                'x-api-key'         => $api_key,
-                'anthropic-version' => '2023-06-01',
-                'content-type'      => 'application/json',
-            ])->timeout(10);
-
-            $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
-            $ca_bundle  = config('services.anthropic.ca_bundle');
-
-            if (! $verify_ssl) {
-                $http = $http->withoutVerifying();
-            } elseif (is_string($ca_bundle) && $ca_bundle !== '' && is_file($ca_bundle)) {
-                $http = $http->withOptions(['verify' => $ca_bundle]);
-            }
-
-            $response = $http->post('https://api.anthropic.com/v1/messages', [
-                'model'      => $model,
-                'max_tokens' => 32,
-                'system'     => $system_prompt,
-                'messages'   => [
-                    [
-                        'role'    => 'user',
-                        'content' => 'Mensaje del cliente: ' . $body,
-                    ],
-                ],
-            ]);
-
-            if (! $response->successful()) {
-                Log::channel('daily')->warning('ImplementationConversationService::detect_files_complete_intent: error Anthropic.', [
-                    'status' => $response->status(),
-                ]);
-
-                return false;
-            }
-
-            $raw_text = '';
-
-            $content_blocks = $response->json('content', []);
-
-            if (is_array($content_blocks)) {
-                foreach ($content_blocks as $block) {
-                    if (is_array($block) && isset($block['text'])) {
-                        $raw_text .= (string) $block['text'];
-                    }
-                }
-            }
-
-            $raw_text = trim($raw_text);
-
-            if ($raw_text === '') {
-                return false;
-            }
-
-            // Extraer JSON aunque Claude agregue texto alrededor.
-            if (preg_match('/\{[^}]+\}/', $raw_text, $matches)) {
-                $raw_text = $matches[0];
-            }
-
-            $parsed = json_decode($raw_text, true);
-
-            if (! is_array($parsed)) {
-                return false;
-            }
-
-            return ! empty($parsed['complete']);
-        } catch (\Throwable $exception) {
-            Log::channel('daily')->warning('ImplementationConversationService::detect_files_complete_intent: excepción.', [
-                'message' => $exception->getMessage(),
-            ]);
-
-            return false;
-        }
-    }
-
-    /**
-     * Infiere la categoría de un archivo recibido en la Etapa 4 usando Claude.
-     *
-     * Combina el texto del mensaje actual, el contexto previo y el nombre del archivo
-     * en un único input para que Claude determine la categoría más probable.
-     *
-     * @param string $body         Texto del mensaje actual (puede estar vacío).
-     * @param string $last_context Último texto recibido (guardado en data['last_text_context']).
-     * @param string $filename     Nombre del archivo recibido.
-     *
-     * @return string|null 'articles' | 'clients' | 'suppliers' | null si no se puede inferir.
-     */
-    private function infer_file_category(string $body, string $last_context, string $filename): ?string
-    {
-        // Combinar los tres contextos disponibles en un único texto para el intérprete.
-        $parts = [];
-        if ($body !== '') {
-            $parts[] = "Mensaje actual: {$body}";
-        }
-        if ($last_context !== '') {
-            $parts[] = "Contexto previo: {$last_context}";
-        }
-        if ($filename !== '') {
-            $parts[] = "Nombre del archivo: {$filename}";
-        }
-
-        // Si no hay ningún contexto disponible, no hay forma de inferir la categoría.
-        if (empty($parts)) {
-            return null;
-        }
-
-        // Construir el texto combinado para enviar al intérprete.
-        $combined_context = implode('. ', $parts);
-
-        // Delegar la inferencia semántica a Claude.
-        $result = $this->ai_interpreter->interpret('file_category', '', $combined_context);
-
-        // Validar que el valor devuelto sea una categoría válida.
-        $value = $result['value'] ?? null;
-
-        if (in_array($value, ['articles', 'clients', 'suppliers'], true)) {
-            return (string) $value;
-        }
-
-        return null;
-    }
-
-    /**
-     * Infiere a qué categoría pertenece un mensaje de tipo "no tengo" usando Claude.
-     *
-     * @param string $normalized_body Texto del mensaje (puede estar normalizado o no).
-     *
-     * @return string|null 'articles' | 'clients' | 'suppliers' | null si no se puede inferir.
-     */
-    private function infer_no_tengo_category(string $normalized_body): ?string
-    {
-        // Delegar la inferencia semántica a Claude para cubrir variantes naturales.
-        $result = $this->ai_interpreter->interpret('no_tengo_category', '', $normalized_body);
-
-        // Validar que el valor devuelto sea una categoría válida.
-        $value = $result['value'] ?? null;
-
-        if (in_array($value, ['articles', 'clients', 'suppliers'], true)) {
-            return (string) $value;
-        }
-
-        return null;
+        // Reiniciar el timer de debounce: cada mensaje nuevo posterga el procesamiento.
+        (new ImplementationStage4Scheduler())->schedule_after_file_received($implementation->id);
     }
 
     /**
@@ -2081,23 +1755,242 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
+    // Etapa 4 — Clasificación de lote con Claude (inteligencia del flujo)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Llama a Claude con el lote de archivos y textos acumulados para clasificarlos y generar
+     * el mensaje de respuesta al cliente.
+     *
+     * Construye un prompt dinámico con:
+     * - Estado actual de categorías ya resueltas y descartadas.
+     * - Lista de archivos recibidos (nombre, tipo, url).
+     * - Lista de textos recibidos en orden cronológico (contexto para asociar a archivos).
+     *
+     * Claude responde con un JSON que incluye:
+     * - classified: archivos clasificados por categoría (articles, clients, suppliers).
+     * - skipped: categorías que el cliente indicó no tener.
+     * - message_to_client: mensaje natural en español rioplatense para enviar al cliente.
+     * - all_resolved: bool, true si no falta ninguna categoría.
+     *
+     * En caso de error de la API, loggea y devuelve un fallback seguro sin bloquear el flujo.
+     *
+     * @param array<int, array<string, string>> $pending_files  Archivos acumulados del lote actual.
+     * @param array<int, array<string, string>> $pending_texts  Textos acumulados del lote actual.
+     * @param array<string, mixed>              $current_data   Data actual del stage (para contexto de estado).
+     *
+     * @return array{
+     *   classified: array{articles: list<array<string,string>>, clients: list<array<string,string>>, suppliers: list<array<string,string>>},
+     *   skipped: list<string>,
+     *   message_to_client: string,
+     *   all_resolved: bool
+     * }
+     */
+    private function classify_stage4_batch_with_claude(
+        array $pending_files,
+        array $pending_texts,
+        array $current_data
+    ): array {
+        // Fallback seguro: se devuelve si la API falla o el JSON es inválido.
+        $fallback = [
+            'classified'        => ['articles' => [], 'clients' => [], 'suppliers' => []],
+            'skipped'           => [],
+            'message_to_client' => 'Recibí los archivos. ¿Tenés algo más para pasarme o arrancamos con la migración?',
+            'all_resolved'      => false,
+        ];
+
+        $api_key = (string) config('services.anthropic.api_key');
+
+        if ($api_key === '') {
+            return $fallback;
+        }
+
+        $model = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+
+        // System prompt: instruye a Claude sobre su rol y el formato de respuesta esperado.
+        $system_prompt = 'Sos un asistente de implementación de software para PyMEs argentinas. '
+            . 'Estás procesando archivos Excel que un cliente envió por WhatsApp para migrar sus datos al sistema. '
+            . 'Las categorías posibles son: articles (artículos/productos), clients (clientes), suppliers (proveedores). '
+            . 'Respondé ÚNICAMENTE con un JSON válido de una línea, sin texto adicional ni markdown.';
+
+        // Construir la descripción del estado actual de categorías ya resueltas.
+        $classified_now = is_array($current_data['classified_files'] ?? null) ? $current_data['classified_files'] : [];
+        $skipped_now    = is_array($current_data['skipped_categories'] ?? null) ? $current_data['skipped_categories'] : [];
+
+        // Generar resumen legible del estado actual para incluir en el prompt.
+        $state_parts = [];
+        foreach (['articles', 'clients', 'suppliers'] as $cat) {
+            if (in_array($cat, $skipped_now, true)) {
+                // La categoría fue descartada explícitamente por el cliente.
+                $state_parts[] = "{$cat}: descartado";
+            } elseif (! empty($classified_now[$cat])) {
+                // La categoría ya tiene archivos clasificados de rondas anteriores.
+                $count         = count($classified_now[$cat]);
+                $label         = $count === 1 ? '1 archivo' : "{$count} archivos";
+                $state_parts[] = "{$cat}: {$label}";
+            } else {
+                // La categoría aún no tiene nada.
+                $state_parts[] = "{$cat}: pendiente";
+            }
+        }
+        $state_summary = implode(', ', $state_parts);
+
+        // Construir la lista de archivos recibidos en el lote actual.
+        $files_lines = [];
+        foreach ($pending_files as $file) {
+            $filename = (string) ($file['filename'] ?? '');
+            $mime     = (string) ($file['type'] ?? '');
+            // Incluir nombre y mime para que Claude tenga máxima info de clasificación.
+            $files_lines[] = "- \"{$filename}\" ({$mime})";
+        }
+        $files_block = ! empty($files_lines)
+            ? implode("\n", $files_lines)
+            : '(ninguno)';
+
+        // Construir la lista de textos recibidos en orden cronológico.
+        $texts_lines = [];
+        foreach ($pending_texts as $text_entry) {
+            $body          = (string) ($text_entry['body'] ?? '');
+            $texts_lines[] = "- \"{$body}\"";
+        }
+        $texts_block = ! empty($texts_lines)
+            ? implode("\n", $texts_lines)
+            : '(ninguno)';
+
+        // User prompt construido dinámicamente con todo el contexto del lote.
+        $user_prompt = "Estado actual de categorías ya resueltas: {$state_summary}\n\n"
+            . "Nuevos archivos recibidos:\n{$files_block}\n\n"
+            . "Mensajes de texto del cliente (en orden cronológico):\n{$texts_block}\n\n"
+            . "Tareas:\n"
+            . "1. Clasificá cada archivo en articles, clients, suppliers o unknown. "
+            . "Usá el nombre del archivo y los mensajes de texto como contexto. "
+            . "Si un texto va justo después de un archivo, es muy probable que describa ese archivo.\n"
+            . "2. Si algún mensaje de texto indica que el cliente no tiene cierta categoría "
+            . "(ej: \"No\", \"no tengo proveedores\", \"no manejamos clientes\"), marcá esa categoría como skipped.\n"
+            . "3. Identificá qué categorías faltan (no tienen archivos y no fueron descartadas).\n"
+            . "4. Generá un mensaje natural en español rioplatense informal para enviarle al cliente. "
+            . "Si faltan categorías, preguntá por ellas de forma natural. "
+            . "Si todo está completo, confirmá y avisale que vas a analizar los archivos.\n"
+            . "5. Determiná si all_resolved es true (no falta ninguna categoría entre las ya resueltas + las de este lote).\n\n"
+            . "Respondé con este JSON:\n"
+            . '{"classified":{"articles":[{"filename":"...","url":"..."}],"clients":[...],"suppliers":[...]},'
+            . '"skipped":["suppliers"],"message_to_client":"...","all_resolved":false}';
+
+        try {
+            // Configurar cliente HTTP con la API key de Anthropic.
+            $http = Http::withHeaders([
+                'x-api-key'         => $api_key,
+                'anthropic-version' => '2023-06-01',
+                'content-type'      => 'application/json',
+            ])->timeout(30);
+
+            // Verificación SSL: configurable por entorno (dev puede deshabilitar).
+            $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
+            $ca_bundle  = config('services.anthropic.ca_bundle');
+
+            if (! $verify_ssl) {
+                $http = $http->withoutVerifying();
+            } elseif (is_string($ca_bundle) && $ca_bundle !== '' && is_file($ca_bundle)) {
+                $http = $http->withOptions(['verify' => $ca_bundle]);
+            }
+
+            $response = $http->post('https://api.anthropic.com/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => 512,
+                'system'     => $system_prompt,
+                'messages'   => [
+                    [
+                        'role'    => 'user',
+                        'content' => $user_prompt,
+                    ],
+                ],
+            ]);
+
+            if (! $response->successful()) {
+                Log::channel('daily')->warning('classify_stage4_batch_with_claude: error Anthropic.', [
+                    'status'            => $response->status(),
+                    'implementation_id' => $current_data['implementation_id'] ?? null,
+                ]);
+                return $fallback;
+            }
+
+            // Extraer el texto de la respuesta de Claude desde los content blocks.
+            $raw_text       = '';
+            $content_blocks = $response->json('content', []);
+
+            if (is_array($content_blocks)) {
+                foreach ($content_blocks as $block) {
+                    if (is_array($block) && isset($block['text'])) {
+                        $raw_text .= (string) $block['text'];
+                    }
+                }
+            }
+
+            $raw_text = trim($raw_text);
+
+            if ($raw_text === '') {
+                return $fallback;
+            }
+
+            // Extraer JSON aunque Claude agregue texto envolvente o markdown.
+            if (preg_match('/\{.*\}/s', $raw_text, $matches)) {
+                $raw_text = $matches[0];
+            }
+
+            $parsed_result = json_decode($raw_text, true);
+
+            if (! is_array($parsed_result)) {
+                Log::channel('daily')->warning('classify_stage4_batch_with_claude: JSON inválido en respuesta de Claude.', [
+                    'raw' => $raw_text,
+                ]);
+                return $fallback;
+            }
+
+            // Normalizar y validar la estructura esperada del JSON de Claude.
+            $classified_result = is_array($parsed_result['classified'] ?? null) ? $parsed_result['classified'] : [];
+            $skipped_result    = is_array($parsed_result['skipped'] ?? null) ? $parsed_result['skipped'] : [];
+            $message_result    = trim((string) ($parsed_result['message_to_client'] ?? ''));
+            $all_resolved      = ! empty($parsed_result['all_resolved']);
+
+            // Asegurar que las tres claves de categorías existan aunque Claude las omita.
+            foreach (['articles', 'clients', 'suppliers'] as $cat) {
+                if (! is_array($classified_result[$cat] ?? null)) {
+                    $classified_result[$cat] = [];
+                }
+            }
+
+            // Usar fallback de mensaje si Claude devolvió vacío.
+            if ($message_result === '') {
+                $message_result = $fallback['message_to_client'];
+            }
+
+            return [
+                'classified'        => $classified_result,
+                'skipped'           => $skipped_result,
+                'message_to_client' => $message_result,
+                'all_resolved'      => $all_resolved,
+            ];
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('classify_stage4_batch_with_claude: excepción al llamar Anthropic.', [
+                'message' => $exception->getMessage(),
+            ]);
+            return $fallback;
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Etapa 4 — Procesamiento diferido de archivos acumulados (llamado desde Job)
     // -------------------------------------------------------------------------
 
     /**
-     * Procesa los archivos acumulados en la Etapa 4 una vez que el timer de debounce expira.
+     * Procesa el lote de archivos y textos acumulados en la Etapa 4 cuando expira el timer de debounce.
      *
-     * Llamado desde ProcessImplementationStage4Files cuando el token de programación
-     * sigue siendo vigente, es decir, el cliente no envió más archivos dentro del período
-     * de espera configurado.
+     * Llamado desde ProcessImplementationStage4Files cuando el token de programación sigue siendo
+     * vigente (el cliente no envió más mensajes dentro del período de espera configurado).
      *
-     * Lógica:
-     * 1. Si hay archivos sin clasificar: preguntar de qué son.
-     * 2. Si todas las categorías están resueltas: llamar a finish_stage_4().
-     * 3. Si solo artículos están resueltos: preguntar por clientes.
-     * 4. Si artículos y clientes están resueltos: preguntar por proveedores.
-     * 5. Si artículos no están resueltos y no hay nada: solo esperar (el timer solo
-     *    se activa cuando llega algo, así que en este caso hubo texto sin archivos).
+     * Toda la inteligencia de clasificación y generación del mensaje al cliente está delegada a
+     * Claude via classify_stage4_batch_with_claude(). Este método solo orquesta: carga estado,
+     * llama a Claude, persiste resultados, envía mensaje al cliente y avanza la etapa si corresponde.
      *
      * @param int $implementation_id ID de la implementación a procesar.
      *
@@ -2126,12 +2019,11 @@ class ImplementationConversationService
             return;
         }
 
-        // Data actual con el estado de archivos acumulados por categoría.
+        // Data actual con archivos/textos pendientes y clasificaciones previas acumuladas.
         $data = is_array($stage->data) ? $stage->data : [];
 
-        // Teléfono del responsable de migración y cliente para mensajes.
+        // Teléfono del responsable de migración: necesario para enviar mensajes.
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
-        $client        = $implementation->client ?? Client::find($implementation->client_id);
 
         if ($contact_phone === '') {
             Log::channel('daily')->warning('process_stage4_pending_files: contact_phone vacío, no se puede enviar mensaje.', [
@@ -2140,81 +2032,87 @@ class ImplementationConversationService
             return;
         }
 
-        // Archivos sin clasificar: pedir aclaración antes de seguir el flujo secuencial.
-        $unclassified = is_array($data['unclassified_files'] ?? null) ? $data['unclassified_files'] : [];
-
-        if (count($unclassified) > 0) {
-            $count = count($unclassified);
-            $label = $count === 1 ? '1 archivo' : "{$count} archivos";
-
-            $this->send_outbound(
-                $implementation,
-                4,
-                $contact_phone,
-                "Recibí {$label} pero no me quedó claro si son de productos, clientes o proveedores. "
-                . '¿Me podés aclarar de qué es cada uno?'
-            );
-
-            return;
-        }
-
-        // Esperando confirmación del mapeo: no reprocesar archivos hasta nueva respuesta del cliente.
+        // Si la etapa ya fue completada o está esperando confirmación, no reprocesar.
         $current_question = trim((string) ($data['current_question'] ?? ''));
-        if ($current_question === 'confirm_analysis') {
+        if ($current_question === 'completed' || $current_question === 'confirm_analysis') {
             return;
         }
 
-        // Evaluar el estado de resolución de cada categoría.
-        $articles_done  = $this->is_stage4_category_resolved($data, 'articles');
-        $clients_done   = $this->is_stage4_category_resolved($data, 'clients');
-        $suppliers_done = $this->is_stage4_category_resolved($data, 'suppliers');
+        // Pendientes del lote actual: archivos y textos acumulados desde el último procesamiento.
+        $pending_files = is_array($data['pending_files'] ?? null) ? $data['pending_files'] : [];
+        $pending_texts = is_array($data['pending_texts'] ?? null) ? $data['pending_texts'] : [];
 
-        // Todas las categorías resueltas: analizar con IA y pedir confirmación de columnas.
-        if ($articles_done && $clients_done && $suppliers_done) {
-            $import_service = new ImplementationImportService(null, $this);
-            $import_service->process_files($implementation);
-
+        // Sin pendientes: el timer se activó por algún mensaje que no generó acumulación; salir silencioso.
+        if (empty($pending_files) && empty($pending_texts)) {
             return;
         }
 
-        // Artículos no resueltos: aún no llegó el archivo principal; solo esperar.
-        // (El timer solo se activa cuando llega algo, así que puede haber llegado un texto
-        // de contexto antes del archivo. En ese caso, no hay nada que preguntar todavía.)
-        if (! $articles_done) {
-            return;
-        }
+        // Delegar toda la inteligencia a Claude: clasificar archivos, detectar skips y generar mensaje.
+        $result = $this->classify_stage4_batch_with_claude($pending_files, $pending_texts, $data);
 
-        // Artículos recibidos, falta clientes: preguntar de forma natural.
-        if (! $clients_done) {
-            // Registrar que el sistema está esperando la respuesta sobre clientes.
-            $data['waiting_for_category'] = 'clients';
-            $stage->data                  = $data;
+        // Merge de los archivos clasificados en classified_files acumulado.
+        $classified = is_array($data['classified_files'] ?? null) ? $data['classified_files'] : [];
+        foreach (['articles', 'clients', 'suppliers'] as $cat) {
+            if (! empty($result['classified'][$cat])) {
+                // Combinar con lo ya clasificado en rondas anteriores.
+                $existing       = is_array($classified[$cat] ?? null) ? $classified[$cat] : [];
+                $classified[$cat] = array_merge($existing, $result['classified'][$cat]);
+            }
+        }
+        $data['classified_files'] = $classified;
+
+        // Merge de categorías descartadas (el cliente indicó que no las tiene).
+        $skipped = is_array($data['skipped_categories'] ?? null) ? $data['skipped_categories'] : [];
+        foreach ((array) ($result['skipped'] ?? []) as $cat) {
+            if (! in_array($cat, $skipped, true)) {
+                $skipped[] = $cat;
+            }
+        }
+        $data['skipped_categories'] = $skipped;
+
+        // Limpiar el lote ya procesado; el próximo mensaje iniciará un nuevo lote.
+        $data['pending_files'] = [];
+        $data['pending_texts'] = [];
+
+        // Evaluar si Claude determinó que todas las categorías están resueltas.
+        $all_resolved = ! empty($result['all_resolved']);
+
+        if (! $all_resolved) {
+            // Aún faltan categorías: enviar pregunta generada por Claude y esperar más mensajes.
+            $stage->data = $data;
             $stage->save();
 
-            $this->send_outbound(
-                $implementation,
-                4,
-                $contact_phone,
-                '¿También tenés los datos de tus clientes para migrar?'
-            );
+            $this->send_outbound($implementation, 4, $contact_phone, (string) ($result['message_to_client'] ?? ''));
             return;
         }
 
-        // Artículos y clientes resueltos, falta proveedores: preguntar de forma natural.
-        if (! $suppliers_done) {
-            // Registrar que el sistema está esperando la respuesta sobre proveedores.
-            $data['waiting_for_category'] = 'suppliers';
-            $stage->data                  = $data;
-            $stage->save();
-
-            $this->send_outbound(
-                $implementation,
-                4,
-                $contact_phone,
-                '¿Manejás proveedores registrados? ¿Tenés un Excel con esa info?'
-            );
-            return;
+        // Todas las categorías resueltas: reconstruir los campos legacy que espera ImplementationImportService.
+        // process_files() lee articles_files, clients_files, suppliers_files del data del stage.
+        foreach (['articles', 'clients', 'suppliers'] as $cat) {
+            // Si fue descartado por el cliente → 'skipped'; si tiene archivos → array de registros.
+            if (in_array($cat, $skipped, true)) {
+                $data[$cat . '_files'] = 'skipped';
+            } else {
+                $data[$cat . '_files'] = ! empty($classified[$cat]) ? $classified[$cat] : [];
+            }
         }
+
+        // Marcar como archivos confirmados completos para compatibilidad con el resto del flujo.
+        $data['files_confirmed_complete'] = true;
+        $stage->data                      = $data;
+        $stage->save();
+
+        // Enviar mensaje de cierre generado por Claude antes de disparar el análisis.
+        $this->send_outbound($implementation, 4, $contact_phone, (string) ($result['message_to_client'] ?? ''));
+
+        // Notificar al admin asignado y disparar evento Pusher de etapa completada.
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
+        event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
+
+        // Iniciar el análisis de columnas con IA (comportamiento existente).
+        $import_service = new ImplementationImportService(null, $this);
+        $import_service->process_files($implementation);
     }
 
     /**
