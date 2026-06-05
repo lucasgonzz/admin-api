@@ -386,6 +386,51 @@ class WhatsappInboundMediaService
     }
 
     /**
+     * Detecta un adjunto de WhatsApp/Kapso persistido como texto en implementation_messages.body.
+     *
+     * El webhook guarda kapso.content con formato:
+     *   [Document attached (archivo.xlsx)]
+     *   [Size: … | Type: …]
+     *   URL: https://…
+     *
+     * @param string $body Texto del mensaje almacenado en implementation_messages.
+     *
+     * @return array{url: string, filename: string, mime: string|null}|null
+     */
+    public function parse_attachment_from_message_body(string $body): ?array
+    {
+        $body = trim($body);
+
+        if ($body === '') {
+            return null;
+        }
+
+        // Solo mensajes con patrón de adjunto multimedia de Kapso.
+        if (! preg_match('/\b(document|image|video|audio)\s+attached\b/i', $body)) {
+            return null;
+        }
+
+        $meta = $this->parse_kapso_content_metadata($body);
+        $url  = trim((string) ($meta['url'] ?? ''));
+
+        if ($url === '') {
+            return null;
+        }
+
+        $filename = trim((string) ($meta['filename'] ?? ''));
+
+        if ($filename === '') {
+            $filename = 'archivo';
+        }
+
+        return [
+            'url'      => $url,
+            'filename' => $filename,
+            'mime'     => $meta['mime'],
+        ];
+    }
+
+    /**
      * Parsea el texto legado de kapso.content (Image attached … URL: https://…).
      *
      * @param string $content
@@ -408,7 +453,10 @@ class WhatsappInboundMediaService
             $mime = trim($matches[1]);
         }
 
-        if (preg_match('/\(([A-Za-z0-9._-]+\.(?:jpe?g|png|gif|webp|pdf|mp4|ogg|opus|webm|mp3|m4a|aac|amr))\)/i', $content, $matches)) {
+        // Nombre entre paréntesis tras "Document/Image/Video/Audio attached".
+        if (preg_match('/(?:document|image|video|audio)\s+attached\s*\(([^)]+)\)/i', $content, $matches)) {
+            $filename = trim($matches[1]);
+        } elseif (preg_match('/\(([A-Za-z0-9._ -]+\.[A-Za-z0-9]+)\)/i', $content, $matches)) {
             $filename = trim($matches[1]);
         }
 

@@ -6,10 +6,12 @@ use App\Http\Controllers\Controller;
 use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\Implementation;
+use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
 use App\Models\WhatsappConfig;
 use App\Services\ImplementationConversationService;
 use App\Services\KapsoHttpClient;
+use App\Services\WhatsappInboundMediaService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -195,6 +197,59 @@ class ImplementationController extends Controller
 
         if ($url === '') {
             return response()->json(['message' => 'El archivo no tiene URL de descarga disponible.'], 404);
+        }
+
+        return $this->proxy_file_download_response($url, $filename);
+    }
+
+    /**
+     * Proxy de descarga de un archivo adjunto en un mensaje de la conversación.
+     *
+     * Parsea implementation_messages.body (formato kapso.content con URL y nombre)
+     * y descarga el archivo desde Kapso sin exponer la URL firmada al browser.
+     *
+     * @param Implementation         $implementation Implementación dueña del hilo.
+     * @param ImplementationMessage  $message        Mensaje con adjunto en el body.
+     *
+     * @return Response|JsonResponse
+     */
+    public function message_file_download(
+        Implementation $implementation,
+        ImplementationMessage $message
+    ): Response|JsonResponse {
+        // Verificar que el mensaje pertenece a la implementación solicitada.
+        if ((int) $message->implementation_id !== (int) $implementation->id) {
+            return response()->json(['message' => 'Mensaje no encontrado.'], 404);
+        }
+
+        $media_service = new WhatsappInboundMediaService();
+        $attachment      = $media_service->parse_attachment_from_message_body((string) $message->body);
+
+        if ($attachment === null) {
+            return response()->json(['message' => 'El mensaje no contiene un archivo descargable.'], 404);
+        }
+
+        return $this->proxy_file_download_response($attachment['url'], $attachment['filename']);
+    }
+
+    /**
+     * Descarga un archivo remoto (Kapso) y lo devuelve como attachment al browser.
+     *
+     * @param string $url      URL firmada o pública del archivo en Kapso.
+     * @param string $filename Nombre sugerido para Content-Disposition.
+     *
+     * @return Response|JsonResponse
+     */
+    private function proxy_file_download_response(string $url, string $filename): Response|JsonResponse
+    {
+        $url = trim($url);
+
+        if ($url === '') {
+            return response()->json(['message' => 'URL de descarga no disponible.'], 404);
+        }
+
+        if ($filename === '') {
+            $filename = 'archivo';
         }
 
         // Obtener la API key de Kapso desde la configuración de WhatsApp.

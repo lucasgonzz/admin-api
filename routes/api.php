@@ -215,6 +215,8 @@ Route::prefix('admin')->group(function () {
         Route::get('implementation/{implementation}/stage4-data', [\App\Http\Controllers\Api\ImplementationController::class, 'get_stage4_data']);
         // Descarga un archivo de la Etapa 4 vía proxy (evita exponer URLs firmadas de Kapso al browser).
         Route::get('implementation/{implementation}/stage4-file-download', [\App\Http\Controllers\Api\ImplementationController::class, 'stage4_file_download']);
+        // Descarga un adjunto de un mensaje de la conversación (mismo proxy Kapso).
+        Route::get('implementation/{implementation}/message-file-download/{message}', [\App\Http\Controllers\Api\ImplementationController::class, 'message_file_download']);
         Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
         Route::delete('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'destroy']);
 
