@@ -2362,10 +2362,10 @@ class ImplementationConversationService
 
         if ($question === 'ask_amount_in_vender') {
             // "Preguntar cantidad" → true | "Agregar 1 unidad" → false.
-            if (str_contains($normalized, 'preguntar')) {
+            if (str_contains($normalized, 'preguntar') || str_contains($normalized, 'pregunte') || str_contains($normalized, 'pregunta') || str_contains($normalized, 'que me')) {
                 return true;
             }
-            if (str_contains($normalized, 'agregar') || str_contains($normalized, '1 unidad')) {
+            if (str_contains($normalized, 'agregar') || str_contains($normalized, '1 unidad') || str_contains($normalized, 'automatica') || str_contains($normalized, 'automatico')) {
                 return false;
             }
             // Fallback sí/no por si el cliente responde directamente.
