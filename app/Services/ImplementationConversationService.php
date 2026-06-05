@@ -395,9 +395,6 @@ class ImplementationConversationService
         $stage->data       = $data;
         $stage->save();
 
-        // Acuse de recibo breve para que el cliente sepa que se recibió el mensaje.
-        $this->send_outbound($implementation, 1, $phone, $this->build_acknowledgement());
-
         // Reiniciar el timer de debounce: cuando expire preguntará si terminó la lista.
         (new ImplementationStage1EmployeesScheduler())->schedule_after_employee_message($implementation->id);
     }
