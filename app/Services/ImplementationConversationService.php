@@ -2265,11 +2265,12 @@ class ImplementationConversationService
             return;
         }
 
-        // Teléfono del contacto para enviar el mensaje de confirmación.
-        $contact_phone = trim((string) ($implementation->contact_phone ?? ''));
+        // Teléfono del cliente (dueño del negocio) para enviar el mensaje de confirmación.
+        $client        = $implementation->client ?? Client::find($implementation->client_id);
+        $contact_phone = trim((string) ($client->phone ?? ''));
 
         if ($contact_phone === '') {
-            Log::channel('daily')->warning('process_stage1_employees_debounce: contact_phone vacío, no se puede enviar mensaje.', [
+            Log::channel('daily')->warning('process_stage1_employees_debounce: cliente sin teléfono, no se puede enviar mensaje.', [
                 'implementation_id' => $implementation_id,
             ]);
             return;
@@ -2916,3 +2917,4 @@ class ImplementationConversationService
         return str_replace($search, $replace, $text);
     }
 }
+
