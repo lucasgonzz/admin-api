@@ -190,4 +190,24 @@ class ImplementationController extends Controller
             'model' => $implementation->load(['stages', 'client']),
         ], 201);
     }
+
+    /**
+     * Elimina una implementación y toda su información asociada.
+     *
+     * Las tablas implementation_stages e implementation_messages tienen
+     * onDelete cascade sobre implementations; al borrar el registro padre
+     * se eliminan etapas, mensajes y datos JSON de cada etapa.
+     *
+     * @param Implementation $implementation Implementación a eliminar (route model binding).
+     *
+     * @return JsonResponse
+     */
+    public function destroy(Implementation $implementation): JsonResponse
+    {
+        DB::transaction(function () use ($implementation) {
+            $implementation->delete();
+        });
+
+        return response()->json(['message' => 'Implementación eliminada.'], 200);
+    }
 }

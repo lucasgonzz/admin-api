@@ -2651,7 +2651,7 @@ class ImplementationConversationService
         $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $body);
 
         // Persistir siempre, aunque el envío falle (para auditoría y re-envío manual).
-        ImplementationMessage::create([
+        $outbound_message = ImplementationMessage::create([
             'implementation_id'   => $implementation->id,
             'stage_number'        => $stage_number,
             'direction'           => 'outbound',
@@ -2659,6 +2659,11 @@ class ImplementationConversationService
             'whatsapp_message_id' => $whatsapp_message_id,
             'sent_at'             => now(),
         ]);
+
+        ImplementationBroadcastService::emit_message_received(
+            (int) $implementation->id,
+            (int) $outbound_message->id
+        );
     }
 
     // -------------------------------------------------------------------------

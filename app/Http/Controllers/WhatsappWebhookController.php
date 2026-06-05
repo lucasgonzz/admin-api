@@ -15,6 +15,7 @@ use App\Models\LeadMessage;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
+use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
 use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
@@ -398,7 +399,7 @@ class WhatsappWebhookController extends Controller
             $body = '[' . strtoupper($message_type) . ' recibido]';
         }
 
-        ImplementationMessage::create([
+        $inbound_message = ImplementationMessage::create([
             'implementation_id'   => $implementation->id,
             'stage_number'        => (int) $implementation->current_stage,
             'direction'           => 'inbound',
@@ -406,6 +407,11 @@ class WhatsappWebhookController extends Controller
             'whatsapp_message_id' => $parsed['message_id'],
             'sent_at'             => $this->resolve_message_datetime($parsed['timestamp']),
         ]);
+
+        ImplementationBroadcastService::emit_message_received(
+            (int) $implementation->id,
+            (int) $inbound_message->id
+        );
 
         // Delegar el procesamiento de la conversación al servicio correspondiente.
         $service = new ImplementationConversationService();
