@@ -14,10 +14,10 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
 /**
- * Importación asistida por IA (Etapa 4): analiza Excels vía empresa-api y ejecuta la carga.
+ * Importación asistida por IA (Etapa 5): analiza Excels vía empresa-api y ejecuta la carga.
  *
- * Descarga archivos desde Kapso, llama a admin-sync/ai-excel-import en el empresa-api del cliente
- * y coordina mensajes al responsable de migración y al admin asignado.
+ * Lee los archivos clasificados en la Etapa 4, llama a admin-sync/ai-excel-import en el empresa-api
+ * del cliente y coordina mensajes al responsable de migración y al admin asignado.
  */
 class ImplementationImportService
 {
@@ -32,7 +32,7 @@ class ImplementationImportService
     const IMPORT_PATH = 'api/admin-sync/ai-excel-import/import';
 
     /**
-     * Categorías de la Etapa 4 con su clave de archivos, modelo remoto y etiqueta en español.
+     * Categorías de la Etapa 5 (migración) con su clave de archivos, modelo remoto y etiqueta en español.
      *
      * @var array<string, array{files_key: string, model: string, label: string, label_plural: string}>
      */
@@ -98,21 +98,21 @@ class ImplementationImportService
     }
 
     /**
-     * Procesa los archivos acumulados en el stage 4 tras el debounce: analiza y pide confirmación.
+     * Procesa los archivos del stage 5 (copiados desde etapa 4 por el job): analiza con IA y pide confirmación.
      *
-     * @param Implementation $implementation Implementación con stage 4 en progreso.
+     * @param Implementation $implementation Implementación con stage 5 en progreso.
      *
      * @return void
      */
     public function process_files(Implementation $implementation): void
     {
-        // Stage 4 y data persistido (archivos por categoría).
+        // Stage 5 y data persistido (archivos copiados desde la etapa 4).
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 4)
+            ->where('stage_number', 5)
             ->first();
 
         if ($stage === null) {
-            Log::channel('daily')->warning('ImplementationImportService::process_files: stage 4 no encontrado.', [
+            Log::channel('daily')->warning('ImplementationImportService::process_files: stage 5 no encontrado.', [
                 'implementation_id' => $implementation->id,
             ]);
 
@@ -140,7 +140,8 @@ class ImplementationImportService
             $count = count($unclassified);
             $label = $count === 1 ? '1 archivo' : "{$count} archivos";
 
-            $this->conversation_service->send_stage_4_outbound(
+            // Usar send_stage_5_outbound ya que el mensaje se envía durante la Etapa 5.
+            $this->conversation_service->send_stage_5_outbound(
                 $implementation,
                 "Recibí {$label} pero no me quedó claro si son de productos, clientes o proveedores. "
                 . '¿Me podés aclarar de qué es cada uno?'
@@ -238,10 +239,10 @@ class ImplementationImportService
             return;
         }
 
-        // Mensaje de resumen con columnas detectadas y pedido de confirmación.
+        // Mensaje de resumen con columnas detectadas y pedido de confirmación (Etapa 5).
         $summary_message = $this->build_analysis_summary_message($analysis_result, $data);
 
-        $this->conversation_service->send_stage_4_outbound($implementation, $summary_message);
+        $this->conversation_service->send_stage_5_outbound($implementation, $summary_message);
 
         // Persistir resultado y estado de pregunta para la confirmación del cliente.
         $data['analysis_result']   = $analysis_result;
@@ -416,7 +417,7 @@ class ImplementationImportService
     }
 
     /**
-     * Ejecuta la importación confirmada en empresa-api para cada categoría analizada.
+     * Ejecuta la importación confirmada en empresa-api para cada categoría analizada (Etapa 5).
      *
      * @param Implementation $implementation
      *
@@ -424,12 +425,13 @@ class ImplementationImportService
      */
     public function execute_import(Implementation $implementation): void
     {
+        // Stage 5 (migración) donde se almacena el analysis_result y el import_status.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 4)
+            ->where('stage_number', 5)
             ->first();
 
         if ($stage === null) {
-            Log::channel('daily')->warning('ImplementationImportService::execute_import: stage 4 no encontrado.', [
+            Log::channel('daily')->warning('ImplementationImportService::execute_import: stage 5 no encontrado.', [
                 'implementation_id' => $implementation->id,
             ]);
 
@@ -584,19 +586,19 @@ class ImplementationImportService
             }
         }
 
-        // Mensaje de éxito al responsable de migración.
+        // Mensaje de éxito al responsable de migración (Etapa 5).
         $success_message = $this->build_import_success_message($imported_counts, $data);
 
-        $this->conversation_service->send_stage_4_outbound($implementation, $success_message);
+        $this->conversation_service->send_stage_5_outbound($implementation, $success_message);
 
-        // Marcar etapa completada: el mensaje al cliente ya fue enviado arriba.
+        // Marcar etapa 5 como completada y notificar al admin con evento Pusher.
         $data['import_success_notified'] = true;
         $data['current_question']        = 'completed';
         $data['completed']               = true;
         $stage->data                     = $data;
         $stage->save();
 
-        $this->conversation_service->finish_stage_4_after_import($implementation, $data);
+        $this->conversation_service->finish_stage_5_after_import($implementation, $data);
     }
 
     /**
@@ -707,9 +709,9 @@ class ImplementationImportService
                 'filename'          => $file_record['filename'] ?? '',
             ]);
             $this->conversation_service->notify_assigned_admin_for_implementation(
-                $implementation,
-                '⚠️ Un archivo de la Etapa 4 no tiene URL de descarga; revisá el webhook de Kapso.'
-            );
+                    $implementation,
+                    '⚠️ Un archivo de la Etapa 5 no tiene URL de descarga; revisá el webhook de Kapso.'
+                );
 
             return null;
         }
@@ -742,7 +744,7 @@ class ImplementationImportService
                 ]);
                 $this->conversation_service->notify_assigned_admin_for_implementation(
                     $implementation,
-                    '⚠️ No se pudo descargar un Excel de la Etapa 4 (HTTP ' . $response->status() . ').'
+                    '⚠️ No se pudo descargar un Excel de la Etapa 5 (HTTP ' . $response->status() . ').'
                 );
 
                 return null;

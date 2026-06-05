@@ -6,7 +6,7 @@ use App\Models\ImplementationStageConfig;
 use Illuminate\Database\Seeder;
 
 /**
- * Catálogo de las 7 etapas del proceso de implementación de clientes.
+ * Catálogo de las 8 etapas del proceso de implementación de clientes.
  * Usa updateOrCreate por stage_number para ser idempotente en re-ejecuciones.
  */
 class ImplementationStageConfigSeeder extends Seeder
@@ -45,27 +45,34 @@ class ImplementationStageConfigSeeder extends Seeder
             ],
             [
                 'stage_number'           => 4,
-                'name'                   => 'Migración de datos',
-                'description'            => 'Pedir e importar archivos Excel de artículos, clientes y proveedores',
+                'name'                   => 'Recolección de archivos',
+                'description'            => 'Recibir los archivos Excel del cliente para la migración',
                 'alert_threshold_hours'  => 24.00,
                 'is_automated'           => false,
             ],
             [
                 'stage_number'           => 5,
+                'name'                   => 'Migración de datos',
+                'description'            => 'Análisis IA de columnas, confirmación e importación al sistema',
+                'alert_threshold_hours'  => 24.00,
+                'is_automated'           => false,
+            ],
+            [
+                'stage_number'           => 6,
                 'name'                   => 'Capacitación',
                 'description'            => 'Enviar credenciales y centro de recursos a cada empleado',
                 'alert_threshold_hours'  => 24.00,
                 'is_automated'           => false,
             ],
             [
-                'stage_number'           => 6,
+                'stage_number'           => 7,
                 'name'                   => 'Vinculación AFIP/ARCA',
                 'description'            => 'Coordinar vinculación con ARCA',
                 'alert_threshold_hours'  => 24.00,
                 'is_automated'           => false,
             ],
             [
-                'stage_number'           => 7,
+                'stage_number'           => 8,
                 'name'                   => 'Videollamada de capacitación',
                 'description'            => 'Coordinar horario de videollamada de dudas',
                 'alert_threshold_hours'  => 24.00,

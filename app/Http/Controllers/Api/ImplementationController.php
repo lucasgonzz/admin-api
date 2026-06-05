@@ -29,7 +29,7 @@ class ImplementationController extends Controller
      * desde la tabla de configuración maestra.
      *
      * Agrega el campo virtual `ready_to_advance` (bool) en cada ítem:
-     * true cuando current_stage < 7 y la etapa activa tiene status === 'completed',
+     * true cuando current_stage < 8 y la etapa activa tiene status === 'completed',
      * lo que indica que el admin puede presionar "Avanzar etapa".
      *
      * @return JsonResponse
@@ -44,10 +44,10 @@ class ImplementationController extends Controller
 
         // Calcular ready_to_advance para cada implementación y anexarlo como atributo virtual.
         $implementations->each(function ($impl) {
-            // Solo puede avanzar si aún hay etapas por delante (current_stage < 7).
+            // Solo puede avanzar si aún hay etapas por delante (current_stage < 8).
             $ready = false;
 
-            if ($impl->current_stage < 7) {
+            if ($impl->current_stage < 8) {
                 // Buscar la etapa cuyo número coincide con la etapa actual.
                 $current_stage_record = $impl->stages->first(function ($stage) use ($impl) {
                     return $stage->stage_number == $impl->current_stage;
@@ -71,7 +71,7 @@ class ImplementationController extends Controller
      *
      * Una implementación está lista para avanzar cuando:
      * - Su status es 'in_progress'
-     * - current_stage < 7
+     * - current_stage < 8
      * - La etapa con stage_number === current_stage tiene status === 'completed'
      *
      * Este endpoint es consumido por el Nav al inicializarse para obtener el conteo inicial
@@ -81,10 +81,10 @@ class ImplementationController extends Controller
      */
     public function ready_to_advance_count(): JsonResponse
     {
-        // Traer solo las implementaciones activas que pueden avanzar (current_stage < 7).
+        // Traer solo las implementaciones activas que pueden avanzar (current_stage < 8).
         $implementations = Implementation::query()
             ->where('status', 'in_progress')
-            ->where('current_stage', '<', 7)
+            ->where('current_stage', '<', 8)
             ->with('stages')
             ->get();
 
@@ -326,8 +326,9 @@ class ImplementationController extends Controller
      * Flujo:
      *  1. Marca la etapa actual como 'completed' con completed_at = now().
      *  2. Incrementa current_stage en 1.
-     *  3. Si current_stage > 7 → marca implementación como 'completed'.
+     *  3. Si current_stage > 8 → marca implementación como 'completed'.
      *  4. Si no → marca nueva etapa como 'in_progress' con started_at = now().
+     *  5. Dispara acciones automáticas vía ImplementationConversationService::handle_stage_advance.
      *
      * @param Implementation $implementation Implementación a avanzar (route model binding).
      *
@@ -351,8 +352,8 @@ class ImplementationController extends Controller
         $next_stage = $implementation->current_stage + 1;
         $implementation->current_stage = $next_stage;
 
-        if ($next_stage > 7) {
-            // La implementación finalizó: todas las etapas cubiertas.
+        if ($next_stage > 8) {
+            // La implementación finalizó: todas las 8 etapas cubiertas.
             $implementation->status       = 'completed';
             $implementation->completed_at = now();
         } else {
@@ -370,8 +371,8 @@ class ImplementationController extends Controller
 
         $implementation->save();
 
-        // Acciones automáticas al activar etapas con lógica de conversación (2 a 7).
-        if ($next_stage >= 2 && $next_stage <= 7) {
+        // Acciones automáticas al activar etapas con lógica de conversación (2 a 8).
+        if ($next_stage >= 2 && $next_stage <= 8) {
             $conversation_service = new ImplementationConversationService();
             $conversation_service->handle_stage_advance($implementation, $next_stage);
         }
@@ -383,7 +384,7 @@ class ImplementationController extends Controller
     }
 
     /**
-     * Inicia la implementación de un cliente: crea el registro y las 7 etapas.
+     * Inicia la implementación de un cliente: crea el registro y las 8 etapas.
      *
      * @param Client $client Cliente destino (route model binding).
      *
@@ -414,8 +415,8 @@ class ImplementationController extends Controller
                 'assigned_admin_id'  => $assigned_admin_id,
             ]);
 
-            // Crear las siete etapas en estado pendiente.
-            for ($stage_number = 1; $stage_number <= 7; $stage_number++) {
+            // Crear las ocho etapas en estado pendiente.
+            for ($stage_number = 1; $stage_number <= 8; $stage_number++) {
                 ImplementationStage::create([
                     'implementation_id' => $implementation->id,
                     'stage_number'        => $stage_number,
