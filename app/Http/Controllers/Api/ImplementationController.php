@@ -22,6 +22,10 @@ class ImplementationController extends Controller
      * Carga relaciones: client, stages y stages.config para mostrar el nombre de etapa
      * desde la tabla de configuración maestra.
      *
+     * Agrega el campo virtual `ready_to_advance` (bool) en cada ítem:
+     * true cuando current_stage < 7 y la etapa activa tiene status === 'completed',
+     * lo que indica que el admin puede presionar "Avanzar etapa".
+     *
      * @return JsonResponse
      */
     public function index(): JsonResponse
@@ -32,7 +36,66 @@ class ImplementationController extends Controller
             ->orderBy('updated_at', 'desc')
             ->get();
 
+        // Calcular ready_to_advance para cada implementación y anexarlo como atributo virtual.
+        $implementations->each(function ($impl) {
+            // Solo puede avanzar si aún hay etapas por delante (current_stage < 7).
+            $ready = false;
+
+            if ($impl->current_stage < 7) {
+                // Buscar la etapa cuyo número coincide con la etapa actual.
+                $current_stage_record = $impl->stages->first(function ($stage) use ($impl) {
+                    return $stage->stage_number == $impl->current_stage;
+                });
+
+                // Si esa etapa completó su conversación automática, está lista para avanzar.
+                if ($current_stage_record && $current_stage_record->status === 'completed') {
+                    $ready = true;
+                }
+            }
+
+            // Appender virtual: el frontend lo leerá como impl.ready_to_advance.
+            $impl->ready_to_advance = $ready;
+        });
+
         return response()->json(['models' => $implementations], 200);
+    }
+
+    /**
+     * Devuelve la cantidad de implementaciones `in_progress` que están listas para avanzar.
+     *
+     * Una implementación está lista para avanzar cuando:
+     * - Su status es 'in_progress'
+     * - current_stage < 7
+     * - La etapa con stage_number === current_stage tiene status === 'completed'
+     *
+     * Este endpoint es consumido por el Nav al inicializarse para obtener el conteo inicial
+     * del badge de "implementaciones listas para avanzar".
+     *
+     * @return JsonResponse { count: int }
+     */
+    public function ready_to_advance_count(): JsonResponse
+    {
+        // Traer solo las implementaciones activas que pueden avanzar (current_stage < 7).
+        $implementations = Implementation::query()
+            ->where('status', 'in_progress')
+            ->where('current_stage', '<', 7)
+            ->with('stages')
+            ->get();
+
+        // Contar cuántas tienen la etapa actual completada (esperando al admin).
+        $count = 0;
+
+        $implementations->each(function ($impl) use (&$count) {
+            $current_stage_record = $impl->stages->first(function ($stage) use ($impl) {
+                return $stage->stage_number == $impl->current_stage;
+            });
+
+            if ($current_stage_record && $current_stage_record->status === 'completed') {
+                $count++;
+            }
+        });
+
+        return response()->json(['count' => $count], 200);
     }
 
     /**

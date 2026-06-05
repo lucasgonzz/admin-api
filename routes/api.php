@@ -209,6 +209,8 @@ Route::prefix('admin')->group(function () {
 
         // Implementaciones: listado, detalle y avance manual de etapa.
         Route::get('implementation', [\App\Http\Controllers\Api\ImplementationController::class, 'index']);
+        // Conteo de implementaciones listas para avanzar (badge del Nav); debe ir antes del wildcard {implementation}.
+        Route::get('implementation/ready-to-advance-count', [\App\Http\Controllers\Api\ImplementationController::class, 'ready_to_advance_count']);
         Route::get('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'show']);
         Route::get('implementation/{implementation}/stage4-data', [\App\Http\Controllers\Api\ImplementationController::class, 'get_stage4_data']);
         Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
