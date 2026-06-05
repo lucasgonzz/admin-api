@@ -7,8 +7,12 @@ use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\Implementation;
 use App\Models\ImplementationStage;
+use App\Models\WhatsappConfig;
 use App\Services\ImplementationConversationService;
+use App\Services\KapsoHttpClient;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -133,6 +137,132 @@ class ImplementationController extends Controller
         $stage_data = is_array($stage->data) ? $stage->data : null;
 
         return response()->json(['data' => $stage_data], 200);
+    }
+
+    /**
+     * Proxy de descarga de un archivo de la Etapa 4.
+     *
+     * Descarga el archivo desde la URL de Kapso/WhatsApp almacenada en el stage.data
+     * usando KapsoHttpClient (con o sin API key según configuración) y lo devuelve
+     * directamente al browser como descarga, evitando exponer las URLs firmadas de Kapso
+     * al cliente y resolviendo posibles restricciones de CORS o expiración de URLs.
+     *
+     * Query params:
+     *   - category: articles | clients | suppliers
+     *   - index:    índice del archivo dentro del array de esa categoría (default 0)
+     *
+     * @param Implementation $implementation Implementación cargada por route model binding.
+     * @param Request        $request        Petición con category e index.
+     *
+     * @return Response|JsonResponse
+     */
+    public function stage4_file_download(Implementation $implementation, Request $request): Response|JsonResponse
+    {
+        // Validar categoría recibida; evitar acceso a claves arbitrarias del stage.data.
+        $category = (string) ($request->input('category', ''));
+        $index    = (int) ($request->input('index', 0));
+
+        $valid_categories = ['articles', 'clients', 'suppliers'];
+
+        if (! in_array($category, $valid_categories, true)) {
+            return response()->json(['message' => 'Categoría inválida.'], 422);
+        }
+
+        // Buscar la etapa 4 de esta implementación.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 4)
+            ->first();
+
+        if ($stage === null || ! is_array($stage->data)) {
+            return response()->json(['message' => 'Etapa 4 no encontrada.'], 404);
+        }
+
+        // Clave del array de archivos para la categoría solicitada.
+        $files_key = $category . '_files';
+        $files     = $stage->data[$files_key] ?? null;
+
+        if (! is_array($files) || ! array_key_exists($index, $files)) {
+            return response()->json(['message' => 'Archivo no encontrado.'], 404);
+        }
+
+        $file_record = $files[$index];
+        $url         = trim((string) ($file_record['url'] ?? ''));
+        $filename    = trim((string) ($file_record['filename'] ?? 'archivo'));
+
+        if ($filename === '') {
+            $filename = 'archivo';
+        }
+
+        if ($url === '') {
+            return response()->json(['message' => 'El archivo no tiene URL de descarga disponible.'], 404);
+        }
+
+        // Obtener la API key de Kapso desde la configuración de WhatsApp.
+        $kapso_api_key = '';
+        $whatsapp_config = WhatsappConfig::query()->orderBy('id')->first();
+
+        if ($whatsapp_config !== null) {
+            $kapso_api_key = trim((string) ($whatsapp_config->kapso_api_key ?? ''));
+        }
+
+        // Primer intento: con la API key si está disponible (URLs de Kapso que la requieren).
+        $timeout     = (int) config('services.client_api.timeout', 60);
+        $http_client = KapsoHttpClient::make($kapso_api_key !== '' ? $kapso_api_key : null, $timeout, false);
+        $remote      = $http_client->withHeaders(['Accept' => '*/*'])->get($url);
+
+        // Segundo intento sin API key (URLs públicas firmadas).
+        if (! $remote->successful() && $kapso_api_key !== '') {
+            $remote = KapsoHttpClient::make(null, $timeout, false)
+                ->withHeaders(['Accept' => '*/*'])
+                ->get($url);
+        }
+
+        if (! $remote->successful()) {
+            return response()->json(['message' => 'No se pudo descargar el archivo desde el origen.'], 502);
+        }
+
+        // Detectar el Content-Type; si el origen no lo informa, deducir por extensión.
+        $content_type = $remote->header('Content-Type') ?: $this->mime_type_from_filename($filename);
+
+        // Sanear el nombre de archivo para el header Content-Disposition.
+        $safe_filename = str_replace(['"', '\\'], ['_', '_'], $filename);
+
+        return response($remote->body(), 200, [
+            'Content-Type'        => $content_type,
+            'Content-Disposition' => 'attachment; filename="' . $safe_filename . '"',
+            'Cache-Control'       => 'no-cache, no-store',
+        ]);
+    }
+
+    /**
+     * Devuelve un MIME type básico inferido desde la extensión del nombre de archivo.
+     *
+     * Se usa cuando el servidor de origen no devuelve un Content-Type confiable.
+     *
+     * @param string $filename Nombre del archivo con extensión.
+     *
+     * @return string
+     */
+    private function mime_type_from_filename(string $filename): string
+    {
+        // Extensión en minúsculas para comparación normalizada.
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+
+        $map = [
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'xls'  => 'application/vnd.ms-excel',
+            'csv'  => 'text/csv',
+            'pdf'  => 'application/pdf',
+            'doc'  => 'application/msword',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'txt'  => 'text/plain',
+            'zip'  => 'application/zip',
+            'jpg'  => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'png'  => 'image/png',
+        ];
+
+        return $map[$ext] ?? 'application/octet-stream';
     }
 
     /**
