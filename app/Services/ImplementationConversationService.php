@@ -2327,13 +2327,35 @@ class ImplementationConversationService
         // Delegar toda la inteligencia a Claude: clasificar archivos, detectar skips y generar mensaje.
         $result = $this->classify_stage4_batch_with_claude($pending_files, $pending_texts, $data);
 
-        // Merge de los archivos clasificados en classified_files acumulado.
+        // Índice de pending_files por filename para recuperar la URL real del webhook.
+        // Claude solo recibe el nombre del archivo — no la URL — así que la URL que
+        // devuelve Claude es inventada. Hay que sustituirla por la URL real del pending_file.
+        $pending_files_by_name = [];
+        foreach ($pending_files as $pf) {
+            $fname = (string) ($pf['filename'] ?? '');
+            if ($fname !== '') {
+                $pending_files_by_name[$fname] = $pf;
+            }
+        }
+
+        // Merge de los archivos clasificados en classified_files acumulado,
+        // reemplazando la URL devuelta por Claude con la URL real del webhook.
         $classified = is_array($data['classified_files'] ?? null) ? $data['classified_files'] : [];
         foreach (['articles', 'clients', 'suppliers'] as $cat) {
             if (! empty($result['classified'][$cat])) {
-                // Combinar con lo ya clasificado en rondas anteriores.
+                $hydrated = [];
+                foreach ($result['classified'][$cat] as $claude_file) {
+                    $fname = (string) ($claude_file['filename'] ?? '');
+                    // Buscar el pending_file original por nombre para recuperar url, type, etc.
+                    if ($fname !== '' && isset($pending_files_by_name[$fname])) {
+                        $hydrated[] = $pending_files_by_name[$fname];
+                    } else {
+                        // Fallback: usar lo que devolvió Claude (puede no tener URL válida).
+                        $hydrated[] = $claude_file;
+                    }
+                }
                 $existing       = is_array($classified[$cat] ?? null) ? $classified[$cat] : [];
-                $classified[$cat] = array_merge($existing, $result['classified'][$cat]);
+                $classified[$cat] = array_merge($existing, $hydrated);
             }
         }
         $data['classified_files'] = $classified;
