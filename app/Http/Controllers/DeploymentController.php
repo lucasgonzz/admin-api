@@ -139,7 +139,12 @@ class DeploymentController extends BaseController
 
         $upgrade->loadMissing('update_commands.version_command', 'update_seeders');
 
+        // Un seeder saltado (skipped) se considera completado a efectos del reintento.
         $seeders_incomplete = $upgrade->update_seeders->contains(function ($update_seeder) {
+            if ((bool) $update_seeder->skipped) {
+                return false;
+            }
+
             return $update_seeder->status !== 'exitoso';
         });
 
@@ -149,12 +154,16 @@ class DeploymentController extends BaseController
             ], 422);
         }
 
+        // Un comando saltado (skipped) no es retriable.
         $has_retryable_command = $upgrade->update_commands->contains(function ($update_command) {
             $version_command = $update_command->version_command;
             if ($version_command === null) {
                 return false;
             }
             if ((bool) $version_command->run_manually) {
+                return false;
+            }
+            if ((bool) $update_command->skipped) {
                 return false;
             }
 

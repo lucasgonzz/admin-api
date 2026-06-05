@@ -31,6 +31,39 @@ class UpdateSeederController extends Controller
         ], 200);
     }
 
+    /**
+     * Alterna el flag `skipped` de un UpdateSeeder.
+     * Permite marcar un seeder para ser omitido en el deployment,
+     * incluso cuando la etapa post-cierre aún no está habilitada.
+     * No modifica el estado (status) del seeder.
+     *
+     * @param  Request  $request
+     * @param  int      $update_id  ID del ClientVersionUpgrade
+     * @param  int      $id         ID del UpdateSeeder
+     * @return \Illuminate\Http\JsonResponse
+     */
+    function toggle_skip_json(Request $request, $update_id, $id)
+    {
+        $upgrade = ClientVersionUpgrade::findOrFail($update_id);
+        $seeder  = UpdateSeeder::where('client_version_upgrade_id', $update_id)->findOrFail($id);
+
+        // Solo se puede saltear si el seeder aún no fue ejecutado.
+        if (in_array($seeder->status, ['exitoso', 'fallido'])) {
+            return response()->json([
+                'message' => 'No se puede modificar el flag de saltear en un seeder ya ejecutado.',
+            ], 422);
+        }
+
+        // Alterna el valor actual del flag.
+        $seeder->update([
+            'skipped' => ! $seeder->skipped,
+        ]);
+
+        return response()->json([
+            'model' => ClientVersionUpgrade::withAll()->find($update_id),
+        ], 200);
+    }
+
     function mark(Request $request, $update_id, $id) {
         $upgrade = ClientVersionUpgrade::findOrFail($update_id);
         $seeder  = UpdateSeeder::where('client_version_upgrade_id', $update_id)->findOrFail($id);

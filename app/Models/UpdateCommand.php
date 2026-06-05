@@ -13,6 +13,8 @@ class UpdateCommand extends Model
 
     protected $casts = [
         'executed_at' => 'datetime',
+        // Indica si el operador marcó este comando para ser omitido en el deployment.
+        'skipped'     => 'boolean',
     ];
 
     function scopeWithAll($query) {

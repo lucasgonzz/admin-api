@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Client;
+use App\Models\ClientVersionUpgrade;
 
 /**
  * Resuelve placeholders de seeders/comandos de deployment con datos del cliente.
@@ -11,6 +12,44 @@ use App\Models\Client;
  */
 class DeploymentRunCommandResolver
 {
+    /**
+     * Obtiene el Client del upgrade y valida que exista.
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @return Client
+     */
+    public function get_upgrade_client(ClientVersionUpgrade $upgrade): Client
+    {
+        $upgrade->loadMissing('client');
+        $client = $upgrade->client;
+
+        if ($client === null) {
+            throw new \RuntimeException(
+                'El ClientVersionUpgrade no tiene cliente asociado (client_id).'
+            );
+        }
+
+        // Recarga el cliente para usar el user_id más reciente guardado en admin.
+        $client->refresh();
+
+        return $client;
+    }
+
+    /**
+     * Resuelve un comando usando el Client del ClientVersionUpgrade (fuente de user_id).
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @param  string  $command
+     * @param  string|null  $run_scope
+     * @return string
+     */
+    public function resolve_for_upgrade(
+        ClientVersionUpgrade $upgrade,
+        string $command,
+        ?string $run_scope
+    ): string {
+        return $this->resolve($command, $run_scope, $this->get_upgrade_client($upgrade));
+    }
     /**
      * Resuelve un comando o seeder para ejecutarlo en el hosting del cliente.
      *

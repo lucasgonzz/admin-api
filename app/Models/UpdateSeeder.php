@@ -13,6 +13,8 @@ class UpdateSeeder extends Model
 
     protected $casts = [
         'executed_at' => 'datetime',
+        // Indica si el operador marcó este seeder para ser omitido en el deployment.
+        'skipped'     => 'boolean',
     ];
 
     function scopeWithAll($query) {

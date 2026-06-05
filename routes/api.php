@@ -146,7 +146,9 @@ Route::prefix('admin')->group(function () {
         Route::post('update/{id}/mark-step', [UpdateController::class, 'mark_step_json']);
         Route::post('update/{id}/sync', [UpdateController::class, 'sync_to_client_json']);
         Route::post('update/{id}/seeders/{seeder}/mark', [UpdateSeederController::class, 'mark_json']);
+        Route::post('update/{id}/seeders/{seeder}/toggle-skip', [UpdateSeederController::class, 'toggle_skip_json']);
         Route::post('update/{id}/commands/{command}/mark', [UpdateCommandController::class, 'mark_json']);
+        Route::post('update/{id}/commands/{command}/toggle-skip', [UpdateCommandController::class, 'toggle_skip_json']);
 
         // Deployment
         Route::post('update/{id}/deploy/start', [DeploymentController::class, 'start_json']);

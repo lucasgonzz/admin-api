@@ -465,6 +465,16 @@ class DeploymentService
     {
         $api_path = $this->get_api_path();
 
+        // Cliente del upgrade: fuente del user_id ComercioCity para placeholders y USER_ID=.
+        $deployment_client = $this->run_command_resolver->get_upgrade_client($this->upgrade);
+        $this->log(
+            'run_seeders',
+            'Cliente: ' . $deployment_client->resolve_display_name()
+            . ' — user_id ComercioCity: '
+            . ($deployment_client->user_id !== null ? (string) $deployment_client->user_id : '(no configurado)'),
+            'info'
+        );
+
         // Orden: versión ascendente y execution_order del VersionSeeder.
         $this->upgrade->loadMissing('update_seeders.version_seeder.version');
         $update_seeders = $this->upgrade->update_seeders->sortBy(function ($update_seeder) {
@@ -481,6 +491,16 @@ class DeploymentService
             $version_seeder = $update_seeder->version_seeder;
             if ($version_seeder === null) {
                 $this->log('run_seeders', "UpdateSeeder #{$update_seeder->id} sin version_seeder asociado", 'error');
+                continue;
+            }
+
+            // Seeder marcado para saltear por el operador: se omite sin error.
+            if ((bool) $update_seeder->skipped) {
+                $this->log(
+                    'run_seeders',
+                    "Seeder omitido (saltear): {$version_seeder->seeder_class}",
+                    'info'
+                );
                 continue;
             }
 
@@ -537,6 +557,16 @@ class DeploymentService
     {
         $api_path = $this->get_api_path();
 
+        // Cliente del upgrade: fuente del user_id ComercioCity para placeholders y USER_ID=.
+        $deployment_client = $this->run_command_resolver->get_upgrade_client($this->upgrade);
+        $this->log(
+            'run_commands',
+            'Cliente: ' . $deployment_client->resolve_display_name()
+            . ' — user_id ComercioCity: '
+            . ($deployment_client->user_id !== null ? (string) $deployment_client->user_id : '(no configurado)'),
+            'info'
+        );
+
         // Orden: versión ascendente y execution_order del VersionCommand.
         $this->upgrade->loadMissing('update_commands.version_command.version');
         $update_commands = $this->upgrade->update_commands->sortBy(function ($update_command) {
@@ -565,6 +595,16 @@ class DeploymentService
                 $this->log(
                     'run_commands',
                     "Comando ya ejecutado (omitido): {$version_command->command}",
+                    'info'
+                );
+                continue;
+            }
+
+            // Comando marcado para saltear por el operador: se omite sin error.
+            if ((bool) $update_command->skipped) {
+                $this->log(
+                    'run_commands',
+                    "Comando omitido (saltear): {$version_command->command}",
                     'info'
                 );
                 continue;
@@ -1016,10 +1056,10 @@ class DeploymentService
      */
     private function resolve_client_run_command(string $command, ?string $run_scope): string
     {
-        return $this->run_command_resolver->resolve(
+        return $this->run_command_resolver->resolve_for_upgrade(
+            $this->upgrade,
             $command,
-            $run_scope,
-            $this->upgrade->client
+            $run_scope
         );
     }
 
