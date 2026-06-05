@@ -2791,6 +2791,17 @@ class ImplementationConversationService
         $client_message = "¡Perfecto, tenemos todo lo que necesito! Voy a revisar la información y te aviso cuando el sistema esté listo para el siguiente paso. ¡Gracias {$client_name}!";
         $this->send_outbound($implementation, 1, $phone, $client_message);
 
+        // Marcar la etapa 1 como completada en la base de datos.
+        $stage_1 = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 1)
+            ->first();
+
+        if ($stage_1 !== null) {
+            $stage_1->status       = 'completed';
+            $stage_1->completed_at = now();
+            $stage_1->save();
+        }
+
         // Evento Pusher al canal private-admin para notificar en tiempo real al panel.
         event(new ImplementationStageCompleted(
             $implementation->id,
