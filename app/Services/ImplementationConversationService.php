@@ -354,13 +354,17 @@ class ImplementationConversationService
                 return;
             }
 
-            // Respuesta ambigua: repreguntar.
-            $this->send_outbound(
-                $implementation,
-                1,
-                $phone,
-                '¿Terminaste de pasar todos los empleados? Respondé Sí o No.'
-            );
+            // Respuesta ambigua o nuevo empleado: el cliente probablemente mandó otro dato.
+            // Tratar como acumulación, volver a modo employees y reiniciar el timer.
+            $existing          = trim((string) ($data['employees'] ?? ''));
+            $data['employees'] = $existing !== '' ? $existing . "
+" . $body : $body;
+            $data['current_question'] = 'employees';
+            $stage->data              = $data;
+            $stage->save();
+
+            $this->send_outbound($implementation, 1, $phone, $this->build_acknowledgement());
+            (new ImplementationStage1EmployeesScheduler())->schedule_after_employee_message($implementation->id);
             return;
         }
 
