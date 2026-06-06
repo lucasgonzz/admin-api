@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Models\EnvTemplate;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\App;
 
@@ -37,9 +38,14 @@ class DatabaseSeeder extends Seeder
             ImplementationDefaultAdminSeeder::class,
             // Tiempo de espera antes de procesar archivos recibidos en la Etapa 4.
             ImplementationFileWaitSeeder::class,
-            // Documentación de import_status en stage.data (Etapa 4); no ejecutar en run() — ver seeder.
-            // ImplementationStage4ImportStatusSeeder::class,
         ]);
+
+        // Plantilla base de variables .env: solo siembra si la tabla está vacía.
+        if (EnvTemplate::count() === 0) {
+            $this->call([
+                EnvTemplateSeeder::class,
+            ]);
+        }
 
         // Configuración placeholder de Kapso solo en entornos de desarrollo.
         if (App::environment(['local', 'testing'])) {

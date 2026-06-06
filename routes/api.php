@@ -16,6 +16,7 @@ use App\Http\Controllers\DemoController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\Admin\ProtocolCacheController;
 use App\Http\Controllers\AiSystemPromptController;
+use App\Http\Controllers\Api\EnvTemplateController;
 use App\Http\Controllers\WhatsappConfigController;
 use App\Http\Controllers\WhatsappWebhookController;
 use App\Http\Controllers\FollowupRuleController;
@@ -237,6 +238,12 @@ Route::prefix('admin')->group(function () {
         Route::put('settings/implementation-file-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_file_wait']);
 
         Route::get('task-template', [TaskTemplateController::class, 'index_json']);
+
+        // Plantilla base de variables .env: gestión y comparación con clientes.
+        Route::get('env-template', [EnvTemplateController::class, 'index']);
+        Route::post('env-template/bulk-update', [EnvTemplateController::class, 'bulk_update']);
+        Route::post('env-template/check-diff/{client}', [EnvTemplateController::class, 'check_diff']);
+        Route::post('env-template/apply-diff/{client}', [EnvTemplateController::class, 'apply_diff']);
 
     });
 });
