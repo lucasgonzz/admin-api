@@ -83,11 +83,13 @@ class ResetImplementationsCommand extends Command
              * Paso 3: crear la implementación en etapa 3 (in_progress).
              * ---------------------------------------------------------------- */
             $implementation = Implementation::create([
-                'client_id'          => $client->id,
-                'assigned_admin_id'  => $admin->id,
-                'current_stage'      => self::TARGET_STAGE,
-                'status'             => 'in_progress',
-                'started_at'         => now(),
+                'client_id'               => $client->id,
+                'assigned_admin_id'       => $admin->id,
+                'current_stage'           => self::TARGET_STAGE,
+                'status'                  => 'in_progress',
+                'started_at'              => now(),
+                // Necesario para que la etapa 4 pueda enviar el mensaje de apertura al contacto de migración.
+                'migration_contact_phone' => $client->phone,
             ]);
 
             /* ----------------------------------------------------------------

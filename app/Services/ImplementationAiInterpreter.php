@@ -79,6 +79,10 @@ class ImplementationAiInterpreter
         'no_tengo_category' =>
             'El cliente indica que no tiene cierto archivo. Inferir a qué categoría se refiere. '
             . '"articles" = artículos o productos. "clients" = clientes. "suppliers" = proveedores. null = no se puede inferir.',
+
+        'employee_choice' =>
+            'Se le presentó al cliente una lista numerada de empleados y se le preguntó quién se encarga de enviar los archivos. '
+            . 'Devolvé el índice base-1 del empleado elegido (int), 0 si eligió "yo mismo" o equivalente, null si la respuesta es ambigua o no identificable.',
     ];
 
     /**
@@ -102,6 +106,8 @@ class ImplementationAiInterpreter
         // Categorías de archivos.
         'file_category'           => '{"value": "articles"|"clients"|"suppliers"|null}',
         'no_tengo_category'       => '{"value": "articles"|"clients"|"suppliers"|null}',
+        // Elección de empleado de un listado numerado.
+        'employee_choice'         => '{"value": 0|1|2|3|4|5|null}',
     ];
 
     /**

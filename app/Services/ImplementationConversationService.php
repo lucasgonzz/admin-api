@@ -4,10 +4,11 @@ namespace App\Services;
 
 use App\Events\ImplementationStageCompleted;
 use App\Models\Admin;
+use App\Models\Client;
+use App\Models\ClientEmployee;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
-use App\Models\Client;
 use App\Models\Lead;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -625,13 +626,40 @@ class ImplementationConversationService
             return;
         }
 
-        // Registrar la primera pregunta pendiente y persistir.
-        $data['current_question'] = 'migration_responsible_name';
-        $stage->data              = $data;
-        $stage->save();
+        // Cargar los empleados del cliente para ofrecer selección desde la lista ya cargada en etapa 1.
+        $employees = ClientEmployee::where('client_id', $client->id)->get();
 
-        $question_text = "Ahora necesito saber quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores). ¿Lo vas a hacer vos o hay otra persona del equipo? Indicame el nombre.";
-        $this->send_outbound($implementation, 2, $phone, $question_text);
+        if ($employees->isNotEmpty()) {
+            // Construir listado numerado de empleados más la opción "Yo mismo" al final.
+            $employee_lines = '';
+            // Array de IDs en el orden en que aparecen en el listado (base-0, indexado por posición).
+            $employee_ids   = [];
+            $index          = 1;
+            foreach ($employees as $emp) {
+                $employee_lines .= "{$index}. {$emp->name}\n";
+                $employee_ids[]  = $emp->id;
+                $index++;
+            }
+            // Opción adicional al final: el dueño mismo.
+            $employee_lines .= "{$index}. Yo mismo";
+
+            // Registrar la pregunta de selección y persistir los IDs para resolver la elección después.
+            $data['current_question'] = 'migration_responsible_choice';
+            $data['employee_ids']     = $employee_ids;
+            $stage->data              = $data;
+            $stage->save();
+
+            $question_text = "¿Quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores)?\n\n{$employee_lines}";
+            $this->send_outbound($implementation, 2, $phone, $question_text);
+        } else {
+            // Sin empleados cargados: preguntar en texto libre como flujo original.
+            $data['current_question'] = 'migration_responsible_name';
+            $stage->data              = $data;
+            $stage->save();
+
+            $question_text = "Ahora necesito saber quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores). ¿Lo vas a hacer vos o hay otra persona del equipo? Indicame el nombre.";
+            $this->send_outbound($implementation, 2, $phone, $question_text);
+        }
     }
 
     /**
@@ -735,12 +763,36 @@ class ImplementationConversationService
 
         // Si no hay current_question → la apertura no se envió aún; inicializar como fallback.
         if (! array_key_exists('current_question', $data)) {
-            $data['current_question'] = 'migration_responsible_name';
-            $stage->data              = $data;
-            $stage->save();
+            // Mismo criterio que send_stage_2_opening: ofrecer lista si hay empleados cargados.
+            $employees = ClientEmployee::where('client_id', $client->id)->get();
 
-            $question_text = "Ahora necesito saber quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores). ¿Lo vas a hacer vos o hay otra persona del equipo? Indicame el nombre.";
-            $this->send_outbound($implementation, 2, $phone, $question_text);
+            if ($employees->isNotEmpty()) {
+                // Construir listado numerado con opción "Yo mismo" al final.
+                $employee_lines = '';
+                $employee_ids   = [];
+                $index          = 1;
+                foreach ($employees as $emp) {
+                    $employee_lines .= "{$index}. {$emp->name}\n";
+                    $employee_ids[]  = $emp->id;
+                    $index++;
+                }
+                $employee_lines .= "{$index}. Yo mismo";
+
+                $data['current_question'] = 'migration_responsible_choice';
+                $data['employee_ids']     = $employee_ids;
+                $stage->data              = $data;
+                $stage->save();
+
+                $question_text = "¿Quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores)?\n\n{$employee_lines}";
+                $this->send_outbound($implementation, 2, $phone, $question_text);
+            } else {
+                $data['current_question'] = 'migration_responsible_name';
+                $stage->data              = $data;
+                $stage->save();
+
+                $question_text = "Ahora necesito saber quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores). ¿Lo vas a hacer vos o hay otra persona del equipo? Indicame el nombre.";
+                $this->send_outbound($implementation, 2, $phone, $question_text);
+            }
             return;
         }
 
@@ -749,6 +801,83 @@ class ImplementationConversationService
 
         // Si la etapa ya fue completada, ignorar mensajes adicionales.
         if ($current_question === 'completed') {
+            return;
+        }
+
+        if ($current_question === 'migration_responsible_choice') {
+            // IDs de los empleados listados, en el mismo orden del mensaje enviado al cliente.
+            $employee_ids = (array) ($data['employee_ids'] ?? []);
+
+            // Reconstruir el listado para reenviarlo si la respuesta es ambigua.
+            $employees_for_list = ClientEmployee::whereIn('id', $employee_ids)->get()->keyBy('id');
+            $list_lines         = '';
+            foreach ($employee_ids as $idx => $emp_id) {
+                // Nombre del empleado en esa posición, con fallback genérico si no se encuentra.
+                $emp_name    = $employees_for_list->has($emp_id) ? $employees_for_list->get($emp_id)->name : 'Empleado #' . ($idx + 1);
+                $list_lines .= ($idx + 1) . ". {$emp_name}\n";
+            }
+            // Opción "Yo mismo" siempre al final, con índice N+1.
+            $self_index  = count($employee_ids) + 1;
+            $list_lines .= "{$self_index}. Yo mismo";
+
+            // Texto original de la pregunta para pasarle al intérprete IA.
+            $question_text = "¿Quién va a encargarse de enviarnos los archivos con la información del negocio (productos, clientes, proveedores)?\n\n{$list_lines}";
+
+            if ($body === '') {
+                $this->send_outbound($implementation, 2, $phone, $question_text);
+                return;
+            }
+
+            // Interpretar la respuesta del cliente: índice base-1 del elegido, 0 = yo mismo, null = ambiguo.
+            $interpreted  = $this->ai_interpreter->interpret('employee_choice', $question_text, $body);
+            $chosen_index = $interpreted['value'];
+
+            if ($chosen_index === null) {
+                // Respuesta ambigua: reenviar el listado con aclaración.
+                $this->send_outbound($implementation, 2, $phone, "No entendí bien tu respuesta. ¿Quién va a encargarse de enviarnos los archivos?\n\n{$list_lines}");
+                return;
+            }
+
+            if ($chosen_index === 0 || $chosen_index === $self_index) {
+                // El dueño mismo se encarga: usar su teléfono como contacto de migración.
+                $responsible_name  = $client ? $client->resolve_display_name() : 'el responsable';
+                $responsible_phone = trim((string) ($client->phone ?? $phone));
+
+                $data['migration_responsible_name']  = $responsible_name;
+                $data['migration_responsible_phone'] = $responsible_phone;
+                $data['current_question']            = 'completed';
+                $data['completed']                   = true;
+                $stage->data                         = $data;
+                $stage->save();
+
+                $this->finish_stage_2($implementation, $phone, $client, $responsible_name, $responsible_phone, true);
+                return;
+            }
+
+            // Buscar el empleado elegido por índice base-1 en el listado.
+            $emp_id   = $employee_ids[$chosen_index - 1] ?? null;
+            $employee = ($emp_id !== null && $employees_for_list->has($emp_id))
+                ? $employees_for_list->get($emp_id)
+                : null;
+
+            if ($employee === null || $chosen_index < 1 || $chosen_index > count($employee_ids)) {
+                // Índice fuera de rango o empleado no encontrado: reenviar el listado.
+                $this->send_outbound($implementation, 2, $phone, "El número que indicaste no corresponde a ninguna opción. ¿Quién va a encargarse de enviarnos los archivos?\n\n{$list_lines}");
+                return;
+            }
+
+            // Empleado seleccionado: usar su nombre y teléfono como contacto de migración.
+            $responsible_name  = (string) $employee->name;
+            $responsible_phone = trim((string) $employee->phone);
+
+            $data['migration_responsible_name']  = $responsible_name;
+            $data['migration_responsible_phone'] = $responsible_phone;
+            $data['current_question']            = 'completed';
+            $data['completed']                   = true;
+            $stage->data                         = $data;
+            $stage->save();
+
+            $this->finish_stage_2($implementation, $phone, $client, $responsible_name, $responsible_phone);
             return;
         }
 
@@ -2733,7 +2862,7 @@ class ImplementationConversationService
                 return "¿Cuál es el nombre de tu empresa tal como debe figurar en los comprobantes?";
             case 'employees':
                 // Sin instrucción de "escribí listo": el sistema detecta el fin de forma inteligente.
-                return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento y de qué área se va a encargar (por ejemplo: ventas, stock, administración).\nEsa info nos sirve para asignarle permisos iniciales a cada uno — los permisos se pueden ajustar más adelante cuando el sistema esté en marcha.";
+                return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento, área (ventas, stock, administración, etc.) y número de WhatsApp.\nEsa info nos sirve para asignarle permisos iniciales a cada uno — los permisos se pueden ajustar más adelante cuando el sistema esté en marcha.";
             case 'logo_received':
                 return "Por último, enviame el logo de tu empresa en formato cuadrado. Lo vamos a usar en los comprobantes.";
             case 'ask_amount_in_vender':
