@@ -28,8 +28,6 @@ class ClientProperties
                 'text' => 'ID ComercioCity',
                 'type' => 'number',
                 'value' => null,
-                // 'only_show' => true,
-                'exclude_on_update' => true,
                 'width' => 64,
             ],
             [

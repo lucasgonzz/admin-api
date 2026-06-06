@@ -23,7 +23,7 @@ class ResetImplementationsCommand extends Command
      *
      * @var string
      */
-    protected $signature = 'impl:reset';
+    protected $signature = 'implementacion:reset';
 
     /**
      * Descripción visible en el listado de comandos artisan.
@@ -74,7 +74,7 @@ class ResetImplementationsCommand extends Command
              * ---------------------------------------------------------------- */
 
             // Primer cliente activo disponible en el sistema.
-            $client = Client::where('is_active', true)->first();
+            $client = Client::where('phone', '+5493444622139')->first();
 
             // Primer admin registrado en el sistema.
             $admin = Admin::first();
