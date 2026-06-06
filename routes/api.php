@@ -72,6 +72,7 @@ Route::prefix('admin')->group(function () {
         Route::delete('version/{id}', [VersionController::class, 'destroy_json']);
 
         Route::get('client', [ClientController::class, 'index_json']);
+        Route::post('client/suggest-subdomain', [ClientController::class, 'suggest_subdomain_json']);
         Route::get('client/{id}', [ClientController::class, 'show_json']);
         Route::post('client', [ClientController::class, 'store_json']);
         Route::put('client/{id}', [ClientController::class, 'update_json']);

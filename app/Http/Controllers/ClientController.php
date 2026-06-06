@@ -6,6 +6,7 @@ use App\Http\Controllers\CommonLaravel\BaseController;
 use App\Http\Controllers\CommonLaravel\Helpers\ModelPropertiesHelper;
 use App\Models\Client;
 use App\Models\Version;
+use App\Services\SubdomainSuggestionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
@@ -156,5 +157,30 @@ class ClientController extends BaseController
         $client->delete();
 
         return response()->json(null, 204);
+    }
+
+    /**
+     * Sugiere un subdominio corto para un cliente usando Claude Haiku.
+     *
+     * Recibe { company_name } y delega en SubdomainSuggestionService.
+     * La lógica de IA y fallback vive en el servicio; este método solo
+     * valida el input y formatea la respuesta.
+     *
+     * @param  Request                    $request   Debe incluir company_name (string).
+     * @param  SubdomainSuggestionService $service   Servicio inyectado por Laravel IoC.
+     * @return \Illuminate\Http\JsonResponse         { subdomain: string }
+     */
+    public function suggest_subdomain_json(Request $request, SubdomainSuggestionService $service)
+    {
+        /* Nombre de empresa: obligatorio para poder generar el subdominio. */
+        $company_name = trim((string) $request->input('company_name', ''));
+        if ($company_name === '') {
+            return response()->json(['message' => 'El campo company_name es obligatorio.'], 422);
+        }
+
+        /* Delegar la sugerencia en el servicio (incluye fallback si Claude falla). */
+        $subdomain = $service->suggest($company_name);
+
+        return response()->json(['subdomain' => $subdomain], 200);
     }
 }

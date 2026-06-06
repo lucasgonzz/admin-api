@@ -773,7 +773,9 @@ class LeadController extends Controller
 
         try {
             // Ejecutar el servicio de promoción: crea Client + genera tareas automáticas.
-            $lead = $service->run($lead, $request->user());
+            // Si el operador envió un subdominio sugerido desde la UI, se usa directamente.
+            $suggested_subdomain = trim((string) $request->input('suggested_subdomain', ''));
+            $lead = $service->run($lead, $request->user(), $suggested_subdomain);
         } catch (\Throwable $error) {
             Log::error('LeadController@promote_to_client_json error: ' . $error->getMessage(), [
                 'lead_id' => $lead->id,

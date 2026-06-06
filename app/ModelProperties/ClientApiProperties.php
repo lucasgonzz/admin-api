@@ -17,7 +17,7 @@ class ClientApiProperties
         return [
             [
                 'key' => 'url',
-                'text' => 'URL base',
+                'text' => 'URL API',
                 'type' => 'text',
                 'value' => '',
                 'show' => true,
@@ -27,7 +27,7 @@ class ClientApiProperties
             ],
             [
                 'key' => 'path',
-                'text' => 'Path API',
+                'text' => 'Path servidor (SSH)',
                 'type' => 'text',
                 'value' => '',
                 'show' => true,
