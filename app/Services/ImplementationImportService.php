@@ -384,7 +384,11 @@ class ImplementationImportService
                     'excel_path'          => (string) $response->json('excel_path', ''),
                     'provider_id'         => $response->json('provider_id'),
                     'provider_confidence' => $response->json('provider_confidence'),
-                    'record_count'        => $this->estimate_record_count($column_mapping),
+                    /*
+                     * Usamos el conteo real que devuelve empresa-api; si por alguna razón no viene
+                     * (versión anterior del endpoint), caemos al estimador heurístico como fallback.
+                     */
+                    'record_count'        => (int) $response->json('row_count', $this->estimate_record_count($column_mapping)),
                     'source_filename'     => $original_filename,
                     'file_index'          => $file_index,
                 ];
@@ -825,18 +829,21 @@ class ImplementationImportService
     }
 
     /**
-     * Formatea las columnas mapeadas como líneas "Nombre ✅" para el resumen.
+     * Formatea las columnas mapeadas como líneas "Columna X — Nombre" para el resumen al cliente.
      *
-     * @param array<int, array<string, mixed>> $column_mapping
+     * Usa la letra de columna Excel real (A, B, C, …) obtenida del índice base-0
+     * almacenado en excel_column_index dentro de cada item del mapping.
      *
-     * @return array<int, string>
+     * @param array<int, array<string, mixed>> $column_mapping Mapeo de columnas enriquecido por AiExcelAnalyzer.
+     *
+     * @return array<int, string> Líneas formateadas listas para incluir en el mensaje al cliente.
      */
     protected function format_detected_columns(array $column_mapping): array
     {
         $lines = [];
         $seen_properties = [];
 
-        foreach ($column_mapping as $mapping_item) {
+        foreach ($column_mapping as $array_position => $mapping_item) {
             if (! is_array($mapping_item)) {
                 continue;
             }
@@ -855,11 +862,42 @@ class ImplementationImportService
 
             $seen_properties[$property_key] = true;
 
+            /* Preferir excel_column_index si está disponible; fallback a la posición en el array. */
+            $col_index = isset($mapping_item['excel_column_index']) && is_numeric($mapping_item['excel_column_index'])
+                ? (int) $mapping_item['excel_column_index']
+                : (int) $array_position;
+
+            /* Letra de columna Excel calculada desde el índice base-0. */
+            $col_letter = $this->index_to_column_letter($col_index);
+
             $label = self::ARTICLE_PROPERTY_LABELS[$property_key] ?? ucfirst(str_replace('_', ' ', $property_key));
-            $lines[] = "{$label} ✅";
+            $lines[] = "Columna {$col_letter} — {$label}";
         }
 
         return $lines;
+    }
+
+    /**
+     * Convierte un índice de columna base-0 a letra(s) de columna Excel.
+     *
+     * Ejemplos: 0 → A, 1 → B, …, 25 → Z, 26 → AA, 27 → AB, etc.
+     *
+     * @param int $index Índice base-0 de la columna.
+     *
+     * @return string Letra(s) de columna en mayúsculas.
+     */
+    protected function index_to_column_letter(int $index): string
+    {
+        /* Cadena que se construye de derecha a izquierda hasta agotar el índice. */
+        $letter = '';
+        $n = $index;
+
+        do {
+            $letter = chr(65 + ($n % 26)) . $letter;
+            $n = (int) floor($n / 26) - 1;
+        } while ($n >= 0);
+
+        return $letter;
     }
 
     /**
