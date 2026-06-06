@@ -931,6 +931,9 @@ class ImplementationConversationService
             $responsible_name  = (string) ($data['migration_responsible_name'] ?? 'el responsable');
             $responsible_phone = $body;
 
+            // Normalizar el teléfono argentino antes de persistirlo en el stage y en la implementación.
+            $responsible_phone = \App\Services\ArgentinePhoneNormalizer::normalize($responsible_phone);
+
             $data['migration_responsible_phone'] = $responsible_phone;
             $data['current_question']            = 'completed';
             $data['completed']                   = true;
@@ -963,6 +966,9 @@ class ImplementationConversationService
         string $responsible_phone,
         bool $is_self = false
     ): void {
+        // Normalizar el teléfono del responsable de migración al formato E.164 antes de persistirlo.
+        $responsible_phone = \App\Services\ArgentinePhoneNormalizer::normalize($responsible_phone);
+
         // Persistir el teléfono de contacto en la implementación para uso en etapas posteriores.
         $implementation->migration_contact_phone = $responsible_phone;
         $implementation->save();
@@ -2161,6 +2167,133 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
+    // Etapa 1 — Parseo de empleados con Claude (inteligencia del flujo)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Parsea el texto libre de empleados acumulado en la Etapa 1 usando Claude.
+     *
+     * Envía el texto completo a la API de Anthropic con un system prompt especializado
+     * para extraer empleados estructurados. Claude devuelve un JSON con un array de
+     * objetos, cada uno con name, document, role y phone.
+     *
+     * En caso de error de API, JSON inválido o respuesta vacía, devuelve array vacío
+     * sin bloquear el flujo principal.
+     *
+     * @param string $employees_text Texto libre con datos de empleados del stage data['employees'].
+     *
+     * @return array<int, array{name: string, document: string, role: string, phone: string}>
+     */
+    private function parse_employees_text_with_claude(string $employees_text): array
+    {
+        /* Clave de API de Anthropic configurada en services.anthropic.api_key. */
+        $api_key = (string) config('services.anthropic.api_key');
+
+        if ($api_key === '') {
+            Log::channel('daily')->warning('parse_employees_text_with_claude: api_key de Anthropic no configurada.');
+            return [];
+        }
+
+        /* Modelo a usar, configurable por entorno. */
+        $model = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+
+        /* System prompt: instruye a Claude como parser de empleados argentinos. */
+        $system_prompt = 'Sos un parser de datos de empleados para un sistema de gestión argentino. '
+            . 'El texto que recibirás es texto libre escrito por un cliente argentino por WhatsApp, '
+            . 'con datos de sus empleados. '
+            . 'Extraé cada empleado y devolvé ÚNICAMENTE un JSON válido de una línea sin markdown.';
+
+        /* User prompt: el texto completo acumulado en data['employees'] de la Etapa 1. */
+        $user_prompt = $employees_text . "\n\n"
+            . 'Formato de respuesta esperado (una línea, sin texto adicional ni markdown):'
+            . "\n"
+            . '[{"name":"Juan García","document":"28123456","role":"ventas","phone":"1155554444"},...]'
+            . "\n\n"
+            . 'Si algún campo no está presente para un empleado, devolvé "" (string vacío). '
+            . 'name, document, role y phone son los únicos campos permitidos en cada objeto.';
+
+        try {
+            /* Configurar cliente HTTP con headers de Anthropic. */
+            $http = Http::withHeaders([
+                'x-api-key'         => $api_key,
+                'anthropic-version' => '2023-06-01',
+                'content-type'      => 'application/json',
+            ])->timeout(30);
+
+            /* Verificación SSL: configurable por entorno (dev puede deshabilitar). */
+            $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
+            $ca_bundle  = config('services.anthropic.ca_bundle');
+
+            if (! $verify_ssl) {
+                $http = $http->withoutVerifying();
+            } elseif (is_string($ca_bundle) && $ca_bundle !== '' && is_file($ca_bundle)) {
+                $http = $http->withOptions(['verify' => $ca_bundle]);
+            }
+
+            /* Llamada a la API de Anthropic con el lote de empleados. */
+            $response = $http->post('https://api.anthropic.com/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => 1024,
+                'system'     => $system_prompt,
+                'messages'   => [
+                    [
+                        'role'    => 'user',
+                        'content' => $user_prompt,
+                    ],
+                ],
+            ]);
+
+            if (! $response->successful()) {
+                Log::channel('daily')->warning('parse_employees_text_with_claude: error Anthropic.', [
+                    'status' => $response->status(),
+                ]);
+                return [];
+            }
+
+            /* Extraer el texto de la respuesta de Claude desde los content blocks. */
+            $raw_text       = '';
+            $content_blocks = $response->json('content', []);
+
+            if (is_array($content_blocks)) {
+                foreach ($content_blocks as $block) {
+                    if (is_array($block) && isset($block['text'])) {
+                        $raw_text .= (string) $block['text'];
+                    }
+                }
+            }
+
+            $raw_text = trim($raw_text);
+
+            if ($raw_text === '') {
+                return [];
+            }
+
+            /* Extraer JSON aunque Claude agregue texto envolvente o markdown. */
+            if (preg_match('/\[.*\]/s', $raw_text, $matches)) {
+                $raw_text = $matches[0];
+            }
+
+            /* Decodificar el array JSON de empleados. */
+            $parsed = json_decode($raw_text, true);
+
+            if (! is_array($parsed)) {
+                Log::channel('daily')->warning('parse_employees_text_with_claude: JSON inválido en respuesta de Claude.', [
+                    'raw' => $raw_text,
+                ]);
+                return [];
+            }
+
+            return $parsed;
+
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('parse_employees_text_with_claude: excepción al llamar Anthropic.', [
+                'message' => $exception->getMessage(),
+            ]);
+            return [];
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Etapa 4 — Clasificación de lote con Claude (inteligencia del flujo)
     // -------------------------------------------------------------------------
 
@@ -2995,6 +3128,59 @@ class ImplementationConversationService
             $stage_1->status       = 'completed';
             $stage_1->completed_at = now();
             $stage_1->save();
+        }
+
+        // Parsear y crear los registros de ClientEmployee desde el texto acumulado en data['employees'].
+        // Solo se ejecuta si hay texto de empleados y el cliente está vinculado.
+        $employees_text = '';
+
+        if ($stage_1 !== null && is_array($stage_1->data)) {
+            /* Obtener el texto libre de empleados acumulado durante la conversación de la Etapa 1. */
+            $employees_text = trim((string) ($stage_1->data['employees'] ?? ''));
+        }
+
+        if ($employees_text !== '' && $client !== null) {
+            /* Llamar a Claude para extraer empleados estructurados del texto libre. */
+            $parsed_employees = $this->parse_employees_text_with_claude($employees_text);
+
+            foreach ($parsed_employees as $emp) {
+                /* Extraer y limpiar cada campo del empleado parseado por Claude. */
+                $name  = trim((string) ($emp['name'] ?? ''));
+                $phone = trim((string) ($emp['phone'] ?? ''));
+                $notes = trim((string) ($emp['role'] ?? ''));
+
+                /* Omitir empleados sin nombre: sin nombre no se puede crear el registro. */
+                if ($name === '') {
+                    continue;
+                }
+
+                /* Normalizar el teléfono argentino al formato E.164 si fue proporcionado. */
+                $normalized_phone = $phone !== ''
+                    ? \App\Services\ArgentinePhoneNormalizer::normalize($phone)
+                    : '';
+
+                /* Construir las notas combinando área/rol y DNI si están disponibles. */
+                $document      = trim((string) ($emp['document'] ?? ''));
+                $notes_for_db  = '';
+
+                if ($notes !== '') {
+                    $notes_for_db = "Área: {$notes}";
+                    if ($document !== '') {
+                        $notes_for_db .= " — DNI: {$document}";
+                    }
+                } elseif ($document !== '') {
+                    $notes_for_db = "DNI: {$document}";
+                }
+
+                /* Crear el ClientEmployee sin verificar duplicados para no pisar la
+                 * sincronización de empresa-api (esa lógica es responsabilidad de otro flujo). */
+                ClientEmployee::create([
+                    'client_id' => $client->id,
+                    'name'      => $name,
+                    'phone'     => $normalized_phone !== '' ? $normalized_phone : $phone,
+                    'notes'     => $notes_for_db,
+                ]);
+            }
         }
 
         // Evento Pusher al canal private-admin para notificar en tiempo real al panel.
