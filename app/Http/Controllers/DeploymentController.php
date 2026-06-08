@@ -222,7 +222,7 @@ class DeploymentController extends BaseController
      */
     public function store_client_api_json(Request $request, $clientId)
     {
-        $client = $this->find_client_by_uuid($clientId);
+        $client = $this->find_client_by_route_id($clientId);
 
         $validated = $request->validate([
             'url'  => 'required|url',
@@ -250,7 +250,7 @@ class DeploymentController extends BaseController
      */
     public function update_client_api_json(Request $request, $clientId, $apiId)
     {
-        $client = $this->find_client_by_uuid($clientId);
+        $client = $this->find_client_by_route_id($clientId);
         $client_api = $this->find_client_api_for_client($client, $apiId);
 
         $validated = $request->validate([
@@ -281,7 +281,7 @@ class DeploymentController extends BaseController
      */
     public function destroy_client_api_json($clientId, $apiId)
     {
-        $client = $this->find_client_by_uuid($clientId);
+        $client = $this->find_client_by_route_id($clientId);
         $client_api = $this->find_client_api_for_client($client, $apiId);
 
         if ((int) $client->active_client_api_id === (int) $client_api->id) {
@@ -304,7 +304,7 @@ class DeploymentController extends BaseController
      */
     public function set_active_api_json($clientId, $apiId)
     {
-        $client = $this->find_client_by_uuid($clientId);
+        $client = $this->find_client_by_route_id($clientId);
         $client_api = $this->find_client_api_for_client($client, $apiId);
 
         $client->active_client_api_id = $client_api->id;
@@ -331,14 +331,18 @@ class DeploymentController extends BaseController
     }
 
     /**
-     * Busca Client por uuid.
+     * Busca Client por id numérico o uuid (coherente con ClientController / ClientEmployeeController).
      *
-     * @param  string  $uuid
+     * @param  int|string  $route_id
      * @return Client
      */
-    protected function find_client_by_uuid($uuid)
+    protected function find_client_by_route_id($route_id)
     {
-        return Client::where('uuid', $uuid)->firstOrFail();
+        if (is_numeric($route_id)) {
+            return Client::findOrFail((int) $route_id);
+        }
+
+        return Client::where('uuid', (string) $route_id)->firstOrFail();
     }
 
     /**

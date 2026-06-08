@@ -239,6 +239,45 @@ class ImplementationImportService
             return;
         }
 
+        /*
+         * Notificar al admin asignado si alguna categoría que tenía archivos
+         * no pudo ser analizada (empresa-api devolvió error o null).
+         * Se hace antes de mostrar el resumen al cliente para que el admin
+         * sea avisado de inmediato aunque el flujo continúe con las categorías exitosas.
+         */
+        foreach (self::CATEGORY_CONFIG as $category => $config) {
+            /* Clave del campo de archivos en $data para esta categoría. */
+            $files_key   = $config['files_key'];
+            $files_value = $data[$files_key] ?? null;
+
+            // Categoría omitida por el cliente: no hay error, se ignora.
+            if ($files_value === 'skipped') {
+                continue;
+            }
+
+            // Sin archivos: no aplica (no se esperaba análisis).
+            if (! is_array($files_value) || count($files_value) === 0) {
+                continue;
+            }
+
+            /*
+             * La categoría tenía archivos pero no aparece en $analysis_result
+             * → el análisis falló para este modelo; notificar al admin.
+             */
+            if (! isset($analysis_result[$category])) {
+                /* Nombre legible del cliente para el cuerpo del mensaje. */
+                $client_name = optional($implementation->client)->resolve_display_name()
+                    ?? "Cliente #{$implementation->client_id}";
+
+                $this->conversation_service->notify_assigned_admin_for_implementation(
+                    $implementation,
+                    "⚠️ {$client_name} — Etapa 5: no se pudo analizar el Excel de {$config['label']}. "
+                    . "Empresa-api devolvió error (posiblemente no implementado para este modelo). "
+                    . "Revisá manualmente."
+                );
+            }
+        }
+
         // Mensaje de resumen con columnas detectadas y pedido de confirmación (Etapa 5).
         $summary_message = $this->build_analysis_summary_message($analysis_result, $data);
 

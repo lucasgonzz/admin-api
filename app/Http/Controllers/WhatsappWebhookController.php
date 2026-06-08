@@ -19,6 +19,7 @@ use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
 use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
+use App\Services\LeadDocNumberGenerator;
 use App\Services\LeadWhatsappInboundAudioService;
 use App\Services\LeadWhatsappOnboardingService;
 use App\Services\SupportTicketAssignmentService;
@@ -714,6 +715,9 @@ class WhatsappWebhookController extends Controller
                 'contact_name' => $display_name,
                 'status'       => 'nuevo',
             ]);
+
+            // Documento de 12 dígitos derivado del id (contraseña demo y setup remoto).
+            LeadDocNumberGenerator::assign_to_lead_if_empty($lead);
         } elseif ($display_name !== null && empty($lead->contact_name)) {
             $lead->contact_name = $display_name;
             $lead->save();

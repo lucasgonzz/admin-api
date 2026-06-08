@@ -103,7 +103,8 @@ class ClientProperties
                     'text' => 'API',
                     'supports_temporal_children' => true,
                     'api_store_path' => 'client-api',
-                    'parent_route_key' => 'uuid',
+                    // Id numérico: evita colisiones si varios clients comparten uuid (p. ej. datos de prueba).
+                    'parent_route_key' => 'id',
                     'child_route_key' => 'uuid',
                     'api_create_path' => 'client/{parent}/apis',
                     'api_update_path' => 'client/{parent}/apis/{child}',

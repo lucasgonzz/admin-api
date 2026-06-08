@@ -30,7 +30,7 @@ class ClientSeeder extends Seeder
                 'api_key'               => 'apikeydeprueba',
                 'inbound_api_key'       => 'inboundapikeydeprueba',
                 'current_version_id'    => 1,
-                'uuid'                  => 'iddeprueba',
+                'uuid'                  => 'san-blas-de-prueba',
                 'phone'                 => '+543444622139',
             ],
         ];
