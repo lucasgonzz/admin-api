@@ -26,7 +26,7 @@ class SupportAiSuggestionService
     /**
      * Repositorio de documentación de ComercioCity.
      */
-    private const GITHUB_REPO = 'lucasgonzz/comerciocity-manual-sistema';
+    private const GITHUB_REPO = 'lucasgonzz/claude-comerciocity';
 
     /**
      * Rama del repositorio a consultar.
@@ -307,7 +307,7 @@ SYSTEM;
     protected function fetch_escalation_rules(): string
     {
         try {
-            $content = $this->github_get_file('escalation_rules.md');
+            $content = $this->github_get_file('manual_sistema/escalation_rules.md');
 
             if (trim($content) === '') {
                 return '';
@@ -343,7 +343,7 @@ SYSTEM;
             $paths = [];
 
             foreach ($tree as $node) {
-                if (is_array($node) && ($node['type'] ?? '') === 'blob' && str_ends_with((string) ($node['path'] ?? ''), '.md')) {
+                if (is_array($node) && ($node['type'] ?? '') === 'blob' && str_ends_with((string) ($node['path'] ?? ''), '.md') && str_starts_with((string) ($node['path'] ?? ''), 'manual_sistema/')) {
                     $paths[] = '- '.(string) $node['path'];
                 }
             }
