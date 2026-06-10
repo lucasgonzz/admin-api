@@ -107,6 +107,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/send-demo-mail', [LeadController::class, 'send_demo_mail_json']);
         Route::post('lead/{id}/generate-contract', [LeadController::class, 'generate_contract_json']);
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
+        Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
         Route::put('lead-message/{id}/approve', [LeadController::class, 'approve_message_json']);

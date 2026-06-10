@@ -27,12 +27,14 @@ class ClientApiProperties
             ],
             [
                 'key' => 'path',
-                'text' => 'Path servidor (SSH)',
+                'text' => 'Ruta relativa API (SSH)',
                 'type' => 'text',
                 'value' => '',
                 'show' => true,
                 'use_to_filter_in_search' => true,
-                'width' => 160,
+                'width' => 200,
+                'placeholder' => 'ej: colman/api',
+                'description' => 'Ruta de la API en el hosting compartido, solo el segmento después de public_html/ (no la URL pública). Ejemplo completo SSH: domains/comerciocity.com/public_html/{subdominio}/api. El deploy del SPA usa la misma ruta cambiando /api por /spa. La URL pública del frontend va en «URL SPA».',
             ],
             [
                 'key' => 'spa_url',

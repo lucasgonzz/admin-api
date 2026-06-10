@@ -58,6 +58,24 @@ class LeadAiSuggestionScheduler
     }
 
     /**
+     * Invalida el job automático de sugerencia IA pendiente (p. ej. pedido manual del setter).
+     *
+     * No encola un reemplazo: el setter o el siguiente inbound volverán a programar si corresponde.
+     *
+     * @param int $lead_id
+     *
+     * @return void
+     */
+    public function cancel_scheduled_suggestion(int $lead_id): void
+    {
+        $this->bump_schedule_token($lead_id);
+
+        Log::channel('daily')->debug('LeadAiSuggestionScheduler: sugerencia automática cancelada.', [
+            'lead_id' => $lead_id,
+        ]);
+    }
+
+    /**
      * Indica si el token del job sigue siendo el último programado para ese lead.
      *
      * @param int $lead_id

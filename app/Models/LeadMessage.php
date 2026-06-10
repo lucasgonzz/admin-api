@@ -29,6 +29,7 @@ class LeadMessage extends Model
         'requiere_verificacion' => 'boolean',
         'sent_at'               => 'datetime',
         'read_at'               => 'datetime',
+        'ai_auto_send_at'       => 'datetime',
     ];
 
     /**
@@ -69,5 +70,41 @@ class LeadMessage extends Model
     public function attachments()
     {
         return $this->hasMany(LeadMessageAttachment::class, 'lead_message_id');
+    }
+
+    /**
+     * Mensajes que deben viajar en listados de leads (notificaciones / pendientes de acción).
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeForListNotifications($query)
+    {
+        return $query->where(function ($wrap) {
+            $wrap->where(function ($sub) {
+                $sub->where('sender', 'lead')->whereNull('read_at');
+            })->orWhere(function ($sub) {
+                $sub->where('sender', 'sistema')->where('status', 'sugerido');
+            })->orWhere(function ($sub) {
+                $sub->where('sender', 'lead')
+                    ->where('status', 'enviado')
+                    ->whereNotExists(function ($exists) {
+                        $exists->selectRaw('1')
+                            ->from('lead_messages as outbound')
+                            ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
+                            ->whereColumn('outbound.id', '>', 'lead_messages.id')
+                            ->where(function ($outbound_wrap) {
+                                $outbound_wrap->where(function ($setter) {
+                                    $setter->where('outbound.sender', 'setter')
+                                        ->whereIn('outbound.status', ['enviado', 'aprobado']);
+                                })->orWhere(function ($sistema) {
+                                    $sistema->where('outbound.sender', 'sistema')
+                                        ->where('outbound.status', 'aprobado');
+                                });
+                            });
+                    });
+            });
+        });
     }
 }

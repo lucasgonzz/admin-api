@@ -68,6 +68,9 @@ class VersionController extends BaseController
 
     /**
      * Listado paginado o completo.
+     *
+     * Query `for_select=1`: respuesta liviana (id, version, title, status) para selects
+     * del SPA (p. ej. current_version_id en Client) sin eager load de seeders/comandos.
      */
     public function index_json(Request $request)
     {
@@ -78,7 +81,18 @@ class VersionController extends BaseController
         if ($per > 200) {
             $per = 200;
         }
-        $q = Version::query()->withAll()->orderBy('id', 'desc');
+
+        /** Selectores relacionales del SPA: evitar withAll() en el listado completo. */
+        $for_select = $request->boolean('for_select');
+
+        if ($for_select) {
+            $q = Version::query()
+                ->select(['id', 'version', 'title', 'status'])
+                ->orderBy('id', 'desc');
+        } else {
+            $q = Version::query()->withAll()->orderBy('id', 'desc');
+        }
+
         if ($request->has('page')) {
             $models = $q->paginate($per);
         } else {

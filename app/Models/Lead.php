@@ -133,6 +133,76 @@ class Lead extends Model
     }
 
     /**
+     * Variante liviana para listados admin-spa: relaciones del lead + solo mensajes de notificación.
+     *
+     * Los mensajes se serializan bajo la clave `messages` (mismo contrato que el SPA) pero filtrados.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     */
+    public function scopeWithAllForList($query)
+    {
+        $query->with(
+            'target_client',
+            'promoted_client',
+            'created_by_admin',
+            'demo',
+            'personalized_demo_videos',
+            'notification_messages'
+        );
+        $query->withUnreadLeadMessagesCount();
+    }
+
+    /**
+     * Marca el alcance de mensajes incluidos en la respuesta JSON (`notification` | `full`).
+     *
+     * @param string $scope
+     *
+     * @return $this
+     */
+    public function mark_messages_scope(string $scope)
+    {
+        $this->setAttribute('messages_scope', $scope);
+
+        return $this;
+    }
+
+    /**
+     * Expone mensajes de notificación bajo `messages` para compatibilidad con admin-spa.
+     *
+     * @return void
+     */
+    public function expose_notification_messages_as_messages(): void
+    {
+        if ($this->relationLoaded('notification_messages')) {
+            $this->setRelation('messages', $this->notification_messages);
+            $this->unsetRelation('notification_messages');
+        }
+    }
+
+    /**
+     * Normaliza una colección o paginador de leads de listado para JSON del SPA.
+     *
+     * @param mixed $models
+     *
+     * @return mixed
+     */
+    public static function prepare_collection_for_list_json($models)
+    {
+        $collection = $models instanceof \Illuminate\Contracts\Pagination\Paginator
+            ? $models->getCollection()
+            : $models;
+
+        if ($collection) {
+            $collection->each(function (Lead $lead) {
+                $lead->expose_notification_messages_as_messages();
+                $lead->mark_messages_scope('notification');
+            });
+        }
+
+        return $models;
+    }
+
+    /**
      * Agrega unread_messages_count: mensajes del lead (sender lead) sin read_at.
      *
      * @param \Illuminate\Database\Eloquent\Builder $query
@@ -201,6 +271,24 @@ class Lead extends Model
     public function messages()
     {
         return $this->hasMany(LeadMessage::class, 'lead_id')->with('attachments')->orderBy('id');
+    }
+
+    /**
+     * Mensajes relevantes para notificaciones en listados (sin cargar el hilo completo).
+     *
+     * Incluye:
+     * - mensajes del lead no leídos (`read_at` nulo),
+     * - sugerencias de Claude pendientes (`status = sugerido`),
+     * - mensajes del lead sin respuesta del setter/sistema posterior.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function notification_messages()
+    {
+        return $this->hasMany(LeadMessage::class, 'lead_id')
+            ->forListNotifications()
+            ->with('attachments')
+            ->orderBy('id');
     }
 
     /**

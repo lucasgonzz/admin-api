@@ -13,7 +13,9 @@ use App\Models\LeadPersonalizedDemoVideo;
 use App\Models\ProtocolEntry;
 use App\Services\LeadAiService;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
+use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
+use App\Services\LeadConversationAiState;
 use App\Services\LeadSuggestionSendService;
 use App\Services\LeadWhatsAppPasteCleaner;
 use App\Services\PromoteLeadService;
@@ -380,8 +382,8 @@ class LeadController extends Controller
             $per = 200;
         }
 
-        // Query base con relaciones habituales para evitar N+1 en tabla.
-        $query = Lead::query()->withAll()->orderBy('id', 'desc');
+        // Query base liviana: relaciones del lead + solo mensajes de notificación.
+        $query = Lead::query()->withAllForList()->orderBy('id', 'desc');
 
         // Filtro por estado comercial.
         if ($request->filled('status')) {
@@ -400,7 +402,39 @@ class LeadController extends Controller
             $models = $query->get();
         }
 
+        $this->prepare_leads_for_list_json($models);
+
         return response()->json(['models' => $models], 200);
+    }
+
+    /**
+     * Normaliza leads de listado: mensajes de notificación bajo `messages` y metadata de alcance.
+     *
+     * @param \Illuminate\Support\Collection|\Illuminate\Database\Eloquent\Collection|\Illuminate\Contracts\Pagination\Paginator $models
+     *
+     * @return void
+     */
+    protected function prepare_leads_for_list_json($models)
+    {
+        Lead::prepare_collection_for_list_json($models);
+    }
+
+    /**
+     * Marca un lead de detalle con alcance completo de mensajes.
+     *
+     * @param \App\Models\Lead|null $lead
+     *
+     * @return \App\Models\Lead|null
+     */
+    protected function prepare_lead_for_detail_json(?Lead $lead)
+    {
+        if (! $lead) {
+            return null;
+        }
+
+        $lead->mark_messages_scope('full');
+
+        return $lead;
     }
 
     /**
@@ -417,6 +451,8 @@ class LeadController extends Controller
         if (! $model) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
+
+        $this->prepare_lead_for_detail_json($model);
 
         return response()->json(['model' => $model], 200);
     }
@@ -886,6 +922,60 @@ class LeadController extends Controller
             $ai_service->generate_suggestion($fresh, false);
         } catch (\Throwable $e) {
             Log::error('LeadController@store_message_json AI error: '.$e->getMessage(), ['lead_id' => $lead->id]);
+
+            return response()->json([
+                'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),
+                'model'   => $this->fullModel('lead', $lead->id),
+            ], 422);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Pide sugerencia a Claude de inmediato cuando hay mensajes del lead sin responder.
+     *
+     * Cancela el debounce automático pendiente; el envío automático de la sugerencia generada
+     * sigue respetando la demora configurada en LeadAiSuggestionAutoSendScheduler.
+     *
+     * @param int|string              $lead_id
+     * @param LeadAiService           $ai_service
+     * @param LeadAiSuggestionScheduler $scheduler
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function request_ai_suggestion_json($lead_id, LeadAiService $ai_service, LeadAiSuggestionScheduler $scheduler)
+    {
+        $lead = Lead::query()->with('messages')->findOrFail($lead_id);
+
+        if (LeadConversationAiState::count_lead_inbound_messages((int) $lead->id) <= 1) {
+            return response()->json([
+                'message' => 'La sugerencia IA aplica desde el segundo mensaje del lead.',
+            ], 422);
+        }
+
+        if (! LeadConversationAiState::has_unanswered_lead_messages($lead)) {
+            return response()->json([
+                'message' => 'No hay mensajes del lead sin responder.',
+            ], 422);
+        }
+
+        if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
+            return response()->json([
+                'message' => 'Ya hay una sugerencia pendiente de revisión.',
+            ], 422);
+        }
+
+        $scheduler->cancel_scheduled_suggestion((int) $lead->id);
+
+        try {
+            $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
+            if (! $fresh) {
+                return response()->json(['message' => 'Lead no encontrado.'], 404);
+            }
+            $ai_service->generate_suggestion($fresh, false);
+        } catch (\Throwable $e) {
+            Log::error('LeadController@request_ai_suggestion_json AI error: '.$e->getMessage(), ['lead_id' => $lead->id]);
 
             return response()->json([
                 'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),

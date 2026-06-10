@@ -850,10 +850,7 @@ class RealVersionesProductionSeeder extends Seeder
                 'title'       => 'Versión 1.1.7',
                 'description' => 'Se guarda la descripcion del precio de las ventas de VENDER. Opcion de que fecha mostrar en PdfColumnProfile. Personalizacion del valor de la mensualidad.',
                 'seeders' => [
-                    /* Sin color → per_database */
                     ['seeder_class' => 'InputsSizeSeeder', 'execution_order' => 1, 'run_scope' => 'per_database'],
-                    /* Especifico de Empresa - Fenix (col 23 en hoja Seeders) */
-                    ['seeder_class' => 'PdfColumnProfileComisionesSeeder', 'execution_order' => 2, 'run_scope' => 'per_database'],
                 ],
                 'notifications' => [
                     [
@@ -1170,6 +1167,16 @@ class RealVersionesProductionSeeder extends Seeder
                         'body'                       => "En el archivo que descargas desde el listado de notas de credito, despues de \"Nro venta\" aparecen dos columnas nuevas: \"Nro factura\" (comprobante con letra, punto de venta y numero) y \"CAE\".",
                         'restricted_to_client_slug'  => 'arfren',
                     ],
+                    [
+                        'title'                     => 'Pedidos online: asignar estados libremente (Galvan)',
+                        'body'                       => "Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\nCuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente.",
+                        'restricted_to_client_slug'  => 'galvan',
+                    ],
+                    [
+                        'title'                     => 'Pedidos online: asignar estados libremente (Ferretotal)',
+                        'body'                       => "Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\nCuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente.",
+                        'restricted_to_client_slug'  => 'ferretotal',
+                    ],
                 ],
             ],
 
@@ -1349,43 +1356,6 @@ class RealVersionesProductionSeeder extends Seeder
                         'title'                     => 'Listado de articulos: buscador puede filtrar la tabla para trabajo en lote',
                         'body'                       => "En el listado podes buscar por nombre, codigo o proveedor (y por categoria/stock) y los resultados se muestran directo en la tabla, sin abrir la pestana de seleccion de un solo articulo.\n\nSobre esos articulos filtrados podes usar las mismas acciones de siempre: generar etiquetas, PDF, exportar a Excel, etc.",
                         'restricted_to_client_slug'  => 'servian',
-                    ],
-                ],
-            ],
-
-            // -----------------------------------------------------------------
-            // 2.0.7 — Columna Imagen en PDF tabla de artículos
-            // -----------------------------------------------------------------
-            [
-                'version'     => '2.0.7',
-                'title'       => 'Versión 2.0.7',
-                'description' => 'Catálogo PDF: columna Imágenes (primera imagen del artículo) en plantillas article.',
-                'seeders' => [
-                    ['seeder_class' => 'PdfColumnOptionSeeder', 'execution_order' => 1, 'run_scope' => 'per_database'],
-                ],
-                'notifications' => [
-                    [
-                        'title' => 'Columna Imagen en PDF de artículos',
-                        'body'  => "En perfiles PDF de artículos podés activar la columna Imágenes: muestra la primera foto del artículo en el listado PDF.\n\nConfigurala en Configuración → Generales → Perfiles de columnas PDF (modelo Artículo).",
-                    ],
-                ],
-            ],
-
-            // -----------------------------------------------------------------
-            // 2.0.6 — PDF tabla de artículos con plantillas
-            // -----------------------------------------------------------------
-            [
-                'version'     => '2.0.6',
-                'title'       => 'Versión 2.0.6',
-                'description' => 'Plantillas PDF tabulares para listado de artículos (PdfColumnProfile model_name article).',
-                'seeders' => [
-                    ['seeder_class' => 'PdfColumnOptionSeeder', 'execution_order' => 1, 'run_scope' => 'per_database'],
-                    ['seeder_class' => 'PdfColumnProfileArticleSeeder', 'execution_order' => 2, 'run_scope' => 'per_user'],
-                ],
-                'notifications' => [
-                    [
-                        'title' => 'PDF tabla de artículos con plantillas',
-                        'body'  => "En Configuración → Generales → Perfiles de columnas PDF podés crear plantillas para el modelo Artículo: columnas visibles, orden, ancho, pie de página e imagen de cabecera.\n\nEn el listado, dentro del menú de seleccionados o filtrados, aparece la sección \"PDF tabla (plantillas)\" para generar el PDF con los artículos elegidos o con todos los que devuelve el filtro activo.",
                     ],
                 ],
             ],

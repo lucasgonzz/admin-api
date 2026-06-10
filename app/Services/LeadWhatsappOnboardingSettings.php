@@ -43,7 +43,7 @@ class LeadWhatsappOnboardingSettings
     /**
      * Mensaje automático por defecto (sin nombre).
      */
-    private const DEFAULT_AUTO_WITHOUT_NAME = '¡Hola! 👋 Ya te atendemos, dame un momento.';
+    private const DEFAULT_AUTO_WITHOUT_NAME = '¡Hola {nombre}! 👋 Un asesor comercial se pondrá en contacto a la brevedad.';
 
     /**
      * Mensaje de bienvenida por defecto (con nombre): presentación de ComercioCity.

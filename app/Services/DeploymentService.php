@@ -400,16 +400,24 @@ class DeploymentService
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
         $this->log('upload_api', 'ZIP subido al hosting');
 
+        // Reconecta SSH al hosting (sesión inicial puede estar inactiva tras operaciones largas en VPS/SFTP).
+        $this->reconnect_hosting_ssh();
         $this->exec_hosting_ssh(
             'upload_api',
-            "cd {$api_path} && unzip -o {$zip_name} && rm {$zip_name}"
+            "cd {$api_path} && unzip -o {$zip_name} && rm {$zip_name}",
+            true,
+            true
         );
         $this->log('upload_api', 'API descomprimida en el hosting');
 
         $this->log('upload_api', 'Corriendo composer install en hosting...');
+        // Cierra canal SSH previo (phpseclib: "Please close the channel before trying to open it again").
+        $this->reconnect_hosting_ssh();
         $this->exec_hosting_ssh(
             'upload_api',
-            $this->build_composer_install_command($api_path, false)
+            $this->build_composer_install_command($api_path, false),
+            true,
+            true
         );
         $this->log('upload_api', 'API lista en el hosting', 'success');
 
@@ -941,7 +949,13 @@ class DeploymentService
 
         $lines = [];
         foreach ($env_vars as $env_key => $env_value) {
-            $lines[] = $env_key . '=' . $env_value;
+            // Valores con espacios requieren comillas para que dotenv/vue-cli los interprete bien.
+            if (preg_match('/\s/', $env_value) !== 0) {
+                $escaped_value = str_replace('"', '\\"', $env_value);
+                $lines[] = $env_key . '="' . $escaped_value . '"';
+            } else {
+                $lines[] = $env_key . '=' . $env_value;
+            }
         }
 
         return implode("\n", $lines);

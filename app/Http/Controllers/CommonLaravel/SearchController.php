@@ -4,6 +4,7 @@ namespace App\Http\Controllers\CommonLaravel;
 
 // use App\Http\Controllers\CommonLaravel\BaseController;
 use App\Http\Controllers\CommonLaravel\Helpers\GeneralHelper;
+use App\Models\Lead;
 use Illuminate\Http\Request;
 
 /**
@@ -224,8 +225,15 @@ class SearchController
             }
         }
 
-        $models = $models->withAll()
-            ->orderBy('created_at', 'DESC');
+        if ($model_name === Lead::class) {
+            $models = $models->withAllForList()
+                ->orderBy('created_at', 'DESC');
+        } elseif (method_exists($model_name, 'scopeWithAll')) {
+            $models = $models->withAll()
+                ->orderBy('created_at', 'DESC');
+        } else {
+            $models = $models->orderBy('created_at', 'DESC');
+        }
 
         if ($paginate) {
             $per_page = (int) $request->input('per_page', 5);
@@ -242,6 +250,10 @@ class SearchController
 
         if ($return_raw_models) {
             return $models;
+        }
+
+        if ($model_name === Lead::class) {
+            Lead::prepare_collection_for_list_json($models);
         }
 
         if ($return_used_filters) {

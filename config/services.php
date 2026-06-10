@@ -81,6 +81,8 @@ return [
             'VUE_APP_USE_HOME_PAGE' => env('DEPLOY_SPA_USE_HOME_PAGE', 'true'),
             'VUE_APP_USE_HELP_DROPDOWN' => env('DEPLOY_SPA_USE_HELP_DROPDOWN', 'true'),
             'VUE_APP_HAS_EXTRA_CONFIG' => env('DEPLOY_SPA_HAS_EXTRA_CONFIG', 'true'),
+            'VUE_APP_ATTEMPT_PROP' => env('DEPLOY_SPA_ATTEMPT_PROP', 'doc_number'),
+            'VUE_APP_ATTEMPT_TEXT' => env('DEPLOY_SPA_ATTEMPT_TEXT', 'numero de documento'),
         ],
         'composer_bin' => env('DEPLOY_COMPOSER_BIN', 'composer'),
     ],

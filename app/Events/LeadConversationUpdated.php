@@ -73,15 +73,13 @@ class LeadConversationUpdated implements ShouldBroadcastNow
     {
         $lead = Lead::query()
             ->where('id', $this->lead_id)
-            ->with([
-                'target_client',
-                'promoted_client',
-                'created_by_admin',
-                'demo',
-                'personalized_demo_videos',
-            ])
-            ->withUnreadLeadMessagesCount()
+            ->withAllForList()
             ->first();
+
+        if ($lead) {
+            $lead->expose_notification_messages_as_messages();
+            $lead->mark_messages_scope('notification');
+        }
 
         $message = null;
         if ($this->lead_message_id !== null) {

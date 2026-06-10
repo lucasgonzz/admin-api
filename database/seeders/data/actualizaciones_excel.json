@@ -1,0 +1,1344 @@
+{
+    "current_versions":  {
+                             "rober":  "1.2.0",
+                             "3dtisk":  "1.2.1",
+                             "masquito":  "1.1.5",
+                             "ffperformance":  "1.0.1",
+                             "2r":  "1.0.1",
+                             "empresa":  "2.0.2",
+                             "ferretotal":  "2.0.2",
+                             "lamartina":  "1.2.2",
+                             "cf":  "1.0.1",
+                             "ananda":  "2.0.1",
+                             "ferremas":  "1.1.8",
+                             "distri-creo":  "2.1.1",
+                             "mbmalizia":  "1.0.1",
+                             "fenix":  "2.0.2",
+                             "oliva":  "1.0.1",
+                             "san-cayetano":  "2.0.2",
+                             "hb":  "1.2.0",
+                             "trama":  "2.0.2",
+                             "arfren":  "2.0.1",
+                             "demo2":  "1.1.9",
+                             "sanblas":  "1.1.9",
+                             "truvari":  "2.1.3",
+                             "golden-breeze":  "2.0.2",
+                             "servian":  "1.1.9",
+                             "lacarra":  "1.0.1",
+                             "ht5":  "2.0.2",
+                             "golonorte":  "1.0.1"
+                         },
+    "versions":  {
+                     "1.2.1":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Exportacion de excel",
+                                                             "body":  "✅ *Exportacion de excel*\n\n➡️ Debido a la cantidad de articulos que intentabas exportar el sistema colapsaba, con esta nueva funcionalidad la exportacion se procesara en segundo plano para poder gestionar bien la cantidad de articulos.\n\n➡️ Una vez que termine, se te notificara para que puedas descargar el archivo generado.",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Quedo corregido el atajo del buscador por nombre en el Listado",
+                                                             "body":  "✅ *Quedo corregido el atajo del buscador por nombre en el Listado*",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nueva configuracion aplicada para sumar el IVA luego del margen de ganancia",
+                                                             "body":  "✅ *Nueva configuracion aplicada para sumar el IVA luego del margen de ganancia*\n\n➡️ Los precios van a seguir igual ya que el orden de los factores no cambia el resultado, lo que si va a cambiar es el costo real del articulo, ahora va a estar mas barato ya que no se le va a sumar el IVA para calcular el costo real.",
+                                                             "restricted_to_client_slug":  "3dtisk"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Ya no les va a aparecer la opcion de descontar stock o de precios con iva en VENDER",
+                                                             "body":  "✅ *Ya no les va a aparecer la opcion de descontar stock o de precios con iva en VENDER*",
+                                                             "restricted_to_client_slug":  "san-cayetano"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Las descripciones de los campos en los formularios ahora aparecen cuando se les hace click al titulo del campo",
+                                                             "body":  "✅ *Las descripciones de los campos en los formularios ahora aparecen cuando se les hace click al titulo del campo*",
+                                                             "restricted_to_client_slug":  "2r"
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionHideIvaDiscountStockVenderSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.3":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Opcion para descontar stock en una venta",
+                                                             "body":  "✅ *Opcion para descontar stock en una venta*\n\n➡️ Desde el modulo de VENDER, cuando estes creando una venta vas a tener disponible un cehck para indicar si queres que se descuente o no el stock de los articulos vendidos.\n\n➡️ Si lo desactivas, el sistema no descontara el stock.\n\n➡️ Podes actualizar la venta las veces que quieras, que hasta que no actives la opcion el stock no se descontara.\n\n➡️ Una vez que activez la opcion, NO SE PODRA DESACTIVAR.\n\n➡️ Si activas la opcion desde un principio, permanecera asi para siempre en esa venta.",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Opcion \"Aplicar IVA\" en modulo VENDER",
+                                                             "body":  "✅ *Opcion \"Aplicar IVA\" en modulo VENDER*\n\n➡️ Cuando estes creado o actualizando una venta, vas a poder elegir si queres que se aplique el iva a los productos (opcion por defecto), o si queres que no se aplique.\n\n➡️ Si permanece activado, el precio de venta va a ser el que ya venis trabajando, el precio final del articulo.\n\n➡️ Si lo desactivas, el sistema va a calcular el precio que el articulo deberia de tener para que, una vez sumado el iva, de como resultado el precio final.\n\n➡️ Es el mismo calculo que hace en la factura para mostrar el precio del articulo sin iva, para que luego el precio del articulo con iva sea igual al precio final.\n\n➡️ Si desactivas esta opcion y facturas la venta, el sistema no le va a \"sumar\" el iva a los precios, va a usar el precio final de la venta como el precio con el iva incluido.\n\n➡️ Ejemplo: tu articulo tiene un precio final de $1.000, si creas uva venta con la opcion \"precios con iva\" activada, el precio del articulo va a ser $1.000, y si facturas la venta en la factura va a aparecer precio sin iva: $826.45, monto iva: $173.55, precio con iva: $1.000 (valor original al que se vendio).\n\nPero si desactivas la opcion de \"precio con iva\", el precio de venta va a ser $826.45. Y si facturas la venta, en la factura aparecera como: precio sin iva: $683.02, monto iva: $143.43, precio con iva: $826.45 (valor original al que se vendio).",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nueva seccion \"Insumos\" en modulo de Produccion",
+                                                             "body":  "✅ *Nueva seccion \"Insumos\" en modulo de Produccion*\n\n➡️ Desde el modulo de produccion vas a tener la nueva seccion \"Insumos\" donde se van a listar todos los articulos que tengan activada la propiedad \"Es un insumo\".\n\n➡️ Desde ahi tambien vas a poder dar de alta nuevos insumos.",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         }
+                                                     ],
+                                   "description":  "1. Opcion para aplicar iva en VENDER\n2. Opcion para descontar stock en VENDER\n3. Seccion insumos en produccion",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan check_extencion_listas_de_precios"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+
+                                               ]
+                               },
+                     "1.1.1":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Formato del PDF de ventas y facturas personalizado",
+                                                             "body":  "✅ *Formato del PDF de ventas y facturas personalizado*\n\n➡️ Quitamos las columnas que no querias que se muestren\n\n➡️ Agrandamos el logo\n\n➡️ Mostramos el total de la factura solo al final de la ultima pagina\n\n➡️ Agrandamos el tu logo en los PDF",
+                                                             "restricted_to_client_slug":  "arfren"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Amplicar contenido dentro de formularios",
+                                                             "body":  "✅ *Amplicar contenido dentro de formularios*\n\n➡️ Dentro de los formularios, vas a poder ampliar la informacion de las tablas\n\n➡️ Por ejemplo dentro de articulos -\u003e descuentos, compras a proveedores -\u003e facturas, etc.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "1. Se agrego estilo personalizables de PDF de ventas: remitos y facturas\n2. Funcionalidad para ampliar datos hasMany en model form",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "SheetTypeSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_user",
+                                                       "seeder_class":  "PdfColumnOptionSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_user",
+                                                       "seeder_class":  "PdfColumnProfileSeeder"
+                                                   }
+                                               ]
+                               },
+                     "3.0.1":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ PDF tabular de artículos: más control de columnas y encabezados",
+                                                             "body":  "✅ PDF tabular de artículos: más control de columnas y encabezados\n\n➡️ En Configuración → Generales → Perfiles PDF de artículos podés definir, por columna, el tamaño de letra y la alineación horizontal (izquierda, centro o derecha). Si dejás la alineación en “Automática”, se mantiene el criterio habitual (precios a la derecha, textos largos a la izquierda, etc.).\n\n➡️ Nuevo campo “Letra encabezado columnas (pt)”: todos los títulos de columna (Imagen, Nombre, Precio, Stock, etc.) usan el mismo tamaño, independiente del tamaño de cada columna en los datos.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Buscador rápido en Clientes, Proveedores y Cajas",
+                                                             "body":  "✅ Buscador rápido en Clientes, Proveedores y Cajas\n\n➡️ Ahora podés buscar por texto directamente desde el listado, sin abrir el formulario de filtros.\n\n➡️ Escribí al menos 2 caracteres y presioná Enter o el botón Buscar para ver los resultados en la tabla.\n\n➡️ En Clientes podés buscar por nombre, email, teléfono, dirección, CUIL, CUIT, DNI, razón social y otros datos.\n\n➡️ En Proveedores podés buscar por nombre, teléfono, dirección, email, razón social, CUIT y observaciones.\n\n➡️ Cuando hay una búsqueda activa, aparece un botón para limpiar y volver al listado completo.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionEmpresaAiExcelImportSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.9":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Opcion para ampliar las imagenes de los articulos",
+                                                             "body":  "✅ *Opcion para ampliar las imagenes de los articulos*\n\n➡️ Desde el LISTADO o cuando busques un articulo desde VENDER, vas a poder hacer click sobre la imagen de un articulo para poder verla en un tamaño ampliado",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Stock en vender",
+                                                             "body":  "✅ *Stock en vender*\n\n➡️ Cuando busques un articulo por su codigo de barras, al lado del campo donde ingresas el codigo de barras, se te va a informar el stock del articulo, y entre parentesis, el stock en la sucursal seleccionada para vender",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Importar excel de articulos \"recibidos\" en compras a proveedores",
+                                                             "body":  "✅ *Importar excel de articulos \"recibidos\" en compras a proveedores*\n\n➡️ Desde el modulo de Proveedores -\u003e comrpas, vas a poder importar un archivo excel para indicar los articulos comprados, y tambien los articulos recibidos.\n\n➡️ El sisteme te va a mostrar las diferencias entre lo pedido y lo recibido de tu proveedor para que puedas verlo facilmente.\n\n➡️ Te dejamos este tutorial para que entiendas como usarlo: https://drive.google.com/drive/folders/1P4FxZ6osYE4gCgIYuzKgyuLkIeLXevqm?usp=sharing",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Scroll automatico en la tienda",
+                                                             "body":  "✅ *Scroll automatico en la tienda*\n\n➡️ Te configuramos la tienda para que cuando inicie, a los 2 segundos, comience a scrollear con una velocidad determinada (esto se puede configurar).\n\n➡️ Este comportamiento va a ocurrir hasta que el usuario realice una accion en la pagina, scrollee o clickee algo.",
+                                                             "restricted_to_client_slug":  "fenix"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Se soluciono la descarga de recursos en el telefono",
+                                                             "body":  "✅ *Se soluciono la descarga de recursos en el telefono*",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Envio de Mails de ventas",
+                                                             "body":  "✅ *Envio de Mails de ventas*\n\n➡️ Luego de crear o actualizar una venta, si el cliente seleccionado tiene indicado un email, vas a poder activar la opcion de \"Enviar correo al cliente\", desde el modulo de VENDER, debajo del cliente seleccinado.\n\n➡️ Al activarlo, se enviara un correo al cliente indicandole sobre su nueva venta, y dejando dos links para que pueda: ver el comprobante, y ver su resumen de la cuenta corriente.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Crear conceptos de movimientos de caja personalizados",
+                                                             "body":  "✅ *Crear conceptos de movimientos de caja personalizados*\n\n➡️ Desde ABM -\u003e Tesoreria -\u003e Conceptos movimiento caja vas a poder crear y editar los conceptos que necesites",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Atajo para agregar articulos de Sugerencia de Stock a Movimiento de deposito",
+                                                             "body":  "✅ *Atajo para agregar articulos de Sugerencia de Stock a Movimiento de deposito*\n\n➡️ Cuando estes viendo los articulos de una sugerencia de stock, vas a tener una nueva columna a la izquierda para ir tildando los articulos que quieras agregar a un \"Movimiento de depositos\" de forma automatica.\n\n➡️ Para que cuando termines de indicar los articulos que queres agregar, preciones el nuevo boton \"Crear movimiento de depositos\", para que el sistema te cree de forma automatica un nuevo movimiento de deposito con todos los articulos que seleccionaste.\n\n➡️ Luego irias a los mivimientos de depositos para gestionar este nuevo movimiento como corresponda.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevo permiso \"Prohibir cambiar la lista de precios en VENDER\"",
+                                                             "body":  "✅ *Nuevo permiso \"Prohibir cambiar la lista de precios en VENDER\"*\n\n➡️ Si queres que tus empleados no puedan cambiar la lista de precio en vender, asignales este permiso.\n\n➡️ De esa forma, cuando esten en VENDER, van a usar siempre la ulitma lista de precio, o la lista que tenga asignada el cliente.",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nueva opcion para \"Pausar precio\" de un articulo en la tienda",
+                                                             "body":  "✅ *Nueva opcion para \"Pausar precio\" de un articulo en la tienda*\n\n➡️ En cada articulo vas a tener un nuevo check en la seccion de \"Tienda online\" llamado \"Pausar precio\".\n\n➡️ Si lo activas, no se va a mostrar el precio del articulo en la tienda, en su lugar se va a mostrar un texto personalizado, y no se va a permitir que se agregue al carrito.\n\n➡️ El texto que se va a mostrar lo podes configurar desde Configuracion online -\u003e Opciones -\u003e Texto para precio pausado",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Logo del e-commerce configurable",
+                                                             "body":  "✅ *Logo del e-commerce configurable*\n\n➡️ Ahora el e-commerce va a utilizar el logo que tengas configurado desde la configuracion general de la cuenta.\n\n➡️ Si queres usar un logo distinto para la tienda, tenes una nueva opcion para elegirlo en Configuracion online -\u003e Diseño -\u003e Logo de la tienda. Para que puedas manejar 2 logos por separado en caso de que lo necesites.",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Logo del e-commerce configurable",
+                                                             "body":  "✅ *Logo del e-commerce configurable*\n\n➡️ Ahora el e-commerce va a utilizar el logo que tengas configurado desde la configuracion general de la cuenta.\n\n➡️ Si queres usar un logo distinto para la tienda, tenes una nueva opcion para elegirlo en Configuracion online -\u003e Diseño -\u003e Logo de la tienda. Para que puedas manejar 2 logos por separado en caso de que lo necesites.",
+                                                             "restricted_to_client_slug":  "fenix"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Logo del e-commerce configurable",
+                                                             "body":  "✅ *Logo del e-commerce configurable*\n\n➡️ Ahora el e-commerce va a utilizar el logo que tengas configurado desde la configuracion general de la cuenta.\n\n➡️ Si queres usar un logo distinto para la tienda, tenes una nueva opcion para elegirlo en Configuracion online -\u003e Diseño -\u003e Logo de la tienda. Para que puedas manejar 2 logos por separado en caso de que lo necesites.",
+                                                             "restricted_to_client_slug":  "galvan"
+                                                         }
+                                                     ],
+                                   "description":  "1. Ampliar imagenes\n2. Importar unidades pedidas y recibidas en pedido a proveedor\n3. CONTROL PARA EL LOGIN DE USUARIOS, NO SE PERMITEN CUENTAS EN MAS DE UN DISPOSITIVO EN SIMULTANEO",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_user_activity {user_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan check_rounding_env_variables"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermissionProhibirListaPreciosVender"
+                                                   }
+                                               ]
+                               },
+                     "2.0.1":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Cambios en la interfaz",
+                                                             "body":  "✅ *Cambios en la interfaz*\n\n➡️ Cambiamos la organizacion cuando ingresar en un registro (articulos, clientes, etc). Ahora vas a ver la informacion por \"paginas\". En la barra superior vas a ver los nombres de las secciones de cada registro para desplazarte mas rapido a la seccion que necesites. \n\n➡️ Cambiamos los iconos de la barra de navegacion.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Pedidos online",
+                                                             "body":  "✅ *Pedidos online*\n\n➡️ Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\n➡️ Cuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente",
+                                                             "restricted_to_client_slug":  "fenix"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Pedidos online",
+                                                             "body":  "✅ *Pedidos online*\n\n➡️ Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\n➡️ Cuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Pedidos online",
+                                                             "body":  "✅ *Pedidos online*\n\n➡️ Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\n➡️ Cuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente",
+                                                             "restricted_to_client_slug":  "galvan"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Pedidos online",
+                                                             "body":  "✅ *Pedidos online*\n\n➡️ Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\n➡️ Cuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Pedidos online",
+                                                             "body":  "✅ *Pedidos online*\n\n➡️ Ahora vas a poder asignar libremente el estado que quieras a los pedidos de la tienda online.\n\n➡️ Cuando cambies de \"Sin confirmar\" a cualquier otro estado que no sea \"Cancelado\", el sistema va a proceder a crear la venta correspondiente",
+                                                             "restricted_to_client_slug":  "galvan"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Actualizamos la forma de buscar clientes al vender: la consulta a ARCA/AFIP por CUIT o DNI quedó integrada en el mismo buscador de cliente.",
+                                                             "body":  "✅ *Actualizamos la forma de buscar clientes al vender: la consulta a ARCA/AFIP por CUIT o DNI quedó integrada en el mismo buscador de cliente.*\n\n➡️ Un solo lugar para buscar por nombre, datos del cliente, CUIT o DNI.\n\n➡️ Si no hay resultados y el texto coincide con un CUIT o DNI, un segundo Enter dispara la consulta a AFIP y el flujo habitual para usar un cliente existente o dar de alta uno con los datos devueltos.\n\n➡️ Se eliminó el campo adicional exclusivo para buscar por CUIT.",
+                                                             "restricted_to_client_slug":  "2r"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Se agregaron las columnas codigo de barras y numero en la tabla de los reportes de ventas de articulos",
+                                                             "body":  "✅ *Se agregaron las columnas codigo de barras y numero en la tabla de los reportes de ventas de articulos*",
+                                                             "restricted_to_client_slug":  "arfren"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Al eliminar una venta, un gasto o un pago en cuenta corriente podés marcar si querés compensar la caja (movimiento inverso por cada medio de pago con caja).",
+                                                             "body":  "✅ Al eliminar una venta, un gasto o un pago en cuenta corriente podés marcar si querés compensar la caja (movimiento inverso por cada medio de pago con caja).\n\n➡️ En el mismo modal de confirmación de borrado aparece la opción “Compensar caja”; por defecto viene marcada y podés desmarcarla si no querés registrar ese movimiento.\n\n➡️ Si la dejás marcada, el sistema revisa que todas las cajas involucradas estén abiertas; si alguna está cerrada, no se elimina el registro y te avisa cuáles tenés que abrir primero.\n\n➡️ Cuando corresponde, se genera un movimiento de caja por cada método de pago que había impactado en caja, con el concepto de eliminación (venta, gasto o pago según el caso), usando el monto cotizado del pago cuando aplica.\n\n➡️ En pagos de cuenta corriente, la compensación aplica a los pagos tipo cliente/proveedor con caja asignada; el resto del flujo de eliminación se mantiene igual si no marcás compensar caja.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Cuenta siempre al día entre usuarios",
+                                                             "body":  "✅ Cuenta siempre al día entre usuarios\n\n➡️ Si hace cambios en la configuración de la cuenta, el resto recibe un aviso con el detalle (por ejemplo cotización del dólar).\n\n➡️ La sesión se actualiza sola para que trabajen con los mismos datos sin cerrar sesión.\n\n➡️ En pagos y métodos de pago, la cotización del dólar se alinea con la del titular cuando la cambia.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Exportación Excel de notas de crédito: ahora incluye N° de factura AFIP y CAE cuando la nota está facturada electrónicamente.",
+                                                             "body":  "✅ Exportación Excel de notas de crédito: ahora incluye N° de factura AFIP y CAE cuando la nota está facturada electrónicamente.\n\n➡️ En el archivo que descargás desde el listado de notas de crédito, después de “N° venta” aparecen dos columnas nuevas: “N° factura” (comprobante con letra, punto de venta y número) y “CAE”.\n\n➡️ Si la nota no tiene comprobante AFIP asociado, esas celdas quedan vacías; si tiene ticket AFIP, se completan con los datos del comprobante.",
+                                                             "restricted_to_client_slug":  "arfren"
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "TiendaNubeOrderStatusSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ConceptoMovimientoCajaCompensacionSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.5":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Actulizar una venta sin cliente asignado",
+                                                             "body":  "✅ *Actulizar una venta sin cliente asignado*\n\n➡️ Si hiciste una venta sin asignarle un cliente y necesitas actualizarla, vas a poder hacerlo siempre y cuando no tenga una caja asignada, y tenga un unico metodo de pago asignado",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Total vendido a C/C en ventas",
+                                                             "body":  "✅ *Total vendido a C/C en ventas*\n\n➡️ En el modulo de VENTAS, arriba a la izquierda, debajo del \"Total\" vendido, va a aparecer el monto vendido a cuenta corriente.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "1. Se recontruyo el store con _base_factory\n2. Se corrigio facturas para que aparezcan descuentos y recargos\n3. Se corrigio modulo de devoluciones para tener en cuenta devoluciones y recargos\n4. Se guarda junto con afip_ticket los importes facturados (ivas, gravados, etc) para no caclular con cada factura al momento del PDF\n5. Se refactorizo AfipHelper",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_sales_ganancia"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_user",
+                                                       "seeder_class":  "PdfColumnSinPreciosSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.2.2":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Indicar el \"Estado\" y \"Descontar stock\" en los presupuestos",
+                                                             "body":  "✅ *Indicar el \"Estado\" y \"Descontar stock\" en los presupuestos*\n\n➡️ Los valores que indiques en estas nuevas propiedades, seran utilizados al momento de confirmar un presupuesto y crear la venta",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Edicion de etiqueta de envio",
+                                                             "body":  "✅ *Edicion de etiqueta de envio*\n\n➡️ Desde el modulo de ventas, para cada venta vas a tener un boton generar un PDF de la etiqueta de envio, con los datos del remitente y del destinatario\n\n➡️ Por defecto, los datos del destinatario seran los datos del cliente, en caso de que quieras modificar estos datos, al lado del boton para generar la etiqueta vas a tener un nuevo boton con el cual, vas a poder crear los datos del destinatario.\n\n➡️ Si modificas los datos del destinatario, esos datos no van a sobreescribir la informacion del cliente, sino que esta informacion del destinatario que indiques sera utilizada unicamente para la etiqueta de esa venta. \n\n➡️ En cuanto al remitente, vas a poder crear todas las direcciones que necesites, para tenerlas disponibles a la hora de generar una etiqueta. Esto vas a manejarlo desde ABM -\u003e Ventas -\u003e Remitentes.",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Duplicar presupuestos",
+                                                             "body":  "✅ *Duplicar presupuestos*\n\n➡️ En el modulo de presupuestos, vas a tener un nuevo boton al comienzo de la tabla para duplicar un presupuesto.\n\n➡️ Luego de precionarlo y confirmar la accion, el sistema va a crear una copia del presupuesto, con los mismos articulos, cliente y los demas datos del presupuesto, asignandole siempre el estado \"Sin confirmar\", para que puedas modificarlo y cuando necesites, lo confirmas.",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Confirmar masivamente pedidos de tienda nube",
+                                                             "body":  "✅ *Confirmar masivamente pedidos de tienda nube*\n\n➡️ Desde el modulo de tienda nube -\u003e pedidos, vas a poder seleccionar todos los pedidos que quieras y, dentro del desplegable de opciones, vas a tener una nueva opcion titulada \"Confirmar pedidos y crear ventas\".\n\n➡️ Cuando preciones esta opcion y luego de confirmar la accion, el sistema va a confirmar estos pedidos y va a crear las respectivas ventas",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Enviar masivamente correos electronicos sobre las ventas",
+                                                             "body":  "✅ *Enviar masivamente correos electronicos sobre las ventas*\n\n➡️ Desde el modulo de VENTAS, vas a poder seleccionar manualemente las ventas que quieras, y en el desplegable de opciones vas a tener la nueva opcion de \"Enviar correo a clientes\"",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Alertas personalizadas por venta",
+                                                             "body":  "✅ *Alertas personalizadas por venta*\n\n➡️ Ademas de poder configurar los dias a partir de los cuales se alerta sobre las ventas no cobradas en la configuracion general, ahora vas a tener la opcion de indicar para cada venta en especifico, a partir de cuantos dias queres que comience a alertarce sobre su falta de cobro.\n\n➡️ Desde el modulo de VENDER, en la seccion de cliente, luego de seleccionar el cliente vas a ver un nuevo campo para indicar este valor.\n\n➡️ Si dejas este nuevo campo en blanco, va a procesarce segun la configuracion ya existente de la cuenta.",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Indicar la \"Medida\" en los articulos",
+                                                             "body":  "✅ *Indicar la \"Medida\" en los articulos*\n\n➡️ Cuando abran para editar un articulo, van a tener un nuevo campo llamado \"medida\", en la seccion de \"Stock\", donde ademas de indicar la unidad de medida de un articulo (kilo, gramo, litro, etc) van a indicar la cantidad que contiene cada articulo, por ejemplo, para unas galletitas con la unidad medida \"gramo\", en este nuevo campo medida indicarian \"200\".\n\n➡️ Este dato sera utilizado cuando se generen las etiquetas de los articulos para que se muestre el precio por kilo o por litro.",
+                                                             "restricted_to_client_slug":  "lamartina"
+                                                         },
+                                                         {
+                                                             "title":  "✅ PDF para ofertas de articulos",
+                                                             "body":  "✅ *PDF para ofertas de articulos*\n\n➡️ Se agrego una nueva opcion al listado para imprimir una hoja A4 con ofertas de los articulos seleccionados o filtrados.\n\n➡️ Dentro del desplegable de filtrados o seleccionados, vas a ver una opcion con el nombre de \"PDF ofertas (plantillas)\".",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Correccion de los filtros en GASTOS",
+                                                             "body":  "✅ *Correccion de los filtros en GASTOS*",
+                                                             "restricted_to_client_slug":  "masquito"
+                                                         }
+                                                     ],
+                                   "description":  "1. Descontar stock y sale_type_id en presupuestos\n2. Todas las modificaciones de HT5\n3. Se corrigio y agrego el descontar_iva a presupuestos",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan init_article_pdf"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionDuplicarPresupuestosSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionEnviarMailClientesSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.2.0":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Nuevo campo \"Nombre dueño\" en puntos de venta ARCA",
+                                                             "body":  "✅ *Nuevo campo \"Nombre dueño\" en puntos de venta ARCA*\n\n➡️ Nuevo campo opcional para que complete con informacion que quiera que salga impresa en la factura junto con la razon social.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Consolidad varias ventas en una unica factura",
+                                                             "body":  "✅ *Consolidad varias ventas en una unica factura*\n\n➡️ Con esta opcion van a poder \"unificar\" varias ventas sin facturar en una unica factura\n\n➡️ Te dejamos este tutorial para que veas como hacerlo: https://drive.google.com/drive/folders/1UnaKcBXpTH82i5nD3uyYsV0QQOa-rToS?usp=sharing",
+                                                             "restricted_to_client_slug":  "rober"
+                                                         }
+                                                     ],
+                                   "description":  "1. Se guarda LOG completo en VENDER\n2. Consolidar varias ventas en una unica factura",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ConsolidacionSeeder"
+                                                   }
+                                               ]
+                               },
+                     "2.1.2":  {
+                                   "commands":  [
+
+                                                ],
+                                   "notifications":  [
+
+                                                     ],
+                                   "description":  "",
+                                   "seeders":  [
+
+                                               ],
+                                   "manual_tasks":  [
+
+                                                    ]
+                               },
+                     "1.1.8":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Adjuntar archivos a los items de una venta",
+                                                             "body":  "✅ *Adjuntar archivos a los items de una venta*\n\n➡️ Cuando estes creando/actualizando una venta, vas a poder agregar archivos a cada item, desde una nueva columna a la izquierda de la tabla de los articulos en el modulo VENDER.\n\n➡️ Aca te dejamos un video para que veas como usar esta funcionalidad: https://drive.google.com/drive/folders/1zQETwUsOKazNgLTr0Bt2Hzw6p-FUAq_5?usp=sharing",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Buscar cliente por numero de documento en VENDER",
+                                                             "body":  "✅ *Buscar cliente por numero de documento en VENDER*",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Restaurar importacion de Excel",
+                                                             "body":  "✅ *Restaurar importacion de Excel*\n\n➡️ Luego de hacer una importacion, desde el \"Historial de importaciones\" vas a poder hacer un roolback para reestablecer los articulos a como estaban antes de hacer la importacion",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevos campos para actualizar masivamente",
+                                                             "body":  "✅ *Nuevos campos para actualizar masivamente*\n\n➡️ Desde el Listado, luego de hacer un filtrado o una seleccion manual, vas a tener la posibilidad de actualizar masivamente opciones como:\n1. Disponibilidad en la tienda online\n2. Aplicar IVA\n3. Costos en dolares\nY todas las opciones de tipo \"Check\" que antes no habia",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Exportar excel de ventas con detalle de articulos",
+                                                             "body":  "✅ *Exportar excel de ventas con detalle de articulos*\n\n➡️ Debajo del total en VENDER, vas a tener un nuevo boton verde \"Excel full\", el cual te va a generar un excel con los datos de todos los articulos vendidos de las ventas que estes viendo en el modulo de VENTAS",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Esto te va a servir para lo que nos habias pedido de exportar el detalle de los articulos vendidos",
+                                                             "body":  "Esto te va a servir para lo que nos habias pedido de exportar el detalle de los articulos vendidos",
+                                                             "restricted_to_client_slug":  "golden-breeze"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Correcion uso de columnas guardadas para importar excel",
+                                                             "body":  "✅ *Correcion uso de columnas guardadas para importar excel*\n\n➡️ Ya podes volver a utilizar las configuraciones de columnas guardadas para importar un excel",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         }
+                                                     ],
+                                   "description":  "1. Rolback de imprtacion de articulos",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionAdjuntarArchivosSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.0":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Establece el orden de las columnas como vos quieras",
+                                                             "body":  "✅ *Establece el orden de las columnas como vos quieras*\n\n➡️ Agregamos la funcionalidad para que puedas configurar cada modulo del sistema como necesites\n\n➡️ Vas a poder elegir el: orden, tamaño y saltos de linea para cada columna de las tablas.\n\n➡️ Enterate como funciona con este video: https://drive.google.com/file/d/1XY72WDNu-QRbgI7ED4JZFntCNxPt-OPb/view?usp=sharing\n\n➡️ Lo mismo aplica para los resultados de busqueda, enterate como funciona con este video: https://drive.google.com/file/d/1cqKtlZ9FyQV25buDgJbrm0vNNBLOAxET/view?usp=sharing",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Karina, con este video vas a poder configurar como queres que se vean los resultados de busqueda en el modulo de VENDER: https://drive.google.com/file/d/1cqKtlZ9FyQV25buDgJbrm0vNNBLOAxET/view?usp=sharing",
+                                                             "body":  "Karina, con este video vas a poder configurar como queres que se vean los resultados de busqueda en el modulo de VENDER: https://drive.google.com/file/d/1cqKtlZ9FyQV25buDgJbrm0vNNBLOAxET/view?usp=sharing",
+                                                             "restricted_to_client_slug":  "oliva"
+                                                         }
+                                                     ],
+                                   "description":  "Se agrego rama order_de_columnas\n1. Se puede elegir el orden, tamaño, posicion, sivibilidad y salto de linea de las columnas. \nTanto en las vistas como en las tablas de searchModal.\n2. Se mejoro la visibilidad de los filtros, y la limpieza del filtro tipo SearchComponent",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+
+                                               ]
+                               },
+                     "2.0.2":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Nuevo Libro IVA de ventas (débito) en Reportes",
+                                                             "body":  "✅ Nuevo Libro IVA de ventas (débito) en Reportes\n\n➡️ En la tarjeta Iva Débito de Reportes tenés el botón Libro Iva, igual que en Iva Crédito.\n\n➡️ Descargás un PDF con las facturas AFIP del período y las notas de crédito facturadas.\n\n➡️ El listado muestra fecha emitida, fecha registrada, comprobante, cliente, importes de IVA por alícuota y total.\n\n➡️ Las ventas suman y las notas de crédito restan en los importes y en el total del libro.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevo botón en el listado de artículos para actualizar la lista.",
+                                                             "body":  "✅ Nuevo botón en el listado de artículos para actualizar la lista.\n\n➡️ En la barra superior del listado (antes del buscador) aparece el botón \"Actualizar\".\n\n➡️ Al pulsarlo se recarga el listado con los artículos modificados recientemente, sin tener que salir y volver a entrar a la pantalla.\n\n➡️ Mientras carga, el botón se deshabilita y muestra 「Actualizando...」 para que sepas que la consulta está en curso.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Aplicar margen de ganancia de proveedor, desactivado por defecto",
+                                                             "body":  "✅ *Aplicar margen de ganancia de proveedor, desactivado por defecto*\n\n➡️ Cuando crees un articulo, a la derecha del campo del proveedor se va a mostrar siempre la opcion \"Aplicar margen de ganancia de proveedor\", la cual va a estar destildada por defecto. Antes aparecia activada por defecto.\n\n➡️ Los articulos que ya tienen esta opcion activada, la van a seguir teniendo activada, solo aplica para los nuevos articulos",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Alta de artículos: el chequeo de código de proveedor repetido respeta tu configuración de usuario",
+                                                             "body":  "✅ Alta de artículos: el chequeo de código de proveedor repetido respeta tu configuración de usuario\n\n➡️ Si tenés activada la opción «Permitir códigos de proveedor repetidos en artículos», al crear un artículo ya no se valida que el código de proveedor sea único.\n\n➡️ Si esa opción está desactivada (comportamiento habitual), el sistema sigue avisando cuando el código de proveedor ya existe en otro artículo, al salir del campo, con Enter o al guardar.\n\n➡️ Los chequeos de código de barras y SKU no cambian: siguen validándose como antes al dar de alta un artículo.",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Historial de exportaciones Excel: cada exportación queda registrada y podés volver a descargar el archivo cuando quieras.",
+                                                             "body":  "✅ Historial de exportaciones Excel: cada exportación queda registrada y podés volver a descargar el archivo cuando quieras.\n\n➡️ Al exportar clientes, proveedores o artículos desde el menú Crear, la exportación sigue procesándose en segundo plano y te avisamos cuando el Excel está listo.\n\n➡️ Debajo de Exportar aparece la opción Historial de exportaciones: abrís un listado con fecha, quién la hizo, estado y cantidad de registros.\n\n➡️ Si la exportación terminó bien, usás Descargar en el historial para abrir otra vez el mismo archivo, sin tener que exportar de nuevo.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Exportación a Excel de cheques filtrados en Reportes",
+                                                             "body":  "✅ Exportación a Excel de cheques filtrados en Reportes\n\n➡️ En la barra que aparece al filtrar cheques (junto a «Limpiar filtros») hay un botón Excel para descargar el listado actual.\n\n➡️ Al pulsarlo se abre una pestaña y se descarga el archivo al momento, con todos los cheques que coinciden con el filtro.\n\n➡️ El Excel incluye todas las columnas del cheque (número, tipo, cliente, proveedor, banco, montos, fechas, estados, etc.) y al final una fila con el total de montos.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Totales al final en los Excel de ventas (simple y completo)",
+                                                             "body":  "✅ Totales al final en los Excel de ventas (simple y completo)\n\n➡️ Al exportar ventas con Excel o Excel full, la última fila del archivo muestra Total con la suma de importes en pesos y en dólares, según la moneda de cada venta.\n\n➡️ En el Excel simple, los totales van en las mismas columnas Total y Total USD que ya usás en el listado.\n\n➡️ En el Excel completo (desglosado por artículo), se agregaron esas dos columnas al final; la fila final resume el total de todas las ventas del período, no la suma línea por línea de cada artículo.",
+                                                             "restricted_to_client_slug":  "golden-breeze"
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_all_users_activity_minutes"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtensionSupportChatSeeder"
+                                                   }
+                                               ]
+                               },
+                     "2.1.3":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Nueva opción en Configuración Online: mostrar u ocultar la sección Catálogo en la tienda",
+                                                             "body":  "✅ Nueva opción en Configuración Online: mostrar u ocultar la sección Catálogo en la tienda\n\n➡️ En Configuración Online podés activar \"Mostrar seccion Catalogo en la Tienda\" para que aparezca el enlace Catálogo en el navbar de la tienda online.\n\n➡️ Por defecto la opción viene desactivada: las tiendas existentes no muestran Catálogo hasta que la actives y guardes.\n\n➡️ Si está desactivada, el enlace no se ve en el menú; la página /catalogo puede seguir accesible por URL directa.",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Imágenes en tablas: rotación automática",
+                                                             "body":  "✅ Imágenes en tablas: rotación automática \n\n➡️ En las tablas del sistema (listados y buscador), cuando un artículo tiene varias fotos, se muestra la primera y cada 2 segundos pasa a la siguiente hasta recorrerlas todas.\n\n➡️ Al volver a la primera imagen, la rotación se detiene sola.\n\n➡️ Si pasás el mouse sobre la foto, avanza a la siguiente; para ver otra más, sacá el mouse y volvé a posarlo.\n\n➡️ Al hacer clic en la imagen, seguís pudiendo abrir la vista ampliada como antes.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Se achico el espacio entre secciones en el inicio de la tienda online.",
+                                                             "body":  "✅ Se achico el espacio entre secciones en el inicio de la tienda online.",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Etiquetas de artículos configurables: elegís medida, campos y orden antes de generar el PDF",
+                                                             "body":  "✅ Etiquetas de artículos configurables: elegís medida, campos y orden antes de generar el PDF\n\n➡️ En el listado de artículos, al usar Códigos de barra (Etiquetas) ya no se descarga el PDF al instante: se abre un panel para armar la etiqueta como necesites.\n\n➡️ Podés elegir entre medidas guardadas (por ejemplo 100×50, 80×55, 90×45, 120×60 en píxeles) o crear una medida propia con nombre, ancho y alto.\n\n➡️ Marcás qué datos van en la etiqueta — nombre, código de barras, SKU, precio, categoría, marca, código de proveedor, fecha del día, nombre del negocio — y los ordenás arrastrando: ese orden es el que se ve de arriba hacia abajo en la etiqueta.\n\n➡️ Hay una vista previa orientativa con el tamaño y los textos que elegiste, para revisar antes de imprimir.\n\n➡️ Al confirmar Generar PDF, se abre el archivo con esas opciones. Las medidas estándar no se pueden borrar; las que creés vos sí.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Búsqueda por código de barra en el buscador por nombre de VENDER",
+                                                             "body":  "✅ Búsqueda por código de barra en el buscador por nombre de VENDER\n\n➡️ Con una sola palabra o código escaneado, la búsqueda busca coincidencia exacta; con varias palabras, también puede encontrar códigos parciales.",
+                                                             "restricted_to_client_slug":  "servian"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Listado de artículos: el buscador puede filtrar la tabla para trabajar en lote sobre los resultados",
+                                                             "body":  "✅ Listado de artículos: el buscador puede filtrar la tabla para trabajar en lote sobre los resultados\n\n➡️ En el listado podés buscar por nombre, código o proveedor (y por categoría/stock) y los resultados se muestran directo en la tabla, sin abrir la pestaña de selección de un solo artículo.\n\n➡️ Sobre esos artículos filtrados podés usar las mismas acciones de siempre que no dependen de la pestaña de filtros: generar etiquetas, PDF, exportar a Excel, etc., y también marcar manualmente los que quieras en la tabla.\n\n➡️ Las opciones Actualizar y Eliminar del menú de “filtrados” no aparecen en esta búsqueda rápida, porque esas acciones masivas requieren los criterios del filtro avanzado. Para actualizar o eliminar varios artículos de una búsqueda así, seleccionalos en la tabla y usá el menú de Selección.\n\n➡️ El botón para limpiar la búsqueda y volver al listado completo queda al lado de Buscar cuando hay resultados activos de esta búsqueda.",
+                                                             "restricted_to_client_slug":  "servian"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Actualizaciones masivas de artículos en segundo plano, con historial y reversión",
+                                                             "body":  "✅ Actualizaciones masivas de artículos en segundo plano, con historial y reversión\n\n➡️ Al actualizar artículos seleccionados o filtrados, el proceso corre en segundo plano: podés seguir trabajando y te avisamos con una notificación cuando termine.\n\n➡️ En el menú Crear del listado, nueva opción Historial de actualizaciones masivas: ves fecha, quién la hizo, cuántos artículos se tocaron y el detalle de cada cambio (propiedad, valor anterior y nuevo).\n\n➡️ Si algo no quedó como esperabas, podés Revertir una actualización desde ese historial; la reversión también corre en segundo plano y te notifica al finalizar.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionBarCodeEnVenderSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "EtiquetaMedidasSeeder"
+                                                   }
+                                               ]
+                               },
+                     "2.1.4":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ WhatsApp en ventas: ahora envía el comprobante con el diseño PDF que ustedes eligen (remito o factura ARCA)",
+                                                             "body":  "✅ WhatsApp en ventas: ahora envía el comprobante con el diseño PDF que ustedes eligen (remito o factura ARCA)\n\n➡️ Al usar el botón de WhatsApp en una venta, el enlace del comprobante usa un perfil de columnas PDF configurado, no un formato fijo genérico.\n\n➡️ Podés marcar un perfil como “Predeterminado WhatsApp (remito)” para ventas sin factura electrónica (comprobante habitual con precios).\n\n➡️ Podés marcar otro perfil —con “Factura de ARCA” activado— como “Predeterminado WhatsApp (factura)” para cuando la venta tenga factura con CAE; en ese caso solo se envía el diseño fiscal, no el de remito.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ PDF tabla de artículos: plantilla predeterminada, validación de anchos y sincronización al actualizar",
+                                                             "body":  "✅ PDF tabla de artículos: plantilla predeterminada, validación de anchos y sincronización al actualizar\n\n➡️ En Configuración → Generales → Perfiles de columnas PDF (modelo Artículo) podés definir columnas, orden y anchos.\n\n➡️ Tras actualizar el sistema, cada empresa recibe el perfil \"Lista de artículos\" con tres columnas visibles por defecto: Imágenes (40 mm), Nombre del artículo (120 mm, con salto de línea) y Precio final (40 mm), en ese orden.\n\n➡️ En el listado de artículos, en el menú de seleccionados o filtrados, la sección PDF tabla (plantillas) permite generar el PDF con los artículos elegidos o con todos los del filtro activo.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan pdf-column-profiles:set-whatsapp-defaults"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan pdf-column-profiles:sync-article-setup"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+
+                                               ]
+                               },
+                     "1.0.2":  {
+                                   "notifications":  [
+
+                                                     ],
+                                   "description":  "Se agrego rama de ht5: \n1. Manejo de venta por estados de ventas.\n2. Separar insumos del listado",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtVentasConEstadosSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.7":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Opcion para imprimir la fecha corriente en PDF de ventas, en lugar de la fecha en que se genero la venta",
+                                                             "body":  "✅ *Opcion para imprimir la fecha corriente en PDF de ventas, en lugar de la fecha en que se genero la venta*\n\n➡️ Si queres activar esta opcion, pedinos para que te lo configuremos",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nueva opcion para elegir el tamaño de los elementos",
+                                                             "body":  "✅ *Nueva opcion para elegir el tamaño de los elementos*\n\n➡️ Si queres que los componentes del sistema tengan un tamaño mas chico para ver mas informacion dentro de la pantalla, vas a tener esta nueva opcion para configurarlo\n\n➡️ Esta opcion esta disponible desde Configuracion -\u003e Interfaz -\u003e Tamaño de los componentes",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Modulo de Devoluciones corregido",
+                                                             "body":  "✅ *Modulo de Devoluciones corregido*\n\n➡️ Ya podes crear nuevas devoluciones agregando manualmente los articulos y el cliente que necesites, sin necesidad de hacerlo sobre una venta",
+                                                             "restricted_to_client_slug":  "fenix"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Comisiones y costos en PDF",
+                                                             "body":  "✅ *Comisiones y costos en PDF*\n\n➡️ Corregimos como aparecen los costos y comisiones en el PDF de las ventas\n\n➡️ Ahora vas a tener una nueva opcion para imprimir llamada \"Remito costos\", ahi vas a ver las comisiones y los costos",
+                                                             "restricted_to_client_slug":  "fenix"
+                                                         }
+                                                     ],
+                                   "description":  "1. Se guarda la descripcion del precio de las ventas de VENDER\n2. Opcion de que fecha mostrar en PdfColumnProfile\n3. Se puede personalizar el valor de la menusalidad teniendo en cuenta ecommerce, y ese valor le aparece al usuario en el sistema\n4. Se agrego opcion de mostras costos y comisiones en NewSalePdf",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "InputsSizeSeeder"
+                                                   }
+                                               ]
+                               },
+                     "2.1.0":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Nueva opción para imprimir compras a proveedor en PDF",
+                                                             "body":  "✅ Nueva opción para imprimir compras a proveedor en PDF\n\n➡️ En el módulo de compras a proveedores, al abrir una compra vas a ver el botón Imprimir en el formulario.\n\n➡️ El PDF incluye datos del proveedor, número y fecha de la compra, comprobante y estado (si están cargados).\n\n➡️ También muestra el detalle de artículos: código de barras, código del proveedor, nombre, costo, cantidad pedida, notas y total por línea.\n\n➡️ Al final suma costos extra y descuentos, con el total general de la compra.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+
+                                               ]
+                               },
+                     "2.1.1":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Buscador por N° de factura en Ventas: encontrá ventas por comprobante sin elegir la fecha",
+                                                             "body":  "✅ *Buscador por N° de factura en Ventas: encontrá ventas por comprobante sin elegir la fecha*\n\n➡️ En el listado de ventas hay un buscador compacto (icono de factura) junto a los filtros de facturación.\n\n➡️ Ingresá el N° de factura y presioná Enter: el sistema busca en todo el historial, no solo en las ventas del día o rango de fechas que tengas cargado.\n\n➡️ Los demás filtros del listado (sucursal, cobradas, con/sin factura, medio de pago, etc.) siguen aplicándose sobre los resultados.\n\n➡️ Para volver al listado normal, borrá el número del buscador o usá «Limpiar filtros».",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Método de pago en Vender: se mantiene tu elección al volver al módulo",
+                                                             "body":  "✅ Método de pago en Vender: se mantiene tu elección al volver al módulo\n\n➡️ Al entrar a vender por primera vez, o si aún no elegiste método de pago, se asigna el método por defecto de tu empresa (o el habitual del sistema).\n\n➡️ Si cambiás el método de pago, salís a otro módulo y volvés a vender, se conserva el método que habías seleccionado.\n\n➡️ Después de confirmar una venta, el método de pago vuelve al predeterminado para la siguiente operación.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevo permiso para editar stock",
+                                                             "body":  "✅ *Nuevo permiso para editar stock*\n\n➡️ Permiso para editar stock solo de la sucursal a la que pertenece el empleado\n\n➡️ De esta forma, los permisos quedarian de la siguiente forma:\nVer stock solo de su sucursal: El empleado solo podra ver el stock de su sucursal. \nModificar stock: Permite que el empleado modifique el stock, de cualquier sucursal.\nModificar stock solo de su sucursal: El empleado solo podra modificar el stock de su sucursal.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Zoom con los dedos en fotos de artículos y botón para compartir por WhatsApp",
+                                                             "body":  "✅ Zoom con los dedos en fotos de artículos y botón para compartir por WhatsApp\n\n➡️ En la vista de un producto, desde el celular podés hacer pellizco sobre la imagen para agrandarla y arrastrarla para ver el detalle. Al cambiar de foto o de artículo, el zoom vuelve al tamaño normal.\n\n➡️ Debajo del botón de agregar al carrito hay un botón Compartir que abre WhatsApp con el nombre del producto y el link de la publicación, para enviarlo al contacto que elijas.\n\n➡️ El enlace de compartir apunta a la página pública del artículo en la tienda, lista para reenviar por chat.",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "\"✅ Configuración del tamaño de letra en la descripción de artículos de la tienda",
+                                                             "body":  "\"✅ Configuración del tamaño de letra en la descripción de artículos de la tienda\n\n➡️ En Configuración Online podés definir el tamaño de letra (en píxeles) que se usa en la descripción de cada artículo en la tienda.\n\n➡️ El valor se aplica en la vista de detalle del producto, tanto en la descripción principal como en las descripciones adicionales.\n\n➡️ Si no configurás nada o el valor no es válido, se usa 16 px por defecto.\"",
+                                                             "restricted_to_client_slug":  "truvari"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Configurá las columnas de las tablas de artículos (y otras relaciones) en pedidos, ventas y formularios similares",
+                                                             "body":  "✅ Configurá las columnas de las tablas de artículos (y otras relaciones) en pedidos, ventas y formularios similares\n\n➡️ En cada tabla de relación (por ejemplo artículos de un pedido a proveedor o de una venta) tenés un botón para elegir qué columnas ver, en qué orden, con qué ancho y si el texto hace salto de línea.\n\n➡️ La configuración es por relación: lo que definís en pedidos a proveedor no cambia lo de ventas, aunque ambas muestren artículos.\n\n➡️ Podés incluir columnas del artículo y del vínculo con el documento (cantidad, precio, costo, descuento, etc.), incluso cuando comparten el mismo nombre (ej. costo del artículo vs costo del pedido).\n\n➡️ Si no configurás nada, se mantiene el diseño definido en el sistema como hasta ahora.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Costos en compras a proveedor: hasta 4 decimales cuando los necesitás, y solo 2 cuando no los usás",
+                                                             "body":  "✅ Costos en compras a proveedor: hasta 4 decimales cuando los necesitás, y solo 2 cuando no los usás\n\n➡️ En cada artículo de una compra podés cargar el costo con hasta 4 decimales (por ejemplo 10,1234).\n\n➡️ En pantalla se muestran 2 decimales por defecto; los 3.º y 4.º solo aparecen si los cargaste (por ejemplo 10,12 se ve como 10,12 y 10,1234 como 10,1234).\n\n➡️ La base de datos ya admite guardar esos 4 decimales en el costo de la línea de compra.",
+                                                             "restricted_to_client_slug":  "distri-creo"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Renovamos el diseño de los formularios: más claros, modernos y fáciles de leer",
+                                                             "body":  "✅ Renovamos el diseño de los formularios: más claros, modernos y fáciles de leer\n\n➡️ Los títulos de cada campo ahora son más compactos y legibles, con un estilo uniforme en todo el sistema.\n\n➡️ Los datos de solo lectura se muestran en bloques grises suaves; si un campo no tiene información, verás “Sin datos” en lugar de quedar vacío.\n\n➡️ Los campos Sí/No se ven como etiquetas de color (verde o rojo) y los interruptores tipo iPhone reemplazan los checkboxes, sin repetir el mismo texto dos veces.\n\n➡️ Las fechas de creación y actualización del registro quedaron alineadas con el mismo estilo, al pie del formulario.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevo boton para enviar comprobante por WhatsApp en VENDER",
+                                                             "body":  "✅ *Nuevo boton para enviar comprobante por WhatsApp en VENDER*\n\n➡️ Luego de hacer una venta, al lado del boton de imprimir la venta, en caso de que el cliente de la venta tenga indicado el numero de whatsapp, vas a tener disponible el boton de whatsapp para enviar el comprobante el cliente.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Crear articulo al vuelo en VENDER",
+                                                             "body":  "✅ *Crear articulo al vuelo en VENDER*\n\n➡️ Si buscas por nombre un articulo y no hay resultados, podes volver a precionar ENTER para que se cree en el momento y usarlo en la venta.\n\n➡️ Al no tener un precio configurado, vas a poder indicar el precio personalizado para esa venta. Los empleados que no tengan permiso para cambiar los precios tambien van a poder indicar el precio personalizado en caso de que creen un articulo al vuelo en vender, siempre que tengan el permiso \"Crear un articulo no ingresado en VENDER\".\n\n➡️ Luego podes indicar el precio correspondiente del articulo desde el modulo de LISTADO para que quede configurado para el futuro.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevos permisos en Vender: “Descontar stock” y “Precios con IVA”",
+                                                             "body":  "✅ Nuevos permisos en Vender: “Descontar stock” y “Precios con IVA”\n\n➡️ Ahora podés controlar por usuario quién ve y usa cada checkbox del remito al vender.\n\n➡️ Descontar stock: permiso \"Descontar stock en VENDER\" — sin él, no aparece la opción para descontar stock al guardar la venta.\n\n➡️ Precios con IVA: permiso \"Usar precios con IVA en VENDER\" — sin él, no aparece la opción para marcar precios con IVA incluido.\n\n➡️ Si la empresa tiene activada la extensión que oculta ambos controles, siguen sin mostrarse aunque el usuario tenga los permisos.\n\n➡️ En instalaciones ya en uso, el administrador debe asignar estos permisos a los roles o usuarios que correspondan desde el ABM de permisos.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ PDF de ofertas con listas de precio",
+                                                             "body":  "✅ PDF de ofertas con listas de precio\n\n➡️ Si tu empresa usa listas de precio, al generar un PDF de ofertas desde el listado de artículos verás una opción por cada plantilla y por cada lista (por ejemplo: «Oferta verano — Mayorista»).\n\n➡️ Al elegir una lista, el PDF muestra el precio final de esa lista para los artículos seleccionados o filtrados, no solo el precio general del artículo.\n\n➡️ También se actualizan en el PDF el precio sin impuestos, el precio por kilo o litro (cuando aplica) y el precio anterior, según los datos de esa lista.\n\n➡️ Si no usás listas de precio, el menú sigue igual: una opción por plantilla, con el precio final habitual del artículo.",
+                                                             "restricted_to_client_slug":  null
+                                                         }
+                                                     ],
+                                   "description":  "",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan check_to_pay_id_de_ventas_eliminadas {user_id?}"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermisosVerStockSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermissionVenderDiscountStockIvaAplicadoSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.2":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "✅ Control de cajas por empleado",
+                                                             "body":  "✅ *Control de cajas por empleado*\n\n➡️ Para controlar que cajas puede usar cada empleado vas a ingresar al modulo de Tesoreria, y cuando ingreses en una caja vas a tener una lista de \"Empleados con acceso\". Ahi vas a cargar el o los empleados que quieras que puedan utilizar la caja.\n\n➡️ Si dejas la lista de \"Empleados con acceso\" vacia, cualquier empleado va a poder usarla.\n\n➡️ Por ejemplo, si queres que \"Marcos\" solo pueda elegir las cajas \"Oficina pesos\", \"Oficina dolares\" y \"Santender\". Vas a ingresar en cada una de esas cajas y vas a agregar a el empleado \"Marcos\" a la lista de \"Empleados con acceso\".",
+                                                             "restricted_to_client_slug":  "ananda"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevas columnas por cada sucursal en \"movimientos de depositos\"",
+                                                             "body":  "✅ *Nuevas columnas por cada sucursal en \"movimientos de depositos\"*\n\n➡️ Cuando estes armando un \"movimiento de depositos\" desde el LISTADO, vas a poder ver por cada articulo del movimiento el stock que tiene actualmente en cada deposito.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Mostrar todas las sucursales en PDF de ventas",
+                                                             "body":  "✅ *Mostrar todas las sucursales en PDF de ventas*\n\n➡️ Cuando generes un PDF, van a aparecer todas las sucursales (independientemente de donde se haya realizado la venta).",
+                                                             "restricted_to_client_slug":  "masquito"
+                                                         },
+                                                         {
+                                                             "title":  "Pasame las notas que queres figuren en el pie de pagina de los PDF de las ventas, el texto que queres poner donde va a aparecer el alias a transferir que me habias comentado",
+                                                             "body":  "Pasame las notas que queres figuren en el pie de pagina de los PDF de las ventas, el texto que queres poner donde va a aparecer el alias a transferir que me habias comentado",
+                                                             "restricted_to_client_slug":  "masquito"
+                                                         }
+                                                     ],
+                                   "description":  "1. Las cajas para mostrar en vender se filtran segun la sucursal, la moneda y segun si el usuario logeado tiene acceso a la caja en la lista de \"usuarios con acceso\" en cada caja. (Funcionalidad para Ananda).\n2. Se muestran los stock por sucursal en los articulos de un \"Movimiento de depositos\" (Masquito).",
+                                   "commands":  [
+
+                                                ],
+                                   "manual_tasks":  [
+
+                                                    ],
+                                   "seeders":  [
+
+                                               ]
+                               },
+                     "1.0.1":  {
+                                   "notifications":  [
+                                                         {
+                                                             "title":  "En los movimientos entre caja, van a ver el nombre del empleado al que pertenece la caja junto al nombre de la caja para evitar confusiones",
+                                                             "body":  "En los movimientos entre caja, van a ver el nombre del empleado al que pertenece la caja junto al nombre de la caja para evitar confusiones",
+                                                             "restricted_to_client_slug":  "lamartina"
+                                                         },
+                                                         {
+                                                             "title":  "Van a poder indicar la moneda cuando cargen un nuevo gasto. Esto se usara en el modulo de reportes para separar tanto los gastos como la rentabilidad en pesos y en dolares",
+                                                             "body":  "Van a poder indicar la moneda cuando cargen un nuevo gasto. Esto se usara en el modulo de reportes para separar tanto los gastos como la rentabilidad en pesos y en dolares\n\nCuando generen una nota de credito a una venta en dolares, el importe de esa nota de credito se va a mostrar como \"Devoluciones USD\" en reportes. \n\nA los empleados ya les aparece completada la cotizacion del dolar desde el modulo de VENDER\n\nEn el PDF de las ventas, va a aparecer el simbolo de dolar para los precios individuales de los productos y para los descuentos y recargos",
+                                                             "restricted_to_client_slug":  "2r"
+                                                         },
+                                                         {
+                                                             "title":  "En reportes cambio el nombre para el dato de todo lo que se vendio, antes figuraba como \"Ingresos Brutos\", ahora van a verlo como \"Total Vendido Bruto\".",
+                                                             "body":  "En reportes cambio el nombre para el dato de todo lo que se vendio, antes figuraba como \"Ingresos Brutos\", ahora van a verlo como \"Total Vendido Bruto\".\n\nEn caso de que se hayan generado devoluciones (notas de credito), va a mostrarse el dato de \"Total Vendido Neto\", que es el \"Total Vendido Bruto\" - \"Devoluciones\"",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Ahora van a poder obtener la informacion de un cliente o de un proveedor en base a su CUIT. La misma funcionalidad que esta en el modulo de VENDER ahora esta disponible en el formulario para crear clientes y proveedores",
+                                                             "body":  "Ahora van a poder obtener la informacion de un cliente o de un proveedor en base a su CUIT. La misma funcionalidad que esta en el modulo de VENDER ahora esta disponible en el formulario para crear clientes y proveedores",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Cuando actualicen una venta, van a poder ver para cada actualizacion el detalle de que articulos se agregaron, quitaron, o cambiaron la cantidad",
+                                                             "body":  "Cuando actualicen una venta, van a poder ver para cada actualizacion el detalle de que articulos se agregaron, quitaron, o cambiaron la cantidad",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "En el modulo de reportes, se agrego una seccion dentro de \"Generaes\" donde se detalla el importe facturado con cada punto de venta, para cada tipo de comprobante.",
+                                                             "body":  "En el modulo de reportes, se agrego una seccion dentro de \"Generaes\" donde se detalla el importe facturado con cada punto de venta, para cada tipo de comprobante.\nPara ver esta nueva informacion, el empleado debera de contar con el permiso \"Ver informacion de facturacion\" dentro de los permisos de \"Reportes\".",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Cuando se busque un articulo en VENDER, se van a utilizar los articulos guardados en memoria para evitar la descarga cuando se busque un articulo.",
+                                                             "body":  "Cuando se busque un articulo en VENDER, se van a utilizar los articulos guardados en memoria para evitar la descarga cuando se busque un articulo.\nImportante: si hay un cambio en los articulos (precio, stock, etc.), los cajeros no lo van a ver reflejado hasta que actualicen la pagina y se vuelvan a descargar los productos.",
+                                                             "restricted_to_client_slug":  "lamartina"
+                                                         },
+                                                         {
+                                                             "title":  "Se agrego un nuevo permiso para controlar si los empleados pueden o no usar el boton de Limpiar una venta en VENDER. Este permiso va a como \"Usar boton de limpiar venta\" dentro de los permisos de VENDER.",
+                                                             "body":  "Se agrego un nuevo permiso para controlar si los empleados pueden o no usar el boton de Limpiar una venta en VENDER. Este permiso va a como \"Usar boton de limpiar venta\" dentro de los permisos de VENDER.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Ademas de generar un pdf con la informacion de una cuenta corriente, ahora tienen otra opcion para generar un pdf con el desglose de los articulos de cada venta de la cuenta corriente, esta opcion esta en el mismo lugar el boton de imprimir la cuenta corriente",
+                                                             "body":  "Ademas de generar un pdf con la informacion de una cuenta corriente, ahora tienen otra opcion para generar un pdf con el desglose de los articulos de cada venta de la cuenta corriente, esta opcion esta en el mismo lugar el boton de imprimir la cuenta corriente",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Ahora van a poder buscar articulos por el codigo de barras en los pedidos a proveedores",
+                                                             "body":  "Ahora van a poder buscar articulos por el codigo de barras en los pedidos a proveedores",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Debido a los cambios en la reglamentacion de ARCA, cuando quieran facturar desde un punto de venta de Responsable Inscripto a un Monotributista, el sistema va a seleccionar automaticamente el tipo de comprobante A",
+                                                             "body":  "Debido a los cambios en la reglamentacion de ARCA, cuando quieran facturar desde un punto de venta de Responsable Inscripto a un Monotributista, el sistema va a seleccionar automaticamente el tipo de comprobante A",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Se agrego una medida de seguridad para controlar que los cajeros no eliminen articulos de una venta sin autirizacion:",
+                                                             "body":  "Se agrego una medida de seguridad para controlar que los cajeros no eliminen articulos de una venta sin autirizacion:\nPara esto hay un nuevo permiso en la seccion de permisos de VENDER con el nombre \"Prohibir eliminar articulo de una venta sin autorizacion\". Si se le asigna este permiso a un empleado, cuando quiera eliminar un articulo de una venta el sistema va a pedir una clave.\nEsta clave es elegida desde la configuracion, dentro de las configuraciones de VENDER con el titulo \"Clave para poder eliminar un articulo en VENDER\". El valor que se configure tendra que ser ingresado por el administrador cuando un cajero quiera eliminar un producto.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Cuando escaneen un codigo de barras de la balanza, el sistema va a obtener del codigo: el plu (para identificar el articulo) y el peso.",
+                                                             "body":  "Cuando escaneen un codigo de barras de la balanza, el sistema va a obtener del codigo: el plu (para identificar el articulo) y el peso.\nEl peso de la balanza va a venir siempre en gramos.\nSi el articulo tiene indicada la unidad de medida en \"Gramos\", el articulo se va a sumar a la venta con la misma cantidad que peso la balanza.\nPor el contrario, si tiene la unidad de medida en \"Kilo\" o en \"Unidad\" la cantidad que se sume a la venta va a ser: el peso de la balanza (gramos) dividido 1.000, ya que el precio del articulo en el sistema va a estar ingresado por kilo.\nEjemplo: la papa esta cargada en el sistema con precio final de $2.000 y la unidad de medida en Kilo. La balanza pesa 300 gramos y cuando se escanea el codigo de la balanza para cargar el articulo a la venta, se va a cargar con la cantidad en 0,3 kilos (300 gramos), para que el total a cobrar sea $2.000 x 0,3 = $600.\nSi por ejemplo tienen el articulo \"Perejil\" con unidad de medida en \"Gamos\", el precio final debe respetar esa unidad de medida, ejemplo $100 el gramo. Cuando se pese, el sistema va a cargar la misma cantidad de viene indicado en el ticket de la balanza, por ejemplo 10 gramos, y el precio de venta sera 10 (gramos) * $100 = $1.000.",
+                                                             "restricted_to_client_slug":  "lamartina"
+                                                         },
+                                                         {
+                                                             "title":  "Se te configurar todos los precios de tus productos, a todos se les puso un:",
+                                                             "body":  "Se te configurar todos los precios de tus productos, a todos se les puso un: \n60% Minorista \n44% mayorista \n83.33% Repro dealer \nTanto en pesos como en dolar",
+                                                             "restricted_to_client_slug":  "ffperformance"
+                                                         },
+                                                         {
+                                                             "title":  "Se corrigio el acceso a la cuenta corriente desde el modulo de Alertas",
+                                                             "body":  "Se corrigio el acceso a la cuenta corriente desde el modulo de Alertas",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Se agrego un nuevo boton a cada articulo en el modulo de Listado para poder ver las ventas en las que tenga unidades acopiadas, con acceso a las ventas y las cuentas corrientes de los clientes con los acopios",
+                                                             "body":  "Se agrego un nuevo boton a cada articulo en el modulo de Listado para poder ver las ventas en las que tenga unidades acopiadas, con acceso a las ventas y las cuentas corrientes de los clientes con los acopios",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Cuando filtren los cheques van a poder hacerlo tambien en base al cliente del que se recibio o al proveedor al que se le emitio",
+                                                             "body":  "Cuando filtren los cheques van a poder hacerlo tambien en base al cliente del que se recibio o al proveedor al que se le emitio",
+                                                             "restricted_to_client_slug":  "golden-breeze"
+                                                         },
+                                                         {
+                                                             "title":  "Ahora van a poder agregar \"Descripciones\" a las notas de credito, para poder computar devoluciones por acuerdos comerciales. Aca tienen un tutorial de como hacerlo: https://drive.google.com/drive/folders/1B2djNCqyW3gRPAzgPKTUIcO53oGUAkEY?usp=sharing",
+                                                             "body":  "Ahora van a poder agregar \"Descripciones\" a las notas de credito, para poder computar devoluciones por acuerdos comerciales. Aca tienen un tutorial de como hacerlo: https://drive.google.com/drive/folders/1B2djNCqyW3gRPAzgPKTUIcO53oGUAkEY?usp=sharing",
+                                                             "restricted_to_client_slug":  "golden-breeze"
+                                                         },
+                                                         {
+                                                             "title":  "Se agrego la funcionalidad de \"Cerrar ventas\".",
+                                                             "body":  "Se agrego la funcionalidad de \"Cerrar ventas\".\nDesde el modulo de ventas o desde la cuenta corriente, vas a ver en las ventas que:\n* No esten facturadas\n* Hayan pasado a la cuenta corriente de un cliente\nUn boton para cerrar la venta en caso de que no este cerrada, y si ya esta cerrada, una etiqueta indicando que esta cerrada.",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         },
+                                                         {
+                                                             "title":  "Ahora cuando indiques que columnas queres que se muestren en la tabla, se va a guardar en memoria para que la proxima vez que ingreses lo veas de la misma forma que lo dejaste.",
+                                                             "body":  "Ahora cuando indiques que columnas queres que se muestren en la tabla, se va a guardar en memoria para que la proxima vez que ingreses lo veas de la misma forma que lo dejaste.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Reconfiguramos la importacion de Excel para los negocios con \"Codigos de proveedor repetidos\".",
+                                                             "body":  "Reconfiguramos la importacion de Excel para los negocios con \"Codigos de proveedor repetidos\".\nMira este video donde te explicamos como importar tus archivos excel correctamente: https://drive.google.com/drive/folders/1OgqsCear4GjWzbj-r39ta2SP80ZZrr16?usp=sharing",
+                                                             "restricted_to_client_slug":  "ferretotal"
+                                                         },
+                                                         {
+                                                             "title":  "Reconfiguramos la importacion de Excel para los negocios con \"Codigos de proveedor repetidos\".",
+                                                             "body":  "Reconfiguramos la importacion de Excel para los negocios con \"Codigos de proveedor repetidos\".\nMira este video donde te explicamos como importar tus archivos excel correctamente: https://drive.google.com/drive/folders/1OgqsCear4GjWzbj-r39ta2SP80ZZrr16?usp=sharing",
+                                                             "restricted_to_client_slug":  "sanblas"
+                                                         },
+                                                         {
+                                                             "title":  "Desde el LISTADO, cuando ves las ventas acopiadas de un articulo, vas a ver dos nuevas columnas indicando para cada articulo la cantidad acopiada y la cantidad entregada.",
+                                                             "body":  "Desde el LISTADO, cuando ves las ventas acopiadas de un articulo, vas a ver dos nuevas columnas indicando para cada articulo la cantidad acopiada y la cantidad entregada.\nY un total de las unidades en acopio de ese articulo",
+                                                             "restricted_to_client_slug":  "sanblas"
+                                                         },
+                                                         {
+                                                             "title":  "Reestructuramos el modulo de facturacion para que puedas emitir mas de una factura por venta, aca te explicamos como funciona a partir de ahora: https://drive.google.com/drive/folders/19CD4sTN9HtduvxEr3_3nOIsmDJKvFaDD?usp=sharing",
+                                                             "body":  "Reestructuramos el modulo de facturacion para que puedas emitir mas de una factura por venta, aca te explicamos como funciona a partir de ahora: https://drive.google.com/drive/folders/19CD4sTN9HtduvxEr3_3nOIsmDJKvFaDD?usp=sharing",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Agregamos nuevos términos de venta a la hora de facturar",
+                                                             "body":  "Agregamos nuevos términos de venta a la hora de facturar",
+                                                             "restricted_to_client_slug":  "golden-breeze"
+                                                         },
+                                                         {
+                                                             "title":  "Cambiamos el nombre de \"Rangos de precio\" por \"Ofertas para VENDER\" en los articulos. Este campo es el utilizado para crear promociones de venta por cantidad vendida",
+                                                             "body":  "Cambiamos el nombre de \"Rangos de precio\" por \"Ofertas para VENDER\" en los articulos. Este campo es el utilizado para crear promociones de venta por cantidad vendida",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Agregamos una capa de automatizacion a la hora de buscar imagenes con Google.",
+                                                             "body":  "✅ *Agregamos una capa de automatizacion a la hora de buscar imagenes con Google.*\n\n➡️ Cuando ingreses a un articulo desde el LISTADO, vas a tener 2 nuevos botones: \"Automatica\" y \"Manual\".\n\n➡️ Si precionas \"Automatica\", se abrira la ventana para buscar la imagen y se procedera a buscar automaticamente por el codigo de barras, luego en X segundos se seleccionara la primer imagen, se recortara y guardara automaticamente.\n\n➡️ El tiempo que tarda en ejecutarse el flujo se puede cambiar desde la misma ventana de seleccionar la imagen.\n\n➡️ En caso de querer seleccionar otra imagen u otra area de recorte, se puede interrumpir el flujo seleccionado la imagen o el area de recrote que quieras con el mouse.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Guardado de la fecha en la que se agrego un articulo a una venta",
+                                                             "body":  "✅ *Guardado de la fecha en la que se agrego un articulo a una venta*\n\n➡️ Cuando agregues un articulo a una venta ya creada, el sistema va a guardar la fecha en la que agregaste ese articulo y la va a mostrar en la impresion desglosada de la cuenta corriente.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Registro de quien anota un pago",
+                                                             "body":  "✅ *Registro de quien anota un pago*\n\n➡️ Desde la cuenta corriente y desde el modulo de comprobantes/pagos de clientes vas a ver el dato de quien fue el empleado que registro un pago en la cuenta corriente",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Cambio el termino para los \"PEDIDOS DE PROVEEDOR\" hacia \"COMPRAS A PROVEEDOR\"",
+                                                             "body":  "✅ *Cambio el termino para los \"PEDIDOS DE PROVEEDOR\" hacia \"COMPRAS A PROVEEDOR\"*\n\n➡️ Desde el modulo de proveedores vas a ver la antigua seccion de \"Pedidos\" como \"Compras\". Y todos los pedidos creados vas a verlos como compras. La informacion siguie siendo la misma pero vas a identificarlos con este nuevo termino.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Vas a poder cargar \"Descuentos\" a las compras de proveedores",
+                                                             "body":  "✅ *Vas a poder cargar \"Descuentos\" a las compras de proveedores*\n\n➡️ Ademas de poder indicar un porcentaje de descuento individual por cada articulo, ahora vas a poder cargar los descuentos que quieras a cada compra. Estos descuentos pueden ser un porcentaje o un monto fijo, y se aplican a el total de la compra.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Filtrar compras facturadas y no facturadas",
+                                                             "body":  "✅ *Filtrar compras facturadas y no facturadas*\n\n➡️ Desde el modulo de proveedores seccion compras, vas a tener un nuevo filtro para mostrar las ventas \"Con y sin factura\", \"Solo con factura\" y \"Solo fin factura\".\n\n➡️ Tambien vas a tener un indicador del TOTAL de las compras que estas viendo.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ IMPORTANTE: Redefinimos el modulo de compras a proveedores",
+                                                             "body":  "✅ *IMPORTANTE: Redefinimos el modulo de compras a proveedores*\n\n➡️ Cambiamos las configuraciones de las compras a proveedores para que tengas mas control sobre como registras las tus compras\n\n➡️ Te recomendamos que veas los tutoriales de como funcionan las compras aca: https://drive.google.com/drive/folders/1OZ2efzFJNXCG5V2n3gKLfyIyV_eM8BE-?usp=sharing\n\n➡️ Las compras que cargaste hasta el momento van a seguir igual, pero si las actualizas van a modificarse con estas nuevas reglas!",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Establecer el orden de los articulos por defecto en VENEDER",
+                                                             "body":  "✅ *Establecer el orden de los articulos por defecto en VENEDER*\n\n➡️ Desde el listado, vas a poder indicar la posicion en la que queres que aparezcan los articulos por defecto en vender.\n\n➡️ En lugar de activar la propiedad \"Por defecto en vender\", vas a tener un campo para completar la posicion en la que queres que aparezca.\n\n➡️ Si lo dejas en blanco sin completar seria el equivalente a que este desactivado.",
+                                                             "restricted_to_client_slug":  "panchito"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Establecer el orden de los articulos por defecto en VENEDER",
+                                                             "body":  "✅ *Establecer el orden de los articulos por defecto en VENEDER*\n\n➡️ Desde el listado, vas a poder indicar la posicion en la que queres que aparezcan los articulos por defecto en vender.\n\n➡️ En lugar de activar la propiedad \"\"Por defecto en vender\"\", vas a tener un campo para completar la posicion en la que queres que aparezca.\n\n➡️ Si lo dejas en blanco sin completar seria el equivalente a que este desactivado.",
+                                                             "restricted_to_client_slug":  "hipermax"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nueva funcion de LIBRO DE IVA COMPRAS",
+                                                             "body":  "✅ *Nueva funcion de LIBRO DE IVA COMPRAS*\n\n➡️ Desde el modulo de reportes, en la seccion \"General\", en la tarjeta de Iva Credito vas a tener un nuevo boton de \"Libro Iva\".\n\n➡️ Cuando lo preciones se va a generar un PDF con la informacion de tu IVA Compra en base al rango de fecha que hayas seleccionado en el modulo de reportes.\n\n➡️ Proximamente tambien estara disponible el LIBRO IVA VENTAS.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Indicar multiples metodos de pago con diferentes monedas",
+                                                             "body":  "✅ *Indicar multiples metodos de pago con diferentes monedas*\n\n➡️ Tanto si haces ventas en pesos o en dolares, vas a poder indicar en un unico movimiento de pago distintos metodos de pago con distintas monedas.\n\n➡️ Al momento de indicar un monto en una moneda distinta a la original, vas a podes establecer la cotizacion para ver el monto cotizado.  \n\n➡️ Te recomendamos este tutorial para que veas como cargar un pago a cuenta corriente con multiples monedas: https://drive.google.com/file/d/1kbkksZ3cACQ_GSw1bgxyy1OEf2PaYTI8/view?usp=drive_link\n\n➡️ Y tambien te recomendamos este tutorial para que veas como indicar multiples metodos de pago con multiples monedas en VENDER: https://drive.google.com/file/d/1eEfK1Q3SRVLEOuct3UHdrf0bEZfgWuEb/view?usp=drive_link",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Se corrigio el modulo de Gastos para poder indicar multiples metodos de pago",
+                                                             "body":  "✅ *Se corrigio el modulo de Gastos para poder indicar multiples metodos de pago*\n\n➡️ Ahora no vas a indicar el total directamente de un gasto, sino que vas a indicar los metodos de pago utilizados y el sistema calculara el total del gasto en base a la informacion indicada.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevo Modulo de produccion",
+                                                             "body":  "✅ *Nuevo Modulo de produccion*\n\n➡️ Vas a ingresar al modulo de produccion desde \"Produccion V2\", aca te dejo unos videos para que veas como utilizar las Recetas y Lotes de produccion junto con todo lo que se agrego, cualquier duda me consultas: https://drive.google.com/drive/folders/1ie-xYvSo7vl_dBCmhJkDuPm7YTnsm-en?usp=sharing",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Cotización automática entre monedas por lista de precios",
+                                                             "body":  "✅ *Cotización automática entre monedas por lista de precios*\n\n➡️ Ahora podés elegir, en cada lista de precios, si el precio en ARS se cotiza desde USD o si el precio en USD se cotiza desde ARS.\n\n➡️ Mirate este video para entender como funciona: https://drive.google.com/file/d/1mDEzSh39XDyu9GimAuQjWl1OAiRA4Lz0/view?usp=sharing",
+                                                             "restricted_to_client_slug":  "2r"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Cotización automática entre monedas por lista de precios",
+                                                             "body":  "✅ *Cotización automática entre monedas por lista de precios*\n\n➡️ Ahora podés elegir, en cada lista de precios, si el precio en ARS se cotiza desde USD o si el precio en USD se cotiza desde ARS.\n\n➡️ Mirate este video para entender como funciona: https://drive.google.com/file/d/1mDEzSh39XDyu9GimAuQjWl1OAiRA4Lz0/view?usp=sharing",
+                                                             "restricted_to_client_slug":  "ananda"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Configurar que direcciones mostrar en comprobantes de VENTAS",
+                                                             "body":  "✅ *Configurar que direcciones mostrar en comprobantes de VENTAS*\n\n➡️ Desde la Configuracion -\u003e Vender, vas a poder configurar la \"Direccion comercial para mostrar en los comprobantes de venta\", si completas este campo se va a mostrar siempre en tus comprobantes de ventas, junto con la direccion de la sucursal desde donde se hizo la venta (en caso de que tengas sucursales)\n\n➡️ A la derecha, vas a ver la otra nueva opcion de \"Mostrar la direccion de todas las sucursales en los comprobantes de venta\", si la activas van a mostrarse todas las sucursales en los comprobantes de ventas que generes, independientemente de donde se haya realizado la venta",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Activale la configuracion de \"Mostrar la direccion de todas las sucursales en los comprobantes de venta\" a masquito",
+                                                             "body":  "Activale la configuracion de \"Mostrar la direccion de todas las sucursales en los comprobantes de venta\" a masquito",
+                                                             "restricted_to_client_slug":  "masquito"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nueva dinamica para errores de ARCA",
+                                                             "body":  "✅ *Nueva dinamica para errores de ARCA*\n\n➡️ Cambiamos el diseño de como ves las facturas en el sistema, para un mejor entendimiento, cada factura va a estar enmarcada dentro de una tarjeta, con su respectiva informacion: N° de factura, opcion para imprimirla.\n\n➡️ Si hubo algun error al obtener el CAE y a la factura se le asigno su N° de factura, vas a ver un boton verde para \"Consultar\" el comprobante ante ARCA. Si el comprobante se logro autorizar, se va a actualizar el CAE en la factura del sistema.\nPor el contrario, si nunca se autorizo, se te informara para que elimines esa factura en el sistema y vuelvas a generar una nueva factura.\n\n➡️ Recorda que una venta puede tener 1 o mas facturas asociadas, por eso se muestra un recuadro por cada factura, esten o no correctamente autorizadas ante ARCA\n\n➡️ Si tenes alguna duda, podes posar el mouse sobre el recuadro de la factura para que veas los pasos que tenes que seguir en caso de haber un error.",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "✅ Agregar metodos de pago personalizados",
+                                                             "body":  "✅ *Agregar metodos de pago personalizados*\n\n➡️ Ahora vas a poder agregar metodos de pago e indicar si son de tipo \"Cheque\" o de tipo \"Tarjeta de credito\".\n\n➡️ Indicando este dato, vas a poder indicar la informacion complementaria como: los datos del cheque en caso de que el metodo de pago sea de tipo \"cheque\", o la cantidad de cuotas en caso de que el metodo de pago sea de tipo \"tarjeta de credito\".",
+                                                             "restricted_to_client_slug":  null
+                                                         },
+                                                         {
+                                                             "title":  "Con esto de arriba vas a poder agregar los metodos de pago personalizados para cheques",
+                                                             "body":  "Con esto de arriba vas a poder agregar los metodos de pago personalizados para cheques",
+                                                             "restricted_to_client_slug":  "golden-breeze"
+                                                         },
+                                                         {
+                                                             "title":  "Desactivar configuracion de usuario: \"Mostrar el nombre del empleado que realizo la venta en los PDF de las ventas\"",
+                                                             "body":  "Desactivar configuracion de usuario: \"Mostrar el nombre del empleado que realizo la venta en los PDF de las ventas\"",
+                                                             "restricted_to_client_slug":  "arfren"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Nuevo buscador en LISTADO",
+                                                             "body":  "✅ *Nuevo buscador en LISTADO*\n\n➡️ Agregamos el mismo buscador del modulo de VENDER al LISTADO.\n\n➡️ Vas a poder buscar por nombre, codigo de proveedor, descripcion y combinar con la categoria y disponibilidad de stock en un mismo lugar.",
+                                                             "restricted_to_client_slug":  "servian"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Separa insumos de articulos",
+                                                             "body":  "✅ *Separa insumos de articulos*\n\n➡️ Ahora los insumos no te van a aparecer junto con los articulos cuando ingreses al listado \n\n➡️ Cada articulo va a tener una nueva propiedad \"Es inusmo\", la cual podes activar o desactivar.\n\n➡️ Los articulos que la tengan activada, no van a aparecer en el Listado ni bien ingreses, salvo que realices un filtrado desde el LISTADO (filtrando por el nombre por ejemplo), en ese caso si van a incluirse los insumos junto con los articulos que no lo son.\nSi queres mas precision, podes incluir la columna \"Es insumo\" en el filtrado para utilizarla tambien como criterio de busqueda.\n\n➡️ Cuando busques articulos por el nombre en VENDER, nunca te van a aparecer insumos en esa seccion.",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Corregimos el agregar combos al actualizar una venta",
+                                                             "body":  "✅ *Corregimos el agregar combos al actualizar una venta*\n\n➡️ Habia un problema cuando querian actualizar una venta que ya tenia un combo, quedo solucionado.",
+                                                             "restricted_to_client_slug":  "golonorte"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Gestionar ventas por \"Estado de venta\"",
+                                                             "body":  "✅ *Gestionar ventas por \"Estado de venta\"*\n\n➡️ Con este nuevo modulo vas a poder gestionar tus ventas segun los estados que necesites.\n\n➡️ En este video te explicamos todo lo referente a este nuevo modulo: https://drive.google.com/drive/folders/18fFxvj_K6DkQ39GLBKTRWA4KvUfiCs8b?usp=sharing",
+                                                             "restricted_to_client_slug":  "ht5"
+                                                         },
+                                                         {
+                                                             "title":  "✅ Indicar a que sucursal pertenece una caja",
+                                                             "body":  "✅ *Indicar a que sucursal pertenece una caja*\n\n➡️ Si indican este dato en una caja desde el modulo de tesoreria, esta caja estara disponible en el modulo de VENDER solo si la sucursal seleccionada en VENDER es la misma que la de la caja.\n\n➡️ Si no indican la sucursal a una caja, estara disponible siempre en vender (siempre que este abierta).",
+                                                             "restricted_to_client_slug":  "golonorte"
+                                                         },
+                                                         {
+                                                             "title":  "✅ IMPORTANTE: Les recordamos su configuracion para actualizar ventas:",
+                                                             "body":  "✅ *IMPORTANTE: Les recordamos su configuracion para actualizar ventas:*\n\n➡️ Cuando le den click a actualizar venta, y se los lleve al modulo de VENDER con la informacion de la venta a actualizar, los precios de los articulos no van a ser los que tenian al momento de generar la venta, sino que se utilizaran los precios actuales.",
+                                                             "restricted_to_client_slug":  "golonorte"
+                                                         }
+                                                     ],
+                                   "description":  "Primer version subida\nImportacion de excel optimizada con procesos de supervisor en paralelo.\nTimpo de Procesamiento: 200segundo por 500 filas",
+                                   "commands":  [
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan db:seed --class=MonedaSeeder"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan iniciar_credit_accounts {user_id?} {client_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_article_purchases_address_id {user_id?} {sale_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_afip_tickets_data {user_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_article_provider_codes {article_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_articles_prices {user_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_costo_ventas {user_id?} {sale_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan check_to_pay_id_de_ventas_eliminadas {user_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_sales_total_factuado"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_afip_ticket_nota_credito_data"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan db:seed --class=ExtNTDescriptionSeeder"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan db:seed --class=CerrarVentasExtencionSeeder"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan db:seed --class=providers_article_price_from_costo_mas_iva_seeder"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_provider_order_afip_tickets_user_id {user_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan set_iva_condition_slugs"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan db:seed --class=ConceptoAjusteSeeder"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_user",
+                                                        "command":  "php artisan set_sub_total_sales {user_id?}"
+                                                    },
+                                                    {
+                                                        "run_scope":  "per_database",
+                                                        "command":  "php artisan set_payment_method_types"
+                                                    }
+                                                ],
+                                   "manual_tasks":  [
+                                                        {
+                                                            "description":  "agregar carpeta ws_sr_constancia_inscripcion a public/afip/wsaa (a la version 1 y a la version 2)",
+                                                            "title":  "agregar carpeta ws_sr_constancia_inscripcion a public/afip/wsaa (a la version 1 y a la version 2)"
+                                                        },
+                                                        {
+                                                            "description":  "Setear users/google_cuota en 100",
+                                                            "title":  "Setear users/google_cuota en 100"
+                                                        },
+                                                        {
+                                                            "description":  "Subir logo de arca a public/afip (a ambos sub dominios, osea al 1 como al 2), sacar el logo de ffperformance/api/public/afip/logo.jpg",
+                                                            "title":  "Subir logo de arca a public/afip (a ambos sub dominios, osea al 1 como al 2), sacar el logo de ffperformance/api/public/afip/logo.jpg"
+                                                        }
+                                                    ],
+                                   "seeders":  [
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ext_mercado_libre"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ext_buscar_por_categoria_en_vender"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "vender_cambiar_address_id"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "MeliConceptoStockMovement"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "SaleChannelSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionBalanzaBarCodeSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermissionArticleEditStockSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "NuevosPermisosListadoSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionArticlePriceRangeSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionArticuloMultiProveedorSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionResumenCajaSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "VendedorEnSalePdfSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PLUBalanzaBarCodeSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermissionPaymentPlanSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermissionInfoFacturacion"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "PermissionLimpiarVentaSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "prohibir_eliminar_articulos_de_venta_seeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtNTDescriptionSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "VariosPreciosExtencionSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "CAPaymentMethodTypeSeeder"
+                                                   },
+                                                   {
+                                                       "run_scope":  "per_database",
+                                                       "seeder_class":  "ExtencionDesEnVenderSeeder"
+                                                   }
+                                               ]
+                               },
+                     "1.1.6":  {
+                                   "commands":  [
+
+                                                ],
+                                   "notifications":  [
+
+                                                     ],
+                                   "description":  "1. Se corrigio importacion de excel (descuentos, recargos y provider_code repetidos)",
+                                   "seeders":  [
+
+                                               ],
+                                   "manual_tasks":  [
+
+                                                    ]
+                               }
+                 }
+}

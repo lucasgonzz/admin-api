@@ -53,15 +53,20 @@ class LeadAiSuggestionAutoSendScheduler
         }
 
         $message_id = (int) $message->id;
+        $auto_send_at = now()->addSeconds($delay_seconds);
         $auto_send_token = $this->bump_auto_send_token($message_id);
 
+        $message->ai_auto_send_at = $auto_send_at;
+        $message->save();
+
         AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token)
-            ->delay(now()->addSeconds($delay_seconds));
+            ->delay($auto_send_at);
 
         Log::channel('daily')->debug('LeadAiSuggestionAutoSendScheduler: envío automático programado.', [
             'message_id'      => $message_id,
             'lead_id'         => $message->lead_id,
             'delay_seconds'   => $delay_seconds,
+            'auto_send_at'    => $auto_send_at->toIso8601String(),
             'auto_send_token' => $auto_send_token,
         ]);
     }
@@ -76,6 +81,10 @@ class LeadAiSuggestionAutoSendScheduler
     public function cancel_for_message(int $message_id): void
     {
         $this->bump_auto_send_token($message_id);
+
+        LeadMessage::query()
+            ->where('id', $message_id)
+            ->update(['ai_auto_send_at' => null]);
     }
 
     /**
