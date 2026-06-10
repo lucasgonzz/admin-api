@@ -13,6 +13,7 @@ use App\Http\Controllers\ClientController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
 use App\Http\Controllers\DemoController;
+use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\Admin\ProtocolCacheController;
 use App\Http\Controllers\AiSystemPromptController;
@@ -137,6 +138,12 @@ Route::prefix('admin')->group(function () {
         Route::post('demo', [DemoController::class, 'store_json']);
         Route::put('demo/{id}', [DemoController::class, 'update_json']);
         Route::delete('demo/{id}', [DemoController::class, 'destroy_json']);
+
+        // Demo Updates: pipeline de actualización SPA + API de una demo.
+        Route::get('demo-update', [DemoUpdateController::class, 'index_json']);
+        Route::get('demo-update/{id}', [DemoUpdateController::class, 'show_json']);
+        Route::post('demo-update', [DemoUpdateController::class, 'store_json']);
+        Route::delete('demo-update/{id}', [DemoUpdateController::class, 'destroy_json']);
 
         Route::get('update', [UpdateController::class, 'index_json']);
         Route::post('update', [UpdateController::class, 'store_json']);
