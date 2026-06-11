@@ -8,6 +8,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadAiService;
 use App\Services\LeadAiSuggestionScheduler;
+use App\Services\LeadConversationAiState;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -76,6 +77,22 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
             ->count();
 
         if ($lead_inbound_count <= 1) {
+            return;
+        }
+
+        if (! LeadConversationAiState::has_unanswered_lead_messages($lead)) {
+            Log::channel('daily')->debug('GenerateLeadAiSuggestionJob: omitido (sin mensajes del lead sin responder).', [
+                'lead_id' => $this->lead_id,
+            ]);
+
+            return;
+        }
+
+        if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
+            Log::channel('daily')->debug('GenerateLeadAiSuggestionJob: omitido (sugerencia pendiente de revisión).', [
+                'lead_id' => $this->lead_id,
+            ]);
+
             return;
         }
 

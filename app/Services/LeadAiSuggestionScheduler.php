@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Jobs\GenerateLeadAiSuggestionJob;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\LeadConversationAiState;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
@@ -42,12 +43,32 @@ class LeadAiSuggestionScheduler
             return;
         }
 
+        $lead = Lead::query()->with('messages')->find($lead_id);
+        if ($lead === null) {
+            return;
+        }
+
+        if (! LeadConversationAiState::has_unanswered_lead_messages($lead)) {
+            Log::channel('daily')->debug('LeadAiSuggestionScheduler: omitido (sin mensajes del lead sin responder).', [
+                'lead_id' => $lead_id,
+            ]);
+
+            return;
+        }
+
+        if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
+            Log::channel('daily')->debug('LeadAiSuggestionScheduler: omitido (sugerencia pendiente de revisión).', [
+                'lead_id' => $lead_id,
+            ]);
+
+            return;
+        }
+
         $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_delay_seconds();
         $this->clear_stale_pending_suggestions($lead_id);
         $schedule_token = $this->bump_schedule_token($lead_id);
 
-        GenerateLeadAiSuggestionJob::dispatch($lead_id, $schedule_token)
-            ->delay(now()->addSeconds($delay_seconds));
+        $this->dispatch_generate_job($lead_id, $schedule_token, $delay_seconds);
 
         Log::channel('daily')->debug('LeadAiSuggestionScheduler: sugerencia IA reprogramada.', [
             'lead_id'         => $lead_id,
@@ -151,6 +172,31 @@ class LeadAiSuggestionScheduler
         }
 
         LeadBroadcastService::emit_conversation_updated($lead_id);
+    }
+
+    /**
+     * Encola el job de sugerencia IA con demora en cola o ejecución inmediata tras el webhook.
+     *
+     * Con demora 0 usa conexión sync + afterResponse para no depender de `queue:work`
+     * (QUEUE_CONNECTION=database).
+     *
+     * @param int $lead_id
+     * @param int $schedule_token
+     * @param int $delay_seconds
+     *
+     * @return void
+     */
+    private function dispatch_generate_job(int $lead_id, int $schedule_token, int $delay_seconds): void
+    {
+        $pending_dispatch = GenerateLeadAiSuggestionJob::dispatch($lead_id, $schedule_token);
+
+        if ($delay_seconds > 0) {
+            $pending_dispatch->delay(now()->addSeconds($delay_seconds));
+
+            return;
+        }
+
+        $pending_dispatch->onConnection('sync')->afterResponse();
     }
 
     /**

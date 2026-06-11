@@ -40,8 +40,8 @@ class LeadWhatsappOnboardingSettingsController extends Controller
             'welcome_message_without_name' => 'required|string|min:1|max:4000',
             'welcome_delay_seconds'        => 'required|integer|min:' . LeadWhatsappOnboardingSettings::DELAY_MIN_SECONDS
                 . '|max:' . LeadWhatsappOnboardingSettings::DELAY_MAX_SECONDS,
-            'ai_suggestion_delay_seconds'  => 'required|integer|min:' . LeadWhatsappOnboardingSettings::DELAY_MIN_SECONDS
-                . '|max:' . LeadWhatsappOnboardingSettings::DELAY_MAX_SECONDS,
+            'ai_suggestion_delay_seconds'  => 'required|integer|min:' . LeadWhatsappOnboardingSettings::AI_SUGGESTION_DELAY_MIN_SECONDS
+                . '|max:' . LeadWhatsappOnboardingSettings::AI_SUGGESTION_DELAY_MAX_SECONDS,
             'ai_suggestion_auto_send_delay_seconds' => 'required|integer|min:'
                 . LeadWhatsappOnboardingSettings::AUTO_SEND_DELAY_MIN_SECONDS
                 . '|max:' . LeadWhatsappOnboardingSettings::AUTO_SEND_DELAY_MAX_SECONDS,

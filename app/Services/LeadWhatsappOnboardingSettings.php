@@ -29,7 +29,7 @@ class LeadWhatsappOnboardingSettings
     /** Clave: segundos de inactividad del lead antes de pedir sugerencia a Claude (debounce). */
     public const KEY_AI_SUGGESTION_DELAY_SECONDS = 'lead_whatsapp_ai_suggestion_delay_seconds';
 
-    /** Clave: segundos hasta enviar automáticamente una sugerencia no confirmada (0 = desactivado). */
+    /** Clave: segundos hasta enviar automáticamente una sugerencia no confirmada (0 = envío inmediato). */
     public const KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS = 'lead_whatsapp_ai_suggestion_auto_send_delay_seconds';
 
     /** Placeholder documentado en plantillas editables desde admin-spa. */
@@ -65,15 +65,20 @@ class LeadWhatsappOnboardingSettings
     /** Demora por defecto antes de pedir sugerencia IA tras mensajes del lead (segundos). */
     private const DEFAULT_AI_SUGGESTION_DELAY_SECONDS = 60;
 
-    /** Demora por defecto antes de enviar automáticamente una sugerencia pendiente (0 = solo manual). */
+    /** Demora por defecto antes de enviar automáticamente una sugerencia pendiente (0 = envío inmediato). */
     private const DEFAULT_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS = 120;
 
-    /** Mínimo y máximo permitidos para demoras de espera activa (segundos). */
+    /** Mínimo y máximo permitidos para demoras de bienvenida y similares (segundos). */
     public const DELAY_MIN_SECONDS = 5;
 
     public const DELAY_MAX_SECONDS = 3600;
 
-    /** Mínimo y máximo para auto-envío de sugerencias (0 desactiva el envío automático). */
+    /** Mínimo y máximo para debounce antes de pedir sugerencia IA (0 = consulta inmediata). */
+    public const AI_SUGGESTION_DELAY_MIN_SECONDS = 0;
+
+    public const AI_SUGGESTION_DELAY_MAX_SECONDS = 3600;
+
+    /** Mínimo y máximo para auto-envío de sugerencias (0 = envío inmediato sin espera humana). */
     public const AUTO_SEND_DELAY_MIN_SECONDS = 0;
 
     public const AUTO_SEND_DELAY_MAX_SECONDS = 3600;
@@ -213,20 +218,34 @@ class LeadWhatsappOnboardingSettings
     {
         $raw = AdminSetting::get(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) self::DEFAULT_AI_SUGGESTION_DELAY_SECONDS);
         $seconds = (int) $raw;
-        if ($seconds < self::DELAY_MIN_SECONDS) {
-            return self::DEFAULT_AI_SUGGESTION_DELAY_SECONDS;
-        }
-        if ($seconds > self::DELAY_MAX_SECONDS) {
-            return self::DELAY_MAX_SECONDS;
+
+        return self::clamp_ai_suggestion_delay($seconds);
+    }
+
+    /**
+     * Acota la demora antes de pedir sugerencia IA al rango permitido.
+     *
+     * @param int $value
+     *
+     * @return int
+     */
+    public static function clamp_ai_suggestion_delay(int $value): int
+    {
+        if ($value < self::AI_SUGGESTION_DELAY_MIN_SECONDS) {
+            return self::AI_SUGGESTION_DELAY_MIN_SECONDS;
         }
 
-        return $seconds;
+        if ($value > self::AI_SUGGESTION_DELAY_MAX_SECONDS) {
+            return self::AI_SUGGESTION_DELAY_MAX_SECONDS;
+        }
+
+        return $value;
     }
 
     /**
      * Segundos tras crear una sugerencia de Claude antes de enviarla por WhatsApp sin confirmación del setter.
      *
-     * 0 desactiva el envío automático.
+     * 0 envía la sugerencia de inmediato sin espera del setter.
      *
      * @return int
      */

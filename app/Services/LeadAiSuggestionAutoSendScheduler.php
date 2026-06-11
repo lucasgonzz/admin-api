@@ -23,7 +23,8 @@ class LeadAiSuggestionAutoSendScheduler
     /**
      * Encola el envío automático de una sugerencia recién creada por Claude.
      *
-     * No programa seguimientos automáticos, mensajes que requieren verificación manual ni demora 0.
+     * No programa seguimientos automáticos ni mensajes que requieren verificación manual.
+     * Con demora 0 encola el envío de inmediato (sin timer ni ai_auto_send_at).
      *
      * @param LeadMessage $message Mensaje en estado `sugerido`.
      *
@@ -48,13 +49,25 @@ class LeadAiSuggestionAutoSendScheduler
         }
 
         $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
+        $message_id = (int) $message->id;
+        $auto_send_token = $this->bump_auto_send_token($message_id);
+
+        /* 0 = enviar por WhatsApp de inmediato, sin countdown ni ai_auto_send_at. */
         if ($delay_seconds <= 0) {
+            AutoSendLeadAiSuggestionJob::dispatch($message_id, $auto_send_token)
+                ->onConnection('sync')
+                ->afterResponse();
+
+            Log::channel('daily')->debug('LeadAiSuggestionAutoSendScheduler: envío automático inmediato programado.', [
+                'message_id'      => $message_id,
+                'lead_id'         => $message->lead_id,
+                'auto_send_token' => $auto_send_token,
+            ]);
+
             return;
         }
 
-        $message_id = (int) $message->id;
         $auto_send_at = now()->addSeconds($delay_seconds);
-        $auto_send_token = $this->bump_auto_send_token($message_id);
 
         $message->ai_auto_send_at = $auto_send_at;
         $message->save();
