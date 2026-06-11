@@ -46,19 +46,19 @@ class SendDemoReminders extends Command
      */
     public function handle(): int
     {
-        // Momento actual y límite superior de la ventana de anticipación.
-        $now        = Carbon::now();
+        // Momento actual y límite superior de la ventana de anticipación (timezone Argentina).
+        $now        = Carbon::now('America/Argentina/Buenos_Aires');
         $window_end = $now->copy()->addMinutes(self::WINDOW_MINUTES);
 
         // Leads candidatos: demo agendada hoy, sin recordatorio emitido y sin sugerencia pendiente.
-        // Pre-filtramos por demo_date = hoy para reducir el conjunto antes del loop PHP.
+        // Se usa CONVERT_TZ para comparar demo_date (guardado en UTC) contra la fecha en Argentina.
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
             ->where('recordatorio_demo_enviado', false)
             ->where('tiene_sugerencia_pendiente', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
-            ->where('demo_date', $now->format('Y-m-d'))
+            ->whereRaw("DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?", [$now->format('Y-m-d')])
             ->get();
 
         // Contador de recordatorios generados para el log final.
@@ -66,7 +66,10 @@ class SendDemoReminders extends Command
 
         foreach ($candidates as $lead) {
             // Construir el datetime completo de inicio de demo combinando fecha y hora.
-            $demo_datetime = $this->parse_demo_datetime($lead->demo_date->format('Y-m-d'), $lead->demo_start_time);
+            $demo_datetime = $this->parse_demo_datetime(
+                $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
+                $lead->demo_start_time
+            );
 
             // Si el formato de hora es inválido, saltear para no romper el batch.
             if ($demo_datetime === null) {
@@ -168,3 +171,4 @@ class SendDemoReminders extends Command
         }
     }
 }
+
