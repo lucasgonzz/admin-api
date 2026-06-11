@@ -6,10 +6,12 @@ use App\Events\ImplementationStageCompleted;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\ClientInstallation;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
 use App\Models\Lead;
+use App\Models\Version;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -79,6 +81,9 @@ class ImplementationConversationService
         if ($current_stage === 3) {
             $phone = (string) $parsed['from'];
             $this->send_outbound($implementation, 3, $phone, 'Estamos preparando tu sistema, en breve te avisamos. ¡Gracias por la paciencia! 🙏');
+
+            // Crea automáticamente un ClientInstallation pendiente si aún no existe para esta implementación.
+            $this->ensure_installation_for_stage_3($implementation);
             return;
         }
 
@@ -3437,6 +3442,52 @@ class ImplementationConversationService
         $search  = ['á', 'é', 'í', 'ó', 'ú', 'ü', 'ñ', 'à', 'è', 'ì', 'ò', 'ù'];
         $replace = ['a', 'e', 'i', 'o', 'u', 'u', 'n', 'a', 'e', 'i', 'o', 'u'];
         return str_replace($search, $replace, $text);
+    }
+
+    /**
+     * Garantiza que exista un ClientInstallation pendiente para la etapa 3 de la implementación.
+     *
+     * Es idempotente: si ya existe una instalación pendiente para el cliente, no crea otra.
+     * Si no existe, crea una con la active_client_api y la versión publicada más reciente.
+     *
+     * @param  Implementation  $implementation  Implementación activa en etapa 3.
+     * @return void
+     */
+    private function ensure_installation_for_stage_3(Implementation $implementation): void
+    {
+        // Solo actúa si la implementación tiene un cliente asociado.
+        if (! $implementation->client_id) {
+            return;
+        }
+
+        // Verifica si ya existe una instalación pendiente para evitar duplicados.
+        $existing = ClientInstallation::where('client_id', $implementation->client_id)
+            ->where('status', 'pendiente')
+            ->first();
+
+        if ($existing !== null) {
+            // Ya existe: no se crea una nueva (comportamiento idempotente).
+            return;
+        }
+
+        // Obtiene el cliente para tomar su active_client_api_id.
+        $client = Client::find($implementation->client_id);
+        if ($client === null) {
+            return;
+        }
+
+        // Versión publicada más reciente disponible.
+        $latest_version = Version::where('status', 'publicada')
+            ->orderByDesc('id')
+            ->first();
+
+        // Crea la instalación pendiente lista para que el operador cargue las variables manuales.
+        ClientInstallation::create([
+            'client_id'     => $client->id,
+            'client_api_id' => $client->active_client_api_id,
+            'version_id'    => $latest_version ? $latest_version->id : null,
+            'status'        => 'pendiente',
+        ]);
     }
 }
 

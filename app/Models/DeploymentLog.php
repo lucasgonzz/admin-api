@@ -37,4 +37,14 @@ class DeploymentLog extends Model
     {
         return $this->belongsTo(ClientVersionUpgrade::class);
     }
+
+    /**
+     * Instalación inicial a la que pertenece esta línea (nullable: solo para logs de instalación).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function client_installation()
+    {
+        return $this->belongsTo(ClientInstallation::class);
+    }
 }

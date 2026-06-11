@@ -17,6 +17,7 @@ use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\Admin\ProtocolCacheController;
 use App\Http\Controllers\AiSystemPromptController;
+use App\Http\Controllers\Api\ClientInstallationController;
 use App\Http\Controllers\Api\EnvTemplateController;
 use App\Http\Controllers\WhatsappConfigController;
 use App\Http\Controllers\WhatsappWebhookController;
@@ -247,6 +248,12 @@ Route::prefix('admin')->group(function () {
         Route::put('settings/implementation-file-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_file_wait']);
 
         Route::get('task-template', [TaskTemplateController::class, 'index_json']);
+
+        // Instalaciones iniciales de sistema para clientes.
+        Route::get('clients/{client}/installations', [ClientInstallationController::class, 'index']);
+        Route::post('clients/{client}/installations', [ClientInstallationController::class, 'store']);
+        Route::put('client-installations/{installation}/env-values', [ClientInstallationController::class, 'update_env_values']);
+        Route::post('client-installations/{installation}/start', [ClientInstallationController::class, 'start']);
 
         // Plantilla base de variables .env: gestión y comparación con clientes.
         Route::get('env-template', [EnvTemplateController::class, 'index']);
