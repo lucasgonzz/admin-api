@@ -250,6 +250,15 @@ Route::prefix('admin')->group(function () {
 
         Route::post('client/{client}/implementation/start', [\App\Http\Controllers\Api\ImplementationController::class, 'start']);
 
+        // Ecommerce implementations: listado, detalle, avance manual de etapa y baja.
+        Route::get('ecommerce-implementation', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'index']);
+        // Conteo de implementaciones de ecommerce listas para avanzar; antes del wildcard.
+        Route::get('ecommerce-implementation/ready-to-advance-count', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'ready_to_advance_count']);
+        Route::get('ecommerce-implementation/{ecommerce_implementation}', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'show']);
+        Route::post('client/{client}/ecommerce-implementation/start', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'start']);
+        Route::post('ecommerce-implementation/{ecommerce_implementation}/advance-stage', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'advance_stage']);
+        Route::delete('ecommerce-implementation/{ecommerce_implementation}', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'destroy']);
+
         // Configuración de implementaciones: admin asignado por defecto.
         Route::get('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show']);
         Route::put('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update']);

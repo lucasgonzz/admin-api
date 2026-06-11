@@ -32,6 +32,8 @@ class DatabaseSeeder extends Seeder
             // Plantillas de tareas automáticas para procesos internos.
             TaskTemplateSeeder::class,
             ImplementationStageConfigSeeder::class,
+            // Catálogo de las 5 etapas del flujo de implementación de la tienda online.
+            EcommerceImplementationStageConfigSeeder::class,
             AiSystemPromptSeeder::class,
             /* Identidad del agente Martín inyectada dinámicamente en el system prompt de Claude. */
             AgentIdentitySeeder::class,

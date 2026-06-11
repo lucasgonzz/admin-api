@@ -8,6 +8,8 @@ use App\Services\SupportAiSettings;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\EcommerceImplementation;
+use App\Models\EcommerceImplementationMessage;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\Lead;
@@ -15,6 +17,8 @@ use App\Models\LeadMessage;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
+use App\Services\EcommerceImplementationBroadcastService;
+use App\Services\EcommerceImplementationConversationService;
 use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
 use App\Services\LeadAiSuggestionScheduler;
@@ -105,7 +109,9 @@ class WhatsappWebhookController extends Controller
                 $client_employee = $support_contact['client_employee'];
 
                 // Verificar si el cliente tiene una implementación activa antes de enrutar a soporte.
-                $implementation = $client->implementation;
+                // Si tiene activas la del sistema y la del ecommerce a la vez, se prioriza la del sistema.
+                $implementation           = $client->implementation;
+                $ecommerce_implementation = $client->ecommerce_implementation;
 
                 if ($implementation !== null && $implementation->status === 'in_progress') {
                     $this->handle_implementation_message($parsed, $client, $implementation);
@@ -115,6 +121,15 @@ class WhatsappWebhookController extends Controller
                         'route'             => 'implementacion',
                         'client_id'         => $client->id,
                         'implementation_id' => $implementation->id,
+                    ]);
+                } elseif ($ecommerce_implementation !== null && $ecommerce_implementation->status === 'in_progress') {
+                    $this->handle_ecommerce_implementation_message($parsed, $client, $ecommerce_implementation);
+                    Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado a implementación de ecommerce.', [
+                        'from'                        => $parsed['from'],
+                        'type'                        => $parsed['type'],
+                        'route'                       => 'ecommerce-implementacion',
+                        'client_id'                   => $client->id,
+                        'ecommerce_implementation_id' => $ecommerce_implementation->id,
                     ]);
                 } else {
                     $this->handle_support_message($parsed, $client, $client_employee, $assignment_service);
@@ -376,6 +391,10 @@ class WhatsappWebhookController extends Controller
             return true;
         }
 
+        if (EcommerceImplementationMessage::where('whatsapp_message_id', $message_id)->exists()) {
+            return true;
+        }
+
         return false;
     }
 
@@ -418,6 +437,49 @@ class WhatsappWebhookController extends Controller
 
         // Delegar el procesamiento de la conversación al servicio correspondiente.
         $service = new ImplementationConversationService();
+        $service->handle($implementation, $parsed);
+    }
+
+    /**
+     * Guarda el mensaje entrante en ecommerce_implementation_messages y delega al servicio
+     * de conversación de la implementación de ecommerce.
+     *
+     * @param array<string, mixed>    $parsed         Resultado de parse_inbound_message.
+     * @param Client                  $client         Cliente dueño de la implementación.
+     * @param EcommerceImplementation $implementation Implementación de ecommerce activa del cliente.
+     *
+     * @return void
+     */
+    private function handle_ecommerce_implementation_message(
+        array $parsed,
+        Client $client,
+        EcommerceImplementation $implementation
+    ): void {
+        // Persistir el mensaje entrante para trazabilidad (idempotencia garantizada por is_duplicate_message).
+        $body         = $parsed['body'];
+        $message_type = (string) ($parsed['type'] ?? 'text');
+
+        // Fallback de cuerpo para mensajes sin texto (imagen, audio, etc.).
+        if ($body === null || trim($body) === '') {
+            $body = '[' . strtoupper($message_type) . ' recibido]';
+        }
+
+        $inbound_message = EcommerceImplementationMessage::create([
+            'ecommerce_implementation_id' => $implementation->id,
+            'stage_number'                => (int) $implementation->current_stage,
+            'direction'                   => 'inbound',
+            'body'                        => $body,
+            'whatsapp_message_id'         => $parsed['message_id'],
+            'sent_at'                     => $this->resolve_message_datetime($parsed['timestamp']),
+        ]);
+
+        EcommerceImplementationBroadcastService::emit_message_received(
+            (int) $implementation->id,
+            (int) $inbound_message->id
+        );
+
+        // Delegar el procesamiento de la conversación al servicio de ecommerce.
+        $service = new EcommerceImplementationConversationService();
         $service->handle($implementation, $parsed);
     }
 

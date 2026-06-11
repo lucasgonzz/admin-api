@@ -29,8 +29,10 @@ class Client extends Model
     protected $guarded = [];
 
     protected $casts = [
-        'is_active' => 'boolean',
-        'user_id'   => 'integer',
+        'is_active'  => 'boolean',
+        'user_id'    => 'integer',
+        // Datos de configuración recolectados en la Etapa 1 de implementación (para UserSetup).
+        'setup_data' => 'array',
     ];
 
     function scopeWithAll($query) {
@@ -86,5 +88,23 @@ class Client extends Model
      */
     public function implementation() {
         return $this->hasOne(Implementation::class);
+    }
+
+    /**
+     * Tienda online (ecommerce) del cliente (como máximo una).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne
+     */
+    public function client_ecommerce() {
+        return $this->hasOne(ClientEcommerce::class);
+    }
+
+    /**
+     * Proceso de implementación de la tienda online (como máximo uno por cliente).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasOne
+     */
+    public function ecommerce_implementation() {
+        return $this->hasOne(EcommerceImplementation::class);
     }
 }

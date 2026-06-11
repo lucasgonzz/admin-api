@@ -55,6 +55,10 @@ class ImplementationAiInterpreter
             'Se le preguntó si quiere que las ventas queden en cuenta corriente automáticamente. '
             . 'true = sí, automático. false = no, manual. null = no responde.',
 
+        'dollar_prices' =>
+            'Se le preguntó si maneja precios en dólares además de pesos. '
+            . 'true = sí, maneja dólares. false = solo pesos. null = no responde.',
+
         'employees_confirm' =>
             'Se le preguntó si terminó de pasar la lista de empleados. '
             . 'true = terminó. false = no terminó. null = no responde (probablemente mandó otro empleado).',
@@ -83,6 +87,27 @@ class ImplementationAiInterpreter
         'employee_choice' =>
             'Se le presentó al cliente una lista numerada de empleados y se le preguntó quién se encarga de enviar los archivos. '
             . 'Devolvé el índice base-1 del empleado elegido (int), 0 si eligió "yo mismo" o equivalente, null si la respuesta es ambigua o no identificable.',
+
+        'social_networks' =>
+            'Se le preguntó al cliente si tiene Instagram o Facebook del negocio para mostrarlos en su tienda online. '
+            . 'Si el cliente manda uno o más links o usuarios, extraé instagram y facebook por separado (la URL completa o el usuario tal como lo escribió; null si no mencionó esa red). '
+            . 'Si el cliente dice que no tiene redes o que prefiere no ponerlas, devolvé none = true. '
+            . 'El valor debe ser un objeto: {"instagram": string|null, "facebook": string|null, "none": true|false}. '
+            . 'Devolvé null (en lugar del objeto) solo si la respuesta es totalmente ambigua o no relacionada.',
+
+        'domain_confirmation' =>
+            'Se le sugirió al cliente un dominio para su tienda online y se le preguntó si le parece bien o prefiere otro. '
+            . 'Si confirma la sugerencia, devolvé el dominio sugerido. Si propone otro nombre, devolvé el dominio elegido (agregale .com.ar si no incluyó extensión). '
+            . 'Devolvé el dominio como string en minúsculas, sin espacios ni "http". null si la respuesta es ambigua.',
+
+        'online_price_type' =>
+            'Se le preguntó al cliente quién puede ver los precios de su tienda online. '
+            . '1 = cualquier persona que entre. 2 = solo usuarios registrados. 3 = solo clientes ya cargados en el sistema. '
+            . 'Devolvé 1, 2 o 3 según la opción elegida, o null si es ambiguo.',
+
+        'colors_change' =>
+            'Se le mostró al cliente una paleta de colores sugerida para su tienda y se le preguntó si le gusta o quiere cambiar algo. '
+            . 'true = el cliente acepta los colores tal cual. false = el cliente pide cambios. null = ambiguo.',
     ];
 
     /**
@@ -98,6 +123,7 @@ class ImplementationAiInterpreter
         'use_deposits'            => '{"value": true|false|null}',
         'ask_amount_in_vender'    => '{"value": true|false|null}',
         'default_cuenta_corriente'=> '{"value": true|false|null}',
+        'dollar_prices'           => '{"value": true|false|null}',
         'employees_confirm'       => '{"value": true|false|null}',
         'skip_videocall'          => '{"value": true|false|null}',
         'yes_no'                  => '{"value": true|false|null}',
@@ -108,6 +134,14 @@ class ImplementationAiInterpreter
         'no_tengo_category'       => '{"value": "articles"|"clients"|"suppliers"|null}',
         // Elección de empleado de un listado numerado.
         'employee_choice'         => '{"value": 0|1|2|3|4|5|null}',
+        // Redes sociales: objeto con instagram/facebook/none, o null si ambiguo.
+        'social_networks'         => '{"value": {"instagram": string|null, "facebook": string|null, "none": true|false}|null}',
+        // Confirmación o elección de dominio para la tienda online.
+        'domain_confirmation'     => '{"value": "dominio.com.ar"|null}',
+        // Tipo de visibilidad de precios de la tienda online.
+        'online_price_type'       => '{"value": 1|2|3|null}',
+        // Aceptación o pedido de cambio de la paleta de colores.
+        'colors_change'           => '{"value": true|false|null}',
     ];
 
     /**
@@ -176,7 +210,7 @@ class ImplementationAiInterpreter
             // Realizar la llamada a la API de Claude.
             $response = $http->post('https://api.anthropic.com/v1/messages', [
                 'model'      => $model,
-                'max_tokens' => 64,
+                'max_tokens' => 256,
                 'system'     => self::SYSTEM_PROMPT_BASE,
                 'messages'   => [
                     [
@@ -217,7 +251,9 @@ class ImplementationAiInterpreter
             }
 
             // Extraer el bloque JSON aunque Claude agregue texto alrededor.
-            if (preg_match('/\{[^}]+\}/', $raw_text, $matches)) {
+            // Se usa una coincidencia greedy (primer "{" hasta el último "}") para
+            // soportar tanto objetos planos como objetos anidados (ej: social_networks).
+            if (preg_match('/\{.*\}/s', $raw_text, $matches)) {
                 $raw_text = $matches[0];
             }
 

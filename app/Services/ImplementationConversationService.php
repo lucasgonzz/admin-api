@@ -175,28 +175,26 @@ class ImplementationConversationService
 
         // Si aún no se envió ninguna pregunta → enviar la primera y registrar el estado.
         if (! array_key_exists('current_question', $data)) {
-            // Verificar si el lead ya confirmó uso de listas de precios.
+            // Verificar si el lead ya confirmó uso de listas de precios. Si es así,
+            // pre-configurar use_price_lists=true para saltar esa pregunta más adelante.
             $promoted_lead               = $client ? $this->find_promoted_lead($client) : null;
             $lead_confirmed_price_lists  = $promoted_lead !== null
                 && isset($promoted_lead->use_price_lists)
                 && $promoted_lead->use_price_lists === true;
 
             if ($lead_confirmed_price_lists) {
-                // Lead confirmado con listas de precios: pre-configurar use_price_lists=true
-                // y saltar directamente a recolectar los nombres de listas (price_lists).
-                $data['use_price_lists']    = true;
-                $data['current_question']   = 'price_lists';
-            } else {
-                // Flujo normal: preguntar primero si usa listas de precios.
-                $data['current_question'] = 'use_price_lists';
+                $data['use_price_lists'] = true;
             }
+
+            // La primera pregunta de configuración es siempre el tipo de negocio.
+            $data['current_question'] = 'business_type';
 
             // Mensaje 1: presentación del admin (se envía siempre antes de la primera pregunta).
             $greeting = $this->build_stage_1_greeting($implementation, $client);
             $this->send_outbound($implementation, 1, $phone, $greeting);
 
             // Mensaje 2: primera pregunta de configuración (sin saludo incluido).
-            $first_question = $this->build_question_use_price_lists($implementation, $client);
+            $first_question = $this->build_question_text('business_type', $data, $client, $implementation);
             $this->send_outbound($implementation, 1, $phone, $first_question);
 
             $stage->data = $data;
@@ -221,6 +219,11 @@ class ImplementationConversationService
 
         if ($current_question === 'logo_received') {
             $this->handle_stage_1_logo($stage, $data, $parsed, $phone, $implementation, $client);
+            return;
+        }
+
+        if ($current_question === 'social_networks') {
+            $this->handle_stage_1_social_networks($stage, $data, $parsed, $phone, $implementation, $client);
             return;
         }
 
@@ -446,6 +449,15 @@ class ImplementationConversationService
 
         // Imagen recibida: marcar logo_received y avanzar.
         $data['logo_received'] = true;
+
+        // Guardar la URL del logo recibido (si Kapso la incluyó en el media entrante)
+        // para reutilizarla en el setup del sistema y en la sugerencia de colores de la tienda.
+        $logo_url = '';
+        if (isset($parsed['inbound_media']) && is_array($parsed['inbound_media'])) {
+            $logo_url = (string) ($parsed['inbound_media']['url'] ?? '');
+        }
+        $data['logo_url'] = $logo_url;
+
         $next_question = $this->get_next_stage1_key('logo_received', $data);
 
         if ($next_question === null) {
@@ -465,6 +477,87 @@ class ImplementationConversationService
 
         // Acuse de recibo al recibir el logo y avanzar a la siguiente pregunta.
         $outbound_text = $this->build_acknowledgement() . ' ' . $next_question_text;
+        $this->send_outbound($implementation, 1, $phone, $outbound_text);
+    }
+
+    /**
+     * Maneja la pregunta de redes sociales: detecta negativa o extrae instagram/facebook.
+     *
+     * Delega la interpretación a ImplementationAiInterpreter con la clave 'social_networks'.
+     * - Negativa o sin redes → guarda data['social_networks'] = 'none'.
+     * - Links provistos → guarda data['social_networks'] = 'provided' y, por separado,
+     *   data['instagram'] y/o data['facebook'].
+     * - Ambiguo → reenvía la pregunta.
+     *
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data
+     * @param array<string, mixed> $parsed
+     * @param string               $phone
+     * @param Implementation       $implementation
+     * @param Client|null          $client
+     *
+     * @return void
+     */
+    private function handle_stage_1_social_networks(
+        ImplementationStage $stage,
+        array $data,
+        array $parsed,
+        string $phone,
+        Implementation $implementation,
+        ?Client $client
+    ): void {
+        $body = trim((string) ($parsed['body'] ?? ''));
+
+        // Texto exacto de la pregunta que se le envió al cliente.
+        $question_text = $this->build_question_text('social_networks', $data, $client, $implementation);
+
+        // Interpretar la respuesta: objeto {instagram, facebook, none} o null si ambiguo.
+        $interpretation = $this->ai_interpreter->interpret('social_networks', $question_text, $body);
+        $value          = $interpretation['value'] ?? null;
+
+        if (! is_array($value)) {
+            // Respuesta ambigua: reenviar la misma pregunta con aclaración.
+            $this->send_outbound($implementation, 1, $phone, 'No entendí bien tu respuesta. ' . $question_text);
+            return;
+        }
+
+        // Extraer cada red social interpretada (string vacío si no se mencionó).
+        $instagram = trim((string) ($value['instagram'] ?? ''));
+        $facebook  = trim((string) ($value['facebook'] ?? ''));
+        $is_none   = ($value['none'] ?? false) === true;
+
+        if ($is_none || ($instagram === '' && $facebook === '')) {
+            // El cliente no tiene o prefiere no compartir redes.
+            $data['social_networks'] = 'none';
+        } else {
+            // Guardar las redes provistas por separado.
+            $data['social_networks'] = 'provided';
+            if ($instagram !== '') {
+                $data['instagram'] = $instagram;
+            }
+            if ($facebook !== '') {
+                $data['facebook'] = $facebook;
+            }
+        }
+
+        // Avanzar a la siguiente pregunta de la secuencia.
+        $next_question = $this->get_next_stage1_key('social_networks', $data);
+
+        if ($next_question === null) {
+            $data['current_question'] = 'completed';
+            $data['completed']        = true;
+            $stage->data              = $data;
+            $stage->save();
+            $this->finish_stage_1($implementation, $phone, $client);
+            return;
+        }
+
+        $data['current_question'] = $next_question;
+        $stage->data              = $data;
+        $stage->save();
+
+        $next_question_text = $this->build_question_text($next_question, $data, $client, $implementation);
+        $outbound_text      = $this->build_acknowledgement() . ' ' . $next_question_text;
         $this->send_outbound($implementation, 1, $phone, $outbound_text);
     }
 
@@ -546,12 +639,17 @@ class ImplementationConversationService
         }
 
         if ($new_stage === 3) {
-            // Etapa manual: solo notificar al admin que debe ejecutar la instalación.
+            // Etapa manual: notificar al admin que debe ejecutar la instalación.
             $client      = $implementation->client ?? Client::find($implementation->client_id);
             $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
             $admin_message = "🛠️ {$client_name} está lista para instalar. Etapa 3: instalación del sistema y creación de empleados.";
             $this->notify_assigned_admin($implementation, $admin_message);
+
+            // Disparar el UserSetup remoto en empresa-api con los datos recolectados en la Etapa 1
+            // para que el sistema del cliente quede configurado a medida desde el inicio.
+            // No bloquea el flujo si falla (el servicio captura y loguea cualquier error).
+            (new ImplementationUserSetupService())->trigger_user_setup($implementation);
             return;
         }
 
@@ -2808,6 +2906,7 @@ class ImplementationConversationService
             case 'use_deposits':
             case 'ask_amount_in_vender':
             case 'default_cuenta_corriente':
+            case 'dollar_prices':
                 return $this->parse_bool_response($question, $body, $data, $client, $implementation);
 
             // Preguntas de texto libre: cualquier respuesta no vacía es válida.
@@ -2815,6 +2914,8 @@ class ImplementationConversationService
             case 'deposit_names':
             case 'payment_discounts':
             case 'company_name':
+            case 'business_type':
+            case 'address_company':
                 return $body !== '' ? $body : null;
 
             // employees se maneja en handle_stage_1_employees; no debería llegar aquí.
@@ -2917,8 +3018,8 @@ class ImplementationConversationService
      */
     private function resolve_stage1_sequence(array $data): array
     {
-        // Secuencia base de preguntas.
-        $keys = ['use_price_lists'];
+        // Secuencia base de preguntas. El tipo de negocio es siempre la primera pregunta.
+        $keys = ['business_type', 'use_price_lists'];
 
         // Preguntar por nombres de listas solo si el cliente usará listas de precios.
         if (isset($data['use_price_lists']) && $data['use_price_lists'] === true) {
@@ -2934,8 +3035,14 @@ class ImplementationConversationService
 
         $keys[] = 'payment_discounts';
         $keys[] = 'company_name';
+        // Dirección del negocio: se usa en los comprobantes.
+        $keys[] = 'address_company';
         $keys[] = 'employees';
         $keys[] = 'logo_received';
+        // Redes sociales para mostrar en la tienda online.
+        $keys[] = 'social_networks';
+        // Manejo de precios en dólares además de pesos.
+        $keys[] = 'dollar_prices';
         $keys[] = 'ask_amount_in_vender';
         $keys[] = 'default_cuenta_corriente';
 
@@ -2960,13 +3067,18 @@ class ImplementationConversationService
             return null;
         }
 
-        // Índice siguiente; null si es el último.
-        $next_index = (int) $current_index + 1;
-        if ($next_index >= count($sequence)) {
-            return null;
+        // Devolver la primera clave posterior que aún no fue respondida.
+        // Esto permite saltar preguntas pre-configuradas (ej: use_price_lists confirmado
+        // desde el lead) sin volver a preguntarlas.
+        for ($next_index = (int) $current_index + 1; $next_index < count($sequence); $next_index++) {
+            $next_key = $sequence[$next_index];
+
+            if (! array_key_exists($next_key, $data)) {
+                return $next_key;
+            }
         }
 
-        return $sequence[$next_index];
+        return null;
     }
 
     // -------------------------------------------------------------------------
@@ -2986,6 +3098,8 @@ class ImplementationConversationService
     private function build_question_text(string $key, array $data, ?Client $client, ?Implementation $implementation = null): string
     {
         switch ($key) {
+            case 'business_type':
+                return "Para empezar: ¿a qué se dedica el negocio? Por ejemplo: distribuidora, ropa, ferretería, verdulería, etc. Con eso configuramos el sistema a medida.";
             case 'use_price_lists':
                 return $this->build_question_use_price_lists($implementation, $client);
             case 'price_lists':
@@ -2998,11 +3112,17 @@ class ImplementationConversationService
                 return "¿Manejás algún descuento o recargo según cómo te pagan? Por ejemplo efectivo con descuento, transferencia con recargo, o algo por el estilo.";
             case 'company_name':
                 return "¿Cuál es el nombre de tu empresa tal como debe figurar en los comprobantes?";
+            case 'address_company':
+                return "¿Cuál es la dirección del negocio? La usamos en los comprobantes.";
             case 'employees':
                 // Sin instrucción de "escribí listo": el sistema detecta el fin de forma inteligente.
                 return "Necesito los datos de vos y de todos los empleados que van a usar el sistema. Por cada persona indicame nombre completo, número de documento, área (ventas, stock, administración, etc.) y número de WhatsApp.\nEsa info nos sirve para asignarle permisos iniciales a cada uno — los permisos se pueden ajustar más adelante cuando el sistema esté en marcha.";
             case 'logo_received':
                 return "Por último, enviame el logo de tu empresa en formato cuadrado. Lo vamos a usar en los comprobantes.";
+            case 'social_networks':
+                return "¿Tenés Instagram o Facebook del negocio? Si querés que aparezcan en tu tienda online, mandame los links. Si no tenés o preferís no ponerlos, avisame.";
+            case 'dollar_prices':
+                return "¿Manejás precios en dólares además de pesos?";
             case 'ask_amount_in_vender':
                 return "Cuando cargás una venta, ¿preferís que el sistema te pregunte cuántas unidades querés vender de cada producto, o que agregue una unidad automáticamente y vos la cambiás si hace falta?";
             case 'default_cuenta_corriente':
@@ -3188,6 +3308,11 @@ class ImplementationConversationService
             }
         }
 
+        // Copiar los datos de configuración recolectados al cliente para usarlos en el UserSetup.
+        if ($stage_1 !== null && $client !== null) {
+            $this->save_setup_data_to_client($implementation, $stage_1);
+        }
+
         // Evento Pusher al canal private-admin para notificar en tiempo real al panel.
         event(new ImplementationStageCompleted(
             $implementation->id,
@@ -3197,6 +3322,64 @@ class ImplementationConversationService
 
         // Notificación WhatsApp al admin asignado.
         $this->notify_assigned_admin_stage1_complete($implementation, $client_name);
+    }
+
+    /**
+     * Copia los datos de configuración recolectados en la Etapa 1 al campo setup_data
+     * del cliente, normalizados para que el UserSetup de empresa-api los consuma luego.
+     *
+     * @param Implementation      $implementation Implementación dueña de la etapa.
+     * @param ImplementationStage $stage_1        Etapa 1 con los datos recolectados.
+     *
+     * @return void
+     */
+    private function save_setup_data_to_client(Implementation $implementation, ImplementationStage $stage_1): void
+    {
+        // Cliente destino: dueño de la implementación.
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+
+        if ($client === null) {
+            return;
+        }
+
+        // Data recolectada durante la conversación de la Etapa 1.
+        $stage_data = is_array($stage_1->data) ? $stage_1->data : [];
+
+        // Construir el array de configuración con los campos relevantes para el setup del sistema.
+        $setup_data = [
+            // Tipo de negocio (texto libre): condiciona el preset del sistema en empresa-api.
+            'business_type'                       => (string) ($stage_data['business_type'] ?? ''),
+            // Listas de precios: bandera y detalle en texto.
+            'use_price_lists'                     => ($stage_data['use_price_lists'] ?? false) === true,
+            'price_lists'                         => (string) ($stage_data['price_lists'] ?? ''),
+            // Depósitos / sucursales: bandera y nombres en texto.
+            'use_deposits'                        => ($stage_data['use_deposits'] ?? false) === true,
+            'deposit_names'                       => (string) ($stage_data['deposit_names'] ?? ''),
+            // IVA incluido en los precios (no se pregunta en Etapa 1; se deja por defecto en true).
+            'iva_included'                        => true,
+            // Cantidad al cargar una venta: preguntar (true) o agregar 1 automáticamente (false).
+            'ask_amount_in_vender'                => ($stage_data['ask_amount_in_vender'] ?? false) === true,
+            // Omitir cuenta corriente por defecto: se deriva de default_cuenta_corriente.
+            'siempre_omitir_en_cuenta_corriente'  => ! (($stage_data['default_cuenta_corriente'] ?? false) === true),
+            // Logo y redes sociales para online_configurations de la tienda.
+            'logo_url'                            => (string) ($stage_data['logo_url'] ?? ''),
+            'instagram'                           => (string) ($stage_data['instagram'] ?? ''),
+            'facebook'                            => (string) ($stage_data['facebook'] ?? ''),
+            // Tipo de precio online: no se pregunta en el flujo de sistema (se define en el ecommerce).
+            'online_price_type_id'                => $stage_data['online_price_type'] ?? null,
+            // Preferencias de entrega/retiro (se completan en el flujo de ecommerce si aplica).
+            'has_delivery'                        => ($stage_data['has_delivery'] ?? false) === true,
+            'retiro_por_local'                    => ($stage_data['retiro_por_local'] ?? false) === true,
+            'enviar_whatsapp_al_terminar_pedido'  => ($stage_data['enviar_whatsapp_al_terminar_pedido'] ?? false) === true,
+            // Dirección del negocio para los comprobantes.
+            'address_company'                     => (string) ($stage_data['address_company'] ?? ''),
+            // Cotización de precios en dólares: se deriva de dollar_prices.
+            'cotizar_precios_en_dolares'          => ($stage_data['dollar_prices'] ?? false) === true,
+        ];
+
+        // Persistir la configuración en el cliente (cast 'array' serializa a JSON).
+        $client->setup_data = $setup_data;
+        $client->save();
     }
 
     /**
