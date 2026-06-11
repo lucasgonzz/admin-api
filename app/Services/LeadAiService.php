@@ -87,13 +87,21 @@ class LeadAiService
         $parsed = $this->parse_json_response($text);
 
         /*
-         * Si Claude indicó que necesita disponibilidad para agendar la demo,
-         * realizar una segunda llamada con los slots libres como contexto.
-         * Si la segunda llamada falla, se usa la respuesta de la primera con nota.
+         * Determinar si hay que hacer la segunda llamada con slots disponibles.
+         *
+         * Se fuerza en dos casos:
+         *   1. Claude lo pidió explícitamente (solicita_disponibilidad: true).
+         *   2. Claude sugiere demo_agendada: siempre hay que verificar que el slot
+         *      propuesto esté libre antes de confirmar, sin importar si Claude
+         *      devolvió solicita_disponibilidad: false o no lo incluyó.
          */
         $solicita_disponibilidad = ! empty($parsed['solicita_disponibilidad']);
+        $estado_sugerido         = trim((string) ($parsed['estado_sugerido'] ?? ''));
 
-        if ($solicita_disponibilidad) {
+        /* true cuando cualquiera de las dos condiciones aplica */
+        $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada';
+
+        if ($needs_availability_check) {
             try {
                 return $this->generate_suggestion_with_availability($lead, $is_followup);
             } catch (\Throwable $e) {
@@ -116,9 +124,14 @@ class LeadAiService
     /**
      * Realiza una segunda llamada a Claude incluyendo los slots de demo disponibles.
      *
-     * Se invoca cuando la primera llamada devuelve `solicita_disponibilidad: true`.
-     * Obtiene los horarios libres, construye el contexto y repite la llamada a la API
-     * para que Claude sugiera horarios concretos al setter.
+     * Se invoca cuando:
+     *   - La primera llamada devuelve `solicita_disponibilidad: true`, o bien
+     *   - La primera llamada devuelve `estado_sugerido: demo_agendada` (se fuerza
+     *     la verificación para evitar confirmar horarios ocupados).
+     *
+     * Obtiene los horarios libres, detecta si el lead propuso un horario concreto,
+     * construye el contexto y repite la llamada a la API para que Claude confirme
+     * o rechace ese horario y sugiera alternativas si es necesario.
      *
      * @param Lead $lead        Lead con relación `messages` cargada.
      * @param bool $is_followup true si lo disparó el scheduler de inactividad.
@@ -148,8 +161,37 @@ class LeadAiService
             }
         }
 
-        /* String completo que se inyecta como contexto en el user content. */
+        /* String base que se inyecta como contexto en el user content. */
         $availability_context = "Slots disponibles (demos de 1 hora, lunes a viernes 9-18hs, sábado 9-12hs):\n{$availability_lines}";
+
+        /*
+         * Detectar si el último mensaje del lead contiene un horario concreto propuesto.
+         * Si lo tiene, agregarlo al contexto para que Claude lo verifique explícitamente
+         * contra los slots disponibles antes de confirmar o rechazar ese horario.
+         */
+        $lead_proposed_time = '';
+
+        /* Último mensaje enviado por el lead (sender = 'lead'). */
+        $last_lead_message = $lead->messages
+            ->filter(fn($m) => (string) $m->sender === 'lead')
+            ->last();
+
+        if ($last_lead_message) {
+            $last_content = trim((string) $last_lead_message->content);
+
+            /*
+             * Detectar patrones de hora en el mensaje del lead.
+             * Ejemplos que deben matchear: "12", "12hs", "12:00", "las 12", "a las 10:30".
+             */
+            if (preg_match('/\b(\d{1,2})(?::(\d{2}))?\s*(?:hs?|h|:00)?\b/i', $last_content, $m)) {
+                $lead_proposed_time = $m[0];
+            }
+        }
+
+        /* Si se detectó un horario propuesto, agregar instrucción explícita para Claude. */
+        if ($lead_proposed_time !== '') {
+            $availability_context .= "\nEl lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en los slots disponibles de arriba. Si aparece: confirmalo. Si NO aparece: es porque está ocupado - informale al lead que ese horario no está disponible y ofrecele las alternativas libres más cercanas.";
+        }
 
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt();
