@@ -50,6 +50,17 @@ class LeadAiService
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
+        /* Log de diagnóstico: contenido enviado a Claude en la primera llamada. */
+        Log::debug('LeadAiService [PRIMERA LLAMADA] - system prompt', [
+            'lead_id' => $lead->id,
+            'system'  => $system,
+        ]);
+
+        Log::debug('LeadAiService [PRIMERA LLAMADA] - user content', [
+            'lead_id' => $lead->id,
+            'content' => $user_content,
+        ]);
+
         /* Primera llamada a Claude para obtener sugerencia base. */
         $response = $http->post('https://api.anthropic.com/v1/messages', [
             'model'      => $model,
@@ -66,6 +77,13 @@ class LeadAiService
         }
 
         $text   = $this->extract_response_text($response->json());
+
+        /* Log de diagnóstico: respuesta cruda de Claude en la primera llamada. */
+        Log::debug('LeadAiService [PRIMERA LLAMADA] - respuesta Claude', [
+            'lead_id'  => $lead->id,
+            'response' => $text,
+        ]);
+
         $parsed = $this->parse_json_response($text);
 
         /*
@@ -139,6 +157,17 @@ class LeadAiService
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
+        /* Log de diagnóstico: contenido enviado a Claude en la segunda llamada. */
+        Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - system prompt', [
+            'lead_id' => $lead->id,
+            'system'  => $system,
+        ]);
+
+        Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - user content', [
+            'lead_id' => $lead->id,
+            'content' => $user_content,
+        ]);
+
         /* Segunda llamada a Claude con disponibilidad como contexto adicional. */
         $response = $http->post('https://api.anthropic.com/v1/messages', [
             'model'      => $model,
@@ -158,6 +187,13 @@ class LeadAiService
         }
 
         $text   = $this->extract_response_text($response->json());
+
+        /* Log de diagnóstico: respuesta cruda de Claude en la segunda llamada. */
+        Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - respuesta Claude', [
+            'lead_id'  => $lead->id,
+            'response' => $text,
+        ]);
+
         $parsed = $this->parse_json_response($text);
 
         return $this->create_message_and_update_lead($lead, $parsed, $is_followup);
