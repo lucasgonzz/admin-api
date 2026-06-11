@@ -227,6 +227,10 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/agent-identity', [\App\Http\Controllers\Api\AgentIdentityController::class, 'show']);
         Route::put('settings/agent-identity', [\App\Http\Controllers\Api\AgentIdentityController::class, 'update']);
 
+        // Configuración de demos: duración, márgenes de setup/gracia y tiempos de automatizaciones.
+        Route::get('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'show']);
+        Route::put('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'update']);
+
         // Implementaciones: listado, detalle y avance manual de etapa.
         Route::get('implementation', [\App\Http\Controllers\Api\ImplementationController::class, 'index']);
         // Conteo de implementaciones listas para avanzar (badge del Nav); debe ir antes del wildcard {implementation}.

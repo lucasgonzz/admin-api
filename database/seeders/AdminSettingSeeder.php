@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\AdminSetting;
+use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Seeder;
 
@@ -23,5 +24,8 @@ class AdminSettingSeeder extends Seeder
         }
 
         LeadWhatsappOnboardingSettings::seed_defaults_if_missing();
+
+        /* Valores por defecto de configuración de demos (duración, márgenes, automatizaciones). */
+        LeadDemoSettings::seed_defaults_if_missing();
     }
 }

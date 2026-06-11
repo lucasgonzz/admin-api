@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Events\LeadSuggestionCreated;
 use App\Services\LeadBroadcastService;
+use App\Services\LeadDemoSettings;
 use App\Models\AiSystemPrompt;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -268,37 +269,248 @@ class LeadAiService
      */
     public function get_available_slots(int $days_ahead = 3): array
     {
+        /* Leer parámetros de configuración de demos. */
+        $duracion    = LeadDemoSettings::get_duracion_minutos();
+        $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
+        $gracia_post = LeadDemoSettings::get_gracia_minutos_post();
+
+        /* Obtener todas las demos registradas para el cálculo multi-demo. */
+        $demos = \App\Models\Demo::orderBy('id')->get();
+
         /*
-         * Construir la lista de días hábiles a partir de mañana.
-         * Se excluyen los domingos; los sábados tienen slots reducidos.
+         * Fallback: si no hay demos registradas, usar el algoritmo legacy
+         * (bloquea exactamente el slot de inicio sin márgenes).
          */
+        if ($demos->isEmpty()) {
+            return $this->get_available_slots_legacy($days_ahead);
+        }
+
+        /* Construir lista de días hábiles a partir de mañana (excluye domingos). */
         $working_days = [];
-        /*
-         * Cursor empieza mañana al inicio del día en timezone Argentina.
-         * Usar la timezone local evita que diferencias UTC adelanten o atrasen el corte de día.
-         */
+        /* Cursor empieza mañana al inicio del día en timezone Argentina. */
         $cursor = now('America/Argentina/Buenos_Aires')->startOfDay()->addDay();
 
         while (count($working_days) < $days_ahead) {
-            /* 0 = domingo, se omite */
+            /* 0 = domingo, se omite. */
             if ($cursor->dayOfWeek !== 0) {
                 $working_days[] = $cursor->copy();
             }
             $cursor->addDay();
         }
-        /* Al salir del while, $cursor apunta al día siguiente al último día incluido */
+        /* Al salir del while, $cursor apunta al día siguiente al último día incluido. */
 
-        /* Construir array de strings de fecha para la consulta SQL. */
+        /* Array de strings de fecha para la consulta SQL. */
         $date_strings = array_map(function ($day) {
             return $day->format('Y-m-d');
         }, $working_days);
 
         /*
-         * Consultar leads con demo agendada en esos días.
-         * Se usa CONVERT_TZ para comparar en timezone Argentina:
-         * demo_date se guarda como datetime UTC en MySQL, hay que convertir
-         * a -03:00 antes de extraer la fecha con DATE().
+         * Obtener todos los leads con demo agendada en esos días.
+         * Se incluye demo_id para asociar cada bloqueo a su demo específica.
          */
+        $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
+        $booked_leads = Lead::whereRaw(
+            "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
+            $date_strings
+        )
+            ->whereNotNull('demo_start_time')
+            ->whereNotNull('demo_id')
+            ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+
+        /*
+         * Construir mapa de rangos bloqueados por demo y fecha.
+         * blocked_by_demo[$demo_id][$date] = [[block_start_min, block_end_min], ...]
+         */
+        $blocked_by_demo = [];
+        foreach ($demos as $demo) {
+            $blocked_by_demo[$demo->id] = [];
+            foreach ($date_strings as $date) {
+                $blocked_by_demo[$demo->id][$date] = [];
+            }
+        }
+
+        foreach ($booked_leads as $bl) {
+            $demo_id  = (int) $bl->demo_id;
+            $date_key = $bl->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
+
+            if (! isset($blocked_by_demo[$demo_id][$date_key])) {
+                continue;
+            }
+
+            /* Parsear hora de inicio del lead. */
+            if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_start_time, $m)) {
+                continue;
+            }
+            $start_minutes = (int) $m[1] * 60 + (int) $m[2];
+
+            /* Hora de fin: usar demo_end_time si existe, sino calcular con duración configurada. */
+            if ($bl->demo_end_time && preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_end_time, $m2)) {
+                $end_minutes = (int) $m2[1] * 60 + (int) $m2[2];
+            } else {
+                $end_minutes = $start_minutes + $duracion;
+            }
+
+            /* El rango bloqueado incluye margen de setup antes y gracia después. */
+            $block_start = $start_minutes - $setup_antes;
+            $block_end   = $end_minutes + $gracia_post;
+
+            $blocked_by_demo[$demo_id][$date_key][] = [$block_start, $block_end];
+        }
+
+        /* Construir resultado: para cada día, slots disponibles en al menos una demo. */
+        $result   = [];
+        $any_full = false;
+
+        foreach ($working_days as $day) {
+            $date_key  = $day->format('Y-m-d');
+            /* Sábados tienen slots reducidos (9–11hs); resto de días 9–17hs. */
+            $all_slots = $day->dayOfWeek === 6
+                ? ['09:00', '10:00', '11:00']
+                : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+
+            $available = [];
+            foreach ($all_slots as $slot) {
+                [$sh, $sm]  = explode(':', $slot);
+                $slot_start = (int) $sh * 60 + (int) $sm;
+                $slot_end   = $slot_start + $duracion;
+
+                /*
+                 * El slot está disponible si al menos una demo no tiene solapamiento
+                 * con ninguno de sus rangos bloqueados.
+                 */
+                $slot_free = false;
+                foreach ($demos as $demo) {
+                    $demo_blocked   = $blocked_by_demo[$demo->id][$date_key] ?? [];
+                    $demo_slot_free = true;
+                    foreach ($demo_blocked as [$bstart, $bend]) {
+                        /* Solapamiento: el slot no está completamente fuera del rango bloqueado. */
+                        if ($slot_start < $bend && $slot_end > $bstart) {
+                            $demo_slot_free = false;
+                            break;
+                        }
+                    }
+                    if ($demo_slot_free) {
+                        $slot_free = true;
+                        break;
+                    }
+                }
+
+                if ($slot_free) {
+                    $available[] = $slot;
+                }
+            }
+
+            if (empty($available)) {
+                $any_full = true;
+            }
+            $result[$date_key] = $available;
+        }
+
+        /*
+         * Si algún día quedó completamente ocupado, agregar el siguiente día hábil
+         * para que Claude siempre tenga opciones concretas para ofrecer.
+         */
+        if ($any_full) {
+            /* Avanzar cursor hasta el próximo día hábil (saltar domingos). */
+            while ($cursor->dayOfWeek === 0) {
+                $cursor->addDay();
+            }
+            $extra_key = $cursor->format('Y-m-d');
+
+            /* Consultar leads con demo en el día extra. */
+            $extra_leads = Lead::whereRaw(
+                "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?",
+                [$extra_key]
+            )
+                ->whereNotNull('demo_start_time')
+                ->whereNotNull('demo_id')
+                ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+
+            /* Construir rangos bloqueados por demo para el día extra. */
+            $extra_blocked = [];
+            foreach ($demos as $demo) {
+                $extra_blocked[$demo->id] = [];
+            }
+            foreach ($extra_leads as $el) {
+                $demo_id = (int) $el->demo_id;
+                if (! isset($extra_blocked[$demo_id])) {
+                    continue;
+                }
+                if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $el->demo_start_time, $m)) {
+                    continue;
+                }
+                $s = (int) $m[1] * 60 + (int) $m[2];
+                if ($el->demo_end_time && preg_match('/(\d{1,2}):(\d{2})/', (string) $el->demo_end_time, $m2)) {
+                    $e = (int) $m2[1] * 60 + (int) $m2[2];
+                } else {
+                    $e = $s + $duracion;
+                }
+                $extra_blocked[$demo_id][] = [$s - $setup_antes, $e + $gracia_post];
+            }
+
+            /* Slots del día extra según día de semana. */
+            $extra_all = $cursor->dayOfWeek === 6
+                ? ['09:00', '10:00', '11:00']
+                : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+
+            $extra_available = [];
+            foreach ($extra_all as $slot) {
+                [$sh, $sm] = explode(':', $slot);
+                $ss        = (int) $sh * 60 + (int) $sm;
+                $se        = $ss + $duracion;
+                $free      = false;
+                foreach ($demos as $demo) {
+                    $db = $extra_blocked[$demo->id] ?? [];
+                    $df = true;
+                    foreach ($db as [$bs, $be]) {
+                        if ($ss < $be && $se > $bs) {
+                            $df = false;
+                            break;
+                        }
+                    }
+                    if ($df) {
+                        $free = true;
+                        break;
+                    }
+                }
+                if ($free) {
+                    $extra_available[] = $slot;
+                }
+            }
+            $result[$extra_key] = $extra_available;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Algoritmo legacy de disponibilidad: bloquea exactamente el slot de inicio_time
+     * sin márgenes ni soporte multi-demo. Se usa como fallback cuando no hay demos.
+     *
+     * Un slot está ocupado si existe un lead con `demo_date` en esa fecha
+     * y `demo_start_time` que coincide con el inicio del bloque.
+     *
+     * @param int $days_ahead Cantidad mínima de días hábiles a incluir (default: 3).
+     *
+     * @return array<string, string[]> Mapa fecha (Y-m-d) → array de slots disponibles ('HH:MM').
+     */
+    public function get_available_slots_legacy(int $days_ahead = 3): array
+    {
+        /* Construir lista de días hábiles a partir de mañana. */
+        $working_days = [];
+        $cursor       = now('America/Argentina/Buenos_Aires')->startOfDay()->addDay();
+
+        while (count($working_days) < $days_ahead) {
+            if ($cursor->dayOfWeek !== 0) {
+                $working_days[] = $cursor->copy();
+            }
+            $cursor->addDay();
+        }
+
+        $date_strings = array_map(function ($day) {
+            return $day->format('Y-m-d');
+        }, $working_days);
+
         $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
         $booked_leads = Lead::whereRaw(
             "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
@@ -307,55 +519,26 @@ class LeadAiService
             ->whereNotNull('demo_start_time')
             ->get(['demo_date', 'demo_start_time']);
 
-        /* Log de diagnóstico: qué leads con demo encontró la query. */
-        Log::debug('get_available_slots — booked_leads encontrados', [
-            'date_strings' => $date_strings,
-            'booked_leads' => $booked_leads->map(fn($l) => [
-                'demo_date_raw'  => $l->getRawOriginal('demo_date'),
-                'demo_date_tz'   => $l->demo_date->setTimezone('America/Argentina/Buenos_Aires')->toDateTimeString(),
-                'demo_start_time' => $l->demo_start_time,
-            ])->toArray(),
-        ]);
-
-        /* Agrupar horarios ocupados por fecha en formato 'HH:MM'. */
+        /* Agrupar horarios ocupados por fecha. */
         $occupied_by_date = [];
         foreach ($booked_leads as $booked_lead) {
-            /*
-             * Convertir a timezone Argentina antes de formatear: demo_date se guarda en UTC
-             * y Carbon lo castea como tal. Sin la conversión, leads con demo entre las 00:00
-             * y las 02:59 Argentina aparecen un día antes en UTC y el slot no se bloquea.
-             */
             $date_key = $booked_lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
             $time_raw = trim((string) $booked_lead->demo_start_time);
-
-            /* Normalizar la hora a formato 'HH:MM' independientemente de cómo fue guardada. */
             if (preg_match('/(\d{1,2}):(\d{2})/', $time_raw, $m)) {
-                $normalized                    = str_pad($m[1], 2, '0', STR_PAD_LEFT).':'.$m[2];
-                $occupied_by_date[$date_key][] = $normalized;
+                $occupied_by_date[$date_key][] = str_pad($m[1], 2, '0', STR_PAD_LEFT).':'.$m[2];
             }
         }
 
-        /* Construir el resultado con slots disponibles por día. */
         $result   = [];
         $any_full = false;
 
-        /* Log de diagnóstico: mapa de ocupados por fecha. */
-        Log::debug('get_available_slots — occupied_by_date', [
-            'occupied_by_date' => $occupied_by_date,
-        ]);
-
         foreach ($working_days as $day) {
-            $date_key = $day->format('Y-m-d');
-
-            /* Slots posibles según día de semana: 6 = sábado. */
+            $date_key  = $day->format('Y-m-d');
             $all_slots = $day->dayOfWeek === 6
                 ? ['09:00', '10:00', '11:00']
                 : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
 
-            /* Slots ocupados para este día (default array vacío si ninguno está reservado). */
-            $booked = isset($occupied_by_date[$date_key]) ? $occupied_by_date[$date_key] : [];
-
-            /* Filtrar los slots que no están ocupados. */
+            $booked    = isset($occupied_by_date[$date_key]) ? $occupied_by_date[$date_key] : [];
             $available = array_values(array_filter($all_slots, function ($slot) use ($booked) {
                 return ! in_array($slot, $booked, true);
             }));
@@ -363,23 +546,14 @@ class LeadAiService
             if (empty($available)) {
                 $any_full = true;
             }
-
             $result[$date_key] = $available;
         }
 
-        /*
-         * Si algún día quedó completamente ocupado, agregar el siguiente día hábil
-         * para asegurar que Claude siempre tenga opciones concretas para ofrecer.
-         */
         if ($any_full) {
-            /* Avanzar el cursor hasta el próximo día hábil (saltar domingos). */
             while ($cursor->dayOfWeek === 0) {
                 $cursor->addDay();
             }
-
-            $extra_key = $cursor->format('Y-m-d');
-
-            /* Consultar ocupados del día extra (query puntual). */
+            $extra_key   = $cursor->format('Y-m-d');
             $extra_leads = Lead::whereRaw(
                 "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?",
                 [$extra_key]
@@ -395,7 +569,6 @@ class LeadAiService
                 }
             }
 
-            /* Slots del día extra según día de semana. */
             $extra_all_slots = $cursor->dayOfWeek === 6
                 ? ['09:00', '10:00', '11:00']
                 : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
