@@ -109,6 +109,12 @@ class Lead extends Model
         // Flag de recordatorio pre-demo: evita generar el mensaje más de una vez por demo agendada.
         'recordatorio_demo_enviado'    => 'boolean',
 
+        // Flag de check de ingreso post-demo: evita duplicar el mensaje al lead.
+        'demo_check_ingreso_enviado'   => 'boolean',
+
+        // Timestamp de llamada del closer tras la demo: parte del pipeline de cierre.
+        'closer_called_at'             => 'datetime',
+
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'        => 'array',
     ];

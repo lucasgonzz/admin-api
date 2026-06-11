@@ -1345,6 +1345,206 @@ class LeadController extends Controller
     }
 
     /**
+     * Envía el recordatorio pre-demo manualmente desde admin-spa.
+     *
+     * Genera el mensaje de recordatorio sin verificar timing (útil para testing
+     * sin esperar el scheduler SendDemoReminders). Crea un LeadMessage con
+     * status 'sugerido' y actualiza el flag recordatorio_demo_enviado.
+     *
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_demo_reminder_json($id)
+    {
+        /* Lead objetivo con mensajes para construir el contexto del recordatorio. */
+        $lead = Lead::with('messages')->findOrFail($id);
+
+        /* Construir la fecha y hora de la demo para incluir en el mensaje. */
+        $demo_date_str = $lead->demo_date
+            ? $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d')
+            : now('America/Argentina/Buenos_Aires')->format('Y-m-d');
+        $demo_time_str = $lead->demo_start_time ?? '00:00';
+
+        try {
+            /* Parsear la fecha completa combinando fecha y hora de la demo. */
+            $demo_datetime = \Carbon\Carbon::parse("{$demo_date_str} {$demo_time_str}");
+        } catch (\Exception $e) {
+            $demo_datetime = now('America/Argentina/Buenos_Aires');
+        }
+
+        /* Nombre del contacto con fallback para evitar saludo vacío. */
+        $contact_name = $lead->contact_name ?? 'Cliente';
+        /* Hora formateada para incluir en el razonamiento del mensaje. */
+        $demo_hour = $demo_datetime->format('H:i');
+
+        /* Texto del recordatorio: mismo contenido que el scheduler automático. */
+        $content = "Hola {$contact_name}! En unos minutos ya tenés disponible el acceso a la demo de ComercioCity.\n\n"
+            . "Un consejo antes de entrar: empezá por el video introductorio que te mandamos al mail, "
+            . "son 3 minutos y te van a ayudar a entender qué mirar cuando entrás al sistema.\n\n"
+            . "Cualquier duda que surja mientras recorrés la plataforma, escribime por acá. 👋";
+
+        /* Crear mensaje sugerido para que el setter lo revise antes de enviar. */
+        \App\Models\LeadMessage::create([
+            'lead_id'      => $lead->id,
+            'sender'       => 'sistema',
+            'content'      => $content,
+            'status'       => 'sugerido',
+            'is_followup'  => false,
+            'ai_reasoning' => "Recordatorio manual pre-demo. Demo programada para las {$demo_hour}.",
+        ]);
+
+        /* Marcar el lead como que ya tiene el recordatorio y una sugerencia pendiente. */
+        $lead->update([
+            'recordatorio_demo_enviado'  => true,
+            'tiene_sugerencia_pendiente' => true,
+        ]);
+
+        \App\Events\LeadSuggestionCreated::dispatch($lead->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Genera el check de ingreso a la demo manualmente desde admin-spa.
+     *
+     * Crea el mensaje de check de ingreso sin verificar timing (para testing
+     * sin esperar el scheduler DemoIngressCheck). Actualiza el flag
+     * demo_check_ingreso_enviado para evitar duplicados.
+     *
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function check_demo_ingress_json($id)
+    {
+        /* Lead objetivo con mensajes para el check de ingreso. */
+        $lead = Lead::with('messages')->findOrFail($id);
+
+        /* Nombre del contacto con fallback para saludo personalizado. */
+        $contact_name = $lead->contact_name ?? 'Cliente';
+
+        /* Crear mensaje sugerido de check de ingreso para el setter. */
+        \App\Models\LeadMessage::create([
+            'lead_id'      => $lead->id,
+            'sender'       => 'sistema',
+            'content'      => "Hola {$contact_name}! ¿Pudiste ingresar a la demo sin problemas? 👋",
+            'status'       => 'sugerido',
+            'is_followup'  => false,
+            'ai_reasoning' => 'Check manual de ingreso a la demo.',
+        ]);
+
+        /* Marcar el lead como que ya recibió el check de ingreso y tiene sugerencia pendiente. */
+        $lead->update([
+            'demo_check_ingreso_enviado' => true,
+            'tiene_sugerencia_pendiente' => true,
+        ]);
+
+        \App\Events\LeadSuggestionCreated::dispatch($lead->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Genera el resumen del lead con Claude manualmente desde admin-spa.
+     *
+     * Llama a la API de Anthropic con el historial de mensajes del lead para
+     * producir un resumen orientado al closer. Mismo prompt que el scheduler
+     * GenerateDemoSummary pero sin esperar el timing automático.
+     *
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function generate_demo_summary_json($id)
+    {
+        /* Lead con historial completo de mensajes para alimentar el prompt. */
+        $lead = Lead::with('messages')->findOrFail($id);
+
+        /* System prompt idéntico al usado en el scheduler automático. */
+        $system_prompt = 'Sos un asistente de ventas. Tu tarea es generar un resumen breve del perfil de este lead '
+            . 'para que el closer pueda llamarlo inmediatamente después de la demo con todo el contexto necesario. '
+            . 'El resumen debe incluir: tipo de negocio, cantidad de empleados, dolores principales que mencionó, '
+            . 'qué funcionalidades le interesaron (si las mencionó), objeciones que planteó, preguntas que hizo, '
+            . 'y cualquier información relevante para el cierre. '
+            . 'Máximo 200 palabras. Sin bullets. Prosa natural.';
+
+        /* Construir el historial formateado para Claude a partir de los mensajes del lead. */
+        $messages_text = $lead->messages->map(function ($msg) {
+            $sender  = $msg->sender === 'lead' ? 'LEAD' : 'MARTÍN';
+            $content = trim((string) ($msg->content ?? ''));
+            if ($content === '') {
+                return null;
+            }
+
+            return "[{$sender}]: {$content}";
+        })->filter()->implode("\n");
+
+        /* Sin mensajes no hay historial para resumir. */
+        if (empty($messages_text)) {
+            return response()->json(['message' => 'El lead no tiene mensajes para resumir.'], 422);
+        }
+
+        /* Prompt de usuario con la conversación completa. */
+        $user_content = "Conversación completa con el lead:\n\n{$messages_text}\n\nGenerá el resumen para el closer.";
+
+        try {
+            /* Llamada a la API de Anthropic con los parámetros estándar del proyecto. */
+            $response = \Illuminate\Support\Facades\Http::withHeaders([
+                'x-api-key'         => config('services.anthropic.api_key'),
+                'anthropic-version' => '2023-06-01',
+                'content-type'      => 'application/json',
+            ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
+                'model'      => config('services.anthropic.model', 'claude-sonnet-4-20250514'),
+                'max_tokens' => 800,
+                'system'     => $system_prompt,
+                'messages'   => [['role' => 'user', 'content' => $user_content]],
+            ]);
+
+            $body    = $response->json();
+            /* Texto generado por Claude: primer bloque de contenido de la respuesta. */
+            $summary = trim($body['content'][0]['text'] ?? '');
+
+            if (empty($summary)) {
+                return response()->json(['message' => 'Claude no devolvió resumen.'], 422);
+            }
+
+            /* Persistir el resumen generado en el campo demo_summary del lead. */
+            $lead->update(['demo_summary' => $summary]);
+
+            return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+
+        } catch (\Throwable $e) {
+            Log::error('LeadController@generate_demo_summary_json: error al llamar Claude.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'Error al generar resumen: ' . $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Marca que el closer realizó la llamada post-demo al lead.
+     *
+     * Actualiza el timestamp closer_called_at con el momento actual,
+     * completando la etapa final del pipeline de cierre comercial.
+     *
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function mark_closer_called_json($id)
+    {
+        /* Lead objetivo de la marca de llamada del closer. */
+        $lead = Lead::findOrFail($id);
+        /* Registrar el momento exacto de la llamada del closer. */
+        $lead->update(['closer_called_at' => now()]);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Normaliza el input del formulario (contact + setup técnico) en un array
      * listo para create/update. Las checkboxes se resuelven con boolean().
      *

@@ -114,6 +114,10 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
+        Route::post('lead/{id}/send-demo-reminder', [LeadController::class, 'send_demo_reminder_json']);
+        Route::post('lead/{id}/check-demo-ingress', [LeadController::class, 'check_demo_ingress_json']);
+        Route::post('lead/{id}/generate-demo-summary', [LeadController::class, 'generate_demo_summary_json']);
+        Route::post('lead/{id}/mark-closer-called', [LeadController::class, 'mark_closer_called_json']);
         Route::put('lead-message/{id}/approve', [LeadController::class, 'approve_message_json']);
         Route::put('lead-message/{id}/approve-with-edit', [LeadController::class, 'approve_message_with_edit_json']);
         Route::put('lead-message/{id}/reject', [LeadController::class, 'reject_message_json']);
