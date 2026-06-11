@@ -399,11 +399,13 @@ class LeadAiService
 
         $lead->save();
 
+        /* Programar auto-envío antes del broadcast: el payload Pusher debe incluir ai_auto_send_at. */
+        (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
+        $msg = $msg->fresh();
+
         // Notificar a admin-spa vía socket para actualizar la fila del lead en tiempo real.
         LeadSuggestionCreated::dispatch($lead->id);
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
-
-        (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
 
         return $msg;
     }
@@ -455,12 +457,22 @@ class LeadAiService
     {
         $historial = '';
         foreach ($lead->messages as $msg) {
-            $label = strtoupper((string) $msg->sender);
+            $sender = (string) $msg->sender;
+            $status = (string) $msg->status;
+            $label = strtoupper($sender);
             // Audio: content es la transcripción Kapso; el prefijo orienta a Claude como en soporte.
-            if ((string) $msg->sender === 'lead' && (string) ($msg->kind ?? 'text') === 'audio') {
+            if ($sender === 'lead' && (string) ($msg->kind ?? 'text') === 'audio') {
                 $label = 'LEAD (audio transcripto)';
             }
             $fecha = $msg->created_at ? $msg->created_at->format('d/m/Y H:i') : '';
+
+            /* Sugerencia de Claude que el setter no envió (canceló envío automático o rechazó). */
+            if ($sender === 'sistema' && $status === 'rechazado') {
+                $body = LeadWhatsAppPasteCleaner::clean_export_paste((string) $msg->content);
+                $historial .= "[{$fecha}] SISTEMA (sugerencia no enviada al lead): {$body}\n";
+
+                continue;
+            }
 
             /* Si el setter aprobó con ajustes, usar el texto enviado y marcar el historial para Claude. */
             $edited = trim((string) ($msg->edited_content ?? ''));

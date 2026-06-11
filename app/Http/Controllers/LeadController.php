@@ -11,7 +11,10 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadPersonalizedDemoVideo;
 use App\Models\ProtocolEntry;
+use App\Events\LeadAiSuggestionFinished;
+use App\Events\LeadAiSuggestionGenerating;
 use App\Services\LeadAiService;
+use App\Services\WhatsappSendService;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
@@ -933,6 +936,58 @@ class LeadController extends Controller
     }
 
     /**
+     * Envía un mensaje de texto directamente al lead por WhatsApp desde el panel de admin.
+     *
+     * El mensaje se crea como `setter` y se envía sin pasar por Claude.
+     *
+     * @param Request              $request  Debe incluir `content` (texto del mensaje).
+     * @param int|string           $lead_id
+     * @param WhatsappSendService  $whatsapp_send_service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_direct_message_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
+    {
+        $text = trim((string) $request->input('content', ''));
+        if ($text === '') {
+            return response()->json(['message' => 'El mensaje no puede estar vacío.'], 422);
+        }
+
+        $lead = Lead::query()->findOrFail($lead_id);
+
+        $phone = trim((string) ($lead->phone ?? ''));
+
+        $whatsapp_message_id = null;
+        if ($phone !== '') {
+            try {
+                $whatsapp_message_id = $whatsapp_send_service->send_text($phone, $text);
+            } catch (\Throwable $e) {
+                Log::error('LeadController@send_direct_message_json: error WhatsApp.', [
+                    'lead_id' => $lead_id,
+                    'error'   => $e->getMessage(),
+                ]);
+
+                return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp: '.$e->getMessage()], 422);
+            }
+        }
+
+        $message = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'setter',
+            'content'               => $text,
+            'status'                => 'enviado',
+            'whatsapp_message_id'   => $whatsapp_message_id,
+            'sent_at'               => now(),
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Pide sugerencia a Claude de inmediato cuando hay mensajes del lead sin responder.
      *
      * Cancela el debounce automático pendiente; el envío automático de la sugerencia generada
@@ -968,6 +1023,8 @@ class LeadController extends Controller
 
         $scheduler->cancel_scheduled_suggestion((int) $lead->id);
 
+        event(new LeadAiSuggestionGenerating((int) $lead->id));
+
         try {
             $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
             if (! $fresh) {
@@ -981,7 +1038,46 @@ class LeadController extends Controller
                 'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),
                 'model'   => $this->fullModel('lead', $lead->id),
             ], 422);
+        } finally {
+            event(new LeadAiSuggestionFinished((int) $lead->id));
         }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Cancela el job diferido que pediría sugerencia IA a Claude tras el debounce automático.
+     *
+     * No genera sugerencia ni modifica mensajes; el setter puede responder manualmente o pedir IA después.
+     *
+     * @param int|string                $lead_id
+     * @param LeadAiSuggestionScheduler $scheduler
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function cancel_scheduled_ai_suggestion_json($lead_id, LeadAiSuggestionScheduler $scheduler)
+    {
+        $lead = Lead::query()->with('messages')->findOrFail($lead_id);
+
+        if (LeadConversationAiState::count_lead_inbound_messages((int) $lead->id) <= 1) {
+            return response()->json([
+                'message' => 'La sugerencia IA automática aplica desde el segundo mensaje del lead.',
+            ], 422);
+        }
+
+        if (! LeadConversationAiState::has_unanswered_lead_messages($lead)) {
+            return response()->json([
+                'message' => 'No hay mensajes del lead sin responder.',
+            ], 422);
+        }
+
+        if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
+            return response()->json([
+                'message' => 'Ya hay una sugerencia pendiente de revisión.',
+            ], 422);
+        }
+
+        $scheduler->cancel_scheduled_suggestion((int) $lead->id);
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
     }
@@ -1072,6 +1168,47 @@ class LeadController extends Controller
         if ($lead) {
             $lead->sync_suggestion_flags();
         }
+
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Cancela el envío automático programado de una sugerencia y la marca como no enviada.
+     *
+     * Claude verá la sugerencia en el historial como no enviada al lead.
+     *
+     * @param int|string $message_id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function cancel_auto_send_message_json($message_id)
+    {
+        $message = LeadMessage::query()->with('lead')->findOrFail($message_id);
+
+        if ((string) $message->sender !== 'sistema') {
+            return response()->json(['message' => 'Solo aplica a sugerencias del sistema.'], 422);
+        }
+
+        if ($message->is_followup) {
+            return response()->json(['message' => 'Las sugerencias de seguimiento no tienen envío automático.'], 422);
+        }
+
+        if ((string) $message->status !== 'sugerido') {
+            return response()->json(['message' => 'Solo se puede cancelar el envío de sugerencias pendientes.'], 422);
+        }
+
+        (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
+
+        $message->update(['status' => 'rechazado']);
+
+        $lead = $message->lead;
+        if ($lead) {
+            $lead->sync_suggestion_flags();
+        }
+
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
     }

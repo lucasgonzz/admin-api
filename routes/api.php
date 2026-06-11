@@ -109,12 +109,15 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/send-demo-mail', [LeadController::class, 'send_demo_mail_json']);
         Route::post('lead/{id}/generate-contract', [LeadController::class, 'generate_contract_json']);
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
+        Route::post('lead/{id}/send-direct-message', [LeadController::class, 'send_direct_message_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
+        Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
         Route::put('lead-message/{id}/approve', [LeadController::class, 'approve_message_json']);
         Route::put('lead-message/{id}/approve-with-edit', [LeadController::class, 'approve_message_with_edit_json']);
         Route::put('lead-message/{id}/reject', [LeadController::class, 'reject_message_json']);
+        Route::put('lead-message/{id}/cancel-auto-send', [LeadController::class, 'cancel_auto_send_message_json']);
 
         Route::get('followup-rule', [FollowupRuleController::class, 'index_json']);
         Route::put('followup-rule/{id}', [FollowupRuleController::class, 'update_json']);
@@ -250,6 +253,7 @@ Route::prefix('admin')->group(function () {
         Route::get('task-template', [TaskTemplateController::class, 'index_json']);
 
         // Instalaciones iniciales de sistema para clientes.
+        Route::get('installations', [ClientInstallationController::class, 'index_all']);
         Route::get('clients/{client}/installations', [ClientInstallationController::class, 'index']);
         Route::post('clients/{client}/installations', [ClientInstallationController::class, 'store']);
         Route::put('client-installations/{installation}/env-values', [ClientInstallationController::class, 'update_env_values']);

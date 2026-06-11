@@ -20,6 +20,23 @@ use Illuminate\Http\Request;
 class ClientInstallationController extends Controller
 {
     /**
+     * Lista todas las instalaciones del sistema (todos los clientes).
+     *
+     * Usado por el ítem del menú lateral en admin-spa.
+     *
+     * @return JsonResponse  { models: ClientInstallation[] }
+     */
+    public function index_all(): JsonResponse
+    {
+        // Carga instalaciones de todos los clientes con relaciones para el listado global.
+        $installations = ClientInstallation::withAll()
+            ->orderByDesc('id')
+            ->get();
+
+        return response()->json(['models' => $installations]);
+    }
+
+    /**
      * Lista todas las instalaciones de un cliente con sus relaciones completas.
      *
      * @param  Client  $client  Cliente resuelto por route model binding.

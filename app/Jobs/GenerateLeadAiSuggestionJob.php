@@ -2,6 +2,8 @@
 
 namespace App\Jobs;
 
+use App\Events\LeadAiSuggestionFinished;
+use App\Events\LeadAiSuggestionGenerating;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadAiService;
@@ -77,6 +79,8 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
             return;
         }
 
+        event(new LeadAiSuggestionGenerating($this->lead_id));
+
         try {
             $suggestion_message = $lead_ai_service->generate_suggestion($lead, false);
 
@@ -88,6 +92,8 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
                 'lead_id' => $this->lead_id,
                 'error'   => $exception->getMessage(),
             ]);
+        } finally {
+            event(new LeadAiSuggestionFinished($this->lead_id));
         }
     }
 }

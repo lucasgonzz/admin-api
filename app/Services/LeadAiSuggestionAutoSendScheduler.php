@@ -69,6 +69,9 @@ class LeadAiSuggestionAutoSendScheduler
             'auto_send_at'    => $auto_send_at->toIso8601String(),
             'auto_send_token' => $auto_send_token,
         ]);
+
+        /* Reemitir el mensaje con ai_auto_send_at para clientes que ya recibieron el alta sin timer. */
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, $message_id);
     }
 
     /**
