@@ -3,7 +3,6 @@
 namespace App\Events;
 
 use App\Models\Lead;
-use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
@@ -13,6 +12,9 @@ use Illuminate\Foundation\Events\Dispatchable;
  * Evento Pusher cuando cambia la conversación WhatsApp de un lead (mensaje nuevo o lectura).
  *
  * admin-spa escucha en `leads.admins` para actualizar tabla, conversación abierta y badge del menú.
+ *
+ * El payload es mínimo (solo IDs + unread_total) para no superar el límite de 10KB de Pusher.
+ * El frontend hace un GET al recibir el evento para cargar los datos actualizados del lead y mensaje.
  */
 class LeadConversationUpdated implements ShouldBroadcastNow
 {
@@ -24,7 +26,7 @@ class LeadConversationUpdated implements ShouldBroadcastNow
     public $lead_id;
 
     /**
-     * @var int|null Mensaje recién creado (opcional, para append en UI sin refetch).
+     * @var int|null Mensaje recién creado (opcional).
      */
     public $lead_message_id;
 
@@ -34,7 +36,7 @@ class LeadConversationUpdated implements ShouldBroadcastNow
      */
     public function __construct(int $lead_id, ?int $lead_message_id = null)
     {
-        $this->lead_id = $lead_id;
+        $this->lead_id        = $lead_id;
         $this->lead_message_id = $lead_message_id;
     }
 
@@ -65,34 +67,19 @@ class LeadConversationUpdated implements ShouldBroadcastNow
     }
 
     /**
-     * Lead con contador de no leídos, mensaje opcional y total global para el nav.
+     * Payload mínimo para no superar el límite de 10KB de Pusher.
+     *
+     * Solo se envían IDs y el total global de no leídos.
+     * El frontend hace GET /leads/{id} y GET /lead-messages/{id} al recibirlo.
      *
      * @return array<string, mixed>
      */
     public function broadcastWith(): array
     {
-        $lead = Lead::query()
-            ->where('id', $this->lead_id)
-            ->withAllForList()
-            ->first();
-
-        if ($lead) {
-            $lead->expose_notification_messages_as_messages();
-            $lead->mark_messages_scope('notification');
-        }
-
-        $message = null;
-        if ($this->lead_message_id !== null) {
-            $message = LeadMessage::query()
-                ->with('attachments')
-                ->where('id', $this->lead_message_id)
-                ->first();
-        }
-
         return [
-            'lead'         => $lead,
-            'message'      => $message,
-            'unread_total' => LeadBroadcastService::count_unread_lead_messages_global(),
+            'lead_id'        => $this->lead_id,
+            'lead_message_id' => $this->lead_message_id,
+            'unread_total'   => LeadBroadcastService::count_unread_lead_messages_global(),
         ];
     }
 }
