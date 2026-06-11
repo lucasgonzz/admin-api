@@ -299,6 +299,16 @@ class LeadAiService
             ->whereNotNull('demo_start_time')
             ->get(['demo_date', 'demo_start_time']);
 
+        /* Log de diagnóstico: qué leads con demo encontró la query. */
+        Log::debug('get_available_slots — booked_leads encontrados', [
+            'date_strings' => $date_strings,
+            'booked_leads' => $booked_leads->map(fn($l) => [
+                'demo_date_raw'  => $l->getRawOriginal('demo_date'),
+                'demo_date_tz'   => $l->demo_date->setTimezone('America/Argentina/Buenos_Aires')->toDateTimeString(),
+                'demo_start_time' => $l->demo_start_time,
+            ])->toArray(),
+        ]);
+
         /* Agrupar horarios ocupados por fecha en formato 'HH:MM'. */
         $occupied_by_date = [];
         foreach ($booked_leads as $booked_lead) {
@@ -320,6 +330,11 @@ class LeadAiService
         /* Construir el resultado con slots disponibles por día. */
         $result   = [];
         $any_full = false;
+
+        /* Log de diagnóstico: mapa de ocupados por fecha. */
+        Log::debug('get_available_slots — occupied_by_date', [
+            'occupied_by_date' => $occupied_by_date,
+        ]);
 
         foreach ($working_days as $day) {
             $date_key = $day->format('Y-m-d');
@@ -641,4 +656,5 @@ TXT;
         return $data;
     }
 }
+
 
