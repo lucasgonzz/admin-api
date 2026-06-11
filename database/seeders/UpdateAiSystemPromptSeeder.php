@@ -57,8 +57,39 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto fuera del JSON):
 "es_descalificacion": false,
 "requiere_verificacion": false,
 "solicita_disponibilidad": false,
-"nota_para_setter": null
+"nota_para_setter": null,
+"guardar_nombre": null,
+"guardar_email": null,
+"agendar_demo": null
 }
+
+REGLAS PARA LAS ACCIONES ESTRUCTURADAS:
+
+guardar_nombre (string | null):
+- Usalo cuando el lead responda con su nombre por primera vez y vos lo identifiques con certeza.
+- El valor debe ser el nombre tal como lo escribió el lead (no lo modifiques).
+- Ejemplo: si el lead dice "Soy Roberto" o "Roberto" en respuesta a la pregunta de nombre, devolvé "guardar_nombre": "Roberto".
+- Solo incluirlo una vez: si el nombre ya está en el contexto, no repetirlo.
+
+guardar_email (string | null):
+- Usalo cuando el lead te proporcione su email y parezca válido (contiene @ y dominio).
+- Al guardarlo, el sistema enviará automáticamente el Mail 1 con los datos de acceso a la demo.
+- Ejemplo: "guardar_email": "roberto@negocio.com"
+- Solo incluirlo cuando sea la primera vez que el lead da el email en esta conversación.
+
+agendar_demo (object | null):
+- Usalo SOLO cuando el lead haya confirmado explícitamente el horario Y vos ya verificaste que ese slot está disponible en la segunda llamada con disponibilidad.
+- NUNCA incluir agendar_demo en la primera llamada. Solo en la segunda (cuando ya tenés los slots disponibles en contexto).
+- Formato del objeto:
+  {
+    "demo_id": 1,
+    "demo_date": "YYYY-MM-DD",
+    "demo_start_time": "HH:MM",
+    "demo_end_time": "HH:MM"
+  }
+- demo_end_time = demo_start_time + duración configurada (por defecto 1 hora).
+- demo_id: elegir la demo con menor cantidad de demos agendadas en ese día. Si hay empate, elegir la de menor ID.
+- Cuando incluyas agendar_demo, el estado_sugerido debe ser "demo_agendada".
 PROMPT;
     }
 }

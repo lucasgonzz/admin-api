@@ -164,6 +164,14 @@ class LeadAiService
         /* String base que se inyecta como contexto en el user content. */
         $availability_context = "Slots disponibles (demos de 1 hora, lunes a viernes 9-18hs, sábado 9-12hs):\n{$availability_lines}";
 
+        /* Agregar IDs de demos activas para que Claude pueda incluir demo_id en agendar_demo. */
+        $demos    = \App\Models\Demo::orderBy('id')->get(['id']);
+        $demo_ids = $demos->pluck('id')->implode(', ');
+        if ($demo_ids !== '') {
+            $availability_context .= "\nDEMOS DISPONIBLES: {$demo_ids}";
+            $availability_context .= "\nAl elegir demo_id para agendar_demo, preferir la demo con menos agendas en ese día. Si hay empate, elegir la de menor ID.";
+        }
+
         /*
          * Detectar si el último mensaje del lead contiene un horario concreto propuesto.
          * Si lo tiene, agregarlo al contexto para que Claude lo verifique explícitamente
@@ -490,6 +498,60 @@ class LeadAiService
         /* Solo marcamos el mensaje si la sugerencia implica un cambio de estado del lead. */
         $suggested_lead_status = $estado !== $previous_status ? $estado : null;
 
+        /* --- Procesar acciones estructuradas devueltas por Claude --- */
+
+        /* Acción: guardar nombre del lead si no tiene uno y Claude lo identificó con certeza. */
+        $guardar_nombre = isset($parsed['guardar_nombre']) ? trim((string) $parsed['guardar_nombre']) : '';
+        if ($guardar_nombre !== '' && empty($lead->contact_name)) {
+            $lead->contact_name = $guardar_nombre;
+            Log::info('LeadAiService: nombre del lead guardado vía acción estructurada.', [
+                'lead_id' => $lead->id,
+                'nombre'  => $guardar_nombre,
+            ]);
+        }
+
+        /* Acción: guardar email del lead si no tiene uno y el valor parece válido. */
+        $guardar_email = isset($parsed['guardar_email']) ? trim((string) $parsed['guardar_email']) : '';
+        /* Bandera para disparar Mail 1 después del save. */
+        $email_nuevo = false;
+        if ($guardar_email !== '' && filter_var($guardar_email, FILTER_VALIDATE_EMAIL) && empty($lead->email)) {
+            $lead->email = $guardar_email;
+            $email_nuevo = true;
+            Log::info('LeadAiService: email del lead guardado vía acción estructurada.', [
+                'lead_id' => $lead->id,
+                'email'   => $guardar_email,
+            ]);
+        }
+
+        /* Acción: agendar demo si Claude devolvió el objeto con todos los campos requeridos. */
+        $agendar_demo = isset($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])
+            ? $parsed['agendar_demo']
+            : null;
+        if ($agendar_demo !== null) {
+            /* Extraer campos del objeto agendar_demo. */
+            $demo_id    = isset($agendar_demo['demo_id'])         ? (int) $agendar_demo['demo_id']                : null;
+            $demo_date  = isset($agendar_demo['demo_date'])        ? trim((string) $agendar_demo['demo_date'])     : '';
+            $demo_start = isset($agendar_demo['demo_start_time'])  ? trim((string) $agendar_demo['demo_start_time']) : '';
+            $demo_end   = isset($agendar_demo['demo_end_time'])    ? trim((string) $agendar_demo['demo_end_time'])   : '';
+
+            /* Solo persistir si llegaron todos los campos requeridos. */
+            if ($demo_id && $demo_date !== '' && $demo_start !== '' && $demo_end !== '') {
+                $lead->demo_id         = $demo_id;
+                $lead->demo_date       = $demo_date;
+                $lead->demo_start_time = $demo_start;
+                $lead->demo_end_time   = $demo_end;
+                Log::info('LeadAiService: demo agendada vía acción estructurada.', [
+                    'lead_id'    => $lead->id,
+                    'demo_id'    => $demo_id,
+                    'demo_date'  => $demo_date,
+                    'demo_start' => $demo_start,
+                    'demo_end'   => $demo_end,
+                ]);
+            }
+        }
+
+        /* --- Fin de acciones estructuradas --- */
+
         $msg = LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
@@ -510,7 +572,27 @@ class LeadAiService
             $lead->tiene_seguimiento_sin_ver = true;
         }
 
+        /* Único save del lead: consolida nombre, email, demo y flags de sugerencia. */
         $lead->save();
+
+        /* Disparar Mail 1 si se guardó un email nuevo en esta pasada. */
+        if ($email_nuevo) {
+            try {
+                $lead->loadMissing('demo');
+                $mailable = \App\Mail\Helpers\LeadDemoMailHelper::build($lead);
+                \Illuminate\Support\Facades\Mail::to($lead->email)->send($mailable);
+                $lead->update(['demo_mail_sent_at' => now()]);
+                Log::info('LeadAiService: Mail 1 enviado automáticamente al guardar email del lead.', [
+                    'lead_id' => $lead->id,
+                    'email'   => $lead->email,
+                ]);
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al enviar Mail 1 automático.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
 
         /* Programar auto-envío antes del broadcast: el payload Pusher debe incluir ai_auto_send_at. */
         (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
