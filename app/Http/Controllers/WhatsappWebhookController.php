@@ -22,8 +22,10 @@ use App\Services\LeadBroadcastService;
 use App\Services\LeadDocNumberGenerator;
 use App\Services\LeadWhatsappInboundAudioService;
 use App\Services\LeadWhatsappOnboardingService;
+use App\Services\SistemaQueryService;
 use App\Services\SupportTicketAssignmentService;
 use App\Services\WhatsappInboundMediaService;
+use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -531,6 +533,39 @@ class WhatsappWebhookController extends Controller
         ?ClientEmployee $client_employee,
         SupportTicketAssignmentService $assignment_service
     ): void {
+        // NUEVO — interceptar el canal "sistema:" antes de crear ticket de soporte.
+        // Solo aplica a clientes activos (este método ya está dentro de esa rama); los leads
+        // se enrutan por handle_lead_message y nunca llegan acá.
+        $body = (string) ($parsed['body'] ?? '');
+        if (SistemaQueryService::is_sistema_query($body)) {
+            $config = WhatsappConfig::getActive();
+
+            if (SistemaQueryService::client_employee_can_query($client, $client_employee)) {
+                // Remitente autorizado: resolver la consulta y responder por WhatsApp.
+                if ($config) {
+                    (new SistemaQueryService())->handle(
+                        $body,
+                        $client,
+                        $client_employee,
+                        $config,
+                        (string) $parsed['from']
+                    );
+                }
+            } else {
+                // Empleado sin permiso: responder con mensaje claro de denegación.
+                if ($config) {
+                    (new WhatsappSendService())->send_text(
+                        (string) $parsed['from'],
+                        'No tenés permiso para consultar el sistema por este medio. Pedile al dueño que lo active.'
+                    );
+                }
+            }
+
+            // No crear ticket de soporte para mensajes del canal sistema.
+            return;
+        }
+        // FIN interceptación canal "sistema:".
+
         $ticket_for_ai_dispatch = null;
         $inbound_message_id = null;
 

@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property string      $phone     Teléfono de contacto (formato libre).
  * @property string|null $notes     Notas internas opcionales.
  * @property int|null    $empresa_employee_id Id del User empleado en empresa-api cuando proviene de sincronización.
+ * @property bool        $can_query_system Habilita el canal "sistema:" de WhatsApp para este empleado.
  */
 class ClientEmployee extends Model
 {
@@ -33,6 +34,16 @@ class ClientEmployee extends Model
      * @var array<int, string>
      */
     protected $guarded = [];
+
+    /**
+     * Casts de atributos.
+     *
+     * @var array<string, string>
+     */
+    protected $casts = [
+        // Permiso para usar el canal "sistema:" de WhatsApp (consultas al sistema del cliente).
+        'can_query_system' => 'boolean',
+    ];
 
     /**
      * Eager load del cliente asociado.

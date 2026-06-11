@@ -44,6 +44,15 @@ class ClientEmployeeProperties
                 'width' => 220,
             ],
             [
+                // Permiso para usar el canal "sistema:" de WhatsApp (consultar stock, ventas, facturas, clientes).
+                'key' => 'can_query_system',
+                'text' => 'Puede consultar el sistema por WhatsApp',
+                'type' => 'checkbox',
+                'value' => false,
+                'show' => true,
+                'width' => 120,
+            ],
+            [
                 'key' => 'empresa_employee_id',
                 'text' => 'ID empresa',
                 'type' => 'number',
