@@ -67,13 +67,23 @@ class WhatsappProtocolService
         }
 
         try {
-            $response = Http::timeout(15)
+            $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
+            $ca_bundle  = config('services.anthropic.ca_bundle');
+
+            $http = Http::timeout(15)
                 ->withHeaders([
                     'Authorization' => 'Bearer '.$token,
                     'Accept'        => 'application/vnd.github+json',
                     'User-Agent'    => 'ComercioCity-Admin-API',
-                ])
-                ->get(self::GITHUB_CONTENTS_URL);
+                ]);
+
+            if (! $verify_ssl) {
+                $http = $http->withoutVerifying();
+            } elseif (is_string($ca_bundle) && $ca_bundle !== '' && is_file($ca_bundle)) {
+                $http = $http->withOptions(['verify' => $ca_bundle]);
+            }
+
+            $response = $http->get(self::GITHUB_CONTENTS_URL);
 
             if (! $response->successful()) {
                 Log::error('WhatsappProtocolService: error al leer protocolo desde GitHub.', [
@@ -112,4 +122,5 @@ class WhatsappProtocolService
         }
     }
 }
+
 
