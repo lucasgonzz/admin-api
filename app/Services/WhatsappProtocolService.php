@@ -18,7 +18,7 @@ class WhatsappProtocolService
     const CACHE_KEY = 'whatsapp_protocol';
 
     /** URL del archivo de protocolo en el repositorio privado. */
-    const GITHUB_CONTENTS_URL = 'https://api.github.com/repos/lucasgonzz/comerciocity-protocolo-whatsapp/contents/protocolo_whatsapp.md';
+    const GITHUB_CONTENTS_URL = 'https://api.github.com/repos/lucasgonzz/claude-comerciocity/contents/comercial/leads_protocolo_whatsapp.md';
 
     /**
      * Devuelve el texto del protocolo, usando caché si está vigente.
@@ -112,3 +112,4 @@ class WhatsappProtocolService
         }
     }
 }
+
