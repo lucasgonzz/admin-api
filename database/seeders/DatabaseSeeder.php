@@ -33,6 +33,8 @@ class DatabaseSeeder extends Seeder
             TaskTemplateSeeder::class,
             ImplementationStageConfigSeeder::class,
             AiSystemPromptSeeder::class,
+            /* Identidad del agente Martín inyectada dinámicamente en el system prompt de Claude. */
+            AgentIdentitySeeder::class,
             AdminSettingSeeder::class,
             // Admin por defecto asignado a nuevas implementaciones (requiere AdminUserSeeder).
             ImplementationDefaultAdminSeeder::class,

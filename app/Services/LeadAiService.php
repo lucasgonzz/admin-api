@@ -544,6 +544,12 @@ class LeadAiService
         /** Texto base editable desde admin (contexto + formato JSON de respuesta). */
         $contenido = trim((string) $prompt_activo->contenido);
 
+        /* Inyectar identidad del agente si existe registro activo. */
+        $agent_identity = \App\Models\AgentIdentity::obtener_activo();
+        if ($agent_identity) {
+            $contenido = "IDENTIDAD DEL AGENTE:\n" . trim($agent_identity->description) . "\n\n" . $contenido;
+        }
+
         /** Documento maestro en GitHub; si falla la lectura, solo se usa el esqueleto de BD. */
         $whatsapp_protocol = app(WhatsappProtocolService::class)->getProtocol();
         if ($whatsapp_protocol !== '') {

@@ -223,6 +223,10 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'show']);
         Route::put('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'update']);
 
+        // Identidad del agente Martín: nombre y descripción inyectados en el system prompt de Claude.
+        Route::get('settings/agent-identity', [\App\Http\Controllers\Api\AgentIdentityController::class, 'show']);
+        Route::put('settings/agent-identity', [\App\Http\Controllers\Api\AgentIdentityController::class, 'update']);
+
         // Implementaciones: listado, detalle y avance manual de etapa.
         Route::get('implementation', [\App\Http\Controllers\Api\ImplementationController::class, 'index']);
         // Conteo de implementaciones listas para avanzar (badge del Nav); debe ir antes del wildcard {implementation}.
