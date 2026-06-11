@@ -265,8 +265,11 @@ class LeadAiService
          * Se excluyen los domingos; los sábados tienen slots reducidos.
          */
         $working_days = [];
-        /* Cursor empieza mañana al inicio del día */
-        $cursor = now()->startOfDay()->addDay();
+        /*
+         * Cursor empieza mañana al inicio del día en timezone Argentina.
+         * Usar la timezone local evita que diferencias UTC adelanten o atrasen el corte de día.
+         */
+        $cursor = now('America/Argentina/Buenos_Aires')->startOfDay()->addDay();
 
         while (count($working_days) < $days_ahead) {
             /* 0 = domingo, se omite */
@@ -290,7 +293,12 @@ class LeadAiService
         /* Agrupar horarios ocupados por fecha en formato 'HH:MM'. */
         $occupied_by_date = [];
         foreach ($booked_leads as $booked_lead) {
-            $date_key = $booked_lead->demo_date->format('Y-m-d');
+            /*
+             * Convertir a timezone Argentina antes de formatear: demo_date se guarda en UTC
+             * y Carbon lo castea como tal. Sin la conversión, leads con demo entre las 00:00
+             * y las 02:59 Argentina aparecen un día antes en UTC y el slot no se bloquea.
+             */
+            $date_key = $booked_lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
             $time_raw = trim((string) $booked_lead->demo_start_time);
 
             /* Normalizar la hora a formato 'HH:MM' independientemente de cómo fue guardada. */
