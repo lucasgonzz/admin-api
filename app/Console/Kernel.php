@@ -20,9 +20,18 @@ class Kernel extends ConsoleKernel
         $schedule->command('support:check-response-alerts')->everyFiveMinutes();
         $schedule->command('leads:check-followups')->everyTwoHours();
 
-        // Genera recordatorios pre-demo para leads con demo en los próximos 15 minutos.
+        // Genera recordatorios pre-demo para leads con demo en los próximos X minutos (configurable).
         // Cada 5 minutos garantiza que ninguna demo se pierda dentro de la ventana.
         $schedule->command('leads:send-demo-reminders')->everyFiveMinutes();
+
+        // Corre demo setup automático X minutos antes del inicio de cada demo.
+        $schedule->command('leads:run-demo-setup')->everyMinute();
+
+        // Envía check de ingreso X minutos después del inicio de la demo.
+        $schedule->command('leads:check-demo-ingress')->everyMinute();
+
+        // Genera resumen del lead con Claude X minutos antes del fin de la demo.
+        $schedule->command('leads:generate-demo-summary')->everyMinute();
 
         $schedule->command('queue:work --stop-when-empty')->everyMinute();
     }

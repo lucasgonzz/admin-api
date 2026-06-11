@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Events\LeadSuggestionCreated;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -33,13 +34,6 @@ class SendDemoReminders extends Command
     protected $description = 'Genera recordatorios pre-demo como sugerencias pendientes para el setter';
 
     /**
-     * Ventana de anticipación en minutos: detecta demos que arrancan dentro de este plazo.
-     *
-     * @var int
-     */
-    const WINDOW_MINUTES = 20;
-
-    /**
      * Procesa todos los leads candidatos y genera el recordatorio correspondiente.
      *
      * @return int Código de salida (0 = éxito).
@@ -47,8 +41,12 @@ class SendDemoReminders extends Command
     public function handle(): int
     {
         // Momento actual y límite superior de la ventana de anticipación (timezone Argentina).
-        $now        = Carbon::now('America/Argentina/Buenos_Aires');
-        $window_end = $now->copy()->addMinutes(self::WINDOW_MINUTES);
+        $now = Carbon::now('America/Argentina/Buenos_Aires');
+
+        // Ventana de anticipación dinámica: se lee del setting configurable para poder ajustarla
+        // sin redeploy; si no hay setting configurado, el default del servicio es 15 minutos.
+        $window_minutes = LeadDemoSettings::get_recordatorio_minutos_antes();
+        $window_end     = $now->copy()->addMinutes($window_minutes);
 
         // Leads candidatos: demo agendada hoy, sin recordatorio emitido y sin sugerencia pendiente.
         // Se usa CONVERT_TZ para comparar demo_date (guardado en UTC) contra la fecha en Argentina.
