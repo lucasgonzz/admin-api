@@ -285,8 +285,17 @@ class LeadAiService
             return $day->format('Y-m-d');
         }, $working_days);
 
-        /* Consultar leads con demo agendada en esos días para determinar slots ocupados. */
-        $booked_leads = Lead::whereIn('demo_date', $date_strings)
+        /*
+         * Consultar leads con demo agendada en esos días.
+         * Se usa CONVERT_TZ para comparar en timezone Argentina:
+         * demo_date se guarda como datetime UTC en MySQL, hay que convertir
+         * a -03:00 antes de extraer la fecha con DATE().
+         */
+        $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
+        $booked_leads = Lead::whereRaw(
+            "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
+            $date_strings
+        )
             ->whereNotNull('demo_start_time')
             ->get(['demo_date', 'demo_start_time']);
 
@@ -348,7 +357,10 @@ class LeadAiService
             $extra_key = $cursor->format('Y-m-d');
 
             /* Consultar ocupados del día extra (query puntual). */
-            $extra_leads = Lead::where('demo_date', $extra_key)
+            $extra_leads = Lead::whereRaw(
+                "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?",
+                [$extra_key]
+            )
                 ->whereNotNull('demo_start_time')
                 ->get(['demo_date', 'demo_start_time']);
 
@@ -629,3 +641,4 @@ TXT;
         return $data;
     }
 }
+
