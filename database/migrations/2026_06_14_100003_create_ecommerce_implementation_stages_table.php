@@ -19,8 +19,8 @@ class CreateEcommerceImplementationStagesTable extends Migration
         Schema::create('ecommerce_implementation_stages', function (Blueprint $table) {
             // Identificador interno.
             $table->id();
-            // Implementación de ecommerce padre.
-            $table->unsignedBigInteger('ecommerce_implementation_id')->index();
+            // Implementación de ecommerce padre (nombre de índice corto: límite MySQL 64 caracteres).
+            $table->unsignedBigInteger('ecommerce_implementation_id')->index('ecom_impl_stages_impl_id_idx');
             // Número de etapa (1–5).
             $table->unsignedTinyInteger('stage_number');
             // Estado de la etapa.
@@ -32,7 +32,7 @@ class CreateEcommerceImplementationStagesTable extends Migration
             $table->timestamp('completed_at')->nullable();
             $table->timestamps();
 
-            $table->foreign('ecommerce_implementation_id')->references('id')->on('ecommerce_implementations')->onDelete('cascade');
+            // $table->foreign('ecommerce_implementation_id')->references('id')->on('ecommerce_implementations')->onDelete('cascade');
         });
     }
 

@@ -19,8 +19,8 @@ class CreateEcommerceImplementationMessagesTable extends Migration
         Schema::create('ecommerce_implementation_messages', function (Blueprint $table) {
             // Identificador interno.
             $table->id();
-            // Implementación de ecommerce asociada.
-            $table->unsignedBigInteger('ecommerce_implementation_id')->index();
+            // Implementación de ecommerce asociada (índice vía FK con nombre corto).
+            $table->unsignedBigInteger('ecommerce_implementation_id');
             // Etapa en la que se registró el mensaje.
             $table->unsignedTinyInteger('stage_number');
             // Dirección del mensaje.
@@ -33,7 +33,10 @@ class CreateEcommerceImplementationMessagesTable extends Migration
             $table->timestamp('sent_at')->nullable();
             $table->timestamps();
 
-            $table->foreign('ecommerce_implementation_id')->references('id')->on('ecommerce_implementations')->onDelete('cascade');
+            $table->foreign('ecommerce_implementation_id', 'ecom_impl_msgs_impl_id_fk')
+                ->references('id')
+                ->on('ecommerce_implementations')
+                ->onDelete('cascade');
         });
     }
 
