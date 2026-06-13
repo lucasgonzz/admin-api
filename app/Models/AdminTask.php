@@ -42,6 +42,17 @@ class AdminTask extends Model
     }
 
     /**
+     * Lead de origen cuando la tarea fue creada automáticamente por una alerta de Claude.
+     * Null para tareas creadas manualmente por admins.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function lead()
+    {
+        return $this->belongsTo(\App\Models\Lead::class, 'lead_id');
+    }
+
+    /**
      * Scope que eager-carga las relaciones necesarias para los listados.
      *
      * @param  \Illuminate\Database\Eloquent\Builder $query
@@ -49,6 +60,10 @@ class AdminTask extends Model
      */
     public function scopeWithAll($query)
     {
-        return $query->with(['created_by_admin:id,name', 'assigned_admin:id,name']);
+        return $query->with([
+            'created_by_admin:id,name',
+            'assigned_admin:id,name',
+            'lead:id,contact_name,company_name',
+        ]);
     }
 }

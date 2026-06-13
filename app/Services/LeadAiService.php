@@ -773,6 +773,56 @@ class LeadAiService
 
         /* --- Fin de acciones estructuradas --- */
 
+        /* Acción: crear tarea de alerta si Claude detectó que se requiere intervención humana. */
+        $requiere_intervencion = ! empty($parsed['requiere_intervencion_humana']);
+        $motivo_intervencion   = isset($parsed['motivo_intervencion']) ? trim((string) $parsed['motivo_intervencion']) : '';
+
+        if ($requiere_intervencion) {
+            try {
+                /* Obtener el admin con is_default_task_assignee = true para notificarlo (si existe). */
+                $default_assignee = \App\Models\Admin::where('is_default_task_assignee', true)->first();
+
+                /* Armar título legible: priorizar nombre del lead, luego empresa, luego teléfono. */
+                $identificador = '';
+                if (! empty($lead->contact_name)) {
+                    $identificador = $lead->contact_name;
+                } elseif (! empty($lead->company_name)) {
+                    $identificador = $lead->company_name;
+                } else {
+                    $identificador = $lead->phone ?? "Lead #{$lead->id}";
+                }
+
+                $task_title   = "Revisar conversación de {$identificador}";
+                $task_content = $motivo_intervencion !== ''
+                    ? $motivo_intervencion
+                    : 'Claude detectó que esta conversación requiere revisión humana.';
+
+                /* Obtener el sort_order más bajo disponible para que aparezca primero. */
+                \App\Models\AdminTask::increment('sort_order');
+
+                \App\Models\AdminTask::create([
+                    'created_by_admin_id' => $default_assignee?->id ?? \App\Models\Admin::first()?->id ?? 1,
+                    'assigned_admin_id'   => null,   /* Sin asignar: visible para todos en el badge */
+                    'lead_id'             => $lead->id,
+                    'title'               => $task_title,
+                    'content'             => $task_content,
+                    'todos'               => null,
+                    'is_done'             => false,
+                    'sort_order'          => 0,
+                ]);
+
+                Log::info('LeadAiService: tarea de alerta creada por intervención humana requerida.', [
+                    'lead_id' => $lead->id,
+                    'motivo'  => $task_content,
+                ]);
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al crear tarea de alerta de intervención humana.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
         $msg = LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',

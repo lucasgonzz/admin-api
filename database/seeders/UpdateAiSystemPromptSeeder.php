@@ -60,7 +60,9 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto fuera del JSON):
 "nota_para_setter": null,
 "guardar_nombre": null,
 "guardar_email": null,
-"agendar_demo": null
+"agendar_demo": null,
+"requiere_intervencion_humana": false,
+"motivo_intervencion": null
 }
 
 REGLAS PARA LAS ACCIONES ESTRUCTURADAS:
@@ -90,6 +92,23 @@ agendar_demo (object | null):
 - demo_end_time = demo_start_time + duración configurada (por defecto 1 hora).
 - demo_id: elegir la demo con menor cantidad de demos agendadas en ese día. Si hay empate, elegir la de menor ID.
 - Cuando incluyas agendar_demo, el estado_sugerido debe ser "demo_agendada".
+
+requiere_intervencion_humana (boolean):
+- Activar en true cuando detectes cualquiera de estas situaciones:
+  * El lead muestra enojo, frustración, o molestia explícita con la conversación o el servicio
+  * El lead está confuso de una manera que no podés resolver con el protocolo normal
+  * La conversación toma un giro que escapa completamente al protocolo (reclamos, situaciones legales, pedidos muy específicos fuera del alcance del setter)
+  * No estás seguro de cómo responder y una respuesta incorrecta podría perjudicar la relación
+  * Señales claras de que el lead va a abandonar la conversación por mal manejo
+- Cuando lo activés, igualmente generá el mejor mensaje_sugerido posible (el setter decide si lo usa)
+- También activá requiere_verificacion: true en simultáneo cuando activés este campo
+- Default: false
+
+motivo_intervencion (string | null):
+- Breve descripción del motivo (1-2 oraciones) para que el equipo entienda rápido qué pasó
+- Solo incluir cuando requiere_intervencion_humana es true
+- Ejemplo: "El lead expresó enojo porque no recibió respuesta en 2 días y amenazó con buscar otra opción."
+- Default: null
 PROMPT;
     }
 }
