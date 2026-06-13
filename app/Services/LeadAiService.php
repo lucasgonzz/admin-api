@@ -162,8 +162,17 @@ class LeadAiService
             }
         }
 
+        /*
+         * Construir etiqueta de fecha/hora actual de Argentina para que Claude
+         * sepa exactamente qué día y hora es hoy (evita errores tipo "mañana sábado"
+         * cuando hoy ya es sábado).
+         */
+        $now_arg        = now('America/Argentina/Buenos_Aires');
+        $day_names_full = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+        $hoy_label      = ucfirst($day_names_full[$now_arg->dayOfWeek]).' '.$now_arg->format('d/m/Y').', '.$now_arg->format('H:i').'hs (hora Argentina)';
+
         /* String base que se inyecta como contexto en el user content. */
-        $availability_context = "Slots disponibles (demos de 1 hora, lunes a viernes 9-18hs, sábado 9-12hs):\n{$availability_lines}";
+        $availability_context = "HOY ES: {$hoy_label}\n\nSlots disponibles (demos de 1 hora, lunes a viernes 9-18hs, sábado 9-12hs):\n{$availability_lines}";
 
         /* Agregar IDs de demos activas para que Claude pueda incluir demo_id en agendar_demo. */
         $demos    = \App\Models\Demo::orderBy('id')->get(['id']);
@@ -285,10 +294,16 @@ class LeadAiService
             return $this->get_available_slots_legacy($days_ahead);
         }
 
-        /* Construir lista de días hábiles a partir de mañana (excluye domingos). */
+        /* Construir lista de días hábiles a partir de HOY (excluye domingos). */
         $working_days = [];
-        /* Cursor empieza mañana al inicio del día en timezone Argentina. */
-        $cursor = now('America/Argentina/Buenos_Aires')->startOfDay()->addDay();
+        /* Instante actual en Argentina; se usa para filtrar slots de hoy ya pasados. */
+        $now = now('America/Argentina/Buenos_Aires');
+        /* Minutos transcurridos del día actual (para comparar contra horas de slot). */
+        $now_minutes = $now->hour * 60 + $now->minute;
+        /* Fecha de hoy (Y-m-d) para detectar el día actual dentro del loop de slots. */
+        $today_key = $now->copy()->startOfDay()->format('Y-m-d');
+        /* Cursor empieza HOY al inicio del día en timezone Argentina. */
+        $cursor = $now->copy()->startOfDay();
 
         while (count($working_days) < $days_ahead) {
             /* 0 = domingo, se omite. */
@@ -368,11 +383,23 @@ class LeadAiService
                 ? ['09:00', '10:00', '11:00']
                 : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
 
+            /* Indica si el día que estamos evaluando es hoy. */
+            $is_today = $date_key === $today_key;
+
             $available = [];
             foreach ($all_slots as $slot) {
                 [$sh, $sm]  = explode(':', $slot);
                 $slot_start = (int) $sh * 60 + (int) $sm;
                 $slot_end   = $slot_start + $duracion;
+
+                /*
+                 * Para el día de hoy, descartar los slots cuyo horario de inicio
+                 * ya pasó o está demasiado cerca (margen mínimo de 30 minutos
+                 * para que el lead tenga tiempo de prepararse).
+                 */
+                if ($is_today && $slot_start < $now_minutes + 30) {
+                    continue;
+                }
 
                 /*
                  * El slot está disponible si al menos una demo no tiene solapamiento
@@ -496,9 +523,15 @@ class LeadAiService
      */
     public function get_available_slots_legacy(int $days_ahead = 3): array
     {
-        /* Construir lista de días hábiles a partir de mañana. */
+        /* Construir lista de días hábiles a partir de HOY. */
         $working_days = [];
-        $cursor       = now('America/Argentina/Buenos_Aires')->startOfDay()->addDay();
+        /* Instante actual en Argentina; se usa para filtrar slots de hoy ya pasados. */
+        $now = now('America/Argentina/Buenos_Aires');
+        /* Minutos transcurridos del día actual (para comparar contra horas de slot). */
+        $now_minutes = $now->hour * 60 + $now->minute;
+        /* Fecha de hoy (Y-m-d) para detectar el día actual dentro del loop de slots. */
+        $today_key = $now->copy()->startOfDay()->format('Y-m-d');
+        $cursor    = $now->copy()->startOfDay();
 
         while (count($working_days) < $days_ahead) {
             if ($cursor->dayOfWeek !== 0) {
@@ -538,8 +571,23 @@ class LeadAiService
                 ? ['09:00', '10:00', '11:00']
                 : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
 
+            /* Indica si el día que estamos evaluando es hoy. */
+            $is_today = $date_key === $today_key;
+
             $booked    = isset($occupied_by_date[$date_key]) ? $occupied_by_date[$date_key] : [];
-            $available = array_values(array_filter($all_slots, function ($slot) use ($booked) {
+            $available = array_values(array_filter($all_slots, function ($slot) use ($booked, $is_today, $now_minutes) {
+                /*
+                 * Para el día de hoy, descartar los slots cuyo horario de inicio
+                 * ya pasó o está demasiado cerca (margen mínimo de 30 minutos).
+                 */
+                if ($is_today) {
+                    [$sh, $sm]  = explode(':', $slot);
+                    $slot_start = (int) $sh * 60 + (int) $sm;
+                    if ($slot_start < $now_minutes + 30) {
+                        return false;
+                    }
+                }
+
                 return ! in_array($slot, $booked, true);
             }));
 
