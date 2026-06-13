@@ -137,6 +137,13 @@ class Lead extends Model
             'messages.attachments'
         );
         $query->withUnreadLeadMessagesCount();
+        // Conteo de seguimientos enviados (mensajes is_followup no rechazados) para el badge de la tabla.
+        $query->withCount([
+            'messages as followup_count' => function ($sub) {
+                $sub->where('is_followup', true)
+                    ->where('status', '!=', 'rechazado');
+            },
+        ]);
     }
 
     /**
@@ -157,6 +164,13 @@ class Lead extends Model
             'notification_messages'
         );
         $query->withUnreadLeadMessagesCount();
+        // Conteo de seguimientos enviados (mensajes is_followup no rechazados) para el badge de la tabla.
+        $query->withCount([
+            'messages as followup_count' => function ($sub) {
+                $sub->where('is_followup', true)
+                    ->where('status', '!=', 'rechazado');
+            },
+        ]);
     }
 
     /**

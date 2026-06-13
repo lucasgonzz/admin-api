@@ -74,6 +74,8 @@ class LeadProperties
                 'show' => true,
                 'table_only' => true,
                 'width' => 110,
+                // Clave del row que aporta la cantidad de seguimientos enviados para el badge.
+                'badge_count_key' => 'followup_count',
             ],
             [
                 /* Badge per-usuario: mensajes del lead sin leer para el admin logueado (no persistido; viene de withCount). */
