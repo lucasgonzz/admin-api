@@ -22,6 +22,7 @@ use App\Http\Controllers\Api\EnvTemplateController;
 use App\Http\Controllers\WhatsappConfigController;
 use App\Http\Controllers\WhatsappWebhookController;
 use App\Http\Controllers\FollowupRuleController;
+use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\ProtocolEntryController;
 use App\Http\Controllers\UpdateCommandController;
@@ -125,6 +126,9 @@ Route::prefix('admin')->group(function () {
 
         Route::get('followup-rule', [FollowupRuleController::class, 'index_json']);
         Route::put('followup-rule/{id}', [FollowupRuleController::class, 'update_json']);
+
+        Route::get('followup-template', [FollowupTemplateController::class, 'index_json']);
+        Route::put('followup-template/{id}', [FollowupTemplateController::class, 'update_json']);
 
         Route::get('ai-system-prompt', [AiSystemPromptController::class, 'index']);
         Route::put('ai-system-prompt', [AiSystemPromptController::class, 'update']);

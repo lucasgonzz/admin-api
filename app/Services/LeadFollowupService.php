@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\FollowupRule;
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use Carbon\Carbon;
@@ -105,9 +106,91 @@ class LeadFollowupService
         if (! $fresh) {
             return null;
         }
-        app(LeadAiService::class)->generate_suggestion($fresh, true);
+
+        // El número de seguimiento que vamos a enviar ahora es $followups + 1
+        // pero usamos $followups como índice del día ya que empieza en 0 antes del primer envío.
+        $followup_number = $followups + 1; // 1-based: primer seguimiento = 1
+
+        // Buscamos la plantilla Meta que corresponde a este estado y número de seguimiento.
+        $template = $this->find_template_for($lead->status, $followup_number);
+
+        if ($template !== null) {
+            // Hay plantilla aprobada: enviamos directo por WhatsApp sin pasar por Claude.
+            $this->send_followup_via_template($fresh, $template, $followup_number);
+        } else {
+            // Fallback: si no hay template configurada para este número, generar sugerencia de Claude.
+            app(LeadAiService::class)->generate_suggestion($fresh, true);
+        }
 
         return 'suggestion';
+    }
+
+    /**
+     * Resuelve la plantilla Meta a usar para un estado y número de seguimiento.
+     *
+     * Las plantillas activas del estado se ordenan por dia_numero ascendente y se
+     * indexan 1-based: el primer seguimiento usa la primera plantilla, el segundo
+     * la segunda, etc. Si no existe esa posición, retorna null.
+     *
+     * @param string $estado          Estado del lead.
+     * @param int    $followup_number Número de seguimiento (1-based).
+     *
+     * @return FollowupTemplate|null
+     */
+    protected function find_template_for(string $estado, int $followup_number): ?FollowupTemplate
+    {
+        // Plantillas activas de este estado, ordenadas por día (define la secuencia de envío).
+        $templates = FollowupTemplate::query()
+            ->where('estado', $estado)
+            ->where('activa', true)
+            ->orderBy('dia_numero', 'asc')
+            ->get();
+
+        // Índice 0-based correspondiente al número de seguimiento (1-based).
+        $index = $followup_number - 1;
+
+        return $templates->get($index);
+    }
+
+    /**
+     * Envía un seguimiento directo vía plantilla Meta y registra el mensaje.
+     *
+     * @param Lead             $lead
+     * @param FollowupTemplate $template
+     * @param int              $followup_number Número de seguimiento (1-based) para etiquetar el registro.
+     *
+     * @return void
+     */
+    protected function send_followup_via_template(Lead $lead, FollowupTemplate $template, int $followup_number): void
+    {
+        // Nombre del contacto como variable {{1}} de la plantilla (vacío si no hay).
+        $contact_name = $lead->contact_name ?? '';
+
+        // Envío directo del template aprobado a través de Kapso/Meta.
+        $whatsapp_message_id = app(WhatsappSendService::class)->send_template(
+            $lead->phone,
+            $template->template_name,
+            [$contact_name],
+            $template->language_code
+        );
+
+        // Registramos el seguimiento en la conversación del lead (trazabilidad).
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => "[Seguimiento automático #{$followup_number} — plantilla: {$template->template_name}]",
+            'status'                => 'enviado',
+            'is_followup'           => true,
+            'whatsapp_message_id'   => $whatsapp_message_id,
+            'requiere_verificacion' => false,
+        ]);
+
+        // Marcamos que el lead tiene un seguimiento que el setter todavía no vio.
+        $lead->tiene_seguimiento_sin_ver = true;
+        $lead->save();
+
+        // Notificamos a admin-spa que la conversación cambió.
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id);
     }
 
     /**

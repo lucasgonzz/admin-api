@@ -28,6 +28,8 @@ class DatabaseSeeder extends Seeder
             LeadPipelineStatusSeeder::class,
             LeadSeeder::class,
             FollowupRulesSeeder::class,
+            // Plantillas Meta aprobadas para seguimientos automáticos directos.
+            FollowupTemplatesSeeder::class,
             ProtocolEntriesSeeder::class,
             // Plantillas de tareas automáticas para procesos internos.
             TaskTemplateSeeder::class,

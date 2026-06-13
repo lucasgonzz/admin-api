@@ -113,6 +113,78 @@ class WhatsappSendService
     }
 
     /**
+     * Envía una plantilla Meta aprobada (Template Message) y retorna el ID de Meta.
+     *
+     * Necesario para contactar leads pasadas las 24 hs de su última respuesta,
+     * cuando Meta ya no permite mensajes free-form.
+     *
+     * @param string   $to            Número destino en formato E.164 (+549…).
+     * @param string   $template_name Nombre exacto de la plantilla aprobada en Meta.
+     * @param array    $variables     Valores de las variables del body, en orden ({{1}}, {{2}}…).
+     * @param string   $language_code Código de idioma de la plantilla en Meta.
+     *
+     * @return string|null whatsapp_message_id asignado por Meta, o null si falló.
+     */
+    public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR'): ?string
+    {
+        $context = $this->resolve_send_context();
+        if ($context === null) {
+            return null;
+        }
+
+        $normalized_to = WhatsappNormalizer::normalize($to);
+        $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+        if ($to_digits === '') {
+            Log::channel('daily')->warning('WhatsappSendService: número destino inválido (template).', [
+                'to' => $to,
+            ]);
+
+            return null;
+        }
+
+        // Payload base del template; sin components si la plantilla no tiene variables.
+        $payload = [
+            'messaging_product' => 'whatsapp',
+            'to'                => $to_digits,
+            'type'              => 'template',
+            'template'          => [
+                'name'     => $template_name,
+                'language' => ['code' => $language_code],
+            ],
+        ];
+
+        // Solo agregamos el componente body si hay variables para inyectar.
+        if (! empty($variables)) {
+            $payload['template']['components'] = [[
+                'type'       => 'body',
+                'parameters' => array_map(function ($value) {
+                    return ['type' => 'text', 'text' => (string) $value];
+                }, $variables),
+            ]];
+        }
+
+        $endpoint = $this->messages_endpoint($context['phone_number_id']);
+
+        try {
+            $http = KapsoHttpClient::make($context['api_key'], (int) config('services.client_api.timeout', 15));
+
+            $response = $http
+                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->post($endpoint, $payload);
+
+            return $this->extract_message_id_from_response($response, $normalized_to);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsappSendService: excepción al enviar template.', [
+                'to'       => $normalized_to,
+                'template' => $template_name,
+                'error'    => $exception->getMessage(),
+            ]);
+        }
+
+        return null;
+    }
+
+    /**
      * Sube un adjunto local y envía mensaje de imagen por WhatsApp.
      *
      * @param string $to
