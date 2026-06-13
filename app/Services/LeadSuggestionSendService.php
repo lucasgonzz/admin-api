@@ -29,6 +29,10 @@ class LeadSuggestionSendService
     /**
      * Envía el texto al lead por WhatsApp y marca el mensaje como enviado.
      *
+     * Si el cuerpo contiene el separador "\n---\n", se parte en múltiples mensajes
+     * y se envían secuencialmente. El whatsapp_message_id que se persiste corresponde
+     * al último envío.
+     *
      * @param LeadMessage $message       Mensaje en estado `sugerido`.
      * @param string|null $edited_content Texto final; si es null se usa content del mensaje.
      *
@@ -61,7 +65,7 @@ class LeadSuggestionSendService
         $phone = trim((string) $lead->phone);
         $whatsapp_message_id = null;
         if ($phone !== '') {
-            $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $body);
+            $whatsapp_message_id = $this->send_body($phone, $body);
         } else {
             Log::channel('daily')->warning('LeadSuggestionSendService: lead sin teléfono.', [
                 'lead_id'    => $lead->id,
@@ -92,6 +96,32 @@ class LeadSuggestionSendService
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return $message->fresh();
+    }
+
+    /**
+     * Envía el cuerpo al número dado, partiéndolo en mensajes separados si contiene "---".
+     *
+     * El separador reconocido es "\n---\n" (línea con solo tres guiones).
+     * Devuelve el whatsapp_message_id del último mensaje enviado.
+     *
+     * @param string $phone
+     * @param string $body
+     *
+     * @return string|null
+     */
+    private function send_body(string $phone, string $body): ?string
+    {
+        $parts = array_values(array_filter(
+            array_map('trim', preg_split('/\n---\n/', $body)),
+            fn($p) => $p !== ''
+        ));
+
+        $last_id = null;
+        foreach ($parts as $part) {
+            $last_id = $this->whatsapp_send_service->send_text($phone, $part);
+        }
+
+        return $last_id;
     }
 
     /**
