@@ -24,15 +24,24 @@ class LeadBroadcastService
     }
 
     /**
-     * Total de mensajes del lead sin leer en todo el sistema (sender = lead, read_at nulo).
+     * Total de mensajes del lead sin leer para un admin específico.
      *
+     * Un mensaje se considera no leído para un admin si no existe un registro
+     * en lead_message_reads para ese (lead_message_id, admin_id).
+     *
+     * @param int $admin_id
      * @return int
      */
-    public static function count_unread_lead_messages_global(): int
+    public static function count_unread_for_admin(int $admin_id): int
     {
         return (int) LeadMessage::query()
             ->where('sender', 'lead')
-            ->whereNull('read_at')
+            ->whereNotExists(function ($query) use ($admin_id) {
+                $query->selectRaw('1')
+                    ->from('lead_message_reads')
+                    ->whereColumn('lead_message_reads.lead_message_id', 'lead_messages.id')
+                    ->where('lead_message_reads.admin_id', $admin_id);
+            })
             ->count();
     }
 }

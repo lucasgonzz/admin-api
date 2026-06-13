@@ -3,7 +3,6 @@
 namespace App\Events;
 
 use App\Models\Lead;
-use App\Services\LeadBroadcastService;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
@@ -69,8 +68,9 @@ class LeadConversationUpdated implements ShouldBroadcastNow
     /**
      * Payload mínimo para no superar el límite de 10KB de Pusher.
      *
-     * Solo se envían IDs y el total global de no leídos.
-     * El frontend hace GET /leads/{id} y GET /lead-messages/{id} al recibirlo.
+     * Solo se envían IDs. El total de no leídos es per-usuario, por lo que NO viaja
+     * en el evento (el canal `leads.admins` es compartido): cada cliente hace
+     * GET /lead/unread-badges para obtener su propio total al recibir el evento.
      *
      * @return array<string, mixed>
      */
@@ -79,7 +79,6 @@ class LeadConversationUpdated implements ShouldBroadcastNow
         return [
             'lead_id'        => $this->lead_id,
             'lead_message_id' => $this->lead_message_id,
-            'unread_total'   => LeadBroadcastService::count_unread_lead_messages_global(),
         ];
     }
 }

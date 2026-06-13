@@ -73,6 +73,16 @@ class LeadMessage extends Model
     }
 
     /**
+     * Registros de lectura per-usuario de este mensaje (un admin = una fila).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function reads()
+    {
+        return $this->hasMany(LeadMessageRead::class, 'lead_message_id');
+    }
+
+    /**
      * Mensajes que deben viajar en listados de leads (notificaciones / pendientes de acción).
      *
      * @param \Illuminate\Database\Eloquent\Builder $query

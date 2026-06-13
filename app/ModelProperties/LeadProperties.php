@@ -76,6 +76,19 @@ class LeadProperties
                 'width' => 110,
             ],
             [
+                /* Badge per-usuario: mensajes del lead sin leer para el admin logueado (no persistido; viene de withCount). */
+                'key' => 'unread_count',
+                'text' => 'Sin leer',
+                'type' => 'unread_badge',
+                'value' => 0,
+                'show' => true,
+                'table_only' => true,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'not_persisted_on_model' => true,
+                'width' => 90,
+            ],
+            [
                 'key' => 'contact_name',
                 'text' => 'Nombre',
                 'type' => 'text',

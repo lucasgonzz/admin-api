@@ -1232,31 +1232,53 @@ class LeadController extends Controller
     }
 
     /**
-     * Totales de mensajes del lead sin leer (badge del menú Leads en admin-spa).
+     * Totales de mensajes del lead sin leer para el admin autenticado (badge del menú Leads en admin-spa).
+     *
+     * @param Request $request
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function unread_badges_json()
+    public function unread_badges_json(Request $request)
     {
+        // Admin autenticado: el total de no leídos es per-usuario.
+        $admin_id = (int) $request->user()->id;
+
         return response()->json([
-            'unread_total' => LeadBroadcastService::count_unread_lead_messages_global(),
+            'unread_total' => LeadBroadcastService::count_unread_for_admin($admin_id),
         ], 200);
     }
 
     /**
      * Marca como leídos los mensajes entrantes del lead (sender = lead) al abrir la conversación.
      *
+     * La lectura es per-usuario: se inserta un registro en lead_message_reads para
+     * el admin autenticado, sin afectar el estado de lectura de los demás admins.
+     *
+     * @param Request    $request
      * @param int|string $lead_id
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function mark_whatsapp_messages_read_json($lead_id)
+    public function mark_whatsapp_messages_read_json(Request $request, $lead_id)
     {
-        LeadMessage::query()
+        // Admin autenticado que abre la conversación.
+        $admin_id = (int) $request->user()->id;
+
+        // Mensajes entrantes del lead (los del setter/sistema no aplican al badge).
+        $message_ids = LeadMessage::query()
             ->where('lead_id', (int) $lead_id)
             ->where('sender', 'lead')
-            ->whereNull('read_at')
-            ->update(['read_at' => now()]);
+            ->pluck('id');
+
+        // Una fila de lectura por mensaje para este admin (idempotente vía firstOrCreate).
+        foreach ($message_ids as $message_id) {
+            \App\Models\LeadMessageRead::firstOrCreate([
+                'lead_message_id' => $message_id,
+                'admin_id'        => $admin_id,
+            ], [
+                'read_at' => now(),
+            ]);
+        }
 
         LeadBroadcastService::emit_conversation_updated((int) $lead_id);
 

@@ -6,6 +6,7 @@ use App\ModelProperties\LeadProperties;
 use App\Models\Concerns\HasUuid;
 use App\Models\LeadPipelineStatus;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Auth;
 
 /**
  * Prospecto comercial cargado desde el panel de admin-api.
@@ -209,7 +210,14 @@ class Lead extends Model
     }
 
     /**
-     * Agrega unread_messages_count: mensajes del lead (sender lead) sin read_at.
+     * Agrega el conteo de mensajes del lead (sender = lead) sin leer para el admin autenticado.
+     *
+     * El conteo es per-usuario: un mensaje cuenta como no leído mientras no exista
+     * su registro en lead_message_reads para el admin logueado.
+     *
+     * Expone dos alias con el mismo valor para mantener compatibilidad:
+     * - `unread_messages_count`: usado por la pestaña Conversación para auto-marcar leído.
+     * - `unread_count`: usado por el badge de la fila en la tabla de leads.
      *
      * @param \Illuminate\Database\Eloquent\Builder $query
      *
@@ -217,10 +225,23 @@ class Lead extends Model
      */
     public function scopeWithUnreadLeadMessagesCount($query)
     {
+        // Admin autenticado: si no hay sesión (ej. jobs), 0 hace que nada se cuente como no leído.
+        $admin_id = (int) (Auth::id() ?? 0);
+
+        // Filtro reutilizable: mensajes entrantes del lead sin registro de lectura del admin actual.
+        $unread_filter = function ($sub) use ($admin_id) {
+            $sub->where('sender', 'lead')
+                ->whereNotExists(function ($exists) use ($admin_id) {
+                    $exists->selectRaw('1')
+                        ->from('lead_message_reads')
+                        ->whereColumn('lead_message_reads.lead_message_id', 'lead_messages.id')
+                        ->where('lead_message_reads.admin_id', $admin_id);
+                });
+        };
+
         return $query->withCount([
-            'messages as unread_messages_count' => function ($sub) {
-                $sub->where('sender', 'lead')->whereNull('read_at');
-            },
+            'messages as unread_messages_count' => $unread_filter,
+            'messages as unread_count'          => $unread_filter,
         ]);
     }
 
