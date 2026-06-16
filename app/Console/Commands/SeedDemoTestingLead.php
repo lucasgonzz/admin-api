@@ -88,7 +88,7 @@ class SeedDemoTestingLead extends Command
          * El último mensaje quedó en status `sugerido`, por lo que el lead tiene
          * una sugerencia pendiente de acción. Reflejar el flag en el modelo.
          */
-        $lead->tiene_sugerencia_pendiente = true;
+        $lead->tiene_sugerencia_pendiente = false;
         $lead->save();
 
         /* Mostrar el resumen del lead creado */
@@ -96,7 +96,7 @@ class SeedDemoTestingLead extends Command
         $this->info("Lead creado → ID: {$lead->id} | {$lead->contact_name} | Estado: calificado");
         $this->info("Phone: {$lead->phone}");
         $this->info('Mensajes creados: 7');
-        $this->info('Sugerencia pendiente: ✓');
+        $this->info('Último mensaje: aprobado (Martín ya ofreció la demo, esperando horario del lead)');
         $this->newLine();
         $this->line('El lead está listo para testear. Escribí desde WhatsApp con ese número');
         $this->line('y el sistema va a procesar tu respuesta como si fueras el lead.');
@@ -257,11 +257,10 @@ class SeedDemoTestingLead extends Command
                     . "hay en el depósito. Y a veces vendemos cosas que no tenemos.",
             ],
 
-            /* Mensaje 7 — el sistema ofrece la demo: sugerencia pendiente (demo_agendada) */
+            /* Mensaje 7 — el sistema ofrece la demo: ya enviado (simula que Martín ya lo mandó al lead) */
             [
-                'sender'                => 'sistema',
-                'status'                => 'sugerido',
-                'suggested_lead_status' => 'demo_agendada',
+                'sender'  => 'sistema',
+                'status'  => 'aprobado',
                 'content' => "Claro, eso es exactamente lo que resuelve ComercioCity — cada venta descuenta el stock "
                     . "en tiempo real, sin depender de que alguien lo anote.\n\n"
                     . "Lo que te propongo es que recorras nuestra demo. La hacés vos solo, con videos cortos, dura "
@@ -272,3 +271,4 @@ class SeedDemoTestingLead extends Command
         ];
     }
 }
+
