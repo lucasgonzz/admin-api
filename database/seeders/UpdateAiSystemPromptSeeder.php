@@ -81,16 +81,15 @@ guardar_email (string | null):
 
 agendar_demo (object | null):
 - Usalo SOLO cuando el lead haya confirmado explícitamente el horario Y vos ya verificaste que ese slot está disponible en la segunda llamada con disponibilidad.
-- NUNCA incluir agendar_demo en la primera llamada. Solo en la segunda (cuando ya tenés los slots disponibles en contexto).
+- NUNCA incluir agendar_demo en la primera llamada. Solo en la segunda (cuando ya tenés el JSON de disponibilidad en contexto).
 - Formato del objeto:
   {
     "demo_id": 1,
     "demo_date": "YYYY-MM-DD",
-    "demo_start_time": "HH:MM",
-    "demo_end_time": "HH:MM"
+    "demo_start_time": "HH:MM"
   }
-- demo_end_time = demo_start_time + duración configurada (por defecto 1 hora).
-- demo_id: elegir la demo con menor cantidad de demos agendadas en ese día. Si hay empate, elegir la de menor ID.
+- NO incluyas demo_end_time: el servidor lo calcula automáticamente (demo_start_time + duración configurada).
+- demo_id: debe ser una demo que tenga ese slot libre en el JSON de disponibilidad. Preferir la demo con menor cantidad de agendas en ese día; si hay empate, la de menor ID.
 - Cuando incluyas agendar_demo, el estado_sugerido debe ser "demo_agendada".
 
 requiere_intervencion_humana (boolean):

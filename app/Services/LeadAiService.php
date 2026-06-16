@@ -143,49 +143,14 @@ class LeadAiService
      */
     protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup): LeadMessage
     {
-        /* Obtener slots disponibles y construir el string de disponibilidad para Claude. */
-        $slots = $this->get_available_slots();
-
-        /* Nombres de días en español para armar el texto de disponibilidad. */
-        $day_names = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-
-        $availability_lines = '';
-        foreach ($slots as $date_key => $times) {
-            /* Construir etiqueta legible: "Lunes 14/05" */
-            $carbon    = Carbon::parse($date_key);
-            $day_label = ucfirst($day_names[$carbon->dayOfWeek]).' '.$carbon->format('d/m');
-
-            if (empty($times)) {
-                $availability_lines .= "- {$day_label}: sin disponibilidad\n";
-            } else {
-                $availability_lines .= "- {$day_label}: ".implode(', ', $times)."\n";
-            }
-        }
-
-        /*
-         * Construir etiqueta de fecha/hora actual de Argentina para que Claude
-         * sepa exactamente qué día y hora es hoy (evita errores tipo "mañana sábado"
-         * cuando hoy ya es sábado).
-         */
-        $now_arg        = now('America/Argentina/Buenos_Aires');
-        $day_names_full = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-        $hoy_label      = ucfirst($day_names_full[$now_arg->dayOfWeek]).' '.$now_arg->format('d/m/Y').', '.$now_arg->format('H:i').'hs (hora Argentina)';
-
-        /* String base que se inyecta como contexto en el user content. */
-        $availability_context = "HOY ES: {$hoy_label}\n\nSlots disponibles (demos de 1 hora, lunes a viernes 9-18hs, sábado 9-12hs):\n{$availability_lines}";
-
-        /* Agregar IDs de demos activas para que Claude pueda incluir demo_id en agendar_demo. */
-        $demos    = \App\Models\Demo::orderBy('id')->get(['id']);
-        $demo_ids = $demos->pluck('id')->implode(', ');
-        if ($demo_ids !== '') {
-            $availability_context .= "\nDEMOS DISPONIBLES: {$demo_ids}";
-            $availability_context .= "\nAl elegir demo_id para agendar_demo, preferir la demo con menos agendas en ese día. Si hay empate, elegir la de menor ID.";
-        }
+        /* JSON estructurado por demo para que Claude interprete disponibilidad sin regex. */
+        $availability_data    = $this->build_availability_json();
+        $availability_context = "DISPONIBILIDAD DE DEMOS (JSON):\n"
+            .json_encode($availability_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
         /*
          * Detectar si el último mensaje del lead contiene un horario concreto propuesto.
-         * Si lo tiene, agregarlo al contexto para que Claude lo verifique explícitamente
-         * contra los slots disponibles antes de confirmar o rechazar ese horario.
+         * Se usa solo como pista adicional; Claude debe cruzar con el JSON de arriba.
          */
         $lead_proposed_time = '';
 
@@ -197,18 +162,22 @@ class LeadAiService
         if ($last_lead_message) {
             $last_content = trim((string) $last_lead_message->content);
 
-            /*
-             * Detectar patrones de hora en el mensaje del lead.
-             * Ejemplos que deben matchear: "12", "12hs", "12:00", "las 12", "a las 10:30".
-             */
             if (preg_match('/\b(\d{1,2})(?::(\d{2}))?\s*(?:hs?|h|:00)?\b/i', $last_content, $m)) {
                 $lead_proposed_time = $m[0];
             }
         }
 
-        /* Si se detectó un horario propuesto, agregar instrucción explícita para Claude. */
+        /* Instrucciones para agendar demo usando el JSON de disponibilidad. */
+        $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
+        $availability_context .= "\n- Analizá el historial de la conversación para determinar qué fecha y hora quiere el lead (puede decir \"hoy\", \"mañana\", \"el jueves\", \"a las 16\", etc.).";
+        $availability_context .= "\n- Verificá que ese slot esté disponible en el JSON de arriba para la demo correspondiente.";
+        $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
+        $availability_context .= "\n- Si el slot NO está disponible: informale al lead con naturalidad y ofrecé las alternativas más cercanas disponibles.";
+        $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
+        $availability_context .= "\n- Nunca confirmes un horario que no aparezca en el JSON de disponibilidad.";
+
         if ($lead_proposed_time !== '') {
-            $availability_context .= "\nEl lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en los slots disponibles de arriba. Si aparece: confirmalo. Si NO aparece: es porque está ocupado - informale al lead que ese horario no está disponible y ofrecele las alternativas libres más cercanas.";
+            $availability_context .= "\n- El lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en el JSON de disponibilidad.";
         }
 
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
@@ -260,6 +229,263 @@ class LeadAiService
     }
 
     /**
+     * Construye el JSON de disponibilidad por demo para que Claude interprete slots sin regex.
+     *
+     * Incluye la fecha/hora actual en Argentina, la duración configurada de cada demo
+     * y un mapa demo_id → fecha (Y-m-d) → horarios libres (HH:MM).
+     *
+     * @param int $days_ahead Cantidad mínima de días hábiles a incluir (default: 3).
+     *
+     * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
+     */
+    public function build_availability_json(int $days_ahead = 3): array
+    {
+        /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo. */
+        $context = $this->prepare_slot_availability_context($days_ahead);
+
+        /* Etiqueta legible de hoy en timezone Argentina. */
+        $day_names_full = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+        $hoy_label      = ucfirst($day_names_full[$context['now']->dayOfWeek])
+            .' '.$context['now']->format('d/m/Y').', '.$context['now']->format('H:i').'hs (hora Argentina)';
+
+        /* Slots disponibles por demo y por fecha. */
+        $demos_json = [];
+        foreach ($context['demos'] as $demo) {
+            $demo_id = (int) $demo->id;
+            $demos_json[$demo_id] = [];
+
+            foreach ($context['dates_map'] as $date_key => $day) {
+                $blocked_ranges = $context['blocked_by_demo'][$demo_id][$date_key] ?? [];
+                $demos_json[$demo_id][$date_key] = $this->compute_day_slots_for_demo(
+                    $day,
+                    $blocked_ranges,
+                    $context['now'],
+                    $context['today_key'],
+                    $context['now_minutes'],
+                    $context['duracion']
+                );
+            }
+        }
+
+        return [
+            'hoy'                   => $hoy_label,
+            'duration_demo_minutos' => $context['duracion'],
+            'demos'                 => $demos_json,
+        ];
+    }
+
+    /**
+     * Prepara días hábiles, consulta de bloqueos y mapa de fechas para disponibilidad.
+     *
+     * Centraliza la lógica compartida entre get_available_slots() y build_availability_json().
+     * Si algún día queda sin slots libres en la unión de demos, agrega un día hábil extra.
+     *
+     * @param int $days_ahead Cantidad mínima de días hábiles a incluir.
+     *
+     * @return array<string, mixed>
+     */
+    protected function prepare_slot_availability_context(int $days_ahead = 3): array
+    {
+        /* Parámetros de configuración de demos. */
+        $duracion    = LeadDemoSettings::get_duracion_minutos();
+        $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
+        $gracia_post = LeadDemoSettings::get_gracia_minutos_post();
+
+        /* Demos activas; sin ellas se delega al algoritmo legacy en get_available_slots(). */
+        $demos = \App\Models\Demo::orderBy('id')->get();
+
+        /* Instante actual en Argentina. */
+        $now         = now('America/Argentina/Buenos_Aires');
+        $now_minutes = $now->hour * 60 + $now->minute;
+        $today_key   = $now->copy()->startOfDay()->format('Y-m-d');
+        $cursor      = $now->copy()->startOfDay();
+
+        /* Lista inicial de días hábiles (lunes a sábado, sin domingos). */
+        $working_days = [];
+        while (count($working_days) < $days_ahead) {
+            if ($cursor->dayOfWeek !== 0) {
+                $working_days[] = $cursor->copy();
+            }
+            $cursor->addDay();
+        }
+
+        $date_strings = [];
+        foreach ($working_days as $day) {
+            $date_strings[] = $day->format('Y-m-d');
+        }
+
+        /* Rangos bloqueados por demo y fecha para los días iniciales. */
+        $blocked_by_demo = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post);
+
+        /* Mapa fecha → Carbon y unión de slots para detectar días sin disponibilidad. */
+        $dates_map = [];
+        $any_full  = false;
+
+        foreach ($working_days as $day) {
+            $date_key              = $day->format('Y-m-d');
+            $dates_map[$date_key]  = $day;
+            $union_available       = [];
+
+            foreach ($demos as $demo) {
+                $demo_slots = $this->compute_day_slots_for_demo(
+                    $day,
+                    $blocked_by_demo[$demo->id][$date_key] ?? [],
+                    $now,
+                    $today_key,
+                    $now_minutes,
+                    $duracion
+                );
+                foreach ($demo_slots as $slot) {
+                    if (! in_array($slot, $union_available, true)) {
+                        $union_available[] = $slot;
+                    }
+                }
+            }
+
+            if (empty($union_available)) {
+                $any_full = true;
+            }
+        }
+
+        /*
+         * Si algún día quedó sin slots en la unión, agregar el siguiente día hábil
+         * para que Claude siempre tenga alternativas concretas.
+         */
+        if ($any_full) {
+            while ($cursor->dayOfWeek === 0) {
+                $cursor->addDay();
+            }
+            $extra_key  = $cursor->format('Y-m-d');
+            $dates_map[$extra_key] = $cursor->copy();
+
+            $extra_blocked = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post);
+            foreach ($demos as $demo) {
+                $blocked_by_demo[$demo->id][$extra_key] = $extra_blocked[$demo->id][$extra_key] ?? [];
+            }
+        }
+
+        return [
+            'duracion'        => $duracion,
+            'now'             => $now,
+            'now_minutes'     => $now_minutes,
+            'today_key'       => $today_key,
+            'demos'           => $demos,
+            'dates_map'       => $dates_map,
+            'blocked_by_demo' => $blocked_by_demo,
+        ];
+    }
+
+    /**
+     * Consulta leads con demo agendada y arma rangos bloqueados por demo y fecha.
+     *
+     * @param \Illuminate\Support\Collection $demos         Colección de Demo.
+     * @param string[]                       $date_strings  Fechas Y-m-d a consultar.
+     * @param int                            $duracion      Duración de la demo en minutos.
+     * @param int                            $setup_antes   Margen de setup antes del inicio.
+     * @param int                            $gracia_post   Margen de gracia después del fin.
+     *
+     * @return array<int, array<string, array<int, array{0: int, 1: int}>>>
+     */
+    protected function load_blocked_ranges_by_demo($demos, array $date_strings, int $duracion, int $setup_antes, int $gracia_post): array
+    {
+        /* Inicializar estructura vacía por demo y fecha. */
+        $blocked_by_demo = [];
+        foreach ($demos as $demo) {
+            $blocked_by_demo[$demo->id] = [];
+            foreach ($date_strings as $date) {
+                $blocked_by_demo[$demo->id][$date] = [];
+            }
+        }
+
+        if (empty($date_strings)) {
+            return $blocked_by_demo;
+        }
+
+        /* Leads con demo en las fechas solicitadas. */
+        $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
+        $booked_leads = Lead::whereRaw(
+            "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
+            $date_strings
+        )
+            ->whereNotNull('demo_start_time')
+            ->whereNotNull('demo_id')
+            ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+
+        foreach ($booked_leads as $bl) {
+            $demo_id  = (int) $bl->demo_id;
+            $date_key = $bl->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
+
+            if (! isset($blocked_by_demo[$demo_id][$date_key])) {
+                continue;
+            }
+
+            if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_start_time, $m)) {
+                continue;
+            }
+            $start_minutes = (int) $m[1] * 60 + (int) $m[2];
+
+            if ($bl->demo_end_time && preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_end_time, $m2)) {
+                $end_minutes = (int) $m2[1] * 60 + (int) $m2[2];
+            } else {
+                $end_minutes = $start_minutes + $duracion;
+            }
+
+            $blocked_by_demo[$demo_id][$date_key][] = [$start_minutes - $setup_antes, $end_minutes + $gracia_post];
+        }
+
+        return $blocked_by_demo;
+    }
+
+    /**
+     * Calcula los slots libres de una demo en un día concreto.
+     *
+     * @param Carbon                              $day             Día a evaluar.
+     * @param array<int, array{0: int, 1: int}>   $blocked_ranges  Rangos bloqueados en minutos del día.
+     * @param Carbon                              $now             Instante actual en Argentina.
+     * @param string                              $today_key       Fecha de hoy (Y-m-d).
+     * @param int                                 $now_minutes     Minutos transcurridos hoy.
+     * @param int                                 $duracion        Duración de la demo en minutos.
+     *
+     * @return string[] Horarios disponibles en formato HH:MM.
+     */
+    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion): array
+    {
+        $date_key  = $day->format('Y-m-d');
+        $is_today  = $date_key === $today_key;
+
+        /* Sábados: 9–11hs; resto de días hábiles: 9–17hs. */
+        $all_slots = $day->dayOfWeek === 6
+            ? ['09:00', '10:00', '11:00']
+            : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+
+        $available = [];
+        foreach ($all_slots as $slot) {
+            [$sh, $sm]  = explode(':', $slot);
+            $slot_start = (int) $sh * 60 + (int) $sm;
+            $slot_end   = $slot_start + $duracion;
+
+            /* Hoy: descartar slots pasados o con menos de 30 min de margen. */
+            if ($is_today && $slot_start < $now_minutes + 30) {
+                continue;
+            }
+
+            $slot_free = true;
+            foreach ($blocked_ranges as [$bstart, $bend]) {
+                if ($slot_start < $bend && $slot_end > $bstart) {
+                    $slot_free = false;
+                    break;
+                }
+            }
+
+            if ($slot_free) {
+                $available[] = $slot;
+            }
+        }
+
+        return $available;
+    }
+
+    /**
      * Consulta los horarios de demo ocupados y devuelve los slots disponibles por día.
      *
      * Incluye los próximos $days_ahead días hábiles (lunes a sábado) a partir de mañana.
@@ -278,11 +504,6 @@ class LeadAiService
      */
     public function get_available_slots(int $days_ahead = 3): array
     {
-        /* Leer parámetros de configuración de demos. */
-        $duracion    = LeadDemoSettings::get_duracion_minutos();
-        $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
-        $gracia_post = LeadDemoSettings::get_gracia_minutos_post();
-
         /* Obtener todas las demos registradas para el cálculo multi-demo. */
         $demos = \App\Models\Demo::orderBy('id')->get();
 
@@ -294,217 +515,31 @@ class LeadAiService
             return $this->get_available_slots_legacy($days_ahead);
         }
 
-        /* Construir lista de días hábiles a partir de HOY (excluye domingos). */
-        $working_days = [];
-        /* Instante actual en Argentina; se usa para filtrar slots de hoy ya pasados. */
-        $now = now('America/Argentina/Buenos_Aires');
-        /* Minutos transcurridos del día actual (para comparar contra horas de slot). */
-        $now_minutes = $now->hour * 60 + $now->minute;
-        /* Fecha de hoy (Y-m-d) para detectar el día actual dentro del loop de slots. */
-        $today_key = $now->copy()->startOfDay()->format('Y-m-d');
-        /* Cursor empieza HOY al inicio del día en timezone Argentina. */
-        $cursor = $now->copy()->startOfDay();
+        /* Contexto compartido con build_availability_json(). */
+        $context = $this->prepare_slot_availability_context($days_ahead);
+        $result  = [];
 
-        while (count($working_days) < $days_ahead) {
-            /* 0 = domingo, se omite. */
-            if ($cursor->dayOfWeek !== 0) {
-                $working_days[] = $cursor->copy();
-            }
-            $cursor->addDay();
-        }
-        /* Al salir del while, $cursor apunta al día siguiente al último día incluido. */
+        foreach ($context['dates_map'] as $date_key => $day) {
+            $union_available = [];
 
-        /* Array de strings de fecha para la consulta SQL. */
-        $date_strings = array_map(function ($day) {
-            return $day->format('Y-m-d');
-        }, $working_days);
+            foreach ($context['demos'] as $demo) {
+                $demo_slots = $this->compute_day_slots_for_demo(
+                    $day,
+                    $context['blocked_by_demo'][$demo->id][$date_key] ?? [],
+                    $context['now'],
+                    $context['today_key'],
+                    $context['now_minutes'],
+                    $context['duracion']
+                );
 
-        /*
-         * Obtener todos los leads con demo agendada en esos días.
-         * Se incluye demo_id para asociar cada bloqueo a su demo específica.
-         */
-        $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
-        $booked_leads = Lead::whereRaw(
-            "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
-            $date_strings
-        )
-            ->whereNotNull('demo_start_time')
-            ->whereNotNull('demo_id')
-            ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
-
-        /*
-         * Construir mapa de rangos bloqueados por demo y fecha.
-         * blocked_by_demo[$demo_id][$date] = [[block_start_min, block_end_min], ...]
-         */
-        $blocked_by_demo = [];
-        foreach ($demos as $demo) {
-            $blocked_by_demo[$demo->id] = [];
-            foreach ($date_strings as $date) {
-                $blocked_by_demo[$demo->id][$date] = [];
-            }
-        }
-
-        foreach ($booked_leads as $bl) {
-            $demo_id  = (int) $bl->demo_id;
-            $date_key = $bl->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
-
-            if (! isset($blocked_by_demo[$demo_id][$date_key])) {
-                continue;
-            }
-
-            /* Parsear hora de inicio del lead. */
-            if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_start_time, $m)) {
-                continue;
-            }
-            $start_minutes = (int) $m[1] * 60 + (int) $m[2];
-
-            /* Hora de fin: usar demo_end_time si existe, sino calcular con duración configurada. */
-            if ($bl->demo_end_time && preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_end_time, $m2)) {
-                $end_minutes = (int) $m2[1] * 60 + (int) $m2[2];
-            } else {
-                $end_minutes = $start_minutes + $duracion;
-            }
-
-            /* El rango bloqueado incluye margen de setup antes y gracia después. */
-            $block_start = $start_minutes - $setup_antes;
-            $block_end   = $end_minutes + $gracia_post;
-
-            $blocked_by_demo[$demo_id][$date_key][] = [$block_start, $block_end];
-        }
-
-        /* Construir resultado: para cada día, slots disponibles en al menos una demo. */
-        $result   = [];
-        $any_full = false;
-
-        foreach ($working_days as $day) {
-            $date_key  = $day->format('Y-m-d');
-            /* Sábados tienen slots reducidos (9–11hs); resto de días 9–17hs. */
-            $all_slots = $day->dayOfWeek === 6
-                ? ['09:00', '10:00', '11:00']
-                : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
-
-            /* Indica si el día que estamos evaluando es hoy. */
-            $is_today = $date_key === $today_key;
-
-            $available = [];
-            foreach ($all_slots as $slot) {
-                [$sh, $sm]  = explode(':', $slot);
-                $slot_start = (int) $sh * 60 + (int) $sm;
-                $slot_end   = $slot_start + $duracion;
-
-                /*
-                 * Para el día de hoy, descartar los slots cuyo horario de inicio
-                 * ya pasó o está demasiado cerca (margen mínimo de 30 minutos
-                 * para que el lead tenga tiempo de prepararse).
-                 */
-                if ($is_today && $slot_start < $now_minutes + 30) {
-                    continue;
-                }
-
-                /*
-                 * El slot está disponible si al menos una demo no tiene solapamiento
-                 * con ninguno de sus rangos bloqueados.
-                 */
-                $slot_free = false;
-                foreach ($demos as $demo) {
-                    $demo_blocked   = $blocked_by_demo[$demo->id][$date_key] ?? [];
-                    $demo_slot_free = true;
-                    foreach ($demo_blocked as [$bstart, $bend]) {
-                        /* Solapamiento: el slot no está completamente fuera del rango bloqueado. */
-                        if ($slot_start < $bend && $slot_end > $bstart) {
-                            $demo_slot_free = false;
-                            break;
-                        }
-                    }
-                    if ($demo_slot_free) {
-                        $slot_free = true;
-                        break;
+                foreach ($demo_slots as $slot) {
+                    if (! in_array($slot, $union_available, true)) {
+                        $union_available[] = $slot;
                     }
                 }
-
-                if ($slot_free) {
-                    $available[] = $slot;
-                }
             }
 
-            if (empty($available)) {
-                $any_full = true;
-            }
-            $result[$date_key] = $available;
-        }
-
-        /*
-         * Si algún día quedó completamente ocupado, agregar el siguiente día hábil
-         * para que Claude siempre tenga opciones concretas para ofrecer.
-         */
-        if ($any_full) {
-            /* Avanzar cursor hasta el próximo día hábil (saltar domingos). */
-            while ($cursor->dayOfWeek === 0) {
-                $cursor->addDay();
-            }
-            $extra_key = $cursor->format('Y-m-d');
-
-            /* Consultar leads con demo en el día extra. */
-            $extra_leads = Lead::whereRaw(
-                "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?",
-                [$extra_key]
-            )
-                ->whereNotNull('demo_start_time')
-                ->whereNotNull('demo_id')
-                ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
-
-            /* Construir rangos bloqueados por demo para el día extra. */
-            $extra_blocked = [];
-            foreach ($demos as $demo) {
-                $extra_blocked[$demo->id] = [];
-            }
-            foreach ($extra_leads as $el) {
-                $demo_id = (int) $el->demo_id;
-                if (! isset($extra_blocked[$demo_id])) {
-                    continue;
-                }
-                if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $el->demo_start_time, $m)) {
-                    continue;
-                }
-                $s = (int) $m[1] * 60 + (int) $m[2];
-                if ($el->demo_end_time && preg_match('/(\d{1,2}):(\d{2})/', (string) $el->demo_end_time, $m2)) {
-                    $e = (int) $m2[1] * 60 + (int) $m2[2];
-                } else {
-                    $e = $s + $duracion;
-                }
-                $extra_blocked[$demo_id][] = [$s - $setup_antes, $e + $gracia_post];
-            }
-
-            /* Slots del día extra según día de semana. */
-            $extra_all = $cursor->dayOfWeek === 6
-                ? ['09:00', '10:00', '11:00']
-                : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
-
-            $extra_available = [];
-            foreach ($extra_all as $slot) {
-                [$sh, $sm] = explode(':', $slot);
-                $ss        = (int) $sh * 60 + (int) $sm;
-                $se        = $ss + $duracion;
-                $free      = false;
-                foreach ($demos as $demo) {
-                    $db = $extra_blocked[$demo->id] ?? [];
-                    $df = true;
-                    foreach ($db as [$bs, $be]) {
-                        if ($ss < $be && $se > $bs) {
-                            $df = false;
-                            break;
-                        }
-                    }
-                    if ($df) {
-                        $free = true;
-                        break;
-                    }
-                }
-                if ($free) {
-                    $extra_available[] = $slot;
-                }
-            }
-            $result[$extra_key] = $extra_available;
+            $result[$date_key] = $union_available;
         }
 
         return $result;
@@ -744,30 +779,53 @@ class LeadAiService
             ]);
         }
 
-        /* Acción: agendar demo si Claude devolvió el objeto con todos los campos requeridos. */
+        /* Acción: agendar demo si Claude devolvió el objeto con los campos requeridos. */
         $agendar_demo = isset($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])
             ? $parsed['agendar_demo']
             : null;
         if ($agendar_demo !== null) {
-            /* Extraer campos del objeto agendar_demo. */
-            $demo_id    = isset($agendar_demo['demo_id'])         ? (int) $agendar_demo['demo_id']                : null;
-            $demo_date  = isset($agendar_demo['demo_date'])        ? trim((string) $agendar_demo['demo_date'])     : '';
-            $demo_start = isset($agendar_demo['demo_start_time'])  ? trim((string) $agendar_demo['demo_start_time']) : '';
-            $demo_end   = isset($agendar_demo['demo_end_time'])    ? trim((string) $agendar_demo['demo_end_time'])   : '';
+            /* Extraer campos del objeto agendar_demo (demo_end_time lo calcula el servidor). */
+            $demo_id    = isset($agendar_demo['demo_id'])        ? (int) $agendar_demo['demo_id']                 : null;
+            $demo_date  = isset($agendar_demo['demo_date'])       ? trim((string) $agendar_demo['demo_date'])      : '';
+            $demo_start = isset($agendar_demo['demo_start_time']) ? trim((string) $agendar_demo['demo_start_time']) : '';
 
-            /* Solo persistir si llegaron todos los campos requeridos. */
-            if ($demo_id && $demo_date !== '' && $demo_start !== '' && $demo_end !== '') {
-                $lead->demo_id         = $demo_id;
-                $lead->demo_date       = $demo_date;
-                $lead->demo_start_time = $demo_start;
-                $lead->demo_end_time   = $demo_end;
-                Log::info('LeadAiService: demo agendada vía acción estructurada.', [
-                    'lead_id'    => $lead->id,
-                    'demo_id'    => $demo_id,
-                    'demo_date'  => $demo_date,
-                    'demo_start' => $demo_start,
-                    'demo_end'   => $demo_end,
-                ]);
+            /* Normalizar hora de inicio a HH:MM para comparar con el JSON de disponibilidad. */
+            if ($demo_start !== '' && preg_match('/(\d{1,2}):(\d{2})/', $demo_start, $start_match)) {
+                $demo_start = str_pad($start_match[1], 2, '0', STR_PAD_LEFT).':'.$start_match[2];
+            }
+
+            if ($demo_id && $demo_date !== '' && $demo_start !== '') {
+                /* Validar que el slot exista en la disponibilidad real para esa demo. */
+                $availability = $this->build_availability_json();
+                $slots_demo   = $availability['demos'][$demo_id][$demo_date] ?? [];
+
+                if (! in_array($demo_start, $slots_demo, true)) {
+                    Log::error('LeadAiService: Claude devolvió un agendar_demo con slot no disponible. Se ignora.', [
+                        'lead_id'            => $lead->id,
+                        'demo_id'            => $demo_id,
+                        'demo_date'          => $demo_date,
+                        'demo_start'         => $demo_start,
+                        'slots_disponibles'  => $slots_demo,
+                    ]);
+                } else {
+                    /* Fin de demo: inicio + duración configurada (Claude no debe enviar demo_end_time). */
+                    $duracion  = LeadDemoSettings::get_duracion_minutos();
+                    $demo_end  = Carbon::createFromFormat('H:i', $demo_start)
+                        ->addMinutes($duracion)
+                        ->format('H:i');
+
+                    $lead->demo_id         = $demo_id;
+                    $lead->demo_date       = $demo_date;
+                    $lead->demo_start_time = $demo_start;
+                    $lead->demo_end_time   = $demo_end;
+                    Log::info('LeadAiService: demo agendada vía acción estructurada y validada.', [
+                        'lead_id'    => $lead->id,
+                        'demo_id'    => $demo_id,
+                        'demo_date'  => $demo_date,
+                        'demo_start' => $demo_start,
+                        'demo_end'   => $demo_end,
+                    ]);
+                }
             }
         }
 
