@@ -158,7 +158,7 @@ class ImplementationController extends Controller
      *
      * @return Response|JsonResponse
      */
-    public function stage4_file_download(Implementation $implementation, Request $request): Response|JsonResponse
+    public function stage4_file_download(Implementation $implementation, Request $request)
     {
         // Validar categoría recibida; evitar acceso a claves arbitrarias del stage.data.
         $category = (string) ($request->input('category', ''));
@@ -216,7 +216,7 @@ class ImplementationController extends Controller
     public function message_file_download(
         Implementation $implementation,
         ImplementationMessage $message
-    ): Response|JsonResponse {
+    ) {
         // Verificar que el mensaje pertenece a la implementación solicitada.
         if ((int) $message->implementation_id !== (int) $implementation->id) {
             return response()->json(['message' => 'Mensaje no encontrado.'], 404);
@@ -240,7 +240,7 @@ class ImplementationController extends Controller
      *
      * @return Response|JsonResponse
      */
-    private function proxy_file_download_response(string $url, string $filename): Response|JsonResponse
+    private function proxy_file_download_response(string $url, string $filename)
     {
         $url = trim($url);
 

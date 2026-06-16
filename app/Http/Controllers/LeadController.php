@@ -20,6 +20,7 @@ use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadConversationAiState;
 use App\Services\LeadSuggestionSendService;
+use App\Services\LeadWhatsappOnboardingService;
 use App\Services\LeadWhatsAppPasteCleaner;
 use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
@@ -1011,6 +1012,15 @@ class LeadController extends Controller
             return response()->json(['message' => 'El mensaje no puede estar vacío.'], 422);
         }
 
+        // Mismo orden que WhatsappWebhookController::handle_lead_message: onboarding antes de persistir inbound.
+        $onboarding_service = new LeadWhatsappOnboardingService();
+        $display_name = $onboarding_service->resolve_display_name(
+            ['from' => $lead->phone, 'contact_name' => $lead->contact_name],
+            [],
+            $lead
+        );
+        $run_onboarding = $onboarding_service->should_run_onboarding($lead);
+
         // Mensaje entrante del lead, equivalente al que persiste el webhook (kind text, status enviado).
         $message = LeadMessage::create([
             'lead_id'               => $lead->id,
@@ -1025,6 +1035,17 @@ class LeadController extends Controller
 
         // Notificar a la conversación abierta y a los listados (mismo broadcast que el webhook).
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        // Bienvenida inmediata + job de presentación (igual que webhook real).
+        if ($run_onboarding) {
+            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);
+        } elseif (
+            (string) $lead->status === 'nuevo'
+            && ! $onboarding_service->has_auto_message_been_sent($lead)
+        ) {
+            // Recuperación: inbound previo sin auto (p. ej. simulación anterior sin onboarding).
+            $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);
+        }
 
         // Disparar el mismo flujo de sugerencia IA con debounce que usa el webhook real.
         // (No genera sugerencia en el primer inbound del lead, igual que en producción.)

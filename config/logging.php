@@ -17,7 +17,8 @@ return [
     |
     */
 
-    'default' => env('LOG_CHANNEL', 'stack'),
+    // Canal por defecto: un único archivo (storage/logs/laravel.log).
+    'default' => env('LOG_CHANNEL', 'single'),
 
     /*
     |--------------------------------------------------------------------------
@@ -50,6 +51,7 @@ return [
     'channels' => [
         'stack' => [
             'driver' => 'stack',
+            // Todos los canales del stack apuntan al mismo archivo único.
             'channels' => ['single'],
             'ignore_exceptions' => false,
         ],
@@ -60,11 +62,14 @@ return [
             'level' => env('LOG_LEVEL', 'debug'),
         ],
 
+        /*
+         * Compatibilidad: el código usa Log::channel('daily') en varios servicios.
+         * Se mantiene el nombre del canal pero con driver single para no rotar por fecha.
+         */
         'daily' => [
-            'driver' => 'daily',
+            'driver' => 'single',
             'path' => storage_path('logs/laravel.log'),
             'level' => env('LOG_LEVEL', 'debug'),
-            'days' => 14,
         ],
 
         'slack' => [

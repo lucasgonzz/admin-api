@@ -56,14 +56,8 @@ class LeadAiSuggestionScheduler
             return;
         }
 
-        if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
-            Log::channel('daily')->debug('LeadAiSuggestionScheduler: omitido (sugerencia pendiente de revisión).', [
-                'lead_id' => $lead_id,
-            ]);
-
-            return;
-        }
-
+        // Nuevo inbound del lead: descartar sugerencias pendientes obsoletas y reprogramar Claude.
+        // (Mismo criterio que SupportAiSuggestionScheduler: el lead siguió escribiendo.)
         $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_delay_seconds();
         $this->clear_stale_pending_suggestions($lead_id);
         $schedule_token = $this->bump_schedule_token($lead_id);
@@ -143,6 +137,8 @@ class LeadAiSuggestionScheduler
     /**
      * Elimina sugerencias IA pendientes de aprobación cuando el lead sigue escribiendo.
      *
+     * Cancela también jobs de envío automático asociados y notifica a la conversación abierta.
+     *
      * @param int $lead_id
      *
      * @return void
@@ -158,6 +154,11 @@ class LeadAiSuggestionScheduler
         if ($pending_ids->isEmpty()) {
             return;
         }
+
+        Log::channel('daily')->info('LeadAiSuggestionScheduler: sugerencias pendientes descartadas (nuevo mensaje del lead).', [
+            'lead_id'      => $lead_id,
+            'message_ids'  => $pending_ids->all(),
+        ]);
 
         $auto_send_scheduler = new LeadAiSuggestionAutoSendScheduler();
         foreach ($pending_ids as $pending_id) {

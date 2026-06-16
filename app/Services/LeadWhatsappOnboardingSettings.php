@@ -68,8 +68,8 @@ class LeadWhatsappOnboardingSettings
     /** Demora por defecto antes de enviar automáticamente una sugerencia pendiente (0 = envío inmediato). */
     private const DEFAULT_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS = 120;
 
-    /** Mínimo y máximo permitidos para demoras de bienvenida y similares (segundos). */
-    public const DELAY_MIN_SECONDS = 5;
+    /** Mínimo y máximo permitidos para demora del mensaje de bienvenida (segundos). 0 = envío inmediato. */
+    public const DELAY_MIN_SECONDS = 0;
 
     public const DELAY_MAX_SECONDS = 3600;
 
@@ -197,14 +197,28 @@ class LeadWhatsappOnboardingSettings
     {
         $raw = AdminSetting::get(self::KEY_WELCOME_DELAY_SECONDS, (string) self::DEFAULT_WELCOME_DELAY_SECONDS);
         $seconds = (int) $raw;
-        if ($seconds < self::DELAY_MIN_SECONDS) {
-            return self::DEFAULT_WELCOME_DELAY_SECONDS;
+
+        return self::clamp_welcome_delay($seconds);
+    }
+
+    /**
+     * Acota la demora del mensaje de bienvenida al rango permitido.
+     *
+     * @param int $value
+     *
+     * @return int
+     */
+    public static function clamp_welcome_delay(int $value): int
+    {
+        if ($value < self::DELAY_MIN_SECONDS) {
+            return self::DELAY_MIN_SECONDS;
         }
-        if ($seconds > self::DELAY_MAX_SECONDS) {
+
+        if ($value > self::DELAY_MAX_SECONDS) {
             return self::DELAY_MAX_SECONDS;
         }
 
-        return $seconds;
+        return $value;
     }
 
     /**

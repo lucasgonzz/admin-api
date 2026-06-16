@@ -164,8 +164,14 @@ class LeadWhatsappOnboardingService
 
         if (! $this->has_welcome_been_sent($lead)) {
             $delay_seconds = LeadWhatsappOnboardingSettings::get_welcome_delay_seconds();
-            SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name)
-                ->delay(now()->addSeconds($delay_seconds));
+            $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name);
+
+            // Con demora 0 no depender de queue:work (mismo criterio que sugerencia IA).
+            if ($delay_seconds > 0) {
+                $pending_dispatch->delay(now()->addSeconds($delay_seconds));
+            } else {
+                $pending_dispatch->onConnection('sync')->afterResponse();
+            }
         }
     }
 
