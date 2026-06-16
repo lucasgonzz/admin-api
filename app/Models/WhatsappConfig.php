@@ -27,6 +27,7 @@ class WhatsappConfig extends Model
         'phone_number_id',
         'webhook_secret',
         'is_active',
+        'test_mode',
     ];
 
     /**
@@ -36,6 +37,7 @@ class WhatsappConfig extends Model
      */
     protected $casts = [
         'is_active' => 'boolean',
+        'test_mode' => 'boolean',
     ];
 
     /**

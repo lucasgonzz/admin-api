@@ -616,6 +616,14 @@ class WhatsappSendService
             return null;
         }
 
+        // Modo de prueba: cortamos el envío real (devolvemos null) pero sin warning,
+        // ya que es un estado esperado. El resto del pipeline (sugerencias, guardado) sigue normal.
+        if ($config->test_mode) {
+            Log::channel('daily')->info('WhatsappSendService: test_mode activo, mensaje no enviado.');
+
+            return null;
+        }
+
         $api_key = trim((string) $config->kapso_api_key);
         $phone_number_id = trim((string) $config->phone_number_id);
         if ($api_key === '' || $phone_number_id === '') {

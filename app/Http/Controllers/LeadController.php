@@ -988,6 +988,52 @@ class LeadController extends Controller
     }
 
     /**
+     * Simula un mensaje entrante del lead sin pasar por WhatsApp (herramienta de testing del setter).
+     *
+     * Replica el mismo flujo que dispara el webhook real de Kapso al recibir un mensaje del lead:
+     * crea el LeadMessage como `lead`, emite el broadcast de conversación y programa la sugerencia
+     * de Claude con el debounce configurado. Útil para probar el pipeline de IA y de seguimiento
+     * aunque WhatsApp esté en `test_mode` o el lead no responda realmente.
+     *
+     * @param Request    $request Debe incluir `content` (texto simulado del lead).
+     * @param int|string $id      Identificador del lead.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function simulate_inbound_json(Request $request, $id)
+    {
+        // Lead objetivo de la simulación.
+        $lead = Lead::findOrFail($id);
+
+        // Texto simulado del lead; sin contenido no hay nada que simular.
+        $content = trim((string) $request->input('content', ''));
+        if ($content === '') {
+            return response()->json(['message' => 'El mensaje no puede estar vacío.'], 422);
+        }
+
+        // Mensaje entrante del lead, equivalente al que persiste el webhook (kind text, status enviado).
+        $message = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'lead',
+            'kind'                  => 'text',
+            'content'               => $content,
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+            'sent_at'               => now(),
+        ]);
+
+        // Notificar a la conversación abierta y a los listados (mismo broadcast que el webhook).
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        // Disparar el mismo flujo de sugerencia IA con debounce que usa el webhook real.
+        // (No genera sugerencia en el primer inbound del lead, igual que en producción.)
+        (new LeadAiSuggestionScheduler())->schedule_after_lead_inbound((int) $lead->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Pide sugerencia a Claude de inmediato cuando hay mensajes del lead sin responder.
      *
      * Cancela el debounce automático pendiente; el envío automático de la sugerencia generada

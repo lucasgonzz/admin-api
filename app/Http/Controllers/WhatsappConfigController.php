@@ -37,6 +37,7 @@ class WhatsappConfigController extends Controller
             'kapso_api_key'   => 'required|string|max:255',
             'phone_number_id' => 'required|string|max:255',
             'webhook_secret'  => 'required|string|max:255',
+            'test_mode'       => 'sometimes|boolean',
         ]);
 
         $config = WhatsappConfig::getActive();
@@ -49,6 +50,10 @@ class WhatsappConfigController extends Controller
         $config->kapso_api_key   = $validated['kapso_api_key'];
         $config->phone_number_id = $validated['phone_number_id'];
         $config->webhook_secret  = $validated['webhook_secret'];
+        // Solo actualizamos test_mode si el panel lo envió, para no resetearlo en updates parciales.
+        if ($request->has('test_mode')) {
+            $config->test_mode = $request->boolean('test_mode');
+        }
         $config->save();
 
         return response()->json($config);
