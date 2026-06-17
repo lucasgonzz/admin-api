@@ -858,8 +858,19 @@ class LeadAiService
                 /* Obtener el sort_order más bajo disponible para que aparezca primero. */
                 \App\Models\AdminTask::increment('sort_order');
 
+                /* Admin creador: default assignee, primer admin o ID 1 (compatible PHP 7, sin ?->). */
+                $created_by_admin_id = 1;
+                if ($default_assignee) {
+                    $created_by_admin_id = $default_assignee->id;
+                } else {
+                    $fallback_admin = \App\Models\Admin::first();
+                    if ($fallback_admin) {
+                        $created_by_admin_id = $fallback_admin->id;
+                    }
+                }
+
                 \App\Models\AdminTask::create([
-                    'created_by_admin_id' => $default_assignee?->id ?? \App\Models\Admin::first()?->id ?? 1,
+                    'created_by_admin_id' => $created_by_admin_id,
                     'assigned_admin_id'   => null,   /* Sin asignar: visible para todos en el badge */
                     'lead_id'             => $lead->id,
                     'title'               => $task_title,
