@@ -58,4 +58,14 @@ class Admin extends Authenticatable
     {
         return $this->hasMany(SupportTicket::class, 'assigned_admin_id');
     }
+
+    /**
+     * Devices con suscripción Web Push activa para este admin.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function push_subscriptions()
+    {
+        return $this->hasMany(AdminPushSubscription::class, 'admin_id');
+    }
 }

@@ -115,6 +115,15 @@ return [
         ),
     ],
 
+    // Web Push (VAPID): claves para firmar las notificaciones push enviadas
+    // a los devices de los admins (minishlink/web-push). Generadas con
+    // Minishlink\WebPush\VAPID::createVapidKeys(); nunca hardcodear en código.
+    'vapid' => [
+        'public_key'  => env('VAPID_PUBLIC_KEY'),
+        'private_key' => env('VAPID_PRIVATE_KEY'),
+        'subject'     => env('VAPID_SUBJECT', 'mailto:soporte@comerciocity.com'),
+    ],
+
     // Kapso (WhatsApp Cloud API): TLS saliente desde WhatsappSendService.
     'kapso' => [
         // Si no se define KAPSO_CAINFO, reutiliza ANTHROPIC_CAINFO (mismo cacert.pem en WAMP).
