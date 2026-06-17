@@ -880,6 +880,16 @@ class WhatsappWebhookController extends Controller
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $inbound_lead_message->id);
 
+        // Notificación push al admin que activó el toggle manual para este lead.
+        if ($lead->notificar_mensajes && $lead->notify_admin_id) {
+            \App\Services\AdminPushNotificationService::send_to_admin(
+                (int) $lead->notify_admin_id,
+                $lead->contact_name ?: $lead->phone,
+                mb_strimwidth($content, 0, 120, '…'),
+                ['url' => '/leads/' . $lead->id]
+            );
+        }
+
         // 2) Bienvenida inmediata + job de presentación (segundo en el hilo; cada envío emite su propio broadcast).
         if ($run_onboarding) {
             $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);

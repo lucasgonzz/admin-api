@@ -1654,6 +1654,32 @@ class LeadController extends Controller
     }
 
     /**
+     * Activa o desactiva las notificaciones push para este lead.
+     * Al activar, el admin autenticado queda como destinatario (notify_admin_id).
+     * Al desactivar, limpia notify_admin_id para no dejar referencia vieja.
+     *
+     * @param Request    $request
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_notify_messages_json(Request $request, $id)
+    {
+        $lead = Lead::findOrFail($id);
+
+        $enabled = (bool) $request->input('enabled');
+
+        $lead->notificar_mensajes = $enabled;
+        $lead->notify_admin_id = $enabled ? Auth::id() : null;
+        $lead->save();
+
+        return response()->json([
+            'notificar_mensajes' => $lead->notificar_mensajes,
+            'notify_admin_id'    => $lead->notify_admin_id,
+        ]);
+    }
+
+    /**
      * Normaliza el input del formulario (contact + setup técnico) en un array
      * listo para create/update. Las checkboxes se resuelven con boolean().
      *

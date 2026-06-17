@@ -107,6 +107,9 @@ class Lead extends Model
         'requiere_seguimiento'         => 'boolean',
         'tiene_seguimiento_sin_ver'    => 'boolean',
 
+        // Toggle manual por lead: notifica al admin por push cada mensaje entrante.
+        'notificar_mensajes'           => 'boolean',
+
         // Flag de recordatorio pre-demo: evita generar el mensaje más de una vez por demo agendada.
         'recordatorio_demo_enviado'    => 'boolean',
 
@@ -282,6 +285,16 @@ class Lead extends Model
     public function created_by_admin()
     {
         return $this->belongsTo(Admin::class, 'created_by_admin_id');
+    }
+
+    /**
+     * Admin que activó el toggle de notificaciones para este lead (recibe el push en mensajes entrantes).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function notify_admin()
+    {
+        return $this->belongsTo(Admin::class, 'notify_admin_id');
     }
 
     /**
