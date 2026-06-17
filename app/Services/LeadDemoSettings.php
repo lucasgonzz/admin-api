@@ -30,6 +30,9 @@ class LeadDemoSettings
     /** Clave: minutos antes del fin de la demo para generar resumen del lead. */
     public const KEY_RESUMEN_MINUTOS_ANTES_FIN = 'demo_resumen_minutos_antes_fin';
 
+    /** Clave: duración de la llamada del closer post-demo en minutos. */
+    public const KEY_DURACION_LLAMADA_CLOSER_MINUTOS = 'demo_duracion_llamada_closer_minutos';
+
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
 
@@ -48,6 +51,9 @@ class LeadDemoSettings
     /** Valor por defecto: resumen antes del fin de la demo (minutos). */
     private const DEFAULT_RESUMEN_MINUTOS_ANTES_FIN = 10;
 
+    /** Valor por defecto: duración de la llamada del closer post-demo (minutos). */
+    private const DEFAULT_DURACION_LLAMADA_CLOSER_MINUTOS = 30;
+
     /** Mínimo permitido para todos los parámetros (minutos). */
     public const MIN_MINUTOS = 0;
 
@@ -62,12 +68,13 @@ class LeadDemoSettings
     public static function to_array(): array
     {
         return [
-            'duracion_minutos'             => self::get_duracion_minutos(),
-            'setup_minutos_antes'          => self::get_setup_minutos_antes(),
-            'gracia_minutos_post'          => self::get_gracia_minutos_post(),
-            'recordatorio_minutos_antes'   => self::get_recordatorio_minutos_antes(),
-            'check_ingreso_minutos_post'   => self::get_check_ingreso_minutos_post(),
-            'resumen_minutos_antes_fin'    => self::get_resumen_minutos_antes_fin(),
+            'duracion_minutos'                => self::get_duracion_minutos(),
+            'setup_minutos_antes'             => self::get_setup_minutos_antes(),
+            'gracia_minutos_post'             => self::get_gracia_minutos_post(),
+            'recordatorio_minutos_antes'      => self::get_recordatorio_minutos_antes(),
+            'check_ingreso_minutos_post'      => self::get_check_ingreso_minutos_post(),
+            'resumen_minutos_antes_fin'       => self::get_resumen_minutos_antes_fin(),
+            'duracion_llamada_closer_minutos' => self::get_duracion_llamada_closer_minutos(),
         ];
     }
 
@@ -80,12 +87,13 @@ class LeadDemoSettings
      */
     public static function persist_from_request(array $data): void
     {
-        AdminSetting::set(self::KEY_DURACION_MINUTOS,           (string) self::clamp((int) $data['duracion_minutos']));
-        AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES,        (string) self::clamp((int) $data['setup_minutos_antes']));
-        AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST,        (string) self::clamp((int) $data['gracia_minutos_post']));
-        AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES, (string) self::clamp((int) $data['recordatorio_minutos_antes']));
-        AdminSetting::set(self::KEY_CHECK_INGRESO_MINUTOS_POST, (string) self::clamp((int) $data['check_ingreso_minutos_post']));
-        AdminSetting::set(self::KEY_RESUMEN_MINUTOS_ANTES_FIN,  (string) self::clamp((int) $data['resumen_minutos_antes_fin']));
+        AdminSetting::set(self::KEY_DURACION_MINUTOS,                (string) self::clamp((int) $data['duracion_minutos']));
+        AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES,             (string) self::clamp((int) $data['setup_minutos_antes']));
+        AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST,             (string) self::clamp((int) $data['gracia_minutos_post']));
+        AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES,      (string) self::clamp((int) $data['recordatorio_minutos_antes']));
+        AdminSetting::set(self::KEY_CHECK_INGRESO_MINUTOS_POST,      (string) self::clamp((int) $data['check_ingreso_minutos_post']));
+        AdminSetting::set(self::KEY_RESUMEN_MINUTOS_ANTES_FIN,       (string) self::clamp((int) $data['resumen_minutos_antes_fin']));
+        AdminSetting::set(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::clamp((int) $data['duracion_llamada_closer_minutos']));
     }
 
     /**
@@ -112,6 +120,9 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_RESUMEN_MINUTOS_ANTES_FIN) === null) {
             AdminSetting::set(self::KEY_RESUMEN_MINUTOS_ANTES_FIN, (string) self::DEFAULT_RESUMEN_MINUTOS_ANTES_FIN);
+        }
+        if (AdminSetting::get(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::DEFAULT_DURACION_LLAMADA_CLOSER_MINUTOS);
         }
     }
 
@@ -173,6 +184,19 @@ class LeadDemoSettings
     public static function get_resumen_minutos_antes_fin(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_RESUMEN_MINUTOS_ANTES_FIN, (string) self::DEFAULT_RESUMEN_MINUTOS_ANTES_FIN));
+    }
+
+    /**
+     * Duración de la llamada del closer post-demo en minutos.
+     *
+     * El closer queda ocupado desde el fin de la gracia hasta fin + este valor.
+     * Ningún otro lead puede liberar su demo en esa ventana.
+     *
+     * @return int
+     */
+    public static function get_duracion_llamada_closer_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::DEFAULT_DURACION_LLAMADA_CLOSER_MINUTOS));
     }
 
     /**

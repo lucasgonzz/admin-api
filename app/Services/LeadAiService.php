@@ -248,21 +248,27 @@ class LeadAiService
         $hoy_label      = ucfirst($day_names_full[$context['now']->dayOfWeek])
             .' '.$context['now']->format('d/m/Y').', '.$context['now']->format('H:i').'hs (hora Argentina)';
 
-        /* Slots disponibles por demo y por fecha. */
+        /* Slots disponibles por demo y por fecha.
+         * Cada llamada aplica las dos capas de bloqueo: por demo y por closer. */
         $demos_json = [];
         foreach ($context['demos'] as $demo) {
             $demo_id = (int) $demo->id;
             $demos_json[$demo_id] = [];
 
             foreach ($context['dates_map'] as $date_key => $day) {
+                /* Rangos bloqueados por este entorno técnico específico. */
                 $blocked_ranges = $context['blocked_by_demo'][$demo_id][$date_key] ?? [];
+                /* Rangos de closer ocupado para esta fecha (transversal a todas las demos). */
+                $closer_busy_for_date = $context['closer_busy'][$date_key] ?? [];
                 $demos_json[$demo_id][$date_key] = $this->compute_day_slots_for_demo(
                     $day,
                     $blocked_ranges,
                     $context['now'],
                     $context['today_key'],
                     $context['now_minutes'],
-                    $context['duracion']
+                    $context['duracion'],
+                    $closer_busy_for_date,
+                    $context['gracia_post']
                 );
             }
         }
@@ -314,8 +320,11 @@ class LeadAiService
             $date_strings[] = $day->format('Y-m-d');
         }
 
-        /* Rangos bloqueados por demo y fecha para los días iniciales. */
-        $blocked_by_demo = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post);
+        /* Rangos bloqueados por demo y rangos de closer ocupado para los días iniciales.
+         * Ambas estructuras se construyen en un solo recorrido sobre la misma query de leads. */
+        $load_result     = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post);
+        $blocked_by_demo = $load_result['blocked_by_demo'];
+        $closer_busy     = $load_result['closer_busy'];
 
         /* Mapa fecha → Carbon y unión de slots para detectar días sin disponibilidad. */
         $dates_map = [];
@@ -333,7 +342,9 @@ class LeadAiService
                     $now,
                     $today_key,
                     $now_minutes,
-                    $duracion
+                    $duracion,
+                    $closer_busy[$date_key] ?? [],
+                    $gracia_post
                 );
                 foreach ($demo_slots as $slot) {
                     if (! in_array($slot, $union_available, true)) {
@@ -358,25 +369,36 @@ class LeadAiService
             $extra_key  = $cursor->format('Y-m-d');
             $dates_map[$extra_key] = $cursor->copy();
 
-            $extra_blocked = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post);
+            /* Cargar bloqueos del día extra y fusionarlos con los ya existentes. */
+            $extra_result = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post);
             foreach ($demos as $demo) {
-                $blocked_by_demo[$demo->id][$extra_key] = $extra_blocked[$demo->id][$extra_key] ?? [];
+                $blocked_by_demo[$demo->id][$extra_key] = $extra_result['blocked_by_demo'][$demo->id][$extra_key] ?? [];
             }
+            /* Fusionar rangos de closer del día extra. */
+            $closer_busy[$extra_key] = $extra_result['closer_busy'][$extra_key] ?? [];
         }
 
         return [
             'duracion'        => $duracion,
+            'gracia_post'     => $gracia_post,
             'now'             => $now,
             'now_minutes'     => $now_minutes,
             'today_key'       => $today_key,
             'demos'           => $demos,
             'dates_map'       => $dates_map,
             'blocked_by_demo' => $blocked_by_demo,
+            'closer_busy'     => $closer_busy,
         ];
     }
 
     /**
-     * Consulta leads con demo agendada y arma rangos bloqueados por demo y fecha.
+     * Consulta leads con demo agendada y arma rangos bloqueados por demo y fecha,
+     * junto con los rangos de ocupación del closer (transversales a todas las demos).
+     *
+     * El closer queda ocupado desde [fin_demo + gracia_post] hasta
+     * [fin_demo + gracia_post + duracion_llamada_closer_minutos].
+     * Ese bloqueo es independiente del entorno técnico (demo_id) y evita que
+     * dos leads liberen su demo en ventanas solapadas que requieran al closer.
      *
      * @param \Illuminate\Support\Collection $demos         Colección de Demo.
      * @param string[]                       $date_strings  Fechas Y-m-d a consultar.
@@ -384,7 +406,10 @@ class LeadAiService
      * @param int                            $setup_antes   Margen de setup antes del inicio.
      * @param int                            $gracia_post   Margen de gracia después del fin.
      *
-     * @return array<int, array<string, array<int, array{0: int, 1: int}>>>
+     * @return array{
+     *   blocked_by_demo: array<int, array<string, array<int, array{0: int, 1: int}>>>,
+     *   closer_busy: array<string, array<int, array{0: int, 1: int}>>
+     * }
      */
     protected function load_blocked_ranges_by_demo($demos, array $date_strings, int $duracion, int $setup_antes, int $gracia_post): array
     {
@@ -397,9 +422,18 @@ class LeadAiService
             }
         }
 
-        if (empty($date_strings)) {
-            return $blocked_by_demo;
+        /* Inicializar estructura de closer ocupado por fecha (transversal a demos). */
+        $closer_busy = [];
+        foreach ($date_strings as $date) {
+            $closer_busy[$date] = [];
         }
+
+        if (empty($date_strings)) {
+            return ['blocked_by_demo' => $blocked_by_demo, 'closer_busy' => $closer_busy];
+        }
+
+        /* Duración de la llamada del closer; define el ancho de la ventana ocupada post-gracia. */
+        $duracion_closer = LeadDemoSettings::get_duracion_llamada_closer_minutos();
 
         /* Leads con demo en las fechas solicitadas. */
         $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
@@ -415,10 +449,6 @@ class LeadAiService
             $demo_id  = (int) $bl->demo_id;
             $date_key = $bl->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
 
-            if (! isset($blocked_by_demo[$demo_id][$date_key])) {
-                continue;
-            }
-
             if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_start_time, $m)) {
                 continue;
             }
@@ -430,25 +460,50 @@ class LeadAiService
                 $end_minutes = $start_minutes + $duracion;
             }
 
-            $blocked_by_demo[$demo_id][$date_key][] = [$start_minutes - $setup_antes, $end_minutes + $gracia_post];
+            /* Bloqueo por demo: impide que dos leads usen el mismo entorno técnico en simultáneo. */
+            if (isset($blocked_by_demo[$demo_id][$date_key])) {
+                $blocked_by_demo[$demo_id][$date_key][] = [$start_minutes - $setup_antes, $end_minutes + $gracia_post];
+            }
+
+            /* Bloqueo del closer: ventana post-gracia en la que el closer atiende a este lead.
+             * Es transversal a todas las demos; aplica a cualquier fecha que esté en el mapa. */
+            if (isset($closer_busy[$date_key])) {
+                /* Inicio de la ventana del closer: cuando el lead queda listo post-gracia. */
+                $closer_start = $end_minutes + $gracia_post;
+                /* Fin de la ventana: inicio + duración estimada de la llamada. */
+                $closer_end   = $closer_start + $duracion_closer;
+                $closer_busy[$date_key][] = [$closer_start, $closer_end];
+            }
         }
 
-        return $blocked_by_demo;
+        return ['blocked_by_demo' => $blocked_by_demo, 'closer_busy' => $closer_busy];
     }
 
     /**
      * Calcula los slots libres de una demo en un día concreto.
      *
-     * @param Carbon                              $day             Día a evaluar.
-     * @param array<int, array{0: int, 1: int}>   $blocked_ranges  Rangos bloqueados en minutos del día.
-     * @param Carbon                              $now             Instante actual en Argentina.
-     * @param string                              $today_key       Fecha de hoy (Y-m-d).
-     * @param int                                 $now_minutes     Minutos transcurridos hoy.
-     * @param int                                 $duracion        Duración de la demo en minutos.
+     * Aplica dos capas de bloqueo independientes:
+     *   1. Bloqueo por demo_id: evita que dos leads usen el mismo entorno técnico en simultáneo.
+     *   2. Bloqueo por closer: evita que el closer deba atender dos leads en ventanas solapadas.
+     *
+     * Un slot candidato es válido solo si pasa ambas validaciones.
+     *
+     * Nota sobre el linde exacto en el chequeo de closer: se usan comparaciones estrictas
+     * (> y <) para que el linde exacto (un lead libera al closer justo cuando otro lo necesita)
+     * se considere válido, conforme a la regla de negocio acordada.
+     *
+     * @param Carbon                              $day                         Día a evaluar.
+     * @param array<int, array{0: int, 1: int}>   $blocked_ranges              Rangos bloqueados por demo en minutos del día.
+     * @param Carbon                              $now                         Instante actual en Argentina.
+     * @param string                              $today_key                   Fecha de hoy (Y-m-d).
+     * @param int                                 $now_minutes                 Minutos transcurridos hoy.
+     * @param int                                 $duracion                    Duración de la demo en minutos.
+     * @param array<int, array{0: int, 1: int}>   $closer_busy_ranges_for_date Rangos de closer ocupado para este día (transversal a demos).
+     * @param int                                 $gracia_post                 Minutos de gracia post-demo; necesario para calcular cuándo el lead candidato liberaría al closer.
      *
      * @return string[] Horarios disponibles en formato HH:MM.
      */
-    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion): array
+    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0): array
     {
         $date_key  = $day->format('Y-m-d');
         $is_today  = $date_key === $today_key;
@@ -470,10 +525,27 @@ class LeadAiService
             }
 
             $slot_free = true;
+
+            /* Capa 1: chequeo por demo_id; impide solapar entornos técnicos. */
             foreach ($blocked_ranges as [$bstart, $bend]) {
                 if ($slot_start < $bend && $slot_end > $bstart) {
                     $slot_free = false;
                     break;
+                }
+            }
+
+            /* Capa 2: chequeo por closer; impide que el closer deba atender dos leads en simultáneo.
+             * Se verifica si el momento en que el lead candidato liberaría al closer
+             * (slot_end + gracia_post) cae dentro de una ventana ya comprometida por otro lead.
+             * Comparaciones estrictas: el linde exacto (un lead termina justo cuando otro empieza) es válido. */
+            if ($slot_free && ! empty($closer_busy_ranges_for_date)) {
+                /* Instante en que este lead candidato quedaría disponible para el closer. */
+                $closer_release = $slot_end + $gracia_post;
+                foreach ($closer_busy_ranges_for_date as [$cstart, $cend]) {
+                    if ($closer_release > $cstart && $closer_release < $cend) {
+                        $slot_free = false;
+                        break;
+                    }
                 }
             }
 
@@ -522,6 +594,9 @@ class LeadAiService
         foreach ($context['dates_map'] as $date_key => $day) {
             $union_available = [];
 
+            /* Rangos de closer ocupado para esta fecha (transversal a todas las demos). */
+            $closer_busy_for_date = $context['closer_busy'][$date_key] ?? [];
+
             foreach ($context['demos'] as $demo) {
                 $demo_slots = $this->compute_day_slots_for_demo(
                     $day,
@@ -529,7 +604,9 @@ class LeadAiService
                     $context['now'],
                     $context['today_key'],
                     $context['now_minutes'],
-                    $context['duracion']
+                    $context['duracion'],
+                    $closer_busy_for_date,
+                    $context['gracia_post']
                 );
 
                 foreach ($demo_slots as $slot) {
