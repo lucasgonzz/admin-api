@@ -1535,6 +1535,26 @@ class LeadController extends Controller
     }
 
     /**
+     * Fuerza el seguimiento que corresponde al lead ahora mismo (testing manual),
+     * ignorando horas de espera y sugerencia pendiente. Ver LeadFollowupService::force_followup_now.
+     *
+     * @param int|string $id
+     * @param \App\Services\LeadFollowupService $service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function force_followup_json($id, \App\Services\LeadFollowupService $service)
+    {
+        $lead = Lead::findOrFail($id);
+        $outcome = $service->force_followup_now($lead);
+
+        return response()->json([
+            'model'   => $this->fullModel('lead', $lead->id),
+            'outcome' => $outcome,
+        ], 200);
+    }
+
+    /**
      * Genera el resumen del lead con Claude manualmente desde admin-spa.
      *
      * Llama a la API de Anthropic con el historial de mensajes del lead para

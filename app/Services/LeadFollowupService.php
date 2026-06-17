@@ -68,6 +68,59 @@ class LeadFollowupService
     }
 
     /**
+     * Fuerza el envío del seguimiento que corresponde a un lead AHORA MISMO,
+     * ignorando horas_espera y tiene_sugerencia_pendiente. Pensado para testing
+     * manual desde el panel admin. El resto de la lógica (conteo de followups,
+     * elección de template, pausado por límite alcanzado) es idéntica a producción.
+     *
+     * @param Lead $lead
+     *
+     * @return array{result:string, followup_number:int|null, via:string|null}
+     *   result: 'suggestion'|'paused'|'no_rule'|'limit_reached_already_paused'
+     *   via: 'template'|'claude'|null
+     */
+    public function force_followup_now(Lead $lead): array
+    {
+        $rules_by_estado = FollowupRule::query()->where('activa', true)->get()->keyBy('estado');
+
+        if (! $rules_by_estado->has($lead->status)) {
+            return ['result' => 'no_rule', 'followup_number' => null, 'via' => null];
+        }
+
+        /** @var FollowupRule $rule */
+        $rule = $rules_by_estado->get($lead->status);
+
+        $followups = LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('is_followup', true)
+            ->where('status', '!=', 'rechazado')
+            ->count();
+
+        if ($followups >= (int) $rule->max_followups) {
+            $this->pause_lead($lead);
+            return ['result' => 'paused', 'followup_number' => null, 'via' => null];
+        }
+
+        $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
+        if (! $fresh) {
+            return ['result' => 'no_rule', 'followup_number' => null, 'via' => null];
+        }
+
+        $followup_number = $followups + 1;
+        $template = $this->find_template_for($lead->status, $followup_number);
+
+        if ($template !== null) {
+            $this->send_followup_via_template($fresh, $template, $followup_number);
+            $via = 'template';
+        } else {
+            app(LeadAiService::class)->generate_suggestion($fresh, true);
+            $via = 'claude';
+        }
+
+        return ['result' => 'suggestion', 'followup_number' => $followup_number, 'via' => $via];
+    }
+
+    /**
      * @param Lead                                       $lead
      * @param \Illuminate\Support\Collection $rules_by_estado
      *
