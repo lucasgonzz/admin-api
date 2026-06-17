@@ -102,6 +102,19 @@ return [
         'verify_ssl' => filter_var(env('ANTHROPIC_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
+    // Google Calendar OAuth2: permite que los closers conecten su calendario dedicado
+    // de Google para bloquear disponibilidad de demos automáticamente.
+    // Credenciales creadas en Google Cloud Console (tipo "Web application",
+    // scope https://www.googleapis.com/auth/calendar.readonly).
+    'google_calendar' => [
+        'client_id'     => env('GOOGLE_OAUTH_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_OAUTH_CLIENT_SECRET'),
+        'redirect_uri'  => env(
+            'GOOGLE_OAUTH_REDIRECT_URI',
+            'https://admin-api.comerciocity.com/api/admin/calendar/google/callback'
+        ),
+    ],
+
     // Kapso (WhatsApp Cloud API): TLS saliente desde WhatsappSendService.
     'kapso' => [
         // Si no se define KAPSO_CAINFO, reutiliza ANTHROPIC_CAINFO (mismo cacert.pem en WAMP).

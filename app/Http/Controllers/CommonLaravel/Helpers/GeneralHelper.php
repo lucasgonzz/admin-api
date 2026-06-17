@@ -19,7 +19,9 @@ class GeneralHelper
     {
         /** "update" en el SPA es el recurso client_version_upgrades, no un modelo "Update" */
         $map = [
-            'update' => 'App\\Models\\ClientVersionUpgrade',
+            'update'     => 'App\\Models\\ClientVersionUpgrade',
+            // "admin_user" mapea al modelo Admin para el CRUD de usuarios del equipo.
+            'admin_user' => 'App\\Models\\Admin',
         ];
         if (isset($map[$model_name])) {
             return $map[$model_name];

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Events\LeadSuggestionCreated;
+use App\Services\CloserGoogleCalendarBusyService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Models\AiSystemPrompt;
@@ -326,6 +327,31 @@ class LeadAiService
         $blocked_by_demo = $load_result['blocked_by_demo'];
         $closer_busy     = $load_result['closer_busy'];
 
+        /* Tercera capa de bloqueo: eventos del calendario Google del closer.
+         * Si la API de Google falla, se degrada de forma segura (continúa sin esta capa)
+         * para no romper el flujo de WhatsApp por un error externo. */
+        try {
+            $google_busy_service = new CloserGoogleCalendarBusyService(
+                new \App\Services\GoogleCalendarOAuthService()
+            );
+            $google_busy = $google_busy_service->get_busy_ranges_for_dates($date_strings);
+
+            // Fusionar rangos de Google Calendar con los rangos de agenda interna.
+            foreach ($date_strings as $date) {
+                if (! empty($google_busy[$date])) {
+                    $closer_busy[$date] = array_merge(
+                        $closer_busy[$date] ?? [],
+                        $google_busy[$date]
+                    );
+                }
+            }
+        } catch (\Exception $e) {
+            // Degradación segura: loguear y continuar sin la capa de Google Calendar.
+            Log::warning('LeadAiService: fallo en CloserGoogleCalendarBusyService, se continúa sin la tercera capa', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
         /* Mapa fecha → Carbon y unión de slots para detectar días sin disponibilidad. */
         $dates_map = [];
         $any_full  = false;
@@ -374,8 +400,27 @@ class LeadAiService
             foreach ($demos as $demo) {
                 $blocked_by_demo[$demo->id][$extra_key] = $extra_result['blocked_by_demo'][$demo->id][$extra_key] ?? [];
             }
-            /* Fusionar rangos de closer del día extra. */
+            /* Fusionar rangos de closer del día extra (agenda interna). */
             $closer_busy[$extra_key] = $extra_result['closer_busy'][$extra_key] ?? [];
+
+            /* Agregar también la tercera capa (Google Calendar) para el día extra. */
+            try {
+                $google_busy_service_extra = new CloserGoogleCalendarBusyService(
+                    new \App\Services\GoogleCalendarOAuthService()
+                );
+                $google_busy_extra = $google_busy_service_extra->get_busy_ranges_for_dates([$extra_key]);
+                if (! empty($google_busy_extra[$extra_key])) {
+                    $closer_busy[$extra_key] = array_merge(
+                        $closer_busy[$extra_key],
+                        $google_busy_extra[$extra_key]
+                    );
+                }
+            } catch (\Exception $e) {
+                Log::warning('LeadAiService: fallo en CloserGoogleCalendarBusyService para día extra', [
+                    'extra_key' => $extra_key,
+                    'error'     => $e->getMessage(),
+                ]);
+            }
         }
 
         return [
@@ -1099,6 +1144,14 @@ class LeadAiService
         foreach ($lead->messages as $msg) {
             /* Saltar mensajes que el operador marcó como eliminados del contexto de IA. */
             if ($msg->deleted_from_context) {
+                continue;
+            }
+
+            /* Reacciones de WhatsApp no son mensajes de texto del lead (legacy o mal parseadas). */
+            if ((string) ($msg->kind ?? '') === 'reaction') {
+                continue;
+            }
+            if ($sender === 'lead' && LeadWhatsappReactionService::is_legacy_reaction_content((string) $msg->content)) {
                 continue;
             }
 

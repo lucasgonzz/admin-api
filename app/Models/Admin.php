@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\ModelProperties\AdminProperties;
+use App\Models\AdminCalendarConnection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -34,7 +35,17 @@ class Admin extends Authenticatable
         'is_default_support_owner' => 'boolean',
         // Flag para asignación automática al crear nuevas tareas internas.
         'is_default_task_assignee' => 'boolean',
+        // Flag que identifica al admin como closer (responsable de llamadas post-demo).
+        'is_closer'                => 'boolean',
     ];
+
+    /**
+     * Relación con la conexión de Google Calendar del admin closer.
+     */
+    public function calendar_connection()
+    {
+        return $this->hasOne(AdminCalendarConnection::class, 'admin_id');
+    }
 
     function scopeWithAll($query) {
         // placeholder para mantener consistencia con empresa-api

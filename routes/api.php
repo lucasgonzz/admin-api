@@ -28,6 +28,8 @@ use App\Http\Controllers\UpdateCommandController;
 use App\Http\Controllers\UpdateController;
 use App\Http\Controllers\UpdateSeederController;
 use App\Http\Controllers\VersionController;
+use App\Http\Controllers\Api\AdminUserController;
+use App\Http\Controllers\Api\AdminCalendarConnectionController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -53,6 +55,15 @@ Route::middleware('admin.inbound.key')
 */
 Route::prefix('admin')->group(function () {
     Route::post('login', [AuthController::class, 'login']);
+
+    /* Callback de Google OAuth: público porque Google no envía header de Sanctum.
+     * La seguridad se garantiza por la firma HMAC del parámetro state. */
+    Route::get('calendar/google/callback', [AdminCalendarConnectionController::class, 'callback']);
+
+    /* Adjuntos de lead: URL firmada (abre en nueva pestaña sin symlink /storage en el hosting). */
+    Route::get('lead-message-attachment/{id}/file', [LeadController::class, 'serve_message_attachment_file_json'])
+        ->name('lead.message.attachment.file')
+        ->middleware('signed');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('logout', [AuthController::class, 'logout']);
@@ -113,6 +124,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
         Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
+        Route::post('lead/{id}/toggle-claude-auto-reply', [LeadController::class, 'toggle_claude_auto_reply_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
         Route::post('lead/{id}/send-demo-reminder', [LeadController::class, 'send_demo_reminder_json']);
@@ -123,6 +135,8 @@ Route::prefix('admin')->group(function () {
         Route::put('lead-message/{id}/approve-with-edit', [LeadController::class, 'approve_message_with_edit_json']);
         Route::put('lead-message/{id}/reject', [LeadController::class, 'reject_message_json']);
         Route::put('lead-message/{id}/cancel-auto-send', [LeadController::class, 'cancel_auto_send_message_json']);
+        /* Alterna si el mensaje se incluye o se excluye del historial enviado a Claude. */
+        Route::put('lead-message/{id}/toggle-deleted-from-context', [LeadController::class, 'toggle_deleted_from_context_json']);
 
         Route::get('followup-rule', [FollowupRuleController::class, 'index_json']);
         Route::put('followup-rule/{id}', [FollowupRuleController::class, 'update_json']);
@@ -142,6 +156,20 @@ Route::prefix('admin')->group(function () {
         Route::get('protocol-entry/{id}', [ProtocolEntryController::class, 'show_json']);
         Route::put('protocol-entry/{id}', [ProtocolEntryController::class, 'update_json']);
         Route::delete('protocol-entry/{id}', [ProtocolEntryController::class, 'destroy_json']);
+
+        // CRUD de usuarios admin (equipo interno de ComercioCity).
+        Route::get('admin-user', [AdminUserController::class, 'index_json']);
+        Route::get('admin-user/{id}', [AdminUserController::class, 'show_json']);
+        Route::post('admin-user', [AdminUserController::class, 'store_json']);
+        Route::put('admin-user/{id}', [AdminUserController::class, 'update_json']);
+        Route::delete('admin-user/{id}', [AdminUserController::class, 'destroy_json']);
+
+        // Google Calendar OAuth: conexión del closer (autenticado por Sanctum).
+        Route::get('calendar/google/connect', [AdminCalendarConnectionController::class, 'connect']);
+        Route::get('calendar/google/status', [AdminCalendarConnectionController::class, 'status']);
+        Route::get('calendar/google/list-calendars', [AdminCalendarConnectionController::class, 'list_calendars']);
+        Route::put('calendar/google/select-calendar', [AdminCalendarConnectionController::class, 'select_calendar']);
+        Route::delete('calendar/google', [AdminCalendarConnectionController::class, 'disconnect']);
 
         Route::get('demo', [DemoController::class, 'index_json']);
         Route::get('demo/{id}', [DemoController::class, 'show_json']);

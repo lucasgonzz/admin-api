@@ -37,6 +37,14 @@ class AdminProperties
                 'show' => true,
                 'exclude_on_update' => true,
             ],
+            [
+                // Flag que indica si el admin actúa como closer en demos.
+                'key'   => 'is_closer',
+                'text'  => 'Es closer',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+            ],
         ];
     }
 }
