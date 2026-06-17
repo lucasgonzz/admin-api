@@ -435,19 +435,18 @@ class LeadAiService
         /* Duración de la llamada del closer; define el ancho de la ventana ocupada post-gracia. */
         $duracion_closer = LeadDemoSettings::get_duracion_llamada_closer_minutos();
 
-        /* Leads con demo en las fechas solicitadas. */
-        $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
-        $booked_leads = Lead::whereRaw(
-            "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
-            $date_strings
-        )
+        /* Leads con demo en las fechas solicitadas.
+         * demo_date es una columna DATE pura (sin hora ni timezone), por lo que se compara
+         * directamente con whereIn sin ninguna conversión de zona horaria. */
+        $booked_leads = Lead::whereIn('demo_date', $date_strings)
             ->whereNotNull('demo_start_time')
             ->whereNotNull('demo_id')
             ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
 
         foreach ($booked_leads as $bl) {
             $demo_id  = (int) $bl->demo_id;
-            $date_key = $bl->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
+            /* demo_date es una fecha de calendario pura; no tiene timezone, se formatea directamente. */
+            $date_key = $bl->demo_date->format('Y-m-d');
 
             if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $bl->demo_start_time, $m)) {
                 continue;
@@ -508,10 +507,8 @@ class LeadAiService
         $date_key  = $day->format('Y-m-d');
         $is_today  = $date_key === $today_key;
 
-        /* Sábados: 9–11hs; resto de días hábiles: 9–17hs. */
-        $all_slots = $day->dayOfWeek === 6
-            ? ['09:00', '10:00', '11:00']
-            : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+        /* Slots candidatos del día según protocolo: sábados 9-11hs, lunes-viernes 9-20hs. */
+        $all_slots = $this->get_all_slots_for_day($day);
 
         $available = [];
         foreach ($all_slots as $slot) {
@@ -564,7 +561,7 @@ class LeadAiService
      * Si alguno de esos días queda sin disponibilidad, agrega el siguiente día hábil.
      *
      * Horarios posibles:
-     *   - Lunes a viernes: cada hora de 09:00 a 17:00 (9 bloques, el último termina a las 18:00)
+     *   - Lunes a viernes: cada hora de 09:00 a 20:00 (12 bloques, el último termina a las 21:00)
      *   - Sábado: 09:00, 10:00, 11:00 (3 bloques, el último termina a las 12:00)
      *
      * Un slot está ocupado si existe un lead con `demo_date` en esa fecha
@@ -656,18 +653,16 @@ class LeadAiService
             return $day->format('Y-m-d');
         }, $working_days);
 
-        $placeholders = implode(',', array_fill(0, count($date_strings), '?'));
-        $booked_leads = Lead::whereRaw(
-            "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) IN ({$placeholders})",
-            $date_strings
-        )
+        /* demo_date es DATE puro; se compara directamente sin conversión de timezone. */
+        $booked_leads = Lead::whereIn('demo_date', $date_strings)
             ->whereNotNull('demo_start_time')
             ->get(['demo_date', 'demo_start_time']);
 
         /* Agrupar horarios ocupados por fecha. */
         $occupied_by_date = [];
         foreach ($booked_leads as $booked_lead) {
-            $date_key = $booked_lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d');
+            /* demo_date no tiene timezone: formatear directamente sin setTimezone(). */
+            $date_key = $booked_lead->demo_date->format('Y-m-d');
             $time_raw = trim((string) $booked_lead->demo_start_time);
             if (preg_match('/(\d{1,2}):(\d{2})/', $time_raw, $m)) {
                 $occupied_by_date[$date_key][] = str_pad($m[1], 2, '0', STR_PAD_LEFT).':'.$m[2];
@@ -679,9 +674,8 @@ class LeadAiService
 
         foreach ($working_days as $day) {
             $date_key  = $day->format('Y-m-d');
-            $all_slots = $day->dayOfWeek === 6
-                ? ['09:00', '10:00', '11:00']
-                : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+            /* Slots candidatos del día según protocolo (método centralizado). */
+            $all_slots = $this->get_all_slots_for_day($day);
 
             /* Indica si el día que estamos evaluando es hoy. */
             $is_today = $date_key === $today_key;
@@ -714,10 +708,8 @@ class LeadAiService
                 $cursor->addDay();
             }
             $extra_key   = $cursor->format('Y-m-d');
-            $extra_leads = Lead::whereRaw(
-                "DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?",
-                [$extra_key]
-            )
+            /* demo_date es DATE puro; comparar directamente sin conversión de timezone. */
+            $extra_leads = Lead::where('demo_date', $extra_key)
                 ->whereNotNull('demo_start_time')
                 ->get(['demo_date', 'demo_start_time']);
 
@@ -729,9 +721,8 @@ class LeadAiService
                 }
             }
 
-            $extra_all_slots = $cursor->dayOfWeek === 6
-                ? ['09:00', '10:00', '11:00']
-                : ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+            /* Slots del día extra: usar el mismo método centralizado. */
+            $extra_all_slots = $this->get_all_slots_for_day($cursor);
 
             $result[$extra_key] = array_values(array_filter($extra_all_slots, function ($slot) use ($extra_booked) {
                 return ! in_array($slot, $extra_booked, true);
@@ -739,6 +730,37 @@ class LeadAiService
         }
 
         return $result;
+    }
+
+    /**
+     * Devuelve los horarios candidatos para un día concreto según el protocolo de demos.
+     *
+     * Centraliza la lista de slots para evitar que los distintos puntos del archivo
+     * (compute_day_slots_for_demo, get_available_slots_legacy y el bloque del día extra)
+     * puedan desincronizarse entre sí.
+     *
+     * Reglas según protocolo WhatsApp (sección "AGENDA DE DEMOS"):
+     *   - Lunes a viernes: 09:00 a 20:00, una hora por bloque (12 slots).
+     *   - Sábado: 09:00, 10:00, 11:00 (último bloque termina a las 12:00).
+     *   - Domingo: no aplica (el caller no debe pasar domingos).
+     *
+     * @param Carbon $day Día a evaluar.
+     *
+     * @return string[] Horarios en formato HH:MM.
+     */
+    private function get_all_slots_for_day(Carbon $day): array
+    {
+        /* Sábado: rango reducido de mañana. */
+        if ($day->dayOfWeek === 6) {
+            return ['09:00', '10:00', '11:00'];
+        }
+
+        /* Lunes a viernes: rango completo hasta las 20:00 (bloque final termina a las 21:00). */
+        return [
+            '09:00', '10:00', '11:00', '12:00',
+            '13:00', '14:00', '15:00', '16:00',
+            '17:00', '18:00', '19:00', '20:00',
+        ];
     }
 
     /**
@@ -1075,6 +1097,11 @@ class LeadAiService
     {
         $historial = '';
         foreach ($lead->messages as $msg) {
+            /* Saltar mensajes que el operador marcó como eliminados del contexto de IA. */
+            if ($msg->deleted_from_context) {
+                continue;
+            }
+
             $sender = (string) $msg->sender;
             $status = (string) $msg->status;
             $label = strtoupper($sender);
