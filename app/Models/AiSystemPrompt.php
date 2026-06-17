@@ -5,7 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * Esqueleto del system prompt de Claude; el protocolo completo se inyecta desde GitHub en runtime.
+ * Esqueleto del system prompt de Claude. El protocolo completo se sincroniza desde GitHub
+ * a la BD (ver SyncedGithubFile) y se inyecta en runtime leyéndolo de base de datos.
  */
 class AiSystemPrompt extends Model
 {

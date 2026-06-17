@@ -20,6 +20,10 @@ class Kernel extends ConsoleKernel
         $schedule->command('support:check-response-alerts')->everyFiveMinutes();
         $schedule->command('leads:check-followups')->everyTwoHours();
 
+        // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
+        // Red de seguridad por si Lucas olvida apretar el botón manual del admin.
+        $schedule->command('agent-prompts:sync')->everyTenMinutes();
+
         // Genera recordatorios pre-demo para leads con demo en los próximos X minutos (configurable).
         // Cada 5 minutos garantiza que ninguna demo se pierda dentro de la ventana.
         $schedule->command('leads:send-demo-reminders')->everyFiveMinutes();

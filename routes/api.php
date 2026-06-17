@@ -15,7 +15,6 @@ use App\Http\Controllers\DeploymentController;
 use App\Http\Controllers\DemoController;
 use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
-use App\Http\Controllers\Admin\ProtocolCacheController;
 use App\Http\Controllers\AiSystemPromptController;
 use App\Http\Controllers\Api\ClientInstallationController;
 use App\Http\Controllers\Api\EnvTemplateController;
@@ -133,8 +132,6 @@ Route::prefix('admin')->group(function () {
 
         Route::get('ai-system-prompt', [AiSystemPromptController::class, 'index']);
         Route::put('ai-system-prompt', [AiSystemPromptController::class, 'update']);
-
-        Route::post('protocol/refresh-cache', [ProtocolCacheController::class, 'refresh']);
 
         Route::get('whatsapp-config', [WhatsappConfigController::class, 'show']);
         Route::put('whatsapp-config', [WhatsappConfigController::class, 'update']);

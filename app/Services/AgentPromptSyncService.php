@@ -4,34 +4,72 @@ namespace App\Services;
 
 use App\Models\AgentIdentity;
 use App\Models\AiSystemPrompt;
+use App\Models\SyncedGithubFile;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Descarga los archivos de prompt de agentes desde GitHub y actualiza la BD.
+ * Descarga TODOS los archivos sincronizables del repositorio lucasgonzz/claude-comerciocity
+ * desde la GitHub Contents API y los persiste en base de datos.
  *
- * Archivos sincronizados:
- *   - prompts_agentes/setter_identidad.md  → AgentIdentity (activo)
- *   - prompts_agentes/setter_system_prompt.md → AiSystemPrompt (activo)
+ * Único punto de contacto con GitHub para contenido editable: tanto el botón
+ * "Sincronizar desde GitHub" del admin como el scheduled job cada 10 minutos
+ * ejecutan este mismo `sync()`. Ningún servicio de runtime debe volver a pegarle
+ * a la GitHub API al generar una sugerencia de Claude — todos leen de BD.
+ *
+ * Para agregar un archivo nuevo, basta con sumar una entrada al mapa self::FILES
+ * (cambio de una sola línea), indicando su ruta en el repo y a qué destino persiste.
  */
 class AgentPromptSyncService
 {
-    /** URL base de la GitHub Contents API para la carpeta de prompts de agentes. */
-    const GITHUB_BASE_URL = 'https://api.github.com/repos/lucasgonzz/claude-comerciocity/contents/prompts_agentes';
+    /** URL base de la GitHub Contents API apuntando a la raíz del repositorio. */
+    const GITHUB_CONTENTS_BASE_URL = 'https://api.github.com/repos/lucasgonzz/claude-comerciocity/contents/';
+
+    /** Destino: descripción del agente activo (modelo AgentIdentity). */
+    const TARGET_AGENT_IDENTITY = 'agent_identity';
+
+    /** Destino: contenido del system prompt activo (modelo AiSystemPrompt). */
+    const TARGET_AI_SYSTEM_PROMPT = 'ai_system_prompt';
+
+    /** Destino: archivo genérico sin modelo de dominio propio (modelo SyncedGithubFile). */
+    const TARGET_SYNCED_FILE = 'synced_github_file';
 
     /**
-     * Mapa clave interna → nombre de archivo en el repositorio.
+     * Mapa de todos los archivos sincronizables del repositorio.
      *
-     * @var array<string, string>
+     * Cada entrada define:
+     *   - key:       clave interna estable (para SyncedGithubFile y logs)
+     *   - repo_path: ruta del archivo dentro del repositorio
+     *   - target:    a qué modelo/clave persiste (ver constantes TARGET_*)
+     *
+     * Agregar un archivo nuevo = sumar una entrada acá, sin tocar el resto del flujo.
+     *
+     * @var array<int, array{key: string, repo_path: string, target: string}>
      */
     const FILES = [
-        'setter_identidad'     => 'setter_identidad.md',
-        'setter_system_prompt' => 'setter_system_prompt.md',
+        [
+            'key'       => 'setter_identidad',
+            'repo_path' => 'prompts_agentes/setter_identidad.md',
+            'target'    => self::TARGET_AGENT_IDENTITY,
+        ],
+        [
+            'key'       => 'setter_system_prompt',
+            'repo_path' => 'prompts_agentes/setter_system_prompt.md',
+            'target'    => self::TARGET_AI_SYSTEM_PROMPT,
+        ],
+        [
+            'key'       => 'leads_protocolo_whatsapp',
+            'repo_path' => 'comercial/leads_protocolo_whatsapp.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
     ];
 
     /**
      * Descarga todos los archivos y actualiza la BD.
      * Devuelve array con resultado por archivo: ['file' => string, 'ok' => bool, 'error' => string|null]
+     *
+     * Cada archivo se sincroniza de forma independiente: el fallo de uno no
+     * interrumpe la sincronización de los demás.
      *
      * @return array<int, array{file: string, ok: bool, error: string|null}>
      */
@@ -40,15 +78,15 @@ class AgentPromptSyncService
         // Acumulador de resultados por archivo sincronizado.
         $results = [];
 
-        foreach (self::FILES as $key => $filename) {
+        foreach (self::FILES as $file) {
             try {
                 // Descarga y persiste cada archivo de forma independiente.
-                $content = $this->fetch_file($filename);
-                $this->persist($key, $content);
-                $results[] = ['file' => $filename, 'ok' => true, 'error' => null];
+                $content = $this->fetch_file($file['repo_path']);
+                $this->persist($file, $content);
+                $results[] = ['file' => $file['repo_path'], 'ok' => true, 'error' => null];
             } catch (\Throwable $e) {
-                Log::error("AgentPromptSyncService: error al sincronizar {$filename}", ['error' => $e->getMessage()]);
-                $results[] = ['file' => $filename, 'ok' => false, 'error' => $e->getMessage()];
+                Log::error("AgentPromptSyncService: error al sincronizar {$file['repo_path']}", ['error' => $e->getMessage()]);
+                $results[] = ['file' => $file['repo_path'], 'ok' => false, 'error' => $e->getMessage()];
             }
         }
 
@@ -58,10 +96,10 @@ class AgentPromptSyncService
     /**
      * Descarga un archivo desde GitHub y devuelve su contenido decodificado.
      *
-     * @param string $filename Nombre del archivo en prompts_agentes/
+     * @param string $repo_path Ruta del archivo dentro del repositorio (ej: 'comercial/leads_protocolo_whatsapp.md')
      * @return string Contenido del markdown
      */
-    protected function fetch_file(string $filename): string
+    protected function fetch_file(string $repo_path): string
     {
         // Token con permiso de lectura al repositorio privado.
         $token = trim((string) env('GITHUB_PROTOCOL_TOKEN', ''));
@@ -85,7 +123,7 @@ class AgentPromptSyncService
             $http = $http->withOptions(['verify' => $ca_bundle]);
         }
 
-        $response = $http->get(self::GITHUB_BASE_URL.'/'.$filename);
+        $response = $http->get(self::GITHUB_CONTENTS_BASE_URL.$repo_path);
 
         if (! $response->successful()) {
             throw new \RuntimeException("GitHub HTTP {$response->status()}: {$response->body()}");
@@ -93,29 +131,29 @@ class AgentPromptSyncService
 
         $payload = $response->json();
         if (! is_array($payload) || empty($payload['content'])) {
-            throw new \RuntimeException("Respuesta de GitHub sin campo content para {$filename}.");
+            throw new \RuntimeException("Respuesta de GitHub sin campo content para {$repo_path}.");
         }
 
         // GitHub devuelve el contenido en base64, a veces con saltos de línea.
         $encoded = str_replace(["\n", "\r"], '', (string) $payload['content']);
         $decoded = base64_decode($encoded, true);
         if ($decoded === false) {
-            throw new \RuntimeException("No se pudo decodificar base64 para {$filename}.");
+            throw new \RuntimeException("No se pudo decodificar base64 para {$repo_path}.");
         }
 
         return trim($decoded);
     }
 
     /**
-     * Persiste el contenido descargado en el modelo correspondiente.
+     * Persiste el contenido descargado en el destino correspondiente.
      *
-     * @param string $key Clave interna del mapa FILES
+     * @param array{key: string, repo_path: string, target: string} $file Entrada del mapa FILES
      * @param string $content Texto del markdown descargado
      * @return void
      */
-    protected function persist(string $key, string $content): void
+    protected function persist(array $file, string $content): void
     {
-        if ($key === 'setter_identidad') {
+        if ($file['target'] === self::TARGET_AGENT_IDENTITY) {
             $identity = AgentIdentity::obtener_activo();
             if (! $identity) {
                 $identity = new AgentIdentity();
@@ -128,7 +166,7 @@ class AgentPromptSyncService
             return;
         }
 
-        if ($key === 'setter_system_prompt') {
+        if ($file['target'] === self::TARGET_AI_SYSTEM_PROMPT) {
             $prompt = AiSystemPrompt::obtener_activo();
             if (! $prompt) {
                 $prompt = new AiSystemPrompt();
@@ -137,6 +175,21 @@ class AgentPromptSyncService
             }
             $prompt->contenido = $content;
             $prompt->save();
+
+            return;
+        }
+
+        if ($file['target'] === self::TARGET_SYNCED_FILE) {
+            // Archivo genérico sin modelo de dominio propio: upsert por clave interna.
+            $synced = SyncedGithubFile::obtener_por_key($file['key']);
+            if (! $synced) {
+                $synced = new SyncedGithubFile();
+                $synced->key = $file['key'];
+            }
+            $synced->repo_path = $file['repo_path'];
+            $synced->content   = $content;
+            $synced->synced_at = now();
+            $synced->save();
 
             return;
         }
