@@ -38,6 +38,18 @@ class GoogleCalendarOAuthService
     const CALENDAR_READONLY_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 
     /**
+     * Scope de lectura de email de la cuenta Google.
+     * Necesario para que el endpoint oauth2/v3/userinfo devuelva el campo email.
+     */
+    const EMAIL_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
+
+    /**
+     * Scope openid, requerido junto a EMAIL_SCOPE para identificar la cuenta
+     * conectada y recuperar el email via el endpoint de userinfo de Google.
+     */
+    const OPENID_SCOPE = 'openid';
+
+    /**
      * Construye la URL de consentimiento OAuth2 de Google para que el closer la visite.
      *
      * Usa access_type=offline + prompt=consent para garantizar que Google devuelva
@@ -58,7 +70,10 @@ class GoogleCalendarOAuthService
             'client_id'     => config('services.google_calendar.client_id'),
             'redirect_uri'  => config('services.google_calendar.redirect_uri'),
             'response_type' => 'code',
-            'scope'         => self::CALENDAR_READONLY_SCOPE,
+            // Tres scopes separados por espacio (formato estándar OAuth2):
+            // - calendar.readonly: acceso de solo lectura al calendario
+            // - userinfo.email + openid: necesarios para que /oauth2/v3/userinfo devuelva el email
+            'scope'         => self::CALENDAR_READONLY_SCOPE . ' ' . self::EMAIL_SCOPE . ' ' . self::OPENID_SCOPE,
             'access_type'   => 'offline',
             // prompt=consent garantiza que Google siempre devuelva refresh_token.
             'prompt'        => 'consent',
@@ -284,9 +299,12 @@ class GoogleCalendarOAuthService
         $response = Http::withToken($access_token)
             ->get('https://www.googleapis.com/oauth2/v3/userinfo');
 
-        if ($response->failed()) {
+        if ($response->failed() || empty($response->json('email'))) {
+            // Incluir el body completo para facilitar el diagnóstico de futuras fallas
+            // (p. ej. scope insuficiente, token inválido, respuesta inesperada de Google).
             Log::warning('GoogleCalendarOAuth: no se pudo obtener email de la cuenta', [
                 'status' => $response->status(),
+                'body'   => substr($response->body(), 0, 500),
             ]);
             return null;
         }
