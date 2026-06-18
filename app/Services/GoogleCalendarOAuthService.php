@@ -38,6 +38,18 @@ class GoogleCalendarOAuthService
     const CALENDAR_READONLY_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 
     /**
+     * Scope de email: necesario para que el endpoint userinfo devuelva el campo `email`.
+     * Sin este scope, fetch_account_email() recibe una respuesta sin el dato y guarda null.
+     */
+    const EMAIL_SCOPE  = 'https://www.googleapis.com/auth/userinfo.email';
+
+    /**
+     * Scope openid: requerido junto con el de email para el flujo de identidad de Google
+     * (userinfo necesita openid + email para resolver la cuenta del consentimiento).
+     */
+    const OPENID_SCOPE = 'openid';
+
+    /**
      * Construye la URL de consentimiento OAuth2 de Google para que el closer la visite.
      *
      * Usa access_type=offline + prompt=consent para garantizar que Google devuelva
@@ -58,7 +70,9 @@ class GoogleCalendarOAuthService
             'client_id'     => config('services.google_calendar.client_id'),
             'redirect_uri'  => config('services.google_calendar.redirect_uri'),
             'response_type' => 'code',
-            'scope'         => self::CALENDAR_READONLY_SCOPE,
+            // Los tres scopes separados por espacio (formato estándar OAuth2 para múltiples scopes).
+            // email + openid son necesarios para que userinfo devuelva el email de la cuenta conectada.
+            'scope'         => self::CALENDAR_READONLY_SCOPE . ' ' . self::EMAIL_SCOPE . ' ' . self::OPENID_SCOPE,
             'access_type'   => 'offline',
             // prompt=consent garantiza que Google siempre devuelva refresh_token.
             'prompt'        => 'consent',
@@ -281,16 +295,30 @@ class GoogleCalendarOAuthService
     protected function fetch_account_email(string $access_token): ?string
     {
         // Endpoint de userinfo de Google para obtener el email de la cuenta.
+        // Requiere que el token tenga los scopes email + openid (ver build_authorization_url).
         $response = Http::withToken($access_token)
             ->get('https://www.googleapis.com/oauth2/v3/userinfo');
 
         if ($response->failed()) {
+            // Se loguea el body completo para diagnosticar fallas de scope/permiso sin reproducir a ciegas.
             Log::warning('GoogleCalendarOAuth: no se pudo obtener email de la cuenta', [
                 'status' => $response->status(),
+                'body'   => $response->body(),
             ]);
             return null;
         }
 
-        return $response->json('email');
+        // La respuesta puede ser 200 pero no traer el campo `email` (token sin scope email/openid).
+        $email = $response->json('email');
+        if (empty($email)) {
+            // Se loguea el body completo para detectar la ausencia del campo email.
+            Log::warning('GoogleCalendarOAuth: respuesta sin campo email', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
+            return null;
+        }
+
+        return $email;
     }
 }
