@@ -25,11 +25,15 @@ class LeadMessage extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'is_followup'           => 'boolean',
-        'requiere_verificacion' => 'boolean',
-        'sent_at'               => 'datetime',
-        'read_at'               => 'datetime',
-        'ai_auto_send_at'       => 'datetime',
+        'is_followup'             => 'boolean',
+        'requiere_verificacion'   => 'boolean',
+        'sent_at'                 => 'datetime',
+        'read_at'                 => 'datetime',
+        'ai_auto_send_at'         => 'datetime',
+        /* Momento en que el lead reaccionó a este mensaje por WhatsApp. */
+        'lead_reaction_at'        => 'datetime',
+        /* Mensaje excluido del historial enviado a Claude (marcado manualmente por el operador). */
+        'deleted_from_context'    => 'boolean',
     ];
 
     /**

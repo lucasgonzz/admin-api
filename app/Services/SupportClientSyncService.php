@@ -30,7 +30,9 @@ class SupportClientSyncService
         // URL base del cliente de empresa-api.
         $base_url = rtrim((string) $client->api_url, '/');
         if ($base_url === '') {
-            Log::warning('SupportClientSyncService: client api_url vacío');
+            Log::warning('SupportClientSyncService: client api_url vacío', [
+                'client_id' => $client->id,
+            ]);
             return false;
         }
 

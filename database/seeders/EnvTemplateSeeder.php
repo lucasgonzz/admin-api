@@ -54,7 +54,8 @@ class EnvTemplateSeeder extends Seeder
             ['key' => 'QUEUE_CONNECTION',  'value' => 'database',                        'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 1],
             ['key' => 'CACHE_DRIVER',      'value' => 'file',                            'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 2],
             ['key' => 'SESSION_DRIVER',    'value' => 'file',                            'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 3],
-            ['key' => 'SESSION_LIFETIME',  'value' => '120',                             'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 4],
+            ['key' => 'SESSION_LIFETIME',  'value' => '10080',                           'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Minutos (7 días). Sesión web.',              'sort_order' => 4],
+            ['key' => 'SANCTUM_EXPIRATION','value' => '10080',                           'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Minutos (7 días). Token admin-spa.',       'sort_order' => 5],
         ];
 
         /* Upsert por key: crea o actualiza cada variable sin duplicar. */

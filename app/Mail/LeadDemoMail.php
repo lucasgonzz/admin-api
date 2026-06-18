@@ -42,6 +42,9 @@ class LeadDemoMail extends Mailable
     /** @var string Contraseña de acceso al sistema demo. */
     public $password;
 
+    /** @var string Número de documento del lead para ingresar al sistema demo. */
+    public $doc_number;
+
     /** @var string URL de la tienda ecommerce demo. */
     public $url_tienda;
 
@@ -87,6 +90,7 @@ class LeadDemoMail extends Mailable
      * @param string $url_demo       URL del sistema demo.
      * @param string $usuario        Usuario de acceso.
      * @param string $password       Contraseña de acceso.
+     * @param string $doc_number     Número de documento del lead (usuario de ingreso).
      * @param string $url_tienda     URL de la tienda demo.
      * @param string $url_whatsapp   URL de WhatsApp.
      * @param string $video_intro    URL del video intro.
@@ -107,6 +111,7 @@ class LeadDemoMail extends Mailable
         string $url_demo,
         string $usuario,
         string $password,
+        string $doc_number,
         string $url_tienda,
         string $url_whatsapp,
         string $video_intro,
@@ -126,6 +131,7 @@ class LeadDemoMail extends Mailable
         $this->url_demo        = $url_demo;
         $this->usuario         = $usuario;
         $this->password        = $password;
+        $this->doc_number      = $doc_number;
         $this->url_tienda      = $url_tienda;
         $this->url_whatsapp    = $url_whatsapp;
         $this->video_intro     = $video_intro;

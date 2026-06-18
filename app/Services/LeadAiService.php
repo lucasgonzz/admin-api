@@ -1147,6 +1147,9 @@ class LeadAiService
                 continue;
             }
 
+            /* $sender se asigna primero para poder usarlo en los filtros siguientes. */
+            $sender = (string) $msg->sender;
+
             /* Reacciones de WhatsApp no son mensajes de texto del lead (legacy o mal parseadas). */
             if ((string) ($msg->kind ?? '') === 'reaction') {
                 continue;
@@ -1154,8 +1157,6 @@ class LeadAiService
             if ($sender === 'lead' && LeadWhatsappReactionService::is_legacy_reaction_content((string) $msg->content)) {
                 continue;
             }
-
-            $sender = (string) $msg->sender;
             $status = (string) $msg->status;
             $label = strtoupper($sender);
             // Audio: content es la transcripción Kapso; el prefijo orienta a Claude como en soporte.

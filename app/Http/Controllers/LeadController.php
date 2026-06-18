@@ -9,6 +9,7 @@ use App\Mail\Helpers\LeadDemoMailHelper;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\LeadMessageAttachment;
 use App\Models\LeadPersonalizedDemoVideo;
 use App\Models\ProtocolEntry;
 use App\Events\LeadAiSuggestionFinished;
@@ -31,6 +32,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * Panel de Leads (prospectos).
@@ -1150,6 +1152,32 @@ class LeadController extends Controller
     }
 
     /**
+     * Activa o desactiva la respuesta automática de Claude para un lead concreto.
+     *
+     * Al desactivar, cancela el debounce pendiente para que no se genere sugerencia en cola.
+     *
+     * @param int|string                $lead_id
+     * @param LeadAiSuggestionScheduler $scheduler
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_claude_auto_reply_json($lead_id, LeadAiSuggestionScheduler $scheduler)
+    {
+        $lead = Lead::query()->with('messages')->findOrFail($lead_id);
+
+        // Invierte el flag por lead (default true en BD para leads existentes).
+        $lead->claude_auto_reply = ! (bool) $lead->claude_auto_reply;
+        $lead->save();
+
+        // Si se desactiva, invalidar jobs diferidos que aún no llamaron a Claude.
+        if (! $lead->claude_auto_reply) {
+            $scheduler->cancel_scheduled_suggestion((int) $lead->id);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Marca un mensaje sugerido como aprobado (listo para enviar por el setter).
      *
      * @param int|string $message_id
@@ -1278,6 +1306,67 @@ class LeadController extends Controller
         LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Alterna si el mensaje se incluye o excluye del historial enviado a Claude.
+     *
+     * Los mensajes marcados con deleted_from_context=true siguen siendo visibles
+     * en la UI del operador pero no se envían a Claude como parte del contexto,
+     * lo que permite ignorar mensajes que no aportan valor a la conversación con la IA.
+     *
+     * @param int|string $message_id Id de lead_messages.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_deleted_from_context_json($message_id)
+    {
+        /* Busca el mensaje incluyendo el lead para poder retornar el modelo completo. */
+        $message = LeadMessage::query()->with('lead')->findOrFail($message_id);
+
+        /* Invierte el estado actual del campo. */
+        $message->update(['deleted_from_context' => !$message->deleted_from_context]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Sirve un adjunto de lead vía URL firmada (nueva pestaña sin depender de public/storage).
+     *
+     * @param \Illuminate\Http\Request $request
+     * @param int|string               $id      ID de lead_message_attachments.
+     *
+     * @return \Symfony\Component\HttpFoundation\StreamedResponse|\Illuminate\Http\Response
+     */
+    public function serve_message_attachment_file_json(Request $request, $id)
+    {
+        /* La ruta usa middleware signed; validación defensiva adicional. */
+        if (! $request->hasValidSignature()) {
+            abort(403, 'Enlace de adjunto inválido o expirado.');
+        }
+
+        $attachment = LeadMessageAttachment::query()->findOrFail($id);
+        $disk = trim((string) ($attachment->disk ?? 'public'));
+        if ($disk === '') {
+            $disk = 'public';
+        }
+
+        $path = trim((string) ($attachment->path ?? ''));
+        if ($path === '' || ! Storage::disk($disk)->exists($path)) {
+            abort(404, 'Adjunto no encontrado.');
+        }
+
+        $download_name = $attachment->display_filename ?: basename($path);
+        $mime = trim((string) ($attachment->mime ?? ''));
+
+        $headers = [];
+        if ($mime !== '') {
+            $headers['Content-Type'] = $mime;
+        }
+
+        return Storage::disk($disk)->response($path, $download_name, $headers);
     }
 
     /**

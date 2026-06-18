@@ -16,7 +16,7 @@ use Carbon\Carbon;
  * Datos del acceso:
  * - URL y tienda vienen de la Demo asignada al lead.
  * - Usuario viene del campo `user_name` del lead (asignado en demo setup).
- * - Contraseña se toma del `doc_number` del lead por requerimiento comercial.
+ * - Número de documento y contraseña se toman del `doc_number` del lead.
  * - Videos y WhatsApp vienen de config para ser configurables por entorno.
  */
 class LeadDemoMailHelper
@@ -50,8 +50,9 @@ class LeadDemoMailHelper
         // Usuario de acceso: campo `user_name` del lead (seteado en demo setup).
         $usuario = (string) ($lead->user_name ?? '');
 
-        // Contraseña de acceso requerida: documento del lead.
-        $password       = (string) ($lead->doc_number ?? '');
+        // Número de documento del lead: se usa como credencial de ingreso y como contraseña.
+        $doc_number = (string) ($lead->doc_number ?? '');
+        $password   = $doc_number;
         $url_whatsapp   = (string) config('commerciocity.demo_mail.whatsapp_url', '');
         $presenter_name = (string) config('commerciocity.demo_mail.presenter_name', 'Equipo ComercioCity');
         $presenter_role = (string) config('commerciocity.demo_mail.presenter_role', 'Fundador');
@@ -91,6 +92,7 @@ class LeadDemoMailHelper
             $url_demo,
             $usuario,
             $password,
+            $doc_number,
             $url_tienda,
             $url_whatsapp,
             $video_intro,

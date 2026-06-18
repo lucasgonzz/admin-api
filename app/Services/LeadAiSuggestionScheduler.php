@@ -48,6 +48,15 @@ class LeadAiSuggestionScheduler
             return;
         }
 
+        // El setter puede desactivar Claude por lead; no programar sugerencia automática.
+        if (! $lead->claude_auto_reply) {
+            Log::channel('daily')->debug('LeadAiSuggestionScheduler: omitido (claude_auto_reply desactivado).', [
+                'lead_id' => $lead_id,
+            ]);
+
+            return;
+        }
+
         if (! LeadConversationAiState::has_unanswered_lead_messages($lead)) {
             Log::channel('daily')->debug('LeadAiSuggestionScheduler: omitido (sin mensajes del lead sin responder).', [
                 'lead_id' => $lead_id,

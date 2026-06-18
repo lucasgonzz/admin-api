@@ -188,6 +188,7 @@ class LeadProperties
                 'value' => null,
                 'width' => 170,
                 'show'  => true,
+                'is_date'   => true,
             ],
             [
                 'key' => 'demo_start_time',

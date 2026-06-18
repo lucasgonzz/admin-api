@@ -26,6 +26,7 @@ use App\Services\LeadBroadcastService;
 use App\Services\LeadDocNumberGenerator;
 use App\Services\LeadWhatsappInboundAudioService;
 use App\Services\LeadWhatsappOnboardingService;
+use App\Services\LeadWhatsappReactionService;
 use App\Services\SistemaQueryService;
 use App\Services\SupportTicketAssignmentService;
 use App\Services\WhatsappInboundMediaService;
@@ -84,6 +85,26 @@ class WhatsappWebhookController extends Controller
 
         $parsed = $this->parse_inbound_message($payload);
         if ($parsed === null) {
+            return response()->json(['ok' => true], 200);
+        }
+
+        // Reacciones: actualizar el mensaje original; no crear fila nueva ni consultar a Claude.
+        $reaction_service = new LeadWhatsappReactionService();
+        $reaction_data = $reaction_service->extract_reaction($payload, $parsed);
+        if ($reaction_data !== null) {
+            try {
+                $support_contact = $this->find_support_contact_by_phone((string) $reaction_data['from']);
+                if ($support_contact === null) {
+                    $reaction_service->handle_lead_inbound_reaction($reaction_data, $payload);
+                }
+            } catch (\Throwable $exception) {
+                Log::channel('daily')->error('WhatsApp webhook: error al procesar reacción.', [
+                    'from'                => $reaction_data['from'] ?? null,
+                    'reaction_message_id' => $reaction_data['reaction_message_id'] ?? null,
+                    'error'               => $exception->getMessage(),
+                ]);
+            }
+
             return response()->json(['ok' => true], 200);
         }
 
@@ -306,9 +327,9 @@ class WhatsappWebhookController extends Controller
             return $this->extract_audio_body($message);
         }
 
-        // Imagen: solo caption; el archivo se guarda como adjunto (no kapso.content legado).
-        if ($type === 'image') {
-            return $this->extract_image_body($message);
+        // Imagen / documento / video: solo caption; el archivo se guarda como adjunto (no kapso.content legado).
+        if (in_array($type, ['image', 'document', 'video'], true)) {
+            return $this->extract_media_caption_body($message, $type);
         }
 
         if (isset($message['kapso']['content'])) {
@@ -352,16 +373,17 @@ class WhatsappWebhookController extends Controller
     }
 
     /**
-     * Texto visible para mensajes de imagen: únicamente el caption de WhatsApp si existe.
+     * Texto visible para mensajes multimedia con adjunto: únicamente el caption de WhatsApp si existe.
      *
      * @param array<string, mixed> $message
+     * @param string               $type    image | document | video
      *
      * @return string|null
      */
-    private function extract_image_body(array $message): ?string
+    private function extract_media_caption_body(array $message, string $type): ?string
     {
-        if (isset($message['image']['caption'])) {
-            $caption = trim((string) $message['image']['caption']);
+        if (isset($message[$type]['caption'])) {
+            $caption = trim((string) $message[$type]['caption']);
             if ($caption !== '') {
                 return $caption;
             }

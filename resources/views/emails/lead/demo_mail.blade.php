@@ -302,7 +302,7 @@
         {{-- ================================================================
              6. SECCIÓN "TU ACCESO": caja oscura con credenciales
              ================================================================ --}}
-        @if($url_demo || $usuario || $password)
+        @if($url_demo || $usuario || $password || $doc_number)
         <tr>
           <td style="padding:20px 32px 8px 32px;">
             <p style="margin:0 0 12px 0;font-size:16px;font-weight:bold;color:#1A1A2E;">
@@ -323,6 +323,13 @@
                       </td>
                     </tr>
                   </table>
+                  @endif
+
+                  @if($doc_number)
+                  <p style="margin:0 0 8px 0;font-size:12px;color:#8899AA;text-transform:uppercase;letter-spacing:0.5px;">Número de documento</p>
+                  <p style="margin:0 0 16px 0;font-family:Courier New,Courier,monospace;font-size:14px;color:#F0F4F8;">
+                    {{ $doc_number }}
+                  </p>
                   @endif
 
                   @if($usuario)

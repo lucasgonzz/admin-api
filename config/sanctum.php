@@ -42,9 +42,14 @@ return [
     | considered expired. If this value is null, personal access tokens do
     | not expire. This won't tweak the lifetime of first-party sessions.
     |
+    | admin-spa guarda el token en localStorage; SANCTUM_EXPIRATION define
+    | cuánto tiempo sigue válido desde el login (p. ej. 10080 = 7 días).
+    |
     */
 
-    'expiration' => null,
+    'expiration' => is_numeric(env('SANCTUM_EXPIRATION'))
+        ? (int) env('SANCTUM_EXPIRATION')
+        : null,
 
     /*
     |--------------------------------------------------------------------------

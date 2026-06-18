@@ -24,6 +24,15 @@ class LeadConversationAiState
         return (int) LeadMessage::query()
             ->where('lead_id', $lead_id)
             ->where('sender', 'lead')
+            ->where(function ($query) {
+                $query->where(function ($sub) {
+                    $sub->whereNull('kind')->orWhere('kind', '!=', 'reaction');
+                });
+            })
+            ->get()
+            ->filter(function (LeadMessage $message) {
+                return ! LeadWhatsappReactionService::is_legacy_reaction_content((string) $message->content);
+            })
             ->count();
     }
 
@@ -68,7 +77,10 @@ class LeadConversationAiState
 
         while ($cursor < $total) {
             $candidate = $messages[$cursor];
-            if ((string) $candidate->sender === 'lead' && (string) $candidate->status === 'enviado') {
+            if ((string) $candidate->sender === 'lead'
+                && (string) $candidate->status === 'enviado'
+                && (string) ($candidate->kind ?? '') !== 'reaction'
+                && ! LeadWhatsappReactionService::is_legacy_reaction_content((string) $candidate->content)) {
                 return true;
             }
             $cursor++;

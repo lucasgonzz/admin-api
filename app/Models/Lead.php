@@ -104,6 +104,8 @@ class Lead extends Model
         'omitir_cuentas_corrientes'    => 'boolean',
 
         'tiene_sugerencia_pendiente'   => 'boolean',
+        // Si false, Claude no genera ni envía sugerencias automáticas para este lead.
+        'claude_auto_reply'            => 'boolean',
         'requiere_seguimiento'         => 'boolean',
         'tiene_seguimiento_sin_ver'    => 'boolean',
 
