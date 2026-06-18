@@ -111,17 +111,6 @@ class LeadAiService
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
-        /* Log de diagnóstico: contenido enviado a Claude en la primera llamada. */
-        Log::debug('LeadAiService [PRIMERA LLAMADA] - system prompt', [
-            'lead_id' => $lead->id,
-            'system'  => $system,
-        ]);
-
-        Log::debug('LeadAiService [PRIMERA LLAMADA] - user content', [
-            'lead_id' => $lead->id,
-            'content' => $user_content,
-        ]);
-
         /* Primera llamada a Claude para obtener sugerencia base. */
         $response = $http->post('https://api.anthropic.com/v1/messages', [
             'model'      => $model,
@@ -245,17 +234,6 @@ class LeadAiService
         $user_content = $this->build_user_content($lead, $is_followup, $availability_context);
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
-
-        /* Log de diagnóstico: contenido enviado a Claude en la segunda llamada. */
-        Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - system prompt', [
-            'lead_id' => $lead->id,
-            'system'  => $system,
-        ]);
-
-        Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - user content', [
-            'lead_id' => $lead->id,
-            'content' => $user_content,
-        ]);
 
         /* Segunda llamada a Claude con disponibilidad como contexto adicional. */
         $response = $http->post('https://api.anthropic.com/v1/messages', [
@@ -1070,6 +1048,45 @@ class LeadAiService
                         'demo_start'         => $demo_start,
                         'slots_disponibles'  => $slots_demo,
                     ]);
+
+                    /*
+                     * Camino "slot inválido detectado por servidor":
+                     * Claude alucinó un horario que no figura en el JSON de disponibilidad.
+                     * El agendado en BD ya quedó descartado arriba, pero el mensaje sugerido
+                     * todavía confirma ese horario falso al lead. Para no enviar una confirmación
+                     * mentirosa, se hace una tercera llamada correctiva a Claude (aislada del
+                     * historial) para que redacte una disculpa natural con las alternativas reales.
+                     */
+                    $mensaje_correctivo = $this->call_corrective_availability_response(
+                        $lead,
+                        $demo_start,
+                        $demo_date,
+                        $slots_demo
+                    );
+
+                    if ($mensaje_correctivo !== '') {
+                        /* Sobrescribir el mensaje mentiroso y forzar estado neutro. */
+                        $mensaje    = $mensaje_correctivo;
+                        $estado_raw = 'solicita_disponibilidad';
+                    } else {
+                        /* Fallback fijo si la tercera llamada falló: garantiza que nunca se envíe confirmación falsa. */
+                        $alternativas = implode(', ', array_slice($slots_demo, 0, 3));
+                        $mensaje = "Ese horario ya no está disponible. "
+                            . ($alternativas ? "Te puedo ofrecer: {$alternativas}." : "Escribime para coordinar un horario.");
+                        $estado_raw = 'solicita_disponibilidad';
+                    }
+
+                    /*
+                     * Recalcular el estado derivado. Más arriba (antes de este bloque) ya se
+                     * computaron $pipeline_status, $estado y $suggested_lead_status a partir del
+                     * $estado_raw original, que en este escenario suele ser 'demo_agendada' (Claude
+                     * confirmó el slot alucinado). Como acá forzamos el estado neutro, hay que
+                     * rehacer ese cálculo para que el lead NO quede en demo_agendada, sino en
+                     * solicita_disponibilidad, conforme al camino de "slot inválido detectado por servidor".
+                     */
+                    $pipeline_status       = LeadPipelineStatus::ensure_exists($estado_raw);
+                    $estado                = $pipeline_status->slug;
+                    $suggested_lead_status = $estado !== $previous_status ? $estado : null;
                 } else {
                     /* Fin de demo: inicio + duración configurada (Claude no debe enviar demo_end_time). */
                     $duracion  = LeadDemoSettings::get_duracion_minutos();
@@ -1206,6 +1223,92 @@ class LeadAiService
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
 
         return $msg;
+    }
+
+    /**
+     * Tercera llamada correctiva a Claude cuando el servidor descartó un agendar_demo
+     * por slot inválido (camino "slot inválido detectado por servidor").
+     *
+     * Claude alucinó un horario que no figura en el JSON de disponibilidad y, aun así,
+     * el mensaje sugerido ya confirma ese horario al lead. Para no enviar esa confirmación
+     * falsa, se hace una llamada AISLADA del historial de la conversación (el historial es
+     * justamente lo que confunde al modelo) con un prompt mínimo y restringido: solo puede
+     * redactar una disculpa con las alternativas reales, nunca devolver agendar_demo ni JSON.
+     *
+     * Si la respuesta parece estructurada (empieza con ``` o {) se trata como fallo y se
+     * devuelve string vacío para que el caller active su fallback fijo de PHP.
+     *
+     * @param Lead     $lead                Lead al que se le responde.
+     * @param string   $slot_invalido       Horario alucinado que el servidor descartó (HH:MM).
+     * @param string   $demo_date           Fecha de la demo propuesta (Y-m-d).
+     * @param string[] $slots_disponibles   Slots realmente disponibles para esa demo y fecha.
+     *
+     * @return string Mensaje natural al lead, o string vacío si falló (activa fallback).
+     */
+    private function call_corrective_availability_response(Lead $lead, string $slot_invalido, string $demo_date, array $slots_disponibles): string
+    {
+        try {
+            /* Lista legible de alternativas para inyectar en el prompt (ej: "18:00, 19:00, 20:00"). */
+            $alternativas_legibles = implode(', ', $slots_disponibles);
+
+            /*
+             * Prompt de usuario mínimo y restringido. NO se usa build_user_content() a propósito:
+             * ese arma el prompt completo con historial, que es lo que hace alucinar al modelo.
+             * Esta llamada debe estar completamente aislada de la conversación.
+             */
+            $user_content = "El lead propuso agendar a las {$slot_invalido} para el {$demo_date}, pero ese horario ya no está disponible.\n";
+            $user_content .= $alternativas_legibles !== ''
+                ? "Los próximos horarios disponibles son: {$alternativas_legibles}.\n"
+                : "Por ahora no hay horarios disponibles para esa fecha.\n";
+            $user_content .= "Redactá un mensaje natural y breve para el lead disculpándote y ofreciéndole esas alternativas.\n";
+            $user_content .= "No uses `agendar_demo`. Solo devolvé el texto del mensaje, sin JSON, sin estructura, solo el mensaje al lead.";
+
+            /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
+            $system = $this->build_system_prompt();
+            $model  = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+            $http   = $this->build_http_client();
+
+            $response = $http->post('https://api.anthropic.com/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => 400,
+                'system'     => $system,
+                'messages'   => [
+                    ['role' => 'user', 'content' => $user_content],
+                ],
+            ]);
+
+            if ($response->failed()) {
+                Log::error('LeadAiService: fallo HTTP en tercera llamada correctiva (slot inválido).', [
+                    'lead_id' => $lead->id,
+                    'status'  => $response->status(),
+                    'body'    => $response->body(),
+                ]);
+                return '';
+            }
+
+            /* Texto limpio de la respuesta. */
+            $texto = trim($this->extract_response_text($response->json()));
+
+            /*
+             * Si la respuesta empieza con bloque de código o JSON, el modelo ignoró la restricción
+             * (intentó devolver estructura). Se trata como fallo para caer al fallback fijo.
+             */
+            if ($texto === '' || str_starts_with($texto, '```') || str_starts_with($texto, '{')) {
+                Log::error('LeadAiService: tercera llamada correctiva devolvió contenido estructurado o vacío. Se ignora.', [
+                    'lead_id'  => $lead->id,
+                    'response' => $texto,
+                ]);
+                return '';
+            }
+
+            return $texto;
+        } catch (\Throwable $e) {
+            Log::error('LeadAiService: excepción en tercera llamada correctiva (slot inválido).', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+            return '';
+        }
     }
 
     /**
