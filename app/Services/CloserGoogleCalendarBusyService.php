@@ -165,6 +165,10 @@ class CloserGoogleCalendarBusyService
             $calendars = $response->json('calendars', []);
             $busy_list = $calendars[$connection->google_calendar_id]['busy'] ?? [];
 
+            /* Diagnóstico: detalle de cada evento busy devuelto por Google, con los valores
+             * originales ISO 8601 y los minutos calculados tras convertir a zona Argentina. */
+            $busy_log_detail = [];
+
             foreach ($busy_list as $busy) {
                 if (empty($busy['start']) || empty($busy['end'])) {
                     continue;
@@ -186,11 +190,32 @@ class CloserGoogleCalendarBusyService
                     $end_minutes = 23 * 60 + 59;
                 }
 
+                // Acumular detalle para el log de diagnóstico (start/end originales + conversión).
+                $busy_log_detail[] = [
+                    'start'         => $busy['start'],
+                    'end'           => $busy['end'],
+                    'date_key'      => $date_key,
+                    'start_minutes' => $start_minutes,
+                    'end_minutes'   => $end_minutes,
+                ];
+
                 // Solo incluir si la fecha está en las solicitadas.
                 if (isset($result[$date_key])) {
                     $result[$date_key][] = [$start_minutes, $end_minutes];
                 }
             }
+
+            /* Diagnóstico: confirmar qué cuenta/calendario se consultó y qué eventos devolvió.
+             * Se loguea aunque la lista venga vacía (cantidad 0) para distinguir "no hay eventos"
+             * de "no se está consultando la cuenta correcta". Nunca se loguean tokens. */
+            Log::info('CloserGoogleCalendarBusyService [DISPONIBILIDAD] - eventos de Google Calendar encontrados', [
+                'admin_id'             => $connection->admin_id,
+                'google_calendar_id'   => $connection->google_calendar_id,
+                'google_account_email' => $connection->google_account_email,
+                'fechas_consultadas'   => $date_strings,
+                'cantidad_eventos'     => count($busy_log_detail),
+                'eventos'              => $busy_log_detail,
+            ]);
         } catch (\Exception $e) {
             Log::error('CloserGoogleCalendarBusyService: excepción al consultar freeBusy', [
                 'admin_id' => $connection->admin_id,

@@ -352,6 +352,13 @@ class LeadAiService
             ]);
         }
 
+        /* Diagnóstico: rangos de closer ocupado ya combinados (capa 2 interna + capa 3 Google),
+         * por fecha y en minutos del día, antes de calcular los slots libres. */
+        Log::info('LeadAiService [DISPONIBILIDAD] - closer_busy combinado (interno + Google)', [
+            'fechas_consultadas'   => $date_strings,
+            'closer_busy_minutos'  => $closer_busy,
+        ]);
+
         /* Mapa fecha → Carbon y unión de slots para detectar días sin disponibilidad. */
         $dates_map = [];
         $any_full  = false;
@@ -421,6 +428,14 @@ class LeadAiService
                     'error'     => $e->getMessage(),
                 ]);
             }
+
+            /* Diagnóstico: closer_busy combinado para el día extra agregado.
+             * Tag distinto para no confundirlo con el log del ciclo principal (la función
+             * efectivamente produce dos bloques de logs cuando se agrega día extra). */
+            Log::info('LeadAiService [DISPONIBILIDAD] - closer_busy combinado (día extra)', [
+                'extra_key'           => $extra_key,
+                'closer_busy_minutos' => $closer_busy[$extra_key] ?? [],
+            ]);
         }
 
         return [
@@ -486,7 +501,26 @@ class LeadAiService
         $booked_leads = Lead::whereIn('demo_date', $date_strings)
             ->whereNotNull('demo_start_time')
             ->whereNotNull('demo_id')
-            ->get(['demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+            ->get(['id', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+
+        /* Diagnóstico: detalle de cada demo agendada encontrada para las fechas consultadas.
+         * Permite confirmar qué leads (capa 1 y 2) está considerando el cálculo de disponibilidad. */
+        $booked_leads_log = [];
+        foreach ($booked_leads as $bl_log) {
+            $booked_leads_log[] = [
+                'lead_id'         => $bl_log->id,
+                'demo_id'         => $bl_log->demo_id,
+                'demo_date'       => $bl_log->demo_date ? $bl_log->demo_date->format('Y-m-d') : null,
+                'demo_start_time' => $bl_log->demo_start_time,
+                'demo_end_time'   => $bl_log->demo_end_time,
+            ];
+        }
+
+        Log::info('LeadAiService [DISPONIBILIDAD] - demos agendadas encontradas', [
+            'fechas_consultadas' => $date_strings,
+            'cantidad_leads'     => $booked_leads->count(),
+            'leads'              => $booked_leads_log,
+        ]);
 
         foreach ($booked_leads as $bl) {
             $demo_id  = (int) $bl->demo_id;
@@ -519,6 +553,20 @@ class LeadAiService
                 $closer_busy[$date_key][] = [$closer_start, $closer_end];
             }
         }
+
+        /* Diagnóstico: resumen de rangos bloqueados por demo/fecha (conteo, no el array completo
+         * para no saturar el log) y los rangos de closer ocupado por fecha (en minutos del día). */
+        $blocked_by_demo_resumen = [];
+        foreach ($blocked_by_demo as $demo_id => $por_fecha) {
+            foreach ($por_fecha as $fecha => $rangos) {
+                $blocked_by_demo_resumen[$demo_id][$fecha] = count($rangos);
+            }
+        }
+
+        Log::info('LeadAiService [DISPONIBILIDAD] - rangos bloqueados calculados (interno)', [
+            'blocked_by_demo_cantidad_rangos' => $blocked_by_demo_resumen,
+            'closer_busy_minutos'             => $closer_busy,
+        ]);
 
         return ['blocked_by_demo' => $blocked_by_demo, 'closer_busy' => $closer_busy];
     }
