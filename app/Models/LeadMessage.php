@@ -12,6 +12,27 @@ class LeadMessage extends Model
     protected $guarded = [];
 
     /**
+     * Al crear un mensaje, actualiza last_message_at del lead para ordenar la bandeja.
+     *
+     * @return void
+     */
+    protected static function booted()
+    {
+        static::created(function (LeadMessage $message) {
+            if (! $message->lead_id) {
+                return;
+            }
+
+            /** Preferir sent_at (webhook WhatsApp) sobre created_at del registro. */
+            $timestamp = $message->sent_at ?? $message->created_at ?? now();
+
+            Lead::query()
+                ->where('id', $message->lead_id)
+                ->update(['last_message_at' => $timestamp]);
+        });
+    }
+
+    /**
      * Etiqueta legible del estado sugerido (para badges en admin-spa).
      *
      * @var array<int, string>

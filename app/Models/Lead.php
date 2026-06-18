@@ -121,6 +121,9 @@ class Lead extends Model
         // Timestamp de llamada del closer tras la demo: parte del pipeline de cierre.
         'closer_called_at'             => 'datetime',
 
+        // Último mensaje del hilo WhatsApp (desnormalizado para orden en listado).
+        'last_message_at'              => 'datetime',
+
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'        => 'array',
     ];

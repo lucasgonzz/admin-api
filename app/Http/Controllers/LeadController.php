@@ -389,7 +389,16 @@ class LeadController extends Controller
         }
 
         // Query base liviana: relaciones del lead + solo mensajes de notificación.
-        $query = Lead::query()->withAllForList()->orderBy('id', 'desc');
+        $query = Lead::query()->withAllForList();
+
+        // Orden configurable desde admin-spa: último mensaje (default UI) o creación del lead.
+        $sort_by = (string) $request->input('sort_by', 'last_message');
+        if ($sort_by === 'last_message') {
+            // COALESCE evita que leads sin mensajes queden al final del listado.
+            $query->orderByRaw('COALESCE(last_message_at, created_at) DESC');
+        } else {
+            $query->orderByDesc('created_at');
+        }
 
         // Filtro por estado comercial.
         if ($request->filled('status')) {
