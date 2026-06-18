@@ -1108,6 +1108,19 @@ class LeadAiService
                         'demo_start' => $demo_start,
                         'demo_end'   => $demo_end,
                     ]);
+
+                    /* Notificar por WhatsApp a los admins suscritos a demos agendadas. */
+                    try {
+                        $demo_notify_service = new \App\Services\DemoScheduledWhatsappService(
+                            new \App\Services\WhatsappSendService()
+                        );
+                        $demo_notify_service->notify($lead, $demo_date, $demo_start);
+                    } catch (\Throwable $e) {
+                        Log::error('LeadAiService: error al notificar demo agendada por WhatsApp.', [
+                            'lead_id' => $lead->id,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
                 }
             }
         }
