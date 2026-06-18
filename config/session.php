@@ -31,7 +31,8 @@ return [
     |
     */
 
-    'lifetime' => env('SESSION_LIFETIME', 120),
+    // Fallback alto (~10 años) si falta SESSION_LIFETIME en el .env del servidor.
+    'lifetime' => env('SESSION_LIFETIME', 5256000),
 
     'expire_on_close' => false,
 
