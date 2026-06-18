@@ -160,11 +160,14 @@ class LeadAiService
                     'error'   => $e->getMessage(),
                 ]);
 
-                /* Fallback: usar mensaje de primera llamada con nota para el setter. */
+                /* Fallback: conservar el mensaje de primera llamada si existe (o vacío si no hay).
+                 * La nota interna va a razonamiento, NO a mensaje_sugerido, para que el auto-send
+                 * no la despache al lead. Se fuerza requiere_verificacion: true para que el setter
+                 * deba aprobar manualmente antes de enviar. */
                 $fallback_base = trim((string) ($parsed['mensaje_sugerido'] ?? ''));
-                $parsed['mensaje_sugerido'] = $fallback_base !== ''
-                    ? $fallback_base."\n\nNota: No se pudo obtener disponibilidad. El setter debe confirmar horarios manualmente."
-                    : 'No se pudo obtener disponibilidad. El setter debe confirmar horarios manualmente.';
+                $parsed['mensaje_sugerido'] = $fallback_base;
+                $parsed['razonamiento'] = 'No se pudo obtener disponibilidad del calendario. El setter debe confirmar el horario manualmente antes de enviar este mensaje.';
+                $parsed['requiere_verificacion'] = true;
             }
         }
 
