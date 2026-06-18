@@ -1173,6 +1173,21 @@ class LeadAiService
                     'error'   => $e->getMessage(),
                 ]);
             }
+
+            /* Notificar por WhatsApp a los admins suscritos a escalaciones de lead.
+             * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte
+             * el AdminTask ya creado ni el flujo principal del mensaje. */
+            try {
+                $escalation_service = new \App\Services\LeadEscalationWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $escalation_service->notify($lead, $motivo_intervencion);
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar escalación por WhatsApp.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
         }
 
         $msg = LeadMessage::create([
