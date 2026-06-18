@@ -142,6 +142,12 @@ class LeadSuggestionSendService
         LeadPipelineStatus::ensure_exists($slug);
         $lead->status = $slug;
         $lead->save();
+
+        // Si el lead pasa a closer_activo (demo confirmada), avisar al closer por WhatsApp.
+        // CloserNotificationService vive en el mismo namespace App\Services, no requiere `use`.
+        if ($slug === 'closer_activo') {
+            (new CloserNotificationService())->notify_for_lead($lead);
+        }
     }
 
     /**
