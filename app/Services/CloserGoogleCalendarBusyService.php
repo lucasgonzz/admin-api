@@ -52,11 +52,38 @@ class CloserGoogleCalendarBusyService
         // Clave de caché única por combinación de fechas consultadas.
         $cache_key = 'closer_google_calendar_busy_' . md5(implode(',', $date_strings));
 
+        // Fragmento corto de la clave para el log (evita líneas largas con el hash completo).
+        $cache_key_short = substr(md5(implode(',', $date_strings)), 0, 8);
+
+        // Detectar si el valor ya está en caché antes de llamar a Cache::remember,
+        // para poder loguear explícitamente si se está sirviendo un resultado cacheado
+        // (posible causa de que no aparezca el log de "Google Calendar consultado" cuando
+        // el evento fue creado después de que el valor quedó en caché).
+        if (Cache::has($cache_key)) {
+            Log::channel('disponibilidad')->info(
+                '[DISPONIBILIDAD] Consulta a Google Calendar: usando valor cacheado para '
+                . implode(', ', $date_strings)
+                . ' (TTL 5 min, clave ...'. $cache_key_short . ')'
+                . ' — si este log aparece sin el de "Google Calendar consultado", el resultado viene de caché.'
+            );
+        } else {
+            Log::channel('disponibilidad')->info(
+                '[DISPONIBILIDAD] Consulta a Google Calendar: cache miss, se va a consultar la API para '
+                . implode(', ', $date_strings)
+                . ' (clave ...' . $cache_key_short . ')'
+            );
+        }
+
         return Cache::remember($cache_key, now()->addMinutes(5), function () use ($date_strings) {
             // Solo admins marcados como closer.
             $closers = Admin::where('is_closer', true)->get();
 
             if ($closers->isEmpty()) {
+                // Loguear en el canal de disponibilidad para visibilidad total del flujo.
+                Log::channel('disponibilidad')->info(
+                    '[DISPONIBILIDAD] No hay ningún admin marcado como closer (is_closer=true).'
+                    . ' La capa de Google Calendar no aporta restricción.'
+                );
                 return [];
             }
 
@@ -71,7 +98,13 @@ class CloserGoogleCalendarBusyService
 
                 if (! $connection) {
                     // Closer sin calendario conectado: no aporta restricción.
-                    // Si no configuró calendario, el sistema no bloquea disponibilidad.
+                    // Loguear para que sea visible en disponibilidad.log y no parezca un silencio.
+                    Log::channel('disponibilidad')->info(
+                        '[DISPONIBILIDAD] Closer #' . $closer->id
+                        . ' (' . ($closer->name ?? $closer->email) . ')'
+                        . ' no tiene Google Calendar conectado o la conexión está inactiva.'
+                        . ' Se omite de esta capa.'
+                    );
                     continue;
                 }
 
@@ -115,10 +148,15 @@ class CloserGoogleCalendarBusyService
             // Obtener access_token fresco para esta consulta.
             $access_token = $this->oauth_service->get_fresh_access_token($connection);
         } catch (GoogleCalendarTokenRevokedException $e) {
-            // Token revocado: loguear y excluir a este closer del cálculo.
+            // Token revocado: loguear en canal default y también en disponibilidad
+            // para que Lucas vea en un solo archivo qué pasó con la consulta.
             Log::warning('CloserGoogleCalendarBusyService: token revocado, se excluye el closer', [
                 'admin_id' => $e->admin_id,
             ]);
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] ERROR Google Calendar: token revocado para admin #' . $e->admin_id
+                . '. El closer queda excluido de esta capa (no bloquea disponibilidad).'
+            );
             return null;
         }
 
@@ -150,11 +188,16 @@ class CloserGoogleCalendarBusyService
                 ]);
 
             if ($response->failed()) {
+                // Loguear en canal default (log general de errores) y también en disponibilidad.
                 Log::warning('CloserGoogleCalendarBusyService: fallo en freeBusy', [
                     'admin_id' => $connection->admin_id,
                     'status'   => $response->status(),
                     'body'     => $response->body(),
                 ]);
+                Log::channel('disponibilidad')->warning(
+                    '[DISPONIBILIDAD] ERROR Google Calendar: fallo en freeBusy para admin #' . $connection->admin_id
+                    . ' (HTTP ' . $response->status() . '). El closer queda excluido de esta capa.'
+                );
                 return null;
             }
 
@@ -233,10 +276,15 @@ class CloserGoogleCalendarBusyService
 
             Log::channel('disponibilidad')->info($mensaje_google);
         } catch (\Exception $e) {
+            // Loguear en canal default (log general de errores) y también en disponibilidad.
             Log::error('CloserGoogleCalendarBusyService: excepción al consultar freeBusy', [
                 'admin_id' => $connection->admin_id,
                 'error'    => $e->getMessage(),
             ]);
+            Log::channel('disponibilidad')->error(
+                '[DISPONIBILIDAD] ERROR Google Calendar: excepción al consultar freeBusy para admin #' . $connection->admin_id
+                . ' — ' . $e->getMessage() . '. El closer queda excluido de esta capa.'
+            );
             return null;
         }
 
