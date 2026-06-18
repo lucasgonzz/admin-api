@@ -37,6 +37,10 @@ class Admin extends Authenticatable
         'is_default_task_assignee' => 'boolean',
         // Flag que identifica al admin como closer (responsable de llamadas post-demo).
         'is_closer'                => 'boolean',
+        // Flag para recibir WhatsApp cuando el agente escala una conversación de lead.
+        'notify_lead_escalation_whatsapp' => 'boolean',
+        // Flag para recibir WhatsApp cuando se agenda una demo.
+        'notify_demo_scheduled_whatsapp'  => 'boolean',
     ];
 
     /**

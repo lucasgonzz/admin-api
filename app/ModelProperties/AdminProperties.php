@@ -53,6 +53,22 @@ class AdminProperties
                 'value' => '',
                 'show'  => true,
             ],
+            [
+                // Recibir WhatsApp cuando el agente escala una conversación de lead que no puede resolver.
+                'key'   => 'notify_lead_escalation_whatsapp',
+                'text'  => 'Notificar escalaciones por WhatsApp',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+            ],
+            [
+                // Recibir WhatsApp cuando se agenda una demo.
+                'key'   => 'notify_demo_scheduled_whatsapp',
+                'text'  => 'Notificar demos agendadas por WhatsApp',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+            ],
         ];
     }
 }
