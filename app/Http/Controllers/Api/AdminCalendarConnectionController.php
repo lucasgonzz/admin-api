@@ -3,21 +3,26 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Admin;
 use App\Models\AdminCalendarConnection;
 use App\Services\GoogleCalendarOAuthService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Gestiona la conexión OAuth2 de Google Calendar para el admin autenticado.
+ * Gestiona la conexión OAuth2 de Google Calendar para un admin objetivo.
+ *
+ * El admin objetivo se identifica por {admin_id} en la URL de la ruta,
+ * no por el admin autenticado en la sesión (que puede ser diferente cuando
+ * un superadmin gestiona el calendario de un closer desde el modal de edición).
  *
  * Flujo completo:
- *   1. GET connect   → devuelve authorization_url para redirigir al closer a Google
- *   2. GET callback  → Google redirige aquí con code; intercambia por tokens y guarda
- *   3. GET status    → informa si hay conexión activa y qué cuenta está conectada
- *   4. GET list-calendars → lista los calendarios disponibles para elegir el dedicado
- *   5. PUT select-calendar → persiste el calendar_id elegido por el closer
- *   6. DELETE        → desactiva la conexión (soft disconnect)
+ *   1. GET {admin_id}/connect        → devuelve authorization_url para redirigir al closer a Google
+ *   2. GET callback                  → Google redirige aquí con code; intercambia por tokens y guarda
+ *   3. GET {admin_id}/status         → informa si hay conexión activa y qué cuenta está conectada
+ *   4. GET {admin_id}/list-calendars → lista los calendarios disponibles para elegir el dedicado
+ *   5. PUT {admin_id}/select-calendar → persiste el calendar_id elegido
+ *   6. DELETE {admin_id}             → desactiva la conexión (soft disconnect)
  */
 class AdminCalendarConnectionController extends Controller
 {
@@ -37,12 +42,15 @@ class AdminCalendarConnectionController extends Controller
      * El frontend debe redirigir al usuario a esta URL.
      *
      * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuyo calendario se está gestionando.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function connect(Request $request)
+    public function connect(Request $request, int $admin_id)
     {
-        // El admin_id se toma del usuario autenticado por Sanctum.
-        $admin_id = (int) $request->user()->id;
+        // Verificar que el admin objetivo exista antes de generar la URL de OAuth.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
 
         $authorization_url = $this->oauth_service->build_authorization_url($admin_id);
 
@@ -92,15 +100,21 @@ class AdminCalendarConnectionController extends Controller
     }
 
     /**
-     * Devuelve el estado de la conexión de Google Calendar del admin autenticado.
+     * Devuelve el estado de la conexión de Google Calendar del admin objetivo.
      *
      * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuyo estado se consulta.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function status(Request $request)
+    public function status(Request $request, int $admin_id)
     {
-        // Buscar conexión activa del admin autenticado.
-        $connection = AdminCalendarConnection::where('admin_id', $request->user()->id)
+        // Verificar que el admin objetivo exista.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
+
+        // Buscar conexión activa del admin objetivo (no del admin logueado en la sesión).
+        $connection = AdminCalendarConnection::where('admin_id', $admin_id)
             ->where('is_active', true)
             ->first();
 
@@ -123,16 +137,22 @@ class AdminCalendarConnectionController extends Controller
     }
 
     /**
-     * Lista los calendarios disponibles en la cuenta Google del admin.
+     * Lista los calendarios disponibles en la cuenta Google del admin objetivo.
      * Se usa para que el closer elija cuál calendario dedicado conectar.
      *
      * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuya lista de calendarios se obtiene.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function list_calendars(Request $request)
+    public function list_calendars(Request $request, int $admin_id)
     {
-        // Verificar que el admin tenga una conexión activa.
-        $connection = AdminCalendarConnection::where('admin_id', $request->user()->id)
+        // Verificar que el admin objetivo exista.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
+
+        // Verificar que el admin objetivo tenga una conexión activa.
+        $connection = AdminCalendarConnection::where('admin_id', $admin_id)
             ->where('is_active', true)
             ->first();
 
@@ -145,7 +165,7 @@ class AdminCalendarConnectionController extends Controller
             return response()->json(['calendars' => $calendars], 200);
         } catch (\Exception $e) {
             Log::error('AdminCalendarConnectionController: fallo al listar calendarios', [
-                'admin_id' => $request->user()->id,
+                'admin_id' => $admin_id,
                 'error'    => $e->getMessage(),
             ]);
             return response()->json([
@@ -155,20 +175,26 @@ class AdminCalendarConnectionController extends Controller
     }
 
     /**
-     * Guarda el ID del calendario dedicado elegido por el closer.
+     * Guarda el ID del calendario dedicado elegido para el admin objetivo.
      * Este paso es necesario después de la conexión OAuth inicial.
      *
      * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuyo calendario se está configurando.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function select_calendar(Request $request)
+    public function select_calendar(Request $request, int $admin_id)
     {
         $request->validate([
             'calendar_id' => 'required|string|max:500',
         ]);
 
-        // Buscar conexión activa del admin autenticado.
-        $connection = AdminCalendarConnection::where('admin_id', $request->user()->id)
+        // Verificar que el admin objetivo exista.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
+
+        // Buscar conexión activa del admin objetivo (no del admin logueado en la sesión).
+        $connection = AdminCalendarConnection::where('admin_id', $admin_id)
             ->where('is_active', true)
             ->first();
 
@@ -176,7 +202,7 @@ class AdminCalendarConnectionController extends Controller
             return response()->json(['message' => 'No hay conexión activa con Google Calendar.'], 422);
         }
 
-        // Persistir el calendar_id del calendario dedicado elegido por el closer.
+        // Persistir el calendar_id del calendario dedicado elegido.
         $connection->update([
             'google_calendar_id' => $request->input('calendar_id'),
         ]);
@@ -188,16 +214,22 @@ class AdminCalendarConnectionController extends Controller
     }
 
     /**
-     * Desconecta el Google Calendar del admin autenticado.
+     * Desconecta el Google Calendar del admin objetivo.
      * Desactivación soft: no borra el registro para mantener historial.
      *
      * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuya conexión se desactiva.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function disconnect(Request $request)
+    public function disconnect(Request $request, int $admin_id)
     {
-        // Buscar cualquier conexión del admin (activa o no) para desactivarla.
-        $connection = AdminCalendarConnection::where('admin_id', $request->user()->id)->first();
+        // Verificar que el admin objetivo exista.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
+
+        // Buscar cualquier conexión del admin objetivo (activa o no) para desactivarla.
+        $connection = AdminCalendarConnection::where('admin_id', $admin_id)->first();
 
         if (! $connection) {
             return response()->json(['message' => 'No hay conexión para desconectar.'], 404);

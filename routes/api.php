@@ -172,11 +172,13 @@ Route::prefix('admin')->group(function () {
         Route::delete('admin-user/{id}', [AdminUserController::class, 'destroy_json']);
 
         // Google Calendar OAuth: conexión del closer (autenticado por Sanctum).
-        Route::get('calendar/google/connect', [AdminCalendarConnectionController::class, 'connect']);
-        Route::get('calendar/google/status', [AdminCalendarConnectionController::class, 'status']);
-        Route::get('calendar/google/list-calendars', [AdminCalendarConnectionController::class, 'list_calendars']);
-        Route::put('calendar/google/select-calendar', [AdminCalendarConnectionController::class, 'select_calendar']);
-        Route::delete('calendar/google', [AdminCalendarConnectionController::class, 'disconnect']);
+        // {admin_id} identifica el admin objetivo que se está gestionando desde el modal,
+        // no necesariamente el admin autenticado en la sesión.
+        Route::get('calendar/google/{admin_id}/connect', [AdminCalendarConnectionController::class, 'connect']);
+        Route::get('calendar/google/{admin_id}/status', [AdminCalendarConnectionController::class, 'status']);
+        Route::get('calendar/google/{admin_id}/list-calendars', [AdminCalendarConnectionController::class, 'list_calendars']);
+        Route::put('calendar/google/{admin_id}/select-calendar', [AdminCalendarConnectionController::class, 'select_calendar']);
+        Route::delete('calendar/google/{admin_id}', [AdminCalendarConnectionController::class, 'disconnect']);
 
         Route::get('demo', [DemoController::class, 'index_json']);
         Route::get('demo/{id}', [DemoController::class, 'show_json']);
