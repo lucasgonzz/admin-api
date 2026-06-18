@@ -45,6 +45,14 @@ class AdminProperties
                 'value' => false,
                 'show'  => true,
             ],
+            [
+                // Teléfono del admin en formato E.164 (+549...) para notificarlo por WhatsApp.
+                'key'   => 'phone_number',
+                'text'  => 'Teléfono',
+                'type'  => 'text',
+                'value' => '',
+                'show'  => true,
+            ],
         ];
     }
 }
