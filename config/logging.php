@@ -63,6 +63,19 @@ return [
         ],
 
         /*
+         * Canal dedicado al diagnóstico de disponibilidad de demos.
+         * Escribe a un archivo propio (storage/logs/disponibilidad.log) para que los
+         * logs con tag [DISPONIBILIDAD] no se mezclen con el log general ni con los
+         * prompts enormes que se le envían a Claude. Mismo criterio que 'single':
+         * un único archivo sin rotación por fecha.
+         */
+        'disponibilidad' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/disponibilidad.log'),
+            'level' => env('LOG_LEVEL', 'debug'),
+        ],
+
+        /*
          * Compatibilidad: el código usa Log::channel('daily') en varios servicios.
          * Se mantiene el nombre del canal pero con driver single para no rotar por fecha.
          */

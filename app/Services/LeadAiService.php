@@ -26,6 +26,65 @@ use Illuminate\Support\Facades\Log;
 class LeadAiService
 {
     /**
+     * Convierte minutos del día (0-1439) al formato legible HH:MM.
+     * Pensado para los logs de diagnóstico de disponibilidad, donde mostrar
+     * minutos crudos (por ejemplo 720) es ilegible frente a "12:00".
+     *
+     * Es público y estático porque también lo reutiliza CloserGoogleCalendarBusyService
+     * para formatear los eventos de Google Calendar con el mismo criterio.
+     *
+     * @param int $minutes Minutos transcurridos desde la medianoche (0 = 00:00).
+     * @return string Hora en formato HH:MM en 24hs (ejemplo: 720 → "12:00").
+     */
+    public static function format_minutes_to_hhmm(int $minutes): string
+    {
+        /* Parte entera de horas y resto de minutos; sprintf rellena con ceros a la izquierda. */
+        $hours = intdiv($minutes, 60);
+        $mins  = $minutes % 60;
+        return sprintf('%02d:%02d', $hours, $mins);
+    }
+
+    /**
+     * Normaliza un string de hora ("12:00", "12:00:00", "9:00") al formato HH:MM.
+     * Se usa para los logs de demos agendadas, donde demo_start_time/demo_end_time
+     * vienen como texto desde la base de datos.
+     *
+     * @param string|null $time Hora en texto, o null si no está cargada.
+     * @return string Hora en formato HH:MM, o "s/h" si no se pudo interpretar.
+     */
+    private static function time_string_to_hhmm(?string $time): string
+    {
+        if ($time === null || $time === '') {
+            return 's/h';
+        }
+        /* Extraer HH:MM del texto y reusar el formateador para uniformar el padding. */
+        if (preg_match('/(\d{1,2}):(\d{2})/', $time, $m)) {
+            return self::format_minutes_to_hhmm((int) $m[1] * 60 + (int) $m[2]);
+        }
+        return $time;
+    }
+
+    /**
+     * Arma el texto legible de los rangos ocupados de una fecha para el log.
+     * Si no hay rangos, devuelve "libre"; si hay, los lista en formato HH:MM.
+     *
+     * @param array<int, array{0: int, 1: int}> $ranges Rangos [inicio_min, fin_min].
+     * @return string Ejemplo: "ocupado 13:10 a 13:40, ocupado 14:00 a 15:00" o "libre".
+     */
+    private static function format_busy_ranges_for_date(array $ranges): string
+    {
+        if (empty($ranges)) {
+            return 'libre';
+        }
+        /* Un fragmento "ocupado HH:MM a HH:MM" por cada rango, separados por coma. */
+        $partes = [];
+        foreach ($ranges as $rango) {
+            $partes[] = 'ocupado ' . self::format_minutes_to_hhmm($rango[0]) . ' a ' . self::format_minutes_to_hhmm($rango[1]);
+        }
+        return implode(', ', $partes);
+    }
+
+    /**
      * Genera un mensaje sugerido por IA y actualiza el estado sugerido del lead.
      *
      * Si Claude devuelve `solicita_disponibilidad: true`, se realiza una segunda
@@ -353,11 +412,17 @@ class LeadAiService
         }
 
         /* Diagnóstico: rangos de closer ocupado ya combinados (capa 2 interna + capa 3 Google),
-         * por fecha y en minutos del día, antes de calcular los slots libres. */
-        Log::info('LeadAiService [DISPONIBILIDAD] - closer_busy combinado (interno + Google)', [
-            'fechas_consultadas'   => $date_strings,
-            'closer_busy_minutos'  => $closer_busy,
-        ]);
+         * por fecha y en formato HH:MM legible, antes de calcular los slots libres.
+         * Permite comparar de un vistazo contra el log "closer_busy interno" y ver qué
+         * aportó la capa de Google Calendar. Va al canal propio 'disponibilidad'. */
+        $lineas_combinado = [];
+        foreach ($date_strings as $fecha) {
+            $lineas_combinado[] = '  ' . $fecha . ': ' . self::format_busy_ranges_for_date($closer_busy[$fecha] ?? []);
+        }
+        Log::channel('disponibilidad')->info(
+            "[DISPONIBILIDAD] closer_busy combinado (interno + Google) por fecha:\n"
+            . implode("\n", $lineas_combinado)
+        );
 
         /* Mapa fecha → Carbon y unión de slots para detectar días sin disponibilidad. */
         $dates_map = [];
@@ -430,12 +495,12 @@ class LeadAiService
             }
 
             /* Diagnóstico: closer_busy combinado para el día extra agregado.
-             * Tag distinto para no confundirlo con el log del ciclo principal (la función
-             * efectivamente produce dos bloques de logs cuando se agrega día extra). */
-            Log::info('LeadAiService [DISPONIBILIDAD] - closer_busy combinado (día extra)', [
-                'extra_key'           => $extra_key,
-                'closer_busy_minutos' => $closer_busy[$extra_key] ?? [],
-            ]);
+             * Prefijo distinto ([DISPONIBILIDAD - día extra]) para no confundirlo con el
+             * bloque del ciclo principal; la función produce dos bloques cuando hay día extra. */
+            Log::channel('disponibilidad')->info(
+                "[DISPONIBILIDAD - día extra] closer_busy combinado (interno + Google) del día extra agregado:\n"
+                . '  ' . $extra_key . ': ' . self::format_busy_ranges_for_date($closer_busy[$extra_key] ?? [])
+            );
         }
 
         return [
@@ -503,24 +568,31 @@ class LeadAiService
             ->whereNotNull('demo_id')
             ->get(['id', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
 
-        /* Diagnóstico: detalle de cada demo agendada encontrada para las fechas consultadas.
+        /* Diagnóstico: detalle de cada demo agendada encontrada para las fechas consultadas,
+         * como texto plano legible (una línea por demo) en el canal propio 'disponibilidad'.
          * Permite confirmar qué leads (capa 1 y 2) está considerando el cálculo de disponibilidad. */
-        $booked_leads_log = [];
+        $lineas_demos = [];
         foreach ($booked_leads as $bl_log) {
-            $booked_leads_log[] = [
-                'lead_id'         => $bl_log->id,
-                'demo_id'         => $bl_log->demo_id,
-                'demo_date'       => $bl_log->demo_date ? $bl_log->demo_date->format('Y-m-d') : null,
-                'demo_start_time' => $bl_log->demo_start_time,
-                'demo_end_time'   => $bl_log->demo_end_time,
-            ];
+            $fecha_demo = $bl_log->demo_date ? $bl_log->demo_date->format('Y-m-d') : 's/fecha';
+            $hora_inicio = self::time_string_to_hhmm($bl_log->demo_start_time);
+            $hora_fin    = self::time_string_to_hhmm($bl_log->demo_end_time);
+            $lineas_demos[] = '  - Lead #' . $bl_log->id . ' | Demo #' . $bl_log->demo_id
+                . ' | ' . $fecha_demo . ' | ' . $hora_inicio . ' a ' . $hora_fin;
         }
 
-        Log::info('LeadAiService [DISPONIBILIDAD] - demos agendadas encontradas', [
-            'fechas_consultadas' => $date_strings,
-            'cantidad_leads'     => $booked_leads->count(),
-            'leads'              => $booked_leads_log,
-        ]);
+        /* Cantidad de demos para la línea de resumen (con pluralización correcta).
+         * Se loguea aunque sea 0 para distinguir "no hay demos" de "no se ejecutó el log". */
+        $cantidad_demos = $booked_leads->count();
+        $resumen_demos  = '(' . $cantidad_demos . ' demo' . ($cantidad_demos === 1 ? '' : 's')
+            . ' encontrada' . ($cantidad_demos === 1 ? '' : 's') . ')';
+
+        $mensaje_demos = '[DISPONIBILIDAD] Demos agendadas encontradas para ' . implode(', ', $date_strings) . ':' . "\n";
+        if ($cantidad_demos > 0) {
+            $mensaje_demos .= implode("\n", $lineas_demos) . "\n";
+        }
+        $mensaje_demos .= $resumen_demos;
+
+        Log::channel('disponibilidad')->info($mensaje_demos, ['cantidad' => $cantidad_demos]);
 
         foreach ($booked_leads as $bl) {
             $demo_id  = (int) $bl->demo_id;
@@ -554,19 +626,18 @@ class LeadAiService
             }
         }
 
-        /* Diagnóstico: resumen de rangos bloqueados por demo/fecha (conteo, no el array completo
-         * para no saturar el log) y los rangos de closer ocupado por fecha (en minutos del día). */
-        $blocked_by_demo_resumen = [];
-        foreach ($blocked_by_demo as $demo_id => $por_fecha) {
-            foreach ($por_fecha as $fecha => $rangos) {
-                $blocked_by_demo_resumen[$demo_id][$fecha] = count($rangos);
-            }
+        /* Diagnóstico: closer_busy interno (agenda calculada a partir de las demos, antes de
+         * mezclar con Google Calendar), por fecha y en formato HH:MM legible. Se compara luego
+         * contra el log "closer_busy combinado" para ver exactamente qué aportó la capa de Google. */
+        $lineas_busy_interno = [];
+        foreach ($closer_busy as $fecha => $rangos) {
+            $lineas_busy_interno[] = '  ' . $fecha . ': ' . self::format_busy_ranges_for_date($rangos);
         }
 
-        Log::info('LeadAiService [DISPONIBILIDAD] - rangos bloqueados calculados (interno)', [
-            'blocked_by_demo_cantidad_rangos' => $blocked_by_demo_resumen,
-            'closer_busy_minutos'             => $closer_busy,
-        ]);
+        Log::channel('disponibilidad')->info(
+            "[DISPONIBILIDAD] closer_busy interno (agenda calculada) por fecha:\n"
+            . implode("\n", $lineas_busy_interno)
+        );
 
         return ['blocked_by_demo' => $blocked_by_demo, 'closer_busy' => $closer_busy];
     }

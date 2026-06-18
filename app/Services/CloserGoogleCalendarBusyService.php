@@ -205,17 +205,33 @@ class CloserGoogleCalendarBusyService
                 }
             }
 
-            /* Diagnóstico: confirmar qué cuenta/calendario se consultó y qué eventos devolvió.
-             * Se loguea aunque la lista venga vacía (cantidad 0) para distinguir "no hay eventos"
-             * de "no se está consultando la cuenta correcta". Nunca se loguean tokens. */
-            Log::info('CloserGoogleCalendarBusyService [DISPONIBILIDAD] - eventos de Google Calendar encontrados', [
-                'admin_id'             => $connection->admin_id,
-                'google_calendar_id'   => $connection->google_calendar_id,
-                'google_account_email' => $connection->google_account_email,
-                'fechas_consultadas'   => $date_strings,
-                'cantidad_eventos'     => count($busy_log_detail),
-                'eventos'              => $busy_log_detail,
-            ]);
+            /* Diagnóstico: confirmar qué cuenta/calendario se consultó y qué eventos devolvió,
+             * como texto plano legible (una línea por evento, horarios en HH:MM) en el canal
+             * propio 'disponibilidad'. Se loguea aunque la lista venga vacía (0 eventos) para
+             * distinguir "no hay eventos" de "no se está consultando la cuenta correcta".
+             * Nunca se loguean tokens. El formateo de minutos se reutiliza de LeadAiService. */
+            $lineas_eventos = [];
+            foreach ($busy_log_detail as $evento) {
+                $lineas_eventos[] = '  - ' . $evento['date_key'] . ': '
+                    . LeadAiService::format_minutes_to_hhmm($evento['start_minutes'])
+                    . ' a ' . LeadAiService::format_minutes_to_hhmm($evento['end_minutes']);
+            }
+
+            /* Cantidad de eventos para la línea de resumen (con pluralización correcta). */
+            $cantidad_eventos = count($busy_log_detail);
+            $resumen_eventos  = '(' . $cantidad_eventos . ' evento' . ($cantidad_eventos === 1 ? '' : 's')
+                . ' encontrado' . ($cantidad_eventos === 1 ? '' : 's') . ')';
+
+            $mensaje_google = '[DISPONIBILIDAD] Google Calendar consultado: admin #' . $connection->admin_id
+                . ' (cuenta ' . $connection->google_account_email
+                . ', calendar_id ' . $connection->google_calendar_id . ')' . "\n"
+                . 'Eventos encontrados para ' . implode(', ', $date_strings) . ':' . "\n";
+            if ($cantidad_eventos > 0) {
+                $mensaje_google .= implode("\n", $lineas_eventos) . "\n";
+            }
+            $mensaje_google .= $resumen_eventos;
+
+            Log::channel('disponibilidad')->info($mensaje_google);
         } catch (\Exception $e) {
             Log::error('CloserGoogleCalendarBusyService: excepción al consultar freeBusy', [
                 'admin_id' => $connection->admin_id,
