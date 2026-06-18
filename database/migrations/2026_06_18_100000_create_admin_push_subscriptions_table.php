@@ -16,7 +16,8 @@ class CreateAdminPushSubscriptionsTable extends Migration
             $table->id();
             $table->unsignedBigInteger('admin_id')->index();
             // URL única que el navegador asigna a esa suscripción (push service del navegador).
-            $table->string('endpoint', 500)->unique();
+            // 191 chars: límite seguro con utf8mb4 para un índice único (4 bytes × 191 = 764 bytes < 767).
+            $table->string('endpoint', 191)->unique();
             // Claves públicas requeridas por el protocolo Web Push (PushSubscription.toJSON().keys).
             $table->string('p256dh');
             $table->string('auth');
