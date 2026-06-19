@@ -124,6 +124,11 @@ return [
         'subject'     => env('VAPID_SUBJECT', 'mailto:soporte@comerciocity.com'),
     ],
 
+    // URL del frontend admin-spa: usada para construir links directos a leads en notificaciones WhatsApp.
+    'admin_spa' => [
+        'url' => env('ADMIN_SPA_URL', 'https://admin.comerciocity.com'),
+    ],
+
     // Kapso (WhatsApp Cloud API): TLS saliente desde WhatsappSendService.
     'kapso' => [
         // Si no se define KAPSO_CAINFO, reutiliza ANTHROPIC_CAINFO (mismo cacert.pem en WAMP).

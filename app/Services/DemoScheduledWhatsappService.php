@@ -16,9 +16,9 @@ use Illuminate\Support\Facades\Log;
  *
  * Variables de la plantilla (en orden):
  *   {{1}} → Nombre del lead (o empresa, o "Lead #ID" si no tiene ninguno)
- *   {{2}} → Teléfono del lead
- *   {{3}} → Fecha de la demo en formato legible (ej. "lunes 23/06/2026")
- *   {{4}} → Hora de inicio de la demo en formato HH:MM
+ *   {{2}} → Fecha de la demo en formato legible (ej. "20/06/2026")
+ *   {{3}} → Hora de inicio de la demo en formato HH:MM
+ *   {{4}} → Link directo al lead en admin-spa (abre el modal de conversación)
  */
 class DemoScheduledWhatsappService
 {
@@ -84,11 +84,12 @@ class DemoScheduledWhatsappService
             $nombre_lead = "Lead #{$lead->id}";
         }
 
-        /* Teléfono del lead como string; fallback a "sin teléfono" si no tiene. */
-        $telefono_lead = (string) ($lead->phone ?? 'sin teléfono');
-
-        /* Convertir la fecha Y-m-d a formato legible: "lunes 23/06/2026". */
+        /* Fecha en formato d/m/Y (sin nombre de día, según el cuerpo real de la plantilla). */
         $fecha_legible = $this->format_date_legible($demo_date);
+
+        /* Link directo al modal del lead en admin-spa (abre automáticamente vía query param lead_id). */
+        $admin_spa_url = rtrim((string) config('services.admin_spa.url'), '/');
+        $link_lead     = $admin_spa_url . '/leads?lead_id=' . $lead->id;
 
         /* Enviar notificación a cada admin suscrito. */
         foreach ($admins as $admin) {
@@ -96,7 +97,7 @@ class DemoScheduledWhatsappService
                 $this->sender->send_template(
                     (string) $admin->phone_number,
                     self::TEMPLATE_NAME,
-                    [$nombre_lead, $telefono_lead, $fecha_legible, $demo_start]
+                    [$nombre_lead, $fecha_legible, $demo_start, $link_lead]
                 );
 
                 Log::info('DemoScheduledWhatsappService: notificación enviada.', [
@@ -117,24 +118,21 @@ class DemoScheduledWhatsappService
     }
 
     /**
-     * Convierte una fecha en formato Y-m-d a texto legible en español.
+     * Convierte una fecha en formato Y-m-d a formato legible d/m/Y.
      *
-     * Ejemplo: "2026-06-23" → "lunes 23/06/2026"
+     * Ejemplo: "2026-06-20" → "20/06/2026"
      * Si la conversión falla, devuelve la fecha original como fallback.
      *
      * @param string $demo_date Fecha en formato Y-m-d.
      *
-     * @return string Fecha formateada en español o la cadena original si falla.
+     * @return string Fecha formateada o la cadena original si falla.
      */
     private function format_date_legible(string $demo_date): string
     {
         try {
             $carbon = Carbon::createFromFormat('Y-m-d', $demo_date, 'America/Argentina/Buenos_Aires');
 
-            /* Nombres de días en español, indexados por dayOfWeek (0 = domingo). */
-            $dias = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
-
-            return $dias[$carbon->dayOfWeek] . ' ' . $carbon->format('d/m/Y');
+            return $carbon->format('d/m/Y');
         } catch (\Throwable $e) {
             /* Si Carbon falla, devolver la fecha sin procesar. */
             return $demo_date;

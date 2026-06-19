@@ -15,8 +15,8 @@ use Illuminate\Support\Facades\Log;
  *
  * Variables de la plantilla (en orden):
  *   {{1}}  Nombre del lead (o identificador alternativo si no tiene nombre)
- *   {{2}}  Teléfono del lead
- *   {{3}}  Motivo de la escalación (breve, provisto por Claude en motivo_intervencion)
+ *   {{2}}  Motivo de la escalación (breve, provisto por Claude en motivo_intervencion)
+ *   {{3}}  Link directo al lead en admin-spa (abre el modal de conversación)
  */
 class LeadEscalationWhatsappService
 {
@@ -66,7 +66,7 @@ class LeadEscalationWhatsappService
             return;
         }
 
-        /* Construir identificador legible del lead: nombre > empresa > teléfono > ID. */
+        /* Construir identificador legible del lead: nombre > empresa > "Lead #ID". */
         $nombre_lead = '';
         if (! empty($lead->contact_name)) {
             $nombre_lead = $lead->contact_name;
@@ -76,8 +76,9 @@ class LeadEscalationWhatsappService
             $nombre_lead = "Lead #{$lead->id}";
         }
 
-        /* Teléfono del lead como string para la variable de la plantilla. */
-        $telefono_lead = ! empty($lead->phone) ? (string) $lead->phone : 'sin teléfono';
+        /* Link directo al modal del lead en admin-spa (abre automáticamente vía query param lead_id). */
+        $admin_spa_url = rtrim((string) config('services.admin_spa.url'), '/');
+        $link_lead     = $admin_spa_url . '/leads?lead_id=' . $lead->id;
 
         /* Motivo de la escalación: usar el de Claude o un texto genérico si está vacío. */
         $motivo_limpio = $motivo !== ''
@@ -90,7 +91,7 @@ class LeadEscalationWhatsappService
                 $this->sender->send_template(
                     (string) $admin->phone_number,
                     self::TEMPLATE_NAME,
-                    [$nombre_lead, $telefono_lead, $motivo_limpio]
+                    [$nombre_lead, $motivo_limpio, $link_lead]
                 );
 
                 Log::info('LeadEscalationWhatsappService: notificación de escalación enviada.', [
