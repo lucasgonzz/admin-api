@@ -706,8 +706,8 @@ class LeadAiService
      * Si alguno de esos días queda sin disponibilidad, agrega el siguiente día hábil.
      *
      * Horarios posibles:
-     *   - Lunes a viernes: cada hora de 09:00 a 20:00 (12 bloques, el último termina a las 21:00)
-     *   - Sábado: 09:00, 10:00, 11:00 (3 bloques, el último termina a las 12:00)
+     *   - Lunes a viernes: cada hora de 09:00 a 17:00 (9 bloques, el último termina a las 18:00)
+     *   - Sábado: 09:00, 10:00, 11:00, 12:00 (4 bloques, el último termina a las 13:00)
      *
      * Un slot está ocupado si existe un lead con `demo_date` en esa fecha
      * y `demo_start_time` que coincide con el inicio del bloque.
@@ -885,8 +885,8 @@ class LeadAiService
      * puedan desincronizarse entre sí.
      *
      * Reglas según protocolo WhatsApp (sección "AGENDA DE DEMOS"):
-     *   - Lunes a viernes: 09:00 a 20:00, una hora por bloque (12 slots).
-     *   - Sábado: 09:00, 10:00, 11:00 (último bloque termina a las 12:00).
+     *   - Lunes a viernes: 09:00 a 17:00, una hora por bloque (9 slots).
+     *   - Sábado: 09:00, 10:00, 11:00, 12:00 (último bloque termina a las 13:00).
      *   - Domingo: no aplica (el caller no debe pasar domingos).
      *
      * @param Carbon $day Día a evaluar.
@@ -895,16 +895,16 @@ class LeadAiService
      */
     private function get_all_slots_for_day(Carbon $day): array
     {
-        /* Sábado: rango reducido de mañana. */
+        /* Sábado: rango reducido de mañana, hasta las 13:00 (último inicio: 12:00). */
         if ($day->dayOfWeek === 6) {
-            return ['09:00', '10:00', '11:00'];
+            return ['09:00', '10:00', '11:00', '12:00'];
         }
 
-        /* Lunes a viernes: rango completo hasta las 20:00 (bloque final termina a las 21:00). */
+        /* Lunes a viernes: hasta las 17:00 (último inicio; la demo termina ~18:00 y ahí entra el closer, que trabaja hasta las 19:00). */
         return [
             '09:00', '10:00', '11:00', '12:00',
             '13:00', '14:00', '15:00', '16:00',
-            '17:00', '18:00', '19:00', '20:00',
+            '17:00',
         ];
     }
 
