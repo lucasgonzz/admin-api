@@ -285,10 +285,11 @@ class LeadFollowupService
         );
 
         // Registramos el seguimiento en la conversación del lead (trazabilidad).
+        // Usamos el texto real de la plantilla (con nombre sustituido) si está disponible.
         LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
-            'content'               => "[Seguimiento automático #{$followup_number} — plantilla: {$template->template_name}]",
+            'content'               => $this->render_template_body($template, $lead),
             'status'                => 'enviado',
             'is_followup'           => true,
             'whatsapp_message_id'   => $whatsapp_message_id,
@@ -347,5 +348,34 @@ class LeadFollowupService
             'is_followup' => false,
             'requiere_verificacion' => false,
         ]);
+    }
+
+    /**
+     * Devuelve el texto del mensaje a mostrar en la conversación del lead.
+     *
+     * Si la plantilla tiene `body_template` cargado, reemplaza {{1}} con el nombre
+     * del contacto y devuelve el texto real enviado al lead.
+     * Si no tiene body_template (ej: estados gestionados por el closer), usa el
+     * placeholder clásico para mantener trazabilidad del nombre de plantilla.
+     *
+     * @param FollowupTemplate $template  Plantilla usada para el envío.
+     * @param Lead             $lead      Lead destinatario del mensaje.
+     *
+     * @return string Texto a registrar en LeadMessage::content.
+     */
+    private function render_template_body(FollowupTemplate $template, Lead $lead): string
+    {
+        /* Texto literal de la plantilla (puede ser null si no fue cargado). */
+        $body = trim((string) ($template->body_template ?? ''));
+
+        if ($body === '') {
+            /* Sin body_template: usar placeholder para no perder trazabilidad del nombre de plantilla. */
+            return "[Seguimiento automático — plantilla: {$template->template_name}]";
+        }
+
+        /* Nombre del contacto para sustituir {{1}} (variable de Meta). */
+        $contact_name = trim((string) ($lead->contact_name ?? ''));
+
+        return str_replace('{{1}}', $contact_name, $body);
     }
 }
