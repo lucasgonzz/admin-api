@@ -29,18 +29,23 @@ class FollowupTemplatesSeeder extends Seeder
             ['estado' => 'demo_agendada',  'dia_numero' => 1, 'template_name' => 'cc_seg_demo_agendada_d1'],
             ['estado' => 'demo_agendada',  'dia_numero' => 3, 'template_name' => 'cc_seg_demo_agendada_d3'],
             ['estado' => 'demo_agendada',  'dia_numero' => 7, 'template_name' => 'cc_seg_demo_agendada_d7'],
-            ['estado' => 'demo_realizada', 'dia_numero' => 1, 'template_name' => 'cc_seg_demo_realizada_d1'],
-            ['estado' => 'demo_realizada', 'dia_numero' => 3, 'template_name' => 'cc_seg_demo_realizada_d3'],
-            ['estado' => 'demo_realizada', 'dia_numero' => 6, 'template_name' => 'cc_seg_demo_realizada_d6'],
-            ['estado' => 'mail2_enviado',  'dia_numero' => 1, 'template_name' => 'cc_seg_cierre_d1'],
-            ['estado' => 'mail2_enviado',  'dia_numero' => 2, 'template_name' => 'cc_seg_cierre_d2'],
-            ['estado' => 'mail2_enviado',  'dia_numero' => 4, 'template_name' => 'cc_seg_cierre_d4'],
+            // Estas plantillas NO existen en Meta: el seguimiento lo maneja el closer de forma personalizada.
+            ['estado' => 'demo_realizada', 'dia_numero' => 1, 'template_name' => 'cc_seg_demo_realizada_d1', 'activa' => false],
+            ['estado' => 'demo_realizada', 'dia_numero' => 3, 'template_name' => 'cc_seg_demo_realizada_d3', 'activa' => false],
+            ['estado' => 'demo_realizada', 'dia_numero' => 6, 'template_name' => 'cc_seg_demo_realizada_d6', 'activa' => false],
+            ['estado' => 'mail2_enviado',  'dia_numero' => 1, 'template_name' => 'cc_seg_cierre_d1',         'activa' => false],
+            ['estado' => 'mail2_enviado',  'dia_numero' => 2, 'template_name' => 'cc_seg_cierre_d2',         'activa' => false],
+            ['estado' => 'mail2_enviado',  'dia_numero' => 4, 'template_name' => 'cc_seg_cierre_d4',         'activa' => false],
         ];
 
         foreach ($templates as $row) {
+            // Para las filas que traen 'activa' explícito (demo_realizada, mail2_enviado), respetar ese valor.
+            // Para el resto de los estados, usar activa=true como valor por defecto.
+            $activa = array_key_exists('activa', $row) ? $row['activa'] : true;
+
             FollowupTemplate::updateOrCreate(
                 ['estado' => $row['estado'], 'dia_numero' => $row['dia_numero']],
-                array_merge($row, ['language_code' => 'es_AR', 'activa' => true])
+                array_merge($row, ['language_code' => 'es_AR', 'activa' => $activa])
             );
         }
     }

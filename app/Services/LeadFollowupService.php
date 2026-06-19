@@ -12,9 +12,21 @@ use Illuminate\Support\Facades\Log;
 /**
  * Evalúa leads activos y dispara seguimientos automáticos vía {@see LeadAiService}
  * o pausa el lead si se agotaron los intentos.
+ *
+ * Para los estados demo_realizada y mail2_enviado no existen plantillas Meta aprobadas:
+ * el seguimiento lo maneja el closer de forma personalizada, por lo que el sistema
+ * notifica al closer vía WhatsApp en lugar de generar una sugerencia de Claude.
  */
 class LeadFollowupService
 {
+    /**
+     * Estados en los que el seguimiento automático delega al closer,
+     * en vez de enviar una plantilla o generar sugerencia de Claude.
+     *
+     * Las plantillas de estos estados no están creadas en Meta Business Manager.
+     */
+    protected const ESTADOS_CLOSER = ['demo_realizada', 'mail2_enviado'];
+
     /**
      * Procesa todos los leads que no están cerrados / en pausa final.
      *
@@ -113,8 +125,15 @@ class LeadFollowupService
             $this->send_followup_via_template($fresh, $template, $followup_number);
             $via = 'template';
         } else {
-            app(LeadAiService::class)->generate_suggestion($fresh, true);
-            $via = 'claude';
+            if (in_array($fresh->status, self::ESTADOS_CLOSER, true)) {
+                // Para demo_realizada y mail2_enviado: notificar al closer en vez de envío automático.
+                $this->notify_closer_for_followup($fresh, $followup_number);
+                $via = 'closer_notified';
+            } else {
+                // Fallback general: generar sugerencia de Claude para aprobación manual.
+                app(LeadAiService::class)->generate_suggestion($fresh, true);
+                $via = 'claude';
+            }
         }
 
         return ['result' => 'suggestion', 'followup_number' => $followup_number, 'via' => $via];
@@ -171,11 +190,49 @@ class LeadFollowupService
             // Hay plantilla aprobada: enviamos directo por WhatsApp sin pasar por Claude.
             $this->send_followup_via_template($fresh, $template, $followup_number);
         } else {
-            // Fallback: si no hay template configurada para este número, generar sugerencia de Claude.
-            app(LeadAiService::class)->generate_suggestion($fresh, true);
+            if (in_array($fresh->status, self::ESTADOS_CLOSER, true)) {
+                // Para demo_realizada y mail2_enviado: notificar al closer en vez de envío automático.
+                $this->notify_closer_for_followup($fresh, $followup_number);
+            } else {
+                // Fallback general: generar sugerencia de Claude para aprobación manual.
+                app(LeadAiService::class)->generate_suggestion($fresh, true);
+            }
         }
 
         return 'suggestion';
+    }
+
+    /**
+     * Notifica al closer vía WhatsApp que un lead en etapa avanzada
+     * (demo_realizada o mail2_enviado) requiere seguimiento personalizado.
+     *
+     * Reutiliza LeadEscalationWhatsappService y la plantilla `lead_escalacion_humana`
+     * (ya aprobada en Meta), pasando un motivo contextual según el estado del lead.
+     *
+     * @param Lead $lead             Lead que requiere atención del closer.
+     * @param int  $followup_number  Número de seguimiento (1-based), para dar contexto en el motivo.
+     *
+     * @return void
+     */
+    protected function notify_closer_for_followup(Lead $lead, int $followup_number): void
+    {
+        /* Motivo contextual según el estado del lead para que el closer entienda el contexto. */
+        $motivos = [
+            'demo_realizada' => "Lead hizo la demo - seguimiento #{$followup_number}",
+            'mail2_enviado'  => "Lead en etapa de cierre - seguimiento #{$followup_number}",
+        ];
+
+        /* Usar el motivo específico del estado o uno genérico de fallback. */
+        $motivo = $motivos[$lead->status] ?? "Seguimiento #{$followup_number} requerido";
+
+        /* Enviar notificación al closer usando el servicio de escalación existente. */
+        app(LeadEscalationWhatsappService::class)->notify($lead, $motivo);
+
+        Log::info('LeadFollowupService: closer notificado por WhatsApp por seguimiento en etapa avanzada.', [
+            'lead_id'         => $lead->id,
+            'estado'          => $lead->status,
+            'followup_number' => $followup_number,
+        ]);
     }
 
     /**

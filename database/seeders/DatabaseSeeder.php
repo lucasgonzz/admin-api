@@ -30,6 +30,8 @@ class DatabaseSeeder extends Seeder
             FollowupRulesSeeder::class,
             // Plantillas Meta aprobadas para seguimientos automáticos directos.
             FollowupTemplatesSeeder::class,
+            // Desactiva las plantillas de demo_realizada y mail2_enviado (no creadas en Meta).
+            FollowupTemplatesDesactivarDemoRealizadaCierreSeeder::class,
             ProtocolEntriesSeeder::class,
             // Plantillas de tareas automáticas para procesos internos.
             TaskTemplateSeeder::class,
