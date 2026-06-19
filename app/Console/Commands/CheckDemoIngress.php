@@ -67,7 +67,7 @@ class CheckDemoIngress extends Command
             ->where('tiene_sugerencia_pendiente', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
-            ->whereRaw("DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?", [$now->format('Y-m-d')])
+            ->whereDate('demo_date', $now->format('Y-m-d'))
             ->with('messages')
             ->get();
 
