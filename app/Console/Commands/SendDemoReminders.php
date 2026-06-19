@@ -49,14 +49,14 @@ class SendDemoReminders extends Command
         $window_end     = $now->copy()->addMinutes($window_minutes);
 
         // Leads candidatos: demo agendada hoy, sin recordatorio emitido y sin sugerencia pendiente.
-        // Se usa CONVERT_TZ para comparar demo_date (guardado en UTC) contra la fecha en Argentina.
+        // demo_date es DATE (sin hora ni timezone), ya guardada como fecha calendario de Argentina.
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
             ->where('recordatorio_demo_enviado', false)
             ->where('tiene_sugerencia_pendiente', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
-            ->whereRaw("DATE(CONVERT_TZ(demo_date, '+00:00', '-03:00')) = ?", [$now->format('Y-m-d')])
+            ->whereDate('demo_date', $now->format('Y-m-d'))
             ->get();
 
         // Contador de recordatorios generados para el log final.
