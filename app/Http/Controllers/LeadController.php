@@ -82,7 +82,7 @@ class LeadController extends Controller
             $query->where('target_client_id', $request->input('target_client_id'));
         }
 
-        $leads = $query->paginate(30)->withQueryString();
+        $leads = $query->paginate(100)->withQueryString();
         $clients = Client::orderBy('name')->get();
         $statuses = self::STATUSES;
 
