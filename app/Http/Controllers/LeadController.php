@@ -1653,13 +1653,15 @@ class LeadController extends Controller
     }
 
     /**
-     * Genera el resumen del lead con Claude manualmente desde admin-spa.
+     * Genera el resumen estructurado del lead con Claude manualmente desde admin-spa.
      *
-     * Llama a la API de Anthropic con el historial de mensajes del lead para
-     * producir un resumen orientado al closer. Mismo prompt que el scheduler
-     * GenerateDemoSummary pero sin esperar el timing automático.
+     * Llama a la API de Anthropic con el historial de mensajes del lead para producir:
+     * - demo_summary: resumen textual en prosa orientado al closer (máx. 200 palabras)
+     * - demo_summary_structured: JSON con empresa, situacion_actual, funcionalidades, puntos_dolor
      *
-     * @param int|string $id
+     * Si el parse JSON falla, se guarda solo demo_summary con el texto crudo (fallback seguro).
+     *
+     * @param int|string $id ID del lead.
      *
      * @return \Illuminate\Http\JsonResponse
      */
@@ -1668,13 +1670,18 @@ class LeadController extends Controller
         /* Lead con historial completo de mensajes para alimentar el prompt. */
         $lead = Lead::with('messages')->findOrFail($id);
 
-        /* System prompt idéntico al usado en el scheduler automático. */
-        $system_prompt = 'Sos un asistente de ventas. Tu tarea es generar un resumen breve del perfil de este lead '
-            . 'para que el closer pueda llamarlo inmediatamente después de la demo con todo el contexto necesario. '
-            . 'El resumen debe incluir: tipo de negocio, cantidad de empleados, dolores principales que mencionó, '
-            . 'qué funcionalidades le interesaron (si las mencionó), objeciones que planteó, preguntas que hizo, '
-            . 'y cualquier información relevante para el cierre. '
-            . 'Máximo 200 palabras. Sin bullets. Prosa natural.';
+        /*
+         * System prompt actualizado (prompt 053): solicita JSON estructurado con 5 claves.
+         * Mismo texto que GenerateDemoSummary::SYSTEM_PROMPT para mantener coherencia.
+         */
+        $system_prompt = 'Sos un asistente de ventas. Analizá la conversación del lead y devolvé ÚNICAMENTE un JSON válido '
+            . '(sin backticks, sin texto adicional, sin explicaciones) con exactamente estas 5 claves: '
+            . '- resumen_textual: resumen en prosa natural (máximo 200 palabras) orientado al closer, con tipo de negocio, empleados, dolores, funcionalidades de interés, objeciones y datos clave para el cierre. '
+            . '- empresa: una o dos frases sobre a qué se dedica el negocio y cuántos empleados tiene. '
+            . '- situacion_actual: qué sistema o herramienta usa actualmente para gestionar su negocio (si no lo mencionó, escribir "No especificó"). '
+            . '- funcionalidades: funcionalidades de ComercioCity que le interesaron o preguntó durante la conversación. '
+            . '- puntos_dolor: principales dolores o problemas con su situación actual. '
+            . 'Devolvé SOLO el JSON, nada más.';
 
         /* Construir el historial formateado para Claude a partir de los mensajes del lead. */
         $messages_text = $lead->messages->map(function ($msg) {
@@ -1703,21 +1710,71 @@ class LeadController extends Controller
                 'content-type'      => 'application/json',
             ])->timeout(60)->post('https://api.anthropic.com/v1/messages', [
                 'model'      => config('services.anthropic.model', 'claude-sonnet-4-20250514'),
-                'max_tokens' => 800,
+                /* max_tokens aumentado a 1000 para dar espacio al JSON estructurado. */
+                'max_tokens' => 1000,
                 'system'     => $system_prompt,
                 'messages'   => [['role' => 'user', 'content' => $user_content]],
             ]);
 
-            $body    = $response->json();
-            /* Texto generado por Claude: primer bloque de contenido de la respuesta. */
-            $summary = trim($body['content'][0]['text'] ?? '');
+            /* Concatenar todos los bloques de texto de la respuesta. */
+            $body = $response->json();
+            $raw  = '';
+            if (isset($body['content']) && is_array($body['content'])) {
+                foreach ($body['content'] as $block) {
+                    if (is_array($block) && isset($block['text'])) {
+                        $raw .= (string) $block['text'];
+                    }
+                }
+            }
+            $raw = trim($raw);
 
-            if (empty($summary)) {
-                return response()->json(['message' => 'Claude no devolvió resumen.'], 422);
+            /* Limpiar posibles backticks de markdown que Claude podría agregar. */
+            $raw = preg_replace('/```(?:json)?\s*([\s\S]*?)\s*```/i', '$1', $raw);
+
+            /*
+             * Intentar parsear el JSON estructurado devuelto por Claude.
+             * Extrae entre el primer { y el último } para tolerar texto residual.
+             */
+            $parsed      = null;
+            $start_pos   = strpos($raw, '{');
+            $end_pos     = strrpos($raw, '}');
+            if ($start_pos !== false && $end_pos !== false && $end_pos > $start_pos) {
+                $json   = substr($raw, $start_pos, $end_pos - $start_pos + 1);
+                $parsed = json_decode($json, true);
             }
 
-            /* Persistir el resumen generado en el campo demo_summary del lead. */
-            $lead->update(['demo_summary' => $summary]);
+            if (is_array($parsed) && ! empty($parsed['resumen_textual'])) {
+                /* Parse exitoso: guardar resumen textual + resumen estructurado. */
+                $summary    = trim((string) ($parsed['resumen_textual'] ?? ''));
+                $structured = [
+                    'empresa'          => trim((string) ($parsed['empresa']          ?? '')),
+                    'situacion_actual' => trim((string) ($parsed['situacion_actual'] ?? '')),
+                    'funcionalidades'  => trim((string) ($parsed['funcionalidades']  ?? '')),
+                    'puntos_dolor'     => trim((string) ($parsed['puntos_dolor']     ?? '')),
+                ];
+
+                $lead->update([
+                    'demo_summary'            => $summary,
+                    /* El cast 'array' en Lead::$casts serializa automáticamente a JSON. */
+                    'demo_summary_structured' => $structured,
+                ]);
+            } else {
+                /*
+                 * Fallback: Claude no devolvió JSON válido.
+                 * Se guarda el texto crudo en demo_summary para no perder el contenido.
+                 * demo_summary_structured queda sin actualizar.
+                 */
+                Log::warning('LeadController@generate_demo_summary_json: Claude no devolvió JSON válido, usando texto crudo.', [
+                    'lead_id' => $lead->id,
+                    'raw'     => substr($raw, 0, 300),
+                ]);
+
+                if (empty($raw)) {
+                    return response()->json(['message' => 'Claude no devolvió resumen.'], 422);
+                }
+
+                $lead->update(['demo_summary' => $raw]);
+            }
 
             return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
 

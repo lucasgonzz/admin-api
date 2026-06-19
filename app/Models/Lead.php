@@ -126,6 +126,9 @@ class Lead extends Model
 
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'        => 'array',
+
+        // Resumen estructurado generado por Claude: {empresa, situacion_actual, funcionalidades, puntos_dolor}
+        'demo_summary_structured'      => 'array',
     ];
 
     /**

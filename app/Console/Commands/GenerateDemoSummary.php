@@ -34,16 +34,25 @@ class GenerateDemoSummary extends Command
     protected $description = 'Genera resumen del lead con Claude X minutos antes de que finalice la demo';
 
     /**
-     * System prompt enviado a Claude para generar el resumen del lead.
+     * System prompt enviado a Claude para generar el resumen estructurado del lead.
+     *
+     * Solicita ÚNICAMENTE un JSON válido con 5 claves:
+     * - resumen_textual: prosa orientada al closer (máx. 200 palabras)
+     * - empresa: rubro y cantidad de empleados
+     * - situacion_actual: sistema/herramienta que usa actualmente
+     * - funcionalidades: funcionalidades de ComercioCity que le interesaron
+     * - puntos_dolor: principales dolores o problemas actuales
      *
      * @var string
      */
-    private const SYSTEM_PROMPT = 'Sos un asistente de ventas. Tu tarea es generar un resumen breve del perfil de este lead '
-        . 'para que el closer pueda llamarlo inmediatamente después de la demo con todo el contexto necesario. '
-        . 'El resumen debe incluir: tipo de negocio, cantidad de empleados, dolores principales que mencionó, '
-        . 'qué funcionalidades le interesaron (si las mencionó), objeciones que planteó, preguntas que hizo, '
-        . 'y cualquier información relevante para el cierre. '
-        . 'Máximo 200 palabras. Sin bullets. Prosa natural.';
+    private const SYSTEM_PROMPT = 'Sos un asistente de ventas. Analizá la conversación del lead y devolvé ÚNICAMENTE un JSON válido '
+        . '(sin backticks, sin texto adicional, sin explicaciones) con exactamente estas 5 claves: '
+        . '- resumen_textual: resumen en prosa natural (máximo 200 palabras) orientado al closer, con tipo de negocio, empleados, dolores, funcionalidades de interés, objeciones y datos clave para el cierre. '
+        . '- empresa: una o dos frases sobre a qué se dedica el negocio y cuántos empleados tiene. '
+        . '- situacion_actual: qué sistema o herramienta usa actualmente para gestionar su negocio (si no lo mencionó, escribir "No especificó"). '
+        . '- funcionalidades: funcionalidades de ComercioCity que le interesaron o preguntó durante la conversación. '
+        . '- puntos_dolor: principales dolores o problemas con su situación actual. '
+        . 'Devolvé SOLO el JSON, nada más.';
 
     /**
      * Procesa candidatos y genera el resumen con Claude.
@@ -107,18 +116,36 @@ class GenerateDemoSummary extends Command
             $user_content = $this->build_history_content($lead);
 
             try {
-                /* Llamar a Claude para generar el resumen. */
-                $summary = $this->call_claude($user_content);
+                /*
+                 * Llamar a Claude: ahora devuelve un array con las 5 claves del resumen estructurado.
+                 * call_claude() lanza RuntimeException si el JSON no es válido.
+                 */
+                $result  = $this->call_claude($user_content);
+
+                /* resumen_textual es el campo principal; sin él no hay resumen útil. */
+                $summary = trim((string) ($result['resumen_textual'] ?? ''));
 
                 if ($summary === '') {
-                    Log::warning('GenerateDemoSummary: Claude devolvió respuesta vacía', [
+                    Log::warning('GenerateDemoSummary: resumen_textual vacío', [
                         'lead_id' => $lead->id,
                     ]);
                     continue;
                 }
 
-                /* Guardar el resumen en el lead. */
-                $lead->update(['demo_summary' => $summary]);
+                /* Las 4 claves estructuradas que van en el campo JSON separado. */
+                $structured = [
+                    'empresa'          => trim((string) ($result['empresa']          ?? '')),
+                    'situacion_actual' => trim((string) ($result['situacion_actual'] ?? '')),
+                    'funcionalidades'  => trim((string) ($result['funcionalidades']  ?? '')),
+                    'puntos_dolor'     => trim((string) ($result['puntos_dolor']     ?? '')),
+                ];
+
+                /* Guardar resumen textual + resumen estructurado en el lead. */
+                $lead->update([
+                    'demo_summary'            => $summary,
+                    /* El cast 'array' en Lead::$casts serializa automáticamente $structured a JSON. */
+                    'demo_summary_structured' => $structured,
+                ]);
 
                 Log::info('GenerateDemoSummary: resumen generado', [
                     'lead_id'      => $lead->id,
@@ -172,17 +199,21 @@ class GenerateDemoSummary extends Command
     }
 
     /**
-     * Envía el historial a Claude y devuelve el texto del resumen generado.
+     * Envía el historial a Claude y devuelve el array con el resumen estructurado.
+     *
+     * Claude debe responder ÚNICAMENTE con un JSON válido con las claves:
+     * resumen_textual, empresa, situacion_actual, funcionalidades, puntos_dolor.
      *
      * Usa la misma configuración HTTP que LeadAiService (API key, headers, timeout, TLS).
      *
      * @param string $user_content Historial de mensajes del lead.
      *
-     * @throws \RuntimeException Si la API key no está configurada o falla la llamada.
+     * @throws \RuntimeException Si la API key no está configurada, falla la llamada,
+     *                           o Claude no devuelve JSON válido.
      *
-     * @return string Resumen generado por Claude.
+     * @return array Array PHP con las 5 claves del resumen estructurado.
      */
-    protected function call_claude(string $user_content): string
+    protected function call_claude(string $user_content): array
     {
         /* Validar que la API key esté configurada. */
         $api_key = (string) config('services.anthropic.api_key');
@@ -211,7 +242,8 @@ class GenerateDemoSummary extends Command
 
         $response = $http->post('https://api.anthropic.com/v1/messages', [
             'model'      => $model,
-            'max_tokens' => 600,
+            /* max_tokens aumentado a 1000 para dar espacio al JSON estructurado de 5 claves. */
+            'max_tokens' => 1000,
             'system'     => self::SYSTEM_PROMPT,
             'messages'   => [
                 ['role' => 'user', 'content' => $user_content],
@@ -224,18 +256,36 @@ class GenerateDemoSummary extends Command
             );
         }
 
-        /* Extraer texto del bloque de contenido de la respuesta. */
+        /* Concatenar todos los bloques de texto de la respuesta. */
         $body = $response->json();
-        $text = '';
+        $raw  = '';
         if (isset($body['content']) && is_array($body['content'])) {
             foreach ($body['content'] as $block) {
                 if (is_array($block) && isset($block['text'])) {
-                    $text .= (string) $block['text'];
+                    $raw .= (string) $block['text'];
                 }
             }
         }
+        $raw = trim($raw);
 
-        return trim($text);
+        /* Limpiar posibles backticks de markdown que Claude podría agregar. */
+        $raw = preg_replace('/```(?:json)?\s*([\s\S]*?)\s*```/i', '$1', $raw);
+
+        /*
+         * Extraer el primer objeto JSON válido entre el primer { y el último }.
+         * Cubre casos donde Claude agregue texto antes o después del JSON.
+         */
+        $start = strpos($raw, '{');
+        $end   = strrpos($raw, '}');
+        if ($start !== false && $end !== false && $end > $start) {
+            $json   = substr($raw, $start, $end - $start + 1);
+            $parsed = json_decode($json, true);
+            if (is_array($parsed)) {
+                return $parsed;
+            }
+        }
+
+        throw new \RuntimeException('Claude no devolvió JSON válido: ' . $raw);
     }
 
     /**

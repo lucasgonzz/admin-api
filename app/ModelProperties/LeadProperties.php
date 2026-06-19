@@ -162,16 +162,11 @@ class LeadProperties
             [
                 'group_title'   => 'Demo'
             ],
-            [
-                /* Resumen del lead generado por Claude antes del fin de la demo; solo lectura. */
-                'key'              => 'demo_summary',
-                'text'             => 'Resumen del lead (IA)',
-                'type'             => 'textarea',
-                'value'            => null,
-                'only_show'        => true,
-                'not_show_on_table' => true,
-                'exclude_on_update' => true,
-            ],
+            /*
+             * demo_summary fue eliminado del formulario Demo (2026-06-19, prompt 053).
+             * El resumen ahora se muestra en el tab "Resumen" via componente Vue (LeadResumenTab),
+             * no como campo del formulario genérico.
+             */
             [
                 'key' => 'demo_id',
                 'text' => 'Demo asignada',
