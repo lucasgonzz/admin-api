@@ -91,6 +91,26 @@ class LeadProperties
                 'width' => 90,
             ],
             [
+                /*
+                 * Botón de acción (solo tabla) que navega a la vista de conversación WhatsApp
+                 * del lead. `whatsapp_conversation_link` no es un campo real de la BD: solo
+                 * identifica el tipo de celda; el CellRenderer usa los metadatos de esta prop
+                 * (route_name + parámetros) para construir el link, no lee row['whatsapp_conversation_link'].
+                 */
+                'key'                    => 'whatsapp_conversation_link',
+                'text'                   => 'Chat',
+                'type'                   => 'router_link_btn',
+                'show'                   => true,
+                'table_only'             => true,
+                'only_show'              => true,
+                'not_form'               => true,
+                'btn_icon'               => 'bi-whatsapp',
+                'btn_title'              => 'Ver conversación WhatsApp',
+                'route_name'             => 'lead_conversation',
+                'route_param_key'        => 'lead_id',
+                'route_param_value_key'  => 'id',
+            ],
+            [
                 'key' => 'contact_name',
                 'text' => 'Nombre',
                 'type' => 'text',
