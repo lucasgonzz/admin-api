@@ -1000,6 +1000,96 @@ class LeadController extends Controller
     }
 
     /**
+     * Recibe un audio grabado por el setter, lo guarda en disco, lo envía por WhatsApp
+     * al lead y crea el LeadMessage correspondiente con kind='audio'.
+     *
+     * El archivo se almacena en storage/app/public/lead_audio/{lead_id}/ con un nombre
+     * único basado en timestamp + uniqid. Si el envío WhatsApp falla, el mensaje queda
+     * guardado en BD igualmente (no abortamos la operación).
+     *
+     * @param Request             $request               Debe incluir `audio` (UploadedFile).
+     * @param int|string          $lead_id               Identificador del lead.
+     * @param WhatsappSendService $whatsapp_send_service Servicio de envío WhatsApp inyectado.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_audio_message_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
+    {
+        // Validar que se haya recibido un archivo de audio válido.
+        $file = $request->file('audio');
+        if (! $file || ! $file->isValid()) {
+            return response()->json(['message' => 'No se recibió un archivo de audio válido.'], 422);
+        }
+
+        // Lead al que pertenece el mensaje.
+        $lead = Lead::query()->findOrFail($lead_id);
+
+        // Determinar extensión y mime real del archivo subido.
+        // Los navegadores pueden enviar webm (Chrome/Edge), ogg (Firefox) o mp4 (Safari).
+        $mime      = $file->getMimeType() ?: $file->getClientMimeType() ?: 'audio/webm';
+        $extension = $file->getClientOriginalExtension() ?: 'webm';
+
+        // Normalizar extensión a un conjunto seguro; cualquier otro formato cae a webm.
+        if (! in_array($extension, ['webm', 'ogg', 'mp3', 'mp4', 'm4a', 'aac', 'amr'], true)) {
+            $extension = 'webm';
+        }
+
+        // Nombre único para el archivo de audio.
+        $filename = 'audio_' . time() . '_' . uniqid() . '.' . $extension;
+
+        // Ruta relativa dentro del disco 'public'.
+        $relative_path = 'lead_audio/' . $lead->id . '/' . $filename;
+
+        // Guardar el archivo en storage/app/public/lead_audio/{lead_id}/.
+        $file->storeAs('lead_audio/' . $lead->id, $filename, ['disk' => 'public']);
+
+        // Crear el LeadMessage primero (sin whatsapp_message_id todavía).
+        $message = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'setter',
+            'content'               => '',
+            'kind'                  => 'audio',
+            'status'                => 'enviado',
+            'sent_at'               => now(),
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+        ]);
+
+        // Crear el adjunto vinculado al mensaje para que send_audio_attachment() pueda referenciarlo.
+        $attachment = LeadMessageAttachment::create([
+            'lead_message_id'  => $message->id,
+            'disk'             => 'public',
+            'path'             => $relative_path,
+            'mime'             => $mime,
+            'display_filename' => $filename,
+        ]);
+
+        // Enviar por WhatsApp si el lead tiene teléfono registrado.
+        $whatsapp_message_id = null;
+        $phone = trim((string) ($lead->phone ?? ''));
+        if ($phone !== '') {
+            try {
+                $whatsapp_message_id = $whatsapp_send_service->send_audio_attachment($phone, $attachment);
+            } catch (\Throwable $e) {
+                Log::error('LeadController@send_audio_message_json: error WhatsApp.', [
+                    'lead_id' => $lead_id,
+                    'error'   => $e->getMessage(),
+                ]);
+                // No abortamos: el mensaje quedó guardado aunque falle el envío.
+            }
+        }
+
+        // Actualizar el whatsapp_message_id si el envío fue exitoso.
+        if ($whatsapp_message_id !== null) {
+            $message->update(['whatsapp_message_id' => $whatsapp_message_id]);
+        }
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Simula un mensaje entrante del lead sin pasar por WhatsApp (herramienta de testing del setter).
      *
      * Replica el mismo flujo que dispara el webhook real de Kapso al recibir un mensaje del lead:

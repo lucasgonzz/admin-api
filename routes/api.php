@@ -121,6 +121,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/generate-contract', [LeadController::class, 'generate_contract_json']);
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
         Route::post('lead/{id}/send-direct-message', [LeadController::class, 'send_direct_message_json']);
+        Route::post('lead/{id}/send-audio-message', [LeadController::class, 'send_audio_message_json']);
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
         Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
