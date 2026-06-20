@@ -1000,93 +1000,137 @@ class LeadController extends Controller
     }
 
     /**
-     * Recibe un audio grabado por el setter, lo guarda en disco, lo envía por WhatsApp
-     * al lead y crea el LeadMessage correspondiente con kind='audio'.
+     * Envía un mensaje de audio (nota de voz) directamente al lead por WhatsApp desde el panel de admin.
      *
-     * El archivo se almacena en storage/app/public/lead_audio/{lead_id}/ con un nombre
-     * único basado en timestamp + uniqid. Si el envío WhatsApp falla, el mensaje queda
-     * guardado en BD igualmente (no abortamos la operación).
+     * El audio llega grabado desde el navegador como archivo multipart (campo `audio`, fallback `file`).
+     * Se persiste el binario en disco `public`, se crea el LeadMessage como `setter` con kind `audio` y
+     * su LeadMessageAttachment, y se envía con el servicio de audio ya existente (mismo que usa soporte).
+     * Igual que el envío de texto, el mensaje queda guardado aunque WhatsApp esté en test_mode o el lead
+     * no tenga teléfono (en esos casos el envío devuelve null sin ser error).
      *
-     * @param Request             $request               Debe incluir `audio` (UploadedFile).
-     * @param int|string          $lead_id               Identificador del lead.
-     * @param WhatsappSendService $whatsapp_send_service Servicio de envío WhatsApp inyectado.
+     * @param Request             $request               Debe incluir el archivo de audio en `audio` (o `file`).
+     * @param int|string          $lead_id
+     * @param WhatsappSendService $whatsapp_send_service
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function send_audio_message_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
+    public function send_direct_audio_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
     {
-        // Validar que se haya recibido un archivo de audio válido.
-        $file = $request->file('audio');
-        if (! $file || ! $file->isValid()) {
+        // El frontend graba con MediaRecorder y sube el blob en el campo `audio`; aceptamos `file` como fallback.
+        $uploaded_file = $request->file('audio') ?: $request->file('file');
+        if ($uploaded_file === null || ! $uploaded_file->isValid()) {
             return response()->json(['message' => 'No se recibió un archivo de audio válido.'], 422);
         }
 
-        // Lead al que pertenece el mensaje.
-        $lead = Lead::query()->findOrFail($lead_id);
-
-        // Determinar extensión y mime real del archivo subido.
-        // Los navegadores pueden enviar webm (Chrome/Edge), ogg (Firefox) o mp4 (Safari).
-        $mime      = $file->getMimeType() ?: $file->getClientMimeType() ?: 'audio/webm';
-        $extension = $file->getClientOriginalExtension() ?: 'webm';
-
-        // Normalizar extensión a un conjunto seguro; cualquier otro formato cae a webm.
-        if (! in_array($extension, ['webm', 'ogg', 'mp3', 'mp4', 'm4a', 'aac', 'amr'], true)) {
-            $extension = 'webm';
+        // Mime real del archivo subido. WhatsApp acepta audio/*; el WebM del navegador (a veces reportado
+        // como video/webm) lo reenvía el servicio como documento, así que también lo permitimos.
+        $mime = strtolower((string) $uploaded_file->getMimeType());
+        $is_audio_mime = strpos($mime, 'audio/') === 0;
+        $is_webm = strpos($mime, 'webm') !== false;
+        if (! $is_audio_mime && ! $is_webm) {
+            return response()->json(['message' => 'El archivo no es un audio soportado.'], 422);
         }
 
-        // Nombre único para el archivo de audio.
-        $filename = 'audio_' . time() . '_' . uniqid() . '.' . $extension;
+        // Límite de 16 MB: tope de audio de la Cloud API de WhatsApp.
+        $max_bytes = 16 * 1024 * 1024;
+        if ($uploaded_file->getSize() > $max_bytes) {
+            return response()->json(['message' => 'El audio supera el tamaño máximo permitido (16 MB).'], 422);
+        }
 
-        // Ruta relativa dentro del disco 'public'.
-        $relative_path = 'lead_audio/' . $lead->id . '/' . $filename;
+        // Lead destino del audio.
+        $lead = Lead::query()->findOrFail($lead_id);
 
-        // Guardar el archivo en storage/app/public/lead_audio/{lead_id}/.
-        $file->storeAs('lead_audio/' . $lead->id, $filename, ['disk' => 'public']);
+        // Extensión coherente con el mime real, para que el servicio de envío detecte el formato correcto.
+        $extension = $this->resolve_outbound_audio_extension($mime, $uploaded_file->getClientOriginalExtension());
 
-        // Crear el LeadMessage primero (sin whatsapp_message_id todavía).
+        // Guardamos el binario en disco public bajo el mismo directorio que los audios entrantes del lead.
+        $directory = 'lead_messages/' . $lead->id;
+        $stored_name = 'out_' . now()->format('Ymd_His') . '_' . substr(md5(uniqid('', true)), 0, 8) . '.' . $extension;
+        $stored_path = $directory . '/' . $stored_name;
+        Storage::disk('public')->put($stored_path, file_get_contents($uploaded_file->getRealPath()));
+
+        // Mensaje saliente: mismo contrato que el audio entrante (kind audio + content placeholder).
         $message = LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'setter',
-            'content'               => '',
             'kind'                  => 'audio',
+            'content'               => '[Audio enviado]',
             'status'                => 'enviado',
             'sent_at'               => now(),
             'is_followup'           => false,
             'requiere_verificacion' => false,
         ]);
 
-        // Crear el adjunto vinculado al mensaje para que send_audio_attachment() pueda referenciarlo.
+        // Adjunto persistido: habilita la reproducción en la conversación vía public_url firmado.
         $attachment = LeadMessageAttachment::create([
-            'lead_message_id'  => $message->id,
-            'disk'             => 'public',
-            'path'             => $relative_path,
-            'mime'             => $mime,
-            'display_filename' => $filename,
+            'lead_message_id' => $message->id,
+            'disk'            => 'public',
+            'path'            => $stored_path,
+            'mime'            => $mime !== '' ? $mime : null,
+            'size'            => Storage::disk('public')->size($stored_path),
         ]);
 
-        // Enviar por WhatsApp si el lead tiene teléfono registrado.
-        $whatsapp_message_id = null;
+        // Envío real por WhatsApp reutilizando el servicio de audio existente (sube media + envía type audio).
         $phone = trim((string) ($lead->phone ?? ''));
         if ($phone !== '') {
             try {
                 $whatsapp_message_id = $whatsapp_send_service->send_audio_attachment($phone, $attachment);
+                if ($whatsapp_message_id !== null && $whatsapp_message_id !== '') {
+                    $message->update(['whatsapp_message_id' => $whatsapp_message_id]);
+                }
             } catch (\Throwable $e) {
-                Log::error('LeadController@send_audio_message_json: error WhatsApp.', [
+                Log::error('LeadController@send_direct_audio_json: error WhatsApp.', [
                     'lead_id' => $lead_id,
                     'error'   => $e->getMessage(),
                 ]);
-                // No abortamos: el mensaje quedó guardado aunque falle el envío.
-            }
-        }
 
-        // Actualizar el whatsapp_message_id si el envío fue exitoso.
-        if ($whatsapp_message_id !== null) {
-            $message->update(['whatsapp_message_id' => $whatsapp_message_id]);
+                // El mensaje y su adjunto ya quedaron persistidos; informamos el fallo de envío sin borrarlos.
+                return response()->json(['message' => 'No se pudo enviar el audio por WhatsApp: '.$e->getMessage()], 422);
+            }
         }
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Deriva la extensión del audio saliente a partir del mime real del archivo subido.
+     *
+     * Mantiene coherencia con los formatos que reconoce WhatsappSendService al reenviar el audio.
+     *
+     * @param string $mime               Mime real reportado por el archivo subido.
+     * @param string $original_extension Extensión original del archivo (fallback).
+     *
+     * @return string
+     */
+    private function resolve_outbound_audio_extension(string $mime, string $original_extension): string
+    {
+        $mime = strtolower($mime);
+
+        if (strpos($mime, 'ogg') !== false) {
+            return 'ogg';
+        }
+        if (strpos($mime, 'mpeg') !== false) {
+            return 'mp3';
+        }
+        if (strpos($mime, 'aac') !== false) {
+            return 'aac';
+        }
+        if (strpos($mime, 'amr') !== false) {
+            return 'amr';
+        }
+        if (strpos($mime, 'mp4') !== false) {
+            return 'm4a';
+        }
+        if (strpos($mime, 'webm') !== false) {
+            return 'webm';
+        }
+
+        // Fallback: usamos la extensión original si vino, o ogg (nota de voz por defecto).
+        $original_extension = strtolower(trim($original_extension));
+
+        return $original_extension !== '' ? $original_extension : 'ogg';
     }
 
     /**
