@@ -125,6 +125,9 @@ class Lead extends Model
         // Último mensaje del hilo WhatsApp (desnormalizado para orden en listado).
         'last_message_at'              => 'datetime',
 
+        // Timestamp de fijado (pin global): null = no fijado; los leads fijados aparecen primero en la tabla.
+        'pinned_at'                    => 'datetime',
+
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'        => 'array',
 

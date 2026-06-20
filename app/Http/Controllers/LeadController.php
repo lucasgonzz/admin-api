@@ -391,7 +391,12 @@ class LeadController extends Controller
         // Query base liviana: relaciones del lead + solo mensajes de notificación.
         $query = Lead::query()->withAllForList();
 
-        // Orden configurable desde admin-spa: último mensaje (default UI) o creación del lead.
+        // Orden: fijados primero (pinned_at DESC NULLS LAST), luego el criterio activo.
+        // CASE WHEN garantiza compatibilidad con MySQL (no soporta NULLS LAST directamente).
+        $query->orderByRaw('CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
+        $query->orderByRaw('pinned_at DESC');
+
+        // Orden secundario configurable desde admin-spa: último mensaje (default UI) o creación del lead.
         $sort_by = (string) $request->input('sort_by', 'last_message');
         if ($sort_by === 'last_message') {
             // COALESCE evita que leads sin mensajes queden al final del listado.
@@ -2020,6 +2025,34 @@ class LeadController extends Controller
         return response()->json([
             'notificar_mensajes' => $enabled,
         ]);
+    }
+
+    /**
+     * Fija o desfija un lead en la tabla de leads.
+     *
+     * Si el lead no está fijado, setea pinned_at = now().
+     * Si ya está fijado, lo limpia (null).
+     * El campo pinned_at se usa para ordenar los leads fijados al inicio
+     * y para determinar el orden entre fijados (el más reciente primero).
+     * El pin es global: todos los admins ven el mismo estado de fijado.
+     *
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_pinned_json($id)
+    {
+        /* Lead objetivo del toggle de pin. */
+        $lead = Lead::findOrFail($id);
+
+        /* Invertir estado: si ya tiene pinned_at lo limpia; si no, lo setea a ahora. */
+        if ($lead->pinned_at) {
+            $lead->update(['pinned_at' => null]);
+        } else {
+            $lead->update(['pinned_at' => now()]);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
     }
 
     /**

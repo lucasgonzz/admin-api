@@ -134,6 +134,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/generate-demo-summary', [LeadController::class, 'generate_demo_summary_json']);
         Route::post('lead/{id}/mark-closer-called', [LeadController::class, 'mark_closer_called_json']);
         Route::post('lead/{id}/toggle-notify-messages', [LeadController::class, 'toggle_notify_messages_json']);
+        Route::post('lead/{id}/toggle-pinned', [LeadController::class, 'toggle_pinned_json']);
         Route::put('lead-message/{id}/approve', [LeadController::class, 'approve_message_json']);
         Route::put('lead-message/{id}/approve-with-edit', [LeadController::class, 'approve_message_with_edit_json']);
         Route::put('lead-message/{id}/reject', [LeadController::class, 'reject_message_json']);
