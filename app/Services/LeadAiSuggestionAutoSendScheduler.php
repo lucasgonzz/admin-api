@@ -23,7 +23,7 @@ class LeadAiSuggestionAutoSendScheduler
     /**
      * Encola el envío automático de una sugerencia recién creada por Claude.
      *
-     * No programa seguimientos automáticos ni mensajes que requieren verificación manual.
+     * No programa mensajes que requieren verificación manual.
      * Con demora 0 encola el envío de inmediato (sin timer ni ai_auto_send_at).
      *
      * @param LeadMessage $message Mensaje en estado `sugerido`.
@@ -37,10 +37,6 @@ class LeadAiSuggestionAutoSendScheduler
         }
 
         if ((string) $message->sender !== 'sistema') {
-            return;
-        }
-
-        if ($message->is_followup) {
             return;
         }
 
