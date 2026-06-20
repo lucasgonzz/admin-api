@@ -424,6 +424,7 @@ class LeadController extends Controller
 
     /**
      * Normaliza leads de listado: mensajes de notificación bajo `messages` y metadata de alcance.
+     * Agrega is_notified_by_me a cada lead usando una sola query contra lead_admin_notifications.
      *
      * @param \Illuminate\Support\Collection|\Illuminate\Database\Eloquent\Collection|\Illuminate\Contracts\Pagination\Paginator $models
      *
@@ -432,10 +433,41 @@ class LeadController extends Controller
     protected function prepare_leads_for_list_json($models)
     {
         Lead::prepare_collection_for_list_json($models);
+
+        /* Obtiene todos los lead_id del listado. */
+        $items    = method_exists($models, 'items') ? $models->items() : $models->all();
+        $lead_ids = array_map(function ($lead) {
+            return $lead->id;
+        }, $items);
+
+        if (empty($lead_ids)) {
+            return;
+        }
+
+        /* Una sola query para saber qué leads tienen suscripto al admin autenticado. */
+        $notified = \Illuminate\Support\Facades\DB::table('lead_admin_notifications')
+            ->where('admin_id', Auth::id())
+            ->whereIn('lead_id', $lead_ids)
+            ->pluck('lead_id')
+            ->flip()
+            ->toArray();
+
+        /* Asigna is_notified_by_me a cada lead del listado. */
+        foreach ($items as $lead) {
+            $lead->is_notified_by_me = isset($notified[$lead->id]);
+        }
     }
 
     /**
      * Marca un lead de detalle con alcance completo de mensajes.
+     *
+     * @param \App\Models\Lead|null $lead
+     *
+     * @return \App\Models\Lead|null
+     */
+    /**
+     * Marca un lead de detalle con alcance completo de mensajes e incluye
+     * si el admin autenticado está suscrito a notificaciones WhatsApp del lead.
      *
      * @param \App\Models\Lead|null $lead
      *
@@ -448,6 +480,12 @@ class LeadController extends Controller
         }
 
         $lead->mark_messages_scope('full');
+
+        /* Indica si el admin autenticado tiene activa la suscripción WhatsApp para este lead. */
+        $lead->is_notified_by_me = \Illuminate\Support\Facades\DB::table('lead_admin_notifications')
+            ->where('lead_id', $lead->id)
+            ->where('admin_id', Auth::id())
+            ->exists();
 
         return $lead;
     }
@@ -1943,28 +1981,44 @@ class LeadController extends Controller
     }
 
     /**
-     * Activa o desactiva las notificaciones push para este lead.
-     * Al activar, el admin autenticado queda como destinatario (notify_admin_id).
-     * Al desactivar, limpia notify_admin_id para no dejar referencia vieja.
+     * Activa o desactiva la suscripción del admin autenticado a notificaciones WhatsApp
+     * de mensajes del lead indicado.
      *
-     * @param Request    $request
-     * @param int|string $id
+     * Al activar: inserta fila en lead_admin_notifications (idempotente con insertOrIgnore).
+     * Al desactivar: elimina la fila del admin autenticado para ese lead.
+     *
+     * Respuesta: { notificar_mensajes: bool } — si el admin autenticado está suscrito ahora.
+     *
+     * @param \Illuminate\Http\Request $request
+     * @param int|string               $id Lead ID.
      *
      * @return \Illuminate\Http\JsonResponse
      */
     public function toggle_notify_messages_json(Request $request, $id)
     {
-        $lead = Lead::findOrFail($id);
-
+        $lead    = Lead::findOrFail($id);
         $enabled = (bool) $request->input('enabled');
 
-        $lead->notificar_mensajes = $enabled;
-        $lead->notify_admin_id = $enabled ? Auth::id() : null;
-        $lead->save();
+        /* Admin autenticado que realiza la acción de suscripción/desuscripción. */
+        $admin = Auth::user();
+
+        if ($enabled) {
+            /* Inserta la fila en la tabla pivot; si ya existe, la ignora (idempotente). */
+            \Illuminate\Support\Facades\DB::table('lead_admin_notifications')
+                ->insertOrIgnore([
+                    'lead_id'  => $lead->id,
+                    'admin_id' => $admin->id,
+                ]);
+        } else {
+            /* Elimina solo la suscripción del admin autenticado para no afectar a otros admins. */
+            \Illuminate\Support\Facades\DB::table('lead_admin_notifications')
+                ->where('lead_id', $lead->id)
+                ->where('admin_id', $admin->id)
+                ->delete();
+        }
 
         return response()->json([
-            'notificar_mensajes' => $lead->notificar_mensajes,
-            'notify_admin_id'    => $lead->notify_admin_id,
+            'notificar_mensajes' => $enabled,
         ]);
     }
 

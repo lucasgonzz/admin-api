@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\ModelProperties\LeadProperties;
 use App\Models\Concerns\HasUuid;
+use App\Models\LeadAdminNotification;
 use App\Models\LeadPipelineStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
@@ -298,11 +299,26 @@ class Lead extends Model
     /**
      * Admin que activó el toggle de notificaciones para este lead (recibe el push en mensajes entrantes).
      *
+     * @deprecated Reemplazado por notification_admins() (tabla pivot lead_admin_notifications).
+     *             Se mantiene hasta confirmar que el nuevo sistema funciona correctamente en producción.
+     *
      * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
      */
     public function notify_admin()
     {
         return $this->belongsTo(Admin::class, 'notify_admin_id');
+    }
+
+    /**
+     * Admins que recibirán un WhatsApp al llegar un mensaje de este lead.
+     * Reemplaza la columna notify_admin_id: ahora múltiples admins pueden suscribirse.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany
+     */
+    public function notification_admins()
+    {
+        return $this->belongsToMany(Admin::class, 'lead_admin_notifications', 'lead_id', 'admin_id')
+                    ->using(LeadAdminNotification::class);
     }
 
     /**
