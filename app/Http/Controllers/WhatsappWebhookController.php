@@ -21,9 +21,11 @@ use App\Services\EcommerceImplementationBroadcastService;
 use App\Services\EcommerceImplementationConversationService;
 use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
+use App\Services\CloserNotificationService;
 use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDocNumberGenerator;
+use App\Services\LeadEscalationWhatsappService;
 use App\Services\LeadWhatsappInboundAudioService;
 use App\Services\LeadWhatsappOnboardingService;
 use App\Services\LeadWhatsappReactionService;
@@ -912,8 +914,169 @@ class WhatsappWebhookController extends Controller
             $onboarding_service->send_welcome_and_schedule_presentation($lead, $display_name);
         }
 
+        // Detectar confirmaciones de la demo (ingreso / fin) ANTES de pedir sugerencia IA.
+        // Si se detecta una confirmación de fin, la IA no debe generar sugerencias sobre ese mensaje.
+        $this->handle_demo_confirmation_if_needed($lead, (string) $content);
+
         // Sugerencia IA con debounce: espera configurable tras el último inbound (2º mensaje o más).
         (new LeadAiSuggestionScheduler())->schedule_after_lead_inbound((int) $lead->id);
+    }
+
+    /**
+     * Detecta confirmaciones del lead durante la demo y avanza el flujo automático.
+     *
+     * Dos casos según el estado de los flags de demo:
+     *   - Caso A: ya se envió el check de ingreso pero el ingreso aún no fue confirmado.
+     *     Si el mensaje confirma el ingreso, setea demo_ingreso_confirmado. Si no, envía
+     *     ayuda con link, usuario y contraseña para que pueda entrar.
+     *   - Caso B: ya se envió el check de fin y el ingreso estaba confirmado. Si el mensaje
+     *     confirma que terminó, transiciona el lead a demo_realizada y notifica admins/closer.
+     *
+     * @param Lead   $lead    Lead remitente del mensaje entrante.
+     * @param string $content Contenido textual del mensaje entrante.
+     *
+     * @return void
+     */
+    private function handle_demo_confirmation_if_needed(Lead $lead, string $content): void
+    {
+        // Sólo aplica mientras la demo está agendada (aún no marcada como realizada).
+        if ((string) $lead->status !== 'demo_agendada') {
+            return;
+        }
+
+        // Normalizar el contenido para la búsqueda de palabras clave.
+        $content_lower = mb_strtolower(trim($content));
+
+        // Caso A: check de ingreso enviado, ingreso aún no confirmado.
+        if ($lead->demo_check_ingreso_enviado && ! $lead->demo_ingreso_confirmado) {
+            if ($this->content_confirms_ingress($content_lower)) {
+                $lead->demo_ingreso_confirmado = true;
+                $lead->save();
+                return;
+            }
+            // No pudo entrar: enviar ayuda con link, doc y contraseña.
+            $this->send_demo_access_help($lead);
+            return;
+        }
+
+        // Caso B: check de fin enviado, esperando confirmación de fin.
+        if ($lead->demo_fin_check_enviado && $lead->demo_ingreso_confirmado) {
+            if ($this->content_confirms_demo_done($content_lower)) {
+                $this->mark_demo_realizada($lead);
+            }
+            return;
+        }
+    }
+
+    /**
+     * Indica si el contenido del mensaje confirma que el lead pudo ingresar a la demo.
+     *
+     * @param string $lower Contenido del mensaje en minúsculas y sin espacios extremos.
+     *
+     * @return bool true si alguna palabra clave de confirmación de ingreso está presente.
+     */
+    private function content_confirms_ingress(string $lower): bool
+    {
+        // Palabras clave de confirmación positiva de ingreso.
+        $keywords = ['sí', 'si', 'pude', 'entré', 'entre', 'ingresé', 'ingrese', 'ya estoy', 'adentro', 'dentro', 'ok', 'perfecto', 'genial', 'listo'];
+        foreach ($keywords as $kw) {
+            if (str_contains($lower, $kw)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Indica si el contenido del mensaje confirma que el lead terminó de recorrer la demo.
+     *
+     * @param string $lower Contenido del mensaje en minúsculas y sin espacios extremos.
+     *
+     * @return bool true si alguna palabra clave de confirmación de fin está presente.
+     */
+    private function content_confirms_demo_done(string $lower): bool
+    {
+        // Palabras clave de confirmación de fin de la demo.
+        $keywords = ['sí', 'si', 'terminé', 'termine', 'pude', 'listo', 'ya', 'recorrí', 'recorri', 'vi todo', 'la vi', 'completa', 'ok', 'perfecto'];
+        foreach ($keywords as $kw) {
+            if (str_contains($lower, $kw)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Envía al lead los datos de acceso a la demo cuando no pudo ingresar.
+     *
+     * Incluye link, usuario y contraseña (ambos = número de documento del lead) y
+     * registra el mensaje en la conversación para trazabilidad.
+     *
+     * @param Lead $lead Lead que no pudo ingresar a la demo.
+     *
+     * @return void
+     */
+    private function send_demo_access_help(Lead $lead): void
+    {
+        // Documento del lead: usuario y contraseña de la demo.
+        $doc = (string) ($lead->doc_number ?? '');
+        // URL de la demo: config si existe, fallback hardcodeado en caso contrario.
+        $demo_url = config('services.demo_url', 'https://demo.comerciocity.com');
+        $msg = "No te preocupes, te paso los datos para ingresar:\n\n"
+            . "🔗 Link: {$demo_url}\n"
+            . "👤 Usuario: {$doc}\n"
+            . "🔑 Contraseña: {$doc}\n\n"
+            . "Probá de nuevo y avisame cuando puedas entrar 👋";
+
+        app(WhatsappSendService::class)->send_text((string) $lead->phone, $msg);
+
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => $msg,
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+    }
+
+    /**
+     * Transiciona el lead a `demo_realizada` y dispara las notificaciones de cierre.
+     *
+     * Registra un mensaje de sistema en la conversación, notifica a todos los admins
+     * con notify_lead_escalation_whatsapp = true (incluido el closer si tiene el flag)
+     * y dispara la notificación específica del closer.
+     *
+     * @param Lead $lead Lead que confirmó que terminó la demo.
+     *
+     * @return void
+     */
+    private function mark_demo_realizada(Lead $lead): void
+    {
+        $lead->status = 'demo_realizada';
+        $lead->save();
+
+        // Registrar mensaje de sistema en la conversación.
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => '✅ Demo completada. Estado actualizado a Demo realizada.',
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+
+        // Notificar a todos los admins con notify_lead_escalation_whatsapp = true
+        // (esto incluye al closer si tiene ese flag activo).
+        $motivo = 'El lead confirmó que terminó la demo. Listo para la llamada de cierre.';
+        app(LeadEscalationWhatsappService::class)->notify($lead, $motivo);
+
+        // Notificación específica al closer (usa closer_notified_at como anti-duplicado).
+        app(CloserNotificationService::class)->notify_for_lead($lead);
     }
 
     /**

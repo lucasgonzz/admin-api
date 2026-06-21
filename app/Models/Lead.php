@@ -122,6 +122,12 @@ class Lead extends Model
         // Flag de check de ingreso post-demo: evita duplicar el mensaje al lead.
         'demo_check_ingreso_enviado'   => 'boolean',
 
+        // Flag: el lead confirmó por WhatsApp que pudo entrar a la demo.
+        'demo_ingreso_confirmado'      => 'boolean',
+
+        // Flag: ya se envió el mensaje preguntando si terminó la demo.
+        'demo_fin_check_enviado'       => 'boolean',
+
         // Timestamp de llamada del closer tras la demo: parte del pipeline de cierre.
         'closer_called_at'             => 'datetime',
 
