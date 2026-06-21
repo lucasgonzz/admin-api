@@ -228,6 +228,22 @@ class LeadFollowupService
         /* Enviar notificación al closer usando el servicio de escalación existente. */
         app(LeadEscalationWhatsappService::class)->notify($lead, $motivo);
 
+        /*
+         * Registrar el seguimiento como LeadMessage con is_followup=true para que el
+         * contador de followups (is_followup=true AND status!='rechazado') suba.
+         * Sin este registro el scheduler reprocesaría el mismo lead cada 2 horas y
+         * reenviaría la notificación al closer indefinidamente, en vez de pausarlo
+         * cuando se agote max_followups.
+         */
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => "[Notificación al closer — {$motivo}]",
+            'status'                => 'enviado',
+            'is_followup'           => true,
+            'requiere_verificacion' => false,
+        ]);
+
         Log::info('LeadFollowupService: closer notificado por WhatsApp por seguimiento en etapa avanzada.', [
             'lead_id'         => $lead->id,
             'estado'          => $lead->status,
