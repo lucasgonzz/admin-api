@@ -1929,11 +1929,25 @@ class LeadController extends Controller
             if (is_array($parsed) && ! empty($parsed['resumen_textual'])) {
                 /* Parse exitoso: guardar resumen textual + resumen estructurado. */
                 $summary    = trim((string) ($parsed['resumen_textual'] ?? ''));
+
+                /*
+                 * Claude puede devolver funcionalidades y puntos_dolor como array JSON
+                 * (ej: ["facturación", "stock"]) en lugar de string, a pesar de que el
+                 * prompt no lo pide explícitamente. Se normaliza a string para evitar
+                 * "Array to string conversion" al hacer trim((string) $value).
+                 */
+                $normalize_to_string = function ($value): string {
+                    if (is_array($value)) {
+                        return implode(', ', $value);
+                    }
+                    return trim((string) ($value ?? ''));
+                };
+
                 $structured = [
-                    'empresa'          => trim((string) ($parsed['empresa']          ?? '')),
-                    'situacion_actual' => trim((string) ($parsed['situacion_actual'] ?? '')),
-                    'funcionalidades'  => trim((string) ($parsed['funcionalidades']  ?? '')),
-                    'puntos_dolor'     => trim((string) ($parsed['puntos_dolor']     ?? '')),
+                    'empresa'          => $normalize_to_string($parsed['empresa']          ?? ''),
+                    'situacion_actual' => $normalize_to_string($parsed['situacion_actual'] ?? ''),
+                    'funcionalidades'  => $normalize_to_string($parsed['funcionalidades']  ?? ''),
+                    'puntos_dolor'     => $normalize_to_string($parsed['puntos_dolor']     ?? ''),
                 ];
 
                 $lead->update([
