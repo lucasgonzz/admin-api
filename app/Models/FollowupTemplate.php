@@ -20,8 +20,10 @@ class FollowupTemplate extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'activa'     => 'boolean',
-        'dia_numero' => 'integer',
+        'activa'                     => 'boolean',
+        'dia_numero'                 => 'integer',
+        /* Cast booleano para el campo de bifurcación de seguimiento por ingreso a demo. */
+        'solo_si_ingreso_confirmado' => 'boolean',
     ];
 
     /**

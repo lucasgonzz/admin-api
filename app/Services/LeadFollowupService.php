@@ -119,7 +119,13 @@ class LeadFollowupService
         }
 
         $followup_number = $followups + 1;
-        $template = $this->find_template_for($lead->status, $followup_number);
+
+        /*
+         * Mismo criterio de bifurcación que process_lead():
+         * si el lead confirmó ingreso a la demo, usar las plantillas "en curso".
+         */
+        $ingreso_confirmado = (bool) ($lead->demo_ingreso_confirmado ?? false);
+        $template = $this->find_template_for($lead->status, $followup_number, $ingreso_confirmado);
 
         if ($template !== null) {
             $this->send_followup_via_template($fresh, $template, $followup_number);
@@ -183,8 +189,15 @@ class LeadFollowupService
         // pero usamos $followups como índice del día ya que empieza en 0 antes del primer envío.
         $followup_number = $followups + 1; // 1-based: primer seguimiento = 1
 
-        // Buscamos la plantilla Meta que corresponde a este estado y número de seguimiento.
-        $template = $this->find_template_for($lead->status, $followup_number);
+        /*
+         * Para leads en demo_agendada bifurcamos por demo_ingreso_confirmado:
+         * true  → el lead entró a la demo pero no la terminó (plantillas cc_seg_demo_en_curso_*)
+         * false → el lead nunca llegó a entrar (plantillas cc_seg_demo_agendada_*)
+         */
+        $ingreso_confirmado = (bool) ($lead->demo_ingreso_confirmado ?? false);
+
+        // Buscamos la plantilla Meta que corresponde a este estado, número de seguimiento y flag de ingreso.
+        $template = $this->find_template_for($lead->status, $followup_number, $ingreso_confirmado);
 
         if ($template !== null) {
             // Hay plantilla aprobada: enviamos directo por WhatsApp sin pasar por Claude.
@@ -258,17 +271,25 @@ class LeadFollowupService
      * indexan 1-based: el primer seguimiento usa la primera plantilla, el segundo
      * la segunda, etc. Si no existe esa posición, retorna null.
      *
-     * @param string $estado          Estado del lead.
-     * @param int    $followup_number Número de seguimiento (1-based).
+     * Para el estado demo_agendada, el flag $ingreso_confirmado bifurca el conjunto
+     * de plantillas: false → "¿pudiste hacer la demo?" | true → "¿pudiste terminarla?".
+     *
+     * @param string $estado             Estado del lead.
+     * @param int    $followup_number    Número de seguimiento (1-based).
+     * @param bool   $ingreso_confirmado Si el lead confirmó ingreso a la demo (default false).
      *
      * @return FollowupTemplate|null
      */
-    protected function find_template_for(string $estado, int $followup_number): ?FollowupTemplate
+    protected function find_template_for(string $estado, int $followup_number, bool $ingreso_confirmado = false): ?FollowupTemplate
     {
-        // Plantillas activas de este estado, ordenadas por día (define la secuencia de envío).
+        /*
+         * Filtrar por solo_si_ingreso_confirmado para bifurcar el seguimiento
+         * cuando el lead en demo_agendada ya confirmó haber ingresado.
+         */
         $templates = FollowupTemplate::query()
             ->where('estado', $estado)
             ->where('activa', true)
+            ->where('solo_si_ingreso_confirmado', $ingreso_confirmado)
             ->orderBy('dia_numero', 'asc')
             ->get();
 

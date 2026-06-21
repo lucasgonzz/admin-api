@@ -92,6 +92,29 @@ class FollowupTemplatesSeeder extends Seeder
             ['estado' => 'mail2_enviado',  'dia_numero' => 1, 'template_name' => 'cc_seg_cierre_d1',         'activa' => false, 'body_template' => null],
             ['estado' => 'mail2_enviado',  'dia_numero' => 2, 'template_name' => 'cc_seg_cierre_d2',         'activa' => false, 'body_template' => null],
             ['estado' => 'mail2_enviado',  'dia_numero' => 4, 'template_name' => 'cc_seg_cierre_d4',         'activa' => false, 'body_template' => null],
+            // Plantillas para leads que YA iniciaron la demo pero no confirmaron que terminaron.
+            // solo_si_ingreso_confirmado=true: se envían cuando demo_ingreso_confirmado = true.
+            [
+                'estado'                     => 'demo_agendada',
+                'dia_numero'                 => 1,
+                'template_name'              => 'cc_seg_demo_en_curso_d1',
+                'body_template'              => 'Hola {{1}}! Habías entrado a la demo de ComercioCity... ¿pudiste terminar de recorrerla? Si te quedó algo pendiente, podés seguir cuando quieras.',
+                'solo_si_ingreso_confirmado' => true,
+            ],
+            [
+                'estado'                     => 'demo_agendada',
+                'dia_numero'                 => 3,
+                'template_name'              => 'cc_seg_demo_en_curso_d3',
+                'body_template'              => 'Hola {{1}}, ¿cómo estás? Quedaste con la demo empezada de ComercioCity. ¿Pudiste terminarla? Cualquier duda que te haya quedado, avisame.',
+                'solo_si_ingreso_confirmado' => true,
+            ],
+            [
+                'estado'                     => 'demo_agendada',
+                'dia_numero'                 => 6,
+                'template_name'              => 'cc_seg_demo_en_curso_d6',
+                'body_template'              => 'Hola {{1}}, último mensaje de mi parte. Si en algún momento querés terminar de ver la demo o charlar con alguien del equipo, escribime. Quedamos disponibles.',
+                'solo_si_ingreso_confirmado' => true,
+            ],
         ];
 
         foreach ($templates as $row) {
@@ -99,9 +122,18 @@ class FollowupTemplatesSeeder extends Seeder
             // Para el resto de los estados, usar activa=true como valor por defecto.
             $activa = array_key_exists('activa', $row) ? $row['activa'] : true;
 
+            /*
+             * La clave incluye template_name para soportar múltiples plantillas con el mismo
+             * (estado, dia_numero): ahora hay dos filas con estado=demo_agendada y dia_numero=1,
+             * una para ingreso_confirmado=false y otra para ingreso_confirmado=true.
+             */
             FollowupTemplate::updateOrCreate(
-                ['estado' => $row['estado'], 'dia_numero' => $row['dia_numero']],
-                array_merge($row, ['language_code' => 'es_AR', 'activa' => $activa])
+                ['estado' => $row['estado'], 'dia_numero' => $row['dia_numero'], 'template_name' => $row['template_name']],
+                array_merge($row, [
+                    'language_code'              => 'es_AR',
+                    'activa'                     => $activa,
+                    'solo_si_ingreso_confirmado' => $row['solo_si_ingreso_confirmado'] ?? false,
+                ])
             );
         }
     }
