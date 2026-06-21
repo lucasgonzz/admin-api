@@ -2,16 +2,17 @@
 
 namespace App\Console\Commands;
 
-use App\Events\LeadSuggestionCreated;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Genera una sugerencia de check-in si el lead no confirmó acceso a la demo.
+ * Envía automáticamente la pregunta de check-in si el lead no confirmó acceso a la demo.
  *
  * Se ejecuta cada minuto. Busca leads en estado `demo_agendada` cuya demo
  * comenzó hace X minutos (configurable) sin confirmación de ingreso y sin
@@ -31,7 +32,7 @@ class CheckDemoIngress extends Command
      *
      * @var string
      */
-    protected $description = 'Genera pregunta automática de check-in si el lead no confirmó acceso a la demo';
+    protected $description = 'Envía pregunta automática de check-in si el lead no confirmó acceso a la demo';
 
     /**
      * Palabras clave en mensajes del lead que indican que ya ingresó a la demo.
@@ -41,7 +42,23 @@ class CheckDemoIngress extends Command
     private const INGRESO_KEYWORDS = ['ingresé', 'ingrese', 'entré', 'entre', 'pude', 'ya estoy', 'sí', 'si'];
 
     /**
-     * Procesa candidatos y genera sugerencia de check-in si corresponde.
+     * Servicio de envío saliente vía Kapso/Meta.
+     *
+     * @var WhatsappSendService
+     */
+    private $whatsapp_send_service;
+
+    /**
+     * @param WhatsappSendService|null $whatsapp_send_service Inyección opcional (tests).
+     */
+    public function __construct(?WhatsappSendService $whatsapp_send_service = null)
+    {
+        parent::__construct();
+        $this->whatsapp_send_service = $whatsapp_send_service ?? new WhatsappSendService();
+    }
+
+    /**
+     * Procesa candidatos y envía check-in directo si corresponde.
      *
      * @return int Código de salida (0 = éxito).
      */
@@ -71,8 +88,8 @@ class CheckDemoIngress extends Command
             ->with('messages')
             ->get();
 
-        /* Contador de mensajes generados para el log final. */
-        $generated = 0;
+        /* Contador de mensajes enviados para el log final. */
+        $sent = 0;
 
         foreach ($candidates as $lead) {
             /* Construir datetime de inicio de demo en timezone Argentina. */
@@ -100,36 +117,45 @@ class CheckDemoIngress extends Command
                 continue;
             }
 
-            /* Crear sugerencia de check-in sin llamar a Claude. */
+            /* Enviar check de ingreso directo por WhatsApp (texto libre, ventana activa). */
             $contact_name = $lead->contact_name ?? 'cliente';
+            $content = "¡Hola {$contact_name}! ¿Pudiste ingresar a la demo sin problemas? 👋";
+
+            $whatsapp_message_id = null;
+            $phone = trim((string) $lead->phone);
+            if ($phone !== '') {
+                $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $content);
+            } else {
+                Log::warning('CheckDemoIngress: lead sin teléfono', [
+                    'lead_id' => $lead->id,
+                ]);
+            }
+
             LeadMessage::create([
-                'lead_id'      => $lead->id,
-                'sender'       => 'sistema',
-                'status'       => 'sugerido',
-                'is_followup'  => false,
-                'content'      => "¡Hola {$contact_name}! ¿Pudiste ingresar a la demo sin problemas? 👋",
-                'ai_reasoning' => "Check automático de ingreso a la demo. Enviado {$check_minutos} minutos después del inicio.",
+                'lead_id'             => $lead->id,
+                'sender'              => 'sistema',
+                'status'              => 'enviado',
+                'is_followup'         => false,
+                'content'             => $content,
+                'whatsapp_message_id' => $whatsapp_message_id,
             ]);
 
-            /* Marcar flag y activar sugerencia pendiente. */
-            $lead->update([
-                'demo_check_ingreso_enviado' => true,
-                'tiene_sugerencia_pendiente'  => true,
-            ]);
+            /* Marcar flag de check enviado. */
+            $lead->update(['demo_check_ingreso_enviado' => true]);
 
             /* Notificar a admin-spa vía socket. */
-            LeadSuggestionCreated::dispatch($lead->id);
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id);
 
-            Log::info('CheckDemoIngress: check de ingreso generado', [
+            Log::info('CheckDemoIngress: check de ingreso enviado', [
                 'lead_id'       => $lead->id,
                 'contact_name'  => $lead->contact_name,
                 'demo_datetime' => $demo_datetime->toDateTimeString(),
             ]);
 
-            $generated++;
+            $sent++;
         }
 
-        $this->info("Checks de ingreso generados: {$generated}");
+        $this->info("Checks de ingreso enviados: {$sent}");
 
         return 0;
     }

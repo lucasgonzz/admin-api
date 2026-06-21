@@ -24,6 +24,9 @@ class LeadDemoSettings
     /** Clave: minutos antes del inicio para enviar recordatorio por WhatsApp. */
     public const KEY_RECORDATORIO_MINUTOS_ANTES = 'demo_recordatorio_minutos_antes';
 
+    /** Clave: hora del recordatorio de mañana de demo (formato H:i, ej. 09:00). */
+    public const KEY_RECORDATORIO_MANANA_HORA = 'demo_recordatorio_manana_hora';
+
     /** Clave: minutos post-inicio para preguntar al lead si pudo ingresar. */
     public const KEY_CHECK_INGRESO_MINUTOS_POST = 'demo_check_ingreso_minutos_post';
 
@@ -45,6 +48,9 @@ class LeadDemoSettings
     /** Valor por defecto: recordatorio antes del inicio (minutos). */
     private const DEFAULT_RECORDATORIO_MINUTOS_ANTES = 15;
 
+    /** Valor por defecto: hora del recordatorio de mañana de demo. */
+    private const DEFAULT_RECORDATORIO_MANANA_HORA = '09:00';
+
     /** Valor por defecto: check de ingreso post-inicio (minutos). */
     private const DEFAULT_CHECK_INGRESO_MINUTOS_POST = 5;
 
@@ -63,7 +69,7 @@ class LeadDemoSettings
     /**
      * Devuelve la configuración completa para el panel (GET settings).
      *
-     * @return array<string, int>
+     * @return array<string, int|string>
      */
     public static function to_array(): array
     {
@@ -72,6 +78,7 @@ class LeadDemoSettings
             'setup_minutos_antes'             => self::get_setup_minutos_antes(),
             'gracia_minutos_post'             => self::get_gracia_minutos_post(),
             'recordatorio_minutos_antes'      => self::get_recordatorio_minutos_antes(),
+            'recordatorio_manana_hora'        => self::get_recordatorio_manana_hora(),
             'check_ingreso_minutos_post'      => self::get_check_ingreso_minutos_post(),
             'resumen_minutos_antes_fin'       => self::get_resumen_minutos_antes_fin(),
             'duracion_llamada_closer_minutos' => self::get_duracion_llamada_closer_minutos(),
@@ -91,6 +98,12 @@ class LeadDemoSettings
         AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES,             (string) self::clamp((int) $data['setup_minutos_antes']));
         AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST,             (string) self::clamp((int) $data['gracia_minutos_post']));
         AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES,      (string) self::clamp((int) $data['recordatorio_minutos_antes']));
+
+        // Hora del recordatorio de mañana: string H:i validado; si es inválido, se ignora el cambio.
+        if (isset($data['recordatorio_manana_hora']) && self::is_valid_hora_format((string) $data['recordatorio_manana_hora'])) {
+            AdminSetting::set(self::KEY_RECORDATORIO_MANANA_HORA, (string) $data['recordatorio_manana_hora']);
+        }
+
         AdminSetting::set(self::KEY_CHECK_INGRESO_MINUTOS_POST,      (string) self::clamp((int) $data['check_ingreso_minutos_post']));
         AdminSetting::set(self::KEY_RESUMEN_MINUTOS_ANTES_FIN,       (string) self::clamp((int) $data['resumen_minutos_antes_fin']));
         AdminSetting::set(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::clamp((int) $data['duracion_llamada_closer_minutos']));
@@ -114,6 +127,9 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_RECORDATORIO_MINUTOS_ANTES) === null) {
             AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES, (string) self::DEFAULT_RECORDATORIO_MINUTOS_ANTES);
+        }
+        if (AdminSetting::get(self::KEY_RECORDATORIO_MANANA_HORA) === null) {
+            AdminSetting::set(self::KEY_RECORDATORIO_MANANA_HORA, self::DEFAULT_RECORDATORIO_MANANA_HORA);
         }
         if (AdminSetting::get(self::KEY_CHECK_INGRESO_MINUTOS_POST) === null) {
             AdminSetting::set(self::KEY_CHECK_INGRESO_MINUTOS_POST, (string) self::DEFAULT_CHECK_INGRESO_MINUTOS_POST);
@@ -167,6 +183,22 @@ class LeadDemoSettings
     }
 
     /**
+     * Hora del recordatorio de mañana de demo (formato H:i, timezone Argentina).
+     *
+     * @return string
+     */
+    public static function get_recordatorio_manana_hora(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_RECORDATORIO_MANANA_HORA, self::DEFAULT_RECORDATORIO_MANANA_HORA);
+
+        if (self::is_valid_hora_format($stored)) {
+            return $stored;
+        }
+
+        return self::DEFAULT_RECORDATORIO_MANANA_HORA;
+    }
+
+    /**
      * Minutos después del inicio para preguntar al lead si pudo ingresar a la demo.
      *
      * @return int
@@ -216,5 +248,17 @@ class LeadDemoSettings
         }
 
         return $value;
+    }
+
+    /**
+     * Valida que un string tenga formato de hora H:i (ej. 09:00).
+     *
+     * @param string $value Valor a validar.
+     *
+     * @return bool
+     */
+    private static function is_valid_hora_format(string $value): bool
+    {
+        return \DateTime::createFromFormat('H:i', $value) !== false;
     }
 }

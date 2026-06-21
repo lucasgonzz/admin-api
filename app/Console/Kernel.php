@@ -24,6 +24,9 @@ class Kernel extends ConsoleKernel
         // Red de seguridad por si Lucas olvida apretar el botón manual del admin.
         $schedule->command('agent-prompts:sync')->everyTenMinutes();
 
+        // Envía recordatorio de mañana de demo por WhatsApp el día de la demo (hora configurable).
+        $schedule->command('leads:send-morning-demo-reminder')->everyFiveMinutes();
+
         // Genera recordatorios pre-demo para leads con demo en los próximos X minutos (configurable).
         // Cada 5 minutos garantiza que ninguna demo se pierda dentro de la ventana.
         $schedule->command('leads:send-demo-reminders')->everyFiveMinutes();

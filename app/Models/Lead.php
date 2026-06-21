@@ -116,6 +116,9 @@ class Lead extends Model
         // Flag de recordatorio pre-demo: evita generar el mensaje más de una vez por demo agendada.
         'recordatorio_demo_enviado'    => 'boolean',
 
+        // Flag de recordatorio de mañana: evita enviar el mensaje más de una vez por demo agendada.
+        'recordatorio_manana_enviado'  => 'boolean',
+
         // Flag de check de ingreso post-demo: evita duplicar el mensaje al lead.
         'demo_check_ingreso_enviado'   => 'boolean',
 

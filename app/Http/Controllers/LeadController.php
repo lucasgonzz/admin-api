@@ -82,7 +82,7 @@ class LeadController extends Controller
             $query->where('target_client_id', $request->input('target_client_id'));
         }
 
-        $leads = $query->paginate(100)->withQueryString();
+        $leads = $query->paginate(500)->withQueryString();
         $clients = Client::orderBy('name')->get();
         $statuses = self::STATUSES;
 
@@ -158,9 +158,12 @@ class LeadController extends Controller
         $data = $this->extract_data($request);
         $lead->update($data);
 
-        // Si se reagendó la demo, resetear el flag para que el nuevo horario reciba recordatorio.
+        // Si se reagendó la demo, resetear flags para que el nuevo horario reciba automatizaciones.
         if ($original_demo_date !== $lead->getRawOriginal('demo_date')) {
-            $lead->update(['recordatorio_demo_enviado' => false]);
+            $lead->update([
+                'recordatorio_demo_enviado'   => false,
+                'recordatorio_manana_enviado' => false,
+            ]);
         }
 
         return redirect()->route('leads.show', $lead->id)->with('success', 'Lead actualizado.');
@@ -563,11 +566,14 @@ class LeadController extends Controller
         ModelPropertiesHelper::set_from_request($lead, $request, 'lead');
         $this->sync_personalized_demo_videos_from_request($lead, $request);
 
-        // Si se reagendó la demo, resetear el flag para que el nuevo horario reciba recordatorio.
+        // Si se reagendó la demo, resetear flags para que el nuevo horario reciba automatizaciones.
         // Recargar el lead desde DB para leer el demo_date ya persistido por set_from_request.
         $lead->refresh();
         if ($original_demo_date !== $lead->getRawOriginal('demo_date')) {
-            $lead->update(['recordatorio_demo_enviado' => false]);
+            $lead->update([
+                'recordatorio_demo_enviado'   => false,
+                'recordatorio_manana_enviado' => false,
+            ]);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $id)], 200);

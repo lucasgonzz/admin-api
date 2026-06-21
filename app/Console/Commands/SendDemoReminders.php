@@ -2,23 +2,31 @@
 
 namespace App\Console\Commands;
 
-use App\Events\LeadSuggestionCreated;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Genera automáticamente el mensaje de recordatorio pre-demo como sugerencia pendiente.
+ * Envía automáticamente el recordatorio pre-demo por WhatsApp (plantilla Meta).
  *
- * Se ejecuta cada 5 minutos. Busca leads con demo agendada en los próximos 20 minutos
- * y crea un LeadMessage con el texto fijo del protocolo (Mensaje 3C), sin llamar a Claude.
- * El flag `recordatorio_demo_enviado` evita que se genere más de un recordatorio por demo.
+ * Se ejecuta cada 5 minutos. Busca leads con demo agendada en los próximos X minutos
+ * (configurable) y envía el template `cc_recordatorio_demo` directamente al lead.
+ * El flag `recordatorio_demo_enviado` evita que se envíe más de un recordatorio por demo.
  */
 class SendDemoReminders extends Command
 {
+    /**
+     * Nombre del template Meta aprobado para el recordatorio pre-demo.
+     *
+     * @var string
+     */
+    private const TEMPLATE_NAME = 'cc_recordatorio_demo';
+
     /**
      * Nombre del comando artisan.
      *
@@ -31,10 +39,26 @@ class SendDemoReminders extends Command
      *
      * @var string
      */
-    protected $description = 'Genera recordatorios pre-demo como sugerencias pendientes para el setter';
+    protected $description = 'Envía recordatorios pre-demo por WhatsApp a leads con demo próxima';
 
     /**
-     * Procesa todos los leads candidatos y genera el recordatorio correspondiente.
+     * Servicio de envío saliente vía Kapso/Meta.
+     *
+     * @var WhatsappSendService
+     */
+    private $whatsapp_send_service;
+
+    /**
+     * @param WhatsappSendService|null $whatsapp_send_service Inyección opcional (tests).
+     */
+    public function __construct(?WhatsappSendService $whatsapp_send_service = null)
+    {
+        parent::__construct();
+        $this->whatsapp_send_service = $whatsapp_send_service ?? new WhatsappSendService();
+    }
+
+    /**
+     * Procesa todos los leads candidatos y envía el recordatorio correspondiente.
      *
      * @return int Código de salida (0 = éxito).
      */
@@ -59,8 +83,8 @@ class SendDemoReminders extends Command
             ->whereDate('demo_date', $now->format('Y-m-d'))
             ->get();
 
-        // Contador de recordatorios generados para el log final.
-        $generated = 0;
+        // Contador de recordatorios enviados para el log final.
+        $sent = 0;
 
         foreach ($candidates as $lead) {
             // Construir el datetime completo de inicio de demo combinando fecha y hora.
@@ -79,74 +103,88 @@ class SendDemoReminders extends Command
                 continue;
             }
 
-            // Verificar que la demo esté dentro de la ventana [ahora, ahora + 20 min].
+            // Verificar que la demo esté dentro de la ventana [ahora, ahora + X min].
             if ($demo_datetime->lt($now) || $demo_datetime->gt($window_end)) {
                 continue;
             }
 
-            // Crear el mensaje de recordatorio como sugerencia pendiente (sin llamar a Claude).
-            $this->create_reminder_message($lead, $demo_datetime);
+            // Enviar el recordatorio pre-demo directo por WhatsApp.
+            $this->send_reminder_message($lead);
 
-            // Marcar que ya se generó el recordatorio y activar flag de sugerencia.
-            $lead->update([
-                'recordatorio_demo_enviado' => true,
-                'tiene_sugerencia_pendiente' => true,
-            ]);
+            // Marcar que ya se envió el recordatorio para esta demo.
+            $lead->update(['recordatorio_demo_enviado' => true]);
 
-            // Notificar a admin-spa vía socket para actualizar la fila del lead en tiempo real.
-            LeadSuggestionCreated::dispatch($lead->id);
+            // Notificar a admin-spa vía socket para actualizar la conversación en tiempo real.
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id);
 
-            Log::info('SendDemoReminders: recordatorio generado', [
+            Log::info('SendDemoReminders: recordatorio enviado', [
                 'lead_id'       => $lead->id,
                 'contact_name'  => $lead->contact_name,
                 'demo_datetime' => $demo_datetime->toDateTimeString(),
             ]);
 
-            $generated++;
+            $sent++;
         }
 
-        $this->info("Recordatorios generados: {$generated}");
+        $this->info("Recordatorios enviados: {$sent}");
 
         return 0;
     }
 
     /**
-     * Construye y persiste el LeadMessage de recordatorio pre-demo.
+     * Envía el template pre-demo y persiste el LeadMessage correspondiente.
      *
-     * El contenido es el Mensaje 3C del protocolo (hardcodeado, no requiere Claude).
-     * El ai_reasoning incluye la hora de la demo para contextualizar al setter.
-     *
-     * @param Lead   $lead          Lead al que pertenece el mensaje.
-     * @param Carbon $demo_datetime Datetime completo de inicio de demo.
+     * @param Lead $lead Lead al que pertenece el mensaje.
      *
      * @return void
      */
-    protected function create_reminder_message(Lead $lead, Carbon $demo_datetime): void
+    protected function send_reminder_message(Lead $lead): void
     {
-        // Nombre de contacto del lead para personalizar el saludo del mensaje.
+        // Nombre de contacto del lead para personalizar el saludo y la variable {{1}} del template.
         $contact_name = $lead->contact_name ?? 'Cliente';
 
-        // Hora formateada de la demo para incluirla en el ai_reasoning del setter.
-        $demo_hour = $demo_datetime->format('H:i');
+        // Texto renderizado del template para trazabilidad en la conversación.
+        $content = $this->build_reminder_content($contact_name);
 
-        // Texto fijo del Mensaje 3C del protocolo de recordatorio pre-demo.
-        $content = "Hola {$contact_name}! En unos minutos ya tenés disponible el acceso a la demo de ComercioCity.\n\n"
+        // Envío directo por WhatsApp vía plantilla Meta aprobada.
+        $whatsapp_message_id = null;
+        $phone = trim((string) $lead->phone);
+        if ($phone !== '') {
+            $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+                $phone,
+                self::TEMPLATE_NAME,
+                [$contact_name],
+                'es_AR'
+            );
+        } else {
+            Log::warning('SendDemoReminders: lead sin teléfono', [
+                'lead_id' => $lead->id,
+            ]);
+        }
+
+        LeadMessage::create([
+            'lead_id'             => $lead->id,
+            'sender'              => 'sistema',
+            'content'             => $content,
+            'status'              => 'enviado',
+            'is_followup'         => false,
+            'whatsapp_message_id' => $whatsapp_message_id,
+        ]);
+    }
+
+    /**
+     * Construye el texto del recordatorio pre-demo con el nombre del contacto sustituido.
+     *
+     * @param string $contact_name Nombre del lead para personalizar el saludo.
+     *
+     * @return string
+     */
+    protected function build_reminder_content(string $contact_name): string
+    {
+        return "Hola {$contact_name}! En unos minutos ya tenés disponible el acceso a la demo de ComercioCity.\n\n"
             . "Un consejo antes de entrar: empezá por el video introductorio que te mandamos al mail, "
             . "son 3 minutos y te van a ayudar a entender qué mirar cuando entrés al sistema.\n\n"
             . "Cualquier duda que surja mientras recorrés la plataforma, escribime por acá. 👋";
-
-        // Razonamiento para el setter: explica el origen automático y cuándo enviar el mensaje.
-        $ai_reasoning = "Recordatorio automático pre-demo. La demo está programada para las {$demo_hour}. "
-            . "Enviá este mensaje 15 minutos antes.";
-
-        LeadMessage::create([
-            'lead_id'      => $lead->id,
-            'sender'       => 'sistema',
-            'content'      => $content,
-            'status'       => 'sugerido',
-            'is_followup'  => false,
-            'ai_reasoning' => $ai_reasoning,
-        ]);
     }
 
     /**
@@ -169,4 +207,3 @@ class SendDemoReminders extends Command
         }
     }
 }
-

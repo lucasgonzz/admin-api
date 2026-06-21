@@ -25,9 +25,9 @@ class LeadDemoSettingsController extends Controller
     }
 
     /**
-     * Persiste los siete parámetros configurables de demos.
+     * Persiste los parámetros configurables de demos.
      *
-     * Todos los valores son enteros entre 0 y 240 minutos.
+     * Los valores en minutos son enteros entre 0 y 240; la hora de mañana es string H:i.
      *
      * @param Request $request
      *
@@ -41,6 +41,7 @@ class LeadDemoSettingsController extends Controller
             'setup_minutos_antes'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'gracia_minutos_post'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'recordatorio_minutos_antes'      => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            'recordatorio_manana_hora'        => 'required|date_format:H:i',
             'check_ingreso_minutos_post'      => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'resumen_minutos_antes_fin'       => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'duracion_llamada_closer_minutos' => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
