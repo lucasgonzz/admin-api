@@ -312,7 +312,8 @@ class LeadAiService
                     $context['now_minutes'],
                     $context['duracion'],
                     $closer_busy_for_date,
-                    $context['gracia_post']
+                    $context['gracia_post'],
+                    $context['slot_config'] ?? []
                 );
             }
         }
@@ -340,6 +341,43 @@ class LeadAiService
         $duracion    = LeadDemoSettings::get_duracion_minutos();
         $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
         $gracia_post = LeadDemoSettings::get_gracia_minutos_post();
+
+        /* Parámetros para generación dinámica de slots (incorporados en prompt 075/076). */
+        /* Horarios laborales del closer por día de semana, en formato H:i-H:i. */
+        $horario_lv        = LeadDemoSettings::get_closer_horario_lunes_viernes();
+        $horario_sab       = LeadDemoSettings::get_closer_horario_sabado();
+        $horario_dom       = LeadDemoSettings::get_closer_horario_domingo();
+        /* Frecuencia en minutos entre slots candidatos (ej. 30 = :00 y :30). */
+        $frecuencia_slots  = LeadDemoSettings::get_frecuencia_slots_minutos();
+        /* Checkbox: si true la llamada del closer también debe terminar dentro del horario. */
+        $llamada_termina   = LeadDemoSettings::get_llamada_debe_terminar_en_horario();
+        /* Duración de la llamada del closer post-demo en minutos. */
+        $duracion_closer   = LeadDemoSettings::get_duracion_llamada_closer_minutos();
+
+        /*
+         * Config agrupada para pasarla a compute_day_slots_for_demo() y get_all_slots_for_day()
+         * sin tener que extender la firma con 6+ parámetros individuales.
+         */
+        $slot_config = [
+            'horario_lv'                       => $horario_lv,
+            'horario_sab'                      => $horario_sab,
+            'horario_dom'                      => $horario_dom,
+            'frecuencia_slots'                 => $frecuencia_slots,
+            'duracion'                         => $duracion,
+            'gracia_post'                      => $gracia_post,
+            'duracion_llamada_closer'          => $duracion_closer,
+            'llamada_debe_terminar_en_horario' => $llamada_termina,
+        ];
+
+        /* Log de diagnóstico: config activa para esta ejecución, facilita comparar con slots resultantes. */
+        Log::channel('disponibilidad')->info(
+            '[DISPONIBILIDAD] Config activa: '
+            . "duracion={$duracion}min, setup_antes={$setup_antes}min, gracia_post={$gracia_post}min, "
+            . "duracion_closer={$duracion_closer}min, frecuencia_slots={$frecuencia_slots}min, "
+            . 'llamada_termina=' . ($llamada_termina ? 'si' : 'no') . ', '
+            . "horario_lv={$horario_lv}, horario_sab={$horario_sab}, "
+            . 'horario_dom=' . ($horario_dom !== '' ? $horario_dom : 'sin trabajo')
+        );
 
         /* Demos activas; sin ellas se delega al algoritmo legacy en get_available_slots(). */
         $demos = \App\Models\Demo::orderBy('id')->get();
@@ -428,7 +466,8 @@ class LeadAiService
                     $now_minutes,
                     $duracion,
                     $closer_busy[$date_key] ?? [],
-                    $gracia_post
+                    $gracia_post,
+                    $slot_config
                 );
                 foreach ($demo_slots as $slot) {
                     if (! in_array($slot, $union_available, true)) {
@@ -499,6 +538,8 @@ class LeadAiService
             'dates_map'       => $dates_map,
             'blocked_by_demo' => $blocked_by_demo,
             'closer_busy'     => $closer_busy,
+            /* Config de generación de slots para pasar a compute_day_slots_for_demo(). */
+            'slot_config'     => $slot_config,
         ];
     }
 
@@ -637,28 +678,30 @@ class LeadAiService
      *
      * Un slot candidato es válido solo si pasa ambas validaciones.
      *
-     * Nota sobre el linde exacto en el chequeo de closer: se usan comparaciones estrictas
-     * (> y <) para que el linde exacto (un lead libera al closer justo cuando otro lo necesita)
-     * se considere válido, conforme a la regla de negocio acordada.
+     * Nota sobre el linde exacto en la capa 2 (closer): si closer_release == cstart
+     * el slot queda BLOQUEADO (comparación >=). Esto evita el bug del caso Patricia/Lead #105,
+     * donde dos demos adyacentes compartían exactamente el mismo instante de liberación
+     * y el segundo slot se ofrecía erróneamente como disponible.
      *
-     * @param Carbon                              $day                         Día a evaluar.
-     * @param array<int, array{0: int, 1: int}>   $blocked_ranges              Rangos bloqueados por demo en minutos del día.
-     * @param Carbon                              $now                         Instante actual en Argentina.
-     * @param string                              $today_key                   Fecha de hoy (Y-m-d).
-     * @param int                                 $now_minutes                 Minutos transcurridos hoy.
-     * @param int                                 $duracion                    Duración de la demo en minutos.
-     * @param array<int, array{0: int, 1: int}>   $closer_busy_ranges_for_date Rangos de closer ocupado para este día (transversal a demos).
-     * @param int                                 $gracia_post                 Minutos de gracia post-demo; necesario para calcular cuándo el lead candidato liberaría al closer.
+     * @param Carbon                            $day                         Día a evaluar.
+     * @param array<int, array{0: int, 1: int}> $blocked_ranges              Rangos bloqueados por demo en minutos del día.
+     * @param Carbon                            $now                         Instante actual en Argentina.
+     * @param string                            $today_key                   Fecha de hoy (Y-m-d).
+     * @param int                               $now_minutes                 Minutos transcurridos hoy.
+     * @param int                               $duracion                    Duración de la demo en minutos.
+     * @param array<int, array{0: int, 1: int}> $closer_busy_ranges_for_date Rangos de closer ocupado para este día.
+     * @param int                               $gracia_post                 Minutos de gracia post-demo.
+     * @param array<string, mixed>              $slot_config                 Config de generación de slots (horarios, frecuencia, flags).
      *
      * @return string[] Horarios disponibles en formato HH:MM.
      */
-    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0): array
+    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0, array $slot_config = []): array
     {
         $date_key  = $day->format('Y-m-d');
         $is_today  = $date_key === $today_key;
 
-        /* Slots candidatos del día según protocolo: sábados 9-11hs, lunes-viernes 9-20hs. */
-        $all_slots = $this->get_all_slots_for_day($day);
+        /* Slots candidatos del día: generados dinámicamente según horario del closer y frecuencia. */
+        $all_slots = $this->get_all_slots_for_day($day, $slot_config);
 
         $available = [];
         foreach ($all_slots as $slot) {
@@ -673,7 +716,9 @@ class LeadAiService
 
             $slot_free = true;
 
-            /* Capa 1: chequeo por demo_id; impide solapar entornos técnicos. */
+            /* Capa 1: chequeo por demo_id; impide solapar entornos técnicos.
+             * El rango bloqueado es [inicio_demo - setup_antes, fin_demo + gracia_post].
+             * Se bloquea si el slot se solapa con ese rango. */
             foreach ($blocked_ranges as [$bstart, $bend]) {
                 if ($slot_start < $bend && $slot_end > $bstart) {
                     $slot_free = false;
@@ -681,15 +726,22 @@ class LeadAiService
                 }
             }
 
-            /* Capa 2: chequeo por closer; impide que el closer deba atender dos leads en simultáneo.
-             * Se verifica si el momento en que el lead candidato liberaría al closer
-             * (slot_end + gracia_post) cae dentro de una ventana ya comprometida por otro lead.
-             * Comparaciones estrictas: el linde exacto (un lead termina justo cuando otro empieza) es válido. */
+            /*
+             * Capa 2: chequeo por closer; impide que el closer atienda dos leads en simultáneo.
+             * Se verifica si el instante en que el lead candidato liberaría al closer
+             * (slot_end + gracia_post = inicio_llamada proyectada) cae dentro de una ventana
+             * ya comprometida por otra demo.
+             *
+             * Bug fix (prompt 076): comparación cambiada de estricta (>) a >= para el linde exacto.
+             * Si closer_release == cstart, el closer arrancaría justo al liberar la demo anterior,
+             * lo que hace imposible intercalar la llamada. Se bloquea correctamente con >=.
+             */
             if ($slot_free && ! empty($closer_busy_ranges_for_date)) {
-                /* Instante en que este lead candidato quedaría disponible para el closer. */
+                /* Instante en que este lead candidato quedaría listo para el closer. */
                 $closer_release = $slot_end + $gracia_post;
                 foreach ($closer_busy_ranges_for_date as [$cstart, $cend]) {
-                    if ($closer_release > $cstart && $closer_release < $cend) {
+                    /* Bloqueado si closer_release cae DENTRO de la ventana comprometida (inclusive el inicio). */
+                    if ($closer_release >= $cstart && $closer_release < $cend) {
                         $slot_free = false;
                         break;
                     }
@@ -753,7 +805,8 @@ class LeadAiService
                     $context['now_minutes'],
                     $context['duracion'],
                     $closer_busy_for_date,
-                    $context['gracia_post']
+                    $context['gracia_post'],
+                    $context['slot_config'] ?? []
                 );
 
                 foreach ($demo_slots as $slot) {
@@ -885,34 +938,124 @@ class LeadAiService
     }
 
     /**
-     * Devuelve los horarios candidatos para un día concreto según el protocolo de demos.
+     * Devuelve los slots candidatos para un día concreto, generados dinámicamente
+     * a partir del horario laboral del closer y la frecuencia de slots configurada.
      *
-     * Centraliza la lista de slots para evitar que los distintos puntos del archivo
-     * (compute_day_slots_for_demo, get_available_slots_legacy y el bloque del día extra)
-     * puedan desincronizarse entre sí.
+     * Un slot HH:MM es ofrecible si la llamada del closer proyectada (que arranca en
+     * slot_inicio + duracion_demo + gracia_post) cae dentro del horario laboral del closer:
+     *   - inicio_llamada >= inicio_horario_closer (el closer ya entró a trabajar)
+     *   - inicio_llamada <= fin_horario_closer    (la llamada empieza antes de que el closer salga)
+     *   - Si checkbox llamada_debe_terminar_en_horario ON:
+     *     también fin_llamada <= fin_horario_closer
      *
-     * Reglas según protocolo WhatsApp (sección "AGENDA DE DEMOS"):
-     *   - Lunes a viernes: 09:00 a 17:00, una hora por bloque (9 slots).
-     *   - Sábado: 09:00, 10:00, 11:00, 12:00 (último bloque termina a las 13:00).
-     *   - Domingo: no aplica (el caller no debe pasar domingos).
+     * Si el horario del closer para ese día de semana está vacío, se devuelve array vacío
+     * y el día queda sin slots (el algoritmo de días hábiles agrega un día extra si hace falta).
      *
-     * @param Carbon $day Día a evaluar.
+     * Nota: el método legacy get_available_slots_legacy() sigue usando este mismo método
+     * sin $slot_config (array vacío), por lo que usa los defaults hardcodeados del fallback.
      *
-     * @return string[] Horarios en formato HH:MM.
+     * @param Carbon               $day         Día a evaluar.
+     * @param array<string, mixed> $slot_config Config de generación (horario_lv, horario_sab,
+     *                                          horario_dom, frecuencia_slots, duracion,
+     *                                          gracia_post, duracion_llamada_closer,
+     *                                          llamada_debe_terminar_en_horario).
+     *
+     * @return string[] Horarios en formato HH:MM, ordenados de menor a mayor.
      */
-    private function get_all_slots_for_day(Carbon $day): array
+    private function get_all_slots_for_day(Carbon $day, array $slot_config = []): array
     {
-        /* Sábado: rango reducido de mañana, hasta las 13:00 (último inicio: 12:00). */
-        if ($day->dayOfWeek === 6) {
-            return ['09:00', '10:00', '11:00', '12:00'];
+        /*
+         * Extraer config con fallbacks a valores hardcodeados históricos,
+         * para que el algoritmo legacy siga funcionando cuando no hay $slot_config.
+         */
+        /* Horario laboral del closer por día de semana (H:i-H:i). */
+        $horario_lv  = isset($slot_config['horario_lv'])  ? (string) $slot_config['horario_lv']  : '09:00-17:00';
+        $horario_sab = isset($slot_config['horario_sab']) ? (string) $slot_config['horario_sab'] : '09:00-13:00';
+        $horario_dom = isset($slot_config['horario_dom']) ? (string) $slot_config['horario_dom'] : '';
+        /* Frecuencia entre slots candidatos en minutos (ej. 60 = en punto, 30 = :00 y :30). */
+        $frecuencia  = isset($slot_config['frecuencia_slots']) ? (int) $slot_config['frecuencia_slots'] : 60;
+        /* Parámetros de la demo necesarios para proyectar cuándo arranca la llamada del closer. */
+        $duracion    = isset($slot_config['duracion'])    ? (int) $slot_config['duracion']    : 60;
+        $gracia      = isset($slot_config['gracia_post']) ? (int) $slot_config['gracia_post'] : 0;
+        /* Duración de la llamada del closer (para la restricción del checkbox). */
+        $dur_closer  = isset($slot_config['duracion_llamada_closer'])          ? (int)  $slot_config['duracion_llamada_closer']          : 30;
+        /* Checkbox: true = la llamada también debe terminar dentro del horario. */
+        $llamada_termina = isset($slot_config['llamada_debe_terminar_en_horario']) ? (bool) $slot_config['llamada_debe_terminar_en_horario'] : false;
+
+        /*
+         * Frecuencia mínima de 5 minutos para evitar loops infinitos o listas exageradamente largas.
+         * En producción siempre vendrá un valor del conjunto {5, 10, 15, 30, 60}.
+         */
+        if ($frecuencia < 5) {
+            $frecuencia = 5;
         }
 
-        /* Lunes a viernes: hasta las 17:00 (último inicio; la demo termina ~18:00 y ahí entra el closer, que trabaja hasta las 19:00). */
-        return [
-            '09:00', '10:00', '11:00', '12:00',
-            '13:00', '14:00', '15:00', '16:00',
-            '17:00',
-        ];
+        /* Seleccionar el horario según día de semana (0=domingo, 6=sábado). */
+        $dow = $day->dayOfWeek;
+        if ($dow === 0) {
+            /* Domingo */
+            $horario_raw = $horario_dom;
+        } elseif ($dow === 6) {
+            /* Sábado */
+            $horario_raw = $horario_sab;
+        } else {
+            /* Lunes a viernes */
+            $horario_raw = $horario_lv;
+        }
+
+        /* Horario vacío significa que el closer no trabaja ese día: sin slots. */
+        if ($horario_raw === '') {
+            return [];
+        }
+
+        /* Parsear "HH:MM-HH:MM" → inicio y fin en minutos del día. */
+        $partes = explode('-', $horario_raw);
+        if (count($partes) !== 2) {
+            return [];
+        }
+
+        /* Extraer inicio del horario. */
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $partes[0], $mi)) {
+            return [];
+        }
+        /* Extraer fin del horario. */
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $partes[1], $mf)) {
+            return [];
+        }
+
+        /* Minutos del día para el inicio y fin del horario laboral del closer. */
+        $horario_inicio = (int) $mi[1] * 60 + (int) $mi[2];
+        $horario_fin    = (int) $mf[1] * 60 + (int) $mf[2];
+
+        /*
+         * Generar todos los slots desde medianoche hasta el final del día en pasos de $frecuencia,
+         * y retener solo los que cumplan las condiciones de ofrecibilidad.
+         * El ancla es 0 (medianoche): con frecuencia=30 los slots son :00 y :30; con 60 solo :00.
+         */
+        $slots = [];
+        for ($slot_min = 0; $slot_min < 1440; $slot_min += $frecuencia) {
+            /*
+             * Proyectar el instante en que el closer tomaría la llamada para este slot:
+             *   inicio_llamada = inicio_demo + duracion_demo + gracia_post
+             */
+            $inicio_llamada = $slot_min + $duracion + $gracia;
+            /* Fin de la llamada del closer (relevante solo si el checkbox está activo). */
+            $fin_llamada    = $inicio_llamada + $dur_closer;
+
+            /* La llamada debe COMENZAR dentro del horario laboral del closer. */
+            if ($inicio_llamada < $horario_inicio || $inicio_llamada > $horario_fin) {
+                continue;
+            }
+
+            /* Si el checkbox está activado: la llamada también debe TERMINAR dentro del horario. */
+            if ($llamada_termina && $fin_llamada > $horario_fin) {
+                continue;
+            }
+
+            $slots[] = self::format_minutes_to_hhmm($slot_min);
+        }
+
+        return $slots;
     }
 
     /**
