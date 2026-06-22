@@ -61,6 +61,7 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto fuera del JSON):
 "guardar_nombre": null,
 "guardar_email": null,
 "agendar_demo": null,
+"cancelar_demo": false,
 "requiere_intervencion_humana": false,
 "motivo_intervencion": null
 }
@@ -91,6 +92,15 @@ agendar_demo (object | null):
 - NO incluyas demo_end_time: el servidor lo calcula automáticamente (demo_start_time + duración configurada).
 - demo_id: debe ser una demo que tenga ese slot libre en el JSON de disponibilidad. Preferir la demo con menor cantidad de agendas en ese día; si hay empate, la de menor ID.
 - Cuando incluyas agendar_demo, el estado_sugerido debe ser "demo_agendada".
+
+cancelar_demo (boolean):
+- Activar en true cuando el lead pide explícitamente cambiar, mover o reagendar la demo que ya tiene confirmada.
+- Señales de reagendado: "mejor el miércoles", "lo pasamos para otro día", "¿podemos cambiar el horario?", "no puedo ese día", "reprogramemos", o cualquier variante que implique que el lead ya tiene una demo asignada y quiere un horario distinto.
+- Solo activarlo cuando el lead tiene demo_date cargada (es decir, ya tenía una demo agendada). Si el lead nunca tuvo demo, no activarlo.
+- Al activarlo, también devolver solicita_disponibilidad: true para iniciar el flujo de búsqueda de nuevo horario.
+- NO activar agendar_demo en el mismo JSON donde activás cancelar_demo: primero se cancela, luego se agenda en el siguiente intercambio.
+- El estado_sugerido en este caso debe ser "calificado" (se vuelve al estado previo al agendamiento).
+- Default: false
 
 requiere_intervencion_humana (boolean):
 - Activar en true cuando detectes cualquiera de estas situaciones:

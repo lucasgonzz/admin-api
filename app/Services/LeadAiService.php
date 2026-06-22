@@ -148,8 +148,11 @@ class LeadAiService
         $solicita_disponibilidad = ! empty($parsed['solicita_disponibilidad']);
         $estado_sugerido         = trim((string) ($parsed['estado_sugerido'] ?? ''));
 
-        /* true cuando cualquiera de las dos condiciones aplica */
-        $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada';
+        /* true cuando Claude pide reagendar: la segunda llamada debe traer los nuevos slots disponibles. */
+        $cancelar_demo_flag = ! empty($parsed['cancelar_demo']);
+
+        /* true cuando cualquiera de las tres condiciones aplica */
+        $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada' || $cancelar_demo_flag;
 
         if ($needs_availability_check) {
             try {
@@ -1024,6 +1027,28 @@ class LeadAiService
             Log::info('LeadAiService: email del lead guardado vía acción estructurada.', [
                 'lead_id' => $lead->id,
                 'email'   => $guardar_email,
+            ]);
+        }
+
+        /* Acción: cancelar demo agendada cuando el lead pide reagendar.
+         * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
+         * Limpia los 4 campos de demo para liberar el slot en la disponibilidad de inmediato. */
+        $cancelar_demo = ! empty($parsed['cancelar_demo']);
+        if ($cancelar_demo && $lead->demo_date !== null) {
+            /* Guardar valores anteriores para el log antes de limpiarlos. */
+            $demo_date_anterior  = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : 'sin fecha';
+            $demo_start_anterior = $lead->demo_start_time ?? 'sin hora';
+
+            /* Limpiar los campos de demo: libera el slot y deja al lead listo para reagendar. */
+            $lead->demo_id         = null;
+            $lead->demo_date       = null;
+            $lead->demo_start_time = null;
+            $lead->demo_end_time   = null;
+
+            Log::info('LeadAiService: demo cancelada por solicitud de reagendado.', [
+                'lead_id'            => $lead->id,
+                'demo_date_anterior' => $demo_date_anterior,
+                'demo_hora_anterior' => $demo_start_anterior,
             ]);
         }
 
