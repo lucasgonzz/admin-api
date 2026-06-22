@@ -119,7 +119,7 @@ class CheckDemoIngress extends Command
 
             /* Enviar check de ingreso directo por WhatsApp (texto libre, ventana activa). */
             $contact_name = $lead->contact_name ?? 'cliente';
-            $content = "¡Hola {$contact_name}! ¿Pudiste ingresar a la demo sin problemas? 👋";
+            $content = "{$contact_name}, ¿cómo vas con la demo? ¿Pudiste entrar bien?";
 
             $whatsapp_message_id = null;
             $phone = trim((string) $lead->phone);
@@ -209,3 +209,4 @@ class CheckDemoIngress extends Command
         }
     }
 }
+
