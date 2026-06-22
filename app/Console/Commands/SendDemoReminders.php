@@ -25,7 +25,7 @@ class SendDemoReminders extends Command
      *
      * @var string
      */
-    private const TEMPLATE_NAME = 'cc_recordatorio_demo';
+    private const TEMPLATE_NAME = 'cc_recordatorio_demo_';
 
     /**
      * Nombre del comando artisan.
