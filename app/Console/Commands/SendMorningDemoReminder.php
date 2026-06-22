@@ -22,10 +22,11 @@ class SendMorningDemoReminder extends Command
 {
     /**
      * Nombre del template Meta aprobado para el recordatorio de mañana.
+     * v2: incluye hora de la demo como segunda variable {{2}}.
      *
      * @var string
      */
-    private const TEMPLATE_NAME = 'cc_recordatorio_manana_demo';
+    private const TEMPLATE_NAME = 'cc_recordatorio_manana_demo_v2';
 
     /**
      * Ventana en minutos alrededor de la hora configurada para no perder el trigger.
@@ -148,6 +149,10 @@ class SendMorningDemoReminder extends Command
     /**
      * Envía el template de recordatorio de mañana y persiste el LeadMessage correspondiente.
      *
+     * Utiliza la plantilla v2 que acepta dos variables: {{1}} nombre del contacto
+     * y {{2}} hora de la demo (ej: "10:00"). Si la hora no está disponible, se envía
+     * cadena vacía como fallback y el texto del mensaje muestra "hoy" sin hora.
+     *
      * @param Lead $lead Lead con demo agendada hoy.
      *
      * @return void
@@ -157,8 +162,11 @@ class SendMorningDemoReminder extends Command
         // Nombre del contacto para personalizar el saludo y la variable {{1}} del template.
         $contact_name = $lead->contact_name ?? 'Cliente';
 
+        // Hora de inicio de la demo para la variable {{2}} del template (ej: "10:00").
+        $demo_start_time = $lead->demo_start_time ?? '';
+
         // Texto renderizado para trazabilidad en la conversación del lead.
-        $content = $this->build_morning_reminder_content($contact_name);
+        $content = $this->build_morning_reminder_content($contact_name, $demo_start_time);
 
         // Envío directo por WhatsApp vía plantilla Meta aprobada.
         $whatsapp_message_id = null;
@@ -167,7 +175,7 @@ class SendMorningDemoReminder extends Command
             $whatsapp_message_id = $this->whatsapp_send_service->send_template(
                 $phone,
                 self::TEMPLATE_NAME,
-                [$contact_name],
+                [$contact_name, $demo_start_time],
                 'es_AR'
             );
         } else {
@@ -194,17 +202,24 @@ class SendMorningDemoReminder extends Command
     }
 
     /**
-     * Construye el texto del recordatorio de mañana con el nombre del contacto sustituido.
+     * Construye el texto del recordatorio de mañana con nombre y hora de la demo sustituidos.
      *
-     * @param string $contact_name Nombre del lead para personalizar el saludo.
+     * Refleja el cuerpo de la plantilla Meta cc_recordatorio_manana_demo_v2.
+     * Si la hora de la demo no está disponible, el fallback omite la hora y dice "hoy".
      *
-     * @return string
+     * @param string $contact_name    Nombre del lead para personalizar el saludo (variable {{1}}).
+     * @param string $demo_start_time Hora de inicio de la demo en formato HH:MM (variable {{2}}). Puede ser vacía.
+     *
+     * @return string Texto completo del mensaje tal como lo recibe el contacto.
      */
-    protected function build_morning_reminder_content(string $contact_name): string
+    protected function build_morning_reminder_content(string $contact_name, string $demo_start_time): string
     {
-        return "Hola {$contact_name}! Te recuerdo que hoy tenés agendada la demo de ComercioCity. 👋\n\n"
-            . "Para aprovecharla al máximo, tené a mano el usuario y contraseña que te enviamos por mail, "
-            . "y reservá unos 40-50 minutos sin interrupciones.\n\n"
-            . "¡Cualquier consulta estoy por acá! 🙂";
+        // Línea de hora: si hay hora disponible muestra "hoy a las HH:MM", si no solo "hoy".
+        $hora_line = $demo_start_time !== '' ? "hoy a las {$demo_start_time}" : 'hoy';
+
+        return "Hola {$contact_name}! Te recuerdo que {$hora_line} tenés agendada la demo de ComercioCity. 👋\n\n"
+            . "Revisá el mail que te enviamos para tener todo listo antes de entrar.\n\n"
+            . "Reservá unos 60 minutos sin interrupciones para aprovecharla al máximo.\n\n"
+            . "¡Cualquier consulta estoy por acá! 😊";
     }
 }
