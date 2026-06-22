@@ -345,7 +345,9 @@ class LeadAiService
         $now         = now('America/Argentina/Buenos_Aires');
         $now_minutes = $now->hour * 60 + $now->minute;
         $today_key   = $now->copy()->startOfDay()->format('Y-m-d');
-        $cursor      = $now->copy()->startOfDay();
+        /* El cursor arranca en mañana: nunca se ofrece el día actual como opción de demo.
+         * El closer necesita al menos un día de anticipación para prepararse. */
+        $cursor      = $now->copy()->startOfDay()->addDay();
 
         /* Lista inicial de días hábiles (lunes a sábado, sin domingos). */
         $working_days = [];
@@ -785,7 +787,9 @@ class LeadAiService
         $now_minutes = $now->hour * 60 + $now->minute;
         /* Fecha de hoy (Y-m-d) para detectar el día actual dentro del loop de slots. */
         $today_key = $now->copy()->startOfDay()->format('Y-m-d');
-        $cursor    = $now->copy()->startOfDay();
+        /* El cursor arranca en mañana: nunca se ofrece el día actual como opción de demo.
+         * El closer necesita al menos un día de anticipación para prepararse. */
+        $cursor    = $now->copy()->startOfDay()->addDay();
 
         while (count($working_days) < $days_ahead) {
             if ($cursor->dayOfWeek !== 0) {
@@ -1495,5 +1499,6 @@ TXT;
         return $data;
     }
 }
+
 
 
