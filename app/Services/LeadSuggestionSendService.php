@@ -63,6 +63,29 @@ class LeadSuggestionSendService
         }
 
         $phone = trim((string) $lead->phone);
+
+        // Si la ventana de conversación de WhatsApp está cerrada (sin mensaje entrante en 24hs),
+        // no intentar send_text (Meta devuelve 422). Marcar como rechazado y salir.
+        if ($phone !== '' && ! $this->is_within_whatsapp_window($lead)) {
+            Log::channel('daily')->warning('LeadSuggestionSendService: ventana de 24hs cerrada, sugerencia no enviada.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message->id,
+            ]);
+
+            (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
+
+            $message->update([
+                'status'  => 'rechazado',
+                'sent_at' => null,
+            ]);
+
+            $lead->sync_suggestion_flags();
+
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+            return $message->fresh();
+        }
+
         $whatsapp_message_id = null;
         if ($phone !== '') {
             $whatsapp_message_id = $this->send_body($phone, $body);
@@ -172,5 +195,23 @@ class LeadSuggestionSendService
             'notas_setter'     => 'Mensaje original de Claude: '.$original_content,
             'activa'           => false,
         ]);
+    }
+
+    /**
+     * Indica si el lead escribió en las últimas 24 horas (ventana activa de WhatsApp).
+     *
+     * Fuera de este período Meta rechaza los mensajes de texto libre con 422.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    private function is_within_whatsapp_window(Lead $lead): bool
+    {
+        return LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('sender', 'lead')
+            ->where('created_at', '>=', now()->subHours(24))
+            ->exists();
     }
 }
