@@ -36,6 +36,21 @@ class LeadDemoSettings
     /** Clave: duración de la llamada del closer post-demo en minutos. */
     public const KEY_DURACION_LLAMADA_CLOSER_MINUTOS = 'demo_duracion_llamada_closer_minutos';
 
+    /** Clave: horario laboral del closer de lunes a viernes (formato H:i-H:i, ej. 09:00-18:00). */
+    public const KEY_CLOSER_HORARIO_LUNES_VIERNES = 'demo_closer_horario_lunes_viernes';
+
+    /** Clave: horario laboral del closer los sábados (formato H:i-H:i; vacío = no trabaja). */
+    public const KEY_CLOSER_HORARIO_SABADO = 'demo_closer_horario_sabado';
+
+    /** Clave: horario laboral del closer los domingos (formato H:i-H:i; vacío = no trabaja). */
+    public const KEY_CLOSER_HORARIO_DOMINGO = 'demo_closer_horario_domingo';
+
+    /** Clave: indica si la llamada del closer debe terminar dentro del horario laboral (string "1"/"0"). */
+    public const KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO = 'demo_llamada_debe_terminar_en_horario';
+
+    /** Clave: frecuencia en minutos con que se generan los slots disponibles. */
+    public const KEY_FRECUENCIA_SLOTS_MINUTOS = 'demo_frecuencia_slots_minutos';
+
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
 
@@ -60,6 +75,24 @@ class LeadDemoSettings
     /** Valor por defecto: duración de la llamada del closer post-demo (minutos). */
     private const DEFAULT_DURACION_LLAMADA_CLOSER_MINUTOS = 30;
 
+    /** Valor por defecto: horario laboral del closer de lunes a viernes. */
+    private const DEFAULT_CLOSER_HORARIO_LUNES_VIERNES = '09:00-18:00';
+
+    /** Valor por defecto: horario laboral del closer los sábados. */
+    private const DEFAULT_CLOSER_HORARIO_SABADO = '10:00-13:00';
+
+    /** Valor por defecto: horario laboral del closer los domingos (vacío = no trabaja). */
+    private const DEFAULT_CLOSER_HORARIO_DOMINGO = '';
+
+    /** Valor por defecto: la llamada del closer NO debe terminar dentro del horario (desactivado). */
+    private const DEFAULT_LLAMADA_DEBE_TERMINAR_EN_HORARIO = '0';
+
+    /** Valor por defecto: frecuencia de slots en minutos. */
+    private const DEFAULT_FRECUENCIA_SLOTS_MINUTOS = 30;
+
+    /** Valores válidos para la frecuencia de slots (minutos). */
+    public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
+
     /** Mínimo permitido para todos los parámetros (minutos). */
     public const MIN_MINUTOS = 0;
 
@@ -74,14 +107,19 @@ class LeadDemoSettings
     public static function to_array(): array
     {
         return [
-            'duracion_minutos'                => self::get_duracion_minutos(),
-            'setup_minutos_antes'             => self::get_setup_minutos_antes(),
-            'gracia_minutos_post'             => self::get_gracia_minutos_post(),
-            'recordatorio_minutos_antes'      => self::get_recordatorio_minutos_antes(),
-            'recordatorio_manana_hora'        => self::get_recordatorio_manana_hora(),
-            'check_ingreso_minutos_post'      => self::get_check_ingreso_minutos_post(),
-            'resumen_minutos_antes_fin'       => self::get_resumen_minutos_antes_fin(),
-            'duracion_llamada_closer_minutos' => self::get_duracion_llamada_closer_minutos(),
+            'duracion_minutos'                    => self::get_duracion_minutos(),
+            'setup_minutos_antes'                 => self::get_setup_minutos_antes(),
+            'gracia_minutos_post'                 => self::get_gracia_minutos_post(),
+            'recordatorio_minutos_antes'          => self::get_recordatorio_minutos_antes(),
+            'recordatorio_manana_hora'            => self::get_recordatorio_manana_hora(),
+            'check_ingreso_minutos_post'          => self::get_check_ingreso_minutos_post(),
+            'resumen_minutos_antes_fin'           => self::get_resumen_minutos_antes_fin(),
+            'duracion_llamada_closer_minutos'     => self::get_duracion_llamada_closer_minutos(),
+            'closer_horario_lunes_viernes'        => self::get_closer_horario_lunes_viernes(),
+            'closer_horario_sabado'               => self::get_closer_horario_sabado(),
+            'closer_horario_domingo'              => self::get_closer_horario_domingo(),
+            'llamada_debe_terminar_en_horario'    => self::get_llamada_debe_terminar_en_horario(),
+            'frecuencia_slots_minutos'            => self::get_frecuencia_slots_minutos(),
         ];
     }
 
@@ -107,6 +145,53 @@ class LeadDemoSettings
         AdminSetting::set(self::KEY_CHECK_INGRESO_MINUTOS_POST,      (string) self::clamp((int) $data['check_ingreso_minutos_post']));
         AdminSetting::set(self::KEY_RESUMEN_MINUTOS_ANTES_FIN,       (string) self::clamp((int) $data['resumen_minutos_antes_fin']));
         AdminSetting::set(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::clamp((int) $data['duracion_llamada_closer_minutos']));
+
+        // Horario lunes a viernes: validar ambos extremos del rango H:i-H:i; ignorar si alguno es inválido.
+        if (isset($data['closer_horario_lunes_viernes'])) {
+            $parts = explode('-', (string) $data['closer_horario_lunes_viernes']);
+            if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+                AdminSetting::set(self::KEY_CLOSER_HORARIO_LUNES_VIERNES, (string) $data['closer_horario_lunes_viernes']);
+            }
+        }
+
+        // Horario sábado: vacío es válido (no trabaja); si no vacío, validar rango H:i-H:i.
+        if (isset($data['closer_horario_sabado'])) {
+            $val = (string) $data['closer_horario_sabado'];
+            if ($val === '') {
+                AdminSetting::set(self::KEY_CLOSER_HORARIO_SABADO, '');
+            } else {
+                $parts = explode('-', $val);
+                if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+                    AdminSetting::set(self::KEY_CLOSER_HORARIO_SABADO, $val);
+                }
+            }
+        }
+
+        // Horario domingo: vacío es válido (no trabaja); si no vacío, validar rango H:i-H:i.
+        if (isset($data['closer_horario_domingo'])) {
+            $val = (string) $data['closer_horario_domingo'];
+            if ($val === '') {
+                AdminSetting::set(self::KEY_CLOSER_HORARIO_DOMINGO, '');
+            } else {
+                $parts = explode('-', $val);
+                if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+                    AdminSetting::set(self::KEY_CLOSER_HORARIO_DOMINGO, $val);
+                }
+            }
+        }
+
+        // Checkbox: castear a bool y guardar "1" o "0".
+        if (isset($data['llamada_debe_terminar_en_horario'])) {
+            AdminSetting::set(self::KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO, $data['llamada_debe_terminar_en_horario'] ? '1' : '0');
+        }
+
+        // Frecuencia de slots: solo aceptar valores del conjunto válido.
+        if (isset($data['frecuencia_slots_minutos'])) {
+            $freq = (int) $data['frecuencia_slots_minutos'];
+            if (in_array($freq, self::VALID_FRECUENCIA_SLOTS, true)) {
+                AdminSetting::set(self::KEY_FRECUENCIA_SLOTS_MINUTOS, (string) $freq);
+            }
+        }
     }
 
     /**
@@ -139,6 +224,21 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS) === null) {
             AdminSetting::set(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::DEFAULT_DURACION_LLAMADA_CLOSER_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_CLOSER_HORARIO_LUNES_VIERNES) === null) {
+            AdminSetting::set(self::KEY_CLOSER_HORARIO_LUNES_VIERNES, self::DEFAULT_CLOSER_HORARIO_LUNES_VIERNES);
+        }
+        if (AdminSetting::get(self::KEY_CLOSER_HORARIO_SABADO) === null) {
+            AdminSetting::set(self::KEY_CLOSER_HORARIO_SABADO, self::DEFAULT_CLOSER_HORARIO_SABADO);
+        }
+        if (AdminSetting::get(self::KEY_CLOSER_HORARIO_DOMINGO) === null) {
+            AdminSetting::set(self::KEY_CLOSER_HORARIO_DOMINGO, self::DEFAULT_CLOSER_HORARIO_DOMINGO);
+        }
+        if (AdminSetting::get(self::KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO) === null) {
+            AdminSetting::set(self::KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO, self::DEFAULT_LLAMADA_DEBE_TERMINAR_EN_HORARIO);
+        }
+        if (AdminSetting::get(self::KEY_FRECUENCIA_SLOTS_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_FRECUENCIA_SLOTS_MINUTOS, (string) self::DEFAULT_FRECUENCIA_SLOTS_MINUTOS);
         }
     }
 
@@ -229,6 +329,99 @@ class LeadDemoSettings
     public static function get_duracion_llamada_closer_minutos(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_DURACION_LLAMADA_CLOSER_MINUTOS, (string) self::DEFAULT_DURACION_LLAMADA_CLOSER_MINUTOS));
+    }
+
+    /**
+     * Horario laboral del closer de lunes a viernes (formato H:i-H:i).
+     *
+     * Devuelve el valor almacenado si es válido; de lo contrario, el default.
+     *
+     * @return string
+     */
+    public static function get_closer_horario_lunes_viernes(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_CLOSER_HORARIO_LUNES_VIERNES, self::DEFAULT_CLOSER_HORARIO_LUNES_VIERNES);
+        $parts  = explode('-', $stored);
+
+        if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+            return $stored;
+        }
+
+        return self::DEFAULT_CLOSER_HORARIO_LUNES_VIERNES;
+    }
+
+    /**
+     * Horario laboral del closer los sábados (formato H:i-H:i o vacío si no trabaja).
+     *
+     * @return string
+     */
+    public static function get_closer_horario_sabado(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_CLOSER_HORARIO_SABADO, self::DEFAULT_CLOSER_HORARIO_SABADO);
+
+        if ($stored === '') {
+            return '';
+        }
+
+        $parts = explode('-', $stored);
+
+        if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+            return $stored;
+        }
+
+        return self::DEFAULT_CLOSER_HORARIO_SABADO;
+    }
+
+    /**
+     * Horario laboral del closer los domingos (formato H:i-H:i o vacío si no trabaja).
+     *
+     * @return string
+     */
+    public static function get_closer_horario_domingo(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_CLOSER_HORARIO_DOMINGO, self::DEFAULT_CLOSER_HORARIO_DOMINGO);
+
+        if ($stored === '') {
+            return '';
+        }
+
+        $parts = explode('-', $stored);
+
+        if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+            return $stored;
+        }
+
+        return self::DEFAULT_CLOSER_HORARIO_DOMINGO;
+    }
+
+    /**
+     * Indica si la llamada del closer debe terminar dentro de su horario laboral.
+     *
+     * Devuelve true cuando el valor almacenado es "1".
+     *
+     * @return bool
+     */
+    public static function get_llamada_debe_terminar_en_horario(): bool
+    {
+        return AdminSetting::get(self::KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO, self::DEFAULT_LLAMADA_DEBE_TERMINAR_EN_HORARIO) === '1';
+    }
+
+    /**
+     * Frecuencia en minutos con que se generan los slots disponibles.
+     *
+     * Solo acepta valores del conjunto VALID_FRECUENCIA_SLOTS; si el almacenado es inválido, devuelve el default.
+     *
+     * @return int
+     */
+    public static function get_frecuencia_slots_minutos(): int
+    {
+        $stored = (int) AdminSetting::get(self::KEY_FRECUENCIA_SLOTS_MINUTOS, (string) self::DEFAULT_FRECUENCIA_SLOTS_MINUTOS);
+
+        if (in_array($stored, self::VALID_FRECUENCIA_SLOTS, true)) {
+            return $stored;
+        }
+
+        return self::DEFAULT_FRECUENCIA_SLOTS_MINUTOS;
     }
 
     /**
