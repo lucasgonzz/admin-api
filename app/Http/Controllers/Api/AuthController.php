@@ -29,7 +29,7 @@ class AuthController extends Controller
         if (! $admin || ! Hash::check($password, $admin->password)) {
             return response()->json(['message' => 'Credenciales inválidas.'], 401);
         }
-        $admin->tokens()->where('name', 'admin-spa')->delete();
+        // No revocar tokens previos: cada dispositivo conserva su sesión hasta logout manual.
         $token = $admin->createToken('admin-spa')->plainTextToken;
 
         return response()->json([
