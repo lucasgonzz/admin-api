@@ -129,6 +129,18 @@ class LeadProperties
                 'width' => 140,
             ],
             [
+                /** Fecha del primer mensaje del hilo WhatsApp (desnormalizada en leads.first_message_at). */
+                'key' => 'first_message_at',
+                'text' => 'Inicio conversación',
+                'type' => 'date',
+                'value' => null,
+                'show' => true,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'use_to_filter_in_search' => true,
+                'width' => 170,
+            ],
+            [
                 'key' => 'email',
                 'text' => 'Email',
                 'type' => 'text',

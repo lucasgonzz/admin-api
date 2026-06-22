@@ -226,8 +226,18 @@ class SearchController
         }
 
         if ($model_name === Lead::class) {
-            $models = $models->withAllForList()
-                ->orderBy('created_at', 'DESC');
+            $models = $models->withAllForList();
+
+            /** Mismo orden que index_json de leads: fijados primero y criterio activo del SPA. */
+            $models->orderByRaw('CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
+            $models->orderByRaw('pinned_at DESC');
+
+            $sort_by = (string) $request->input('sort_by', 'last_message');
+            if ($sort_by === 'last_message') {
+                $models->orderByRaw('COALESCE(last_message_at, created_at) DESC');
+            } else {
+                $models->orderByDesc('created_at');
+            }
         } elseif (method_exists($model_name, 'scopeWithAll')) {
             $models = $models->withAll()
                 ->orderBy('created_at', 'DESC');

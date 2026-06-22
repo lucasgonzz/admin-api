@@ -26,9 +26,21 @@ class LeadMessage extends Model
             /** Preferir sent_at (webhook WhatsApp) sobre created_at del registro. */
             $timestamp = $message->sent_at ?? $message->created_at ?? now();
 
-            Lead::query()
-                ->where('id', $message->lead_id)
-                ->update(['last_message_at' => $timestamp]);
+            /** Lead dueño del mensaje: actualizar last_message_at y, si aplica, first_message_at. */
+            $lead = Lead::query()->where('id', $message->lead_id)->first();
+            if (! $lead) {
+                return;
+            }
+
+            /** Siempre refrescar la actividad reciente del hilo. */
+            $lead_updates = ['last_message_at' => $timestamp];
+
+            /** Solo el primer mensaje del hilo define el inicio de conversación. */
+            if ($lead->first_message_at === null) {
+                $lead_updates['first_message_at'] = $timestamp;
+            }
+
+            $lead->update($lead_updates);
         });
     }
 
