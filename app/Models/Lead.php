@@ -159,7 +159,12 @@ class Lead extends Model
         'pinned_at'                    => 'datetime',
 
         // Cuotas del contrato PDF: [{monto, fecha}]
-        'contract_financiacion'        => 'array',
+        'contract_financiacion'              => 'array',
+
+        // Fechas del contrato ComercioCity (inputs type="date" en admin-spa).
+        'contract_fecha_emision'             => 'date',
+        'contract_fecha_primer_pago_unico'   => 'date',
+        'contract_fecha_primer_pago_mensual' => 'date',
 
         // Resumen estructurado generado por Claude: {empresa, situacion_actual, funcionalidades, puntos_dolor}
         'demo_summary_structured'      => 'array',

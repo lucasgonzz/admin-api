@@ -9,9 +9,11 @@ use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
 use App\Models\WhatsappConfig;
+use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
 use App\Services\KapsoHttpClient;
 use App\Services\WhatsappInboundMediaService;
+use App\Services\WhatsappSendService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -469,5 +471,109 @@ class ImplementationController extends Controller
         });
 
         return response()->json(['message' => 'Implementación eliminada.'], 200);
+    }
+
+    /**
+     * Simula un mensaje entrante del cliente sin pasar por WhatsApp.
+     *
+     * Persiste el mensaje en implementation_messages con direction='inbound',
+     * emite el evento Pusher para actualizar la UI en tiempo real y luego
+     * invoca el mismo flujo de procesamiento que el webhook real.
+     *
+     * Útil para testing del agente de implementación sin necesidad de enviar
+     * mensajes reales por WhatsApp.
+     *
+     * @param Request        $request        Petición con campo 'content' (texto del mensaje).
+     * @param Implementation $implementation Implementación destino (route model binding).
+     *
+     * @return JsonResponse { model: ImplementationMessage } con código 201, o 422 si el content es vacío.
+     */
+    public function simulate_inbound(Request $request, Implementation $implementation): JsonResponse
+    {
+        // Validar que el contenido no esté vacío antes de procesar.
+        $content = trim((string) $request->input('content', ''));
+
+        if ($content === '') {
+            return response()->json(['message' => 'El mensaje no puede estar vacío.'], 422);
+        }
+
+        // Persistir el mensaje entrante simulado en la tabla de mensajes de la implementación.
+        $message = ImplementationMessage::create([
+            'implementation_id'   => $implementation->id,
+            'stage_number'        => $implementation->current_stage,
+            'direction'           => 'inbound',
+            'body'                => $content,
+            'whatsapp_message_id' => null,
+            'sent_at'             => now(),
+        ]);
+
+        // Emitir evento Pusher para que la UI lo reciba en tiempo real sin recargar.
+        ImplementationBroadcastService::emit_message_received(
+            (int) $implementation->id,
+            (int) $message->id
+        );
+
+        // Procesar el mensaje como si viniera del webhook de WhatsApp real.
+        $parsed = [
+            'from' => (string) ($implementation->client->phone ?? ''),
+            'type' => 'text',
+            'body' => $content,
+        ];
+
+        (new ImplementationConversationService())->handle($implementation, $parsed);
+
+        return response()->json(['model' => $message], 201);
+    }
+
+    /**
+     * Envía un mensaje de texto saliente manual al cliente por WhatsApp.
+     *
+     * Permite al operador enviar un mensaje desde el panel admin sin pasar por
+     * el flujo automático del agente. El mensaje se persiste en implementation_messages
+     * con direction='outbound' y se emite evento Pusher para la UI.
+     *
+     * @param Request        $request        Petición con campo 'content' (texto del mensaje).
+     * @param Implementation $implementation Implementación destino (route model binding).
+     *
+     * @return JsonResponse { model: ImplementationMessage } con código 201, o 422 si hay error de validación.
+     */
+    public function send_message(Request $request, Implementation $implementation): JsonResponse
+    {
+        // Validar que el contenido no esté vacío.
+        $content = trim((string) $request->input('content', ''));
+
+        if ($content === '') {
+            return response()->json(['message' => 'El mensaje no puede estar vacío.'], 422);
+        }
+
+        // Obtener el cliente asociado a la implementación para leer el teléfono.
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+        $phone  = trim((string) ($client->phone ?? ''));
+
+        if ($phone === '') {
+            return response()->json(['message' => 'El cliente no tiene teléfono cargado.'], 422);
+        }
+
+        // Enviar el mensaje de texto por WhatsApp usando el servicio de envío.
+        $whatsapp_send_service = new WhatsappSendService();
+        $whatsapp_message_id   = $whatsapp_send_service->send_text($phone, $content);
+
+        // Persistir el mensaje saliente con el ID de WhatsApp obtenido.
+        $message = ImplementationMessage::create([
+            'implementation_id'   => $implementation->id,
+            'stage_number'        => $implementation->current_stage,
+            'direction'           => 'outbound',
+            'body'                => $content,
+            'whatsapp_message_id' => $whatsapp_message_id,
+            'sent_at'             => now(),
+        ]);
+
+        // Emitir evento Pusher para actualizar la UI en tiempo real.
+        ImplementationBroadcastService::emit_message_received(
+            (int) $implementation->id,
+            (int) $message->id
+        );
+
+        return response()->json(['model' => $message], 201);
     }
 }
