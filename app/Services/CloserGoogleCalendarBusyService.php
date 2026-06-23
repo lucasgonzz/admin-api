@@ -34,19 +34,21 @@ class CloserGoogleCalendarBusyService
     }
 
     /**
-     * Devuelve los rangos ocupados por fecha, provenientes de los calendarios
-     * Google de todos los closers activos con conexión válida.
+     * Devuelve los rangos ocupados por fecha y un snapshot legible de los eventos consultados.
      *
-     * Si hay más de un closer conectado, se aplica intersección conservadora:
+     * Si hay más de un closer conectado, se aplica intersección conservadora en `ranges`:
      * un slot solo es libre si TODOS los closers activos estarían libres.
      *
      * @param string[] $date_strings Fechas Y-m-d a consultar.
-     * @return array<string, array<int, array{0: int, 1: int}>> Mapa fecha → rangos [inicio_min, fin_min].
+     * @return array{
+     *   ranges: array<string, array<int, array{0: int, 1: int}>>,
+     *   snapshot: array<string, mixed>|null
+     * }
      */
     public function get_busy_ranges_for_dates(array $date_strings): array
     {
         if (empty($date_strings)) {
-            return [];
+            return ['ranges' => [], 'snapshot' => null];
         }
 
         // Clave de caché única por combinación de fechas consultadas.
@@ -56,12 +58,10 @@ class CloserGoogleCalendarBusyService
         $cache_key_short = substr($cache_key, -8);
 
         /* Diagnóstico: detectar si la respuesta va a salir de un valor cacheado de una
-         * corrida anterior o si se va a consultar la API de Google ahora. Sin este log,
-         * un valor cacheado viejo (de antes de que existiera un evento nuevo en Google)
-         * se devuelve en silencio y parece que la consulta nunca se ejecutó. Se chequea
-         * Cache::has() ANTES de Cache::remember() para no alterar el comportamiento de la
-         * caché (no se toca el TTL ni la lógica). */
-        if (Cache::has($cache_key)) {
+         * corrida anterior o si se va a consultar la API de Google ahora. */
+        $from_cache = Cache::has($cache_key);
+
+        if ($from_cache) {
             Log::channel('disponibilidad')->info(
                 '[DISPONIBILIDAD] Consulta a Google Calendar: usando valor cacheado para '
                 . implode(', ', $date_strings) . ' (TTL 5 min, clave ...' . $cache_key_short . ').'
@@ -74,63 +74,179 @@ class CloserGoogleCalendarBusyService
             );
         }
 
-        return Cache::remember($cache_key, now()->addMinutes(5), function () use ($date_strings) {
-            // Solo admins marcados como closer.
-            $closers = Admin::where('is_closer', true)->get();
-
-            if ($closers->isEmpty()) {
-                // Diagnóstico: sin closers, la capa de Google no aporta restricción.
-                Log::channel('disponibilidad')->info(
-                    '[DISPONIBILIDAD] No hay ningún admin marcado como closer (is_closer=true).'
-                    . ' La capa de Google Calendar no aporta restricción.'
-                );
-                return [];
-            }
-
-            // Rangos ocupados por closer_id → fecha → array de rangos.
-            $busy_by_closer = [];
-
-            foreach ($closers as $closer) {
-                // Buscar conexión activa de Google Calendar para este closer.
-                $connection = AdminCalendarConnection::where('admin_id', $closer->id)
-                    ->where('is_active', true)
-                    ->first();
-
-                if (! $connection) {
-                    // Closer sin calendario conectado: no aporta restricción.
-                    // Si no configuró calendario, el sistema no bloquea disponibilidad.
-                    // Diagnóstico: dejar rastro de que este closer se omitió de la capa.
-                    $closer_label = $closer->name ?? $closer->email ?? ('admin #' . $closer->id);
-                    Log::channel('disponibilidad')->info(
-                        '[DISPONIBILIDAD] Closer #' . $closer->id . ' (' . $closer_label . ')'
-                        . ' no tiene Google Calendar conectado o la conexión está inactiva.'
-                        . ' Se omite de esta capa.'
-                    );
-                    continue;
-                }
-
-                // Consultar rangos ocupados desde Google Calendar (con manejo de errores).
-                $ranges = $this->fetch_busy_ranges_from_google($connection, $date_strings);
-                if ($ranges !== null) {
-                    $busy_by_closer[$closer->id] = $ranges;
-                }
-            }
-
-            if (empty($busy_by_closer)) {
-                return [];
-            }
-
-            // Un solo closer con calendario conectado: devolver directo sin intersección.
-            if (count($busy_by_closer) === 1) {
-                return reset($busy_by_closer);
-            }
-
-            // TODO: decisión pendiente de asignación de closer cuando haya más de uno -
-            // hoy se usa intersección conservadora (un slot solo es libre si TODOS los
-            // closers activos estarían libres). Revisar cuando se defina el criterio de
-            // asignación real (round robin / carga / manual).
-            return $this->intersect_busy_ranges($busy_by_closer, $date_strings);
+        /* El closure devuelve ranges + snapshot fresco; la caché guarda ambos para reutilizar ranges. */
+        $cached_payload = Cache::remember($cache_key, now()->addMinutes(5), function () use ($date_strings) {
+            return $this->compute_busy_ranges_and_snapshot($date_strings);
         });
+
+        /* Compatibilidad con entradas cacheadas antes del prompt 105 (solo mapa de rangos). */
+        if (isset($cached_payload['ranges'])) {
+            $ranges = $cached_payload['ranges'];
+        } else {
+            $ranges = is_array($cached_payload) ? $cached_payload : [];
+        }
+
+        // Respuesta servida desde caché: marcar closers como cacheado sin eventos detallados.
+        if ($from_cache) {
+            $snapshot = $this->build_cache_hit_snapshot($date_strings);
+        } else {
+            $snapshot = $cached_payload['snapshot'] ?? null;
+        }
+
+        return [
+            'ranges'   => $ranges,
+            'snapshot' => $snapshot,
+        ];
+    }
+
+    /**
+     * Consulta Google Calendar y arma rangos en minutos junto al snapshot estructurado.
+     *
+     * @param string[] $date_strings Fechas Y-m-d a consultar.
+     * @return array{ranges: array<string, array<int, array{0: int, 1: int}>>, snapshot: array<string, mixed>}
+     */
+    protected function compute_busy_ranges_and_snapshot(array $date_strings): array
+    {
+        // Momento de la consulta fresca a Google (o del intento).
+        $consultado_en = now()->toIso8601String();
+
+        // Solo admins marcados como closer.
+        $closers = Admin::where('is_closer', true)->get();
+
+        if ($closers->isEmpty()) {
+            Log::channel('disponibilidad')->info(
+                '[DISPONIBILIDAD] No hay ningún admin marcado como closer (is_closer=true).'
+                . ' La capa de Google Calendar no aporta restricción.'
+            );
+
+            return [
+                'ranges'   => [],
+                'snapshot' => [
+                    'consultado_en' => $consultado_en,
+                    'closers'       => [],
+                ],
+            ];
+        }
+
+        // Rangos ocupados por closer_id → fecha → array de rangos.
+        $busy_by_closer   = [];
+        $snapshot_closers = [];
+
+        foreach ($closers as $closer) {
+            $closer_label = $closer->name ?? $closer->email ?? ('admin #' . $closer->id);
+
+            // Entrada base del snapshot para este closer.
+            $snapshot_entry = [
+                'admin_id' => $closer->id,
+                'nombre'   => $closer_label,
+            ];
+
+            // Buscar conexión activa de Google Calendar para este closer.
+            $connection = AdminCalendarConnection::where('admin_id', $closer->id)
+                ->where('is_active', true)
+                ->first();
+
+            if (! $connection) {
+                Log::channel('disponibilidad')->info(
+                    '[DISPONIBILIDAD] Closer #' . $closer->id . ' (' . $closer_label . ')'
+                    . ' no tiene Google Calendar conectado o la conexión está inactiva.'
+                    . ' Se omite de esta capa.'
+                );
+
+                $snapshot_entry['estado'] = 'sin_calendario';
+                $snapshot_closers[]       = $snapshot_entry;
+                continue;
+            }
+
+            $snapshot_entry['google_account_email'] = $connection->google_account_email;
+            $snapshot_entry['google_calendar_id']   = $connection->google_calendar_id;
+
+            // Consultar rangos ocupados desde Google Calendar (con manejo de errores).
+            $fetch_result = $this->fetch_busy_ranges_from_google($connection, $date_strings);
+
+            if (empty($fetch_result['ok'])) {
+                $snapshot_entry['estado'] = $fetch_result['estado'] ?? 'error_api';
+                $snapshot_closers[]       = $snapshot_entry;
+                continue;
+            }
+
+            $snapshot_entry['estado']  = 'consultado';
+            $snapshot_entry['eventos'] = $fetch_result['eventos'] ?? [];
+            $snapshot_closers[]        = $snapshot_entry;
+
+            $busy_by_closer[$closer->id] = $fetch_result['ranges'];
+        }
+
+        // Sin closers consultables: no hay restricción pero sí snapshot de diagnóstico.
+        if (empty($busy_by_closer)) {
+            return [
+                'ranges'   => [],
+                'snapshot' => [
+                    'consultado_en' => $consultado_en,
+                    'closers'       => $snapshot_closers,
+                ],
+            ];
+        }
+
+        // Un solo closer con calendario conectado: devolver directo sin intersección.
+        if (count($busy_by_closer) === 1) {
+            $ranges = reset($busy_by_closer);
+        } else {
+            // Intersección conservadora entre closers activos con calendario.
+            $ranges = $this->intersect_busy_ranges($busy_by_closer, $date_strings);
+        }
+
+        return [
+            'ranges'   => $ranges,
+            'snapshot' => [
+                'consultado_en' => $consultado_en,
+                'closers'       => $snapshot_closers,
+            ],
+        ];
+    }
+
+    /**
+     * Arma snapshot cuando la respuesta de rangos proviene de caché (sin eventos detallados).
+     *
+     * @param string[] $date_strings Fechas consultadas (contexto del log).
+     * @return array<string, mixed>
+     */
+    protected function build_cache_hit_snapshot(array $date_strings): array
+    {
+        $closers          = Admin::where('is_closer', true)->get();
+        $snapshot_closers = [];
+
+        foreach ($closers as $closer) {
+            $closer_label = $closer->name ?? $closer->email ?? ('admin #' . $closer->id);
+
+            $snapshot_entry = [
+                'admin_id' => $closer->id,
+                'nombre'   => $closer_label,
+                'estado'   => 'cacheado',
+                'eventos'  => [],
+            ];
+
+            $connection = AdminCalendarConnection::where('admin_id', $closer->id)
+                ->where('is_active', true)
+                ->first();
+
+            if ($connection) {
+                $snapshot_entry['google_account_email'] = $connection->google_account_email;
+                $snapshot_entry['google_calendar_id']   = $connection->google_calendar_id;
+            }
+
+            $snapshot_closers[] = $snapshot_entry;
+        }
+
+        Log::channel('disponibilidad')->info(
+            '[DISPONIBILIDAD] Snapshot de calendario marcado como cacheado para '
+            . implode(', ', $date_strings) . ' (sin detalle de eventos de Google).'
+        );
+
+        return [
+            'consultado_en' => now()->toIso8601String(),
+            'closers'       => $snapshot_closers,
+        ];
     }
 
     /**
@@ -141,29 +257,33 @@ class CloserGoogleCalendarBusyService
      *
      * @param AdminCalendarConnection $connection   Conexión activa del closer.
      * @param string[]                $date_strings Fechas Y-m-d a consultar.
-     * @return array<string, array<int, array{0: int, 1: int}>>|null Mapa fecha → rangos, o null si falló.
+     * @return array{
+     *   ok: bool,
+     *   estado?: string,
+     *   ranges?: array<string, array<int, array{0: int, 1: int}>>,
+     *   eventos?: array<int, array{fecha: string, inicio: string, fin: string}>
+     * }
      */
-    protected function fetch_busy_ranges_from_google(AdminCalendarConnection $connection, array $date_strings): ?array
+    protected function fetch_busy_ranges_from_google(AdminCalendarConnection $connection, array $date_strings): array
     {
         try {
             // Obtener access_token fresco para esta consulta.
             $access_token = $this->oauth_service->get_fresh_access_token($connection);
         } catch (GoogleCalendarTokenRevokedException $e) {
-            // Token revocado: loguear y excluir a este closer del cálculo.
             Log::warning('CloserGoogleCalendarBusyService: token revocado, se excluye el closer', [
                 'admin_id' => $e->admin_id,
             ]);
-            // Diagnóstico: reflejar el error también en el canal disponibilidad para que
-            // Lucas vea en un solo archivo todo lo que pasó con la consulta.
             Log::channel('disponibilidad')->warning(
                 '[DISPONIBILIDAD] Google Calendar: token revocado para admin #' . $e->admin_id
                 . ', se excluye el closer de esta capa.'
             );
-            return null;
+
+            return ['ok' => false, 'estado' => 'token_revocado'];
         }
 
         // Inicializar resultado con arrays vacíos para cada fecha solicitada.
-        $result = [];
+        $result  = [];
+        $eventos = [];
         foreach ($date_strings as $date) {
             $result[$date] = [];
         }
@@ -195,13 +315,13 @@ class CloserGoogleCalendarBusyService
                     'status'   => $response->status(),
                     'body'     => $response->body(),
                 ]);
-                // Diagnóstico: reflejar el fallo de la API también en el canal disponibilidad.
                 Log::channel('disponibilidad')->warning(
                     '[DISPONIBILIDAD] Google Calendar: fallo en freeBusy para admin #' . $connection->admin_id
                     . ' (HTTP ' . $response->status() . ').'
                     . ' Se excluye el closer de esta capa. Respuesta: ' . $response->body()
                 );
-                return null;
+
+                return ['ok' => false, 'estado' => 'error_api'];
             }
 
             // Actualizar timestamp de última sincronización exitosa.
@@ -211,8 +331,7 @@ class CloserGoogleCalendarBusyService
             $calendars = $response->json('calendars', []);
             $busy_list = $calendars[$connection->google_calendar_id]['busy'] ?? [];
 
-            /* Diagnóstico: detalle de cada evento busy devuelto por Google, con los valores
-             * originales ISO 8601 y los minutos calculados tras convertir a zona Argentina. */
+            /* Diagnóstico: detalle de cada evento busy devuelto por Google. */
             $busy_log_detail = [];
 
             foreach ($busy_list as $busy) {
@@ -236,7 +355,10 @@ class CloserGoogleCalendarBusyService
                     $end_minutes = 23 * 60 + 59;
                 }
 
-                // Acumular detalle para el log de diagnóstico (start/end originales + conversión).
+                $inicio_hhmm = LeadAiService::format_minutes_to_hhmm($start_minutes);
+                $fin_hhmm    = LeadAiService::format_minutes_to_hhmm($end_minutes);
+
+                // Acumular detalle para el log de diagnóstico.
                 $busy_log_detail[] = [
                     'start'         => $busy['start'],
                     'end'           => $busy['end'],
@@ -248,14 +370,15 @@ class CloserGoogleCalendarBusyService
                 // Solo incluir si la fecha está en las solicitadas.
                 if (isset($result[$date_key])) {
                     $result[$date_key][] = [$start_minutes, $end_minutes];
+
+                    $eventos[] = [
+                        'fecha'  => $date_key,
+                        'inicio' => $inicio_hhmm,
+                        'fin'    => $fin_hhmm,
+                    ];
                 }
             }
 
-            /* Diagnóstico: confirmar qué cuenta/calendario se consultó y qué eventos devolvió,
-             * como texto plano legible (una línea por evento, horarios en HH:MM) en el canal
-             * propio 'disponibilidad'. Se loguea aunque la lista venga vacía (0 eventos) para
-             * distinguir "no hay eventos" de "no se está consultando la cuenta correcta".
-             * Nunca se loguean tokens. El formateo de minutos se reutiliza de LeadAiService. */
             $lineas_eventos = [];
             foreach ($busy_log_detail as $evento) {
                 $lineas_eventos[] = '  - ' . $evento['date_key'] . ': '
@@ -263,7 +386,6 @@ class CloserGoogleCalendarBusyService
                     . ' a ' . LeadAiService::format_minutes_to_hhmm($evento['end_minutes']);
             }
 
-            /* Cantidad de eventos para la línea de resumen (con pluralización correcta). */
             $cantidad_eventos = count($busy_log_detail);
             $resumen_eventos  = '(' . $cantidad_eventos . ' evento' . ($cantidad_eventos === 1 ? '' : 's')
                 . ' encontrado' . ($cantidad_eventos === 1 ? '' : 's') . ')';
@@ -283,15 +405,19 @@ class CloserGoogleCalendarBusyService
                 'admin_id' => $connection->admin_id,
                 'error'    => $e->getMessage(),
             ]);
-            // Diagnóstico: reflejar la excepción también en el canal disponibilidad.
             Log::channel('disponibilidad')->error(
                 '[DISPONIBILIDAD] Google Calendar: excepción al consultar freeBusy para admin #'
                 . $connection->admin_id . '. Se excluye el closer de esta capa. Error: ' . $e->getMessage()
             );
-            return null;
+
+            return ['ok' => false, 'estado' => 'error_api'];
         }
 
-        return $result;
+        return [
+            'ok'      => true,
+            'ranges'  => $result,
+            'eventos' => $eventos,
+        ];
     }
 
     /**
@@ -301,17 +427,11 @@ class CloserGoogleCalendarBusyService
      * para que el próximo cálculo de slots consulte la API de Google en lugar de usar el valor
      * cacheado de 5 minutos (que podría no reflejar el evento recién creado/eliminado).
      *
-     * La clave invalidada corresponde a una consulta de un solo día (el caso más común
-     * al verificar disponibilidad de la fecha de la demo).
-     *
      * @param string $date Fecha Y-m-d cuya caché se invalida.
      * @return void
      */
     public function flush_cache_for_date(string $date): void
     {
-        // La clave de caché se genera con md5 del implode de las fechas consultadas.
-        // Para una sola fecha, la clave es md5 de la fecha sola, lo que coincide con
-        // la consulta más frecuente (build_availability_json consulta días individuales).
         $cache_key = 'closer_google_calendar_busy_' . md5($date);
 
         Cache::forget($cache_key);
@@ -345,7 +465,6 @@ class CloserGoogleCalendarBusyService
         $minutes_in_day = 24 * 60;
 
         foreach ($date_strings as $date) {
-            // Para cada minuto del día, verificar si TODOS los closers están ocupados.
             $all_closer_ids = array_keys($busy_by_closer);
             $num_closers    = count($all_closer_ids);
 
@@ -374,16 +493,16 @@ class CloserGoogleCalendarBusyService
             }
 
             // Comprimir los minutos intersectados en rangos [inicio, fin].
-            $ranges    = [];
-            $in_range  = false;
+            $ranges      = [];
+            $in_range    = false;
             $range_start = 0;
             for ($m = 0; $m < $minutes_in_day; $m++) {
                 if ($intersected[$m] && ! $in_range) {
                     $in_range    = true;
                     $range_start = $m;
                 } elseif (! $intersected[$m] && $in_range) {
-                    $ranges[]   = [$range_start, $m];
-                    $in_range   = false;
+                    $ranges[] = [$range_start, $m];
+                    $in_range = false;
                 }
             }
             if ($in_range) {

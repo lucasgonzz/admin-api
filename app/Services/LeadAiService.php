@@ -200,8 +200,10 @@ class LeadAiService
      */
     protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup): LeadMessage
     {
-        /* JSON estructurado por demo para que Claude interprete disponibilidad sin regex. */
-        $availability_data    = $this->build_availability_json();
+        /* JSON estructurado por demo para que Claude interprete disponibilidad sin regex.
+         * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
+        $calendar_snapshot    = null;
+        $availability_data    = $this->build_availability_json(3, $calendar_snapshot);
         $availability_context = "DISPONIBILIDAD DE DEMOS (JSON):\n"
             .json_encode($availability_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
@@ -271,7 +273,7 @@ class LeadAiService
 
         $parsed = $this->parse_json_response($text);
 
-        return $this->create_message_and_update_lead($lead, $parsed, $is_followup);
+        return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot);
     }
 
     /**
@@ -280,14 +282,18 @@ class LeadAiService
      * Incluye la fecha/hora actual en Argentina, la duración configurada de cada demo
      * y un mapa demo_id → fecha (Y-m-d) → horarios libres (HH:MM).
      *
-     * @param int $days_ahead Cantidad mínima de días hábiles a incluir (default: 3).
+     * @param int        $days_ahead        Cantidad mínima de días hábiles a incluir (default: 3).
+     * @param array|null $calendar_snapshot Referencia opcional para recibir el snapshot de Google Calendar.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = 3): array
+    public function build_availability_json(int $days_ahead = 3, &$calendar_snapshot = null): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo. */
         $context = $this->prepare_slot_availability_context($days_ahead);
+
+        /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
+        $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
 
         /* Etiqueta legible de hoy en timezone Argentina. */
         $day_names_full = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
@@ -412,6 +418,9 @@ class LeadAiService
         $blocked_by_demo = $load_result['blocked_by_demo'];
         $closer_busy     = $load_result['closer_busy'];
 
+        /* Snapshot legible de eventos Google del closer (solo para debug en admin-spa). */
+        $google_calendar_snapshot = null;
+
         /* Tercera capa de bloqueo: eventos del calendario Google del closer.
          * Si la API de Google falla, se degrada de forma segura (continúa sin esta capa)
          * para no romper el flujo de WhatsApp por un error externo. */
@@ -419,7 +428,9 @@ class LeadAiService
             $google_busy_service = new CloserGoogleCalendarBusyService(
                 new \App\Services\GoogleCalendarOAuthService()
             );
-            $google_busy = $google_busy_service->get_busy_ranges_for_dates($date_strings);
+            $google_busy_result = $google_busy_service->get_busy_ranges_for_dates($date_strings);
+            $google_busy        = $google_busy_result['ranges'] ?? [];
+            $google_calendar_snapshot = $google_busy_result['snapshot'] ?? null;
 
             // Fusionar rangos de Google Calendar con los rangos de agenda interna.
             foreach ($date_strings as $date) {
@@ -507,11 +518,21 @@ class LeadAiService
                 $google_busy_service_extra = new CloserGoogleCalendarBusyService(
                     new \App\Services\GoogleCalendarOAuthService()
                 );
-                $google_busy_extra = $google_busy_service_extra->get_busy_ranges_for_dates([$extra_key]);
+                $google_busy_extra_result = $google_busy_service_extra->get_busy_ranges_for_dates([$extra_key]);
+                $google_busy_extra        = $google_busy_extra_result['ranges'] ?? [];
+
                 if (! empty($google_busy_extra[$extra_key])) {
                     $closer_busy[$extra_key] = array_merge(
                         $closer_busy[$extra_key],
                         $google_busy_extra[$extra_key]
+                    );
+                }
+
+                /* Acumular eventos del día extra en el snapshot principal. */
+                if (! empty($google_busy_extra_result['snapshot'])) {
+                    $google_calendar_snapshot = $this->merge_google_calendar_snapshots(
+                        $google_calendar_snapshot,
+                        $google_busy_extra_result['snapshot']
                     );
                 }
             } catch (\Exception $e) {
@@ -531,17 +552,70 @@ class LeadAiService
         }
 
         return [
-            'duracion'        => $duracion,
-            'gracia_post'     => $gracia_post,
-            'now'             => $now,
-            'now_minutes'     => $now_minutes,
-            'today_key'       => $today_key,
-            'demos'           => $demos,
-            'dates_map'       => $dates_map,
-            'blocked_by_demo' => $blocked_by_demo,
-            'closer_busy'     => $closer_busy,
+            'duracion'                 => $duracion,
+            'gracia_post'              => $gracia_post,
+            'now'                      => $now,
+            'now_minutes'              => $now_minutes,
+            'today_key'                => $today_key,
+            'demos'                    => $demos,
+            'dates_map'                => $dates_map,
+            'blocked_by_demo'          => $blocked_by_demo,
+            'closer_busy'              => $closer_busy,
             /* Config de generación de slots para pasar a compute_day_slots_for_demo(). */
-            'slot_config'     => $slot_config,
+            'slot_config'              => $slot_config,
+            /* Snapshot de eventos Google consultados al calcular disponibilidad. */
+            'google_calendar_snapshot' => $google_calendar_snapshot,
+        ];
+    }
+
+    /**
+     * Fusiona dos snapshots de calendario Google acumulando eventos por closer.
+     *
+     * Se usa cuando la consulta principal y la de día extra consultan fechas distintas.
+     *
+     * @param array<string, mixed>|null $base_snapshot   Snapshot de la consulta principal.
+     * @param array<string, mixed>|null $extra_snapshot  Snapshot de la consulta del día extra.
+     * @return array<string, mixed>|null Snapshot combinado o el único disponible.
+     */
+    protected function merge_google_calendar_snapshots(?array $base_snapshot, ?array $extra_snapshot): ?array
+    {
+        if (empty($base_snapshot)) {
+            return $extra_snapshot;
+        }
+        if (empty($extra_snapshot)) {
+            return $base_snapshot;
+        }
+
+        $merged_closers = [];
+        foreach ($base_snapshot['closers'] ?? [] as $closer_entry) {
+            $merged_closers[(int) $closer_entry['admin_id']] = $closer_entry;
+        }
+
+        foreach ($extra_snapshot['closers'] ?? [] as $closer_entry) {
+            $admin_id = (int) $closer_entry['admin_id'];
+
+            if (! isset($merged_closers[$admin_id])) {
+                $merged_closers[$admin_id] = $closer_entry;
+                continue;
+            }
+
+            $existing_eventos = $merged_closers[$admin_id]['eventos'] ?? [];
+            $extra_eventos    = $closer_entry['eventos'] ?? [];
+
+            if (! empty($extra_eventos)) {
+                $merged_closers[$admin_id]['eventos'] = array_merge($existing_eventos, $extra_eventos);
+            }
+
+            /* Si el segundo snapshot trae un estado más informativo, conservarlo. */
+            if (($merged_closers[$admin_id]['estado'] ?? '') === 'cacheado'
+                && ($closer_entry['estado'] ?? '') !== 'cacheado') {
+                $merged_closers[$admin_id]['estado'] = $closer_entry['estado'];
+            }
+        }
+
+        return [
+            'consultado_en' => $base_snapshot['consultado_en'] ?? ($extra_snapshot['consultado_en'] ?? now()->toIso8601String()),
+            'closers'       => array_values($merged_closers),
         ];
     }
 
@@ -1127,8 +1201,12 @@ class LeadAiService
      *
      * @return LeadMessage Mensaje creado con status `sugerido` (sin envío a WhatsApp).
      */
-    protected function create_message_and_update_lead(Lead $lead, array $parsed, bool $is_followup): LeadMessage
-    {
+    protected function create_message_and_update_lead(
+        Lead $lead,
+        array $parsed,
+        bool $is_followup,
+        ?array $calendar_snapshot = null
+    ): LeadMessage {
         /* Extraer y validar los campos obligatorios de la respuesta. */
         $mensaje    = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
         $estado_raw = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
@@ -1508,6 +1586,10 @@ class LeadAiService
             'sender'                => 'sistema',
             'content'               => $mensaje,
             'ai_reasoning'          => $razonamiento,
+            /* Snapshot de eventos Google del closer al ofrecer disponibilidad (debug admin-spa). */
+            'calendar_snapshot'     => $calendar_snapshot
+                ? json_encode($calendar_snapshot, JSON_UNESCAPED_UNICODE)
+                : null,
             'suggested_lead_status' => $suggested_lead_status,
             'status'                => 'sugerido',
             'is_followup'           => $is_followup,
