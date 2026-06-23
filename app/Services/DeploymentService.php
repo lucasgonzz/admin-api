@@ -398,7 +398,11 @@ class DeploymentService
         $zip_command = 'cd ' . escapeshellarg($api_build_path)
             . ' && rm -f ' . escapeshellarg($zip_name)
             . ' && zip -r ' . escapeshellarg($zip_name) . ' . '
-            . "--exclude='.env' --exclude='vendor/*' --exclude='storage/*' --exclude='public/*' 2>&1";
+            . "--exclude='.env' --exclude='vendor/*' --exclude='storage/*' --exclude='public/*'"
+            . " --exclude='*.zip' --exclude='tests/*' --exclude='database/super-budgets/*'"
+            . " --exclude='database/seeders/articles/*' --exclude='database/seeders/truvari/*'"
+            . " --exclude='database/seeders/subcategories/*' --exclude='database/seeders/sales/*'"
+            . " 2>&1";
         $this->exec_build_ssh('upload_api', $zip_command, true, true);
         $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
         $this->log('upload_api', "API empaquetada ({$api_zip_bytes} bytes en VPS)");
@@ -1785,3 +1789,4 @@ class DeploymentService
         return $deployment_log;
     }
 }
+
