@@ -186,15 +186,15 @@ class ImplementationConversationService
                 $data['use_price_lists'] = true;
             }
 
-            // La primera pregunta de configuración es siempre el tipo de negocio.
-            $data['current_question'] = 'business_type';
+            // La primera pregunta arranca por listas de precios (business_type eliminado).
+            $data['current_question'] = 'use_price_lists';
 
             // Mensaje 1: presentación del admin (se envía siempre antes de la primera pregunta).
             $greeting = $this->build_stage_1_greeting($implementation, $client);
             $this->send_outbound($implementation, 1, $phone, $greeting);
 
             // Mensaje 2: primera pregunta de configuración (sin saludo incluido).
-            $first_question = $this->build_question_text('business_type', $data, $client, $implementation);
+            $first_question = $this->build_question_text('use_price_lists', $data, $client, $implementation);
             $this->send_outbound($implementation, 1, $phone, $first_question);
 
             $stage->data = $data;
@@ -2914,7 +2914,6 @@ class ImplementationConversationService
             case 'deposit_names':
             case 'payment_discounts':
             case 'company_name':
-            case 'business_type':
             case 'address_company':
                 return $body !== '' ? $body : null;
 
@@ -3018,8 +3017,8 @@ class ImplementationConversationService
      */
     private function resolve_stage1_sequence(array $data): array
     {
-        // Secuencia base de preguntas. El tipo de negocio es siempre la primera pregunta.
-        $keys = ['business_type', 'use_price_lists'];
+        // Secuencia base de preguntas. Arranca directamente por listas de precios.
+        $keys = ['use_price_lists'];
 
         // Preguntar por nombres de listas solo si el cliente usará listas de precios.
         if (isset($data['use_price_lists']) && $data['use_price_lists'] === true) {
@@ -3098,8 +3097,6 @@ class ImplementationConversationService
     private function build_question_text(string $key, array $data, ?Client $client, ?Implementation $implementation = null): string
     {
         switch ($key) {
-            case 'business_type':
-                return "Para empezar: ¿a qué se dedica el negocio? Por ejemplo: distribuidora, ropa, ferretería, verdulería, etc. Con eso configuramos el sistema a medida.";
             case 'use_price_lists':
                 return $this->build_question_use_price_lists($implementation, $client);
             case 'price_lists':
