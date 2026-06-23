@@ -3,8 +3,10 @@
 namespace App\Console\Commands;
 
 use App\Models\Lead;
+use App\Services\DemoCicloAdminNotificationService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -89,12 +91,23 @@ class CheckDemoIngresoTimeout extends Command
 
             /*
              * Pasar el lead a demo_pendiente_de_ingreso y marcar el flag anti-duplicado.
-             * El prompt 097 escucha este cambio de estado para notificar a los admins.
+             * La notificación a admins se dispara inmediatamente después del update.
              */
             $lead->update([
-                'status'                   => 'demo_pendiente_de_ingreso',
+                'status'                     => 'demo_pendiente_de_ingreso',
                 'demo_no_ingreso_notificado' => true,
             ]);
+
+            /* Notificar a admins suscritos vía WhatsApp que el lead no ingresó por timeout. */
+            try {
+                $ciclo_service = new DemoCicloAdminNotificationService(new WhatsappSendService());
+                $ciclo_service->notify_no_ingreso($lead->fresh(), 'no respondió al check de ingreso');
+            } catch (\Throwable $e) {
+                Log::error('CheckDemoIngresoTimeout: error al notificar no_ingreso a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
 
             /* Notificar a admin-spa vía socket. */
             LeadBroadcastService::emit_conversation_updated((int) $lead->id);

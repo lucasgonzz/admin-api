@@ -2,6 +2,8 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Admin;
+use App\Models\AdminSetting;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
@@ -28,6 +30,22 @@ class SendMorningDemoReminder extends Command
      * @var string
      */
     private const TEMPLATE_NAME = 'cc_recordatorio_manana_demo_v2';
+
+    /**
+     * Nombre del template Meta para el resumen matinal de demos del día a los admins.
+     * Variable {{1}}: listado formateado de leads con demo hoy (puede contener saltos de línea).
+     *
+     * @var string
+     */
+    private const TEMPLATE_RESUMEN_ADMINS = 'cc_admin_resumen_demos_dia';
+
+    /**
+     * Clave en AdminSetting para registrar la fecha del último envío del resumen a admins.
+     * Se usa como anti-duplicado para que el resumen salga una sola vez por día.
+     *
+     * @var string
+     */
+    private const SETTING_ULTIMO_ENVIO_RESUMEN = 'demo_resumen_admins_ultimo_envio';
 
     /**
      * Ventana en minutos alrededor de la hora configurada para no perder el trigger.
@@ -112,6 +130,13 @@ class SendMorningDemoReminder extends Command
 
         // Notificar a admin-spa que las conversaciones cambiaron (una emisión por lead ya ocurrió en send_morning_reminder).
         $this->info("Recordatorios de mañana enviados: {$sent}");
+
+        /*
+         * Resumen matinal a admins: lista de todos los leads con demo hoy.
+         * Se envía en la misma ventana horaria del recordatorio, una sola vez por día.
+         * Anti-duplicado: se verifica que la fecha guardada en AdminSetting no sea hoy.
+         */
+        $this->send_morning_summary_to_admins($now);
 
         return 0;
     }
@@ -208,6 +233,137 @@ class SendMorningDemoReminder extends Command
 
         // Notificar a admin-spa vía socket para refrescar la conversación.
         LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+    }
+
+    /**
+     * Envía el resumen matinal de demos del día a los admins suscritos (una vez por día).
+     *
+     * Construye un listado de todos los leads con demo hoy ordenados por hora,
+     * formatea el texto y lo envía como una sola variable del template a cada admin.
+     * Si ya se envió hoy (según AdminSetting), omite el envío.
+     * Si no hay demos hoy, omite el envío para evitar mensajes vacíos.
+     *
+     * @param Carbon $now Momento actual en timezone Argentina.
+     *
+     * @return void
+     */
+    protected function send_morning_summary_to_admins(Carbon $now): void
+    {
+        /* Anti-duplicado: verificar si ya se envió el resumen hoy. */
+        $hoy           = $now->format('Y-m-d');
+        $ultimo_envio  = AdminSetting::get(self::SETTING_ULTIMO_ENVIO_RESUMEN, '');
+        if ($ultimo_envio === $hoy) {
+            $this->info('Resumen matinal a admins ya enviado hoy. Se omite.');
+
+            return;
+        }
+
+        /* Reunir todos los leads con demo hoy (sin importar sub-estado de demo), ordenados por hora de inicio. */
+        $leads_hoy = Lead::query()
+            ->whereNotNull('demo_date')
+            ->whereNotNull('demo_start_time')
+            ->whereDate('demo_date', $hoy)
+            ->orderBy('demo_start_time')
+            ->get();
+
+        /* Si no hay demos hoy, no enviar para evitar mensajes vacíos. */
+        if ($leads_hoy->isEmpty()) {
+            $this->info('Sin demos hoy. No se envía resumen matinal a admins.');
+
+            return;
+        }
+
+        /* Construir el listado de líneas formateadas (una por lead). */
+        $lineas = $this->build_resumen_lineas($leads_hoy);
+
+        /* Texto completo que se envía como variable {{1}} del template. */
+        $listado = implode("\n", $lineas);
+
+        /* Obtener admins suscritos con teléfono cargado. */
+        $admins = Admin::where('notify_demo_scheduled_whatsapp', true)
+            ->whereNotNull('phone_number')
+            ->where('phone_number', '!=', '')
+            ->get();
+
+        if ($admins->isEmpty()) {
+            Log::info('SendMorningDemoReminder: sin admins suscritos para el resumen matinal.');
+
+            return;
+        }
+
+        /* Enviar el resumen a cada admin suscrito. Los errores individuales no cortan el loop. */
+        $enviados = 0;
+        foreach ($admins as $admin) {
+            try {
+                $this->whatsapp_send_service->send_template(
+                    (string) $admin->phone_number,
+                    self::TEMPLATE_RESUMEN_ADMINS,
+                    [$listado]
+                );
+
+                Log::info('SendMorningDemoReminder: resumen matinal enviado a admin.', [
+                    'admin_id'     => $admin->id,
+                    'total_demos'  => $leads_hoy->count(),
+                ]);
+
+                $enviados++;
+            } catch (\Throwable $e) {
+                Log::error('SendMorningDemoReminder: error al enviar resumen matinal a admin.', [
+                    'admin_id' => $admin->id,
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
+
+        /* Registrar fecha de envío para el anti-duplicado del día siguiente. */
+        if ($enviados > 0) {
+            AdminSetting::set(self::SETTING_ULTIMO_ENVIO_RESUMEN, $hoy);
+        }
+
+        $this->info("Resumen matinal enviado a {$enviados} admin(s). Total demos hoy: {$leads_hoy->count()}");
+    }
+
+    /**
+     * Construye el array de líneas formateadas para el resumen matinal de admins.
+     *
+     * Formato de cada línea: "HH:MM - Nombre (rubro)"
+     * El rubro se resuelve en orden: demo_summary_structured['empresa'] > company_name > '-'.
+     *
+     * @param \Illuminate\Support\Collection $leads Colección de leads con demo hoy, ordenados por hora.
+     *
+     * @return string[] Array de líneas formateadas, una por lead.
+     */
+    protected function build_resumen_lineas($leads): array
+    {
+        /* Construir cada línea como "HH:MM - Nombre (rubro)". */
+        $lineas = [];
+        foreach ($leads as $lead) {
+            /* Hora de inicio de la demo. */
+            $hora = $lead->demo_start_time ?? '??:??';
+
+            /* Nombre legible del lead: contact_name > company_name > "Lead #ID". */
+            $nombre = '';
+            if (! empty($lead->contact_name)) {
+                $nombre = $lead->contact_name;
+            } elseif (! empty($lead->company_name)) {
+                $nombre = $lead->company_name;
+            } else {
+                $nombre = "Lead #{$lead->id}";
+            }
+
+            /* Rubro: demo_summary_structured['empresa'] > company_name > '-'. */
+            $rubro = '-';
+            $structured = $lead->demo_summary_structured;
+            if (is_array($structured) && ! empty($structured['empresa'])) {
+                $rubro = (string) $structured['empresa'];
+            } elseif (! empty($lead->company_name)) {
+                $rubro = (string) $lead->company_name;
+            }
+
+            $lineas[] = "{$hora} - {$nombre} ({$rubro})";
+        }
+
+        return $lineas;
     }
 
     /**

@@ -1173,11 +1173,20 @@ class LeadAiService
             ]);
         }
 
+        /*
+         * Flag para detectar si el agendar_demo que sigue es un reagendado (el lead ya tenía demo
+         * y pidió cambiar el horario). Se usa para elegir el template correcto en DemoScheduledWhatsappService.
+         * Se marca true dentro del bloque cancelar_demo cuando efectivamente había una demo previa.
+         */
+        $es_reagendado = false;
+
         /* Acción: cancelar demo agendada cuando el lead pide reagendar.
          * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
          * Limpia los 4 campos de demo para liberar el slot en la disponibilidad de inmediato. */
         $cancelar_demo = ! empty($parsed['cancelar_demo']);
         if ($cancelar_demo && $lead->demo_date !== null) {
+            /* Marcar que el próximo agendar_demo es un reagendado. */
+            $es_reagendado = true;
             /* Guardar valores anteriores para el log antes de limpiarlos. */
             $demo_date_anterior  = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : 'sin fecha';
             $demo_start_anterior = $lead->demo_start_time ?? 'sin hora';
@@ -1281,21 +1290,32 @@ class LeadAiService
                         'demo_end'   => $demo_end,
                     ]);
 
-                    /* Notificar por WhatsApp a los admins suscritos a demos agendadas. */
+                    /* Notificar por WhatsApp a los admins suscritos a demos agendadas.
+                     * Si $es_reagendado = true se usa el template de cambio de horario. */
                     try {
                         $demo_notify_service = new \App\Services\DemoScheduledWhatsappService(
                             new \App\Services\WhatsappSendService()
                         );
-                        $demo_notify_service->notify($lead, $demo_date, $demo_start);
+                        $demo_notify_service->notify($lead, $demo_date, $demo_start, $es_reagendado);
                     } catch (\Throwable $e) {
                         Log::error('LeadAiService: error al notificar demo agendada por WhatsApp.', [
-                            'lead_id' => $lead->id,
-                            'error'   => $e->getMessage(),
+                            'lead_id'       => $lead->id,
+                            'is_reagendado' => $es_reagendado,
+                            'error'         => $e->getMessage(),
                         ]);
                     }
                 }
             }
         }
+
+        /*
+         * Flags de notificación WhatsApp a admins para las acciones de inferencia del ciclo de demo.
+         * Se marcan true únicamente cuando la acción se procesa de verdad (primera vez, anti-duplicado).
+         * Las notificaciones se disparan después del $lead->save() para que los timestamps estén persistidos.
+         */
+        $notificar_ingreso_confirmado = false;
+        $notificar_fin_confirmado     = false;
+        $notificar_no_ingreso         = false;
 
         /* Acción: confirmar que el lead ingresó a la demo (inferencia conversacional).
          * Solo válida si el lead está en ingresando_demo o en demo_agendada (tolerante,
@@ -1311,6 +1331,8 @@ class LeadAiService
                     /* Marcar el flag y registrar el momento exacto de confirmación. */
                     $lead->demo_ingreso_confirmado    = true;
                     $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');
+                    /* Habilitar la notificación a admins (se dispara después del save). */
+                    $notificar_ingreso_confirmado = true;
                     Log::info('LeadAiService: ingreso a demo confirmado por inferencia.', [
                         'lead_id' => $lead->id,
                     ]);
@@ -1327,7 +1349,9 @@ class LeadAiService
 
         /* Acción: confirmar que el lead terminó la demo (inferencia conversacional).
          * Válida en demo_en_curso o demo_pendiente_de_terminar.
-         * Anti-duplicado igual que confirmar_ingreso. */
+         * Anti-duplicado igual que confirmar_ingreso.
+         * Cubre también la reanudación (evento 8): lead en demo_pendiente_de_terminar
+         * que vuelve y confirma el fin. El mismo enganche sirve para ambos estados. */
         $confirmar_fin_demo = ! empty($parsed['confirmar_fin_demo']);
         if ($confirmar_fin_demo) {
             /* Estados desde los cuales tiene sentido confirmar el fin. */
@@ -1338,6 +1362,8 @@ class LeadAiService
                     /* Marcar el flag y registrar el momento exacto de confirmación de fin. */
                     $lead->demo_terminada_confirmada    = true;
                     $lead->demo_terminada_confirmada_at = now('America/Argentina/Buenos_Aires');
+                    /* Habilitar la notificación a admins (se dispara después del save). */
+                    $notificar_fin_confirmado = true;
                     Log::info('LeadAiService: fin de demo confirmado por inferencia.', [
                         'lead_id' => $lead->id,
                     ]);
@@ -1363,6 +1389,8 @@ class LeadAiService
             $estado          = $pipeline_status->slug;
             /* Recalcular el diff de estado para el badge. */
             $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            /* Habilitar la notificación a admins (se dispara después del save). */
+            $notificar_no_ingreso = true;
             Log::info('LeadAiService: no ingreso a demo marcado por inferencia.', [
                 'lead_id' => $lead->id,
             ]);
@@ -1468,6 +1496,53 @@ class LeadAiService
 
         /* Único save del lead: consolida nombre, email, demo y flags de sugerencia. */
         $lead->save();
+
+        /*
+         * Notificaciones WhatsApp a admins del ciclo de demo.
+         * Se disparan después del save() para que los timestamps (_at) ya estén persistidos.
+         * Cada bloque es independiente: un fallo en uno no afecta a los demás.
+         */
+        if ($notificar_ingreso_confirmado) {
+            try {
+                $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $ciclo_service->notify_ingreso_confirmado($lead->fresh());
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar ingreso_confirmado a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($notificar_fin_confirmado) {
+            try {
+                $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $ciclo_service->notify_fin_confirmado($lead->fresh());
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar fin_confirmado a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($notificar_no_ingreso) {
+            try {
+                $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $ciclo_service->notify_no_ingreso($lead->fresh(), 'el lead indicó que no podía ingresar');
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar no_ingreso a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
 
         /* Disparar Mail 1 si se guardó un email nuevo en esta pasada. */
         if ($email_nuevo) {

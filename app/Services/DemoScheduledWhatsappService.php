@@ -9,12 +9,12 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Servicio responsable de notificar por WhatsApp a los admins suscritos
- * cuando se confirma y persiste una demo agendada.
+ * cuando se confirma y persiste una demo agendada (alta o reagendado).
  *
  * Usa send_template() para no depender de la ventana de 24hs de Meta.
- * La plantilla `demo_agendada_admin` debe estar aprobada en Meta Business Manager.
+ * Las plantillas deben estar aprobadas en Meta Business Manager.
  *
- * Variables de la plantilla (en orden):
+ * Variables de las plantillas (en orden):
  *   {{1}} → Nombre del lead (o empresa, o "Lead #ID" si no tiene ninguno)
  *   {{2}} → Fecha de la demo en formato legible (ej. "20/06/2026")
  *   {{3}} → Hora de inicio de la demo en formato HH:MM
@@ -23,10 +23,21 @@ use Illuminate\Support\Facades\Log;
 class DemoScheduledWhatsappService
 {
     /**
-     * Nombre de la plantilla aprobada en Meta Business Manager.
-     * Debe coincidir exactamente con el nombre registrado en la plataforma.
+     * Nombre de la plantilla de alta de demo (primera vez que se agenda).
+     * Debe coincidir exactamente con el nombre registrado en Meta Business Manager.
+     *
+     * @var string
      */
     const TEMPLATE_NAME = 'demo_agendada_admin';
+
+    /**
+     * Nombre de la plantilla de reagendado de demo (cambio de horario).
+     * Se usa cuando el lead cancela la demo existente y agenda una nueva.
+     * Mismo set de variables que TEMPLATE_NAME; el texto del body distingue la situación.
+     *
+     * @var string
+     */
+    const TEMPLATE_NAME_REAGENDADO = 'cc_admin_demo_reagendada';
 
     /**
      * Instancia del servicio de envío de WhatsApp.
@@ -46,20 +57,26 @@ class DemoScheduledWhatsappService
     }
 
     /**
-     * Notifica a todos los admins suscritos que se agendó una demo.
+     * Notifica a todos los admins suscritos que se agendó (o reagendó) una demo.
      *
      * Busca admins con notify_demo_scheduled_whatsapp = true y phone_number cargado.
      * Para cada uno, envía la plantilla con los datos del lead y la demo.
      * Los errores individuales se logean pero no cortan el flujo de los demás admins.
      *
-     * @param Lead   $lead        Lead que agendó la demo.
-     * @param string $demo_date   Fecha de la demo en formato Y-m-d.
-     * @param string $demo_start  Hora de inicio en formato HH:MM.
+     * Si $is_reagendado = true, se usa TEMPLATE_NAME_REAGENDADO para que el admin
+     * entienda que es un cambio de horario y no una demo nueva.
+     *
+     * @param Lead   $lead          Lead que agendó la demo.
+     * @param string $demo_date     Fecha de la demo en formato Y-m-d.
+     * @param string $demo_start    Hora de inicio en formato HH:MM.
+     * @param bool   $is_reagendado true si el lead ya tenía una demo previa y cambió el horario.
      *
      * @return void
      */
-    public function notify(Lead $lead, string $demo_date, string $demo_start): void
+    public function notify(Lead $lead, string $demo_date, string $demo_start, bool $is_reagendado = false): void
     {
+        /* Elegir el template según si es un alta nueva o un cambio de horario. */
+        $template_name = $is_reagendado ? self::TEMPLATE_NAME_REAGENDADO : self::TEMPLATE_NAME;
         /* Obtener admins que tienen activo el flag de notificación y tienen teléfono cargado. */
         $admins = Admin::where('notify_demo_scheduled_whatsapp', true)
             ->whereNotNull('phone_number')
@@ -96,15 +113,16 @@ class DemoScheduledWhatsappService
             try {
                 $this->sender->send_template(
                     (string) $admin->phone_number,
-                    self::TEMPLATE_NAME,
+                    $template_name,
                     [$nombre_lead, $fecha_legible, $demo_start, $link_lead]
                 );
 
                 Log::info('DemoScheduledWhatsappService: notificación enviada.', [
-                    'lead_id'    => $lead->id,
-                    'admin_id'   => $admin->id,
-                    'demo_date'  => $demo_date,
-                    'demo_start' => $demo_start,
+                    'lead_id'       => $lead->id,
+                    'admin_id'      => $admin->id,
+                    'demo_date'     => $demo_date,
+                    'demo_start'    => $demo_start,
+                    'is_reagendado' => $is_reagendado,
                 ]);
             } catch (\Throwable $e) {
                 /* Loguear el error pero continuar con los demás admins. */

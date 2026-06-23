@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\DemoCicloAdminNotificationService;
 use App\Services\LeadBroadcastService;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
@@ -133,6 +134,17 @@ class CheckDemoIngress extends Command
 
             /* Marcar flag anti-duplicado para que este comando no vuelva a procesarlo. */
             $lead->update(['demo_check_ingreso_enviado' => true]);
+
+            /* Notificar a admins suscritos vía WhatsApp que se envió el check de ingreso. */
+            try {
+                $ciclo_service = new DemoCicloAdminNotificationService($this->whatsapp_send_service);
+                $ciclo_service->notify_check_ingreso_enviado($lead->fresh());
+            } catch (\Throwable $e) {
+                Log::error('CheckDemoIngress: error al notificar check_ingreso_enviado a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
 
             /* Notificar a admin-spa vía socket. */
             LeadBroadcastService::emit_conversation_updated((int) $lead->id);
