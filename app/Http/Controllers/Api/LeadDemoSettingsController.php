@@ -45,6 +45,10 @@ class LeadDemoSettingsController extends Controller
             'check_ingreso_minutos_post'      => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'resumen_minutos_antes_fin'       => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'duracion_llamada_closer_minutos' => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            // Settings del ciclo de vida automatizado de la demo.
+            'ingreso_timeout_minutos'         => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            'fin_seguimiento_minutos'         => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            'fin_timeout_minutos'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
         ]);
 
         /* Persistir todos los valores validados. */
