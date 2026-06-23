@@ -312,7 +312,8 @@ class LeadAiService
                     $context['now_minutes'],
                     $context['duracion'],
                     $closer_busy_for_date,
-                    $context['gracia_post']
+                    $context['gracia_post'],
+                    $context['slot_config'] ?? []
                 );
             }
         }
@@ -340,6 +341,43 @@ class LeadAiService
         $duracion    = LeadDemoSettings::get_duracion_minutos();
         $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
         $gracia_post = LeadDemoSettings::get_gracia_minutos_post();
+
+        /* Parámetros para generación dinámica de slots (incorporados en prompt 075/076). */
+        /* Horarios laborales del closer por día de semana, en formato H:i-H:i. */
+        $horario_lv        = LeadDemoSettings::get_closer_horario_lunes_viernes();
+        $horario_sab       = LeadDemoSettings::get_closer_horario_sabado();
+        $horario_dom       = LeadDemoSettings::get_closer_horario_domingo();
+        /* Frecuencia en minutos entre slots candidatos (ej. 30 = :00 y :30). */
+        $frecuencia_slots  = LeadDemoSettings::get_frecuencia_slots_minutos();
+        /* Checkbox: si true la llamada del closer también debe terminar dentro del horario. */
+        $llamada_termina   = LeadDemoSettings::get_llamada_debe_terminar_en_horario();
+        /* Duración de la llamada del closer post-demo en minutos. */
+        $duracion_closer   = LeadDemoSettings::get_duracion_llamada_closer_minutos();
+
+        /*
+         * Config agrupada para pasarla a compute_day_slots_for_demo() y get_all_slots_for_day()
+         * sin tener que extender la firma con 6+ parámetros individuales.
+         */
+        $slot_config = [
+            'horario_lv'                       => $horario_lv,
+            'horario_sab'                      => $horario_sab,
+            'horario_dom'                      => $horario_dom,
+            'frecuencia_slots'                 => $frecuencia_slots,
+            'duracion'                         => $duracion,
+            'gracia_post'                      => $gracia_post,
+            'duracion_llamada_closer'          => $duracion_closer,
+            'llamada_debe_terminar_en_horario' => $llamada_termina,
+        ];
+
+        /* Log de diagnóstico: config activa para esta ejecución, facilita comparar con slots resultantes. */
+        Log::channel('disponibilidad')->info(
+            '[DISPONIBILIDAD] Config activa: '
+            . "duracion={$duracion}min, setup_antes={$setup_antes}min, gracia_post={$gracia_post}min, "
+            . "duracion_closer={$duracion_closer}min, frecuencia_slots={$frecuencia_slots}min, "
+            . 'llamada_termina=' . ($llamada_termina ? 'si' : 'no') . ', '
+            . "horario_lv={$horario_lv}, horario_sab={$horario_sab}, "
+            . 'horario_dom=' . ($horario_dom !== '' ? $horario_dom : 'sin trabajo')
+        );
 
         /* Demos activas; sin ellas se delega al algoritmo legacy en get_available_slots(). */
         $demos = \App\Models\Demo::orderBy('id')->get();
@@ -428,7 +466,8 @@ class LeadAiService
                     $now_minutes,
                     $duracion,
                     $closer_busy[$date_key] ?? [],
-                    $gracia_post
+                    $gracia_post,
+                    $slot_config
                 );
                 foreach ($demo_slots as $slot) {
                     if (! in_array($slot, $union_available, true)) {
@@ -499,6 +538,8 @@ class LeadAiService
             'dates_map'       => $dates_map,
             'blocked_by_demo' => $blocked_by_demo,
             'closer_busy'     => $closer_busy,
+            /* Config de generación de slots para pasar a compute_day_slots_for_demo(). */
+            'slot_config'     => $slot_config,
         ];
     }
 
@@ -637,28 +678,30 @@ class LeadAiService
      *
      * Un slot candidato es válido solo si pasa ambas validaciones.
      *
-     * Nota sobre el linde exacto en el chequeo de closer: se usan comparaciones estrictas
-     * (> y <) para que el linde exacto (un lead libera al closer justo cuando otro lo necesita)
-     * se considere válido, conforme a la regla de negocio acordada.
+     * Nota sobre el linde exacto en la capa 2 (closer): si closer_release == cstart
+     * el slot queda BLOQUEADO (comparación >=). Esto evita el bug del caso Patricia/Lead #105,
+     * donde dos demos adyacentes compartían exactamente el mismo instante de liberación
+     * y el segundo slot se ofrecía erróneamente como disponible.
      *
-     * @param Carbon                              $day                         Día a evaluar.
-     * @param array<int, array{0: int, 1: int}>   $blocked_ranges              Rangos bloqueados por demo en minutos del día.
-     * @param Carbon                              $now                         Instante actual en Argentina.
-     * @param string                              $today_key                   Fecha de hoy (Y-m-d).
-     * @param int                                 $now_minutes                 Minutos transcurridos hoy.
-     * @param int                                 $duracion                    Duración de la demo en minutos.
-     * @param array<int, array{0: int, 1: int}>   $closer_busy_ranges_for_date Rangos de closer ocupado para este día (transversal a demos).
-     * @param int                                 $gracia_post                 Minutos de gracia post-demo; necesario para calcular cuándo el lead candidato liberaría al closer.
+     * @param Carbon                            $day                         Día a evaluar.
+     * @param array<int, array{0: int, 1: int}> $blocked_ranges              Rangos bloqueados por demo en minutos del día.
+     * @param Carbon                            $now                         Instante actual en Argentina.
+     * @param string                            $today_key                   Fecha de hoy (Y-m-d).
+     * @param int                               $now_minutes                 Minutos transcurridos hoy.
+     * @param int                               $duracion                    Duración de la demo en minutos.
+     * @param array<int, array{0: int, 1: int}> $closer_busy_ranges_for_date Rangos de closer ocupado para este día.
+     * @param int                               $gracia_post                 Minutos de gracia post-demo.
+     * @param array<string, mixed>              $slot_config                 Config de generación de slots (horarios, frecuencia, flags).
      *
      * @return string[] Horarios disponibles en formato HH:MM.
      */
-    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0): array
+    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0, array $slot_config = []): array
     {
         $date_key  = $day->format('Y-m-d');
         $is_today  = $date_key === $today_key;
 
-        /* Slots candidatos del día según protocolo: sábados 9-11hs, lunes-viernes 9-20hs. */
-        $all_slots = $this->get_all_slots_for_day($day);
+        /* Slots candidatos del día: generados dinámicamente según horario del closer y frecuencia. */
+        $all_slots = $this->get_all_slots_for_day($day, $slot_config);
 
         $available = [];
         foreach ($all_slots as $slot) {
@@ -673,7 +716,9 @@ class LeadAiService
 
             $slot_free = true;
 
-            /* Capa 1: chequeo por demo_id; impide solapar entornos técnicos. */
+            /* Capa 1: chequeo por demo_id; impide solapar entornos técnicos.
+             * El rango bloqueado es [inicio_demo - setup_antes, fin_demo + gracia_post].
+             * Se bloquea si el slot se solapa con ese rango. */
             foreach ($blocked_ranges as [$bstart, $bend]) {
                 if ($slot_start < $bend && $slot_end > $bstart) {
                     $slot_free = false;
@@ -681,15 +726,22 @@ class LeadAiService
                 }
             }
 
-            /* Capa 2: chequeo por closer; impide que el closer deba atender dos leads en simultáneo.
-             * Se verifica si el momento en que el lead candidato liberaría al closer
-             * (slot_end + gracia_post) cae dentro de una ventana ya comprometida por otro lead.
-             * Comparaciones estrictas: el linde exacto (un lead termina justo cuando otro empieza) es válido. */
+            /*
+             * Capa 2: chequeo por closer; impide que el closer atienda dos leads en simultáneo.
+             * Se verifica si el instante en que el lead candidato liberaría al closer
+             * (slot_end + gracia_post = inicio_llamada proyectada) cae dentro de una ventana
+             * ya comprometida por otra demo.
+             *
+             * Bug fix (prompt 076): comparación cambiada de estricta (>) a >= para el linde exacto.
+             * Si closer_release == cstart, el closer arrancaría justo al liberar la demo anterior,
+             * lo que hace imposible intercalar la llamada. Se bloquea correctamente con >=.
+             */
             if ($slot_free && ! empty($closer_busy_ranges_for_date)) {
-                /* Instante en que este lead candidato quedaría disponible para el closer. */
+                /* Instante en que este lead candidato quedaría listo para el closer. */
                 $closer_release = $slot_end + $gracia_post;
                 foreach ($closer_busy_ranges_for_date as [$cstart, $cend]) {
-                    if ($closer_release > $cstart && $closer_release < $cend) {
+                    /* Bloqueado si closer_release cae DENTRO de la ventana comprometida (inclusive el inicio). */
+                    if ($closer_release >= $cstart && $closer_release < $cend) {
                         $slot_free = false;
                         break;
                     }
@@ -753,7 +805,8 @@ class LeadAiService
                     $context['now_minutes'],
                     $context['duracion'],
                     $closer_busy_for_date,
-                    $context['gracia_post']
+                    $context['gracia_post'],
+                    $context['slot_config'] ?? []
                 );
 
                 foreach ($demo_slots as $slot) {
@@ -885,34 +938,124 @@ class LeadAiService
     }
 
     /**
-     * Devuelve los horarios candidatos para un día concreto según el protocolo de demos.
+     * Devuelve los slots candidatos para un día concreto, generados dinámicamente
+     * a partir del horario laboral del closer y la frecuencia de slots configurada.
      *
-     * Centraliza la lista de slots para evitar que los distintos puntos del archivo
-     * (compute_day_slots_for_demo, get_available_slots_legacy y el bloque del día extra)
-     * puedan desincronizarse entre sí.
+     * Un slot HH:MM es ofrecible si la llamada del closer proyectada (que arranca en
+     * slot_inicio + duracion_demo + gracia_post) cae dentro del horario laboral del closer:
+     *   - inicio_llamada >= inicio_horario_closer (el closer ya entró a trabajar)
+     *   - inicio_llamada <= fin_horario_closer    (la llamada empieza antes de que el closer salga)
+     *   - Si checkbox llamada_debe_terminar_en_horario ON:
+     *     también fin_llamada <= fin_horario_closer
      *
-     * Reglas según protocolo WhatsApp (sección "AGENDA DE DEMOS"):
-     *   - Lunes a viernes: 09:00 a 17:00, una hora por bloque (9 slots).
-     *   - Sábado: 09:00, 10:00, 11:00, 12:00 (último bloque termina a las 13:00).
-     *   - Domingo: no aplica (el caller no debe pasar domingos).
+     * Si el horario del closer para ese día de semana está vacío, se devuelve array vacío
+     * y el día queda sin slots (el algoritmo de días hábiles agrega un día extra si hace falta).
      *
-     * @param Carbon $day Día a evaluar.
+     * Nota: el método legacy get_available_slots_legacy() sigue usando este mismo método
+     * sin $slot_config (array vacío), por lo que usa los defaults hardcodeados del fallback.
      *
-     * @return string[] Horarios en formato HH:MM.
+     * @param Carbon               $day         Día a evaluar.
+     * @param array<string, mixed> $slot_config Config de generación (horario_lv, horario_sab,
+     *                                          horario_dom, frecuencia_slots, duracion,
+     *                                          gracia_post, duracion_llamada_closer,
+     *                                          llamada_debe_terminar_en_horario).
+     *
+     * @return string[] Horarios en formato HH:MM, ordenados de menor a mayor.
      */
-    private function get_all_slots_for_day(Carbon $day): array
+    private function get_all_slots_for_day(Carbon $day, array $slot_config = []): array
     {
-        /* Sábado: rango reducido de mañana, hasta las 13:00 (último inicio: 12:00). */
-        if ($day->dayOfWeek === 6) {
-            return ['09:00', '10:00', '11:00', '12:00'];
+        /*
+         * Extraer config con fallbacks a valores hardcodeados históricos,
+         * para que el algoritmo legacy siga funcionando cuando no hay $slot_config.
+         */
+        /* Horario laboral del closer por día de semana (H:i-H:i). */
+        $horario_lv  = isset($slot_config['horario_lv'])  ? (string) $slot_config['horario_lv']  : '09:00-17:00';
+        $horario_sab = isset($slot_config['horario_sab']) ? (string) $slot_config['horario_sab'] : '09:00-13:00';
+        $horario_dom = isset($slot_config['horario_dom']) ? (string) $slot_config['horario_dom'] : '';
+        /* Frecuencia entre slots candidatos en minutos (ej. 60 = en punto, 30 = :00 y :30). */
+        $frecuencia  = isset($slot_config['frecuencia_slots']) ? (int) $slot_config['frecuencia_slots'] : 60;
+        /* Parámetros de la demo necesarios para proyectar cuándo arranca la llamada del closer. */
+        $duracion    = isset($slot_config['duracion'])    ? (int) $slot_config['duracion']    : 60;
+        $gracia      = isset($slot_config['gracia_post']) ? (int) $slot_config['gracia_post'] : 0;
+        /* Duración de la llamada del closer (para la restricción del checkbox). */
+        $dur_closer  = isset($slot_config['duracion_llamada_closer'])          ? (int)  $slot_config['duracion_llamada_closer']          : 30;
+        /* Checkbox: true = la llamada también debe terminar dentro del horario. */
+        $llamada_termina = isset($slot_config['llamada_debe_terminar_en_horario']) ? (bool) $slot_config['llamada_debe_terminar_en_horario'] : false;
+
+        /*
+         * Frecuencia mínima de 5 minutos para evitar loops infinitos o listas exageradamente largas.
+         * En producción siempre vendrá un valor del conjunto {5, 10, 15, 30, 60}.
+         */
+        if ($frecuencia < 5) {
+            $frecuencia = 5;
         }
 
-        /* Lunes a viernes: hasta las 17:00 (último inicio; la demo termina ~18:00 y ahí entra el closer, que trabaja hasta las 19:00). */
-        return [
-            '09:00', '10:00', '11:00', '12:00',
-            '13:00', '14:00', '15:00', '16:00',
-            '17:00',
-        ];
+        /* Seleccionar el horario según día de semana (0=domingo, 6=sábado). */
+        $dow = $day->dayOfWeek;
+        if ($dow === 0) {
+            /* Domingo */
+            $horario_raw = $horario_dom;
+        } elseif ($dow === 6) {
+            /* Sábado */
+            $horario_raw = $horario_sab;
+        } else {
+            /* Lunes a viernes */
+            $horario_raw = $horario_lv;
+        }
+
+        /* Horario vacío significa que el closer no trabaja ese día: sin slots. */
+        if ($horario_raw === '') {
+            return [];
+        }
+
+        /* Parsear "HH:MM-HH:MM" → inicio y fin en minutos del día. */
+        $partes = explode('-', $horario_raw);
+        if (count($partes) !== 2) {
+            return [];
+        }
+
+        /* Extraer inicio del horario. */
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $partes[0], $mi)) {
+            return [];
+        }
+        /* Extraer fin del horario. */
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $partes[1], $mf)) {
+            return [];
+        }
+
+        /* Minutos del día para el inicio y fin del horario laboral del closer. */
+        $horario_inicio = (int) $mi[1] * 60 + (int) $mi[2];
+        $horario_fin    = (int) $mf[1] * 60 + (int) $mf[2];
+
+        /*
+         * Generar todos los slots desde medianoche hasta el final del día en pasos de $frecuencia,
+         * y retener solo los que cumplan las condiciones de ofrecibilidad.
+         * El ancla es 0 (medianoche): con frecuencia=30 los slots son :00 y :30; con 60 solo :00.
+         */
+        $slots = [];
+        for ($slot_min = 0; $slot_min < 1440; $slot_min += $frecuencia) {
+            /*
+             * Proyectar el instante en que el closer tomaría la llamada para este slot:
+             *   inicio_llamada = inicio_demo + duracion_demo + gracia_post
+             */
+            $inicio_llamada = $slot_min + $duracion + $gracia;
+            /* Fin de la llamada del closer (relevante solo si el checkbox está activo). */
+            $fin_llamada    = $inicio_llamada + $dur_closer;
+
+            /* La llamada debe COMENZAR dentro del horario laboral del closer. */
+            if ($inicio_llamada < $horario_inicio || $inicio_llamada > $horario_fin) {
+                continue;
+            }
+
+            /* Si el checkbox está activado: la llamada también debe TERMINAR dentro del horario. */
+            if ($llamada_termina && $fin_llamada > $horario_fin) {
+                continue;
+            }
+
+            $slots[] = self::format_minutes_to_hhmm($slot_min);
+        }
+
+        return $slots;
     }
 
     /**
@@ -1030,11 +1173,20 @@ class LeadAiService
             ]);
         }
 
+        /*
+         * Flag para detectar si el agendar_demo que sigue es un reagendado (el lead ya tenía demo
+         * y pidió cambiar el horario). Se usa para elegir el template correcto en DemoScheduledWhatsappService.
+         * Se marca true dentro del bloque cancelar_demo cuando efectivamente había una demo previa.
+         */
+        $es_reagendado = false;
+
         /* Acción: cancelar demo agendada cuando el lead pide reagendar.
          * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
          * Limpia los 4 campos de demo para liberar el slot en la disponibilidad de inmediato. */
         $cancelar_demo = ! empty($parsed['cancelar_demo']);
         if ($cancelar_demo && $lead->demo_date !== null) {
+            /* Marcar que el próximo agendar_demo es un reagendado. */
+            $es_reagendado = true;
             /* Guardar valores anteriores para el log antes de limpiarlos. */
             $demo_date_anterior  = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : 'sin fecha';
             $demo_start_anterior = $lead->demo_start_time ?? 'sin hora';
@@ -1138,20 +1290,110 @@ class LeadAiService
                         'demo_end'   => $demo_end,
                     ]);
 
-                    /* Notificar por WhatsApp a los admins suscritos a demos agendadas. */
+                    /* Notificar por WhatsApp a los admins suscritos a demos agendadas.
+                     * Si $es_reagendado = true se usa el template de cambio de horario. */
                     try {
                         $demo_notify_service = new \App\Services\DemoScheduledWhatsappService(
                             new \App\Services\WhatsappSendService()
                         );
-                        $demo_notify_service->notify($lead, $demo_date, $demo_start);
+                        $demo_notify_service->notify($lead, $demo_date, $demo_start, $es_reagendado);
                     } catch (\Throwable $e) {
                         Log::error('LeadAiService: error al notificar demo agendada por WhatsApp.', [
-                            'lead_id' => $lead->id,
-                            'error'   => $e->getMessage(),
+                            'lead_id'       => $lead->id,
+                            'is_reagendado' => $es_reagendado,
+                            'error'         => $e->getMessage(),
                         ]);
                     }
                 }
             }
+        }
+
+        /*
+         * Flags de notificación WhatsApp a admins para las acciones de inferencia del ciclo de demo.
+         * Se marcan true únicamente cuando la acción se procesa de verdad (primera vez, anti-duplicado).
+         * Las notificaciones se disparan después del $lead->save() para que los timestamps estén persistidos.
+         */
+        $notificar_ingreso_confirmado = false;
+        $notificar_fin_confirmado     = false;
+        $notificar_no_ingreso         = false;
+
+        /* Acción: confirmar que el lead ingresó a la demo (inferencia conversacional).
+         * Solo válida si el lead está en ingresando_demo o en demo_agendada (tolerante,
+         * para el caso en que el check se envió pero el estado todavía no actualizó).
+         * Si ya estaba confirmado, no se repite el timestamp ni se re-dispara nada. */
+        $confirmar_ingreso = ! empty($parsed['confirmar_ingreso']);
+        if ($confirmar_ingreso) {
+            /* Estados desde los cuales tiene sentido confirmar el ingreso. */
+            $estados_validos_ingreso = ['ingresando_demo', 'demo_agendada'];
+            if (in_array((string) $lead->status, $estados_validos_ingreso, true)) {
+                /* Anti-duplicado: solo setear la fecha la primera vez que se confirma. */
+                if (! $lead->demo_ingreso_confirmado) {
+                    /* Marcar el flag y registrar el momento exacto de confirmación. */
+                    $lead->demo_ingreso_confirmado    = true;
+                    $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');
+                    /* Habilitar la notificación a admins (se dispara después del save). */
+                    $notificar_ingreso_confirmado = true;
+                    Log::info('LeadAiService: ingreso a demo confirmado por inferencia.', [
+                        'lead_id' => $lead->id,
+                    ]);
+                }
+
+                /* Forzar el estado a demo_en_curso independientemente de lo que Claude sugirió. */
+                $estado_raw      = 'demo_en_curso';
+                $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+                $estado          = $pipeline_status->slug;
+                /* Recalcular el diff de estado para que el badge del mensaje sea correcto. */
+                $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            }
+        }
+
+        /* Acción: confirmar que el lead terminó la demo (inferencia conversacional).
+         * Válida en demo_en_curso o demo_pendiente_de_terminar.
+         * Anti-duplicado igual que confirmar_ingreso.
+         * Cubre también la reanudación (evento 8): lead en demo_pendiente_de_terminar
+         * que vuelve y confirma el fin. El mismo enganche sirve para ambos estados. */
+        $confirmar_fin_demo = ! empty($parsed['confirmar_fin_demo']);
+        if ($confirmar_fin_demo) {
+            /* Estados desde los cuales tiene sentido confirmar el fin. */
+            $estados_validos_fin = ['demo_en_curso', 'demo_pendiente_de_terminar'];
+            if (in_array((string) $lead->status, $estados_validos_fin, true)) {
+                /* Anti-duplicado: solo setear la fecha la primera vez que se confirma el fin. */
+                if (! $lead->demo_terminada_confirmada) {
+                    /* Marcar el flag y registrar el momento exacto de confirmación de fin. */
+                    $lead->demo_terminada_confirmada    = true;
+                    $lead->demo_terminada_confirmada_at = now('America/Argentina/Buenos_Aires');
+                    /* Habilitar la notificación a admins (se dispara después del save). */
+                    $notificar_fin_confirmado = true;
+                    Log::info('LeadAiService: fin de demo confirmado por inferencia.', [
+                        'lead_id' => $lead->id,
+                    ]);
+                }
+
+                /* Forzar el estado a demo_realizada independientemente de lo que Claude sugirió. */
+                $estado_raw      = 'demo_realizada';
+                $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+                $estado          = $pipeline_status->slug;
+                /* Recalcular el diff de estado para que el badge del mensaje sea correcto. */
+                $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            }
+        }
+
+        /* Acción: marcar que el lead no va a poder ingresar a la demo.
+         * Claude la usa cuando el lead dice explícitamente que no puede o no quiere entrar.
+         * Solo válida si el lead está en ingresando_demo. */
+        $marcar_no_ingreso = ! empty($parsed['marcar_no_ingreso']);
+        if ($marcar_no_ingreso && (string) $lead->status === 'ingresando_demo') {
+            /* Retroceder a demo_pendiente_de_ingreso para que el sistema pueda reintentar el flujo. */
+            $estado_raw      = 'demo_pendiente_de_ingreso';
+            $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+            $estado          = $pipeline_status->slug;
+            /* Recalcular el diff de estado para el badge. */
+            $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            /* Habilitar la notificación a admins (se dispara después del save). */
+            $notificar_no_ingreso = true;
+            Log::info('LeadAiService: no ingreso a demo marcado por inferencia.', [
+                'lead_id' => $lead->id,
+            ]);
         }
 
         /* --- Fin de acciones estructuradas --- */
@@ -1254,6 +1496,53 @@ class LeadAiService
 
         /* Único save del lead: consolida nombre, email, demo y flags de sugerencia. */
         $lead->save();
+
+        /*
+         * Notificaciones WhatsApp a admins del ciclo de demo.
+         * Se disparan después del save() para que los timestamps (_at) ya estén persistidos.
+         * Cada bloque es independiente: un fallo en uno no afecta a los demás.
+         */
+        if ($notificar_ingreso_confirmado) {
+            try {
+                $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $ciclo_service->notify_ingreso_confirmado($lead->fresh());
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar ingreso_confirmado a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($notificar_fin_confirmado) {
+            try {
+                $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $ciclo_service->notify_fin_confirmado($lead->fresh());
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar fin_confirmado a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($notificar_no_ingreso) {
+            try {
+                $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $ciclo_service->notify_no_ingreso($lead->fresh(), 'el lead indicó que no podía ingresar');
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar no_ingreso a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
 
         /* Disparar Mail 1 si se guardó un email nuevo en esta pasada. */
         if ($email_nuevo) {
@@ -1489,6 +1778,42 @@ TXT;
         /* Inyectar disponibilidad de demos si se provee (segunda llamada con slots). */
         if ($availability_context !== '') {
             $txt .= "\n\nDISPONIBILIDAD DE DEMOS:\n{$availability_context}";
+        }
+
+        /* Inyectar el objetivo activo según el estado de la demo.
+         * Este bloque le indica a Claude qué debe perseguir en cada momento del ciclo de la demo,
+         * de forma análoga a cómo persigue el agendamiento cuando solicita disponibilidad.
+         * El detalle fino de comportamiento está en el protocolo (sección CICLO DE LA DEMO). */
+        $lead_status_for_context = (string) $lead->status;
+
+        if ($lead_status_for_context === 'ingresando_demo') {
+            /* El lead está en el momento de intentar entrar al sistema demo. */
+            $txt .= "\n\nCONTEXTO DE DEMO - INGRESO:\n"
+                . "El lead tiene la demo en curso de inicio y se le preguntó si pudo ingresar al sistema.\n"
+                . "Tu objetivo es asegurarte de que entre. Si dice que tuvo un problema para entrar, resolveselo:\n"
+                . "pasale el link de la demo y aclarale que el usuario y la contraseña son su número de documento.\n"
+                . "(Ver datos del lead arriba y regla 13.2 del protocolo.)\n"
+                . "Cuando el lead confirme que ya entró (infieras de su mensaje, no por una palabra exacta),\n"
+                . "devolvé la acción confirmar_ingreso: true en el JSON.\n"
+                . "Si el lead dice claramente que no va a poder o no quiere entrar, devolvé marcar_no_ingreso: true.\n"
+                . "Si intentaste resolver el acceso y aun así no puede, devolvé requiere_intervencion_humana: true\n"
+                . "con motivo_intervencion claro.";
+        } elseif ($lead_status_for_context === 'demo_en_curso') {
+            /* El lead ya está dentro de la demo, haciendo el recorrido. */
+            $txt .= "\n\nCONTEXTO DE DEMO - EN CURSO:\n"
+                . "El lead ya está dentro de la demo. Respondé cualquier duda técnica que tenga sobre el sistema\n"
+                . "con naturalidad. Pero tu objetivo permanente es saber cuándo terminó la demo: si ya se le\n"
+                . "preguntó si terminó y responde otra cosa, respondele lo que pregunte y volvé a preguntar al\n"
+                . "final si ya terminó. No te quedes esperando pasivamente.\n"
+                . "Cuando infieras que el lead terminó la demo (aunque te lo diga indirectamente, o te diga que sí\n"
+                . "y encima te haga una pregunta), devolvé confirmar_fin_demo: true, respondé lo que haya que\n"
+                . "responder, y dejá que el sistema lo avance.";
+        } elseif ($lead_status_for_context === 'demo_pendiente_de_terminar') {
+            /* El lead volvió a escribir después de que el sistema no pudo confirmar el fin de la demo. */
+            $txt .= "\n\nCONTEXTO DE DEMO - PENDIENTE DE TERMINAR:\n"
+                . "Se había dado por no confirmada la finalización de la demo de este lead, pero volvió a escribir.\n"
+                . "Si de su mensaje se infiere que efectivamente terminó la demo, devolvé confirmar_fin_demo: true.\n"
+                . "Si todavía está en la demo, seguí ayudándolo y volvé a perseguir saber cuándo termina.";
         }
 
         $txt .= "\n¿Qué respuesta sugerís y en qué estado debería quedar el lead?";

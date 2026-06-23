@@ -121,6 +121,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/generate-contract', [LeadController::class, 'generate_contract_json']);
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
         Route::post('lead/{id}/send-direct-message', [LeadController::class, 'send_direct_message_json']);
+        Route::post('lead/{lead_id}/send-template', [LeadController::class, 'send_template_json']);
         Route::post('lead/{id}/send-direct-audio', [LeadController::class, 'send_direct_audio_json']);
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
@@ -130,6 +131,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
         Route::post('lead/{id}/send-demo-reminder', [LeadController::class, 'send_demo_reminder_json']);
         Route::post('lead/{id}/check-demo-ingress', [LeadController::class, 'check_demo_ingress_json']);
+        Route::post('lead/{id}/check-demo-fin', [LeadController::class, 'check_demo_fin_json']);
         Route::post('lead/{id}/force-followup', [LeadController::class, 'force_followup_json']);
         Route::post('lead/{id}/generate-demo-summary', [LeadController::class, 'generate_demo_summary_json']);
         Route::post('lead/{id}/mark-closer-called', [LeadController::class, 'mark_closer_called_json']);

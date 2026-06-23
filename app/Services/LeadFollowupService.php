@@ -54,6 +54,12 @@ class LeadFollowupService
             } catch (\Throwable $e) {
                 $stats['errors']++;
                 Log::error('LeadFollowupService error', ['lead_id' => $lead->id, 'msg' => $e->getMessage()]);
+
+                /* Notificar a admins suscritos que falló el procesamiento del seguimiento. */
+                app(SystemErrorWhatsappService::class)->notify_send_error(
+                    "Seguimiento automático - Lead #{$lead->id}",
+                    $e->getMessage()
+                );
             }
         }
 
@@ -320,6 +326,14 @@ class LeadFollowupService
             [$contact_name],
             $template->language_code
         );
+
+        /* Si el envío falló (id null), notificar a los admins suscritos. */
+        if ($whatsapp_message_id === null) {
+            app(SystemErrorWhatsappService::class)->notify_send_error(
+                "Seguimiento automático - Lead #{$lead->id} ({$lead->contact_name})",
+                "send_template() retornó null para plantilla {$template->template_name}"
+            );
+        }
 
         // Registramos el seguimiento en la conversación del lead (trazabilidad).
         // Usamos el texto real de la plantilla (con nombre sustituido) si está disponible.

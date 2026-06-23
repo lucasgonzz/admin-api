@@ -69,6 +69,14 @@ class AdminProperties
                 'value' => false,
                 'show'  => true,
             ],
+            [
+                // Recibir WhatsApp cuando falla el envío automático de un mensaje del sistema.
+                'key'   => 'notify_send_errors_whatsapp',
+                'text'  => 'Notificar errores de envío por WhatsApp',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+            ],
         ];
     }
 }

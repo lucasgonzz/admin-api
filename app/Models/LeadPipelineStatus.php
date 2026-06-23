@@ -12,33 +12,51 @@ class LeadPipelineStatus extends Model
 {
     /**
      * Slugs por defecto del pipeline (seed y fallback si la tabla está vacía).
+     *
+     * Orden del ciclo de vida de la demo:
+     *   demo_agendada → ingresando_demo → demo_en_curso → demo_realizada
+     * Ramas de fallo (sin confirmación de ingreso o de fin):
+     *   demo_pendiente_de_ingreso, demo_pendiente_de_terminar
      */
     public const DEFAULT_STATUSES = [
-        'nuevo'             => 'Nuevo',
-        'contactado'        => 'Contactado',
-        'calificado'        => 'Calificado',
-        'demo_agendada'     => 'Demo agendada',
-        'demo_realizada'    => 'Demo realizada',
-        'mail2_enviado'     => 'Mail2 enviado',
-        'cerrado_ganado'    => 'Cerrado ganado',
-        'cerrado_perdido'   => 'Cerrado perdido',
-        'en_pausa'          => 'En pausa',
+        'nuevo'                        => 'Nuevo',
+        'contactado'                   => 'Contactado',
+        'calificado'                   => 'Calificado',
+        'demo_agendada'                => 'Demo agendada',
+        // Subestados del ciclo de vida de la demo (automatizados por el agente).
+        'ingresando_demo'              => 'Ingresando a demo',
+        'demo_en_curso'                => 'Demo en curso',
+        // Ramas de fallo: no respondió al check de ingreso o no confirmó fin.
+        'demo_pendiente_de_ingreso'    => 'Demo pendiente de ingreso',
+        'demo_pendiente_de_terminar'   => 'Demo pendiente de terminar',
+        'demo_realizada'               => 'Demo realizada',
+        'mail2_enviado'                => 'Mail2 enviado',
+        'cerrado_ganado'               => 'Cerrado ganado',
+        'cerrado_perdido'              => 'Cerrado perdido',
+        'en_pausa'                     => 'En pausa',
     ];
 
     /**
      * Color de fondo del badge por slug (hex). De menos a más llamativo en el pipeline;
+     * gama azul para el progreso de la demo; gama ámbar para los estados de espera/fallo;
      * cierres y pausa vuelven a tonos discretos.
      */
     public const DEFAULT_COLORS = [
-        'nuevo'             => '#e9ecef',
-        'contactado'        => '#dee2e6',
-        'calificado'        => '#b8d4e8',
-        'demo_agendada'     => '#6ea8fe',
-        'demo_realizada'    => '#0d6efd',
-        'mail2_enviado'     => '#ffc107',
-        'cerrado_ganado'    => '#d1e7dd',
-        'cerrado_perdido'   => '#e8d4d4',
-        'en_pausa'          => '#f1f3f5',
+        'nuevo'                        => '#e9ecef',
+        'contactado'                   => '#dee2e6',
+        'calificado'                   => '#b8d4e8',
+        'demo_agendada'                => '#6ea8fe',
+        // Progreso del ciclo de demo: escala de azul hacia el azul intenso.
+        'ingresando_demo'              => '#9ec5fe',
+        'demo_en_curso'                => '#3d8bfd',
+        // Ramas de fallo: ámbar discreto para "pendiente de acción".
+        'demo_pendiente_de_ingreso'    => '#ffe5a0',
+        'demo_pendiente_de_terminar'   => '#ffd8a8',
+        'demo_realizada'               => '#0d6efd',
+        'mail2_enviado'                => '#ffc107',
+        'cerrado_ganado'               => '#d1e7dd',
+        'cerrado_perdido'              => '#e8d4d4',
+        'en_pausa'                     => '#f1f3f5',
     ];
 
     protected $guarded = [];

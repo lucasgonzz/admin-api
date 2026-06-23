@@ -14,12 +14,14 @@ use Illuminate\Support\Facades\Log;
 /**
  * Envía automáticamente el mensaje de fin de demo preguntando al lead si terminó.
  *
- * Se ejecuta cada minuto. Busca leads en estado `demo_agendada` que ya confirmaron
- * el ingreso (`demo_ingreso_confirmado = true`) y a los que aún no se les envió el
- * check de fin (`demo_fin_check_enviado = false`), cuya demo termina ahora mismo
- * (dentro de una ventana de ±2 minutos alrededor del fin calculado).
+ * Se ejecuta cada minuto. Busca leads en estado `demo_en_curso` (ingreso ya
+ * confirmado por Claude en prompt 095) a los que aún no se les envió el check de fin
+ * (`demo_fin_check_enviado = false`), cuya demo termina ahora mismo (dentro de una
+ * ventana de ±2 minutos alrededor del fin calculado = inicio + duración).
  *
- * Reutiliza el mismo patrón de parse_demo_datetime() y ventana ±2 min de CheckDemoIngress.
+ * A partir del prompt 096, el filtro usa `demo_en_curso` en lugar de `demo_agendada`
+ * con `demo_ingreso_confirmado = true`, porque el estado `demo_en_curso` ya implica
+ * que el ingreso fue confirmado.
  */
 class CheckDemoFin extends Command
 {
@@ -35,7 +37,7 @@ class CheckDemoFin extends Command
      *
      * @var string
      */
-    protected $description = 'Envía pregunta automática de fin de demo al lead que ya confirmó el ingreso';
+    protected $description = 'Envía pregunta automática de fin de demo al lead en demo_en_curso al cumplirse la duración';
 
     /**
      * Servicio de envío saliente vía Kapso/Meta.
@@ -73,10 +75,12 @@ class CheckDemoFin extends Command
         $target_fin_before = $now->copy()->addMinutes(2);
         $target_fin_after  = $now->copy()->subMinutes(2);
 
-        /* Buscar leads con demo agendada, ingreso confirmado y check de fin sin enviar. */
+        /*
+         * Buscar leads en demo_en_curso (ingreso ya confirmado) y check de fin sin enviar.
+         * El estado demo_en_curso lo setea Claude al confirmar el ingreso (prompt 095).
+         */
         $candidates = Lead::query()
-            ->where('status', 'demo_agendada')
-            ->where('demo_ingreso_confirmado', true)
+            ->where('status', 'demo_en_curso')
             ->where('demo_fin_check_enviado', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')

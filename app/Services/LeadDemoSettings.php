@@ -27,7 +27,13 @@ class LeadDemoSettings
     /** Clave: hora del recordatorio de mañana de demo (formato H:i, ej. 09:00). */
     public const KEY_RECORDATORIO_MANANA_HORA = 'demo_recordatorio_manana_hora';
 
-    /** Clave: minutos post-inicio para preguntar al lead si pudo ingresar. */
+    /**
+     * Clave: minutos post-inicio para preguntar al lead si pudo ingresar.
+     *
+     * @deprecated Obsoleto tras la feature de ciclo de demo automatizado (prompt 094+).
+     *             El check de ingreso ahora se envía en el minuto exacto de inicio (ver prompt 096).
+     *             No borrar aún; mantener para no romper comandos existentes.
+     */
     public const KEY_CHECK_INGRESO_MINUTOS_POST = 'demo_check_ingreso_minutos_post';
 
     /** Clave: minutos antes del fin de la demo para generar resumen del lead. */
@@ -50,6 +56,15 @@ class LeadDemoSettings
 
     /** Clave: frecuencia en minutos con que se generan los slots disponibles. */
     public const KEY_FRECUENCIA_SLOTS_MINUTOS = 'demo_frecuencia_slots_minutos';
+
+    /** Clave: minutos sin respuesta al check de ingreso antes de marcar demo_pendiente_de_ingreso y avisar a admins. */
+    public const KEY_INGRESO_TIMEOUT_MINUTOS = 'demo_ingreso_timeout_minutos';
+
+    /** Clave: minutos desde el check de fin antes de enviar el seguimiento de "¿pudiste terminar?". */
+    public const KEY_FIN_SEGUIMIENTO_MINUTOS = 'demo_fin_seguimiento_minutos';
+
+    /** Clave: minutos desde el check de fin antes de marcar demo_pendiente_de_terminar y avisar a admins. */
+    public const KEY_FIN_TIMEOUT_MINUTOS = 'demo_fin_timeout_minutos';
 
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
@@ -90,6 +105,15 @@ class LeadDemoSettings
     /** Valor por defecto: frecuencia de slots en minutos. */
     private const DEFAULT_FRECUENCIA_SLOTS_MINUTOS = 30;
 
+    /** Valor por defecto: timeout de ingreso (minutos sin respuesta → demo_pendiente_de_ingreso). */
+    private const DEFAULT_INGRESO_TIMEOUT_MINUTOS = 15;
+
+    /** Valor por defecto: minutos desde el check de fin antes de insistir una vez más. */
+    private const DEFAULT_FIN_SEGUIMIENTO_MINUTOS = 10;
+
+    /** Valor por defecto: timeout de fin (minutos sin confirmación → demo_pendiente_de_terminar). */
+    private const DEFAULT_FIN_TIMEOUT_MINUTOS = 25;
+
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
 
@@ -120,6 +144,9 @@ class LeadDemoSettings
             'closer_horario_domingo'              => self::get_closer_horario_domingo(),
             'llamada_debe_terminar_en_horario'    => self::get_llamada_debe_terminar_en_horario(),
             'frecuencia_slots_minutos'            => self::get_frecuencia_slots_minutos(),
+            'ingreso_timeout_minutos'             => self::get_ingreso_timeout_minutos(),
+            'fin_seguimiento_minutos'             => self::get_fin_seguimiento_minutos(),
+            'fin_timeout_minutos'                 => self::get_fin_timeout_minutos(),
         ];
     }
 
@@ -192,6 +219,11 @@ class LeadDemoSettings
                 AdminSetting::set(self::KEY_FRECUENCIA_SLOTS_MINUTOS, (string) $freq);
             }
         }
+
+        // Timeouts y seguimiento del ciclo de demo automatizado.
+        AdminSetting::set(self::KEY_INGRESO_TIMEOUT_MINUTOS,  (string) self::clamp((int) $data['ingreso_timeout_minutos']));
+        AdminSetting::set(self::KEY_FIN_SEGUIMIENTO_MINUTOS,  (string) self::clamp((int) $data['fin_seguimiento_minutos']));
+        AdminSetting::set(self::KEY_FIN_TIMEOUT_MINUTOS,      (string) self::clamp((int) $data['fin_timeout_minutos']));
     }
 
     /**
@@ -239,6 +271,15 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_FRECUENCIA_SLOTS_MINUTOS) === null) {
             AdminSetting::set(self::KEY_FRECUENCIA_SLOTS_MINUTOS, (string) self::DEFAULT_FRECUENCIA_SLOTS_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_INGRESO_TIMEOUT_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_INGRESO_TIMEOUT_MINUTOS, (string) self::DEFAULT_INGRESO_TIMEOUT_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_FIN_SEGUIMIENTO_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_FIN_SEGUIMIENTO_MINUTOS, (string) self::DEFAULT_FIN_SEGUIMIENTO_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_FIN_TIMEOUT_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_FIN_TIMEOUT_MINUTOS, (string) self::DEFAULT_FIN_TIMEOUT_MINUTOS);
         }
     }
 
@@ -422,6 +463,38 @@ class LeadDemoSettings
         }
 
         return self::DEFAULT_FRECUENCIA_SLOTS_MINUTOS;
+    }
+
+    /**
+     * Minutos sin respuesta al check de ingreso antes de marcar demo_pendiente_de_ingreso.
+     *
+     * @return int
+     */
+    public static function get_ingreso_timeout_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_INGRESO_TIMEOUT_MINUTOS, (string) self::DEFAULT_INGRESO_TIMEOUT_MINUTOS));
+    }
+
+    /**
+     * Minutos desde el check de fin antes de enviar el seguimiento de "¿pudiste terminar?".
+     *
+     * @return int
+     */
+    public static function get_fin_seguimiento_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_FIN_SEGUIMIENTO_MINUTOS, (string) self::DEFAULT_FIN_SEGUIMIENTO_MINUTOS));
+    }
+
+    /**
+     * Minutos desde el check de fin antes de marcar demo_pendiente_de_terminar.
+     *
+     * Conceptualmente debe ser mayor que fin_seguimiento_minutos (no se valida de forma cruzada).
+     *
+     * @return int
+     */
+    public static function get_fin_timeout_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_FIN_TIMEOUT_MINUTOS, (string) self::DEFAULT_FIN_TIMEOUT_MINUTOS));
     }
 
     /**

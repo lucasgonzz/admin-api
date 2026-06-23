@@ -57,6 +57,16 @@ class ClientApiProperties
                     ['value' => 'vps', 'text' => 'VPS'],
                 ],
             ],
+            [
+                'key' => 'vps_path',
+                'text' => 'VPS Path',
+                'type' => 'text',
+                'value' => '',
+                'show' => true,
+                'width' => 160,
+                'placeholder' => 'ej: arfren2',
+                'description' => 'Solo para hosting_type=vps. Identificador del cliente en el VPS. API SSH: /home/api-{vps_path}/empresa-api. SPA SSH: /home/{vps_path}/htdocs/{dominio_spa}.',
+            ],
         ];
     }
 }

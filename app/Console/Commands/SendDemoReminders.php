@@ -6,6 +6,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\SystemErrorWhatsappService;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -156,6 +157,14 @@ class SendDemoReminders extends Command
                 [$contact_name],
                 'es_AR'
             );
+
+            /* Si el envío falló (id null), notificar a los admins suscritos a errores. */
+            if ($whatsapp_message_id === null) {
+                app(SystemErrorWhatsappService::class)->notify_send_error(
+                    "Recordatorio demo - Lead #{$lead->id} ({$lead->contact_name})",
+                    'send_template() retornó null para plantilla ' . self::TEMPLATE_NAME
+                );
+            }
         } else {
             Log::warning('SendDemoReminders: lead sin teléfono', [
                 'lead_id' => $lead->id,

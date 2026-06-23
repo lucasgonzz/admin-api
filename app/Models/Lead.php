@@ -128,6 +128,24 @@ class Lead extends Model
         // Flag: ya se envió el mensaje preguntando si terminó la demo.
         'demo_fin_check_enviado'       => 'boolean',
 
+        // Timestamp exacto en que Claude confirmó el ingreso del lead a la demo.
+        'demo_ingreso_confirmado_at'        => 'datetime',
+
+        // Flag: Claude infirió que la demo terminó (el lead confirmó el fin).
+        'demo_terminada_confirmada'         => 'boolean',
+
+        // Timestamp exacto en que se confirmó el fin de la demo.
+        'demo_terminada_confirmada_at'      => 'datetime',
+
+        // Flag de un solo disparo: ya se envió el seguimiento de fin (anti-duplicado).
+        'demo_fin_seguimiento_enviado'      => 'boolean',
+
+        // Flag de un solo disparo: ya se notificó a admins el timeout de fin (anti-duplicado).
+        'demo_pendiente_terminar_notificado' => 'boolean',
+
+        // Flag de un solo disparo: ya se notificó a admins el no-ingreso (anti-duplicado).
+        'demo_no_ingreso_notificado'        => 'boolean',
+
         // Timestamp de llamada del closer tras la demo: parte del pipeline de cierre.
         'closer_called_at'             => 'datetime',
 
