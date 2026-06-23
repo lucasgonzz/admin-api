@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Events\LeadSuggestionCreated;
 use App\Services\CloserGoogleCalendarBusyService;
+use App\Services\CloserGoogleCalendarEventService;
+use App\Services\GoogleCalendarOAuthService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Models\AiSystemPrompt;
@@ -1180,6 +1182,19 @@ class LeadAiService
          */
         $es_reagendado = false;
 
+        /*
+         * Variables para coordinar las operaciones de Google Calendar event DESPUÉS del save() principal.
+         * Se usan flags para evitar llamadas parciales al servicio antes de que el lead esté persistido.
+         */
+        // ID del evento anterior de Google Calendar: guardado antes de limpiar el lead.
+        $google_event_id_anterior = null;
+        // Fecha de la demo anterior: se necesita para invalidar la caché al eliminar el evento.
+        $google_event_demo_date_anterior = null;
+        // Flag: se debe eliminar el evento existente en Google Calendar del closer.
+        $google_event_delete_needed = false;
+        // Flag: se debe crear un nuevo evento en Google Calendar del closer.
+        $google_event_create_needed = false;
+
         /* Acción: cancelar demo agendada cuando el lead pide reagendar.
          * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
          * Limpia los 4 campos de demo para liberar el slot en la disponibilidad de inmediato. */
@@ -1190,6 +1205,16 @@ class LeadAiService
             /* Guardar valores anteriores para el log antes de limpiarlos. */
             $demo_date_anterior  = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : 'sin fecha';
             $demo_start_anterior = $lead->demo_start_time ?? 'sin hora';
+
+            /* Marcar que se debe eliminar el evento anterior de Google Calendar del closer.
+             * Se guarda el ID y la fecha ANTES de limpiar el lead para usarlos en el POST-save. */
+            if (! empty($lead->google_event_id)) {
+                $google_event_delete_needed      = true;
+                $google_event_id_anterior        = $lead->google_event_id;
+                $google_event_demo_date_anterior = $lead->demo_date->format('Y-m-d');
+                // Limpiar el google_event_id en memoria para que el save() principal lo persista como null.
+                $lead->google_event_id = null;
+            }
 
             /* Limpiar los campos de demo: libera el slot y deja al lead listo para reagendar. */
             $lead->demo_id         = null;
@@ -1289,6 +1314,10 @@ class LeadAiService
                         'demo_start' => $demo_start,
                         'demo_end'   => $demo_end,
                     ]);
+
+                    /* Marcar que se debe crear el evento en Google Calendar del closer
+                     * después del save() principal del lead. */
+                    $google_event_create_needed = true;
 
                     /* Notificar por WhatsApp a los admins suscritos a demos agendadas.
                      * Si $es_reagendado = true se usa el template de cambio de horario. */
@@ -1496,6 +1525,44 @@ class LeadAiService
 
         /* Único save del lead: consolida nombre, email, demo y flags de sugerencia. */
         $lead->save();
+
+        /*
+         * Operaciones de Google Calendar del closer: se ejecutan después del save() para que
+         * los campos de demo (demo_date, demo_start_time, etc.) estén ya persistidos en BD.
+         * Son best-effort: si fallan, no rompen el flujo de agendamiento.
+         *
+         * Tres escenarios posibles:
+         *   1. Solo cancelar_demo sin agendar_demo: eliminar el evento existente.
+         *   2. cancelar_demo + agendar_demo (reagendado): eliminar el viejo y crear el nuevo.
+         *   3. Solo agendar_demo (primer agendado): crear el evento nuevo.
+         */
+        if ($google_event_delete_needed || $google_event_create_needed) {
+            try {
+                $google_event_service = new CloserGoogleCalendarEventService(
+                    new GoogleCalendarOAuthService(),
+                    new CloserGoogleCalendarBusyService(new GoogleCalendarOAuthService())
+                );
+
+                if ($google_event_delete_needed) {
+                    // Eliminar el evento anterior usando el ID guardado antes de limpiar el lead.
+                    // (google_event_id ya está null en el lead por lo que pasamos el ID guardado).
+                    $google_event_service->delete_event_by_id(
+                        $google_event_id_anterior,
+                        $google_event_demo_date_anterior
+                    );
+                }
+
+                if ($google_event_create_needed) {
+                    // Crear el nuevo evento usando el lead fresco con los datos de demo persistidos.
+                    $google_event_service->create_event_for_lead($lead->fresh());
+                }
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error en operaciones de Google Calendar del closer.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
 
         /*
          * Notificaciones WhatsApp a admins del ciclo de demo.

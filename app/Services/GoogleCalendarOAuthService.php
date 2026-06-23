@@ -38,6 +38,14 @@ class GoogleCalendarOAuthService
     const CALENDAR_READONLY_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
 
     /**
+     * Scope de escritura de eventos de calendario.
+     * Permite crear, editar y eliminar eventos sin dar acceso completo al calendario.
+     * Se necesita para crear el evento de llamada del closer cuando se agenda una demo.
+     * Nota: solo aplica a reconexiones nuevas; los closers con token previo deben reconectarse.
+     */
+    const CALENDAR_EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+
+    /**
      * Scope de email: necesario para que el endpoint userinfo devuelva el campo `email`.
      * Sin este scope, fetch_account_email() recibe una respuesta sin el dato y guarda null.
      */
@@ -70,9 +78,10 @@ class GoogleCalendarOAuthService
             'client_id'     => config('services.google_calendar.client_id'),
             'redirect_uri'  => config('services.google_calendar.redirect_uri'),
             'response_type' => 'code',
-            // Los tres scopes separados por espacio (formato estándar OAuth2 para múltiples scopes).
+            // Cuatro scopes separados por espacio (formato estándar OAuth2 para múltiples scopes).
             // email + openid son necesarios para que userinfo devuelva el email de la cuenta conectada.
-            'scope'         => self::CALENDAR_READONLY_SCOPE . ' ' . self::EMAIL_SCOPE . ' ' . self::OPENID_SCOPE,
+            // calendar.events agrega permiso de escritura de eventos para crear llamadas post-demo.
+            'scope'         => self::CALENDAR_READONLY_SCOPE . ' ' . self::CALENDAR_EVENTS_SCOPE . ' ' . self::EMAIL_SCOPE . ' ' . self::OPENID_SCOPE,
             'access_type'   => 'offline',
             // prompt=consent garantiza que Google siempre devuelva refresh_token.
             'prompt'        => 'consent',

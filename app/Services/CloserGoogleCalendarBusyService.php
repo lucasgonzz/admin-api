@@ -295,6 +295,34 @@ class CloserGoogleCalendarBusyService
     }
 
     /**
+     * Invalida la entrada de caché de disponibilidad de Google Calendar para una fecha concreta.
+     *
+     * Se llama desde CloserGoogleCalendarEventService después de crear o eliminar un evento,
+     * para que el próximo cálculo de slots consulte la API de Google en lugar de usar el valor
+     * cacheado de 5 minutos (que podría no reflejar el evento recién creado/eliminado).
+     *
+     * La clave invalidada corresponde a una consulta de un solo día (el caso más común
+     * al verificar disponibilidad de la fecha de la demo).
+     *
+     * @param string $date Fecha Y-m-d cuya caché se invalida.
+     * @return void
+     */
+    public function flush_cache_for_date(string $date): void
+    {
+        // La clave de caché se genera con md5 del implode de las fechas consultadas.
+        // Para una sola fecha, la clave es md5 de la fecha sola, lo que coincide con
+        // la consulta más frecuente (build_availability_json consulta días individuales).
+        $cache_key = 'closer_google_calendar_busy_' . md5($date);
+
+        Cache::forget($cache_key);
+
+        Log::channel('disponibilidad')->info(
+            '[CALENDAR_EVENT] Caché de disponibilidad invalidada para ' . $date
+            . ' (clave ...' . substr($cache_key, -8) . ').'
+        );
+    }
+
+    /**
      * Intersecta los rangos ocupados de múltiples closers.
      *
      * Un minuto está "ocupado" en el resultado final solo si TODOS los closers
