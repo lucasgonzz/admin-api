@@ -1297,6 +1297,77 @@ class LeadAiService
             }
         }
 
+        /* Acción: confirmar que el lead ingresó a la demo (inferencia conversacional).
+         * Solo válida si el lead está en ingresando_demo o en demo_agendada (tolerante,
+         * para el caso en que el check se envió pero el estado todavía no actualizó).
+         * Si ya estaba confirmado, no se repite el timestamp ni se re-dispara nada. */
+        $confirmar_ingreso = ! empty($parsed['confirmar_ingreso']);
+        if ($confirmar_ingreso) {
+            /* Estados desde los cuales tiene sentido confirmar el ingreso. */
+            $estados_validos_ingreso = ['ingresando_demo', 'demo_agendada'];
+            if (in_array((string) $lead->status, $estados_validos_ingreso, true)) {
+                /* Anti-duplicado: solo setear la fecha la primera vez que se confirma. */
+                if (! $lead->demo_ingreso_confirmado) {
+                    /* Marcar el flag y registrar el momento exacto de confirmación. */
+                    $lead->demo_ingreso_confirmado    = true;
+                    $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');
+                    Log::info('LeadAiService: ingreso a demo confirmado por inferencia.', [
+                        'lead_id' => $lead->id,
+                    ]);
+                }
+
+                /* Forzar el estado a demo_en_curso independientemente de lo que Claude sugirió. */
+                $estado_raw      = 'demo_en_curso';
+                $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+                $estado          = $pipeline_status->slug;
+                /* Recalcular el diff de estado para que el badge del mensaje sea correcto. */
+                $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            }
+        }
+
+        /* Acción: confirmar que el lead terminó la demo (inferencia conversacional).
+         * Válida en demo_en_curso o demo_pendiente_de_terminar.
+         * Anti-duplicado igual que confirmar_ingreso. */
+        $confirmar_fin_demo = ! empty($parsed['confirmar_fin_demo']);
+        if ($confirmar_fin_demo) {
+            /* Estados desde los cuales tiene sentido confirmar el fin. */
+            $estados_validos_fin = ['demo_en_curso', 'demo_pendiente_de_terminar'];
+            if (in_array((string) $lead->status, $estados_validos_fin, true)) {
+                /* Anti-duplicado: solo setear la fecha la primera vez que se confirma el fin. */
+                if (! $lead->demo_terminada_confirmada) {
+                    /* Marcar el flag y registrar el momento exacto de confirmación de fin. */
+                    $lead->demo_terminada_confirmada    = true;
+                    $lead->demo_terminada_confirmada_at = now('America/Argentina/Buenos_Aires');
+                    Log::info('LeadAiService: fin de demo confirmado por inferencia.', [
+                        'lead_id' => $lead->id,
+                    ]);
+                }
+
+                /* Forzar el estado a demo_realizada independientemente de lo que Claude sugirió. */
+                $estado_raw      = 'demo_realizada';
+                $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+                $estado          = $pipeline_status->slug;
+                /* Recalcular el diff de estado para que el badge del mensaje sea correcto. */
+                $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            }
+        }
+
+        /* Acción: marcar que el lead no va a poder ingresar a la demo.
+         * Claude la usa cuando el lead dice explícitamente que no puede o no quiere entrar.
+         * Solo válida si el lead está en ingresando_demo. */
+        $marcar_no_ingreso = ! empty($parsed['marcar_no_ingreso']);
+        if ($marcar_no_ingreso && (string) $lead->status === 'ingresando_demo') {
+            /* Retroceder a demo_pendiente_de_ingreso para que el sistema pueda reintentar el flujo. */
+            $estado_raw      = 'demo_pendiente_de_ingreso';
+            $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+            $estado          = $pipeline_status->slug;
+            /* Recalcular el diff de estado para el badge. */
+            $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            Log::info('LeadAiService: no ingreso a demo marcado por inferencia.', [
+                'lead_id' => $lead->id,
+            ]);
+        }
+
         /* --- Fin de acciones estructuradas --- */
 
         /* Acción: crear tarea de alerta si Claude detectó que se requiere intervención humana. */
@@ -1632,6 +1703,42 @@ TXT;
         /* Inyectar disponibilidad de demos si se provee (segunda llamada con slots). */
         if ($availability_context !== '') {
             $txt .= "\n\nDISPONIBILIDAD DE DEMOS:\n{$availability_context}";
+        }
+
+        /* Inyectar el objetivo activo según el estado de la demo.
+         * Este bloque le indica a Claude qué debe perseguir en cada momento del ciclo de la demo,
+         * de forma análoga a cómo persigue el agendamiento cuando solicita disponibilidad.
+         * El detalle fino de comportamiento está en el protocolo (sección CICLO DE LA DEMO). */
+        $lead_status_for_context = (string) $lead->status;
+
+        if ($lead_status_for_context === 'ingresando_demo') {
+            /* El lead está en el momento de intentar entrar al sistema demo. */
+            $txt .= "\n\nCONTEXTO DE DEMO - INGRESO:\n"
+                . "El lead tiene la demo en curso de inicio y se le preguntó si pudo ingresar al sistema.\n"
+                . "Tu objetivo es asegurarte de que entre. Si dice que tuvo un problema para entrar, resolveselo:\n"
+                . "pasale el link de la demo y aclarale que el usuario y la contraseña son su número de documento.\n"
+                . "(Ver datos del lead arriba y regla 13.2 del protocolo.)\n"
+                . "Cuando el lead confirme que ya entró (infieras de su mensaje, no por una palabra exacta),\n"
+                . "devolvé la acción confirmar_ingreso: true en el JSON.\n"
+                . "Si el lead dice claramente que no va a poder o no quiere entrar, devolvé marcar_no_ingreso: true.\n"
+                . "Si intentaste resolver el acceso y aun así no puede, devolvé requiere_intervencion_humana: true\n"
+                . "con motivo_intervencion claro.";
+        } elseif ($lead_status_for_context === 'demo_en_curso') {
+            /* El lead ya está dentro de la demo, haciendo el recorrido. */
+            $txt .= "\n\nCONTEXTO DE DEMO - EN CURSO:\n"
+                . "El lead ya está dentro de la demo. Respondé cualquier duda técnica que tenga sobre el sistema\n"
+                . "con naturalidad. Pero tu objetivo permanente es saber cuándo terminó la demo: si ya se le\n"
+                . "preguntó si terminó y responde otra cosa, respondele lo que pregunte y volvé a preguntar al\n"
+                . "final si ya terminó. No te quedes esperando pasivamente.\n"
+                . "Cuando infieras que el lead terminó la demo (aunque te lo diga indirectamente, o te diga que sí\n"
+                . "y encima te haga una pregunta), devolvé confirmar_fin_demo: true, respondé lo que haya que\n"
+                . "responder, y dejá que el sistema lo avance.";
+        } elseif ($lead_status_for_context === 'demo_pendiente_de_terminar') {
+            /* El lead volvió a escribir después de que el sistema no pudo confirmar el fin de la demo. */
+            $txt .= "\n\nCONTEXTO DE DEMO - PENDIENTE DE TERMINAR:\n"
+                . "Se había dado por no confirmada la finalización de la demo de este lead, pero volvió a escribir.\n"
+                . "Si de su mensaje se infiere que efectivamente terminó la demo, devolvé confirmar_fin_demo: true.\n"
+                . "Si todavía está en la demo, seguí ayudándolo y volvé a perseguir saber cuándo termina.";
         }
 
         $txt .= "\n¿Qué respuesta sugerís y en qué estado debería quedar el lead?";
