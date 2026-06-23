@@ -3438,6 +3438,71 @@ class ImplementationConversationService
         $this->whatsapp_send_service->send_text($admin_phone, $message);
     }
 
+    /**
+     * Envía la plantilla de bienvenida `cc_implementacion_bienvenida` al iniciar la implementación.
+     *
+     * Best-effort: si falta teléfono o falla Kapso, se loguea y no se interrumpe el inicio.
+     * El cuerpo reconstruido queda en implementation_messages para la vista de conversación.
+     *
+     * @param Implementation $implementation Implementación recién creada.
+     *
+     * @return void
+     */
+    public function send_welcome_template(Implementation $implementation): void
+    {
+        try {
+            $implementation->loadMissing('client');
+            $client = $implementation->client;
+
+            if ($client === null) {
+                Log::channel('daily')->warning('ImplementationConversationService: send_welcome_template sin cliente.', [
+                    'implementation_id' => $implementation->id,
+                ]);
+
+                return;
+            }
+
+            // Teléfono del cliente: destino de la plantilla de bienvenida.
+            $phone = trim((string) ($client->phone ?? ''));
+            if ($phone === '') {
+                Log::channel('daily')->warning('ImplementationConversationService: send_welcome_template sin teléfono de cliente.', [
+                    'implementation_id' => $implementation->id,
+                    'client_id'         => $client->id,
+                ]);
+
+                return;
+            }
+
+            // Nombre para personalizar {{1}} de la plantilla Meta.
+            $client_name = $client->resolve_display_name();
+            if ($client_name === '') {
+                $client_name = 'cliente';
+            }
+
+            // Envío vía plantilla aprobada (variables en orden {{1}}, {{2}}…).
+            $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+                $phone,
+                'cc_implementacion_bienvenida',
+                [$client_name]
+            );
+
+            // Texto plano equivalente para mostrar en el hilo del admin.
+            $body = "Hola {$client_name}, ¿cómo estás?\n\n"
+                . "Soy Martín, te escribo porque voy a ser el encargado de tu implementación en ComercioCity. "
+                . "Mi trabajo es acompañarte en todo el proceso: cargar la información de tu negocio, migrar tus datos y dejarte operando en la plataforma.\n\n"
+                . "Vamos a ir paso a paso, y cualquier duda que tengas en el camino me la podés consultar acá mismo por este chat.\n\n"
+                . "¿Arrancamos?";
+
+            // Persistir sin reenviar texto: el ID proviene del send_template anterior.
+            $this->send_outbound($implementation, 1, $phone, $body, $whatsapp_message_id);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('ImplementationConversationService: error en send_welcome_template.', [
+                'implementation_id' => $implementation->id,
+                'error'             => $exception->getMessage(),
+            ]);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Helpers de envío y persistencia
     // -------------------------------------------------------------------------
@@ -3445,10 +3510,11 @@ class ImplementationConversationService
     /**
      * Envía un mensaje de texto por WhatsApp y lo persiste en implementation_messages.
      *
-     * @param Implementation $implementation Implementación asociada al mensaje.
-     * @param int            $stage_number   Número de etapa del mensaje.
-     * @param string         $phone          Teléfono destino E.164.
-     * @param string         $body           Texto del mensaje.
+     * @param Implementation $implementation      Implementación asociada al mensaje.
+     * @param int            $stage_number        Número de etapa del mensaje.
+     * @param string         $phone               Teléfono destino E.164.
+     * @param string         $body                Texto del mensaje.
+     * @param string|null    $whatsapp_message_id ID de Meta si el envío ya ocurrió (p. ej. plantilla).
      *
      * @return void
      */
@@ -3456,10 +3522,13 @@ class ImplementationConversationService
         Implementation $implementation,
         int $stage_number,
         string $phone,
-        string $body
+        string $body,
+        ?string $whatsapp_message_id = null
     ): void {
-        // Enviar por Kapso y obtener el ID de Meta para trazabilidad.
-        $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $body);
+        // Enviar por Kapso salvo que ya exista un ID (p. ej. mensaje de plantilla).
+        if ($whatsapp_message_id === null) {
+            $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $body);
+        }
 
         // Persistir siempre, aunque el envío falle (para auditoría y re-envío manual).
         $outbound_message = ImplementationMessage::create([

@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Acciones y listado del flujo de implementación guiada de clientes.
@@ -434,6 +435,16 @@ class ImplementationController extends Controller
 
             return $implementation;
         });
+
+        // Plantilla de bienvenida por WhatsApp: best-effort, no bloquea la respuesta JSON.
+        try {
+            (new ImplementationConversationService())->send_welcome_template($implementation);
+        } catch (\Throwable $exception) {
+            Log::error('ImplementationController@start: fallo envío plantilla bienvenida.', [
+                'implementation_id' => $implementation->id,
+                'error'             => $exception->getMessage(),
+            ]);
+        }
 
         return response()->json([
             'model' => $implementation->load(['stages', 'client']),

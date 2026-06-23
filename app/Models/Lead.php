@@ -178,7 +178,7 @@ class Lead extends Model
     {
         $query->with(
             'target_client',
-            'promoted_client',
+            'promoted_client.implementation',
             'created_by_admin',
             'demo',
             'personalized_demo_videos',
@@ -205,7 +205,7 @@ class Lead extends Model
     {
         $query->with(
             'target_client',
-            'promoted_client',
+            'promoted_client.implementation',
             'created_by_admin',
             'demo',
             'personalized_demo_videos',
