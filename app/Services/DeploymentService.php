@@ -16,7 +16,10 @@ use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
 
 /**
- * Ejecuta el deployment automatizado de un cliente en hosting compartido vía SSH.
+ * Ejecuta el deployment automatizado de un cliente en hosting compartido o VPS vía SSH.
+ * Soporta dos tipos de hosting para el servidor destino:
+ *   - shared_hosting: Hostinger, paths relativos bajo domains/comerciocity.com/public_html/
+ *   - vps: servidor VPS propio, paths absolutos bajo /home/{vps_path}/
  */
 class DeploymentService
 {
@@ -82,7 +85,8 @@ class DeploymentService
     private $run_command_resolver;
 
     /**
-     * Carga upgrade, API destino y credencial shared_hosting.
+     * Carga upgrade, API destino y credencial SSH según hosting_type de la API destino.
+     * La credencial se carga en connect() de forma dinámica según hosting_type.
      *
      * @param  ClientVersionUpgrade  $upgrade
      */
@@ -97,17 +101,24 @@ class DeploymentService
             throw new \RuntimeException('El upgrade no tiene API destino configurada.');
         }
 
-        $this->credential = ClientSshCredential::where('type', 'shared_hosting')->firstOrFail();
+        /* La credencial se resuelve dinámicamente en connect() según hosting_type de target_api */
+        $this->credential = ClientSshCredential::where('type', $this->get_hosting_credential_type())->firstOrFail();
     }
 
     /**
-     * Conecta por SSH al servidor de hosting compartido.
+     * Conecta por SSH al servidor destino del cliente (shared_hosting o VPS según hosting_type).
+     * Resuelve la credencial correcta antes de conectar.
      *
      * @return void
      */
     public function connect()
     {
         $this->disconnect_hosting_ssh();
+
+        /* Seleccionar credencial según hosting_type de la API destino */
+        $credential_type = $this->get_hosting_credential_type();
+        $this->credential = ClientSshCredential::where('type', $credential_type)->firstOrFail();
+
         $this->ssh = new SSH2($this->credential->host, (int) $this->credential->port);
 
         $logged_in = $this->ssh->login($this->credential->username, $this->credential->password);
@@ -319,9 +330,17 @@ class DeploymentService
         $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
         $this->log('upload_spa', 'ZIP descargado al servidor de admin');
 
-        $spa_path = $this->get_spa_path();
-        $hosting_zip_remote = "domains/comerciocity.com/public_html/{$spa_path}/dist.zip";
-        $sftp_hosting = $this->open_sftp_session('shared_hosting');
+        /* Construir el path destino del ZIP según hosting_type */
+        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+        if ($hosting_type === 'vps') {
+            /* En VPS get_spa_hosting_dir() devuelve path absoluto */
+            $hosting_zip_remote = $this->get_spa_hosting_dir() . '/dist.zip';
+        } else {
+            /* En shared_hosting el path del zip es relativo al home del usuario SSH */
+            $spa_path = $this->get_spa_path();
+            $hosting_zip_remote = "domains/comerciocity.com/public_html/{$spa_path}/dist.zip";
+        }
+        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $hosting_zip_remote, 'upload_spa');
         $this->log('upload_spa', 'ZIP subido al hosting');
 
@@ -396,7 +415,8 @@ class DeploymentService
 
         $api_path = $this->get_api_path();
         $remote_zip = "{$api_path}/{$zip_name}";
-        $sftp_hosting = $this->open_sftp_session('shared_hosting');
+        /* Usar la credencial correcta según hosting_type (shared_hosting o vps) */
+        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
         $this->log('upload_api', 'ZIP subido al hosting');
 
@@ -915,12 +935,41 @@ class DeploymentService
     }
 
     /**
-     * Ruta relativa del SPA en el hosting (reemplaza /api por /spa en el path de la API).
+     * Ruta del SPA en el servidor destino según hosting_type.
+     *
+     * shared_hosting: ruta relativa derivada del path de la API (reemplaza /api por /spa).
+     * vps: path absoluto construido como /home/{vps_path}/htdocs/{dominio_spa}.
      *
      * @return string
      */
     private function get_spa_path()
     {
+        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+
+        if ($hosting_type === 'vps') {
+            /* Validar que vps_path esté configurado */
+            $vps_path = trim((string) ($this->target_api->vps_path ?? ''));
+            if ($vps_path === '') {
+                throw new \RuntimeException(
+                    'La ClientApi destino tiene hosting_type=vps pero no tiene vps_path configurado. '
+                    . 'Completá el campo vps_path antes de deployar.'
+                );
+            }
+
+            /* Derivar el dominio del SPA desde spa_url (ej: https://arfren.comerciocity.com → arfren.comerciocity.com) */
+            $spa_url = trim((string) ($this->target_api->spa_url ?? ''));
+            $spa_domain = preg_replace('#^https?://#', '', rtrim($spa_url, '/'));
+            if ($spa_domain === '') {
+                throw new \RuntimeException(
+                    'La ClientApi destino tiene hosting_type=vps pero no tiene spa_url configurada. '
+                    . 'Completá el campo spa_url antes de deployar.'
+                );
+            }
+
+            return '/home/' . $vps_path . '/htdocs/' . $spa_domain;
+        }
+
+        /* shared_hosting: reemplazar /api por /spa en el path relativo */
         return str_replace('/api', '/spa', $this->target_api->path);
     }
 
@@ -962,12 +1011,22 @@ class DeploymentService
     }
 
     /**
-     * Ruta absoluta SSH del directorio público del SPA en hosting compartido.
+     * Ruta SSH del directorio público del SPA en el servidor destino.
+     *
+     * VPS: get_spa_path() ya devuelve el path absoluto (ej: /home/arfren2/htdocs/arfren.comerciocity.com).
+     * shared_hosting: agrega el prefijo Hostinger al path relativo.
      *
      * @return string
      */
     private function get_spa_hosting_dir(): string
     {
+        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+
+        if ($hosting_type === 'vps') {
+            /* En VPS el path ya es absoluto */
+            return $this->get_spa_path();
+        }
+
         return 'domains/comerciocity.com/public_html/' . $this->get_spa_path();
     }
 
@@ -995,12 +1054,31 @@ class DeploymentService
     }
 
     /**
-     * Ruta del API en el hosting compartido.
+     * Ruta del API en el servidor destino según hosting_type.
+     *
+     * shared_hosting: prefijo Hostinger + path relativo de la API (ej: domains/comerciocity.com/public_html/colman/api).
+     * vps: path absoluto construido como /home/api-{vps_path}/empresa-api.
      *
      * @return string
      */
     private function get_api_path(): string
     {
+        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+
+        if ($hosting_type === 'vps') {
+            /* Validar que vps_path esté configurado */
+            $vps_path = trim((string) ($this->target_api->vps_path ?? ''));
+            if ($vps_path === '') {
+                throw new \RuntimeException(
+                    'La ClientApi destino tiene hosting_type=vps pero no tiene vps_path configurado. '
+                    . 'Completá el campo vps_path antes de deployar.'
+                );
+            }
+
+            return '/home/api-' . $vps_path . '/empresa-api';
+        }
+
+        /* shared_hosting: prefijo Hostinger + path relativo */
         return 'domains/comerciocity.com/public_html/' . $this->target_api->path;
     }
 
@@ -1464,6 +1542,17 @@ class DeploymentService
         }
 
         return false;
+    }
+
+    /**
+     * Tipo de credencial SSH/SFTP para el servidor destino del cliente.
+     * Depende del hosting_type configurado en la API destino del upgrade.
+     *
+     * @return string  'shared_hosting' | 'vps'
+     */
+    private function get_hosting_credential_type(): string
+    {
+        return ($this->target_api->hosting_type ?? 'shared_hosting') === 'vps' ? 'vps' : 'shared_hosting';
     }
 
     /**

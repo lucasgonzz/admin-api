@@ -258,6 +258,8 @@ class DeploymentController extends BaseController
             'path'          => 'sometimes|required|string|max:255',
             'spa_url'       => 'nullable|url',
             'hosting_type'  => 'sometimes|required|in:shared_hosting,vps',
+            /* Identificador del cliente en el VPS; solo requerido cuando hosting_type=vps */
+            'vps_path'      => 'nullable|string|max:255',
         ]);
 
         if (array_key_exists('url', $validated) && is_string($validated['url'])) {
