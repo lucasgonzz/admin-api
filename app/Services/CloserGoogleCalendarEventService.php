@@ -50,8 +50,8 @@ class CloserGoogleCalendarEventService
      * variables de configuración de LeadDemoSettings. Si el closer no tiene calendario
      * conectado con scope de escritura, no hace nada (sin excepción).
      *
-     * Persiste el google_event_id devuelto por Google usando update() sobre el lead
-     * (solo actualiza ese campo, sin tocar el resto del modelo).
+     * Persiste el google_event_id y meet_url devueltos por Google usando update() sobre el lead
+     * (solo actualiza esos campos, sin tocar el resto del modelo).
      *
      * Debe llamarse DESPUÉS del save() principal del lead, con demo_date y demo_start_time
      * ya persistidos en la base de datos.
@@ -80,17 +80,25 @@ class CloserGoogleCalendarEventService
             // Calcular horario del evento: inicio = fin de la demo, fin = gracia + llamada closer.
             [$event_start, $event_end] = $this->calculate_event_times($lead);
 
-            // Construir el cuerpo del evento para la API de Google Calendar.
+            // Construir el cuerpo del evento para la API de Google Calendar (incluye Google Meet).
             $event_body = $this->build_event_body($lead, $event_start, $event_end);
 
             // Obtener access_token fresco para la llamada.
             $access_token = $this->oauth_service->get_fresh_access_token($connection);
 
-            // Llamar a la API de Google Calendar para crear el evento.
+            // Query params: conferenceDataVersion=1 habilita Google Meet; sendUpdates=all solo si hay email del lead.
+            $lead_tiene_email = ! empty($lead->email);
+            $query_params     = 'conferenceDataVersion=1';
+            if ($lead_tiene_email) {
+                $query_params .= '&sendUpdates=all';
+            }
+
+            // Llamar a la API de Google Calendar para crear el evento con Meet.
             $response = Http::withToken($access_token)
                 ->post(
                     'https://www.googleapis.com/calendar/v3/calendars/'
-                        . urlencode($connection->google_calendar_id) . '/events',
+                        . urlencode($connection->google_calendar_id)
+                        . '/events?' . $query_params,
                     $event_body
                 );
 
@@ -115,14 +123,30 @@ class CloserGoogleCalendarEventService
                 return;
             }
 
-            // Persistir el google_event_id en el lead usando update() (solo ese campo).
+            // Persistir google_event_id y meet_url en el lead usando update().
             $google_event_id = $response->json('id');
-            $lead->update(['google_event_id' => $google_event_id]);
+
+            // Extraer meet_url de la respuesta de Google (entryPointType === video).
+            $meet_url     = null;
+            $entry_points = $response->json('conferenceData.entryPoints') ?? [];
+            foreach ($entry_points as $entry) {
+                if (($entry['entryPointType'] ?? '') === 'video') {
+                    $meet_url = $entry['uri'] ?? null;
+                    break;
+                }
+            }
+
+            $update_data = ['google_event_id' => $google_event_id];
+            if ($meet_url) {
+                $update_data['meet_url'] = $meet_url;
+            }
+            $lead->update($update_data);
 
             Log::channel('disponibilidad')->info(
                 '[CALENDAR_EVENT] Evento creado en Google Calendar del closer.'
                 . ' lead_id=' . $lead->id
                 . ' google_event_id=' . $google_event_id
+                . ' meet_url=' . ($meet_url ?? 'no generada')
                 . ' event_start=' . $event_start->toDateTimeString()
                 . ' event_end=' . $event_end->toDateTimeString()
             );
@@ -143,7 +167,7 @@ class CloserGoogleCalendarEventService
     /**
      * Elimina el evento del lead en Google Calendar (si existe google_event_id en el lead).
      *
-     * Solo borra en Google y limpia el atributo google_event_id en el objeto $lead.
+     * Solo borra en Google y limpia google_event_id y meet_url en el objeto $lead.
      * NO llama a $lead->save(): el guardado lo hace el llamador, que consolida todos
      * los cambios del lead en un único save() para evitar escrituras parciales.
      *
@@ -166,8 +190,9 @@ class CloserGoogleCalendarEventService
         // Llamar al método centralizado usando el ID del lead.
         $this->delete_event_by_id($lead->google_event_id, $demo_date_str);
 
-        // Limpiar el google_event_id del lead en memoria (sin save; el llamador persiste).
+        // Limpiar google_event_id y meet_url del lead en memoria (sin save; el llamador persiste).
         $lead->google_event_id = null;
+        $lead->meet_url        = null;
     }
 
     /**
@@ -317,7 +342,14 @@ class CloserGoogleCalendarEventService
         $start_iso = $event_start->setTimezone($tz)->toIso8601String();
         $end_iso   = $event_end->setTimezone($tz)->toIso8601String();
 
-        return [
+        // Invitados: si el lead tiene email, Google envía la invitación con el link de Meet.
+        $attendees = [];
+        if (! empty($lead->email)) {
+            $attendees[] = ['email' => $lead->email];
+        }
+
+        // Cuerpo base del evento con Google Meet (conferenceData).
+        $event_body = [
             // Prefijo [CC] para distinguir eventos generados por ComercioCity de eventos personales.
             'summary'     => '[CC] Llamada con ' . $lead_nombre,
             'description' => 'Lead: ' . $lead_nombre . "\n"
@@ -333,8 +365,21 @@ class CloserGoogleCalendarEventService
                 'timeZone' => $tz,
             ],
             // colorId "2" = sage/verde oscuro: distingue visualmente los eventos de ComercioCity.
-            'colorId'     => '2',
+            'colorId'        => '2',
+            'conferenceData' => [
+                'createRequest' => [
+                    'requestId'             => 'cc-lead-' . $lead->id . '-' . time(),
+                    'conferenceSolutionKey' => ['type' => 'hangoutsMeet'],
+                ],
+            ],
         ];
+
+        // Solo incluir attendees si hay email; Google no lo requiere cuando no hay invitado externo.
+        if (! empty($attendees)) {
+            $event_body['attendees'] = $attendees;
+        }
+
+        return $event_body;
     }
 
     /**

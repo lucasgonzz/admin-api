@@ -235,6 +235,16 @@ class LeadProperties
                 'show'  => true,
             ],
             [
+                'key' => 'meet_url',
+                'text' => 'URL Google Meet',
+                'type' => 'text',
+                'value' => '',
+                'width' => 280,
+                'show'  => true,
+                'not_show_on_table' => true,
+                'readonly' => true,
+            ],
+            [
                 'key' => 'personalized_demo_videos',
                 'text' => 'Videos tutoriales personalizados (mail demo)',
                 'type' => 'custom',

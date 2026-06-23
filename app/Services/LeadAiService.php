@@ -1290,8 +1290,9 @@ class LeadAiService
                 $google_event_delete_needed      = true;
                 $google_event_id_anterior        = $lead->google_event_id;
                 $google_event_demo_date_anterior = $lead->demo_date->format('Y-m-d');
-                // Limpiar el google_event_id en memoria para que el save() principal lo persista como null.
+                // Limpiar google_event_id y meet_url en memoria para que el save() principal los persista como null.
                 $lead->google_event_id = null;
+                $lead->meet_url        = null;
             }
 
             /* Limpiar los campos de demo: libera el slot y deja al lead listo para reagendar. */
