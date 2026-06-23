@@ -421,6 +421,125 @@ class CloserGoogleCalendarBusyService
     }
 
     /**
+     * Lista eventos con nombre del calendario Google del closer para el panel de administración.
+     *
+     * Usa calendar.events.list (no freeBusy) para obtener summary y horarios legibles.
+     * Si la API falla o el token está revocado, devuelve array vacío sin lanzar excepción.
+     * Actualiza last_synced_at en la conexión cuando la consulta es exitosa.
+     *
+     * @param AdminCalendarConnection $connection   Conexión activa con google_calendar_id configurado.
+     * @param int                     $days_ahead   Cantidad de días hacia adelante desde hoy a consultar.
+     * @return array<int, array{fecha: string, inicio: string, fin: string, nombre: string}>
+     */
+    public function get_events_for_admin(AdminCalendarConnection $connection, int $days_ahead = 30): array
+    {
+        // Zona horaria de referencia para rangos y formateo de horas.
+        $tz = 'America/Argentina/Buenos_Aires';
+
+        // Sin calendario elegido no hay eventos que listar.
+        if (empty($connection->google_calendar_id)) {
+            return [];
+        }
+
+        try {
+            // Access token fresco para la llamada a events.list.
+            $access_token = $this->oauth_service->get_fresh_access_token($connection);
+        } catch (GoogleCalendarTokenRevokedException $e) {
+            Log::warning('CloserGoogleCalendarBusyService: token revocado al listar eventos para admin', [
+                'admin_id' => $e->admin_id,
+            ]);
+
+            return [];
+        } catch (\Exception $e) {
+            Log::error('CloserGoogleCalendarBusyService: error al obtener token para listar eventos', [
+                'admin_id' => $connection->admin_id,
+                'error'    => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+
+        try {
+            // Rango de consulta: desde ahora hasta $days_ahead días adelante.
+            $time_min = \Carbon\Carbon::now($tz)->toIso8601String();
+            $time_max = \Carbon\Carbon::now($tz)->addDays($days_ahead)->toIso8601String();
+
+            // Llamada a events.list con instancias expandidas y orden cronológico.
+            $response = \Illuminate\Support\Facades\Http::withToken($access_token)
+                ->get(
+                    'https://www.googleapis.com/calendar/v3/calendars/'
+                    . rawurlencode($connection->google_calendar_id)
+                    . '/events',
+                    [
+                        'timeMin'      => $time_min,
+                        'timeMax'      => $time_max,
+                        'singleEvents' => 'true',
+                        'orderBy'      => 'startTime',
+                        'maxResults'   => 100,
+                        'timeZone'     => $tz,
+                    ]
+                );
+
+            if ($response->failed()) {
+                Log::warning('CloserGoogleCalendarBusyService: fallo al listar eventos', [
+                    'admin_id' => $connection->admin_id,
+                    'status'   => $response->status(),
+                    'body'     => $response->body(),
+                ]);
+
+                return [];
+            }
+
+            // Marcar sincronización exitosa en la conexión del closer.
+            $connection->update(['last_synced_at' => now()]);
+
+            // Parsear cada item devuelto por Google en el formato del panel admin.
+            $items  = $response->json('items', []);
+            $events = [];
+
+            foreach ($items as $item) {
+                // Nombre del evento; Google puede omitir summary en borradores o eventos sin título.
+                $nombre = ! empty($item['summary']) ? $item['summary'] : 'Sin título';
+
+                $start = $item['start'] ?? [];
+                $end   = $item['end'] ?? [];
+
+                // Eventos de día completo usan start.date en lugar de start.dateTime.
+                $is_all_day = isset($start['date']) && ! isset($start['dateTime']);
+
+                if ($is_all_day) {
+                    $fecha  = $start['date'];
+                    $inicio = 'Todo el día';
+                    $fin    = '';
+                } else {
+                    $start_carbon = \Carbon\Carbon::parse($start['dateTime'])->setTimezone($tz);
+                    $end_carbon   = \Carbon\Carbon::parse($end['dateTime'] ?? $start['dateTime'])->setTimezone($tz);
+
+                    $fecha  = $start_carbon->format('Y-m-d');
+                    $inicio = $start_carbon->format('H:i');
+                    $fin    = $end_carbon->format('H:i');
+                }
+
+                $events[] = [
+                    'fecha'  => $fecha,
+                    'inicio' => $inicio,
+                    'fin'    => $fin,
+                    'nombre' => $nombre,
+                ];
+            }
+
+            return $events;
+        } catch (\Exception $e) {
+            Log::error('CloserGoogleCalendarBusyService: excepción al listar eventos', [
+                'admin_id' => $connection->admin_id,
+                'error'    => $e->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    /**
      * Invalida la entrada de caché de disponibilidad de Google Calendar para una fecha concreta.
      *
      * Se llama desde CloserGoogleCalendarEventService después de crear o eliminar un evento,

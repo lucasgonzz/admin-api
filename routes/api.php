@@ -189,6 +189,8 @@ Route::prefix('admin')->group(function () {
         Route::get('calendar/google/{admin_id}/status', [AdminCalendarConnectionController::class, 'status']);
         Route::get('calendar/google/{admin_id}/list-calendars', [AdminCalendarConnectionController::class, 'list_calendars']);
         Route::put('calendar/google/{admin_id}/select-calendar', [AdminCalendarConnectionController::class, 'select_calendar']);
+        Route::get('calendar/google/{admin_id}/events', [AdminCalendarConnectionController::class, 'get_events']);
+        Route::post('calendar/google/{admin_id}/sync', [AdminCalendarConnectionController::class, 'sync_calendar']);
         Route::delete('calendar/google/{admin_id}', [AdminCalendarConnectionController::class, 'disconnect']);
 
         Route::get('demo', [DemoController::class, 'index_json']);
@@ -299,6 +301,8 @@ Route::prefix('admin')->group(function () {
         // Descarga un adjunto de un mensaje de la conversación (mismo proxy Kapso).
         Route::get('implementation/{implementation}/message-file-download/{message}', [\App\Http\Controllers\Api\ImplementationController::class, 'message_file_download']);
         Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
+        Route::post('implementation/{implementation}/simulate-inbound', [\App\Http\Controllers\Api\ImplementationController::class, 'simulate_inbound']);
+        Route::post('implementation/{implementation}/send-message', [\App\Http\Controllers\Api\ImplementationController::class, 'send_message']);
         Route::delete('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'destroy']);
 
         Route::post('client/{client}/implementation/start', [\App\Http\Controllers\Api\ImplementationController::class, 'start']);

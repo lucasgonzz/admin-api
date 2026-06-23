@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Admin;
 use App\Models\AdminCalendarConnection;
+use App\Services\CloserGoogleCalendarBusyService;
 use App\Services\GoogleCalendarOAuthService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -29,12 +30,19 @@ class AdminCalendarConnectionController extends Controller
     /** @var GoogleCalendarOAuthService */
     protected $oauth_service;
 
+    /** @var CloserGoogleCalendarBusyService */
+    protected $busy_service;
+
     /**
-     * @param GoogleCalendarOAuthService $oauth_service Servicio de autenticación OAuth Google.
+     * @param GoogleCalendarOAuthService       $oauth_service Servicio de autenticación OAuth Google.
+     * @param CloserGoogleCalendarBusyService  $busy_service  Consulta eventos y caché de disponibilidad.
      */
-    public function __construct(GoogleCalendarOAuthService $oauth_service)
-    {
+    public function __construct(
+        GoogleCalendarOAuthService $oauth_service,
+        CloserGoogleCalendarBusyService $busy_service
+    ) {
         $this->oauth_service = $oauth_service;
+        $this->busy_service  = $busy_service;
     }
 
     /**
@@ -210,6 +218,82 @@ class AdminCalendarConnectionController extends Controller
         return response()->json([
             'message'            => 'Calendario seleccionado correctamente.',
             'google_calendar_id' => $connection->google_calendar_id,
+        ], 200);
+    }
+
+    /**
+     * Lista los eventos próximos del calendario Google del admin objetivo (con nombre y horario).
+     *
+     * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuyos eventos se consultan.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function get_events(Request $request, int $admin_id)
+    {
+        // Verificar que el admin objetivo exista.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
+
+        // Conexión activa con calendario dedicado elegido.
+        $connection = AdminCalendarConnection::where('admin_id', $admin_id)
+            ->where('is_active', true)
+            ->first();
+
+        if (! $connection || empty($connection->google_calendar_id)) {
+            return response()->json(['message' => 'No hay conexión activa con calendario configurado.'], 422);
+        }
+
+        // Consulta fresca a events.list de Google (sin caché intermedia).
+        $events = $this->busy_service->get_events_for_admin($connection);
+
+        // Recargar last_synced_at actualizado por el servicio tras consulta exitosa.
+        $connection->refresh();
+
+        return response()->json([
+            'events'         => $events,
+            'last_synced_at' => $connection->last_synced_at,
+        ], 200);
+    }
+
+    /**
+     * Fuerza sincronización del calendario: refresca eventos e invalida caché freeBusy de 14 días.
+     *
+     * @param Request $request
+     * @param int     $admin_id  ID del admin objetivo cuyo calendario se sincroniza.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function sync_calendar(Request $request, int $admin_id)
+    {
+        // Verificar que el admin objetivo exista.
+        if (! Admin::find($admin_id)) {
+            return response()->json(['message' => 'Admin no encontrado.'], 404);
+        }
+
+        // Conexión activa del closer.
+        $connection = AdminCalendarConnection::where('admin_id', $admin_id)
+            ->where('is_active', true)
+            ->first();
+
+        if (! $connection) {
+            return response()->json(['message' => 'No hay conexión activa con Google Calendar.'], 422);
+        }
+
+        // Refrescar listado de eventos desde Google.
+        $events = $this->busy_service->get_events_for_admin($connection);
+
+        // Invalidar caché freeBusy de hoy y los 13 días siguientes (14 fechas en total).
+        $tz = 'America/Argentina/Buenos_Aires';
+        for ($day_offset = 0; $day_offset < 14; $day_offset++) {
+            $date_string = \Carbon\Carbon::now($tz)->addDays($day_offset)->format('Y-m-d');
+            $this->busy_service->flush_cache_for_date($date_string);
+        }
+
+        $connection->refresh();
+
+        return response()->json([
+            'events'         => $events,
+            'last_synced_at' => $connection->last_synced_at,
         ], 200);
     }
 
