@@ -1816,6 +1816,46 @@ class LeadController extends Controller
     }
 
     /**
+     * Genera manualmente el check de fin de demo para el lead indicado.
+     *
+     * Crea un mensaje sugerido preguntando si el lead pudo terminar la demo
+     * y marca el flag demo_fin_check_enviado en true. Espeja la lógica del
+     * check_demo_ingress_json para que el operador pueda enviarlo sin esperar
+     * al scheduler automático.
+     *
+     * @param int|string $id Identificador del lead.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function check_demo_fin_json($id)
+    {
+        /* Lead objetivo. */
+        $lead = Lead::findOrFail($id);
+
+        /* Nombre del contacto con fallback para el saludo personalizado. */
+        $contact_name = $lead->contact_name ?? 'cliente';
+
+        /* Crear mensaje sugerido de check de fin de demo para el setter. */
+        \App\Models\LeadMessage::create([
+            'lead_id'      => $lead->id,
+            'sender'       => 'sistema',
+            'content'      => "¡Hola {$contact_name}! ¿Pudiste recorrer la demo completa? 😊",
+            'status'       => 'sugerido',
+            'is_followup'  => false,
+            'ai_reasoning' => 'Check manual de fin de demo.',
+        ]);
+
+        /* Marcar el flag de check de fin y activar sugerencia pendiente para el setter. */
+        $lead->update([
+            'demo_fin_check_enviado'     => true,
+            'tiene_sugerencia_pendiente' => true,
+        ]);
+
+        \App\Events\LeadSuggestionCreated::dispatch($lead->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Fuerza el seguimiento que corresponde al lead ahora mismo (testing manual),
      * ignorando horas de espera y sugerencia pendiente. Ver LeadFollowupService::force_followup_now.
      *
@@ -2143,5 +2183,77 @@ class LeadController extends Controller
             'redondear_centenas_en_vender' => $request->boolean('redondear_centenas_en_vender'),
             'omitir_cuentas_corrientes'    => $request->boolean('omitir_cuentas_corrientes'),
         ];
+    }
+
+    /**
+     * Envía manualmente una plantilla Meta al lead desde el panel de admin.
+     *
+     * Recibe el nombre de la plantilla, el código de idioma y el array de variables
+     * ya resueltas. Llama a WhatsappSendService::send_template() y registra el
+     * LeadMessage con el body renderizado.
+     *
+     * @param Request             $request               Debe incluir: template_name, language_code, variables (array), content (texto renderizado)
+     * @param int|string          $lead_id
+     * @param WhatsappSendService $whatsapp_send_service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_template_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
+    {
+        /* Parámetros obligatorios recibidos del frontend. */
+        $template_name  = trim((string) $request->input('template_name', ''));
+        $language_code  = trim((string) $request->input('language_code', 'es_AR'));
+        $variables      = $request->input('variables', []);
+        /* Texto ya renderizado (variables reemplazadas) que se guarda como contenido del mensaje. */
+        $content        = trim((string) $request->input('content', ''));
+
+        /* Validaciones mínimas antes de llamar a WhatsApp. */
+        if ($template_name === '') {
+            return response()->json(['message' => 'El nombre de la plantilla es obligatorio.'], 422);
+        }
+        if ($content === '') {
+            return response()->json(['message' => 'El contenido renderizado no puede estar vacío.'], 422);
+        }
+
+        $lead  = Lead::query()->findOrFail($lead_id);
+        $phone = trim((string) ($lead->phone ?? ''));
+
+        /* Intentar el envío por WhatsApp solo si el lead tiene teléfono. */
+        $whatsapp_message_id = null;
+        if ($phone !== '') {
+            try {
+                $whatsapp_message_id = $whatsapp_send_service->send_template(
+                    $phone,
+                    $template_name,
+                    $variables,
+                    $language_code
+                );
+            } catch (\Throwable $e) {
+                Log::error('LeadController@send_template_json: error WhatsApp.', [
+                    'lead_id'       => $lead_id,
+                    'template_name' => $template_name,
+                    'error'         => $e->getMessage(),
+                ]);
+
+                return response()->json(['message' => 'No se pudo enviar la plantilla por WhatsApp: ' . $e->getMessage()], 422);
+            }
+        }
+
+        /* Registrar el mensaje en la conversación del lead. */
+        $message = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'setter',
+            'content'               => $content,
+            'status'                => 'enviado',
+            'whatsapp_message_id'   => $whatsapp_message_id,
+            'sent_at'               => now(),
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+        ]);
+
+        /* Notificar a todos los clientes conectados que la conversación cambió. */
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
     }
 }
