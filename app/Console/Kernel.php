@@ -40,8 +40,17 @@ class Kernel extends ConsoleKernel
         // Genera resumen del lead con Claude X minutos antes del fin de la demo.
         $schedule->command('leads:generate-demo-summary')->everyMinute();
 
-        // Envía pregunta de fin de demo al lead que ya confirmó el ingreso (al cumplirse la duración).
+        // Envía pregunta de fin de demo al lead en demo_en_curso (al cumplirse la duración).
         $schedule->command('leads:check-demo-fin')->everyMinute();
+
+        // Pasa a demo_pendiente_de_ingreso si el lead no confirmó el ingreso en el timeout configurado.
+        $schedule->command('leads:check-demo-ingreso-timeout')->everyMinute();
+
+        // Envía seguimiento único de fin si el lead no confirmó que terminó (demo_fin_seguimiento_minutos).
+        $schedule->command('leads:check-demo-fin-seguimiento')->everyMinute();
+
+        // Pasa a demo_pendiente_de_terminar si el lead no confirmó el fin en el timeout configurado.
+        $schedule->command('leads:check-demo-fin-timeout')->everyMinute();
 
         $schedule->command('queue:work --stop-when-empty')->everyMinute();
     }

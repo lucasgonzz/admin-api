@@ -5,18 +5,21 @@ namespace App\Console\Commands;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
-use App\Services\LeadDemoSettings;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Envía automáticamente la pregunta de check-in si el lead no confirmó acceso a la demo.
+ * Envía automáticamente el check de ingreso en el minuto exacto de inicio de la demo
+ * y transiciona el lead al estado `ingresando_demo`.
  *
- * Se ejecuta cada minuto. Busca leads en estado `demo_agendada` cuya demo
- * comenzó hace X minutos (configurable) sin confirmación de ingreso y sin
- * mensajes recientes que sugieran que ya está dentro.
+ * Se ejecuta cada minuto. Busca leads en `demo_agendada` cuya `demo_datetime`
+ * cae dentro de la ventana ±2 min del instante actual, sin check de ingreso enviado.
+ *
+ * A partir del prompt 096, ya no se usa el retardo configurable
+ * `demo_check_ingreso_minutos_post`; el check se manda en el minuto exacto de inicio.
+ * La confirmación de ingreso la hace Claude (prompt 095) al interpretar la respuesta del lead.
  */
 class CheckDemoIngress extends Command
 {
@@ -32,14 +35,7 @@ class CheckDemoIngress extends Command
      *
      * @var string
      */
-    protected $description = 'Envía pregunta automática de check-in si el lead no confirmó acceso a la demo';
-
-    /**
-     * Palabras clave en mensajes del lead que indican que ya ingresó a la demo.
-     *
-     * @var array<string>
-     */
-    private const INGRESO_KEYWORDS = ['ingresé', 'ingrese', 'entré', 'entre', 'pude', 'ya estoy', 'sí', 'si'];
+    protected $description = 'Transiciona el lead a ingresando_demo y envía el check de ingreso en el minuto exacto de inicio';
 
     /**
      * Servicio de envío saliente vía Kapso/Meta.
@@ -58,24 +54,22 @@ class CheckDemoIngress extends Command
     }
 
     /**
-     * Procesa candidatos y envía check-in directo si corresponde.
+     * Procesa candidatos: transiciona a `ingresando_demo` y envía el check de ingreso.
      *
      * @return int Código de salida (0 = éxito).
      */
     public function handle(): int
     {
-        /* Minutos post-inicio para verificar el ingreso según configuración. */
-        $check_minutos = LeadDemoSettings::get_check_ingreso_minutos_post();
-
         /* Momento actual en timezone Argentina. */
         $now = Carbon::now('America/Argentina/Buenos_Aires');
 
         /*
-         * Ventana de 4 minutos alrededor del momento exacto de check
+         * Ventana de ±2 minutos alrededor del inicio exacto de la demo
          * para no perder el trigger con el scheduler de 1 minuto.
+         * Un lead cuya demo_datetime esté en [now-2, now+2] es candidato.
          */
-        $target_demo_start_before = $now->copy()->subMinutes($check_minutos - 2);
-        $target_demo_start_after  = $now->copy()->subMinutes($check_minutos + 2);
+        $window_start = $now->copy()->subMinutes(2);
+        $window_end   = $now->copy()->addMinutes(2);
 
         /* Buscar leads con demo agendada, sin check enviado y sin sugerencia pendiente. */
         $candidates = Lead::query()
@@ -85,10 +79,9 @@ class CheckDemoIngress extends Command
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->whereDate('demo_date', $now->format('Y-m-d'))
-            ->with('messages')
             ->get();
 
-        /* Contador de mensajes enviados para el log final. */
+        /* Contador de checks enviados para el log final. */
         $sent = 0;
 
         foreach ($candidates as $lead) {
@@ -103,24 +96,21 @@ class CheckDemoIngress extends Command
             }
 
             /*
-             * Verificar que la demo haya empezado hace entre (check_minutos - 2) y (check_minutos + 2)
-             * minutos (la demo_datetime debe estar en la ventana $target_demo_start_after..$target_demo_start_before).
+             * Verificar que el inicio de la demo caiga dentro de la ventana ±2 min.
+             * demo_datetime debe estar entre window_start y window_end.
              */
-            if ($demo_datetime->gt($target_demo_start_before) || $demo_datetime->lt($target_demo_start_after)) {
+            if ($demo_datetime->lt($window_start) || $demo_datetime->gt($window_end)) {
                 continue;
             }
 
-            /* Si hay evidencia de ingreso en los mensajes recientes, no enviar. */
-            if ($this->has_ingress_evidence($lead, $demo_datetime)) {
-                /* Marcar igualmente para no volver a procesar este lead. */
-                $lead->update(['demo_check_ingreso_enviado' => true]);
-                continue;
-            }
+            /* Transicionar el lead a ingresando_demo antes de enviar el mensaje. */
+            $lead->update(['status' => 'ingresando_demo']);
 
-            /* Enviar check de ingreso directo por WhatsApp (texto libre, ventana activa). */
+            /* Texto natural del check de ingreso (texto libre, ventana 24hs activa). */
             $contact_name = $lead->contact_name ?? 'cliente';
-            $content = "{$contact_name}, ¿cómo vas con la demo? ¿Pudiste entrar bien?";
+            $content      = "{$contact_name}, ¿cómo vas? ¿Pudiste entrar a la demo?";
 
+            /* Enviar por WhatsApp si el lead tiene teléfono. */
             $whatsapp_message_id = null;
             $phone = trim((string) $lead->phone);
             if ($phone !== '') {
@@ -131,6 +121,7 @@ class CheckDemoIngress extends Command
                 ]);
             }
 
+            /* Registrar el mensaje en la conversación del lead. */
             LeadMessage::create([
                 'lead_id'             => $lead->id,
                 'sender'              => 'sistema',
@@ -140,13 +131,13 @@ class CheckDemoIngress extends Command
                 'whatsapp_message_id' => $whatsapp_message_id,
             ]);
 
-            /* Marcar flag de check enviado. */
+            /* Marcar flag anti-duplicado para que este comando no vuelva a procesarlo. */
             $lead->update(['demo_check_ingreso_enviado' => true]);
 
             /* Notificar a admin-spa vía socket. */
             LeadBroadcastService::emit_conversation_updated((int) $lead->id);
 
-            Log::info('CheckDemoIngress: check de ingreso enviado', [
+            Log::info('CheckDemoIngress: lead pasó a ingresando_demo + check enviado', [
                 'lead_id'       => $lead->id,
                 'contact_name'  => $lead->contact_name,
                 'demo_datetime' => $demo_datetime->toDateTimeString(),
@@ -158,38 +149,6 @@ class CheckDemoIngress extends Command
         $this->info("Checks de ingreso enviados: {$sent}");
 
         return 0;
-    }
-
-    /**
-     * Verifica si los mensajes del lead después del inicio de la demo contienen
-     * evidencia de que ya ingresó (palabras clave o explicación de acceso).
-     *
-     * En caso de duda, devuelve false para no enviar (es mejor no molestar).
-     *
-     * @param Lead   $lead          Lead con relación messages cargada.
-     * @param Carbon $demo_datetime Datetime de inicio de la demo.
-     *
-     * @return bool true si hay evidencia de ingreso.
-     */
-    protected function has_ingress_evidence(Lead $lead, Carbon $demo_datetime): bool
-    {
-        /* Mensajes del lead enviados DESPUÉS del inicio de la demo. */
-        $recent_lead_messages = $lead->messages->filter(function ($msg) use ($demo_datetime) {
-            return (string) $msg->sender === 'lead'
-                && $msg->created_at !== null
-                && $msg->created_at->gt($demo_datetime);
-        });
-
-        foreach ($recent_lead_messages as $msg) {
-            $content_lower = mb_strtolower((string) $msg->content);
-            foreach (self::INGRESO_KEYWORDS as $keyword) {
-                if (str_contains($content_lower, $keyword)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -209,4 +168,3 @@ class CheckDemoIngress extends Command
         }
     }
 }
-

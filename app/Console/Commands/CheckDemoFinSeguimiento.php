@@ -12,32 +12,33 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Envía automáticamente el mensaje de fin de demo preguntando al lead si terminó.
+ * Envía un único mensaje de seguimiento de fin de demo si el lead no confirmó
+ * que terminó dentro del tiempo configurado.
  *
- * Se ejecuta cada minuto. Busca leads en estado `demo_en_curso` (ingreso ya
- * confirmado por Claude en prompt 095) a los que aún no se les envió el check de fin
- * (`demo_fin_check_enviado = false`), cuya demo termina ahora mismo (dentro de una
- * ventana de ±2 minutos alrededor del fin calculado = inicio + duración).
+ * Se ejecuta cada minuto. Busca leads en `demo_en_curso` que ya recibieron el
+ * check de fin (`demo_fin_check_enviado = true`) pero no confirmaron la terminación
+ * (`demo_terminada_confirmada = false`) y aún no recibieron el seguimiento
+ * (`demo_fin_seguimiento_enviado = false`).
  *
- * A partir del prompt 096, el filtro usa `demo_en_curso` en lugar de `demo_agendada`
- * con `demo_ingreso_confirmado = true`, porque el estado `demo_en_curso` ya implica
- * que el ingreso fue confirmado.
+ * La referencia temporal es `demo_datetime + duración` (momento en que se envió el
+ * check de fin). Si desde ese momento pasaron más de `fin_seguimiento_minutos`,
+ * se envía 1 seguimiento. El flag anti-duplicado garantiza que no se repita.
  */
-class CheckDemoFin extends Command
+class CheckDemoFinSeguimiento extends Command
 {
     /**
      * Nombre del comando artisan.
      *
      * @var string
      */
-    protected $signature = 'leads:check-demo-fin';
+    protected $signature = 'leads:check-demo-fin-seguimiento';
 
     /**
      * Descripción del comando para `php artisan list`.
      *
      * @var string
      */
-    protected $description = 'Envía pregunta automática de fin de demo al lead en demo_en_curso al cumplirse la duración';
+    protected $description = 'Envía seguimiento único de fin de demo si el lead no confirmó en el tiempo esperado';
 
     /**
      * Servicio de envío saliente vía Kapso/Meta.
@@ -56,7 +57,7 @@ class CheckDemoFin extends Command
     }
 
     /**
-     * Procesa candidatos y envía el check de fin directo si corresponde.
+     * Procesa candidatos y envía el seguimiento de fin si corresponde.
      *
      * @return int Código de salida (0 = éxito).
      */
@@ -65,29 +66,27 @@ class CheckDemoFin extends Command
         /* Duración estimada de la demo en minutos según configuración. */
         $duracion_minutos = LeadDemoSettings::get_duracion_minutos();
 
+        /* Minutos desde el check de fin antes de enviar el seguimiento. */
+        $seguimiento_minutos = LeadDemoSettings::get_fin_seguimiento_minutos();
+
         /* Momento actual en timezone Argentina. */
         $now = Carbon::now('America/Argentina/Buenos_Aires');
 
         /*
-         * Ventana de ±2 minutos alrededor del fin de la demo
-         * para no perder el trigger con el scheduler de 1 minuto.
-         */
-        $target_fin_before = $now->copy()->addMinutes(2);
-        $target_fin_after  = $now->copy()->subMinutes(2);
-
-        /*
-         * Buscar leads en demo_en_curso (ingreso ya confirmado) y check de fin sin enviar.
-         * El estado demo_en_curso lo setea Claude al confirmar el ingreso (prompt 095).
+         * Referencia: el check de fin se mandó en el momento demo_datetime + duracion.
+         * Si desde ese punto pasaron más de seguimiento_minutos, corresponde el seguimiento.
+         * Límite: solo leads cuyo (demo_datetime + duracion + seguimiento_minutos) <= now.
          */
         $candidates = Lead::query()
             ->where('status', 'demo_en_curso')
-            ->where('demo_fin_check_enviado', false)
+            ->where('demo_fin_check_enviado', true)
+            ->where('demo_terminada_confirmada', false)
+            ->where('demo_fin_seguimiento_enviado', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
-            ->whereDate('demo_date', $now->format('Y-m-d'))
             ->get();
 
-        /* Contador de mensajes enviados para el log final. */
+        /* Contador de seguimientos enviados para el log final. */
         $sent = 0;
 
         foreach ($candidates as $lead) {
@@ -101,31 +100,33 @@ class CheckDemoFin extends Command
                 continue;
             }
 
-            /* Datetime de fin de la demo = inicio + duración estimada. */
-            $demo_fin_datetime = $demo_datetime->copy()->addMinutes($duracion_minutos);
-
             /*
-             * Verificar que el fin de la demo esté dentro de la ventana de ±2 minutos
-             * alrededor del momento actual ($target_fin_after..$target_fin_before).
+             * Momento en que se envió el check de fin = inicio + duración.
+             * El seguimiento se dispara cuando ese momento + seguimiento_minutos <= now.
              */
-            if ($demo_fin_datetime->gt($target_fin_before) || $demo_fin_datetime->lt($target_fin_after)) {
+            $check_fin_datetime    = $demo_datetime->copy()->addMinutes($duracion_minutos);
+            $trigger_seguimiento   = $check_fin_datetime->copy()->addMinutes($seguimiento_minutos);
+
+            if ($trigger_seguimiento->gt($now)) {
                 continue;
             }
 
-            /* Enviar check de fin directo por WhatsApp (texto libre, ventana activa). */
+            /* Texto natural del seguimiento (único). */
             $contact_name = $lead->contact_name ?? 'cliente';
-            $content = "¡Hola {$contact_name}! ¿Pudiste recorrer la demo completa? 😊";
+            $content      = "{$contact_name}, ¿pudiste terminar de recorrer la demo?";
 
+            /* Enviar por WhatsApp si el lead tiene teléfono. */
             $whatsapp_message_id = null;
             $phone = trim((string) $lead->phone);
             if ($phone !== '') {
                 $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $content);
             } else {
-                Log::warning('CheckDemoFin: lead sin teléfono', [
+                Log::warning('CheckDemoFinSeguimiento: lead sin teléfono', [
                     'lead_id' => $lead->id,
                 ]);
             }
 
+            /* Registrar el mensaje en la conversación del lead. */
             LeadMessage::create([
                 'lead_id'             => $lead->id,
                 'sender'              => 'sistema',
@@ -135,22 +136,23 @@ class CheckDemoFin extends Command
                 'whatsapp_message_id' => $whatsapp_message_id,
             ]);
 
-            /* Marcar flag de check de fin enviado. */
-            $lead->update(['demo_fin_check_enviado' => true]);
+            /* Marcar flag anti-duplicado para que no se vuelva a enviar. */
+            $lead->update(['demo_fin_seguimiento_enviado' => true]);
 
             /* Notificar a admin-spa vía socket. */
             LeadBroadcastService::emit_conversation_updated((int) $lead->id);
 
-            Log::info('CheckDemoFin: check de fin enviado', [
-                'lead_id'           => $lead->id,
-                'contact_name'      => $lead->contact_name,
-                'demo_fin_datetime' => $demo_fin_datetime->toDateTimeString(),
+            Log::info('CheckDemoFinSeguimiento: seguimiento de fin enviado', [
+                'lead_id'              => $lead->id,
+                'contact_name'         => $lead->contact_name,
+                'check_fin_datetime'   => $check_fin_datetime->toDateTimeString(),
+                'trigger_seguimiento'  => $trigger_seguimiento->toDateTimeString(),
             ]);
 
             $sent++;
         }
 
-        $this->info("Checks de fin enviados: {$sent}");
+        $this->info("Seguimientos de fin enviados: {$sent}");
 
         return 0;
     }
