@@ -20,6 +20,7 @@ use App\Http\Controllers\Api\ClientInstallationController;
 use App\Http\Controllers\Api\EnvTemplateController;
 use App\Http\Controllers\WhatsappConfigController;
 use App\Http\Controllers\WhatsappWebhookController;
+use App\Http\Controllers\RecallWebhookController;
 use App\Http\Controllers\FollowupRuleController;
 use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadController;
@@ -36,6 +37,12 @@ use Illuminate\Support\Facades\Route;
 | Webhook Kapso / WhatsApp (público, verificación por firma HMAC)
 */
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
+    ->middleware('throttle:api');
+
+/*
+| Webhook Recall.ai (público, verificación por firma HMAC opcional)
+*/
+Route::post('webhook/recall', [RecallWebhookController::class, 'receive'])
     ->middleware('throttle:api');
 
 /*

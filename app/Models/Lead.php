@@ -163,6 +163,9 @@ class Lead extends Model
 
         // Resumen estructurado generado por Claude: {empresa, situacion_actual, funcionalidades, puntos_dolor}
         'demo_summary_structured'      => 'array',
+
+        // Resumen estructurado de la llamada del closer, extraído por Claude de la transcripción de Recall.ai.
+        'call_summary'                 => 'array',
     ];
 
     /**

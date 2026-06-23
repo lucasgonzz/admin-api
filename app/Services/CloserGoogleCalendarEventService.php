@@ -190,9 +190,11 @@ class CloserGoogleCalendarEventService
         // Llamar al método centralizado usando el ID del lead.
         $this->delete_event_by_id($lead->google_event_id, $demo_date_str);
 
-        // Limpiar google_event_id y meet_url del lead en memoria (sin save; el llamador persiste).
+        // Limpiar google_event_id, meet_url y recall_bot_id del lead en memoria (sin save; el llamador persiste).
+        // recall_bot_id se limpia porque si el lead reagenda, se enviará un nuevo bot a la nueva reunión.
         $lead->google_event_id = null;
         $lead->meet_url        = null;
+        $lead->recall_bot_id   = null;
     }
 
     /**

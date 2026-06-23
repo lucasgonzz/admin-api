@@ -66,6 +66,9 @@ class LeadDemoSettings
     /** Clave: minutos desde el check de fin antes de marcar demo_pendiente_de_terminar y avisar a admins. */
     public const KEY_FIN_TIMEOUT_MINUTOS = 'demo_fin_timeout_minutos';
 
+    /** Clave: minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai. */
+    public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
+
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
 
@@ -113,6 +116,9 @@ class LeadDemoSettings
 
     /** Valor por defecto: timeout de fin (minutos sin confirmación → demo_pendiente_de_terminar). */
     private const DEFAULT_FIN_TIMEOUT_MINUTOS = 25;
+
+    /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
+    private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
@@ -495,6 +501,16 @@ class LeadDemoSettings
     public static function get_fin_timeout_minutos(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_FIN_TIMEOUT_MINUTOS, (string) self::DEFAULT_FIN_TIMEOUT_MINUTOS));
+    }
+
+    /**
+     * Minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai a la reunión.
+     *
+     * @return int
+     */
+    public static function get_recall_bot_minutos_antes(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_RECALL_BOT_MINUTOS_ANTES, (string) self::DEFAULT_RECALL_BOT_MINUTOS_ANTES));
     }
 
     /**
