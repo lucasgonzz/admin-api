@@ -1977,9 +1977,23 @@ class LeadController extends Controller
                 $parsed = json_decode($json, true);
             }
 
-            if (is_array($parsed) && ! empty($parsed['resumen_textual'])) {
+            /*
+             * Normalizar la clave del resumen textual: Claude a veces usa 'resumen_narrativo'
+             * o devuelve 'resumen_textual' vacío pero el resto del JSON es correcto.
+             * Se acepta cualquiera de las dos claves; si ambas están vacías pero el JSON
+             * tiene las tarjetas estructuradas (empresa, puntos_dolor, etc.) igual se guarda.
+             */
+            $summary_text = trim((string) ($parsed['resumen_textual'] ?? $parsed['resumen_narrativo'] ?? ''));
+            $has_structured = is_array($parsed) && (
+                ! empty($parsed['empresa'])
+                || ! empty($parsed['puntos_dolor'])
+                || ! empty($parsed['funcionalidades'])
+                || ! empty($parsed['situacion_actual'])
+            );
+
+            if ($has_structured || (is_array($parsed) && $summary_text !== '')) {
                 /* Parse exitoso: guardar resumen textual + resumen estructurado. */
-                $summary    = trim((string) ($parsed['resumen_textual'] ?? ''));
+                $summary    = $summary_text;
 
                 /*
                  * Claude puede devolver funcionalidades y puntos_dolor como array JSON
@@ -2269,3 +2283,4 @@ class LeadController extends Controller
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
     }
 }
+
