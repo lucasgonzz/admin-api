@@ -1395,8 +1395,9 @@ class LeadAiService
                     $lead->status = 'demo_agendada';
                     $pipeline_status       = LeadPipelineStatus::ensure_exists('demo_agendada');
                     $estado                = $pipeline_status->slug;
-                    /* El status ya está en BD; evitar que apply_suggested_pipeline_status() lo repita. */
-                    $suggested_lead_status = null;
+                    /* El badge de cambio de estado se mantiene (suggested_lead_status != null).
+                     * apply_suggested_pipeline_status() tiene guardia para no pisar el status ya aplicado. */
+                    $suggested_lead_status = $estado !== $previous_status ? $estado : null;
 
                     Log::info('LeadAiService: demo agendada vía acción estructurada y validada.', [
                         'lead_id'    => $lead->id,
