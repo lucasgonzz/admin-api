@@ -733,7 +733,7 @@ class LeadController extends Controller
      * de disparar el correo. Registra timestamp de éxito y último error para
      * trazabilidad desde el panel.
      *
-     * Campos requeridos: contact_name, email, doc_number, company_name,
+     * Campos requeridos: contact_name, email, doc_number,
      * demo_id, demo_date, demo_start_time, demo_end_time.
      *
      * @param int|string $id
@@ -750,7 +750,6 @@ class LeadController extends Controller
         if (empty($lead->contact_name))   { $missing[] = 'nombre'; }
         if (empty($lead->email))          { $missing[] = 'email'; }
         if (empty($lead->doc_number))     { $missing[] = 'documento'; }
-        if (empty($lead->company_name))   { $missing[] = 'nombre de empresa'; }
         if (empty($lead->demo_id))        { $missing[] = 'demo asignada'; }
         if (empty($lead->demo_date))      { $missing[] = 'fecha demo'; }
         if (empty($lead->demo_start_time)) { $missing[] = 'hora inicio'; }
