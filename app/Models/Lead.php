@@ -62,6 +62,7 @@ class Lead extends Model
         static::deleting(function (Lead $lead) {
             $lead->personalized_demo_videos()->delete();
             $lead->messages()->delete();
+            $lead->partners()->delete();
         });
     }
 
@@ -171,6 +172,9 @@ class Lead extends Model
 
         // Resumen estructurado de la llamada del closer, extraído por Claude de la transcripción de Recall.ai.
         'call_summary'                 => 'array',
+
+        // Snapshot de la variante de welcome asignada en A/B testing.
+        'welcome_variant_id'           => 'integer',
     ];
 
     /**
@@ -187,7 +191,8 @@ class Lead extends Model
             'created_by_admin',
             'demo',
             'personalized_demo_videos',
-            'messages.attachments'
+            'messages.attachments',
+            'partners'
         );
         $query->withUnreadLeadMessagesCount();
         // Conteo de seguimientos enviados (mensajes is_followup no rechazados) para el badge de la tabla.
@@ -380,6 +385,36 @@ class Lead extends Model
         return $this->hasMany(LeadPersonalizedDemoVideo::class, 'lead_id')
             ->orderBy('sort_order')
             ->orderBy('id');
+    }
+
+    /**
+     * Socios adicionales vinculados al lead (confirmados o pendientes).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function partners()
+    {
+        return $this->hasMany(LeadPartner::class, 'lead_id');
+    }
+
+    /**
+     * Socios ya confirmados por el closer (excluye sugerencias pendientes).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function confirmed_partners()
+    {
+        return $this->hasMany(LeadPartner::class, 'lead_id')->where('pending_confirmation', false);
+    }
+
+    /**
+     * Variante de mensaje de welcome asignada a este lead (snapshot A/B).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function welcome_variant()
+    {
+        return $this->belongsTo(MessageVariant::class, 'welcome_variant_id');
     }
 
     /**

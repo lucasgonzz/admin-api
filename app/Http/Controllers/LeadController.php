@@ -7,9 +7,11 @@ use App\Mail\Helpers\LeadPresentationMailHelper;
 use App\Mail\Helpers\LeadFollowupMailHelper;
 use App\Mail\Helpers\LeadDemoMailHelper;
 use App\Models\Client;
+use App\Models\AdminSetting;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadMessageAttachment;
+use App\Models\LeadPartner;
 use App\Models\LeadPersonalizedDemoVideo;
 use App\Models\ProtocolEntry;
 use App\Events\LeadAiSuggestionFinished;
@@ -2280,6 +2282,136 @@ class LeadController extends Controller
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Panel del closer: leads agrupados por sección operativa (en curso, agendadas, seguimiento).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function closer_panel_json()
+    {
+        /* Sección 1: demos en curso o recién finalizadas (requieren acción del closer). */
+        $en_curso_statuses = [
+            'demo_en_curso',
+            'ingresando_demo',
+            'demo_pendiente_de_terminar',
+            'demo_pendiente_de_ingreso',
+            'demo_realizada',
+        ];
+        $en_curso = Lead::withAll()
+            ->whereIn('status', $en_curso_statuses)
+            ->orderBy('demo_date')
+            ->orderBy('demo_start_time')
+            ->get();
+
+        /* Sección 2: demos agendadas o leads que pidieron disponibilidad. */
+        $agendadas_statuses = ['demo_agendada', 'solicita_disponibilidad'];
+        $agendadas = Lead::withAll()
+            ->whereIn('status', $agendadas_statuses)
+            ->orderBy('demo_date')
+            ->orderBy('demo_start_time')
+            ->get();
+
+        /* Sección 3: seguimiento post-llamada con resumen de Recall.ai. */
+        $seguimiento = Lead::withAll()
+            ->where('status', 'closer_activo')
+            ->whereNotNull('call_summary')
+            ->orderBy('closer_called_at', 'desc')
+            ->get();
+
+        return response()->json([
+            'en_curso'    => $en_curso,
+            'agendadas'   => $agendadas,
+            'seguimiento' => $seguimiento,
+            'settings'    => [
+                'alert_delay_minutes'   => (int) AdminSetting::get('closer_alert_delay_minutes', 5),
+                'alert_abandon_minutes' => (int) AdminSetting::get('closer_alert_abandon_minutes', 20),
+            ],
+        ], 200);
+    }
+
+    /**
+     * Confirma un socio sugerido: deja de estar pendiente de alta.
+     *
+     * @param int|string $id ID del LeadPartner.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function confirm_partner_json($id)
+    {
+        $partner = LeadPartner::findOrFail($id);
+        $partner->pending_confirmation = false;
+        $partner->save();
+
+        return response()->json(['model' => $partner], 200);
+    }
+
+    /**
+     * Rechaza o elimina un socio sugerido del lead.
+     *
+     * @param int|string $id ID del LeadPartner.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function destroy_partner_json($id)
+    {
+        $partner = LeadPartner::findOrFail($id);
+        $partner->delete();
+
+        return response()->json(['ok' => true], 200);
+    }
+
+    /**
+     * Crea un socio manualmente para un lead (ya confirmado).
+     *
+     * @param int|string $lead_id
+     * @param Request    $request
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function store_partner_json($lead_id, Request $request)
+    {
+        Lead::findOrFail($lead_id);
+
+        $partner = LeadPartner::create([
+            'lead_id'               => (int) $lead_id,
+            'name'                  => trim((string) $request->input('name', '')) ?: null,
+            'phone'                 => trim((string) $request->input('phone', '')) ?: null,
+            'notes'                 => trim((string) $request->input('notes', '')) ?: null,
+            'source'                => 'manual',
+            'pending_confirmation'  => false,
+        ]);
+
+        return response()->json(['model' => $partner], 201);
+    }
+
+    /**
+     * Devuelve los minutos configurables para alertas "Tomar llamada" del closer.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function closer_alert_settings_json()
+    {
+        return response()->json([
+            'alert_delay_minutes'   => (int) AdminSetting::get('closer_alert_delay_minutes', 5),
+            'alert_abandon_minutes' => (int) AdminSetting::get('closer_alert_abandon_minutes', 20),
+        ], 200);
+    }
+
+    /**
+     * Persiste los minutos de alerta y abandono del panel del closer.
+     *
+     * @param Request $request
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function update_closer_alert_settings_json(Request $request)
+    {
+        AdminSetting::set('closer_alert_delay_minutes', (string) (int) $request->input('alert_delay_minutes', 5));
+        AdminSetting::set('closer_alert_abandon_minutes', (string) (int) $request->input('alert_abandon_minutes', 20));
+
+        return response()->json(['ok' => true], 200);
     }
 }
 

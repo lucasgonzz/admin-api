@@ -42,6 +42,8 @@ class DatabaseSeeder extends Seeder
             /* Identidad del agente Martín inyectada dinámicamente en el system prompt de Claude. */
             AgentIdentitySeeder::class,
             AdminSettingSeeder::class,
+            // Variantes iniciales de welcome para A/B testing del onboarding WhatsApp.
+            MessageVariantSeeder::class,
             // Admin por defecto asignado a nuevas implementaciones (requiere AdminUserSeeder).
             ImplementationDefaultAdminSeeder::class,
             // Tiempo de espera antes de procesar archivos recibidos en la Etapa 4.

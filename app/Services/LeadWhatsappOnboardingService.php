@@ -6,6 +6,7 @@ use App\Helpers\WhatsappNormalizer;
 use App\Jobs\SendLeadPresentationMessageJob;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\MessageVariant;
 use App\Services\LeadBroadcastService;
 use Illuminate\Support\Facades\Log;
 
@@ -198,7 +199,8 @@ class LeadWhatsappOnboardingService
             return;
         }
 
-        $body = $this->build_welcome_message_body($display_name);
+        /* Primera iteración A/B: solo asignar variante cuando hay nombre de contacto. */
+        $body = $this->resolve_welcome_message_body($lead, $display_name);
         $this->persist_and_send_system_message($lead, $body, self::KIND_WELCOME);
     }
 
@@ -212,6 +214,37 @@ class LeadWhatsappOnboardingService
     public function build_auto_message_body(?string $display_name): string
     {
         return LeadWhatsappOnboardingSettings::build_auto_message_body($display_name);
+    }
+
+    /**
+     * Resuelve el cuerpo del welcome: variante A/B activa o fallback histórico.
+     *
+     * Si no hay nombre de contacto, mantiene el texto actual sin variante (primera iteración).
+     *
+     * @param Lead        $lead
+     * @param string|null $display_name
+     *
+     * @return string
+     */
+    private function resolve_welcome_message_body(Lead $lead, ?string $display_name): string
+    {
+        $normalized_name = $this->normalize_contact_name($display_name);
+
+        if ($normalized_name === null) {
+            return $this->build_welcome_message_body($display_name);
+        }
+
+        /* A/B testing: intentar variante activa del tipo welcome_with_name. */
+        $variant = MessageVariant::pick_active_variant('welcome_with_name');
+        if ($variant === null) {
+            return $this->build_welcome_message_body($display_name);
+        }
+
+        $body = LeadWhatsappOnboardingSettings::apply_nombre_placeholder($variant->body, $normalized_name);
+        Lead::where('id', $lead->id)->update(['welcome_variant_id' => $variant->id]);
+        $variant->increment_sent();
+
+        return $body;
     }
 
     /**

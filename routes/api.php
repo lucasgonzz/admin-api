@@ -155,6 +155,21 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/mark-closer-called', [LeadController::class, 'mark_closer_called_json']);
         Route::post('lead/{id}/toggle-notify-messages', [LeadController::class, 'toggle_notify_messages_json']);
         Route::post('lead/{id}/toggle-pinned', [LeadController::class, 'toggle_pinned_json']);
+
+        // Panel del closer: leads filtrados por rol y sección operativa.
+        Route::get('closer/panel', [LeadController::class, 'closer_panel_json']);
+        Route::post('lead-partner/{id}/confirm', [LeadController::class, 'confirm_partner_json']);
+        Route::delete('lead-partner/{id}', [LeadController::class, 'destroy_partner_json']);
+        Route::post('lead/{id}/partners', [LeadController::class, 'store_partner_json']);
+
+        Route::get('settings/closer-alert', [LeadController::class, 'closer_alert_settings_json']);
+        Route::put('settings/closer-alert', [LeadController::class, 'update_closer_alert_settings_json']);
+
+        Route::get('message-variant', [\App\Http\Controllers\Api\MessageVariantController::class, 'index_json']);
+        Route::post('message-variant', [\App\Http\Controllers\Api\MessageVariantController::class, 'store_json']);
+        Route::put('message-variant/{id}', [\App\Http\Controllers\Api\MessageVariantController::class, 'update_json']);
+        Route::delete('message-variant/{id}', [\App\Http\Controllers\Api\MessageVariantController::class, 'destroy_json']);
+
         Route::put('lead-message/{id}/approve', [LeadController::class, 'approve_message_json']);
         Route::put('lead-message/{id}/approve-with-edit', [LeadController::class, 'approve_message_with_edit_json']);
         Route::put('lead-message/{id}/reject', [LeadController::class, 'reject_message_json']);
