@@ -682,14 +682,19 @@ class ImplementationConversationService
             if ($client !== null) {
                 $existing = ClientInstallation::where('client_id', $client->id)->first();
                 if ($existing === null) {
-                    $latest_version = \App\Models\Version::where('status', 'publicada')
-                        ->orderByDesc('id')
-                        ->first();
+                    // Usar la versión asignada al cliente; si no tiene, buscar la última publicada.
+                    $version_id = $client->current_version_id;
+                    if (!$version_id) {
+                        $latest_version = \App\Models\Version::where('status', 'publicada')
+                            ->orderByDesc('id')
+                            ->first();
+                        $version_id = $latest_version ? $latest_version->id : null;
+                    }
 
                     ClientInstallation::create([
                         'client_id'     => $client->id,
                         'client_api_id' => $client->active_client_api_id ?? null,
-                        'version_id'    => $latest_version ? $latest_version->id : null,
+                        'version_id'    => $version_id,
                         'status'        => 'pendiente',
                     ]);
 
