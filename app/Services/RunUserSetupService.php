@@ -166,16 +166,22 @@ class RunUserSetupService
         $api_key = Str::random(40);
         $inbound_api_key = Str::random(40);
 
+        // Obtener la última versión publicada para asignarla al cliente.
+        $latest_version = \App\Models\Version::where('status', 'publicada')
+            ->orderByDesc('id')
+            ->first();
+
         $client = Client::create([
-            'name'            => $client_name,
-            'company_name'    => $company_name,
-            'user_id'         => $comercio_city_user_id,
-            'slug'            => $slug,
-            'api_url'         => $production_api_url,
-            'api_key'         => $api_key,
-            'inbound_api_key' => $inbound_api_key,
-            'is_active'       => true,
-            'phone'           => $lead->phone ?? null,
+            'name'               => $client_name,
+            'company_name'       => $company_name,
+            'user_id'            => $comercio_city_user_id,
+            'slug'               => $slug,
+            'api_url'            => $production_api_url,
+            'api_key'            => $api_key,
+            'inbound_api_key'    => $inbound_api_key,
+            'is_active'          => true,
+            'phone'              => $lead->phone ?? null,
+            'current_version_id' => $latest_version ? $latest_version->id : null,
         ]);
 
         $lead->update(['promoted_client_id' => $client->id]);
