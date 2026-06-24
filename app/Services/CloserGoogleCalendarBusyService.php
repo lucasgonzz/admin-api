@@ -261,7 +261,7 @@ class CloserGoogleCalendarBusyService
      *   ok: bool,
      *   estado?: string,
      *   ranges?: array<string, array<int, array{0: int, 1: int}>>,
-     *   eventos?: array<int, array{fecha: string, inicio: string, fin: string}>
+     *   eventos?: array<int, array{fecha: string, inicio: string, fin: string, nombre: string}>
      * }
      */
     protected function fetch_busy_ranges_from_google(AdminCalendarConnection $connection, array $date_strings): array
@@ -298,7 +298,10 @@ class CloserGoogleCalendarBusyService
             $time_min = \Carbon\Carbon::parse($min_date, $tz)->startOfDay()->toIso8601String();
             $time_max = \Carbon\Carbon::parse($max_date, $tz)->endOfDay()->toIso8601String();
 
-            // Llamada a la API freeBusy de Google.
+            /*
+             * freeBusy es eficiente para calcular rangos ocupados pero no devuelve el nombre del evento.
+             * Para enriquecer el snapshot con summary habría que combinar con events.list (ver get_events_for_admin).
+             */
             $response = \Illuminate\Support\Facades\Http::withToken($access_token)
                 ->post('https://www.googleapis.com/calendar/v3/freeBusy', [
                     'timeMin'  => $time_min,
@@ -375,6 +378,8 @@ class CloserGoogleCalendarBusyService
                         'fecha'  => $date_key,
                         'inicio' => $inicio_hhmm,
                         'fin'    => $fin_hhmm,
+                        /* freeBusy no expone summary; aclarar en UI de diagnóstico. */
+                        'nombre' => '(sin nombre - freeBusy)',
                     ];
                 }
             }

@@ -204,6 +204,49 @@ class LeadAiService
          * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
         $calendar_snapshot    = null;
         $availability_data    = $this->build_availability_json(3, $calendar_snapshot);
+
+        /*
+         * Ampliar snapshot con demos agendadas, slots enviados a Claude y config del closer
+         * para debug completo de disponibilidad (prompt 123).
+         */
+        $demos_agendadas = Lead::query()
+            ->whereNotNull('demo_date')
+            ->whereNotNull('demo_start_time')
+            ->whereNotNull('demo_id')
+            ->where('demo_date', '>=', now('America/Argentina/Buenos_Aires')->toDateString())
+            ->get(['id', 'contact_name', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time'])
+            ->map(fn ($lead_row) => [
+                'lead_id'         => $lead_row->id,
+                'contact_name'    => $lead_row->contact_name ?? '(sin nombre)',
+                'demo_id'         => $lead_row->demo_id,
+                'demo_date'       => $lead_row->demo_date?->format('Y-m-d'),
+                'demo_start_time' => $lead_row->demo_start_time,
+                'demo_end_time'   => $lead_row->demo_end_time,
+            ])
+            ->values()
+            ->all();
+
+        /* Config del closer activa al momento de la consulta de disponibilidad. */
+        $closer_config = [
+            'horario_lv'                       => LeadDemoSettings::get_closer_horario_lunes_viernes(),
+            'horario_sab'                      => LeadDemoSettings::get_closer_horario_sabado(),
+            'horario_dom'                      => LeadDemoSettings::get_closer_horario_domingo(),
+            'duracion_demo_min'                => LeadDemoSettings::get_duracion_minutos(),
+            'setup_minutos_antes'              => LeadDemoSettings::get_setup_minutos_antes(),
+            'gracia_post_min'                  => LeadDemoSettings::get_gracia_minutos_post(),
+            'duracion_llamada_closer_min'      => LeadDemoSettings::get_duracion_llamada_closer_minutos(),
+            'frecuencia_slots_min'             => LeadDemoSettings::get_frecuencia_slots_minutos(),
+            'llamada_debe_terminar_en_horario' => LeadDemoSettings::get_llamada_debe_terminar_en_horario(),
+        ];
+
+        /* Inyectar datos adicionales en el snapshot (Google Calendar ya viene de build_availability_json). */
+        if ($calendar_snapshot === null) {
+            $calendar_snapshot = [];
+        }
+        $calendar_snapshot['demos_agendadas']  = $demos_agendadas;
+        $calendar_snapshot['slots_disponibles'] = $availability_data['demos'] ?? [];
+        $calendar_snapshot['closer_config']    = $closer_config;
+
         $availability_context = "DISPONIBILIDAD DE DEMOS (JSON):\n"
             .json_encode($availability_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
@@ -294,6 +337,18 @@ class LeadAiService
 
         /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
         $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
+
+        /*
+         * Garantizar snapshot mínimo de diagnóstico cuando se consultó disponibilidad
+         * pero no hubo datos de Google Calendar (p. ej. sin closers conectados).
+         */
+        if (empty($calendar_snapshot)) {
+            $calendar_snapshot = [
+                'consultado_en' => now()->toIso8601String(),
+                'closers'       => [],
+                'nota'          => 'sin_datos',
+            ];
+        }
 
         /* Etiqueta legible de hoy en timezone Argentina. */
         $day_names_full = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
@@ -432,6 +487,9 @@ class LeadAiService
             $google_busy        = $google_busy_result['ranges'] ?? [];
             $google_calendar_snapshot = $google_busy_result['snapshot'] ?? null;
 
+            /* Log explícito cuando ningún closer tiene calendario conectado o aplicable. */
+            $this->log_google_calendar_connection_diagnosis($google_calendar_snapshot);
+
             // Fusionar rangos de Google Calendar con los rangos de agenda interna.
             foreach ($date_strings as $date) {
                 if (! empty($google_busy[$date])) {
@@ -566,6 +624,71 @@ class LeadAiService
             /* Snapshot de eventos Google consultados al calcular disponibilidad. */
             'google_calendar_snapshot' => $google_calendar_snapshot,
         ];
+    }
+
+    /**
+     * Registra en el canal disponibilidad si la capa de Google Calendar no aporta bloqueos.
+     *
+     * Facilita el diagnóstico en producción cuando no hay closers marcados,
+     * ninguno tiene calendario conectado o todos fallaron al consultar la API.
+     *
+     * @param array<string, mixed>|null $snapshot Snapshot devuelto por CloserGoogleCalendarBusyService.
+     * @return void
+     */
+    protected function log_google_calendar_connection_diagnosis(?array $snapshot): void
+    {
+        if (empty($snapshot)) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Google Calendar: snapshot nulo tras consultar disponibilidad.'
+                . ' La tercera capa de bloqueo no aportó datos de diagnóstico.'
+            );
+
+            return;
+        }
+
+        $closers = $snapshot['closers'] ?? [];
+
+        if (empty($closers)) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Google Calendar: ningún admin marcado como closer (is_closer=true).'
+                . ' La tercera capa no bloquea slots por eventos del calendario.'
+            );
+
+            return;
+        }
+
+        $closers_con_calendario = 0;
+
+        foreach ($closers as $closer_entry) {
+            $estado = $closer_entry['estado'] ?? '';
+            $nombre = $closer_entry['nombre'] ?? ('admin #' . ($closer_entry['admin_id'] ?? '?'));
+
+            if ($estado === 'consultado' || $estado === 'cacheado') {
+                $closers_con_calendario++;
+                continue;
+            }
+
+            if ($estado === 'sin_calendario') {
+                Log::channel('disponibilidad')->warning(
+                    '[DISPONIBILIDAD] Google Calendar: closer "' . $nombre . '" (admin #'
+                    . ($closer_entry['admin_id'] ?? '?') . ') sin calendario conectado o conexión inactiva.'
+                    . ' Esta capa no aplica bloqueos para ese closer.'
+                );
+                continue;
+            }
+
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Google Calendar: closer "' . $nombre . '" (admin #'
+                . ($closer_entry['admin_id'] ?? '?') . ') excluido de la capa por estado "' . $estado . '".'
+            );
+        }
+
+        if ($closers_con_calendario === 0) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Google Calendar: ningún closer con calendario consultable.'
+                . ' Los slots no se filtran por eventos externos del calendario.'
+            );
+        }
     }
 
     /**
