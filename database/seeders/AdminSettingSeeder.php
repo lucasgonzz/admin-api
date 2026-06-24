@@ -6,6 +6,7 @@ use App\Models\AdminSetting;
 use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Seeder;
+use Database\Seeders\AddImplementationFormSettingsSeeder;
 
 /**
  * Siembra configuraciones globales por defecto del panel admin.
@@ -27,5 +28,8 @@ class AdminSettingSeeder extends Seeder
 
         /* Valores por defecto de configuración de demos (duración, márgenes, automatizaciones). */
         LeadDemoSettings::seed_defaults_if_missing();
+
+        /* Settings del formulario público de configuración de implementación. */
+        (new AddImplementationFormSettingsSeeder())->run();
     }
 }

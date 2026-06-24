@@ -438,6 +438,11 @@ class ImplementationController extends Controller
             return $implementation;
         });
 
+        // Generar token único (UUID v4) para acceso público al formulario de configuración.
+        // Se genera fuera de la transacción para evitar colisiones de unique constraint.
+        $implementation->form_token = \Illuminate\Support\Str::uuid()->toString();
+        $implementation->save();
+
         // Plantilla de bienvenida por WhatsApp: best-effort, no bloquea la respuesta JSON.
         try {
             (new ImplementationConversationService())->send_welcome_template($implementation);

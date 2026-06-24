@@ -31,6 +31,7 @@ use App\Http\Controllers\UpdateSeederController;
 use App\Http\Controllers\VersionController;
 use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\AdminCalendarConnectionController;
+use App\Http\Controllers\Api\ImplementationFormController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -44,6 +45,16 @@ Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
 */
 Route::post('webhook/recall', [RecallWebhookController::class, 'receive'])
     ->middleware('throttle:api');
+
+/*
+| Formulario público de configuración de implementación (acceso por token, sin auth).
+| El cliente accede con un link único que contiene form_token; no requiere Sanctum.
+*/
+Route::prefix('form')->group(function () {
+    Route::get('implementation/{token}',         [ImplementationFormController::class, 'show']);
+    Route::patch('implementation/{token}',       [ImplementationFormController::class, 'save']);
+    Route::post('implementation/{token}/submit', [ImplementationFormController::class, 'submit']);
+});
 
 /*
 | Callback desde empresa-api cliente (inbound)
@@ -327,6 +338,14 @@ Route::prefix('admin')->group(function () {
         // Configuración de implementaciones: tiempo de espera para procesar archivos (Etapa 4).
         Route::get('settings/implementation-file-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_file_wait']);
         Route::put('settings/implementation-file-wait', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_file_wait']);
+
+        // Configuración de implementaciones: delay post-envío del formulario antes del contacto WhatsApp.
+        Route::get('settings/implementation-form-contact-delay', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_contact_delay']);
+        Route::put('settings/implementation-form-contact-delay', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_contact_delay']);
+
+        // Configuración de implementaciones: URL base del formulario público de configuración.
+        Route::get('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_url']);
+        Route::put('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_url']);
 
         Route::get('task-template', [TaskTemplateController::class, 'index_json']);
 

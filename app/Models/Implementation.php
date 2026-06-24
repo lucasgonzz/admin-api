@@ -2,17 +2,20 @@
 
 namespace App\Models;
 
+use App\Services\ImplementationSettings;
 use Illuminate\Database\Eloquent\Model;
 
 /**
  * Proceso de implementación guiada de un cliente (una instancia por client_id).
  *
  * @property int         $client_id      Cliente dueño.
- * @property int         $current_stage  Etapa actual (1–7).
+ * @property int         $current_stage  Etapa actual (1–8).
  * @property string      $status         pending | in_progress | completed | paused.
  * @property string|null $migration_contact_phone Teléfono del responsable de migración.
+ * @property string|null $form_token     UUID v4 para acceso público al formulario de configuración.
  * @property \Illuminate\Support\Carbon|null $started_at
  * @property \Illuminate\Support\Carbon|null $completed_at
+ * @property \Illuminate\Support\Carbon|null $form_submitted_at Fecha/hora de envío definitivo del formulario.
  */
 class Implementation extends Model
 {
@@ -22,13 +25,23 @@ class Implementation extends Model
     protected $guarded = [];
 
     /**
+     * Atributos virtuales incluidos automáticamente en la serialización JSON.
+     *
+     * form_link: link completo del formulario (url_base + form_token) para que el admin lo copie.
+     *
+     * @var array<int, string>
+     */
+    protected $appends = ['form_link'];
+
+    /**
      * @var array<string, string>
      */
     protected $casts = [
-        'current_stage' => 'integer',
-        'started_at'    => 'datetime',
-        'completed_at'  => 'datetime',
-        'status'        => 'string',
+        'current_stage'     => 'integer',
+        'started_at'        => 'datetime',
+        'completed_at'      => 'datetime',
+        'form_submitted_at' => 'datetime',
+        'status'            => 'string',
     ];
 
     /**
@@ -41,6 +54,47 @@ class Implementation extends Model
     public function scopeWithAll($query)
     {
         $query->with(['client', 'stages', 'messages']);
+    }
+
+    /**
+     * Atributo virtual: link completo del formulario público para copiar y enviar al cliente.
+     *
+     * Combina la URL base configurada en settings con el form_token de esta implementación.
+     * Devuelve null si el token no está generado o la URL base no está configurada.
+     *
+     * @return string|null URL completa (ej: https://admin.cc.com/configuracion/{token}).
+     */
+    public function getFormLinkAttribute(): ?string
+    {
+        // Sin token no se puede construir el link.
+        if (empty($this->form_token)) {
+            return null;
+        }
+
+        // Leer la URL base configurada en settings; si está vacía devolver null.
+        $base_url = rtrim(ImplementationSettings::get_form_url(), '/');
+
+        if ($base_url === '') {
+            return null;
+        }
+
+        // Link completo: {url_base}/{form_token}.
+        return "{$base_url}/{$this->form_token}";
+    }
+
+    /**
+     * Filtra por el token público del formulario de configuración.
+     *
+     * Permite buscar una implementación por su form_token sin exponer el id interno.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     * @param string                                $token Token UUID v4 del formulario.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeByFormToken($query, string $token)
+    {
+        return $query->where('form_token', $token);
     }
 
     /**

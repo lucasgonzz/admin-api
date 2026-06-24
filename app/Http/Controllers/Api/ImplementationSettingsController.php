@@ -130,4 +130,76 @@ class ImplementationSettingsController extends Controller
 
         return response()->json(['seconds' => (int) $validated['seconds']], 200);
     }
+
+    /**
+     * Retorna la cantidad de segundos de delay post-formulario configurada.
+     *
+     * Es el tiempo entre que el cliente envía el formulario y el primer contacto automático por WhatsApp.
+     *
+     * @return JsonResponse { seconds: int }
+     */
+    public function get_form_contact_delay(): JsonResponse
+    {
+        // Leer el valor actual del setting; ImplementationSettings aplica el fallback a 60.
+        $seconds = ImplementationSettings::get_form_contact_delay_seconds();
+
+        return response()->json(['seconds' => $seconds], 200);
+    }
+
+    /**
+     * Actualiza la cantidad de segundos de delay entre el envío del formulario
+     * y el primer contacto automático por WhatsApp.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse { seconds: int }
+     */
+    public function update_form_contact_delay(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // Al menos 1 segundo; sin límite superior estricto (puede ser minutos).
+            'seconds' => 'required|integer|min:1|max:3600',
+        ]);
+
+        // Persistir o actualizar el setting.
+        AdminSetting::set('implementation_form_contact_delay_seconds', (string) $validated['seconds']);
+
+        return response()->json(['seconds' => (int) $validated['seconds']], 200);
+    }
+
+    /**
+     * Retorna la URL base del formulario de configuración configurada.
+     *
+     * @return JsonResponse { url: string }
+     */
+    public function get_form_url(): JsonResponse
+    {
+        // Leer la URL guardada; devuelve cadena vacía si no está configurada.
+        $url = ImplementationSettings::get_form_url();
+
+        return response()->json(['url' => $url], 200);
+    }
+
+    /**
+     * Actualiza la URL base del formulario de configuración en admin-spa.
+     *
+     * La URL completa para el cliente es: {url}/{form_token}.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse { url: string }
+     */
+    public function update_form_url(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // La URL puede estar vacía (para limpiar el setting) o ser una URL válida.
+            'url' => 'nullable|string|max:500',
+        ]);
+
+        // Persistir o actualizar el setting con la nueva URL.
+        $url = (string) ($validated['url'] ?? '');
+        AdminSetting::set('implementation_form_url', $url);
+
+        return response()->json(['url' => $url], 200);
+    }
 }

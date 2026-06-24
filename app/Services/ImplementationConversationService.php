@@ -3501,6 +3501,127 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
+    // Formulario público de configuración (Stage 1 via link)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Procesa el formulario de configuración enviado por el cliente.
+     *
+     * Se invoca desde ProcessImplementationFormSubmit después del delay configurado.
+     *
+     * Flujo:
+     * 1. Envía mensaje de confirmación de recepción al cliente por WhatsApp.
+     * 2. Marca el stage 1 como completed.
+     * 3. Avanza a la Etapa 2 disparando handle_stage_advance.
+     *
+     * @param Implementation $implementation Implementación cuyo formulario fue enviado.
+     *
+     * @return void
+     */
+    public function handle_form_submitted(Implementation $implementation): void
+    {
+        // Cargar el cliente y las etapas si no están cargadas.
+        $implementation->loadMissing(['client', 'stages']);
+
+        $client = $implementation->client;
+
+        if ($client === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: handle_form_submitted sin cliente.', [
+                'implementation_id' => $implementation->id,
+            ]);
+
+            return;
+        }
+
+        // Teléfono del cliente para enviar el mensaje de confirmación.
+        $phone = trim((string) ($client->phone ?? ''));
+
+        if ($phone === '') {
+            Log::channel('daily')->warning('ImplementationConversationService: handle_form_submitted sin teléfono de cliente.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $client->id,
+            ]);
+
+            return;
+        }
+
+        // Nombre del cliente para personalizar el mensaje.
+        $client_name = $client->resolve_display_name();
+        if ($client_name === '') {
+            $client_name = 'cliente';
+        }
+
+        // Generar lista de progreso de las 8 etapas; etapa 1 ya completada (✅).
+        $etapas = [
+            1 => 'Información de la empresa',
+            2 => 'Instalación del sistema',
+            3 => 'Recolección de archivos',
+            4 => 'Migración de datos',
+            5 => 'Entrega del sistema',
+            6 => 'Capacitación',
+            7 => 'Vinculación con ARCA/AFIP',
+            8 => 'Videollamada de capacitación',
+        ];
+
+        // Cargar las etapas reales para marcar cuáles están completadas.
+        $stages_map = [];
+        $implementation->stages->each(function ($stage) use (&$stages_map) {
+            $stages_map[(int) $stage->stage_number] = $stage->status;
+        });
+
+        // Construir líneas del resumen de progreso con íconos de estado.
+        $progress_lines = [];
+        foreach ($etapas as $number => $label) {
+            $status = $stages_map[$number] ?? 'pending';
+            // Etapa 1 se considera completed porque acaba de enviarse el formulario.
+            $icon = ($number === 1 || $status === 'completed') ? '✅' : '⬜';
+            $progress_lines[] = "{$icon} {$number}. {$label}";
+        }
+
+        // Mensaje de confirmación de recepción del formulario.
+        $progress_text = implode("\n", $progress_lines);
+        $body          = "¡Perfecto, {$client_name}! Ya recibimos toda la información de tu empresa 🎉\n\n"
+            . "Tu progreso:\n{$progress_text}\n\n"
+            . "Nuestro equipo ya está trabajando en la instalación. Te aviso cuando esté lista.";
+
+        // Enviar el mensaje por WhatsApp.
+        $this->send_outbound($implementation, 1, $phone, $body, null);
+
+        // Marcar el stage 1 como completado.
+        $stage_1 = $implementation->stages->first(function ($s) {
+            return (int) $s->stage_number === 1;
+        });
+
+        if ($stage_1 !== null && $stage_1->status !== 'completed') {
+            $stage_1->status       = 'completed';
+            $stage_1->completed_at = now();
+            $stage_1->save();
+        }
+
+        // Actualizar current_stage a 2 en la implementación.
+        $implementation->current_stage = 2;
+        $implementation->save();
+
+        // Activar stage 2 en la tabla de etapas.
+        $stage_2 = $implementation->stages->first(function ($s) {
+            return (int) $s->stage_number === 2;
+        });
+
+        if ($stage_2 !== null && $stage_2->status !== 'completed') {
+            $stage_2->status     = 'in_progress';
+            $stage_2->started_at = now();
+            $stage_2->save();
+        }
+
+        // Disparar acciones automáticas al avanzar a la Etapa 2 (envío de mensaje de instalación).
+        $this->handle_stage_advance($implementation, 2);
+
+        Log::channel('daily')->info('ImplementationConversationService: handle_form_submitted completado.', [
+            'implementation_id' => $implementation->id,
+        ]);
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers de envío y persistencia
     // -------------------------------------------------------------------------
 

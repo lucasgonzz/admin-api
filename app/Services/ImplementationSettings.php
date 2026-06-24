@@ -46,4 +46,38 @@ class ImplementationSettings
 
         return $value > 0 ? $value : 30;
     }
+
+    /**
+     * Retorna la cantidad de segundos de delay entre el envío del formulario de configuración
+     * y el primer contacto automático del sistema por WhatsApp (procesamiento del job).
+     *
+     * El valor se lee desde admin_settings con key 'implementation_form_contact_delay_seconds'.
+     * Si no existe el registro, devuelve 60 como valor por defecto (1 minuto).
+     *
+     * @return int Segundos de delay (mínimo 1).
+     */
+    public static function get_form_contact_delay_seconds(): int
+    {
+        // Leer el valor guardado; fallback a 60 si no existe o es 0.
+        $value = (int) AdminSetting::where('key', 'implementation_form_contact_delay_seconds')->value('value');
+
+        return $value > 0 ? $value : 60;
+    }
+
+    /**
+     * Retorna la URL base del formulario de configuración en admin-spa.
+     *
+     * El link completo que se le envía al cliente es: {form_url}/{form_token}.
+     * El valor se lee desde admin_settings con key 'implementation_form_url'.
+     * Si no existe el registro, devuelve cadena vacía.
+     *
+     * @return string URL base del formulario (sin barra final ni token).
+     */
+    public static function get_form_url(): string
+    {
+        // Leer la URL guardada; devuelve cadena vacía si no está configurada.
+        $value = (string) AdminSetting::where('key', 'implementation_form_url')->value('value');
+
+        return $value ?? '';
+    }
 }
