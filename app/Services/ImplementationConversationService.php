@@ -68,33 +68,31 @@ class ImplementationConversationService
         $current_stage = (int) $implementation->current_stage;
 
         if ($current_stage === 1) {
+            // Etapa 1: formulario de configuración - reenviar link si aún no fue completado.
             $this->handle_stage_1($implementation, $parsed);
             return;
         }
 
         if ($current_stage === 2) {
+            // Etapa 2: instalación manual del sistema - ignorar mensajes del cliente.
             $this->handle_stage_2($implementation, $parsed);
             return;
         }
 
-        // Etapa 3 es manual (instalación del sistema): responder al cliente con mensaje de espera.
         if ($current_stage === 3) {
-            $phone = (string) $parsed['from'];
-            $this->send_outbound($implementation, 3, $phone, 'Estamos preparando tu sistema, en breve te avisamos. ¡Gracias por la paciencia! 🙏');
-
-            // Crea automáticamente un ClientInstallation pendiente si aún no existe para esta implementación.
-            $this->ensure_installation_for_stage_3($implementation);
+            // Etapa 3: recolección de archivos Excel del cliente (responsable de migración).
+            $this->handle_stage_3($implementation, $parsed);
             return;
         }
 
         if ($current_stage === 4) {
-            // Etapa 4: recolección de archivos Excel del cliente.
+            // Etapa 4: migración de datos — el cliente confirma o corrige el mapeo de columnas.
             $this->handle_stage_4($implementation, $parsed);
             return;
         }
 
         if ($current_stage === 5) {
-            // Etapa 5: migración de datos — el cliente confirma o corrige el mapeo de columnas.
+            // Etapa 5: entrega del sistema al cliente.
             $this->handle_stage_5($implementation, $parsed);
             return;
         }
@@ -125,22 +123,19 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 1 — Recolección de datos de configuración inicial
+    // Etapa 1 — Formulario de configuración inicial (web)
     // -------------------------------------------------------------------------
 
     /**
-     * Maneja un mensaje entrante durante la Etapa 1.
+     * Maneja un mensaje entrante durante la Etapa 1 (formulario web).
      *
-     * Flujo:
-     * 1. Cargar stage 1 y su data actual.
-     * 2. Si no hay `current_question` en data → enviar la primera pregunta.
-     * 3. Procesar la respuesta del cliente para `current_question`.
-     * 4. Si válida → guardar, enviar confirmación breve + siguiente pregunta.
-     * 5. Si inválida → reenviar la misma pregunta con mensaje de aclaración.
+     * La Etapa 1 ya no recopila datos por WhatsApp: el cliente completa un formulario web.
+     * Este método solo responde al cliente con el link del formulario si aún no lo completó.
+     * Si ya completó el formulario (form_submitted_at no es null), se ignoran los mensajes.
      *
-     * Caso especial de arranque: si el lead ya confirmó `use_price_lists = true`,
-     * se pre-configura ese valor y la primera pregunta pide directamente los nombres
-     * de las listas, saltando la pregunta de confirmación sí/no.
+     * Nota: la lógica anterior de preguntas por WhatsApp de la Etapa 1 se preserva en
+     * handle_stage_1_legacy_questions() para referencia y compatibilidad con implementaciones
+     * en curso iniciadas antes del rediseño.
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $parsed
@@ -148,6 +143,43 @@ class ImplementationConversationService
      * @return void
      */
     private function handle_stage_1(Implementation $implementation, array $parsed): void
+    {
+        // Si el formulario ya fue enviado, ignorar mensajes en esta etapa.
+        if ($implementation->form_submitted_at !== null) {
+            return;
+        }
+
+        // Teléfono del remitente para enviar el link del formulario.
+        $phone = (string) $parsed['from'];
+
+        // Construir el link personalizado del formulario usando el token de esta implementación.
+        $form_base_url = ImplementationSettings::get_form_url();
+        $form_token    = (string) ($implementation->form_token ?? '');
+        $form_url      = rtrim($form_base_url, '/') . '/' . $form_token;
+
+        // Mensaje con el link al formulario - no distingue entre señal positiva y preguntas.
+        $message = "Bien, vamos con el primer paso.\n\n"
+            . "Completá este formulario con la información de tu empresa. "
+            . "No te va a llevar más de 5 minutos y podés hacerlo cuando puedas 🙂\n\n"
+            . $form_url . "\n\n"
+            . "Avisame cuando lo hayas enviado.";
+
+        $this->send_outbound($implementation, 1, $phone, $message);
+    }
+
+    /**
+     * Flujo legacy de la Etapa 1: preguntas de configuración por WhatsApp.
+     *
+     * Método preservado para compatibilidad con implementaciones en curso iniciadas
+     * antes del rediseño al esquema de formulario web. No se invoca desde el flujo
+     * principal (handle()); solo queda disponible como referencia.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed
+     *
+     * @return void
+     */
+    private function handle_stage_1_legacy_questions(Implementation $implementation, array $parsed): void
     {
         // Stage 1 de esta implementación concreta.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
@@ -578,18 +610,19 @@ class ImplementationConversationService
      */
     public function send_stage_opening_message(Implementation $implementation, int $stage): void
     {
-        if ($stage === 2) {
-            $this->send_stage_2_opening($implementation);
+        if ($stage === 3) {
+            // Etapa 3: recolección de archivos — envía solicitud de Excels y logo al responsable de migración.
+            $this->send_stage_3_opening($implementation);
             return;
         }
 
-        if ($stage === 4) {
-            // Etapa 4: recolección de archivos — envía solicitud de Excels al responsable de migración.
-            $this->send_stage_4_opening($implementation);
+        // Etapa 4 (migración): no tiene apertura vía WhatsApp; process_files() se encarga vía job.
+
+        if ($stage === 5) {
+            // Etapa 5: entrega del sistema — envía acceso al cliente.
+            $this->send_stage_5_opening($implementation);
             return;
         }
-
-        // Etapa 5 (migración): no tiene apertura vía WhatsApp; process_files() se encarga vía job.
 
         if ($stage === 6) {
             // Etapa 6: capacitación — envía credenciales y recursos a empleados.
@@ -634,35 +667,35 @@ class ImplementationConversationService
     public function handle_stage_advance(Implementation $implementation, int $new_stage): void
     {
         if ($new_stage === 2) {
-            $this->send_stage_opening_message($implementation, 2);
-            return;
-        }
-
-        if ($new_stage === 3) {
-            // Etapa manual: notificar al admin que debe ejecutar la instalación.
+            // Etapa 2: instalación manual. Notificar al admin + disparar UserSetup.
             $client      = $implementation->client ?? Client::find($implementation->client_id);
             $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
-            $admin_message = "🛠️ {$client_name} está lista para instalar. Etapa 3: instalación del sistema y creación de empleados.";
+            $admin_message = "🛠️ {$client_name} lista para instalar. Etapa 2: instalación del sistema.";
             $this->notify_assigned_admin($implementation, $admin_message);
 
-            // Disparar el UserSetup remoto en empresa-api con los datos recolectados en la Etapa 1
-            // para que el sistema del cliente quede configurado a medida desde el inicio.
+            // Disparar el UserSetup remoto en empresa-api con los datos del formulario de la Etapa 1.
             // No bloquea el flujo si falla (el servicio captura y loguea cualquier error).
             (new ImplementationUserSetupService())->trigger_user_setup($implementation);
             return;
         }
 
+        if ($new_stage === 3) {
+            // Etapa 3: recolección de archivos — enviar primer mensaje al responsable de migración.
+            $this->send_stage_opening_message($implementation, 3);
+            return;
+        }
+
         if ($new_stage === 4) {
-            // Etapa 4: recolección de archivos — enviar primer mensaje al responsable de migración.
-            $this->send_stage_opening_message($implementation, 4);
+            // Etapa 4: migración de datos — disparar análisis IA en background.
+            // El job copia los archivos recolectados en etapa 3 al data de etapa 4 y llama a process_files().
+            \App\Jobs\ProcessImplementationStage4Import::dispatch($implementation->id);
             return;
         }
 
         if ($new_stage === 5) {
-            // Etapa 5: migración de datos — disparar análisis IA en background.
-            // El job copia los archivos recolectados en etapa 4 al data de etapa 5 y llama a process_files().
-            \App\Jobs\ProcessImplementationStage5Import::dispatch($implementation->id);
+            // Etapa 5: entrega del sistema — enviar acceso al cliente con los datos ya cargados.
+            $this->send_stage_opening_message($implementation, 5);
             return;
         }
 
@@ -766,24 +799,25 @@ class ImplementationConversationService
     }
 
     /**
-     * Envía el primer mensaje de la Etapa 4 al responsable de migración (migration_contact_phone).
+     * Envía el primer mensaje de la Etapa 3 al responsable de migración (migration_contact_phone).
      *
-     * Registra `current_question = 'articles_excel'` en el data del stage 4 e inicializa
-     * la solicitud de archivos. Es idempotente: si ya se envió la apertura, no reenvía.
+     * Incluye en el mensaje la lista completa de archivos necesarios: artículos, clientes,
+     * proveedores y logo. Registra `current_question = 'collecting_files'` en el data del
+     * stage 3. Es idempotente: si ya se envió la apertura, no reenvía.
      *
      * @param Implementation $implementation
      *
      * @return void
      */
-    private function send_stage_4_opening(Implementation $implementation): void
+    private function send_stage_3_opening(Implementation $implementation): void
     {
-        // Stage 4 de esta implementación.
+        // Stage 3 (recolección de archivos) de esta implementación.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 4)
+            ->where('stage_number', 3)
             ->first();
 
         if ($stage === null) {
-            Log::channel('daily')->warning('ImplementationConversationService: stage 4 no encontrado para apertura.', [
+            Log::channel('daily')->warning('ImplementationConversationService: stage 3 no encontrado para apertura.', [
                 'implementation_id' => $implementation->id,
             ]);
             return;
@@ -797,50 +831,91 @@ class ImplementationConversationService
             return;
         }
 
-        // Teléfono del responsable de migración (puede ser distinto al dueño).
+        // Teléfono del responsable de migración (puede ser distinto al dueño del negocio).
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
 
         if ($contact_phone === '') {
-            Log::channel('daily')->warning('ImplementationConversationService: migration_contact_phone vacío para apertura de Etapa 4.', [
+            Log::channel('daily')->warning('ImplementationConversationService: migration_contact_phone vacío para apertura de Etapa 3.', [
                 'implementation_id' => $implementation->id,
             ]);
             return;
         }
 
-        // Nombre del cliente para personalizar el mensaje de apertura.
+        // Nombre del cliente y del responsable para personalizar el mensaje.
         $client      = $implementation->client ?? Client::find($implementation->client_id);
         $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
-        // Registrar la primera pregunta pendiente y persistir.
-        $data['current_question'] = 'articles_excel';
+        // Nombre del responsable de migración guardado en el data del stage 1 (si existe).
+        $stage_1 = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 1)
+            ->first();
+        $stage_1_data = $stage_1 !== null && is_array($stage_1->data) ? $stage_1->data : [];
+        $responsable  = trim((string) ($stage_1_data['migration_responsible_name'] ?? ''));
+
+        // Generar la lista de progreso para incluir en el mensaje de apertura.
+        $progress_list = $this->build_progress_list($implementation);
+
+        // Registrar estado de acumulación activa y persistir antes de enviar el mensaje.
+        $data['current_question'] = 'collecting_files';
         $stage->data              = $data;
         $stage->save();
 
-        // Mensaje directo al punto, sin presentación del agente.
-        $question_text = "Arrancamos con la migración de datos para {$client_name}. Primero necesito los archivos Excel con los productos o artículos. Podés enviarlos directamente por acá.";
-        $this->send_outbound($implementation, 4, $contact_phone, $question_text);
+        // Construir el mensaje de apertura incluyendo la lista de archivos requeridos.
+        $responsable_saludo = $responsable !== '' ? $responsable : 'Hola';
+        $question_text = "{$progress_list}\n\n"
+            . "{$responsable_saludo}, ¡el sistema ya está instalado con la configuración de {$client_name}! 🎉\n\n"
+            . "Ahora necesito que nos envíes los archivos con la información del negocio:\n\n"
+            . "📦 Artículos o productos (Excel)\n"
+            . "👥 Clientes (Excel)\n"
+            . "🏭 Proveedores (Excel)\n"
+            . "🖼️ Logo de la empresa (imagen cuadrada)\n\n"
+            . "Podés enviarlos directamente por acá, de a uno o todos juntos. Si no tenés alguno, avisame y arrancamos igual.";
+
+        $this->send_outbound($implementation, 3, $contact_phone, $question_text);
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 2 — Definir responsable de migración
+    // Etapa 2 — Instalación del sistema (manual)
     // -------------------------------------------------------------------------
 
     /**
-     * Maneja un mensaje entrante durante la Etapa 2.
+     * Maneja un mensaje entrante durante la Etapa 2 (instalación del sistema).
      *
-     * Flujo:
-     * 1. Cargar stage 2 y su data actual.
-     * 2. Procesar respuesta según `current_question`:
-     *    - migration_responsible_name: detectar si es el dueño mismo (saltar teléfono) o tercero.
-     *    - migration_responsible_phone: guardar teléfono y completar.
-     * 3. Al completar: persistir migration_contact_phone, notificar admin, disparar evento.
+     * La Etapa 2 es manual: el equipo técnico instala empresa-api y empresa-spa.
+     * El cliente no necesita hacer nada por WhatsApp en esta etapa, por lo que se
+     * ignoran todos los mensajes entrantes sin enviar respuesta.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed         Mensaje entrante (ignorado).
+     *
+     * @return void
+     */
+    private function handle_stage_2(Implementation $implementation, array $parsed): void
+    {
+        // Etapa de instalación manual: no se requiere interacción del cliente por WhatsApp.
+        // El avance de esta etapa lo hace el admin manualmente desde el panel.
+        Log::channel('daily')->debug('ImplementationConversationService: mensaje recibido en etapa 2 (instalación manual) - ignorado.', [
+            'implementation_id' => $implementation->id,
+            'from'              => $parsed['from'] ?? '',
+        ]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Etapa 2 legacy — Definir responsable de migración (flujo anterior)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Flujo legacy de la Etapa 2: definir responsable de migración por WhatsApp.
+     *
+     * Preservado para referencia y compatibilidad con implementaciones en curso
+     * iniciadas antes del rediseño. No se invoca desde el flujo principal.
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $parsed         Mensaje entrante.
      *
      * @return void
      */
-    private function handle_stage_2(Implementation $implementation, array $parsed): void
+    private function handle_stage_2_legacy_migration_responsible(Implementation $implementation, array $parsed): void
     {
         // Stage 2 de esta implementación concreta.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
@@ -1265,15 +1340,27 @@ class ImplementationConversationService
      *
      * @return void
      */
-    private function handle_stage_5(Implementation $implementation, array $parsed): void
+    /**
+     * Maneja un mensaje entrante durante la Etapa 4 (migración de datos con IA).
+     *
+     * El responsable de migración puede recibir el resumen de columnas detectadas y
+     * confirmarlo o solicitar correcciones. Si el análisis aún está en proceso,
+     * se responde con un mensaje de espera.
+     *
+     * @param Implementation       $implementation Implementación activa.
+     * @param array<string, mixed> $parsed         Mensaje entrante parseado.
+     *
+     * @return void
+     */
+    private function handle_stage_4(Implementation $implementation, array $parsed): void
     {
-        // Stage 5 (migración) de esta implementación.
+        // Stage 4 (migración de datos) de esta implementación.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 5)
+            ->where('stage_number', 4)
             ->first();
 
         if ($stage === null) {
-            Log::channel('daily')->warning('ImplementationConversationService: stage 5 no encontrado.', [
+            Log::channel('daily')->warning('ImplementationConversationService: stage 4 no encontrado.', [
                 'implementation_id' => $implementation->id,
             ]);
             return;
@@ -1288,7 +1375,7 @@ class ImplementationConversationService
             $phone = (string) $parsed['from'];
             $this->send_outbound(
                 $implementation,
-                5,
+                4,
                 $phone,
                 'Estamos analizando los archivos con IA. En breve te enviamos el resumen de columnas detectadas.'
             );
@@ -1300,11 +1387,11 @@ class ImplementationConversationService
             return;
         }
 
-        // El cliente está respondiendo al mapeo de columnas.
+        // El responsable está respondiendo al mapeo de columnas.
         if ($current_question === 'confirm_analysis') {
             $body   = trim((string) ($parsed['body'] ?? ''));
             $client = $implementation->client ?? Client::find($implementation->client_id);
-            $this->handle_stage_5_confirm_analysis($stage, $data, $body, $implementation, $client);
+            $this->handle_stage_4_confirm_analysis($stage, $data, $body, $implementation, $client);
             return;
         }
 
@@ -1312,7 +1399,7 @@ class ImplementationConversationService
         $phone = (string) $parsed['from'];
         $this->send_outbound(
             $implementation,
-            5,
+            4,
             $phone,
             'Recibí tu mensaje. En breve te respondemos.'
         );
@@ -1333,7 +1420,22 @@ class ImplementationConversationService
      *
      * @return void
      */
-    private function handle_stage_5_confirm_analysis(
+    /**
+     * Procesa la respuesta del responsable cuando `current_question` es confirm_analysis (Etapa 4).
+     *
+     * - Afirmativo: ejecuta la importación vía ImplementationImportService::execute_import().
+     * - Corrección / negación: notifica al admin asignado con el mensaje recibido.
+     * - Ambiguo: re-pregunta brevemente.
+     *
+     * @param ImplementationStage  $stage
+     * @param array<string, mixed> $data
+     * @param string               $body
+     * @param Implementation       $implementation
+     * @param Client|null          $client
+     *
+     * @return void
+     */
+    private function handle_stage_4_confirm_analysis(
         ImplementationStage $stage,
         array $data,
         string $body,
@@ -1358,7 +1460,7 @@ class ImplementationConversationService
                 $admin_name = $this->resolve_assigned_admin_name($implementation);
                 $this->send_outbound(
                     $implementation,
-                    5,
+                    4,
                     $contact_phone,
                     "Entendido. {$admin_name} va a revisar el mapeo de columnas y te avisamos cuando esté listo."
                 );
@@ -1370,7 +1472,7 @@ class ImplementationConversationService
 
             $this->notify_assigned_admin(
                 $implementation,
-                "⚠️ {$client_name} solicitó corrección del mapeo de columnas en Etapa 5. Mensaje: \"{$body}\""
+                "⚠️ {$client_name} solicitó corrección del mapeo de columnas en Etapa 4. Mensaje: \"{$body}\""
             );
 
             return;
@@ -1381,7 +1483,7 @@ class ImplementationConversationService
         if ($contact_phone !== '') {
             $this->send_outbound(
                 $implementation,
-                5,
+                4,
                 $contact_phone,
                 '¿Confirmás que el mapeo de columnas es correcto? Respondé sí para continuar o indicá qué columna hay que corregir.'
             );
@@ -1389,60 +1491,60 @@ class ImplementationConversationService
     }
 
     /**
-     * Envía un mensaje outbound al responsable de migración durante la Etapa 5.
+     * Envía un mensaje outbound al responsable de migración durante la Etapa 4 (migración).
      *
      * Usado por ImplementationImportService para el resumen de análisis IA y el mensaje
-     * de éxito de importación, que ocurren durante la etapa 5.
+     * de éxito de importación, que ocurren durante la etapa 4.
      *
      * @param Implementation $implementation
      * @param string         $body
      *
      * @return void
      */
-    public function send_stage_5_outbound(Implementation $implementation, string $body): void
+    public function send_stage_4_outbound(Implementation $implementation, string $body): void
     {
         // Teléfono del responsable de migración (destino de los mensajes de importación).
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
 
         if ($contact_phone === '') {
-            Log::channel('daily')->warning('ImplementationConversationService::send_stage_5_outbound: teléfono vacío.', [
+            Log::channel('daily')->warning('ImplementationConversationService::send_stage_4_outbound: teléfono vacío.', [
                 'implementation_id' => $implementation->id,
             ]);
 
             return;
         }
 
-        $this->send_outbound($implementation, 5, $contact_phone, $body);
+        $this->send_outbound($implementation, 4, $contact_phone, $body);
     }
 
     /**
-     * Cierra la Etapa 5 tras una importación exitosa (Pusher + aviso al admin, sin mensaje duplicado al cliente).
+     * Cierra la Etapa 4 (migración) tras una importación exitosa (Pusher + aviso al admin).
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $data
      *
      * @return void
      */
-    public function finish_stage_5_after_import(Implementation $implementation, array $data): void
+    public function finish_stage_4_after_import(Implementation $implementation, array $data): void
     {
         // Teléfono del responsable de migración y cliente para el cierre de etapa.
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
         $client        = $implementation->client ?? Client::find($implementation->client_id);
 
-        $this->finish_stage_5($implementation, $contact_phone, $client, $data);
+        $this->finish_stage_4($implementation, $contact_phone, $client, $data);
     }
 
     /**
-     * Cierra la Etapa 5: notifica al admin con resumen de importación y dispara evento Pusher.
+     * Cierra la Etapa 4 (migración): notifica al admin con resumen de importación y dispara evento Pusher.
      *
      * @param Implementation       $implementation
      * @param string               $contact_phone  Teléfono del responsable de migración.
      * @param Client|null          $client
-     * @param array<string, mixed> $data           Data final del stage 5.
+     * @param array<string, mixed> $data           Data final del stage 4.
      *
      * @return void
      */
-    private function finish_stage_5(
+    private function finish_stage_4(
         Implementation $implementation,
         string $contact_phone,
         ?Client $client,
@@ -1458,22 +1560,22 @@ class ImplementationConversationService
         $suppliers_icon = $this->is_stage4_category_resolved($data, 'suppliers') ? '✅' : '—';
 
         // Mensaje al admin con resumen de la importación.
-        $admin_message = "✅ {$client_name} completó la Etapa 5 con importación IA. Artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}.";
+        $admin_message = "✅ {$client_name} completó la Etapa 4 con importación IA. Artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}.";
         $this->notify_assigned_admin($implementation, $admin_message);
 
-        // Marcar la etapa 5 como completada en la base de datos.
-        $stage_5_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 5)
+        // Marcar la etapa 4 como completada en la base de datos.
+        $stage_4_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 4)
             ->first();
 
-        if ($stage_5_record !== null) {
-            $stage_5_record->status       = 'completed';
-            $stage_5_record->completed_at = now();
-            $stage_5_record->save();
+        if ($stage_4_record !== null) {
+            $stage_4_record->status       = 'completed';
+            $stage_4_record->completed_at = now();
+            $stage_4_record->save();
         }
 
         // Evento Pusher para notificar al panel admin en tiempo real.
-        event(new ImplementationStageCompleted($implementation->id, 5, $client_name));
+        event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
     }
 
     // -------------------------------------------------------------------------
@@ -1785,6 +1887,209 @@ class ImplementationConversationService
         );
     }
 
+    // -------------------------------------------------------------------------
+    // Etapa 5 — Entrega del sistema al cliente
+    // -------------------------------------------------------------------------
+
+    /**
+     * Envía el primer mensaje de la Etapa 5 al dueño del cliente con el acceso al sistema.
+     *
+     * Incluye el link al sistema, usuario y contraseña provisional leídos del data de la
+     * etapa 2 (instalación). Si no están disponibles todavía, envía el mensaje sin esos datos
+     * y loguea un warning. Es idempotente: si ya se envió la apertura, no reenvía.
+     *
+     * @param Implementation $implementation
+     *
+     * @return void
+     */
+    private function send_stage_5_opening(Implementation $implementation): void
+    {
+        // Stage 5 (entrega del sistema) de esta implementación.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 5)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->warning('ImplementationConversationService: stage 5 no encontrado para apertura.', [
+                'implementation_id' => $implementation->id,
+            ]);
+            return;
+        }
+
+        // Data actual del stage.
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        // Idempotente: si ya se registró current_question, no reenviar la apertura.
+        if (array_key_exists('current_question', $data)) {
+            return;
+        }
+
+        // Teléfono del dueño del negocio (cliente).
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $owner_phone = trim((string) ($client->phone ?? ''));
+
+        if ($owner_phone === '') {
+            Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 5.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $implementation->client_id,
+            ]);
+            return;
+        }
+
+        $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
+
+        // Leer datos de acceso del stage 2 (instalación): link, usuario y contraseña provisional.
+        $stage_2 = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 2)
+            ->first();
+        $stage_2_data = $stage_2 !== null && is_array($stage_2->data) ? $stage_2->data : [];
+
+        // Link del sistema, usuario y contraseña; pueden estar vacíos si instalación no completó datos.
+        $link_sistema   = trim((string) ($stage_2_data['system_url'] ?? ''));
+        $usuario        = trim((string) ($stage_2_data['admin_username'] ?? ''));
+        $contrasena     = trim((string) ($stage_2_data['admin_password'] ?? ''));
+
+        if ($link_sistema === '' || $usuario === '' || $contrasena === '') {
+            Log::channel('daily')->warning('ImplementationConversationService: datos de acceso incompletos en stage 2 para apertura de Etapa 5.', [
+                'implementation_id' => $implementation->id,
+                'link'              => $link_sistema,
+                'usuario'           => $usuario,
+            ]);
+        }
+
+        // Generar la lista de progreso para incluir en el mensaje de apertura.
+        $progress_list = $this->build_progress_list($implementation);
+
+        // Registrar la primera pregunta pendiente y persistir.
+        $data['current_question'] = 'system_delivered';
+        $stage->data              = $data;
+        $stage->save();
+
+        // Construir el mensaje con los datos de acceso (si están disponibles).
+        if ($link_sistema !== '' && $usuario !== '' && $contrasena !== '') {
+            $mensaje = "{$progress_list}\n\n"
+                . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
+                . "Podés ingresar desde acá: {$link_sistema}\n"
+                . "Usuario: {$usuario}\n"
+                . "Contraseña: {$contrasena}\n\n"
+                . "Una cosa importante: no es necesario que abandones tu sistema actual de golpe. "
+                . "Podés trabajar en paralelo con ambos durante el tiempo que necesites. "
+                . "Cuando estés listo para hacer el pase definitivo, nos avisás y hacemos una migración final con toda la información actualizada.\n\n"
+                . "¿Alguna duda antes de empezar a explorar?";
+        } else {
+            $mensaje = "{$progress_list}\n\n"
+                . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
+                . "En breve te enviamos los datos de acceso para que puedas ingresar.\n\n"
+                . "¿Alguna duda antes de empezar?";
+        }
+
+        $this->send_outbound($implementation, 5, $owner_phone, $mensaje);
+    }
+
+    /**
+     * Maneja un mensaje entrante durante la Etapa 5 (entrega del sistema).
+     *
+     * En esta etapa el dueño puede hacer preguntas sobre el acceso. El agente responde
+     * con un mensaje de transición y notifica al admin asignado para seguimiento.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed         Mensaje entrante.
+     *
+     * @return void
+     */
+    private function handle_stage_5(Implementation $implementation, array $parsed): void
+    {
+        // Teléfono del remitente para responder.
+        $phone = (string) $parsed['from'];
+
+        // Stage 5 (entrega del sistema) de esta implementación.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 5)
+            ->first();
+
+        // Si la etapa ya fue completada, ignorar mensajes.
+        $current_question = $stage !== null && is_array($stage->data)
+            ? trim((string) ($stage->data['current_question'] ?? ''))
+            : '';
+
+        if ($current_question === 'completed') {
+            return;
+        }
+
+        // Si la apertura no fue enviada todavía, enviarla como fallback.
+        if ($current_question === '') {
+            $this->send_stage_5_opening($implementation);
+            return;
+        }
+
+        // Notificar al admin asignado que el cliente escribió en la etapa de entrega.
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
+        $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
+        $body        = trim((string) ($parsed['body'] ?? ''));
+
+        $this->notify_assigned_admin(
+            $implementation,
+            "💬 {$client_name} escribió en Etapa 5 (entrega del sistema): \"{$body}\""
+        );
+
+        // Responder al cliente indicando que recibirá atención.
+        $admin_name = $this->resolve_assigned_admin_name($implementation);
+        $this->send_outbound(
+            $implementation,
+            5,
+            $phone,
+            "Recibí tu mensaje. {$admin_name} te va a responder en breve. 🙏"
+        );
+    }
+
+    /**
+     * Genera la lista de progreso de etapas en formato de texto para WhatsApp.
+     *
+     * Usa ✅ para etapas completadas y ⬜ para etapas pendientes o en progreso.
+     * Se incluye al inicio de los mensajes de apertura de cada etapa para que el
+     * cliente vea en qué punto del proceso se encuentra.
+     *
+     * @param Implementation $implementation Implementación con relación stages cargable.
+     *
+     * @return string Texto multilínea con las 8 etapas y sus estados.
+     */
+    private function build_progress_list(Implementation $implementation): string
+    {
+        // Nombres definitivos de las 8 etapas para mostrar en la lista de progreso.
+        $etapas = [
+            1 => 'Información de la empresa',
+            2 => 'Instalación del sistema',
+            3 => 'Recolección de archivos',
+            4 => 'Migración de datos',
+            5 => 'Entrega del sistema',
+            6 => 'Capacitación',
+            7 => 'Vinculación con ARCA/AFIP',
+            8 => 'Videollamada de capacitación',
+        ];
+
+        // Cargar las etapas si no están ya en memoria.
+        $implementation->loadMissing('stages');
+
+        // Mapear número de etapa → estado para consulta O(1).
+        $stages_map = [];
+        $implementation->stages->each(function ($s) use (&$stages_map) {
+            $stages_map[(int) $s->stage_number] = (string) $s->status;
+        });
+
+        // Construir línea por etapa con ícono según estado.
+        $lines = [];
+        foreach ($etapas as $number => $label) {
+            $icon    = ($stages_map[$number] ?? 'pending') === 'completed' ? '✅' : '⬜';
+            $lines[] = "{$icon} {$number}. {$label}";
+        }
+
+        return implode("\n", $lines);
+    }
+
+    // -------------------------------------------------------------------------
+    // Etapa 8 — Videollamada de capacitación
+    // -------------------------------------------------------------------------
+
     /**
      * Maneja un mensaje entrante durante la Etapa 8 (videollamada de capacitación).
      *
@@ -1945,15 +2250,27 @@ class ImplementationConversationService
      *
      * @return void
      */
-    private function handle_stage_4(Implementation $implementation, array $parsed): void
+    /**
+     * Maneja un mensaje entrante durante la Etapa 3 (recolección de archivos Excel y logo).
+     *
+     * Acumula archivos y textos enviados por el responsable de migración en `pending_files`
+     * o `pending_texts`, y reinicia el timer de debounce. Cuando el timer expira, Claude
+     * analiza el lote completo y genera la respuesta al responsable de migración.
+     *
+     * @param Implementation       $implementation Implementación activa.
+     * @param array<string, mixed> $parsed         Mensaje entrante parseado.
+     *
+     * @return void
+     */
+    private function handle_stage_3(Implementation $implementation, array $parsed): void
     {
-        // Stage 4 de esta implementación concreta.
+        // Stage 3 (recolección de archivos) de esta implementación concreta.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 4)
+            ->where('stage_number', 3)
             ->first();
 
         if ($stage === null) {
-            Log::channel('daily')->warning('ImplementationConversationService: stage 4 no encontrado.', [
+            Log::channel('daily')->warning('ImplementationConversationService: stage 3 no encontrado.', [
                 'implementation_id' => $implementation->id,
             ]);
             return;
@@ -1964,7 +2281,7 @@ class ImplementationConversationService
 
         // Si no hay current_question → la apertura no fue enviada aún; enviarla como fallback.
         if (! array_key_exists('current_question', $data)) {
-            $this->send_stage_4_opening($implementation);
+            $this->send_stage_3_opening($implementation);
             return;
         }
 
@@ -1978,14 +2295,14 @@ class ImplementationConversationService
         if ($current_question === 'confirm_analysis') {
             $body   = trim((string) ($parsed['body'] ?? ''));
             $client = $implementation->client ?? Client::find($implementation->client_id);
-            $this->handle_stage_4_confirm_analysis($stage, $data, $body, $implementation, $client);
+            $this->handle_stage_3_confirm_analysis($stage, $data, $body, $implementation, $client);
             return;
         }
 
-        // Tipo de mensaje entrante: 'document' o texto libre.
+        // Tipo de mensaje entrante: 'document', 'image' o texto libre.
         $message_type = (string) ($parsed['type'] ?? 'text');
 
-        if ($message_type === 'document') {
+        if ($message_type === 'document' || $message_type === 'image') {
             // Construir registro del archivo recibido con metadatos disponibles.
             $file_record = [
                 'filename'    => (string) ($parsed['inbound_media']['filename'] ?? ''),
@@ -2056,17 +2373,17 @@ class ImplementationConversationService
     }
 
     /**
-     * Cierra la Etapa 4: envía confirmación al responsable de migración, notifica al admin
-     * con el resumen de archivos recibidos y dispara el evento Pusher.
+     * Cierra la Etapa 3 (archivos): envía confirmación al responsable de migración, notifica
+     * al admin con el resumen de archivos recibidos y dispara el evento Pusher.
      *
      * @param Implementation       $implementation
      * @param string               $contact_phone  Teléfono del responsable de migración.
      * @param Client|null          $client
-     * @param array<string, mixed> $data           Data final del stage 4 con el estado de cada archivo.
+     * @param array<string, mixed> $data           Data final del stage 3 con el estado de cada archivo.
      *
      * @return void
      */
-    private function finish_stage_4(
+    private function finish_stage_3(
         Implementation $implementation,
         string $contact_phone,
         ?Client $client,
@@ -2080,7 +2397,7 @@ class ImplementationConversationService
         if (empty($data['import_success_notified'])) {
             $this->send_outbound(
                 $implementation,
-                4,
+                3,
                 $contact_phone,
                 '¡Listo, recibí todo! Vamos a procesar los archivos y te avisamos cuando estén cargados en el sistema.'
             );
@@ -2092,29 +2409,32 @@ class ImplementationConversationService
         $suppliers_icon = $this->is_stage4_category_resolved($data, 'suppliers') ? '✅' : '—';
 
         if (! empty($data['import_success_notified'])) {
-            $admin_message = "✅ {$client_name} completó la Etapa 4 con importación IA. Artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}.";
+            $admin_message = "✅ {$client_name} completó la Etapa 3 con importación IA. Artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}.";
         } else {
-            $admin_message = "✅ {$client_name} completó la Etapa 4. Archivos recibidos: artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}. Podés proceder con la importación.";
+            $admin_message = "✅ {$client_name} completó la Etapa 3. Archivos recibidos: artículos {$articles_icon} | clientes {$clients_icon} | proveedores {$suppliers_icon}. Podés proceder con la importación.";
         }
         $this->notify_assigned_admin($implementation, $admin_message);
 
-        // Marcar la etapa 4 como completada en la base de datos.
-        $stage_4_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 4)
+        // Marcar la etapa 3 como completada en la base de datos.
+        $stage_3_record = \App\Models\ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 3)
             ->first();
 
-        if ($stage_4_record !== null) {
-            $stage_4_record->status       = 'completed';
-            $stage_4_record->completed_at = now();
-            $stage_4_record->save();
+        if ($stage_3_record !== null) {
+            $stage_3_record->status       = 'completed';
+            $stage_3_record->completed_at = now();
+            $stage_3_record->save();
         }
 
         // Evento Pusher para notificar al panel en tiempo real.
-        event(new ImplementationStageCompleted($implementation->id, 4, $client_name));
+        event(new ImplementationStageCompleted($implementation->id, 3, $client_name));
     }
 
     /**
-     * Procesa la respuesta del cliente cuando `current_question` es confirm_analysis.
+     * Procesa la respuesta del responsable cuando `current_question` es confirm_analysis (Etapa 3).
+     *
+     * Verifica si el responsable confirma los archivos recibidos. Si confirma, cierra la etapa.
+     * Si solicita corrección, notifica al admin. Si es ambiguo, re-pregunta.
      *
      * @param ImplementationStage  $stage
      * @param array<string, mixed> $data
@@ -2124,7 +2444,7 @@ class ImplementationConversationService
      *
      * @return void
      */
-    private function handle_stage_4_confirm_analysis(
+    private function handle_stage_3_confirm_analysis(
         ImplementationStage $stage,
         array $data,
         string $body,
@@ -2150,7 +2470,7 @@ class ImplementationConversationService
                 $admin_name = $this->resolve_assigned_admin_name($implementation);
                 $this->send_outbound(
                     $implementation,
-                    4,
+                    3,
                     $contact_phone,
                     "Entendido. {$admin_name} va a revisar el mapeo de columnas y te avisamos cuando esté listo."
                 );
@@ -2162,7 +2482,7 @@ class ImplementationConversationService
 
             $this->notify_assigned_admin(
                 $implementation,
-                "⚠️ {$client_name} solicitó corrección del mapeo de columnas en Etapa 4. Mensaje: \"{$body}\""
+                "⚠️ {$client_name} solicitó corrección del mapeo de columnas en Etapa 3. Mensaje: \"{$body}\""
             );
 
             return;
@@ -2173,7 +2493,7 @@ class ImplementationConversationService
         if ($contact_phone !== '') {
             $this->send_outbound(
                 $implementation,
-                4,
+                3,
                 $contact_phone,
                 '¿Confirmás que el mapeo de columnas es correcto? Respondé sí para continuar o indicá qué columna hay que corregir.'
             );
@@ -2218,26 +2538,26 @@ class ImplementationConversationService
     }
 
     /**
-     * Envía un mensaje outbound al responsable de migración en la Etapa 4.
+     * Envía un mensaje outbound al responsable de migración en la Etapa 3 (recolección de archivos).
      *
      * @param Implementation $implementation
      * @param string         $body
      *
      * @return void
      */
-    public function send_stage_4_outbound(Implementation $implementation, string $body): void
+    public function send_stage_3_outbound(Implementation $implementation, string $body): void
     {
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
 
         if ($contact_phone === '') {
-            Log::channel('daily')->warning('ImplementationConversationService::send_stage_4_outbound: teléfono vacío.', [
+            Log::channel('daily')->warning('ImplementationConversationService::send_stage_3_outbound: teléfono vacío.', [
                 'implementation_id' => $implementation->id,
             ]);
 
             return;
         }
 
-        $this->send_outbound($implementation, 4, $contact_phone, $body);
+        $this->send_outbound($implementation, 3, $contact_phone, $body);
     }
 
     /**
@@ -2254,19 +2574,19 @@ class ImplementationConversationService
     }
 
     /**
-     * Cierra la Etapa 4 tras una importación exitosa (Pusher + aviso al admin, sin mensaje duplicado al cliente).
+     * Cierra la Etapa 3 (archivos) tras una importación exitosa (Pusher + aviso al admin).
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $data
      *
      * @return void
      */
-    public function finish_stage_4_after_import(Implementation $implementation, array $data): void
+    public function finish_stage_3_after_import(Implementation $implementation, array $data): void
     {
         $contact_phone = trim((string) ($implementation->migration_contact_phone ?? ''));
         $client        = $implementation->client ?? Client::find($implementation->client_id);
 
-        $this->finish_stage_4($implementation, $contact_phone, $client, $data);
+        $this->finish_stage_3($implementation, $contact_phone, $client, $data);
     }
 
     // -------------------------------------------------------------------------
