@@ -162,6 +162,14 @@ class LeadSuggestionSendService
             return;
         }
 
+        /*
+         * FIX (prompt 118): si create_message_and_update_lead() ya aplicó el status,
+         * no repetir el save() redundante al enviar el mensaje sugerido.
+         */
+        if ((string) $lead->status === $slug) {
+            return;
+        }
+
         LeadPipelineStatus::ensure_exists($slug);
         $lead->status = $slug;
         $lead->save();

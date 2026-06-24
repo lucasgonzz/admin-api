@@ -1386,6 +1386,18 @@ class LeadAiService
                     $lead->demo_date       = $demo_date;
                     $lead->demo_start_time = $demo_start;
                     $lead->demo_end_time   = $demo_end;
+
+                    /*
+                     * FIX (prompt 118): actualizar el status junto con los campos de demo.
+                     * La demo ya quedó persistida en BD; no esperar al envío del mensaje por WhatsApp.
+                     * Así, si el lead responde antes del auto-send, generate_suggestion() ve demo_agendada.
+                     */
+                    $lead->status = 'demo_agendada';
+                    $pipeline_status       = LeadPipelineStatus::ensure_exists('demo_agendada');
+                    $estado                = $pipeline_status->slug;
+                    /* El status ya está en BD; evitar que apply_suggested_pipeline_status() lo repita. */
+                    $suggested_lead_status = null;
+
                     Log::info('LeadAiService: demo agendada vía acción estructurada y validada.', [
                         'lead_id'    => $lead->id,
                         'demo_id'    => $demo_id,
