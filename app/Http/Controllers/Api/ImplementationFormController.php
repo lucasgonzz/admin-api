@@ -271,10 +271,13 @@ class ImplementationFormController extends Controller
         $stage_data = $stage->data;
 
         if (isset($stage_data[self::FORM_RESPONSES_KEY]) && is_array($stage_data[self::FORM_RESPONSES_KEY])) {
-            return $stage_data[self::FORM_RESPONSES_KEY];
+            // Forzar objeto vacío en lugar de array vacío para que JSON lo serialice como {} no como []
+            $responses = $stage_data[self::FORM_RESPONSES_KEY];
+            return empty($responses) ? new \stdClass() : $responses;
         }
 
-        return $this->extract_legacy_form_fields($stage_data);
+        $legacy = $this->extract_legacy_form_fields($stage_data);
+        return empty($legacy) ? new \stdClass() : $legacy;
     }
 
     /**
