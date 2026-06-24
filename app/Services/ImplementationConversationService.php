@@ -667,7 +667,7 @@ class ImplementationConversationService
     public function handle_stage_advance(Implementation $implementation, int $new_stage): void
     {
         if ($new_stage === 2) {
-            // Etapa 2: instalación manual. Notificar al admin + disparar UserSetup.
+            // Etapa 2: instalación manual. Notificar al admin + disparar UserSetup + crear ClientInstallation.
             $client      = $implementation->client ?? Client::find($implementation->client_id);
             $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
@@ -677,6 +677,29 @@ class ImplementationConversationService
             // Disparar el UserSetup remoto en empresa-api con los datos del formulario de la Etapa 1.
             // No bloquea el flujo si falla (el servicio captura y loguea cualquier error).
             (new ImplementationUserSetupService())->trigger_user_setup($implementation);
+
+            // Crear automáticamente la ClientInstallation para que aparezca en el módulo de Instalaciones.
+            if ($client !== null) {
+                $existing = ClientInstallation::where('client_id', $client->id)->first();
+                if ($existing === null) {
+                    $latest_version = \App\Models\Version::where('status', 'publicada')
+                        ->orderByDesc('id')
+                        ->first();
+
+                    ClientInstallation::create([
+                        'client_id'     => $client->id,
+                        'client_api_id' => $client->active_client_api_id ?? null,
+                        'version_id'    => $latest_version ? $latest_version->id : null,
+                        'status'        => 'pendiente',
+                    ]);
+
+                    Log::channel('daily')->info('ImplementationConversationService: ClientInstallation creada al avanzar a Etapa 2.', [
+                        'implementation_id' => $implementation->id,
+                        'client_id'         => $client->id,
+                    ]);
+                }
+            }
+
             return;
         }
 
