@@ -36,22 +36,31 @@ class GenerateDemoSummary extends Command
     /**
      * System prompt enviado a Claude para generar el resumen estructurado del lead.
      *
-     * Solicita ÚNICAMENTE un JSON válido con 5 claves:
+     * Solicita ÚNICAMENTE un JSON válido con 7 claves:
      * - resumen_textual: prosa orientada al closer (máx. 200 palabras)
-     * - empresa: rubro y cantidad de empleados
-     * - situacion_actual: sistema/herramienta que usa actualmente
-     * - funcionalidades: funcionalidades de ComercioCity que le interesaron
-     * - puntos_dolor: principales dolores o problemas actuales
+     * - empresa, situacion_actual, funcionalidades, puntos_dolor: campos de texto existentes
+     * - precio_sugerido: objeto con scoring interno de precio (uso exclusivo del equipo)
+     * - temperatura: objeto con nivel de interés del lead (uso exclusivo del equipo)
      *
      * @var string
      */
     private const SYSTEM_PROMPT = 'Sos un asistente de ventas. Analizá la conversación del lead y devolvé ÚNICAMENTE un JSON válido '
-        . '(sin backticks, sin texto adicional, sin explicaciones) con exactamente estas 5 claves: '
+        . '(sin backticks, sin texto adicional, sin explicaciones) con exactamente estas 7 claves: '
         . '- resumen_textual: resumen en prosa natural (máximo 200 palabras) orientado al closer, con tipo de negocio, empleados, dolores, funcionalidades de interés, objeciones y datos clave para el cierre. '
         . '- empresa: una o dos frases sobre a qué se dedica el negocio y cuántos empleados tiene. '
         . '- situacion_actual: qué sistema o herramienta usa actualmente para gestionar su negocio (si no lo mencionó, escribir "No especificó"). '
         . '- funcionalidades: funcionalidades de ComercioCity que le interesaron o preguntó durante la conversación. '
         . '- puntos_dolor: principales dolores o problemas con su situación actual. '
+        . '- precio_sugerido: objeto interno (nunca mostrar al lead) con las subclaves precio_base (número 500, 1000 o 1500), incluye_ecommerce (booleano), total (número final en USD), bono (número en USD o null si no aplica) y razonamiento (una o dos frases explicando qué señales detectaste). '
+        . 'Para calcular precio_sugerido, detectá estas señales en la conversación. SEÑALES ALTAS: (1) más de una sucursal — menciona dos o más locales, depósitos o puntos de venta; (2) mayorista/distribuidor — se presenta como mayorista, distribuidor o vende a revendedores. '
+        . 'SEÑALES MEDIAS: (1) cuenta corriente — menciona fiado, deudas de clientes, cuentas a cobrar/pagar o trabaja con crédito; (2) quiere ecommerce — pide tienda online, integración con Mercado Libre o Tienda Nube, o ventas por internet. '
+        . 'Precio base según señales: sin señales altas ni dos medias juntas → precio_base 500; una señal alta O dos señales medias → precio_base 1000; dos señales altas O una alta más una media → precio_base 1500. '
+        . 'Si quiere ecommerce, sumá al precio base: base 500 +200=total 700 bono 200; base 1000 +300=total 1300 bono 300; base 1500 +500=total 2000 bono 500. '
+        . 'Si NO quiere ecommerce: base 500 bono 100; base 1000 bono null; base 1500 bono null. '
+        . '- temperatura: objeto interno con nivel ("alta", "media" o "baja") y razonamiento (una o dos frases basadas en lo que dijo el lead). '
+        . 'Nivel alta: menciona urgencia, problema activo que le duele hoy, pregunta por implementación o plazos, dice que lo necesita ya. '
+        . 'Nivel media: interés genuino sin apuro, hace preguntas de funcionalidades, no menciona urgencia concreta. '
+        . 'Nivel baja: solo averigua, "viendo opciones", no cuenta un dolor concreto, respuestas cortas sin profundidad. '
         . 'Devolvé SOLO el JSON, nada más.';
 
     /**
@@ -117,7 +126,7 @@ class GenerateDemoSummary extends Command
 
             try {
                 /*
-                 * Llamar a Claude: ahora devuelve un array con las 5 claves del resumen estructurado.
+                 * Llamar a Claude: devuelve un array con las 7 claves del resumen estructurado.
                  * call_claude() lanza RuntimeException si el JSON no es válido.
                  */
                 $result  = $this->call_claude($user_content);
@@ -132,12 +141,14 @@ class GenerateDemoSummary extends Command
                     continue;
                 }
 
-                /* Las 4 claves estructuradas que van en el campo JSON separado. */
+                /* Claves estructuradas que van en el campo JSON separado (texto + objetos internos). */
                 $structured = [
                     'empresa'          => trim((string) ($result['empresa']          ?? '')),
                     'situacion_actual' => trim((string) ($result['situacion_actual'] ?? '')),
                     'funcionalidades'  => trim((string) ($result['funcionalidades']  ?? '')),
                     'puntos_dolor'     => trim((string) ($result['puntos_dolor']     ?? '')),
+                    'precio_sugerido'  => is_array($result['precio_sugerido'] ?? null) ? $result['precio_sugerido'] : null,
+                    'temperatura'      => is_array($result['temperatura']     ?? null) ? $result['temperatura']     : null,
                 ];
 
                 /* Guardar resumen textual + resumen estructurado en el lead. */
@@ -202,7 +213,8 @@ class GenerateDemoSummary extends Command
      * Envía el historial a Claude y devuelve el array con el resumen estructurado.
      *
      * Claude debe responder ÚNICAMENTE con un JSON válido con las claves:
-     * resumen_textual, empresa, situacion_actual, funcionalidades, puntos_dolor.
+     * resumen_textual, empresa, situacion_actual, funcionalidades, puntos_dolor,
+     * precio_sugerido y temperatura.
      *
      * Usa la misma configuración HTTP que LeadAiService (API key, headers, timeout, TLS).
      *
@@ -211,7 +223,7 @@ class GenerateDemoSummary extends Command
      * @throws \RuntimeException Si la API key no está configurada, falla la llamada,
      *                           o Claude no devuelve JSON válido.
      *
-     * @return array Array PHP con las 5 claves del resumen estructurado.
+     * @return array Array PHP con las 7 claves del resumen estructurado.
      */
     protected function call_claude(string $user_content): array
     {
@@ -242,7 +254,7 @@ class GenerateDemoSummary extends Command
 
         $response = $http->post('https://api.anthropic.com/v1/messages', [
             'model'      => $model,
-            /* max_tokens aumentado a 1000 para dar espacio al JSON estructurado de 5 claves. */
+            /* max_tokens aumentado a 1000 para dar espacio al JSON estructurado de 7 claves. */
             'max_tokens' => 1000,
             'system'     => self::SYSTEM_PROMPT,
             'messages'   => [

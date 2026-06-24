@@ -1880,7 +1880,8 @@ class LeadController extends Controller
      *
      * Llama a la API de Anthropic con el historial de mensajes del lead para producir:
      * - demo_summary: resumen textual en prosa orientado al closer (máx. 200 palabras)
-     * - demo_summary_structured: JSON con empresa, situacion_actual, funcionalidades, puntos_dolor
+     * - demo_summary_structured: JSON con empresa, situacion_actual, funcionalidades, puntos_dolor,
+     *   precio_sugerido y temperatura (uso interno del equipo)
      *
      * Si el parse JSON falla, se guarda solo demo_summary con el texto crudo (fallback seguro).
      *
@@ -1894,16 +1895,26 @@ class LeadController extends Controller
         $lead = Lead::with('messages')->findOrFail($id);
 
         /*
-         * System prompt actualizado (prompt 053): solicita JSON estructurado con 5 claves.
+         * System prompt (prompt 117): solicita JSON estructurado con 7 claves.
          * Mismo texto que GenerateDemoSummary::SYSTEM_PROMPT para mantener coherencia.
          */
         $system_prompt = 'Sos un asistente de ventas. Analizá la conversación del lead y devolvé ÚNICAMENTE un JSON válido '
-            . '(sin backticks, sin texto adicional, sin explicaciones) con exactamente estas 5 claves: '
+            . '(sin backticks, sin texto adicional, sin explicaciones) con exactamente estas 7 claves: '
             . '- resumen_textual: resumen en prosa natural (máximo 200 palabras) orientado al closer, con tipo de negocio, empleados, dolores, funcionalidades de interés, objeciones y datos clave para el cierre. '
             . '- empresa: una o dos frases sobre a qué se dedica el negocio y cuántos empleados tiene. '
             . '- situacion_actual: qué sistema o herramienta usa actualmente para gestionar su negocio (si no lo mencionó, escribir "No especificó"). '
             . '- funcionalidades: funcionalidades de ComercioCity que le interesaron o preguntó durante la conversación. '
             . '- puntos_dolor: principales dolores o problemas con su situación actual. '
+            . '- precio_sugerido: objeto interno (nunca mostrar al lead) con las subclaves precio_base (número 500, 1000 o 1500), incluye_ecommerce (booleano), total (número final en USD), bono (número en USD o null si no aplica) y razonamiento (una o dos frases explicando qué señales detectaste). '
+            . 'Para calcular precio_sugerido, detectá estas señales en la conversación. SEÑALES ALTAS: (1) más de una sucursal — menciona dos o más locales, depósitos o puntos de venta; (2) mayorista/distribuidor — se presenta como mayorista, distribuidor o vende a revendedores. '
+            . 'SEÑALES MEDIAS: (1) cuenta corriente — menciona fiado, deudas de clientes, cuentas a cobrar/pagar o trabaja con crédito; (2) quiere ecommerce — pide tienda online, integración con Mercado Libre o Tienda Nube, o ventas por internet. '
+            . 'Precio base según señales: sin señales altas ni dos medias juntas → precio_base 500; una señal alta O dos señales medias → precio_base 1000; dos señales altas O una alta más una media → precio_base 1500. '
+            . 'Si quiere ecommerce, sumá al precio base: base 500 +200=total 700 bono 200; base 1000 +300=total 1300 bono 300; base 1500 +500=total 2000 bono 500. '
+            . 'Si NO quiere ecommerce: base 500 bono 100; base 1000 bono null; base 1500 bono null. '
+            . '- temperatura: objeto interno con nivel ("alta", "media" o "baja") y razonamiento (una o dos frases basadas en lo que dijo el lead). '
+            . 'Nivel alta: menciona urgencia, problema activo que le duele hoy, pregunta por implementación o plazos, dice que lo necesita ya. '
+            . 'Nivel media: interés genuino sin apuro, hace preguntas de funcionalidades, no menciona urgencia concreta. '
+            . 'Nivel baja: solo averigua, "viendo opciones", no cuenta un dolor concreto, respuestas cortas sin profundidad. '
             . 'Devolvé SOLO el JSON, nada más.';
 
         /* Construir el historial formateado para Claude a partir de los mensajes del lead. */
@@ -1972,9 +1983,8 @@ class LeadController extends Controller
 
                 /*
                  * Claude puede devolver funcionalidades y puntos_dolor como array JSON
-                 * (ej: ["facturación", "stock"]) en lugar de string, a pesar de que el
-                 * prompt no lo pide explícitamente. Se normaliza a string para evitar
-                 * "Array to string conversion" al hacer trim((string) $value).
+                 * (ej: ["facturación", "stock"]) en lugar de string. Se normaliza a string.
+                 * precio_sugerido y temperatura son objetos y no pasan por esta función.
                  */
                 $normalize_to_string = function ($value): string {
                     if (is_array($value)) {
@@ -1988,6 +1998,8 @@ class LeadController extends Controller
                     'situacion_actual' => $normalize_to_string($parsed['situacion_actual'] ?? ''),
                     'funcionalidades'  => $normalize_to_string($parsed['funcionalidades']  ?? ''),
                     'puntos_dolor'     => $normalize_to_string($parsed['puntos_dolor']     ?? ''),
+                    'precio_sugerido'  => is_array($parsed['precio_sugerido'] ?? null) ? $parsed['precio_sugerido'] : null,
+                    'temperatura'      => is_array($parsed['temperatura']     ?? null) ? $parsed['temperatura']     : null,
                 ];
 
                 $lead->update([
