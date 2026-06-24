@@ -175,6 +175,7 @@ class RunUserSetupService
             'api_key'         => $api_key,
             'inbound_api_key' => $inbound_api_key,
             'is_active'       => true,
+            'phone'           => $lead->phone ?? null,
         ]);
 
         $lead->update(['promoted_client_id' => $client->id]);
