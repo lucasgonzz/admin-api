@@ -343,7 +343,7 @@ SYSTEM;
             $paths = [];
 
             foreach ($tree as $node) {
-                if (is_array($node) && ($node['type'] ?? '') === 'blob' && str_ends_with((string) ($node['path'] ?? ''), '.md') && str_starts_with((string) ($node['path'] ?? ''), 'manual_sistema/')) {
+                if (is_array($node) && ($node['type'] ?? '') === 'blob' && (substr((string) ($node['path'] ?? ''), -3) === '.md') && (strncmp((string) ($node['path'] ?? ''), 'manual_sistema/', 15) === 0)) {
                     $paths[] = '- '.(string) $node['path'];
                 }
             }
