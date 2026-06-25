@@ -4,66 +4,50 @@ namespace App\Services;
 
 use App\Jobs\GenerateLeadAiSuggestionJob;
 use App\Models\Lead;
+use App\Services\LeadConversationAiState;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
- * Servicio de recovery masivo de leads sin respuesta.
+ * Recovery masivo de leads sin respuesta.
  *
- * Encola GenerateLeadAiSuggestionJob para todos los leads elegibles:
- * leads con claude_auto_reply activo, mensajes entrantes suficientes,
- * sin sugerencia pendiente y cuyo último mensaje entrante sea de hace
- * más de BATCH_MIN_ELAPSED_MINUTES minutos.
- *
- * Útil para recuperar leads que quedaron sin job por errores del servidor.
+ * Despacha GenerateLeadAiSuggestionJob en modo sync+afterResponse para cada
+ * lead elegible, sin depender de queue:work.
  */
 class BatchLeadAiRecoveryService
 {
-    /**
-     * Minutos mínimos transcurridos desde el último mensaje del lead
-     * para considerarlo elegible para recovery (evita pisar debounces activos).
-     */
-    private const BATCH_MIN_ELAPSED_MINUTES = 3;
+    /** Minutos mínimos desde el último mensaje del lead para considerarlo elegible. */
+    const BATCH_MIN_ELAPSED_MINUTES = 3;
+
+    /** Prefijo de clave de caché del token de debounce (debe coincidir con LeadAiSuggestionScheduler). */
+    const CACHE_KEY_PREFIX = 'lead_ai_suggestion_schedule_token:';
+
+    /** TTL del token en caché. */
+    const CACHE_TTL_SECONDS = 7200;
 
     /**
-     * Segundos de separación entre cada job encolado para no saturar la API de Claude.
-     */
-    private const STAGGER_SECONDS = 4;
-
-    /**
-     * Prefijo de clave de caché para el token de scheduling por lead.
-     * Debe coincidir con LeadAiSuggestionScheduler::CACHE_KEY_PREFIX.
-     */
-    private const CACHE_KEY_PREFIX = 'lead_ai_suggestion_schedule_token:';
-
-    /**
-     * Encola GenerateLeadAiSuggestionJob para todos los leads sin respuesta elegibles.
+     * Identifica leads sin respuesta elegibles y despacha un job de sugerencia por cada uno.
      *
      * Criterios de elegibilidad:
      *  1. claude_auto_reply = true
-     *  2. Al menos 2 mensajes entrantes del lead (excluyendo el primero de onboarding)
+     *  2. Al menos 2 mensajes entrantes del lead (el primero es onboarding sin IA)
      *  3. Sin sugerencia pendiente de revisión (no followup)
      *  4. Último mensaje entrante hace más de BATCH_MIN_ELAPSED_MINUTES minutos
-     *  5. Tiene mensajes sin responder según LeadConversationAiState::has_unanswered_lead_messages()
+     *  5. Tiene mensajes sin responder según LeadConversationAiState
      *
-     * @return array{dispatched: int, skipped: int}
+     * @return array
      */
-    public function dispatch_unanswered_leads(): array
+    public function dispatch_unanswered_leads()
     {
-        /* Umbral de tiempo: el último mensaje debe ser anterior a este instante. */
         $cutoff = now()->subMinutes(self::BATCH_MIN_ELAPSED_MINUTES);
 
-        /* Cargamos todos los leads con auto reply activo y sus mensajes en una sola query. */
         $leads = Lead::query()
             ->with('messages')
             ->where('claude_auto_reply', true)
             ->get();
 
-        /* Contadores de resultado. */
         $dispatched = 0;
         $skipped    = 0;
-
-        /* Delay acumulado para escalonar los jobs en la cola. */
-        $delay_seconds = 0;
 
         foreach ($leads as $lead) {
 
@@ -74,52 +58,60 @@ class BatchLeadAiRecoveryService
                 continue;
             }
 
-            /* Condición 3: sin sugerencia pendiente de revisión (no followup). */
+            /* Condición 3: sin sugerencia pendiente de revisión. */
             if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
                 $skipped++;
                 continue;
             }
 
-            /* Condición 4: obtener el último mensaje entrante del lead. */
+            /* Condición 4: último mensaje entrante del lead. */
             $last_lead_message = $lead->messages
                 ->filter(function ($m) {
-                    /* Solo mensajes enviados del lead que no sean reacciones. */
+                    $kind = $m->kind !== null ? (string) $m->kind : '';
                     return (string) $m->sender === 'lead'
                         && (string) $m->status === 'enviado'
-                        && ((string) ($m->kind ?? '') !== 'reaction');
+                        && $kind !== 'reaction';
                 })
                 ->sortByDesc('id')
                 ->first();
 
-            /* Si no hay mensaje entrante relevante, omitir. */
             if ($last_lead_message === null) {
                 $skipped++;
                 continue;
             }
 
-            /* Verificar que el último mensaje sea más antiguo que el cutoff. */
+            /* Mensaje muy reciente: puede haber un job legítimo en tránsito. */
             if ($last_lead_message->created_at > $cutoff) {
-                /* Mensaje muy reciente: puede haber un job legítimo en tránsito. */
                 $skipped++;
                 continue;
             }
 
-            /* Condición 5: verificar que haya mensajes sin responder. */
-            if (!LeadConversationAiState::has_unanswered_lead_messages($lead)) {
+            /* Condición 5: tiene mensajes sin responder. */
+            if (! LeadConversationAiState::has_unanswered_lead_messages($lead)) {
                 $skipped++;
                 continue;
             }
 
-            /* Generar nuevo token de scheduling para este lead. */
-            $schedule_token = $this->bump_schedule_token($lead->id);
+            /* Bumpeamos token para invalidar cualquier job previo colgado. */
+            $schedule_token = $this->bump_schedule_token((int) $lead->id);
 
-            /* Encolar el job con el stagger correspondiente. */
-            GenerateLeadAiSuggestionJob::dispatch($lead->id, $schedule_token)
-                ->delay(now()->addSeconds($delay_seconds));
+            /* Despacho inmediato post-respuesta HTTP: no requiere queue:work. */
+            GenerateLeadAiSuggestionJob::dispatch((int) $lead->id, $schedule_token)
+                ->onConnection('sync')
+                ->afterResponse();
 
-            $delay_seconds += self::STAGGER_SECONDS;
+            Log::channel('daily')->info('BatchLeadAiRecoveryService: job despachado.', [
+                'lead_id'        => $lead->id,
+                'schedule_token' => $schedule_token,
+            ]);
+
             $dispatched++;
         }
+
+        Log::channel('daily')->info('BatchLeadAiRecoveryService: recovery completado.', [
+            'dispatched' => $dispatched,
+            'skipped'    => $skipped,
+        ]);
 
         return [
             'dispatched' => $dispatched,
@@ -128,23 +120,19 @@ class BatchLeadAiRecoveryService
     }
 
     /**
-     * Incrementa el token de scheduling del lead en la caché para invalidar jobs anteriores.
+     * Incrementa el token de debounce del lead en caché.
      *
-     * @param int $lead_id ID del lead.
+     * @param int $lead_id
      *
-     * @return int Nuevo token asignado.
+     * @return int Token nuevo.
      */
-    private function bump_schedule_token(int $lead_id): int
+    private function bump_schedule_token($lead_id)
     {
-        /* Construir clave de caché idéntica a la del scheduler principal. */
         $cache_key = self::CACHE_KEY_PREFIX . $lead_id;
+        $current   = (int) Cache::get($cache_key, 0);
+        $next      = $current + 1;
 
-        /* Incrementar el token; si no existe, parte de 0. */
-        $current = (int) Cache::get($cache_key, 0);
-        $next    = $current + 1;
-
-        /* TTL de 2 horas, igual que el scheduler. */
-        Cache::put($cache_key, $next, 7200);
+        Cache::put($cache_key, $next, self::CACHE_TTL_SECONDS);
 
         return $next;
     }
