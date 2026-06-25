@@ -25,7 +25,8 @@ class MessageVariant extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'active' => 'boolean',
+        'active'        => 'boolean',
+        'delay_seconds' => 'integer',
     ];
 
     /**

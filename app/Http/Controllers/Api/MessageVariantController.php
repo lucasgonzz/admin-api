@@ -37,21 +37,25 @@ class MessageVariantController extends Controller
     public function store_json(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'slug'         => 'required|string|max:60|unique:message_variants,slug',
-            'name'         => 'required|string|max:150',
-            'message_type' => 'required|string|max:40',
-            'body'         => 'required|string',
-            'active'       => 'sometimes|boolean',
-            'notes'        => 'nullable|string',
+            'slug'          => 'required|string|max:60|unique:message_variants,slug',
+            'name'          => 'required|string|max:150',
+            'message_type'  => 'required|string|max:40',
+            'body'          => 'required|string',
+            'delay_seconds' => 'nullable|integer|min:0|max:300',
+            'active'        => 'sometimes|boolean',
+            'notes'         => 'nullable|string',
         ]);
 
         $variant = MessageVariant::create([
-            'slug'         => trim((string) $validated['slug']),
-            'name'         => trim((string) $validated['name']),
-            'message_type' => trim((string) $validated['message_type']),
-            'body'         => trim((string) $validated['body']),
-            'active'       => array_key_exists('active', $validated) ? (bool) $validated['active'] : true,
-            'notes'        => isset($validated['notes']) ? trim((string) $validated['notes']) : null,
+            'slug'          => trim((string) $validated['slug']),
+            'name'          => trim((string) $validated['name']),
+            'message_type'  => trim((string) $validated['message_type']),
+            'body'          => trim((string) $validated['body']),
+            'delay_seconds' => array_key_exists('delay_seconds', $validated) && $validated['delay_seconds'] !== null
+                ? (int) $validated['delay_seconds']
+                : null,
+            'active'        => array_key_exists('active', $validated) ? (bool) $validated['active'] : true,
+            'notes'         => isset($validated['notes']) ? trim((string) $validated['notes']) : null,
         ]);
 
         return response()->json(['model' => $variant], 201);
@@ -70,12 +74,13 @@ class MessageVariantController extends Controller
         $variant = MessageVariant::findOrFail($id);
 
         $validated = $request->validate([
-            'slug'         => 'sometimes|string|max:60|unique:message_variants,slug,'.$variant->id,
-            'name'         => 'sometimes|string|max:150',
-            'message_type' => 'sometimes|string|max:40',
-            'body'         => 'sometimes|string',
-            'active'       => 'sometimes|boolean',
-            'notes'        => 'nullable|string',
+            'slug'          => 'sometimes|string|max:60|unique:message_variants,slug,'.$variant->id,
+            'name'          => 'sometimes|string|max:150',
+            'message_type'  => 'sometimes|string|max:40',
+            'body'          => 'sometimes|string',
+            'delay_seconds' => 'nullable|integer|min:0|max:300',
+            'active'        => 'sometimes|boolean',
+            'notes'         => 'nullable|string',
         ]);
 
         if (array_key_exists('slug', $validated)) {
@@ -89,6 +94,10 @@ class MessageVariantController extends Controller
         }
         if (array_key_exists('body', $validated)) {
             $variant->body = trim((string) $validated['body']);
+        }
+        if (array_key_exists('delay_seconds', $validated)) {
+            $raw_delay = $validated['delay_seconds'];
+            $variant->delay_seconds = $raw_delay === null ? null : (int) $raw_delay;
         }
         if (array_key_exists('active', $validated)) {
             $variant->active = (bool) $validated['active'];
