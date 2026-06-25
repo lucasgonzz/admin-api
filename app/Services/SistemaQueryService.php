@@ -68,7 +68,7 @@ class SistemaQueryService
      */
     public static function is_sistema_query(string $body): bool
     {
-        return str_starts_with(strtolower(trim($body)), self::PREFIX);
+        return strncmp(strtolower(trim($body)), self::PREFIX, strlen(self::PREFIX)) === 0;
     }
 
     /**
