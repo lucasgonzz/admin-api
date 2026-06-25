@@ -237,7 +237,7 @@ class LeadAiService
                 'lead_id'         => $lead_row->id,
                 'contact_name'    => $lead_row->contact_name ?? '(sin nombre)',
                 'demo_id'         => $lead_row->demo_id,
-                'demo_date'       => $lead_row->demo_date?->format('Y-m-d'),
+                'demo_date'       => ($lead_row->demo_date ? $lead_row->demo_date->format('Y-m-d') : null),
                 'demo_start_time' => $lead_row->demo_start_time,
                 'demo_end_time'   => $lead_row->demo_end_time,
             ])
