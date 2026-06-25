@@ -1073,13 +1073,14 @@ class LeadController extends Controller
             return response()->json(['message' => 'No se recibió un archivo de audio válido.'], 422);
         }
 
-        // Mime real del archivo subido. WhatsApp acepta audio/*; el WebM del navegador (a veces reportado
-        // como video/webm) lo reenvía el servicio como documento, así que también lo permitimos.
+        // Mime real del archivo subido. WhatsApp acepta audio/*; iOS Safari puede sniffearse como video/mp4
+        // aunque el contenido sea audio; Chrome a veces reporta video/webm para blobs WebM de voz.
         $mime = strtolower((string) $uploaded_file->getMimeType());
         $is_audio_mime = strpos($mime, 'audio/') === 0;
         $is_webm = strpos($mime, 'webm') !== false;
-        if (! $is_audio_mime && ! $is_webm) {
-            return response()->json(['message' => 'El archivo no es un audio soportado.'], 422);
+        $is_mp4_video = $mime === 'video/mp4' || $mime === 'video/quicktime';
+        if (! $is_audio_mime && ! $is_webm && ! $is_mp4_video) {
+            return response()->json(['message' => 'El archivo no es un audio soportado (mime: '.$mime.').'], 422);
         }
 
         // Límite de 16 MB: tope de audio de la Cloud API de WhatsApp.
@@ -1129,6 +1130,23 @@ class LeadController extends Controller
                 if ($whatsapp_message_id !== null && $whatsapp_message_id !== '') {
                     $message->update(['whatsapp_message_id' => $whatsapp_message_id]);
                 }
+
+                // Si Meta rechazó el upload silenciosamente (null), no dejar el mensaje en la UI como enviado.
+                if ($whatsapp_message_id === null) {
+                    $whatsapp_config = \App\Models\WhatsappConfig::getActive();
+                    $is_test_mode = $whatsapp_config && $whatsapp_config->test_mode;
+                    if (! $is_test_mode) {
+                        Log::warning('LeadController@send_direct_audio_json: audio guardado pero WhatsApp send retornó null (revisar logs de WhatsappSendService).', [
+                            'lead_id'    => $lead_id,
+                            'attachment' => $attachment->id,
+                        ]);
+                        $message->delete();
+                        $attachment->delete();
+                        Storage::disk('public')->delete($stored_path);
+
+                        return response()->json(['message' => 'El audio se grabó correctamente pero no se pudo enviar a WhatsApp. Revisá los logs para más detalles.'], 422);
+                    }
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadController@send_direct_audio_json: error WhatsApp.', [
                     'lead_id' => $lead_id,
@@ -1171,7 +1189,7 @@ class LeadController extends Controller
         if (strpos($mime, 'amr') !== false) {
             return 'amr';
         }
-        if (strpos($mime, 'mp4') !== false) {
+        if (strpos($mime, 'mp4') !== false || strpos($mime, 'quicktime') !== false) {
             return 'm4a';
         }
         if (strpos($mime, 'webm') !== false) {
