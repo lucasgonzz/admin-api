@@ -77,6 +77,14 @@ class AdminProperties
                 'value' => false,
                 'show'  => true,
             ],
+            [
+                // Recibir WhatsApp cuando una sugerencia del agente queda pendiente de verificación manual.
+                'key'   => 'notify_verificacion_whatsapp',
+                'text'  => 'Notificar verificaciones pendientes por WhatsApp',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+            ],
         ];
     }
 }

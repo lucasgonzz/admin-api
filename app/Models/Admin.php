@@ -43,6 +43,8 @@ class Admin extends Authenticatable
         'notify_demo_scheduled_whatsapp'  => 'boolean',
         // Flag para recibir WhatsApp cuando falla el envío automático de un mensaje del sistema.
         'notify_send_errors_whatsapp'     => 'boolean',
+        // Flag para recibir WhatsApp cuando una sugerencia queda pendiente de verificación manual.
+        'notify_verificacion_whatsapp'    => 'boolean',
     ];
 
     /**

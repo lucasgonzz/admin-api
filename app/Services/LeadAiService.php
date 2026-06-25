@@ -283,6 +283,16 @@ class LeadAiService
             $availability_context .= "\n- El lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en el JSON de disponibilidad.";
         }
 
+        /*
+         * Aclaración crítica para Claude: esta es la segunda llamada, ya tiene los slots.
+         * Prohibir explícitamente que vuelva a solicitar disponibilidad.
+         */
+        $availability_context .= "\n\n⚠️ ATENCIÓN — SEGUNDA LLAMADA: El sistema YA te trajo los horarios disponibles en el JSON de arriba. ESTÁ PROHIBIDO devolver solicita_disponibilidad: true en esta llamada.";
+        $availability_context .= "\n- Si el lead pidió un día sin especificar hora (ej: 'el sábado'): ofrecele directamente los horarios disponibles de ese día del JSON y preguntale cuál le viene mejor.";
+        $availability_context .= "\n- Si el lead pidió un horario concreto y está disponible: pedile el email (Paso 3 del protocolo).";
+        $availability_context .= "\n- Si el lead pidió un horario concreto y NO está disponible: informale y ofrecele las alternativas más cercanas del JSON.";
+        $availability_context .= "\nBajo ninguna circunstancia devolver solicita_disponibilidad: true. Tenés toda la información necesaria para responder ahora.";
+
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt();
         $user_content = $this->build_user_content($lead, $is_followup, $availability_context);
@@ -1335,7 +1345,13 @@ class LeadAiService
         $mensaje    = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
         $estado_raw = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
 
-        if ($mensaje === '' || $estado_raw === '') {
+        /*
+         * Permitir mensaje vacío únicamente cuando Claude solicita disponibilidad (flujo normal de agenda).
+         * En ese caso el mensaje vacío es intencional: el sistema hará una segunda llamada con los slots.
+         * Fuera de ese caso, mensaje o estado vacío sigue siendo un error real.
+         */
+        $solicita_disponibilidad_flag = ! empty($parsed['solicita_disponibilidad']);
+        if ($estado_raw === '' || ($mensaje === '' && ! $solicita_disponibilidad_flag)) {
             throw new \RuntimeException('Respuesta de Claude incompleta (mensaje o estado vacío).');
         }
 
@@ -1892,6 +1908,22 @@ class LeadAiService
             }
         }
 
+        /* Notificar a admins suscritos cuando la sugerencia requiere verificación manual. */
+        if ($req_verif) {
+            try {
+                $verificacion_service = new \App\Services\LeadVerificacionWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $verificacion_service->notify($lead->fresh(), $msg);
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar verificacion pendiente por WhatsApp.', [
+                    'lead_id'    => $lead->id,
+                    'message_id' => $msg->id,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
+        }
+
         /* Programar auto-envío antes del broadcast: el payload Pusher debe incluir ai_auto_send_at. */
         (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
         $msg = $msg->fresh();
@@ -2161,6 +2193,10 @@ TXT;
     /**
      * Extrae y decodifica el JSON de la respuesta de Claude.
      *
+     * Claude a veces autocorrige dentro de la misma respuesta (primer JSON incorrecto,
+     * texto intermedio y segundo JSON correcto). En ese caso se retorna el último
+     * bloque JSON válido encontrado, no el span completo entre el primer { y el último }.
+     *
      * @param string $raw Texto crudo devuelto por la API (puede tener texto extra fuera del JSON).
      *
      * @throws \RuntimeException Si no se encuentra un JSON válido en la respuesta.
@@ -2169,21 +2205,44 @@ TXT;
      */
     protected function parse_json_response(string $raw): array
     {
-        $start = strpos($raw, '{');
-        $end   = strrpos($raw, '}');
+        // Candidatos JSON válidos encontrados al recorrer cada apertura `{`.
+        $candidates = [];
+        // Posición desde la cual buscar la próxima apertura `{`.
+        $pos = 0;
 
-        if ($start === false || $end === false || $end <= $start) {
+        while (($start = strpos($raw, '{', $pos)) !== false) {
+            // Probar desde el `}` más a la derecha hacia atrás hasta emparejar con este `{`.
+            $end = strrpos($raw, '}');
+
+            while ($end !== false && $end >= $start) {
+                // Fragmento candidato entre el `{` actual y el `}` en evaluación.
+                $candidate = substr($raw, $start, $end - $start + 1);
+                $decoded   = json_decode($candidate, true);
+
+                if (is_array($decoded)) {
+                    $candidates[] = $decoded;
+                    break;
+                }
+
+                // Si no decodifica, probar con el `}` anterior más cercano a este `{`.
+                $prev_end_relative = strrpos(substr($raw, $start, $end - $start), '}');
+
+                if ($prev_end_relative === false) {
+                    break;
+                }
+
+                $end = $start + $prev_end_relative;
+            }
+
+            $pos = $start + 1;
+        }
+
+        if (empty($candidates)) {
             throw new \RuntimeException('Claude no devolvió JSON válido: '.$raw);
         }
 
-        $json = substr($raw, $start, $end - $start + 1);
-        $data = json_decode($json, true);
-
-        if (! is_array($data)) {
-            throw new \RuntimeException('JSON inválido: '.json_last_error_msg());
-        }
-
-        return $data;
+        // El último candidato válido es la autocorrección definitiva de Claude.
+        return end($candidates);
     }
 }
 
