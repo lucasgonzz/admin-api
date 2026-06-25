@@ -367,18 +367,25 @@ class LeadAiService
             .' '.$context['now']->format('d/m/Y').', '.$context['now']->format('H:i').'hs (hora Argentina)';
 
         /* Slots disponibles por demo y por fecha.
-         * Cada llamada aplica las dos capas de bloqueo: por demo y por closer. */
+         * Cada llamada aplica las dos capas de bloqueo: por demo y por closer.
+         * La clave incluye el nombre del día de semana para que Claude pueda asociar
+         * "el domingo", "el sábado", etc. con la fecha correcta sin ambigüedad. */
+        $day_names_key = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
         $demos_json = [];
         foreach ($context['demos'] as $demo) {
             $demo_id = (int) $demo->id;
             $demos_json[$demo_id] = [];
 
             foreach ($context['dates_map'] as $date_key => $day) {
+                /* Clave legible: "domingo 2026-06-28", "lunes 2026-06-29", etc. */
+                $dia_nombre  = $day_names_key[$day->dayOfWeek];
+                $date_label  = $dia_nombre . ' ' . $date_key;
+
                 /* Rangos bloqueados por este entorno técnico específico. */
                 $blocked_ranges = $context['blocked_by_demo'][$demo_id][$date_key] ?? [];
                 /* Rangos de closer ocupado para esta fecha (transversal a todas las demos). */
                 $closer_busy_for_date = $context['closer_busy'][$date_key] ?? [];
-                $demos_json[$demo_id][$date_key] = $this->compute_day_slots_for_demo(
+                $demos_json[$demo_id][$date_label] = $this->compute_day_slots_for_demo(
                     $day,
                     $blocked_ranges,
                     $context['now'],
@@ -1519,9 +1526,20 @@ class LeadAiService
             }
 
             if ($demo_id && $demo_date !== '' && $demo_start !== '') {
-                /* Validar que el slot exista en la disponibilidad real para esa demo. */
+                /* Validar que el slot exista en la disponibilidad real para esa demo.
+                 * Las claves del JSON incluyen el nombre del día ("domingo 2026-06-28"),
+                 * pero Claude devuelve demo_date en formato Y-m-d. Buscar la clave que
+                 * contenga la fecha solicitada. */
                 $availability = $this->build_availability_json();
-                $slots_demo   = $availability['demos'][$demo_id][$demo_date] ?? [];
+                $slots_demo   = [];
+                $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
+                foreach ($demo_slots_by_date as $date_label => $slots) {
+                    /* La clave puede ser "Y-m-d" (legacy) o "nombre Y-m-d" (nuevo formato). */
+                    if ($date_label === $demo_date || str_ends_with($date_label, $demo_date)) {
+                        $slots_demo = $slots;
+                        break;
+                    }
+                }
 
                 if (! in_array($demo_start, $slots_demo, true)) {
                     Log::error('LeadAiService: Claude devolvió un agendar_demo con slot no disponible. Se ignora.', [
