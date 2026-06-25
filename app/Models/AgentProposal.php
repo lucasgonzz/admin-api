@@ -58,31 +58,38 @@ class AgentProposal extends Model
         $tipo    = $this->tipo;
 
         /* Ejecuta la acción según el tipo de propuesta. */
-        match ($tipo) {
+        switch ($tipo) {
             /* Cambia el valor de una admin_setting existente o la crea. */
-            'cambiar_setting' => AdminSetting::set(
-                $payload['key'],
-                (string) $payload['value']
-            ),
+            case 'cambiar_setting':
+                AdminSetting::set(
+                    $payload['key'],
+                    (string) $payload['value']
+                );
+                break;
 
             /* Desactiva una variante de mensaje por su slug. */
-            'desactivar_variante' => MessageVariant::where('slug', $payload['slug'])
-                ->update(['active' => false]),
+            case 'desactivar_variante':
+                MessageVariant::where('slug', $payload['slug'])
+                    ->update(['active' => false]);
+                break;
 
             /* Crea una nueva variante de mensaje A/B. */
-            'nueva_variante' => MessageVariant::create([
-                'slug'          => $payload['slug'],
-                'name'          => $payload['name'],
-                'message_type'  => $payload['message_type'] ?? 'welcome_with_name',
-                'body'          => $payload['body'],
-                'delay_seconds' => $payload['delay_seconds'] ?? null,
-                'active'        => true,
-                'notes'         => $payload['notes'] ?? null,
-            ]),
+            case 'nueva_variante':
+                MessageVariant::create([
+                    'slug'          => $payload['slug'],
+                    'name'          => $payload['name'],
+                    'message_type'  => $payload['message_type'] ?? 'welcome_with_name',
+                    'body'          => $payload['body'],
+                    'delay_seconds' => $payload['delay_seconds'] ?? null,
+                    'active'        => true,
+                    'notes'         => $payload['notes'] ?? null,
+                ]);
+                break;
 
             /* Tipos no implementados: no hace nada. */
-            default => null,
-        };
+            default:
+                break;
+        }
 
         /* Marca la propuesta como aprobada. */
         $this->update([
