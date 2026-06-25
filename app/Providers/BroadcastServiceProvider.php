@@ -60,7 +60,8 @@ class BroadcastServiceProvider extends ServiceProvider
             return new PusherBroadcaster($pusher);
         });
 
-        Broadcast::routes();
+        // Registra /broadcasting/auth con Sanctum para que los tokens Bearer funcionen en canales privados.
+        Broadcast::routes(['middleware' => ['auth:sanctum']]);
 
         require base_path('routes/channels.php');
     }

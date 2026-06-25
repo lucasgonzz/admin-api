@@ -2413,5 +2413,27 @@ class LeadController extends Controller
 
         return response()->json(['ok' => true], 200);
     }
+
+    /**
+     * El closer acepta la alerta "Tomar llamada":
+     * registra el timestamp de aceptación y envía el link de Meet al lead por WhatsApp.
+     *
+     * @param int $id ID del lead cuya alerta fue aceptada.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function closer_accept_alert_json($id)
+    {
+        // Buscar el lead o devolver 404 si no existe.
+        $lead = Lead::findOrFail($id);
+
+        // Delegar al servicio de alertas del closer.
+        app(\App\Services\CloserAlertService::class)->accept_alert($lead);
+
+        return response()->json([
+            'ok'       => true,
+            'meet_url' => $lead->meet_url,
+        ], 200);
+    }
 }
 

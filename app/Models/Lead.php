@@ -175,6 +175,12 @@ class Lead extends Model
 
         // Snapshot de la variante de welcome asignada en A/B testing.
         'welcome_variant_id'           => 'integer',
+
+        // Timestamps del flujo de alerta "Tomar llamada" (prompt 127).
+        'closer_alert_sent_at'          => 'datetime',
+        'closer_alert_accepted_at'      => 'datetime',
+        'closer_delay_message_sent_at'  => 'datetime',
+        'closer_no_show_rescheduled_at' => 'datetime',
     ];
 
     /**

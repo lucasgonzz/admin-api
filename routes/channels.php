@@ -20,3 +20,8 @@ Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
 Broadcast::channel('deployment.{upgradeId}', function ($user, $upgradeId) {
     return $user !== null;
 });
+
+// Canal privado de alertas del closer: solo admins con is_closer = true pueden escuchar.
+Broadcast::channel('closer-alerts', function ($user) {
+    return $user !== null && $user->is_closer === true;
+});
