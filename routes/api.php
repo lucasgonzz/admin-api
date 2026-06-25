@@ -125,6 +125,8 @@ Route::prefix('admin')->group(function () {
 
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
+        // Ruta de recovery batch: debe ir antes de las rutas con {id} para evitar colisión.
+        Route::post('lead/batch-recover-unanswered', [LeadController::class, 'batch_recover_unanswered_json']);
         Route::get('lead/{id}', [LeadController::class, 'show_json']);
         Route::post('lead', [LeadController::class, 'store_json']);
         Route::put('lead/{id}', [LeadController::class, 'update_json']);

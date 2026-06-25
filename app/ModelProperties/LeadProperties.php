@@ -48,24 +48,24 @@ class LeadProperties
                 'width' => 150,
                 'options' => LeadPipelineStatus::options_for_meta(),
             ],
-            [
-                'key' => 'tiene_sugerencia_pendiente',
-                'text' => 'IA pendiente',
-                'type' => 'checkbox',
-                'value' => false,
-                'show' => true,
-                'only_show' => true,
-                'width' => 90,
-            ],
-            [
-                'key' => 'requiere_seguimiento',
-                'text' => 'Seguimiento',
-                'type' => 'checkbox',
-                'value' => false,
-                'show' => true,
-                'only_show' => true,
-                'width' => 100,
-            ],
+            // [
+            //     'key' => 'tiene_sugerencia_pendiente',
+            //     'text' => 'IA pendiente',
+            //     'type' => 'checkbox',
+            //     'value' => false,
+            //     'show' => true,
+            //     'only_show' => true,
+            //     'width' => 90,
+            // ],
+            // [
+            //     'key' => 'requiere_seguimiento',
+            //     'text' => 'Seguimiento',
+            //     'type' => 'checkbox',
+            //     'value' => false,
+            //     'show' => true,
+            //     'only_show' => true,
+            //     'width' => 100,
+            // ],
             [
                 'key' => 'tiene_seguimiento_sin_ver',
                 'text' => 'Alerta seg.',
@@ -90,27 +90,27 @@ class LeadProperties
                 'not_persisted_on_model' => true,
                 'width' => 90,
             ],
-            [
-                /*
-                 * Botón en la tabla que navega a la vista de conversación WhatsApp del lead.
-                 * `whatsapp_conversation_link` no es un campo real de la BD: es solo un
-                 * identificador de celda para que CellRenderer construya el router-link.
-                 */
-                'key'                   => 'whatsapp_conversation_link',
-                'text'                  => 'Chat',
-                'type'                  => 'router_link_btn',
-                'show'                  => true,
-                'table_only'            => true,
-                'only_show'             => true,
-                'not_form'              => true,
-                'not_persisted_on_model'=> true,
-                'btn_icon'              => 'bi-whatsapp',
-                'btn_title'             => 'Ver conversación WhatsApp',
-                'route_name'            => 'lead_conversation',
-                'route_param_key'       => 'lead_id',
-                'route_param_value_key' => 'id',
-                'width'                 => 70,
-            ],
+            // [
+            //     /*
+            //      * Botón en la tabla que navega a la vista de conversación WhatsApp del lead.
+            //      * `whatsapp_conversation_link` no es un campo real de la BD: es solo un
+            //      * identificador de celda para que CellRenderer construya el router-link.
+            //      */
+            //     'key'                   => 'whatsapp_conversation_link',
+            //     'text'                  => 'Chat',
+            //     'type'                  => 'router_link_btn',
+            //     'show'                  => true,
+            //     'table_only'            => true,
+            //     'only_show'             => true,
+            //     'not_form'              => true,
+            //     'not_persisted_on_model'=> true,
+            //     'btn_icon'              => 'bi-whatsapp',
+            //     'btn_title'             => 'Ver conversación WhatsApp',
+            //     'route_name'            => 'lead_conversation',
+            //     'route_param_key'       => 'lead_id',
+            //     'route_param_value_key' => 'id',
+            //     'width'                 => 70,
+            // ],
             [
                 'key' => 'contact_name',
                 'text' => 'Nombre',

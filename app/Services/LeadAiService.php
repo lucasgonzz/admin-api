@@ -29,6 +29,16 @@ use Illuminate\Support\Facades\Log;
 class LeadAiService
 {
     /**
+     * Restricción explícita para la primera llamada: el agente no puede inventar rangos horarios
+     * sin haber recibido el JSON de disponibilidad en una segunda llamada previa.
+     * Complementa el protocolo de WhatsApp y evita alucinaciones tipo "tengo de 18 a 20 hs".
+     */
+    private const PROHIBICION_RANGO_HORARIO_SIN_JSON = <<<'TXT'
+⚠️ PROHIBIDO — Nunca anunciar un rango de horario propio sin JSON de disponibilidad:
+Cuando el lead pregunta por disponibilidad en términos generales ("la semana que viene por la tarde", "¿podés mañana?", "¿tenés algo el finde?") sin mencionar un día puntual, la única acción válida es devolver solicita_disponibilidad: true con fecha_solicitada en el primer día hábil del rango pedido. NO responder con frases como "tengo disponibilidad de X a Y hs" ni ninguna variante que afirme conocer el horario disponible. Esa información solo puede venir del JSON que el sistema devuelve en la segunda llamada. Si el agente no tiene ese JSON en el contexto actual, no tiene información de disponibilidad.
+TXT;
+
+    /**
      * Convierte minutos del día (0-1439) al formato legible HH:MM.
      * Pensado para los logs de diagnóstico de disponibilidad, donde mostrar
      * minutos crudos (por ejemplo 720) es ilegible frente a "12:00".
@@ -2227,6 +2237,12 @@ class LeadAiService
             $contenido .= "\n\nPROTOCOLO DE WHATSAPP\n";
             $contenido .= $whatsapp_protocol;
         }
+
+        /*
+         * Regla de código adicional (prompt 151): refuerza que sin JSON de disponibilidad
+         * en el contexto actual el agente no puede afirmar rangos horarios propios.
+         */
+        $contenido .= "\n\n" . self::PROHIBICION_RANGO_HORARIO_SIN_JSON;
 
         return $contenido;
     }

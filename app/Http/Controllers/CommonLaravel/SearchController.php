@@ -72,7 +72,11 @@ class SearchController
             }
 
             if (isset($filter['en_blanco']) && (bool) $filter['en_blanco']) {
-                if ($filter['type'] == 'select' || $filter['type'] == 'search') {
+                if (
+                    $filter['type'] == 'select'
+                    || $filter['type'] == 'pipeline_status'
+                    || $filter['type'] == 'search'
+                ) {
                     $models = $models->where(function ($subquery) use ($filter) {
                         $subquery->whereNull($filter['key'])
                             ->orWhere($filter['key'], 0);
@@ -160,11 +164,14 @@ class SearchController
                         'value' => $filter['igual_que'],
                         'type' => $filter['type'],
                     ];
-                } elseif ($filter['type'] == 'date' && (
-                    (isset($filter['menor_que']) && $filter['menor_que'] != '')
-                    || (isset($filter['igual_que']) && $filter['igual_que'] != '')
-                    || (isset($filter['mayor_que']) && $filter['mayor_que'] != '')
-                )) {
+                } elseif (
+                    ($filter['type'] == 'date' || $filter['type'] == 'day')
+                    && (
+                        (isset($filter['menor_que']) && $filter['menor_que'] != '')
+                        || (isset($filter['igual_que']) && $filter['igual_que'] != '')
+                        || (isset($filter['mayor_que']) && $filter['mayor_que'] != '')
+                    )
+                ) {
                     if (isset($filter['menor_que']) && $filter['menor_que'] != '') {
                         $models = $models->whereDate($filter['key'], '<', $filter['menor_que']);
                         $used_filters[] = [
@@ -192,7 +199,13 @@ class SearchController
                             'type' => $filter['type'],
                         ];
                     }
-                } elseif ($filter['type'] == 'select' && isset($filter['igual_que']) && $filter['igual_que'] !== 0) {
+                } elseif (
+                    ($filter['type'] == 'select' || $filter['type'] == 'pipeline_status')
+                    && isset($filter['igual_que'])
+                    && $filter['igual_que'] !== 0
+                    && $filter['igual_que'] !== ''
+                    && $filter['igual_que'] !== null
+                ) {
                     $models = $models->where($filter['key'], $filter['igual_que']);
                     $used_filters[] = [
                         'key' => $filter['key'],

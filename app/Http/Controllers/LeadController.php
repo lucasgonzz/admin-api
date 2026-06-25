@@ -28,6 +28,7 @@ use App\Services\LeadWhatsAppPasteCleaner;
 use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
+use App\Services\BatchLeadAiRecoveryService;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
 use Illuminate\Http\Request;
@@ -2508,6 +2509,30 @@ class LeadController extends Controller
             'ok'       => true,
             'meet_url' => $lead->meet_url,
         ], 200);
+    }
+
+    /**
+     * Encola GenerateLeadAiSuggestionJob para todos los leads sin respuesta elegibles.
+     *
+     * Punto de entrada del recovery manual batch: útil cuando errores del servidor
+     * mataron jobs silenciosamente y hay leads esperando sugerencia de Claude.
+     *
+     * @param BatchLeadAiRecoveryService $service Servicio de recovery inyectado por Laravel.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function batch_recover_unanswered_json(BatchLeadAiRecoveryService $service)
+    {
+        /* Ejecutar el recovery y obtener los contadores. */
+        $result = $service->dispatch_unanswered_leads();
+
+        Log::channel('daily')->info('batch_recover_unanswered: recovery iniciado.', $result);
+
+        return response()->json([
+            'message'    => 'Recovery iniciado',
+            'dispatched' => $result['dispatched'],
+            'skipped'    => $result['skipped'],
+        ]);
     }
 }
 
