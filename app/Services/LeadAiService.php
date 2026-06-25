@@ -157,9 +157,21 @@ class LeadAiService
         /* true cuando cualquiera de las tres condiciones aplica */
         $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada' || $cancelar_demo_flag;
 
+        /*
+         * Si Claude pidió disponibilidad, puede haber devuelto también una fecha específica
+         * (fecha_solicitada en formato Y-m-d) para que el sistema consulte ese día puntual
+         * cuando está fuera del rango de los 3 días hábiles por defecto.
+         */
+        $fecha_solicitada = isset($parsed['fecha_solicitada']) ? trim((string) $parsed['fecha_solicitada']) : '';
+
         if ($needs_availability_check) {
             try {
-                return $this->generate_suggestion_with_availability($lead, $is_followup);
+                /* Pasar la fecha solicitada (o null si no viene) para ampliar el rango del JSON. */
+                return $this->generate_suggestion_with_availability(
+                    $lead,
+                    $is_followup,
+                    $fecha_solicitada !== '' ? $fecha_solicitada : null
+                );
             } catch (\Throwable $e) {
                 Log::error('Error en segunda llamada a Claude (disponibilidad)', [
                     'lead_id' => $lead->id,
@@ -192,19 +204,24 @@ class LeadAiService
      * construye el contexto y repite la llamada a la API para que Claude confirme
      * o rechace ese horario y sugiera alternativas si es necesario.
      *
-     * @param Lead $lead        Lead con relación `messages` cargada.
-     * @param bool $is_followup true si lo disparó el scheduler de inactividad.
+     * Cuando $specific_date tiene valor (Claude devolvió fecha_solicitada en la primera
+     * llamada), se amplía el JSON de disponibilidad para cubrir el rango hasta esa fecha.
+     *
+     * @param Lead        $lead          Lead con relación `messages` cargada.
+     * @param bool        $is_followup   true si lo disparó el scheduler de inactividad.
+     * @param string|null $specific_date Fecha objetivo en formato Y-m-d, o null para los 3 días por defecto.
      *
      * @throws \RuntimeException Si falla la llamada HTTP o el JSON es inválido.
      *
      * @return LeadMessage Mensaje creado con los horarios sugeridos por Claude.
      */
-    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup): LeadMessage
+    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null): LeadMessage
     {
         /* JSON estructurado por demo para que Claude interprete disponibilidad sin regex.
+         * Se pasa $specific_date para ampliar el rango cuando el lead pidió una fecha lejana.
          * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
         $calendar_snapshot    = null;
-        $availability_data    = $this->build_availability_json(3, $calendar_snapshot);
+        $availability_data    = $this->build_availability_json(3, $calendar_snapshot, $specific_date);
 
         /*
          * Ampliar snapshot con demos agendadas, slots enviados a Claude y config del closer
@@ -265,7 +282,14 @@ class LeadAiService
         if ($last_lead_message) {
             $last_content = trim((string) $last_lead_message->content);
 
-            if (preg_match('/\b(\d{1,2})(?::(\d{2}))?\s*(?:hs?|h|:00)?\b/i', $last_content, $m)) {
+            /*
+             * Detectar horario propuesto por el lead. Se usa solo como pista para Claude;
+             * el modelo razona sobre el texto completo. La regex es intencionalmente estricta
+             * para no capturar falsos positivos como "5 de julio" o "dentro de 5 días":
+             * solo captura patrones con indicador horario explícito (HH:MM, 14hs, 9h, 5pm, 8am).
+             */
+            if (preg_match('/\b(\d{1,2})(?::(\d{2}))\s*(?:hs?|h)?\b/i', $last_content, $m)
+                || preg_match('/\b(\d{1,2})\s*(?:hs|h|am|pm|a\.?m\.?|p\.?m\.?)\b/i', $last_content, $m)) {
                 $lead_proposed_time = $m[0];
             }
         }
@@ -284,14 +308,30 @@ class LeadAiService
         }
 
         /*
-         * Aclaración crítica para Claude: esta es la segunda llamada, ya tiene los slots.
-         * Prohibir explícitamente que vuelva a solicitar disponibilidad.
+         * Instrucción crítica para la segunda llamada: Claude ya tiene los slots en el JSON.
+         * Se reemplaza la prohibición absoluta de solicita_disponibilidad por una regla
+         * matizada: solo puede devolverla si el lead pidió una fecha que NO está en el JSON
+         * (demasiado lejana), junto con fecha_solicitada para que el sistema la consulte.
+         * Para cualquier fecha que SÍ aparece en el JSON (con o sin slots), debe responder
+         * directamente sin volver a pedir disponibilidad.
          */
-        $availability_context .= "\n\n⚠️ ATENCIÓN — SEGUNDA LLAMADA: El sistema YA te trajo los horarios disponibles en el JSON de arriba. ESTÁ PROHIBIDO devolver solicita_disponibilidad: true en esta llamada.";
-        $availability_context .= "\n- Si el lead pidió un día sin especificar hora (ej: 'el sábado'): ofrecele directamente los horarios disponibles de ese día del JSON y preguntale cuál le viene mejor.";
-        $availability_context .= "\n- Si el lead pidió un horario concreto y está disponible: pedile el email (Paso 3 del protocolo).";
-        $availability_context .= "\n- Si el lead pidió un horario concreto y NO está disponible: informale y ofrecele las alternativas más cercanas del JSON.";
-        $availability_context .= "\nBajo ninguna circunstancia devolver solicita_disponibilidad: true. Tenés toda la información necesaria para responder ahora.";
+        $availability_context .= "\n\n⚠️ ATENCIÓN - SEGUNDA LLAMADA: El sistema YA te trajo los horarios disponibles en el JSON de arriba.";
+        $availability_context .= "\n- Si la fecha que pidió el lead SÍ aparece en el JSON (con o sin slots): usá esa info. Si tiene slots, ofrecelos. Si aparece SIN slots, significa que no hay disponibilidad ese día: informá al lead y ofrecé alternativas cercanas del JSON. NO vuelvas a pedir disponibilidad para una fecha que ya está en el JSON.";
+        $availability_context .= "\n- Si la fecha que pidió el lead NO aparece en el JSON (pidió un día más lejano que los que trae el JSON): devolvé solicita_disponibilidad: true junto con fecha_solicitada en formato Y-m-d, para que el sistema consulte ese día puntual. Usá la FECHA Y HORA ACTUAL del contexto para calcular la fecha exacta que pide el lead (ej: 'dentro de 5 días', 'el viernes que viene').";
+        $availability_context .= "\n- Si el lead pidió un día sin especificar hora (ej: 'el sábado') y ese día está en el JSON con slots: ofrecele directamente los horarios disponibles de ese día.";
+        $availability_context .= "\n- Si el lead pidió un horario concreto disponible: confirmalo aclarando si es mañana o tarde, y pedile el email (Paso 3 del protocolo).";
+
+        /*
+         * Regla de inferencia AM/PM: las demos son en horario diurno/laboral. Claude debe
+         * usar sentido común para interpretar horas ambiguas y siempre aclarar el turno
+         * al confirmar para que el lead pueda corregir si eligió el otro.
+         */
+        $availability_context .= "\n\nINTERPRETACIÓN DE HORARIOS (AM/PM):";
+        $availability_context .= "\n- Las demos son siempre en horario diurno/laboral. Si el lead dice una hora ambigua ('a las 5', 'a las 9'), inferí con sentido común: nadie agenda una demo de madrugada.";
+        $availability_context .= "\n- 'A las 5', 'a las 6', 'a las 7' sin aclaración → casi siempre es PM (17, 18, 19hs). 'A las 9', 'a las 10', 'a las 11' → casi siempre AM (mañana).";
+        $availability_context .= "\n- Si el lead aclara explícitamente ('a las 5 de la tarde', 'a las 9 de la mañana'), respetá eso.";
+        $availability_context .= "\n- SIEMPRE que confirmes un horario, aclarás si es de la mañana o de la tarde (ej: 'el sábado a las 10 de la mañana'), para que el lead pueda corregirte si quería el otro turno.";
+        $availability_context .= "\n- Si una hora ambigua podría caer fuera del rango en una interpretación pero dentro en la otra (ej: 'a las 8' → 8am está en rango, 20hs no), elegí la interpretación que caiga dentro del horario disponible y confirmala aclarando el turno, para que el lead corrija si hace falta.";
 
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt();
@@ -336,15 +376,21 @@ class LeadAiService
      * Incluye la fecha/hora actual en Argentina, la duración configurada de cada demo
      * y un mapa demo_id → fecha (Y-m-d) → horarios libres (HH:MM).
      *
-     * @param int        $days_ahead        Cantidad mínima de días hábiles a incluir (default: 3).
-     * @param array|null $calendar_snapshot Referencia opcional para recibir el snapshot de Google Calendar.
+     * Cuando $specific_date tiene valor, delega a prepare_slot_availability_context() el
+     * cálculo del rango desde mañana hasta esa fecha, para que Claude tenga contexto completo
+     * de días intermedios al buscar una fecha lejana.
+     *
+     * @param int         $days_ahead        Cantidad mínima de días hábiles a incluir (default: 3; ignorado si $specific_date es válida).
+     * @param array|null  $calendar_snapshot Referencia opcional para recibir el snapshot de Google Calendar.
+     * @param string|null $specific_date     Fecha objetivo en formato Y-m-d, o null para comportamiento por defecto.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = 3, &$calendar_snapshot = null): array
+    public function build_availability_json(int $days_ahead = 3, &$calendar_snapshot = null, ?string $specific_date = null): array
     {
-        /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo. */
-        $context = $this->prepare_slot_availability_context($days_ahead);
+        /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
+         * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango. */
+        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date);
 
         /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
         $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
@@ -405,11 +451,17 @@ class LeadAiService
      * Centraliza la lógica compartida entre get_available_slots() y build_availability_json().
      * Si algún día queda sin slots libres en la unión de demos, agrega un día hábil extra.
      *
-     * @param int $days_ahead Cantidad mínima de días hábiles a incluir.
+     * Cuando se provee $specific_date, en lugar de calcular los próximos $days_ahead días
+     * hábiles, se calcula el rango desde mañana hasta esa fecha inclusive (solo días con
+     * horario configurado). Esto permite que Claude tenga contexto de todo el rango intermedio
+     * para una fecha lejana solicitada por el lead.
+     *
+     * @param int         $days_ahead    Cantidad mínima de días hábiles a incluir (ignorado si $specific_date es válida).
+     * @param string|null $specific_date Fecha objetivo en formato Y-m-d, o null para comportamiento por defecto.
      *
      * @return array<string, mixed>
      */
-    protected function prepare_slot_availability_context(int $days_ahead = 3): array
+    protected function prepare_slot_availability_context(int $days_ahead = 3, ?string $specific_date = null): array
     {
         /* Parámetros de configuración de demos. */
         $duracion    = LeadDemoSettings::get_duracion_minutos();
@@ -466,24 +518,72 @@ class LeadAiService
 
         /* Lista inicial de días hábiles: solo fechas con horario configurado para ese día de semana. */
         $working_days = [];
-        while (count($working_days) < $days_ahead) {
-            /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). */
-            $dow = $cursor->dayOfWeek;
-            /* Horario laboral del closer según el día de la semana evaluado. */
-            $horario_dia = '';
-            if ($dow === 0) {
-                $horario_dia = $horario_dom;
-            } elseif ($dow === 6) {
-                $horario_dia = $horario_sab;
-            } else {
-                $horario_dia = $horario_lv;
+
+        /*
+         * Cuando se pide una fecha específica lejana, calcular el rango desde mañana hasta
+         * esa fecha inclusive (solo días con horario configurado). Esto le da a Claude el
+         * contexto de todo el rango intermedio para poder ofrecer alternativas si el día
+         * exacto no tiene slots. Si la fecha es inválida o pasada, se cae al comportamiento
+         * por defecto de $days_ahead.
+         */
+        $use_specific_date = false;
+        if ($specific_date !== null) {
+            /* Validar formato Y-m-d y que la fecha sea futura (>= mañana). */
+            $target_date = null;
+            try {
+                $target_date = \Carbon\Carbon::createFromFormat('Y-m-d', $specific_date, 'America/Argentina/Buenos_Aires')
+                    ->startOfDay();
+            } catch (\Throwable $e) {
+                $target_date = null;
             }
 
-            /* Incluir el día solo si tiene rango horario configurado (no vacío). */
-            if ($horario_dia !== '') {
-                $working_days[] = $cursor->copy();
+            /* Fecha mínima aceptable: mañana. */
+            $tomorrow = $now->copy()->startOfDay()->addDay();
+
+            if ($target_date !== null && $target_date->gte($tomorrow)) {
+                /* Recorrer desde mañana hasta la fecha objetivo inclusive, incluyendo solo
+                 * días con horario configurado. */
+                $cursor_specific = $tomorrow->copy();
+                while ($cursor_specific->lte($target_date)) {
+                    $dow_s       = $cursor_specific->dayOfWeek;
+                    $horario_dia = ($dow_s === 0) ? $horario_dom : (($dow_s === 6) ? $horario_sab : $horario_lv);
+                    if ($horario_dia !== '') {
+                        $working_days[] = $cursor_specific->copy();
+                    }
+                    $cursor_specific->addDay();
+                }
+
+                /* Si el rango produjo al menos un día hábil, usarlo; de lo contrario caer al default. */
+                if (! empty($working_days)) {
+                    $use_specific_date = true;
+                    /* Adelantar el cursor principal al día siguiente de la fecha objetivo
+                     * para que la lógica de "día extra" arranque desde ahí si es necesaria. */
+                    $cursor = $target_date->copy()->addDay();
+                }
             }
-            $cursor->addDay();
+        }
+
+        /* Comportamiento por defecto: próximos $days_ahead días hábiles desde mañana. */
+        if (! $use_specific_date) {
+            while (count($working_days) < $days_ahead) {
+                /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). */
+                $dow = $cursor->dayOfWeek;
+                /* Horario laboral del closer según el día de la semana evaluado. */
+                $horario_dia = '';
+                if ($dow === 0) {
+                    $horario_dia = $horario_dom;
+                } elseif ($dow === 6) {
+                    $horario_dia = $horario_sab;
+                } else {
+                    $horario_dia = $horario_lv;
+                }
+
+                /* Incluir el día solo si tiene rango horario configurado (no vacío). */
+                if ($horario_dia !== '') {
+                    $working_days[] = $cursor->copy();
+                }
+                $cursor->addDay();
+            }
         }
 
         $date_strings = [];
@@ -2177,7 +2277,20 @@ class LeadAiService
 
         $demo = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : '';
 
+        /*
+         * Fecha y hora actual en Argentina para que Claude pueda calcular referencias
+         * temporales relativas ("dentro de 5 días", "el viernes que viene", etc.)
+         * tanto en la primera como en la segunda llamada.
+         */
+        $now_ar    = now('America/Argentina/Buenos_Aires');
+        $day_names = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+        $fecha_hoy = ucfirst($day_names[$now_ar->dayOfWeek])
+            . ' ' . $now_ar->format('d/m/Y')
+            . ', ' . $now_ar->format('H:i') . 'hs (hora Argentina)';
+
         $txt = <<<TXT
+FECHA Y HORA ACTUAL: {$fecha_hoy}
+
 Conversación del lead:
 {$historial}
 
