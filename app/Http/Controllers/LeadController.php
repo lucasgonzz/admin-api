@@ -1308,6 +1308,55 @@ class LeadController extends Controller
     }
 
     /**
+     * Genera sugerencia IA a partir del historial completo aunque el último mensaje sea del setter.
+     *
+     * Permite retomar el flujo con Claude cuando el operador tomó control manual de la conversación
+     * (claude_auto_reply desactivado) y escribió al lead sin esperar respuesta entrante nueva.
+     *
+     * @param int|string                $lead_id
+     * @param LeadAiService             $ai_service
+     * @param LeadAiSuggestionScheduler $scheduler
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function resume_with_claude_json($lead_id, LeadAiService $ai_service, LeadAiSuggestionScheduler $scheduler)
+    {
+        // Lead con mensajes para evaluar sugerencias pendientes y generar la nueva propuesta.
+        $lead = Lead::query()->with('messages')->findOrFail($lead_id);
+
+        // Solo bloquear si ya hay una sugerencia pendiente sin enviar (misma regla que el botón ⚡).
+        if (LeadConversationAiState::has_pending_non_followup_suggestion($lead)) {
+            return response()->json([
+                'message' => 'Ya hay una sugerencia pendiente de revisión.',
+            ], 422);
+        }
+
+        // Cancelar cualquier debounce pendiente antes de generar en caliente.
+        $scheduler->cancel_scheduled_suggestion((int) $lead->id);
+
+        event(new LeadAiSuggestionGenerating((int) $lead->id));
+
+        try {
+            $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
+            if (! $fresh) {
+                return response()->json(['message' => 'Lead no encontrado.'], 404);
+            }
+            $ai_service->generate_suggestion($fresh, false);
+        } catch (\Throwable $e) {
+            Log::error('LeadController@resume_with_claude_json AI error: '.$e->getMessage(), ['lead_id' => $lead->id]);
+
+            return response()->json([
+                'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),
+                'model'   => $this->fullModel('lead', $lead->id),
+            ], 422);
+        } finally {
+            event(new LeadAiSuggestionFinished((int) $lead->id));
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Cancela el job diferido que pediría sugerencia IA a Claude tras el debounce automático.
      *
      * No genera sugerencia ni modifica mensajes; el setter puede responder manualmente o pedir IA después.

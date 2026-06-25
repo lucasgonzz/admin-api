@@ -143,6 +143,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/send-direct-audio', [LeadController::class, 'send_direct_audio_json']);
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
+        Route::post('lead/{id}/resume-with-claude', [LeadController::class, 'resume_with_claude_json']);
         Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
         Route::post('lead/{id}/toggle-claude-auto-reply', [LeadController::class, 'toggle_claude_auto_reply_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
