@@ -313,13 +313,13 @@ PROMPT;
         $resumen      = $summary['resumen_general'] ?? '';
 
         /* Etiqueta legible del escenario de cierre para el mensaje. */
-        $escenario_label = match ($escenario) {
-            'A'     => 'Cerró en llamada',
-            'B'     => 'Requiere reunión con Lucas',
-            'C'     => 'Seguimiento con Claude',
-            'D'     => 'No quiere avanzar',
-            default => 'Sin determinar',
-        };
+        $escenario_labels = [
+            'A' => 'Cerró en llamada',
+            'B' => 'Requiere reunión con Lucas',
+            'C' => 'Seguimiento con Claude',
+            'D' => 'No quiere avanzar',
+        ];
+        $escenario_label = isset($escenario_labels[$escenario]) ? $escenario_labels[$escenario] : 'Sin determinar';
 
         /* Armar el mensaje de WhatsApp con el resumen. */
         $mensaje = "Resumen de llamada: {$contact_name}\n\n"
