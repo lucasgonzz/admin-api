@@ -126,6 +126,7 @@ class AuthController extends Controller
             'id'                        => $admin->id,
             'name'                      => $admin->name,
             'email'                     => $admin->email,
+            'is_closer'                 => (bool) ($admin->is_closer ?? false),
             'is_default_support_owner'  => (bool) $admin->is_default_support_owner,
             'is_default_task_assignee'  => (bool) ($admin->is_default_task_assignee ?? false),
         ];
