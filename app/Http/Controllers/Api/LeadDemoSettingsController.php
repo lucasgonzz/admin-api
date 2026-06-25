@@ -35,7 +35,7 @@ class LeadDemoSettingsController extends Controller
      */
     public function update(Request $request): JsonResponse
     {
-        /* Validar que todos los campos sean enteros dentro del rango permitido. */
+        /* Validar todos los campos que consume persist_from_request (solo pasan las claves listadas). */
         $validated = $request->validate([
             'duracion_minutos'                => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'setup_minutos_antes'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
@@ -45,6 +45,12 @@ class LeadDemoSettingsController extends Controller
             'check_ingreso_minutos_post'      => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'resumen_minutos_antes_fin'       => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'duracion_llamada_closer_minutos' => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            /* Horarios del closer: string H:i-H:i o vacío (día sin trabajo). */
+            'closer_horario_lunes_viernes'    => 'nullable|string|max:20',
+            'closer_horario_sabado'           => 'nullable|string|max:20',
+            'closer_horario_domingo'          => 'nullable|string|max:20',
+            'frecuencia_slots_minutos'        => 'required|integer|in:'.implode(',', LeadDemoSettings::VALID_FRECUENCIA_SLOTS),
+            'llamada_debe_terminar_en_horario' => 'required|boolean',
             // Settings del ciclo de vida automatizado de la demo.
             'ingreso_timeout_minutos'         => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'fin_seguimiento_minutos'         => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,

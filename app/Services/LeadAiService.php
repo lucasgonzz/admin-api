@@ -464,10 +464,23 @@ class LeadAiService
          * El closer necesita al menos un día de anticipación para prepararse. */
         $cursor      = $now->copy()->startOfDay()->addDay();
 
-        /* Lista inicial de días hábiles (lunes a sábado, sin domingos). */
+        /* Lista inicial de días hábiles: solo fechas con horario configurado para ese día de semana. */
         $working_days = [];
         while (count($working_days) < $days_ahead) {
-            if ($cursor->dayOfWeek !== 0) {
+            /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). */
+            $dow = $cursor->dayOfWeek;
+            /* Horario laboral del closer según el día de la semana evaluado. */
+            $horario_dia = '';
+            if ($dow === 0) {
+                $horario_dia = $horario_dom;
+            } elseif ($dow === 6) {
+                $horario_dia = $horario_sab;
+            } else {
+                $horario_dia = $horario_lv;
+            }
+
+            /* Incluir el día solo si tiene rango horario configurado (no vacío). */
+            if ($horario_dia !== '') {
                 $working_days[] = $cursor->copy();
             }
             $cursor->addDay();
@@ -568,8 +581,20 @@ class LeadAiService
          * para que Claude siempre tenga alternativas concretas.
          */
         if ($any_full) {
-            while ($cursor->dayOfWeek === 0) {
-                $cursor->addDay();
+            /* Avanzar el cursor hasta el próximo día con horario configurado (p. ej. domingo si aplica). */
+            $horario_extra = '';
+            while ($horario_extra === '') {
+                $dow_extra = $cursor->dayOfWeek;
+                if ($dow_extra === 0) {
+                    $horario_extra = $horario_dom;
+                } elseif ($dow_extra === 6) {
+                    $horario_extra = $horario_sab;
+                } else {
+                    $horario_extra = $horario_lv;
+                }
+                if ($horario_extra === '') {
+                    $cursor->addDay();
+                }
             }
             $extra_key  = $cursor->format('Y-m-d');
             $dates_map[$extra_key] = $cursor->copy();
@@ -1057,8 +1082,26 @@ class LeadAiService
          * El closer necesita al menos un día de anticipación para prepararse. */
         $cursor    = $now->copy()->startOfDay()->addDay();
 
+        /* Horarios laborales del closer para decidir qué días son hábiles en el algoritmo legacy. */
+        $horario_lv  = LeadDemoSettings::get_closer_horario_lunes_viernes();
+        $horario_sab = LeadDemoSettings::get_closer_horario_sabado();
+        $horario_dom = LeadDemoSettings::get_closer_horario_domingo();
+
         while (count($working_days) < $days_ahead) {
-            if ($cursor->dayOfWeek !== 0) {
+            /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). */
+            $dow = $cursor->dayOfWeek;
+            /* Horario laboral del closer según el día de la semana evaluado. */
+            $horario_dia = '';
+            if ($dow === 0) {
+                $horario_dia = $horario_dom;
+            } elseif ($dow === 6) {
+                $horario_dia = $horario_sab;
+            } else {
+                $horario_dia = $horario_lv;
+            }
+
+            /* Incluir el día solo si tiene rango horario configurado (no vacío). */
+            if ($horario_dia !== '') {
                 $working_days[] = $cursor->copy();
             }
             $cursor->addDay();
@@ -1119,8 +1162,20 @@ class LeadAiService
         }
 
         if ($any_full) {
-            while ($cursor->dayOfWeek === 0) {
-                $cursor->addDay();
+            /* Avanzar el cursor hasta el próximo día con horario configurado (p. ej. domingo si aplica). */
+            $horario_extra = '';
+            while ($horario_extra === '') {
+                $dow_extra = $cursor->dayOfWeek;
+                if ($dow_extra === 0) {
+                    $horario_extra = $horario_dom;
+                } elseif ($dow_extra === 6) {
+                    $horario_extra = $horario_sab;
+                } else {
+                    $horario_extra = $horario_lv;
+                }
+                if ($horario_extra === '') {
+                    $cursor->addDay();
+                }
             }
             $extra_key   = $cursor->format('Y-m-d');
             /* demo_date es DATE puro; comparar directamente sin conversión de timezone. */

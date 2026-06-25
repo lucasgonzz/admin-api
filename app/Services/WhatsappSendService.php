@@ -257,16 +257,6 @@ class WhatsappSendService
         $stored_mime = strtolower((string) ($attachment->mime ?? ''));
         $extension = strtolower(pathinfo($absolute_path, PATHINFO_EXTENSION));
 
-        // WebM del MediaRecorder del navegador no es aceptado por WhatsApp: se envía como documento.
-        if (strpos($stored_mime, 'webm') !== false || $extension === 'webm') {
-            return $this->send_document_attachment(
-                $to,
-                $attachment,
-                'audio_' . date('Ymd_His') . '.webm',
-                'audio/webm'
-            );
-        }
-
         $whatsapp_mime = $this->resolve_whatsapp_audio_mime($stored_mime, $extension);
         $upload_filename = $this->resolve_whatsapp_audio_upload_filename($extension, $whatsapp_mime);
         $voice_note = $this->should_send_as_whatsapp_voice_note($whatsapp_mime, $extension);
@@ -463,7 +453,7 @@ class WhatsappSendService
     }
 
     /**
-     * Envía un archivo como documento (fallback para webm u otros no soportados como audio nativo).
+     * Envía un archivo como documento (fallback para formatos no soportados como audio nativo).
      *
      * @param string      $to
      * @param object      $attachment
@@ -546,6 +536,10 @@ class WhatsappSendService
      */
     private function resolve_whatsapp_audio_mime(string $stored_mime, string $extension): string
     {
+        // WebM de Chrome (codec Opus) → declarar como audio/ogg para que Meta lo acepte.
+        if (strpos($stored_mime, 'webm') !== false || $extension === 'webm') {
+            return 'audio/ogg';
+        }
         if (strpos($stored_mime, 'ogg') !== false || $extension === 'ogg') {
             return 'audio/ogg';
         }
@@ -575,6 +569,10 @@ class WhatsappSendService
      */
     private function resolve_whatsapp_audio_upload_filename(string $extension, string $whatsapp_mime): string
     {
+        // WebM → subir con extensión .ogg coherente con el mime declarado.
+        if ($extension === 'webm') {
+            return 'audio_' . time() . '.ogg';
+        }
         if ($extension !== '') {
             return 'audio_' . time() . '.' . $extension;
         }

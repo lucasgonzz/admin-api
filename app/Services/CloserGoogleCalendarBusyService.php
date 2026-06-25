@@ -51,50 +51,86 @@ class CloserGoogleCalendarBusyService
             return ['ranges' => [], 'snapshot' => null];
         }
 
-        // Clave de caché única por combinación de fechas consultadas.
-        $cache_key = 'closer_google_calendar_busy_' . md5(implode(',', $date_strings));
+        // Fechas que ya tienen caché individual vs las que requieren consulta fresca a Google.
+        $dates_in_cache = [];
+        $dates_to_fetch = [];
 
-        // Fragmento corto de la clave para los logs (la clave completa es larga).
-        $cache_key_short = substr($cache_key, -8);
+        foreach ($date_strings as $date) {
+            $cache_key = 'closer_gcal_busy_date_' . $date;
+            if (Cache::has($cache_key)) {
+                $dates_in_cache[] = $date;
+            } else {
+                $dates_to_fetch[] = $date;
+            }
+        }
 
-        /* Diagnóstico: detectar si la respuesta va a salir de un valor cacheado de una
-         * corrida anterior o si se va a consultar la API de Google ahora. */
-        $from_cache = Cache::has($cache_key);
-
-        if ($from_cache) {
+        if (! empty($dates_in_cache)) {
             Log::channel('disponibilidad')->info(
-                '[DISPONIBILIDAD] Consulta a Google Calendar: usando valor cacheado para '
-                . implode(', ', $date_strings) . ' (TTL 5 min, clave ...' . $cache_key_short . ').'
-                . ' El resultado puede no reflejar eventos creados en los últimos minutos.'
-            );
-        } else {
-            Log::channel('disponibilidad')->info(
-                '[DISPONIBILIDAD] Consulta a Google Calendar: cache miss, se va a consultar la API para '
-                . implode(', ', $date_strings) . ' (clave ...' . $cache_key_short . ').'
+                '[DISPONIBILIDAD] Consulta a Google Calendar: usando caché para '
+                . implode(', ', $dates_in_cache) . ' (TTL 5 min). '
+                . 'El resultado puede no reflejar eventos creados en los últimos minutos.'
             );
         }
-
-        /* El closure devuelve ranges + snapshot fresco; la caché guarda ambos para reutilizar ranges. */
-        $cached_payload = Cache::remember($cache_key, now()->addMinutes(5), function () use ($date_strings) {
-            return $this->compute_busy_ranges_and_snapshot($date_strings);
-        });
-
-        /* Compatibilidad con entradas cacheadas antes del prompt 105 (solo mapa de rangos). */
-        if (isset($cached_payload['ranges'])) {
-            $ranges = $cached_payload['ranges'];
-        } else {
-            $ranges = is_array($cached_payload) ? $cached_payload : [];
+        if (! empty($dates_to_fetch)) {
+            Log::channel('disponibilidad')->info(
+                '[DISPONIBILIDAD] Consulta a Google Calendar: cache miss, consultando API para '
+                . implode(', ', $dates_to_fetch) . '.'
+            );
         }
 
-        // Respuesta servida desde caché: marcar closers como cacheado sin eventos detallados.
-        if ($from_cache) {
-            $snapshot = $this->build_cache_hit_snapshot($date_strings);
-        } else {
-            $snapshot = $cached_payload['snapshot'] ?? null;
+        // Rangos por fecha y closers del snapshot combinado (caché + consulta fresca).
+        $all_ranges       = [];
+        $snapshot_closers = [];
+
+        foreach ($dates_in_cache as $date) {
+            $cache_key = 'closer_gcal_busy_date_' . $date;
+            $cached    = Cache::get($cache_key, ['ranges' => [], 'snapshot_closers' => []]);
+            $all_ranges[$date] = $cached['ranges'] ?? [];
+
+            foreach ($cached['snapshot_closers'] ?? [] as $closer_entry) {
+                $snapshot_closers[$closer_entry['admin_id']] = $closer_entry;
+            }
         }
+
+        if (! empty($dates_to_fetch)) {
+            $fresh          = $this->compute_busy_ranges_and_snapshot($dates_to_fetch);
+            $fresh_ranges   = $fresh['ranges'] ?? [];
+            $fresh_snapshot = $fresh['snapshot'] ?? null;
+
+            foreach ($dates_to_fetch as $date) {
+                $cache_key       = 'closer_gcal_busy_date_' . $date;
+                $ranges_for_date = $fresh_ranges[$date] ?? [];
+
+                // Snapshot reducido por fecha para hits de caché posteriores (sin eventos detallados).
+                $closers_for_cache = [];
+                foreach ($fresh_snapshot['closers'] ?? [] as $closer_entry) {
+                    $closers_for_cache[] = [
+                        'admin_id' => $closer_entry['admin_id'],
+                        'nombre'   => $closer_entry['nombre'] ?? '',
+                        'estado'   => 'cacheado',
+                    ];
+                }
+
+                Cache::put($cache_key, [
+                    'ranges'           => $ranges_for_date,
+                    'snapshot_closers' => $closers_for_cache,
+                ], now()->addMinutes(5));
+
+                $all_ranges[$date] = $ranges_for_date;
+            }
+
+            foreach ($fresh_snapshot['closers'] ?? [] as $closer_entry) {
+                $snapshot_closers[$closer_entry['admin_id']] = $closer_entry;
+            }
+        }
+
+        $snapshot = [
+            'consultado_en' => now()->toIso8601String(),
+            'closers'       => array_values($snapshot_closers),
+        ];
 
         return [
-            'ranges'   => $ranges,
+            'ranges'   => $all_ranges,
             'snapshot' => $snapshot,
         ];
     }
@@ -556,13 +592,13 @@ class CloserGoogleCalendarBusyService
      */
     public function flush_cache_for_date(string $date): void
     {
-        $cache_key = 'closer_google_calendar_busy_' . md5($date);
+        $cache_key = 'closer_gcal_busy_date_' . $date;
 
         Cache::forget($cache_key);
 
         Log::channel('disponibilidad')->info(
             '[CALENDAR_EVENT] Caché de disponibilidad invalidada para ' . $date
-            . ' (clave ...' . substr($cache_key, -8) . ').'
+            . ' (clave ' . $cache_key . ').'
         );
     }
 
