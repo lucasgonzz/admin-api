@@ -2555,7 +2555,7 @@ class ImplementationConversationService
         ];
 
         foreach ($correction_signals as $signal) {
-            if (str_contains($normalized_body, $signal)) {
+            if (strpos($normalized_body, $signal) !== false) {
                 return true;
             }
         }
