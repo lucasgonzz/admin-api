@@ -201,7 +201,7 @@ class GenerateDailyAgentReportCommand extends Command
             $error_messages->map(fn ($m) => [
                 'tipo'    => 'error_envio',
                 'lead_id' => $m->lead_id,
-                'lead'    => $m->lead?->contact_name ?? "Lead #{$m->lead_id}",
+                'lead'    => ($m->lead ? $m->lead->contact_name : null) ?? "Lead #{$m->lead_id}",
                 'detalle' => $m->whatsapp_send_error ?? 'Error desconocido',
             ])->toArray(),
             $stuck_leads->map(fn ($l) => [
