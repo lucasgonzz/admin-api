@@ -382,5 +382,21 @@ Route::prefix('admin')->group(function () {
         Route::post('env-template/check-diff/{client}', [EnvTemplateController::class, 'check_diff']);
         Route::post('env-template/apply-diff/{client}', [EnvTemplateController::class, 'apply_diff']);
 
+        // Reportes diarios del agente analizador: listado, descarga y generación manual.
+        Route::get('agent-report', [\App\Http\Controllers\Api\AgentReportController::class, 'index_json']);
+        Route::post('agent-report/generate', [\App\Http\Controllers\Api\AgentReportController::class, 'generate_json']);
+        Route::get('agent-report/{id}/download', [\App\Http\Controllers\Api\AgentReportController::class, 'download'])
+            ->name('agent.report.download');
+
+        // Propuestas del agente: listado, creación manual y aprobación/rechazo.
+        Route::get('agent-proposal', [\App\Http\Controllers\Api\AgentProposalController::class, 'index_json']);
+        Route::post('agent-proposal', [\App\Http\Controllers\Api\AgentProposalController::class, 'store_json']);
+        Route::post('agent-proposal/{id}/approve', [\App\Http\Controllers\Api\AgentProposalController::class, 'approve_json']);
+        Route::post('agent-proposal/{id}/reject', [\App\Http\Controllers\Api\AgentProposalController::class, 'reject_json']);
+
+        // Configuración del agente: presupuesto Meta, hora del reporte y retención de archivos.
+        Route::get('settings/agent', [\App\Http\Controllers\Api\AgentSettingsController::class, 'show']);
+        Route::put('settings/agent', [\App\Http\Controllers\Api\AgentSettingsController::class, 'update']);
+
     });
 });
