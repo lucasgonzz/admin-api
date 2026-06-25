@@ -1635,7 +1635,7 @@ class LeadAiService
                 $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
                 foreach ($demo_slots_by_date as $date_label => $slots) {
                     /* La clave puede ser "Y-m-d" (legacy) o "nombre Y-m-d" (nuevo formato). */
-                    if ($date_label === $demo_date || str_ends_with($date_label, $demo_date)) {
+                    if ($date_label === $demo_date || (strlen($demo_date) <= strlen($date_label) && substr($date_label, -strlen($demo_date)) === $demo_date)) {
                         $slots_demo = $slots;
                         break;
                     }
@@ -2176,7 +2176,7 @@ class LeadAiService
              * Si la respuesta empieza con bloque de código o JSON, el modelo ignoró la restricción
              * (intentó devolver estructura). Se trata como fallo para caer al fallback fijo.
              */
-            if ($texto === '' || str_starts_with($texto, '```') || str_starts_with($texto, '{')) {
+            if ($texto === '' || strncmp($texto, '```', 3) === 0 || strncmp($texto, '{', 1) === 0) {
                 Log::error('LeadAiService: tercera llamada correctiva devolvió contenido estructurado o vacío. Se ignora.', [
                     'lead_id'  => $lead->id,
                     'response' => $texto,
