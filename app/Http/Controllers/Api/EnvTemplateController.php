@@ -34,6 +34,44 @@ class EnvTemplateController extends Controller
     }
 
     /**
+     * Crea una nueva variable en la plantilla .env.
+     *
+     * La key se normaliza a mayúsculas y se valida que no exista previamente.
+     * Devuelve la lista completa actualizada para que el frontend se re-sincronice.
+     *
+     * @param  Request  $request  { key, value, group, is_common, is_manual_on_create, notes, sort_order }
+     * @return JsonResponse  { models: EnvTemplate[] }
+     */
+    public function store(Request $request): JsonResponse
+    {
+        $request->validate([
+            'key'                 => 'required|string|max:120|unique:env_templates,key',
+            'value'               => 'nullable|string',
+            'group'               => 'required|string|max:80',
+            'is_common'           => 'required|boolean',
+            'is_manual_on_create' => 'required|boolean',
+            'notes'               => 'nullable|string',
+            'sort_order'          => 'required|integer',
+        ]);
+
+        /* Normaliza la key a mayúsculas y sin espacios antes de crear. */
+        EnvTemplate::create([
+            'key'                 => strtoupper(trim($request->input('key'))),
+            'value'               => $request->input('value') ?: null,
+            'group'               => trim($request->input('group')),
+            'is_common'           => (bool) $request->input('is_common'),
+            'is_manual_on_create' => (bool) $request->input('is_manual_on_create'),
+            'notes'               => $request->input('notes') ?: null,
+            'sort_order'          => (int) $request->input('sort_order'),
+        ]);
+
+        /* Devuelve la lista completa ordenada para que el frontend refleje el nuevo registro. */
+        $templates = EnvTemplate::orderBy('group')->orderBy('sort_order')->get();
+
+        return response()->json(['models' => $templates], 201);
+    }
+
+    /**
      * Actualiza masivamente las variables del template en una sola llamada.
      *
      * Recibe un array `items[]` con los campos editables de cada variable.

@@ -378,6 +378,7 @@ Route::prefix('admin')->group(function () {
 
         // Plantilla base de variables .env: gestión y comparación con clientes.
         Route::get('env-template', [EnvTemplateController::class, 'index']);
+        Route::post('env-template', [EnvTemplateController::class, 'store']);
         Route::post('env-template/bulk-update', [EnvTemplateController::class, 'bulk_update']);
         Route::post('env-template/check-diff/{client}', [EnvTemplateController::class, 'check_diff']);
         Route::post('env-template/apply-diff/{client}', [EnvTemplateController::class, 'apply_diff']);
