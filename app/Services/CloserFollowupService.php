@@ -110,12 +110,12 @@ class CloserFollowupService
     private function build_prompt(string $nombre, ?string $escenario, string $proximo_paso, string $resumen): string
     {
         /* Descripción legible del escenario para contextualizar a Claude. */
-        $escenario_desc = match ($escenario) {
+        $escenario_descs = [
             'A' => 'El lead cerró o acordó términos. Necesita un mensaje de confirmación y próximos pasos.',
             'B' => 'El lead quiere hablar con Lucas (el dueño) antes de decidir.',
             'C' => 'El lead está interesado pero no decidió. Quedó en pensar/consultar.',
-            default => 'Resultado no determinado de la llamada.',
-        };
+        ];
+        $escenario_desc = isset($escenario_descs[$escenario]) ? $escenario_descs[$escenario] : 'Resultado no determinado de la llamada.';
 
         return <<<PROMPT
 Sos el asistente del closer de ComercioCity (Tommy). Tu tarea es escribir UN mensaje de WhatsApp
