@@ -2415,6 +2415,31 @@ class LeadController extends Controller
     }
 
     /**
+     * Genera (o regenera) un mensaje de seguimiento sugerido para el closer basado en call_summary.
+     *
+     * Llama a CloserFollowupService con el lead actualizado y devuelve el lead completo
+     * con la conversación refrescada para que el frontend pueda mostrar el nuevo mensaje.
+     *
+     * @param int $id ID del lead al que se le generará el seguimiento.
+     *
+     * @return \Illuminate\Http\JsonResponse Lead completo con mensajes y adjuntos.
+     */
+    public function generate_closer_followup_json($id)
+    {
+        /* Buscar el lead con todas sus relaciones para que el servicio tenga el contexto completo. */
+        $lead = Lead::withAll()->findOrFail($id);
+
+        /* Generar la sugerencia de seguimiento con Claude. */
+        app(\App\Services\CloserFollowupService::class)->generate_followup_from_summary($lead);
+
+        /* Refrescar el lead para incluir el nuevo mensaje en la respuesta. */
+        $lead->refresh();
+        $lead->load('messages.attachments');
+
+        return response()->json($lead);
+    }
+
+    /**
      * El closer acepta la alerta "Tomar llamada":
      * registra el timestamp de aceptación y envía el link de Meet al lead por WhatsApp.
      *

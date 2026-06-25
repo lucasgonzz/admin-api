@@ -167,6 +167,7 @@ Route::prefix('admin')->group(function () {
 
         // El closer acepta la alerta "Tomar llamada": registra aceptación + envía Meet al lead.
         Route::post('lead/{id}/closer-accept-alert', [LeadController::class, 'closer_accept_alert_json']);
+        Route::post('lead/{id}/generate-closer-followup', [LeadController::class, 'generate_closer_followup_json']);
 
         Route::get('message-variant', [\App\Http\Controllers\Api\MessageVariantController::class, 'index_json']);
         Route::post('message-variant', [\App\Http\Controllers\Api\MessageVariantController::class, 'store_json']);

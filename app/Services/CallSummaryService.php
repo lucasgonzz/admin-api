@@ -174,6 +174,9 @@ PROMPT;
             ]);
         }
 
+        /* Generar sugerencia de seguimiento para el closer basada en el resumen de la llamada. */
+        app(CloserFollowupService::class)->generate_followup_from_summary($lead);
+
         /* Notificar al equipo por WhatsApp. */
         $this->notify_team($lead, $summary);
     }
