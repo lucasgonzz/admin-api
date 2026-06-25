@@ -185,6 +185,151 @@ class EnvTemplateController extends Controller
     }
 
     /**
+     * Compara variables comunes del template contra el .env real de TODAS las APIs del cliente.
+     *
+     * Para cada ClientApi del cliente, ejecuta la misma lógica que check_diff
+     * y devuelve los resultados agrupados por client_api_id.
+     *
+     * Si una API falla (SSH error), devuelve sus diffs vacíos con un campo error.
+     *
+     * @param  Client  $client  Cliente resuelto por route model binding.
+     * @return JsonResponse  {
+     *   results: [
+     *     { client_api_id, api_url, diffs: [{ key, template_value, client_value }], error: string|null }
+     *   ]
+     * }
+     */
+    public function check_diff_all(Client $client): JsonResponse
+    {
+        /* Recupera solo las variables del template marcadas como comunes. */
+        $common_templates = EnvTemplate::where('is_common', true)->get();
+
+        /* Obtiene todas las APIs del cliente para iterar sobre ellas. */
+        $client_apis = $client->client_apis;
+
+        /* Instancia el servicio SSH compartido para todas las conexiones. */
+        $env_ssh_service = new EnvSshService();
+
+        /* Acumula los resultados por API para devolver al frontend. */
+        $results = [];
+
+        foreach ($client_apis as $client_api) {
+            /* Determina el path del .env del cliente en el hosting. */
+            $api_path = $env_ssh_service->get_api_path($client_api);
+
+            try {
+                /* Lee el .env real del cliente vía SSH. */
+                $client_env = $env_ssh_service->read_env($api_path);
+
+                /* Compara cada variable común contra el valor en el .env real. */
+                $diffs = [];
+                foreach ($common_templates as $template) {
+                    /* Valor en el template base (trimmed). */
+                    $template_value = trim((string) ($template->value ?? ''));
+
+                    /* Valor en el .env real del cliente (trimmed); vacío si no existe la key. */
+                    $client_value = isset($client_env[$template->key])
+                        ? trim((string) $client_env[$template->key])
+                        : '';
+
+                    /* Solo reporta diferencia si los valores no coinciden (case-sensitive). */
+                    if ($template_value !== $client_value) {
+                        $diffs[] = [
+                            'key'            => $template->key,
+                            'template_value' => $template_value,
+                            'client_value'   => $client_value,
+                        ];
+                    }
+                }
+
+                $results[] = [
+                    'client_api_id' => $client_api->id,
+                    'api_url'       => $client_api->url,
+                    'diffs'         => $diffs,
+                    'error'         => null,
+                ];
+            } catch (\Throwable $e) {
+                /* Si hay error SSH en esta API, reporta el error sin bloquear las demás. */
+                $results[] = [
+                    'client_api_id' => $client_api->id,
+                    'api_url'       => $client_api->url,
+                    'diffs'         => [],
+                    'error'         => 'SSH error: ' . $e->getMessage(),
+                ];
+            }
+        }
+
+        $env_ssh_service->disconnect();
+
+        return response()->json(['results' => $results]);
+    }
+
+    /**
+     * Aplica variables seleccionadas del template al .env de TODAS las APIs del cliente.
+     *
+     * Para cada ClientApi del cliente, escribe las variables solicitadas vía SSH.
+     * Devuelve cuántas APIs fueron actualizadas y cuáles fallaron.
+     *
+     * @param  Request  $request  { keys: string[] }
+     * @param  Client   $client   Cliente resuelto por route model binding.
+     * @return JsonResponse  { updated_apis: int, failed_apis: [{ api_url, error }] }
+     */
+    public function apply_diff_all(Request $request, Client $client): JsonResponse
+    {
+        $request->validate([
+            'keys'   => 'required|array',
+            'keys.*' => 'required|string',
+        ]);
+
+        /* Obtiene los templates para las keys solicitadas, indexados por key. */
+        $keys_to_apply = $request->input('keys');
+        $templates     = EnvTemplate::whereIn('key', $keys_to_apply)->get()->keyBy('key');
+
+        /* Construye el array KEY => valor_del_template para escribir en cada .env. */
+        $vars_to_write = [];
+        foreach ($keys_to_apply as $key) {
+            if ($templates->has($key)) {
+                $vars_to_write[$key] = (string) ($templates[$key]->value ?? '');
+            }
+        }
+
+        /* Si no hay variables válidas, responde inmediatamente sin abrir SSH. */
+        if (empty($vars_to_write)) {
+            return response()->json(['updated_apis' => 0, 'failed_apis' => []]);
+        }
+
+        /* Escribe las variables en el .env de cada API del cliente. */
+        $client_apis     = $client->client_apis;
+        $env_ssh_service = new EnvSshService();
+
+        /* Contador de APIs actualizadas correctamente. */
+        $updated_apis = 0;
+
+        /* Acumula errores por API para reportarlos al frontend. */
+        $failed_apis = [];
+
+        foreach ($client_apis as $client_api) {
+            $api_path = $env_ssh_service->get_api_path($client_api);
+            try {
+                $env_ssh_service->write_env_vars($api_path, $vars_to_write);
+                $updated_apis++;
+            } catch (\Throwable $e) {
+                $failed_apis[] = [
+                    'api_url' => $client_api->url,
+                    'error'   => $e->getMessage(),
+                ];
+            }
+        }
+
+        $env_ssh_service->disconnect();
+
+        return response()->json([
+            'updated_apis' => $updated_apis,
+            'failed_apis'  => $failed_apis,
+        ]);
+    }
+
+    /**
      * Aplica las variables seleccionadas del template al .env real del cliente vía SSH.
      *
      * Toma los valores del template para las keys recibidas y los escribe en el .env del cliente.

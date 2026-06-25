@@ -382,6 +382,8 @@ Route::prefix('admin')->group(function () {
         Route::post('env-template/bulk-update', [EnvTemplateController::class, 'bulk_update']);
         Route::post('env-template/check-diff/{client}', [EnvTemplateController::class, 'check_diff']);
         Route::post('env-template/apply-diff/{client}', [EnvTemplateController::class, 'apply_diff']);
+        Route::post('env-template/check-diff-all/{client}', [EnvTemplateController::class, 'check_diff_all']);
+        Route::post('env-template/apply-diff-all/{client}', [EnvTemplateController::class, 'apply_diff_all']);
 
         // Reportes diarios del agente analizador: listado, descarga y generación manual.
         Route::get('agent-report', [\App\Http\Controllers\Api\AgentReportController::class, 'index_json']);
