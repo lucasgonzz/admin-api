@@ -302,7 +302,7 @@ class LeadAiService
         /* Segunda llamada a Claude con disponibilidad como contexto adicional. */
         $response = $http->post('https://api.anthropic.com/v1/messages', [
             'model'      => $model,
-            'max_tokens' => 1000,
+            'max_tokens' => 3000,
             'system'     => $system,
             'messages'   => [
                 ['role' => 'user', 'content' => $user_content],
