@@ -102,7 +102,7 @@ class EnvSshService
             $trimmed = trim($line);
 
             /* Ignora líneas vacías y comentarios. */
-            if ($trimmed === '' || str_starts_with($trimmed, '#')) {
+            if ($trimmed === '' || strncmp($trimmed, '#', 1) === 0) {
                 continue;
             }
 
@@ -211,12 +211,12 @@ class EnvSshService
         $value = trim($value);
 
         /* Stripea comillas dobles envolventes. */
-        if (strlen($value) >= 2 && str_starts_with($value, '"') && str_ends_with($value, '"')) {
+        if (strlen($value) >= 2 && strncmp($value, '"', 1) === 0 && substr($value, -1) === '"') {
             return substr($value, 1, -1);
         }
 
         /* Stripea comillas simples envolventes. */
-        if (strlen($value) >= 2 && str_starts_with($value, "'") && str_ends_with($value, "'")) {
+        if (strlen($value) >= 2 && strncmp($value, "'", 1) === 0 && substr($value, -1) === "'") {
             return substr($value, 1, -1);
         }
 
