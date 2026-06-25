@@ -980,7 +980,7 @@ class WhatsappWebhookController extends Controller
         // Palabras clave de confirmación positiva de ingreso.
         $keywords = ['sí', 'si', 'pude', 'entré', 'entre', 'ingresé', 'ingrese', 'ya estoy', 'adentro', 'dentro', 'ok', 'perfecto', 'genial', 'listo'];
         foreach ($keywords as $kw) {
-            if (str_contains($lower, $kw)) {
+            if (strpos($lower, $kw) !== false) {
                 return true;
             }
         }
@@ -999,7 +999,7 @@ class WhatsappWebhookController extends Controller
         // Palabras clave de confirmación de fin de la demo.
         $keywords = ['sí', 'si', 'terminé', 'termine', 'pude', 'listo', 'ya', 'recorrí', 'recorri', 'vi todo', 'la vi', 'completa', 'ok', 'perfecto'];
         foreach ($keywords as $kw) {
-            if (str_contains($lower, $kw)) {
+            if (strpos($lower, $kw) !== false) {
                 return true;
             }
         }
