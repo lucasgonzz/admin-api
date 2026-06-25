@@ -11,6 +11,7 @@ use App\Services\LeadDemoSettings;
 use App\Models\AiSystemPrompt;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Models\LeadPartner;
 use App\Models\LeadPipelineStatus;
 use Carbon\Carbon;
 use Illuminate\Http\Client\PendingRequest;
@@ -1640,6 +1641,36 @@ class LeadAiService
             ]);
         }
 
+        /*
+         * Acción: sugerir socio adicional cuando el lead lo menciona en post-llamada (closer_activo).
+         * Solo aplica si el lead está en closer_activo; fuera de ese estado se ignora la acción.
+         */
+        $sugerir_socio = isset($parsed['sugerir_socio']) && is_array($parsed['sugerir_socio'])
+            ? $parsed['sugerir_socio']
+            : null;
+        if ($sugerir_socio !== null && (string) $lead->status === 'closer_activo') {
+            $nombre   = trim((string) ($sugerir_socio['nombre']   ?? ''));
+            $telefono = trim((string) ($sugerir_socio['telefono'] ?? ''));
+            $rol      = trim((string) ($sugerir_socio['rol']      ?? ''));
+
+            if ($nombre !== '' || $telefono !== '') {
+                LeadPartner::create([
+                    'lead_id'              => $lead->id,
+                    'name'                 => $nombre !== '' ? $nombre : null,
+                    'phone'                => $telefono !== '' ? $telefono : null,
+                    'notes'                => $rol !== '' ? "Rol: {$rol}" : null,
+                    'source'               => 'whatsapp_suggestion',
+                    'pending_confirmation' => true,
+                ]);
+
+                Log::info('LeadAiService: socio sugerido desde WhatsApp post-llamada.', [
+                    'lead_id' => $lead->id,
+                    'nombre'  => $nombre,
+                    'telefono'=> $telefono,
+                ]);
+            }
+        }
+
         /* --- Fin de acciones estructuradas --- */
 
         /* Acción: crear tarea de alerta si Claude detectó que se requiere intervención humana. */
@@ -2112,6 +2143,14 @@ TXT;
                 . "Se había dado por no confirmada la finalización de la demo de este lead, pero volvió a escribir.\n"
                 . "Si de su mensaje se infiere que efectivamente terminó la demo, devolvé confirmar_fin_demo: true.\n"
                 . "Si todavía está en la demo, seguí ayudándolo y volvé a perseguir saber cuándo termina.";
+        } elseif ($lead_status_for_context === 'closer_activo') {
+            /* Post-llamada: el lead ya tuvo la demo con el closer y puede mencionar socios u otros contactos. */
+            $txt .= "\n\nCONTEXTO POST-LLAMADA - CLOSER ACTIVO:\n"
+                . "El lead ya tuvo la llamada de cierre con el closer. Si en su mensaje menciona explícitamente\n"
+                . "a otra persona que participa en la decisión (socio, cónyuge, contador, etc.) con nombre\n"
+                . "y/o número de teléfono, devolvé la acción sugerir_socio con los datos detectados.\n"
+                . "Solo usar cuando el lead lo mencione con datos de contacto concretos. Si no hay socio nuevo,\n"
+                . "omití sugerir_socio o ponelo en null.";
         }
 
         $txt .= "\n¿Qué respuesta sugerís y en qué estado debería quedar el lead?";

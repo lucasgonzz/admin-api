@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Admin;
 use App\Models\Lead;
+use App\Models\LeadPartner;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -56,10 +57,24 @@ Estructura exacta a devolver:
   },
   "modificaciones_requeridas": ["modificación 1"],
   "modulos_de_interes": ["stock", "facturacion", "ecommerce"],
+  "personas_adicionales": [
+    {
+      "nombre": "string o null",
+      "telefono": "string o null (solo dígitos, sin espacios ni guiones)",
+      "rol": "string corto — ej: socio, esposa, contador, socio comercial"
+    }
+  ],
   "escenario_cierre": "A",
   "proximo_paso": "Descripción del próximo paso acordado.",
   "transcripcion_completa": "Tommy: hola...\nLead: bien..."
 }
+
+Para personas_adicionales: detectá si durante la llamada el lead mencionó o presentó a otras personas
+que participan en la decisión de compra o en el negocio (socios, cónyuge, contador, socio comercial, etc.).
+Solo incluir personas que el lead mencionó con nombre o número de teléfono, o que participaron activamente
+en la llamada. Si no hay ninguna, devolvé [].
+No incluir al closer (Tommy) ni al lead principal.
+Para personas_adicionales: devolvé [] si no hay información.
 
 Valores válidos de escenario_cierre:
 - "A": cerró en llamada (compró o acordó términos definitivos)
@@ -119,6 +134,45 @@ PROMPT;
             'lead_id'          => $lead->id,
             'escenario_cierre' => $summary['escenario_cierre'] ?? null,
         ]);
+
+        /*
+         * Crear socios sugeridos desde la transcripción (pendientes de confirmación del closer).
+         * personas_adicionales queda también persistido dentro de call_summary automáticamente.
+         */
+        $partners_created = 0;
+        if (!empty($summary['personas_adicionales']) && is_array($summary['personas_adicionales'])) {
+            foreach ($summary['personas_adicionales'] as $persona) {
+                /* Datos detectados por Claude en la transcripción de Recall. */
+                $nombre   = trim((string) ($persona['nombre']   ?? ''));
+                $telefono = trim((string) ($persona['telefono'] ?? ''));
+                $rol      = trim((string) ($persona['rol']      ?? ''));
+
+                /* Solo crear si hay al menos nombre o teléfono. */
+                if ($nombre === '' && $telefono === '') {
+                    continue;
+                }
+
+                LeadPartner::create([
+                    'lead_id'              => $lead->id,
+                    'name'                 => $nombre !== '' ? $nombre : null,
+                    'phone'                => $telefono !== '' ? $telefono : null,
+                    'notes'                => $rol !== '' ? "Rol: {$rol}" : null,
+                    'source'               => 'call_transcript',
+                    'pending_confirmation' => true,
+                ]);
+                $partners_created++;
+            }
+        }
+
+        /* Refrescar el panel del closer si se crearon socios sugeridos. */
+        if ($partners_created > 0) {
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, 0);
+
+            Log::channel('daily')->info('[CALL_SUMMARY] Socios sugeridos creados desde transcripción.', [
+                'lead_id'          => $lead->id,
+                'partners_created' => $partners_created,
+            ]);
+        }
 
         /* Notificar al equipo por WhatsApp. */
         $this->notify_team($lead, $summary);

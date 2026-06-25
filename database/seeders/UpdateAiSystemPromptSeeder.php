@@ -63,7 +63,8 @@ FORMATO DE RESPUESTA (JSON estricto, sin texto fuera del JSON):
 "agendar_demo": null,
 "cancelar_demo": false,
 "requiere_intervencion_humana": false,
-"motivo_intervencion": null
+"motivo_intervencion": null,
+"sugerir_socio": null
 }
 
 REGLAS PARA LAS ACCIONES ESTRUCTURADAS:
@@ -117,6 +118,20 @@ motivo_intervencion (string | null):
 - Breve descripción del motivo (1-2 oraciones) para que el equipo entienda rápido qué pasó
 - Solo incluir cuando requiere_intervencion_humana es true
 - Ejemplo: "El lead expresó enojo porque no recibió respuesta en 2 días y amenazó con buscar otra opción."
+- Default: null
+
+sugerir_socio (object | null):
+- Si en el mensaje del lead (estando en estado closer_activo) aparece el nombre y/o número de teléfono
+  de una persona adicional que participa en la decisión (socio, cónyuge, contador, etc.), devolvé este
+  campo con los datos detectados. El sistema creará el socio como pendiente de confirmación del closer.
+- Solo usar cuando el lead lo mencione explícitamente con datos de contacto. Si no hay socio nuevo a
+  registrar, omitir este campo o ponerlo en null.
+- Formato del objeto:
+  {
+    "nombre": "Rodrigo",
+    "telefono": "1123456789",
+    "rol": "socio"
+  }
 - Default: null
 PROMPT;
     }
