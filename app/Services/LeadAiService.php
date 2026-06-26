@@ -2443,7 +2443,20 @@ TXT;
             throw new \RuntimeException('Claude no devolvió JSON válido: '.$raw);
         }
 
-        // El último candidato válido es la autocorrección definitiva de Claude.
+        /*
+         * Priorizar el último candidato que contenga 'mensaje_sugerido': eso garantiza
+         * que nunca se devuelva un sub-objeto anidado (como agendar_demo) en lugar del
+         * objeto raíz. Si ningún candidato tiene 'mensaje_sugerido', usar el último
+         * válido como fallback (comportamiento original para respuestas sin esa clave).
+         */
+        $candidates_with_mensaje = array_filter($candidates, function ($c) {
+            return array_key_exists('mensaje_sugerido', $c);
+        });
+
+        if (! empty($candidates_with_mensaje)) {
+            return end($candidates_with_mensaje);
+        }
+
         return end($candidates);
     }
 }
