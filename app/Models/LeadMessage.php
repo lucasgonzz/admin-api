@@ -23,6 +23,12 @@ class LeadMessage extends Model
                 return;
             }
 
+            /* Los eventos de cambio de estado no son actividad real del hilo:
+               no deben actualizar last_message_at ni generar badge de "sin leer". */
+            if ($message->is_status_event) {
+                return;
+            }
+
             /** Preferir sent_at (webhook WhatsApp) sobre created_at del registro. */
             $timestamp = $message->sent_at ?? $message->created_at ?? now();
 
@@ -59,6 +65,8 @@ class LeadMessage extends Model
      */
     protected $casts = [
         'is_followup'             => 'boolean',
+        /* True si el mensaje representa un evento interno de cambio de estado (no se envió por WhatsApp). */
+        'is_status_event'         => 'boolean',
         'requiere_verificacion'   => 'boolean',
         'sent_at'                 => 'datetime',
         'read_at'                 => 'datetime',
@@ -128,7 +136,9 @@ class LeadMessage extends Model
      */
     public function scopeForListNotifications($query)
     {
-        return $query->where(function ($wrap) {
+        /* Excluir mensajes de sistema que solo registran cambios de estado internos:
+           no representan actividad real ni requieren acción del operador. */
+        return $query->where('is_status_event', false)->where(function ($wrap) {
             $wrap->where(function ($sub) {
                 $sub->where('sender', 'lead')->whereNull('read_at');
             })->orWhere(function ($sub) {

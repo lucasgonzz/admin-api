@@ -392,11 +392,14 @@ class LeadFollowupService
         $lead->save();
 
         LeadMessage::create([
-            'lead_id' => $lead->id,
-            'sender' => 'sistema',
-            'content' => 'Lead pasado a En Pausa automáticamente por inactividad.',
-            'status' => 'enviado',
-            'is_followup' => false,
+            'lead_id'          => $lead->id,
+            'sender'           => 'sistema',
+            'content'          => 'Lead pasado a En Pausa automáticamente por inactividad.',
+            'status'           => 'enviado',
+            'is_followup'      => false,
+            /* Marcado como evento de estado para que no actualice last_message_at
+               ni aparezca en el listado de notificaciones del panel. */
+            'is_status_event'  => true,
             'requiere_verificacion' => false,
         ]);
     }

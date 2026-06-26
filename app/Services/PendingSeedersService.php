@@ -6,6 +6,7 @@ use App\Models\AdminSetting;
 use App\Models\EcommerceImplementationStageConfig;
 use App\Models\FollowupTemplate;
 use App\Models\ImplementationStageConfig;
+use App\Models\LeadMessage;
 use App\Models\MessageVariant;
 use App\Models\TaskTemplate;
 use Illuminate\Support\Facades\Artisan;
@@ -72,6 +73,16 @@ class PendingSeedersService
                 'description' => 'Actualización del esquema de etapas de implementación (nueva Etapa 5: Entrega del sistema)',
                 'is_pending'  => function () {
                     return ! ImplementationStageConfig::where('name', 'Entrega del sistema')->exists();
+                },
+            ],
+            [
+                'class'       => 'AddIsStatusEventToLeadMessagesSeeder',
+                'description' => 'Marcar mensajes de pausa automática como status events (is_status_event = true)',
+                /* Pendiente si existen mensajes de pausa que todavía no fueron marcados como status event. */
+                'is_pending'  => function () {
+                    return LeadMessage::where('content', 'Lead pasado a En Pausa automáticamente por inactividad.')
+                        ->where('is_status_event', false)
+                        ->exists();
                 },
             ],
         ];
