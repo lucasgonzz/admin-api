@@ -164,8 +164,8 @@ class LeadWhatsappOnboardingService
         $this->persist_and_send_system_message($lead, $auto_body, self::KIND_AUTO);
 
         if (! $this->has_welcome_been_sent($lead)) {
-            /* Demora: variante asignada (pre-pick con nombre) → global → sync si es 0. */
-            $delay_seconds = $this->resolve_welcome_delay_seconds($lead, $display_name);
+            /* Demora: variante asignada (pre-pick universal) → global → sync si es 0. */
+            $delay_seconds = $this->resolve_welcome_delay_seconds($lead);
             $pending_dispatch = SendLeadPresentationMessageJob::dispatch((int) $lead->id, $display_name);
 
             // Con demora 0 no depender de queue:work (mismo criterio que sugerencia IA).
@@ -200,7 +200,7 @@ class LeadWhatsappOnboardingService
             return;
         }
 
-        /* Primera iteración A/B: solo asignar variante cuando hay nombre de contacto. */
+        /* Variantes A/B universales: funcionan con o sin nombre de contacto. */
         $body = $this->resolve_welcome_message_body($lead, $display_name);
         $this->persist_and_send_system_message($lead, $body, self::KIND_WELCOME);
     }
@@ -220,28 +220,37 @@ class LeadWhatsappOnboardingService
     /**
      * Resuelve el cuerpo del welcome: variante A/B activa o fallback histórico.
      *
-     * Si no hay nombre de contacto, mantiene el texto actual sin variante (primera iteración).
+     * Funciona siempre, independientemente de si el lead tiene nombre de contacto.
+     * Si hay variante asignada:
+     *   - Con nombre: reemplaza el placeholder {nombre} con el nombre real.
+     *   - Sin nombre: elimina el placeholder {nombre} y recorta espacios sobrantes.
+     * Si no hay variantes activas del tipo 'welcome', hace fallback al mensaje
+     * configurado en admin_settings.
      *
      * @param Lead        $lead
-     * @param string|null $display_name
+     * @param string|null $display_name Nombre del contacto (puede ser null).
      *
-     * @return string
+     * @return string Cuerpo del mensaje listo para enviar.
      */
     private function resolve_welcome_message_body(Lead $lead, ?string $display_name): string
     {
-        $normalized_name = $this->normalize_contact_name($display_name);
-
-        if ($normalized_name === null) {
-            return $this->build_welcome_message_body($display_name);
-        }
-
         /* Reutilizar variante ya asignada al programar el job (misma que definió el delay). */
-        $variant = $this->resolve_or_assign_welcome_variant($lead, $display_name);
+        $variant = $this->resolve_or_assign_welcome_variant($lead);
         if ($variant === null) {
             return $this->build_welcome_message_body($display_name);
         }
 
-        $body = LeadWhatsappOnboardingSettings::apply_nombre_placeholder($variant->body, $normalized_name);
+        /* Nombre normalizado: puede ser null si el lead no compartió perfil. */
+        $normalized_name = $this->normalize_contact_name($display_name);
+
+        if ($normalized_name !== null) {
+            /* Con nombre: inyectar el nombre en el placeholder. */
+            $body = LeadWhatsappOnboardingSettings::apply_nombre_placeholder($variant->body, $normalized_name);
+        } else {
+            /* Sin nombre: eliminar el placeholder y limpiar espacios residuales. */
+            $body = trim(str_replace('{nombre}', '', $variant->body));
+        }
+
         $variant->increment_sent();
 
         return $body;
@@ -250,14 +259,17 @@ class LeadWhatsappOnboardingService
     /**
      * Segundos de espera antes del welcome: delay de la variante o fallback global.
      *
-     * @param Lead        $lead
-     * @param string|null $display_name Nombre al momento del primer contacto.
+     * Siempre consulta la variante asignada al lead, sin requerir nombre de contacto.
+     * Si la variante tiene delay_seconds configurado, lo usa; de lo contrario usa el
+     * valor global de admin_settings.
      *
-     * @return int
+     * @param Lead $lead
+     *
+     * @return int Segundos de demora para encolar el job.
      */
-    private function resolve_welcome_delay_seconds(Lead $lead, ?string $display_name): int
+    private function resolve_welcome_delay_seconds(Lead $lead): int
     {
-        $variant = $this->resolve_or_assign_welcome_variant($lead, $display_name);
+        $variant = $this->resolve_or_assign_welcome_variant($lead);
 
         if ($variant !== null && $variant->delay_seconds !== null) {
             return (int) $variant->delay_seconds;
@@ -267,30 +279,31 @@ class LeadWhatsappOnboardingService
     }
 
     /**
-     * Devuelve la variante A/B del welcome; la asigna al lead si aún no tiene y hay nombre.
+     * Devuelve la variante A/B del welcome; la asigna al lead si aún no tiene una.
      *
-     * @param Lead        $lead
-     * @param string|null $display_name
+     * Funciona siempre, independientemente de si el lead tiene nombre de contacto.
+     * Si el lead ya tiene welcome_variant_id asignado, devuelve esa misma variante
+     * (garantiza consistencia entre el delay calculado al encolar y el body enviado).
+     * Si no tiene variante, elige una aleatoria del tipo 'welcome' y la persiste.
      *
-     * @return MessageVariant|null
+     * @param Lead $lead
+     *
+     * @return MessageVariant|null null si no hay variantes activas del tipo 'welcome'.
      */
-    private function resolve_or_assign_welcome_variant(Lead $lead, ?string $display_name): ?MessageVariant
+    private function resolve_or_assign_welcome_variant(Lead $lead): ?MessageVariant
     {
+        /* Reutilizar variante ya asignada para mantener coherencia entre delay y body. */
         if ($lead->welcome_variant_id) {
             return MessageVariant::find($lead->welcome_variant_id);
         }
 
-        $normalized_name = $this->normalize_contact_name($display_name);
-        if ($normalized_name === null) {
-            return null;
-        }
-
-        /* A/B testing: elegir variante activa del tipo welcome_with_name. */
-        $variant = MessageVariant::pick_active_variant('welcome_with_name');
+        /* A/B testing: elegir variante activa del tipo universal 'welcome'. */
+        $variant = MessageVariant::pick_active_variant('welcome');
         if ($variant === null) {
             return null;
         }
 
+        /* Persistir la asignación para que el job use la misma variante que definió el delay. */
         Lead::where('id', $lead->id)->update(['welcome_variant_id' => $variant->id]);
         $lead->welcome_variant_id = $variant->id;
 

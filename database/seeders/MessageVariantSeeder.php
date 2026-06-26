@@ -13,6 +13,10 @@ class MessageVariantSeeder extends Seeder
     /**
      * Definición compartida de variantes de arranque (reutilizada por el seeder standalone).
      *
+     * Todas las variantes usan message_type 'welcome' (universal: con o sin nombre).
+     * El placeholder {nombre} es opcional: si el lead tiene nombre se inyecta,
+     * si no tiene nombre se elimina y se hace trim del resultado.
+     *
      * @return array<int, array<string, mixed>>
      */
     public static function variant_definitions(): array
@@ -21,7 +25,8 @@ class MessageVariantSeeder extends Seeder
             [
                 'slug'         => 'control',
                 'name'         => 'Control — Presentación completa (actual)',
-                'message_type' => 'welcome_with_name',
+                /* Tipo universal: cubre leads con y sin nombre de contacto. */
+                'message_type' => 'welcome',
                 'body'         => "Hola, soy Martín, del equipo de ComercioCity.\n\n"
                     . "Ayudamos a distribuidoras y comercios a profesionalizar su operación: stock, ventas, facturación ARCA, ecommerce integrado y WhatsApp conectado al sistema — todo en un solo lugar.\n\n"
                     . "La implementación la hacemos nosotros: te hacemos unas preguntas por WhatsApp, y te entregamos el sistema andando con tu información ya cargada. Sin tecnicismos, sin que tengas que hacer nada.\n\n"
@@ -33,7 +38,8 @@ class MessageVariantSeeder extends Seeder
             [
                 'slug'         => 'pregunta_directa',
                 'name'         => 'B — Pregunta directa sin presentación',
-                'message_type' => 'welcome_with_name',
+                /* {nombre} es opcional: con nombre se inyecta, sin nombre se elimina. */
+                'message_type' => 'welcome',
                 'body'         => 'Hola {nombre}! Dale, contame... ¿a qué se dedica el negocio?',
                 'active'        => true,
                 'delay_seconds' => null,
@@ -42,7 +48,8 @@ class MessageVariantSeeder extends Seeder
             [
                 'slug'         => 'empatia_pregunta',
                 'name'         => 'C — Empatía + pregunta corta',
-                'message_type' => 'welcome_with_name',
+                /* {nombre} es opcional: con nombre se inyecta, sin nombre se elimina. */
+                'message_type' => 'welcome',
                 'body'         => 'Hola {nombre}! Vi que te interesó lo del sistema... ¿qué tipo de negocio tenés vos?',
                 'active'        => true,
                 'delay_seconds' => null,
@@ -53,6 +60,9 @@ class MessageVariantSeeder extends Seeder
 
     /**
      * Inserta las 3 variantes iniciales si no existen (idempotente por slug).
+     *
+     * Para registros ya existentes, actualiza delay_seconds y message_type.
+     * Esto migra variantes antiguas de 'welcome_with_name' al tipo universal 'welcome'.
      *
      * @return void
      */
@@ -66,13 +76,20 @@ class MessageVariantSeeder extends Seeder
             /* delay_seconds null = usar welcome_delay_seconds global. */
             $delay_seconds = $definition['delay_seconds'] ?? null;
 
+            /* message_type destino para la migración. */
+            $message_type = $definition['message_type'];
+
             $variant = MessageVariant::firstOrCreate(
                 ['slug' => $slug],
                 $definition
             );
 
             if (! $variant->wasRecentlyCreated) {
-                $variant->fill(['delay_seconds' => $delay_seconds])->save();
+                /* Actualizar delay_seconds y migrar message_type al tipo universal 'welcome'. */
+                $variant->fill([
+                    'delay_seconds' => $delay_seconds,
+                    'message_type'  => $message_type,
+                ])->save();
             }
         }
     }
