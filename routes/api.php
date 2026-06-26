@@ -403,5 +403,9 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/agent', [\App\Http\Controllers\Api\AgentSettingsController::class, 'show']);
         Route::put('settings/agent', [\App\Http\Controllers\Api\AgentSettingsController::class, 'update']);
 
+        // Chequeo y ejecución de seeders pendientes en producción.
+        Route::get('pending-seeders', [\App\Http\Controllers\Api\PendingSeedersController::class, 'index']);
+        Route::post('pending-seeders/run', [\App\Http\Controllers\Api\PendingSeedersController::class, 'run']);
+
     });
 });
