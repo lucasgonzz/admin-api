@@ -1315,6 +1315,23 @@ class LeadController extends Controller
         } catch (\Throwable $e) {
             Log::error('LeadController@request_ai_suggestion_json AI error: '.$e->getMessage(), ['lead_id' => $lead->id]);
 
+            try {
+                $lead_identifier = "Lead #{$lead->id}"
+                    . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '');
+                $notify_service = new \App\Services\SystemErrorWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $notify_service->notify_send_error(
+                    "Generación manual de sugerencia IA ({$lead_identifier})",
+                    $e->getMessage()
+                );
+            } catch (\Throwable $notify_exception) {
+                Log::error('LeadController: error al notificar admins de fallo de sugerencia.', [
+                    'lead_id'   => $lead->id,
+                    'exception' => $notify_exception->getMessage(),
+                ]);
+            }
+
             return response()->json([
                 'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),
                 'model'   => $this->fullModel('lead', $lead->id),
@@ -1363,6 +1380,23 @@ class LeadController extends Controller
             $ai_service->generate_suggestion($fresh, false);
         } catch (\Throwable $e) {
             Log::error('LeadController@resume_with_claude_json AI error: '.$e->getMessage(), ['lead_id' => $lead->id]);
+
+            try {
+                $lead_identifier = "Lead #{$lead->id}"
+                    . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '');
+                $notify_service = new \App\Services\SystemErrorWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $notify_service->notify_send_error(
+                    "Generación manual de sugerencia IA ({$lead_identifier})",
+                    $e->getMessage()
+                );
+            } catch (\Throwable $notify_exception) {
+                Log::error('LeadController: error al notificar admins de fallo de sugerencia.', [
+                    'lead_id'   => $lead->id,
+                    'exception' => $notify_exception->getMessage(),
+                ]);
+            }
 
             return response()->json([
                 'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),

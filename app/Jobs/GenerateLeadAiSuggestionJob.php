@@ -109,6 +109,22 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
                 'lead_id' => $this->lead_id,
                 'error'   => $exception->getMessage(),
             ]);
+
+            try {
+                $lead_identifier = "Lead #{$this->lead_id}";
+                $notify_service = new \App\Services\SystemErrorWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $notify_service->notify_send_error(
+                    "Generación automática de sugerencia IA ({$lead_identifier})",
+                    $exception->getMessage()
+                );
+            } catch (\Throwable $notify_exception) {
+                Log::channel('daily')->error('GenerateLeadAiSuggestionJob: error al notificar admins por WhatsApp.', [
+                    'lead_id'   => $this->lead_id,
+                    'exception' => $notify_exception->getMessage(),
+                ]);
+            }
         } finally {
             event(new LeadAiSuggestionFinished($this->lead_id));
         }
