@@ -317,9 +317,22 @@ class Lead extends Model
                 });
         };
 
+        // Filtro nuevo: TODOS los mensajes (cualquier sender) sin registro de lectura del admin.
+        // Alimenta el badge gris "actividad no vista" en la tabla de leads.
+        $unseen_filter = function ($sub) use ($admin_id) {
+            $sub->whereNotExists(function ($exists) use ($admin_id) {
+                $exists->selectRaw('1')
+                    ->from('lead_message_reads')
+                    ->whereColumn('lead_message_reads.lead_message_id', 'lead_messages.id')
+                    ->where('lead_message_reads.admin_id', $admin_id);
+            });
+        };
+
         return $query->withCount([
             'messages as unread_messages_count' => $unread_filter,
             'messages as unread_count'          => $unread_filter,
+            // Actividad total no vista: mensajes de cualquier emisor sin lectura del admin.
+            'messages as unseen_count'          => $unseen_filter,
         ]);
     }
 

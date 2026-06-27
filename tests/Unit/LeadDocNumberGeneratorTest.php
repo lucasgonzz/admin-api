@@ -6,39 +6,39 @@ use App\Services\LeadDocNumberGenerator;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Pruebas del generador de documento memorable para leads de WhatsApp.
+ * Pruebas del generador de documento aleatorio para leads de WhatsApp.
  */
 class LeadDocNumberGeneratorTest extends TestCase
 {
     /**
-     * El formato debe ser 12 dígitos: prefijo 20 + id padded + checksum.
+     * El formato debe ser exactamente 5 dígitos numéricos.
      */
-    public function test_from_lead_id_generates_twelve_digit_pattern(): void
+    public function test_generate_random_produces_five_digit_pattern(): void
     {
-        $doc_number = LeadDocNumberGenerator::from_lead_id(42);
+        for ($iteration = 0; $iteration < 50; $iteration++) {
+            $doc_number = LeadDocNumberGenerator::generate_random();
 
-        $this->assertSame('200000004207', $doc_number);
-        $this->assertSame(12, strlen($doc_number));
-        $this->assertMatchesRegularExpression('/^\d{12}$/', $doc_number);
+            $this->assertSame(5, strlen($doc_number));
+            $this->assertMatchesRegularExpression('/^\d{5}$/', $doc_number);
+        }
     }
 
     /**
-     * Ids grandes se acotan a 8 dígitos sin romper el largo total.
+     * El valor mínimo del rango debe rellenarse con ceros a la izquierda.
      */
-    public function test_from_lead_id_bounds_large_ids(): void
+    public function test_generate_random_pads_leading_zeros(): void
     {
-        $doc_number = LeadDocNumberGenerator::from_lead_id(123456789);
-
-        $this->assertSame(12, strlen($doc_number));
-        $this->assertStringStartsWith('20', $doc_number);
-        $this->assertStringEndsWith('36', $doc_number);
+        // Ejemplo fijo del formato esperado para el límite inferior del rango.
+        $this->assertSame('00000', str_pad('0', LeadDocNumberGenerator::TOTAL_LENGTH, '0', STR_PAD_LEFT));
     }
 
     /**
-     * El id 1 produce el mínimo patrón con ceros intermedios.
+     * Las constantes del generador deben reflejar un rango de 5 dígitos (00000–99999).
      */
-    public function test_from_lead_id_for_first_lead(): void
+    public function test_constants_define_five_digit_range(): void
     {
-        $this->assertSame('200000000120', LeadDocNumberGenerator::from_lead_id(1));
+        $this->assertSame(5, LeadDocNumberGenerator::TOTAL_LENGTH);
+        $this->assertSame(0, LeadDocNumberGenerator::MIN_VALUE);
+        $this->assertSame(99999, LeadDocNumberGenerator::MAX_VALUE);
     }
 }

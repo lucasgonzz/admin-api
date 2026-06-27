@@ -37,26 +37,28 @@ class LeadPipelineStatus extends Model
     ];
 
     /**
-     * Color de fondo del badge por slug (hex). De menos a más llamativo en el pipeline;
-     * gama azul para el progreso de la demo; gama ámbar para los estados de espera/fallo;
-     * cierres y pausa vuelven a tonos discretos.
+     * Color de fondo del badge por slug (hex) para admin-spa.
+     * Gris: etapas iniciales y cierres/pausa de baja prioridad visual.
+     * Rojo: acciones urgentes del ciclo de demo (ingreso y pendientes).
+     * Azul claro: solicita disponibilidad; azul fuerte: demo agendada;
+     * amarillo: demo en curso; verde: calificado;
+     * gris oscuro: cerrado ganado (texto blanco vía contraste en el SPA).
      */
     public const DEFAULT_COLORS = [
-        'nuevo'                        => '#e9ecef',
-        'contactado'                   => '#dee2e6',
-        'calificado'                   => '#b8d4e8',
-        'demo_agendada'                => '#6ea8fe',
-        // Progreso del ciclo de demo: escala de azul hacia el azul intenso.
-        'ingresando_demo'              => '#9ec5fe',
-        'demo_en_curso'                => '#3d8bfd',
-        // Ramas de fallo: ámbar discreto para "pendiente de acción".
-        'demo_pendiente_de_ingreso'    => '#ffe5a0',
-        'demo_pendiente_de_terminar'   => '#ffd8a8',
+        'nuevo'                        => '#adb5bd',
+        'contactado'                   => '#adb5bd',
+        'calificado'                   => '#28a745',
+        'solicita_disponibilidad'      => '#0d6efd',
+        'demo_agendada'                => '#0a58ca',
+        'ingresando_demo'              => '#dc3545',
+        'demo_en_curso'                => '#ffc107',
+        'demo_pendiente_de_ingreso'    => '#dc3545',
+        'demo_pendiente_de_terminar'   => '#dc3545',
         'demo_realizada'               => '#0d6efd',
-        'mail2_enviado'                => '#ffc107',
-        'cerrado_ganado'               => '#d1e7dd',
-        'cerrado_perdido'              => '#e8d4d4',
-        'en_pausa'                     => '#f1f3f5',
+        'mail2_enviado'                => '#adb5bd',
+        'cerrado_ganado'               => '#495057',
+        'cerrado_perdido'              => '#adb5bd',
+        'en_pausa'                     => '#adb5bd',
     ];
 
     protected $guarded = [];

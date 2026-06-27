@@ -5,52 +5,75 @@ namespace App\Services;
 use App\Models\Lead;
 
 /**
- * Genera números de documento de 12 dígitos para leads creados automáticamente.
+ * Genera números de documento aleatorios de 5 dígitos para leads creados automáticamente.
  *
- * El formato es determinístico y fácil de recordar a partir del id del lead:
- * - prefijo fijo "20" (2 dígitos),
- * - id del lead con ceros a la izquierda (8 dígitos),
- * - sufijo de verificación derivado del id (2 dígitos).
+ * Se usa como credencial de demo (usuario y contraseña). El valor es aleatorio
+ * y se verifica unicidad en la tabla leads antes de persistirlo.
  *
- * Ejemplo: lead id=42 → 200000004207
+ * Ejemplo: 48291
  */
 class LeadDocNumberGenerator
 {
     /**
-     * Prefijo constante del documento (parece año 20xx y ancla el patrón).
-     */
-    public const PREFIX = '20';
-
-    /**
-     * Cantidad de dígitos reservados para el id del lead (con padding).
-     */
-    public const ID_PADDING_LENGTH = 8;
-
-    /**
      * Longitud total esperada del documento generado.
      */
-    public const TOTAL_LENGTH = 12;
+    public const TOTAL_LENGTH = 5;
 
     /**
-     * Construye el doc_number de 12 dígitos a partir del id del lead.
-     *
-     * @param int $lead_id Id autoincremental del lead.
-     *
-     * @return string Cadena de exactamente 12 dígitos numéricos.
+     * Valor mínimo del rango aleatorio (inclusive).
      */
-    public static function from_lead_id(int $lead_id): string
+    public const MIN_VALUE = 0;
+
+    /**
+     * Valor máximo del rango aleatorio (inclusive).
+     */
+    public const MAX_VALUE = 99999;
+
+    /**
+     * Intentos máximos para obtener un doc_number no usado por otro lead.
+     */
+    public const MAX_UNIQUENESS_ATTEMPTS = 100;
+
+    /**
+     * Genera un doc_number aleatorio de exactamente 5 dígitos numéricos.
+     *
+     * @return string Cadena de exactamente 5 dígitos (p. ej. 0042 → "00042").
+     */
+    public static function generate_random(): string
     {
-        // Id acotado a 8 dígitos para mantener el largo total en 12.
-        $id_bounded = $lead_id % (10 ** self::ID_PADDING_LENGTH);
+        // Número aleatorio criptográficamente seguro en el rango 00000–99999.
+        $raw_value = random_int(self::MIN_VALUE, self::MAX_VALUE);
 
-        // Parte central: id con ceros a la izquierda (p. ej. 42 → 00000042).
-        $id_part = str_pad((string) $id_bounded, self::ID_PADDING_LENGTH, '0', STR_PAD_LEFT);
+        // Padding a la izquierda para garantizar longitud fija de 5.
+        return str_pad((string) $raw_value, self::TOTAL_LENGTH, '0', STR_PAD_LEFT);
+    }
 
-        // Sufijo de 2 dígitos: determinístico pero no obvio a simple vista.
-        $checksum = ($lead_id * 7 + 13) % 100;
-        $checksum_part = str_pad((string) $checksum, 2, '0', STR_PAD_LEFT);
+    /**
+     * Genera un doc_number aleatorio de 5 dígitos que no exista en otro lead.
+     *
+     * @return string Cadena de exactamente 5 dígitos numéricos, única en leads.doc_number.
+     *
+     * @throws \RuntimeException Si no se encuentra un valor libre tras los reintentos.
+     */
+    public static function generate_unique_random(): string
+    {
+        // Reintentos ante colisión (poco probable con 100k valores posibles).
+        for ($attempt = 0; $attempt < self::MAX_UNIQUENESS_ATTEMPTS; $attempt++) {
+            $doc_number = self::generate_random();
 
-        return self::PREFIX . $id_part . $checksum_part;
+            // Solo aceptar si ningún otro lead ya usa ese documento.
+            $already_used = Lead::query()
+                ->where('doc_number', $doc_number)
+                ->exists();
+
+            if (! $already_used) {
+                return $doc_number;
+            }
+        }
+
+        throw new \RuntimeException(
+            'No se pudo generar un doc_number único de '.self::TOTAL_LENGTH.' dígitos.'
+        );
     }
 
     /**
@@ -72,7 +95,7 @@ class LeadDocNumberGenerator
             return false;
         }
 
-        $lead->doc_number = self::from_lead_id($lead_id);
+        $lead->doc_number = self::generate_unique_random();
         $lead->save();
 
         return true;

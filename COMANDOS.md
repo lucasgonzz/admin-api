@@ -89,7 +89,7 @@ php artisan lead:diagnose-audio --limit=20
 ---
 
 #### `leads:assign-doc-numbers`
-**Propósito:** Asigna número de documento de 12 dígitos a leads existentes que no tienen `doc_number`.
+**Propósito:** Asigna número de documento aleatorio de 5 dígitos a leads existentes que no tienen `doc_number`.
 
 ```bash
 # Ver qué cambiaría sin persistir

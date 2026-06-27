@@ -78,7 +78,12 @@ class LeadProperties
                 'badge_count_key' => 'followup_count',
             ],
             [
-                /* Badge per-usuario: mensajes del lead sin leer para el admin logueado (no persistido; viene de withCount). */
+                /*
+                 * Badge per-usuario doble:
+                 * - Rojo (key): mensajes del lead sin leer por el admin logueado.
+                 * - Gris (unseen_count_key): actividad total no vista (cualquier sender).
+                 * Ambos valores vienen de withCount en scopeWithUnreadLeadMessagesCount.
+                 */
                 'key' => 'unread_count',
                 'text' => 'Sin leer',
                 'type' => 'unread_badge',
@@ -88,7 +93,10 @@ class LeadProperties
                 'only_show' => true,
                 'exclude_on_update' => true,
                 'not_persisted_on_model' => true,
-                'width' => 90,
+                // Ancho levemente mayor para acomodar los dos badges.
+                'width' => 110,
+                // Clave del row que aporta el conteo de actividad total no vista (badge gris).
+                'unseen_count_key' => 'unseen_count',
             ],
             // [
             //     /*

@@ -837,7 +837,7 @@ class WhatsappWebhookController extends Controller
                 'status'       => 'nuevo',
             ]);
 
-            // Documento de 12 dígitos derivado del id (contraseña demo y setup remoto).
+            // Documento aleatorio de 5 dígitos (contraseña demo y setup remoto).
             LeadDocNumberGenerator::assign_to_lead_if_empty($lead);
         } elseif ($display_name !== null && empty($lead->contact_name)) {
             $lead->contact_name = $display_name;

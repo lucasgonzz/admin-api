@@ -9,7 +9,7 @@ use Illuminate\Console\Command;
 /**
  * Asigna doc_number a leads existentes que aún no tienen documento cargado.
  *
- * Usa el mismo formato de 12 dígitos derivado del id que el alta automática por WhatsApp.
+ * Usa el mismo formato aleatorio de 5 dígitos que el alta automática por WhatsApp.
  */
 class AssignLeadDocNumbersCommand extends Command
 {
@@ -25,10 +25,10 @@ class AssignLeadDocNumbersCommand extends Command
      *
      * @var string
      */
-    protected $description = 'Asigna documento de 12 dígitos a leads existentes sin doc_number';
+    protected $description = 'Asigna documento aleatorio de 5 dígitos a leads existentes sin doc_number';
 
     /**
-     * Procesa leads sin documento y asigna el número derivado de su id.
+     * Procesa leads sin documento y asigna un número aleatorio de 5 dígitos.
      *
      * @return int Código de salida (0 = éxito).
      */
@@ -71,22 +71,29 @@ class AssignLeadDocNumbersCommand extends Command
                 continue;
             }
 
-            $doc_number = LeadDocNumberGenerator::from_lead_id($lead_id);
-
-            $rows[] = [
-                'id'         => $lead_id,
-                'contacto'   => (string) ($lead->contact_name ?? ''),
-                'telefono'   => (string) ($lead->phone ?? ''),
-                'doc_number' => $doc_number,
-            ];
-
             if ($dry_run) {
+                // Vista previa: número aleatorio de ejemplo (no se persiste en dry-run).
+                $preview_doc_number = LeadDocNumberGenerator::generate_unique_random();
+
+                $rows[] = [
+                    'id'         => $lead_id,
+                    'contacto'   => (string) ($lead->contact_name ?? ''),
+                    'telefono'   => (string) ($lead->phone ?? ''),
+                    'doc_number' => $preview_doc_number,
+                ];
+
                 $assigned_count++;
                 continue;
             }
 
             // Reutiliza la misma lógica del webhook (no sobrescribe si ya tiene valor).
             if (LeadDocNumberGenerator::assign_to_lead_if_empty($lead)) {
+                $rows[] = [
+                    'id'         => $lead_id,
+                    'contacto'   => (string) ($lead->contact_name ?? ''),
+                    'telefono'   => (string) ($lead->phone ?? ''),
+                    'doc_number' => (string) $lead->doc_number,
+                ];
                 $assigned_count++;
             } else {
                 $skipped_count++;
