@@ -59,6 +59,22 @@ class Lead extends Model
      */
     protected static function booted()
     {
+        // Defaults de sucursales y depósitos: todo lead nuevo arranca configurado para demo
+        static::creating(function (Lead $lead) {
+            if (! $lead->use_deposits) {
+                $lead->use_deposits = true;
+            }
+            if (empty($lead->address_1)) {
+                $lead->address_1 = 'Sucursal 1';
+            }
+            if (empty($lead->address_2)) {
+                $lead->address_2 = 'Sucursal 2';
+            }
+            if (empty($lead->address_3)) {
+                $lead->address_3 = 'Sucursal 3';
+            }
+        });
+
         static::deleting(function (Lead $lead) {
             $lead->personalized_demo_videos()->delete();
             $lead->messages()->delete();
