@@ -2408,7 +2408,7 @@ class LeadController extends Controller
             ->get();
 
         /* Sección 2: demos agendadas o leads que pidieron disponibilidad. */
-        $agendadas_statuses = ['demo_agendada', 'solicita_disponibilidad'];
+        $agendadas_statuses = ['demo_agendada'];
         $agendadas = Lead::withAll()
             ->whereIn('status', $agendadas_statuses)
             ->orderBy('demo_date')
