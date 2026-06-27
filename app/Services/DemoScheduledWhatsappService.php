@@ -150,9 +150,11 @@ class DemoScheduledWhatsappService
         try {
             $carbon = Carbon::createFromFormat('Y-m-d', $demo_date, 'America/Argentina/Buenos_Aires');
 
-            return $carbon->format('d/m/Y');
+            $dias = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+            $nombre_dia = ucfirst($dias[$carbon->dayOfWeek]);
+
+            return $nombre_dia . ' ' . $carbon->format('d/m/Y');
         } catch (\Throwable $e) {
-            /* Si Carbon falla, devolver la fecha sin procesar. */
             return $demo_date;
         }
     }
