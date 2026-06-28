@@ -40,6 +40,10 @@ class RecallWebhookController extends Controller
      */
     public function receive(Request $request, RecallService $recall_service, CallSummaryService $call_summary_service): JsonResponse
     {
+
+        Log::channel('daily')->info('[RECALL_WEBHOOK] Payload completo.', [
+            'payload' => $request->all(),
+        ]);
         /* Validar firma HMAC si hay webhook_secret configurado en la BD. */
         $config = RecallConfig::where('is_active', true)->first();
         if ($config && $config->webhook_secret) {
@@ -53,7 +57,7 @@ class RecallWebhookController extends Controller
 
         /* Extraer tipo de evento e ID del bot de la petición. */
         $event  = $request->input('event');
-        $bot_id = $request->input('data.bot_id') ?? $request->input('data.id');
+        $bot_id = $request->input('data.bot.id');
 
         Log::channel('daily')->info('[RECALL_WEBHOOK] Evento recibido.', [
             'event'  => $event,

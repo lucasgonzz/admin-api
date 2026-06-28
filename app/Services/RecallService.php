@@ -21,7 +21,7 @@ use Illuminate\Support\Facades\Log;
 class RecallService
 {
     /** URL base de la API de Recall.ai (región US East, default para nuevas cuentas). */
-    private const API_BASE = 'https://us-east-1.recall.ai/api/v1';
+    private const API_BASE = 'https://us-west-2.recall.ai/api/v1';
 
     /**
      * Obtiene la configuración activa de Recall.ai desde la BD.
@@ -73,9 +73,10 @@ class RecallService
                     'transcript' => [
                         'provider' => [
                             /* Usar el transcriptor asíncrono de Recall con idioma español. */
-                            'recallai_async' => [
-                                'language_code' => 'es',
-                            ],
+                            // 'recallai_async' => [
+                            //     'language_code' => 'es',
+                            // ],
+                            'recallai_streaming' => ['language_code' => 'es']
                         ],
                     ],
                 ],
