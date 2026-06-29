@@ -166,6 +166,23 @@ class LeadFollowupService
             return null;
         }
 
+        /*
+         * Guard para demo_agendada: si la demo aún no llegó, no disparar seguimiento.
+         * Las plantillas cc_seg_demo_agendada_* son para leads que no se presentaron
+         * DESPUÉS del horario acordado — no para los que todavía esperan su turno.
+         */
+        if ($lead->status === 'demo_agendada' && isset($lead->demo_date)) {
+            $demo_date_str = $lead->demo_date->format('Y-m-d');
+            if (!empty($lead->demo_start_time)) {
+                $demo_start = Carbon::parse($demo_date_str . ' ' . $lead->demo_start_time);
+            } else {
+                $demo_start = Carbon::parse($demo_date_str . ' 23:59:59');
+            }
+            if ($demo_start->isFuture()) {
+                return null;
+            }
+        }
+
         /** @var FollowupRule $rule */
         $rule = $rules_by_estado->get($lead->status);
         $last_at = $this->last_message_at($lead);
