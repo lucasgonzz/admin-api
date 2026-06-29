@@ -2350,12 +2350,22 @@ TXT;
         $lead_status_for_context = (string) $lead->status;
 
         if ($lead_status_for_context === 'ingresando_demo') {
+            /* Datos de acceso del lead: doc_number es usuario y contraseña. URL desde config. */
+            $doc_number_ingreso = (string) ($lead->doc_number ?? '');
+            $demo_url_ingreso   = rtrim((string) config('services.demo_url', 'https://demo.comerciocity.com'), '/');
+
             /* El lead está en el momento de intentar entrar al sistema demo. */
             $txt .= "\n\nCONTEXTO DE DEMO - INGRESO:\n"
                 . "El lead tiene la demo en curso de inicio y se le preguntó si pudo ingresar al sistema.\n"
-                . "Tu objetivo es asegurarte de que entre. Si dice que tuvo un problema para entrar, resolveselo:\n"
-                . "pasale el link de la demo y aclarale que el usuario y la contraseña son su número de documento.\n"
-                . "(Ver datos del lead arriba y regla 13.2 del protocolo.)\n"
+                . "\n"
+                . "DATOS DE ACCESO DEL LEAD (USAR SIEMPRE ESTOS — NUNCA INVENTAR):\n"
+                . "  Link de la demo: {$demo_url_ingreso}\n"
+                . "  Usuario: {$doc_number_ingreso}\n"
+                . "  Contraseña: {$doc_number_ingreso}\n"
+                . "\n"
+                . "Tu objetivo es asegurarte de que entre. Si dice que tuvo un problema para entrar,\n"
+                . "pasale estos datos exactos (link, usuario y contraseña).\n"
+                . "NUNCA uses un número de documento diferente al que figura arriba.\n"
                 . "Cuando el lead confirme que ya entró (infieras de su mensaje, no por una palabra exacta),\n"
                 . "devolvé la acción confirmar_ingreso: true en el JSON.\n"
                 . "Si el lead dice claramente que no va a poder o no quiere entrar, devolvé marcar_no_ingreso: true.\n"

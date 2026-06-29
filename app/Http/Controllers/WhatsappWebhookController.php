@@ -939,8 +939,9 @@ class WhatsappWebhookController extends Controller
      */
     private function handle_demo_confirmation_if_needed(Lead $lead, string $content): void
     {
-        // Sólo aplica mientras la demo está agendada (aún no marcada como realizada).
-        if ((string) $lead->status !== 'demo_agendada') {
+        // Estados en los que aplica el procesamiento automático del ciclo de demo.
+        $estados_ciclo = ['demo_agendada', 'ingresando_demo', 'demo_en_curso', 'demo_pendiente_de_terminar'];
+        if (! in_array((string) $lead->status, $estados_ciclo, true)) {
             return;
         }
 
@@ -948,10 +949,28 @@ class WhatsappWebhookController extends Controller
         $content_lower = mb_strtolower(trim($content));
 
         // Caso A: check de ingreso enviado, ingreso aún no confirmado.
+        // El lead puede estar en demo_agendada o ingresando_demo en este punto.
         if ($lead->demo_check_ingreso_enviado && ! $lead->demo_ingreso_confirmado) {
             if ($this->content_confirms_ingress($content_lower)) {
-                $lead->demo_ingreso_confirmado = true;
+                $lead->demo_ingreso_confirmado    = true;
+                $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');
+                $lead->status                     = 'demo_en_curso';
                 $lead->save();
+
+                // Notificar a admins suscritos que el lead confirmó el ingreso.
+                try {
+                    $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
+                        new \App\Services\WhatsappSendService()
+                    );
+                    $ciclo_service->notify_ingreso_confirmado($lead->fresh());
+                } catch (\Throwable $e) {
+                    Log::error('WhatsappWebhookController: error al notificar ingreso_confirmado.', [
+                        'lead_id' => $lead->id,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+
+                LeadBroadcastService::emit_conversation_updated((int) $lead->id);
                 return;
             }
             // No pudo entrar: enviar ayuda con link, doc y contraseña.
@@ -960,6 +979,7 @@ class WhatsappWebhookController extends Controller
         }
 
         // Caso B: check de fin enviado, esperando confirmación de fin.
+        // Solo si el ingreso ya estaba confirmado.
         if ($lead->demo_fin_check_enviado && $lead->demo_ingreso_confirmado) {
             if ($this->content_confirms_demo_done($content_lower)) {
                 $this->mark_demo_realizada($lead);
