@@ -1076,6 +1076,19 @@ class LeadController extends Controller
         // Mime real del archivo subido. WhatsApp acepta audio/*; iOS Safari puede sniffearse como video/mp4
         // aunque el contenido sea audio; Chrome a veces reporta video/webm para blobs WebM de voz.
         $mime = strtolower((string) $uploaded_file->getMimeType());
+
+        // iOS Safari graba en fragmented MP4 que PHP finfo no siempre reconoce (devuelve application/octet-stream).
+        // Como safety net, usar el mime reportado por el cliente si corresponde a audio o video/mp4.
+        if ($mime === 'application/octet-stream') {
+            $client_mime     = strtolower((string) $uploaded_file->getClientMimeType());
+            $is_client_audio = strpos($client_mime, 'audio/') === 0;
+            $is_client_mp4   = $client_mime === 'video/mp4' || $client_mime === 'video/quicktime';
+            $is_client_webm  = strpos($client_mime, 'webm') !== false;
+            if ($is_client_audio || $is_client_mp4 || $is_client_webm) {
+                $mime = $client_mime;
+            }
+        }
+
         $is_audio_mime = strpos($mime, 'audio/') === 0;
         $is_webm = strpos($mime, 'webm') !== false;
         $is_mp4_video = $mime === 'video/mp4' || $mime === 'video/quicktime';
