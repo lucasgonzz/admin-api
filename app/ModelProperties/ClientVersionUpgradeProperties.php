@@ -101,6 +101,14 @@ class ClientVersionUpgradeProperties
                 ],
             ],
             [
+                'key'   => 'scheduled_date',
+                'text'  => 'Fecha programada',
+                'type'  => 'date',
+                'value' => \Carbon\Carbon::now()->toDateString(),
+                'show'  => true,
+                'width' => 150,
+            ],
+            [
                 'key' => 'notes',
                 'text' => 'Notas',
                 'type' => 'textarea',

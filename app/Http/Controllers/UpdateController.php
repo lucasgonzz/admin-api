@@ -231,6 +231,7 @@ class UpdateController extends BaseController
         }
         $q = ClientVersionUpgrade::query()
             ->with('client', 'from_version', 'to_version', 'created_by_admin')
+            ->orderBy('scheduled_date', 'desc')
             ->orderBy('id', 'desc');
         if ($request->filled('client_id')) {
             $q->where('client_id', (int) $request->input('client_id'));
@@ -424,6 +425,9 @@ class UpdateController extends BaseController
             'to_version_id'       => $to_version_id,
             'status'              => 'pendiente',
             'notes'               => $notes,
+            'scheduled_date'      => ($request && $request->input('scheduled_date'))
+                ? $request->input('scheduled_date')
+                : now()->toDateString(),
             'created_by_admin_id' => Auth::id(),
         ];
 

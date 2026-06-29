@@ -21,6 +21,7 @@ class ClientVersionUpgrade extends Model
     protected $guarded = [];
 
     protected $casts = [
+        'scheduled_date'         => 'date:Y-m-d',
         'synced_at'              => 'datetime',
         'started_at'             => 'datetime',
         'finished_at'            => 'datetime',
