@@ -49,63 +49,63 @@ class AgentPromptSyncService
     const FILES = [
         [
             'key'       => 'setter_identidad',
-            'repo_path' => 'prompts_agentes/setter_identidad.md',
+            'repo_path' => 'agentes/lead/identidad.md', // antes: prompts_agentes/setter_identidad.md
             'target'    => self::TARGET_AGENT_IDENTITY,
         ],
         [
             'key'       => 'setter_system_prompt',
-            'repo_path' => 'prompts_agentes/setter_system_prompt.md',
+            'repo_path' => 'agentes/lead/instrucciones_operativas.md', // antes: prompts_agentes/setter_system_prompt.md
             'target'    => self::TARGET_AI_SYSTEM_PROMPT,
         ],
         [
             'key'       => 'leads_protocolo_whatsapp',
-            'repo_path' => 'comercial/leads_protocolo_whatsapp.md',
+            'repo_path' => 'comercial/leads_protocolo_whatsapp.md', // sin cambios — fallback técnico
             'target'    => self::TARGET_SYNCED_FILE,
         ],
-        // Archivos del protocolo modular (tool use)
+        // Archivos del agente de leads (agentes/lead/)
         [
             'key'       => 'whatsapp_system_base',
-            'repo_path' => 'agente/protocolo_whatsapp/system_base.md',
+            'repo_path' => 'agentes/lead/recursos/README.md', // antes: agente/protocolo_whatsapp/system_base.md
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_calificacion',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/calificacion.md',
+            'repo_path' => 'agentes/lead/recursos/calificacion.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_posicionamiento',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/posicionamiento.md',
+            'repo_path' => 'agentes/lead/recursos/posicionamiento.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_precios',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/precios.md',
+            'repo_path' => 'agentes/lead/recursos/precios.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_demo_agenda',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/demo_agenda.md',
+            'repo_path' => 'agentes/lead/recursos/demo_agenda.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_demo_ciclo',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/demo_ciclo.md',
+            'repo_path' => 'agentes/lead/recursos/demo_ciclo.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_post_demo',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/post_demo.md',
+            'repo_path' => 'agentes/lead/recursos/post_demo.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_reglas',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/reglas.md',
+            'repo_path' => 'agentes/lead/recursos/reglas.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
         [
             'key'       => 'whatsapp_recurso_referidos',
-            'repo_path' => 'agente/protocolo_whatsapp/recursos/referidos.md',
+            'repo_path' => 'agentes/lead/recursos/referidos.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
     ];
