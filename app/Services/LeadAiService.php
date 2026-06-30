@@ -1968,8 +1968,11 @@ TXT;
             'calendar_snapshot'     => $calendar_snapshot
                 ? json_encode($calendar_snapshot, JSON_UNESCAPED_UNICODE)
                 : null,
-            'suggested_lead_status' => $suggested_lead_status,
-            'status'                => 'sugerido',
+            'suggested_lead_status'           => $suggested_lead_status,
+            /* Marca en el mensaje si el agente confirmó ingreso/fin de demo en esta respuesta. */
+            'marca_demo_ingreso_confirmado'   => $notificar_ingreso_confirmado,
+            'marca_demo_terminada_confirmada' => $notificar_fin_confirmado,
+            'status'                          => 'sugerido',
             'is_followup'           => $is_followup,
             'requiere_verificacion' => $req_verif,
             'sent_at'               => null,

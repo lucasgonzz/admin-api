@@ -66,8 +66,12 @@ class LeadMessage extends Model
     protected $casts = [
         'is_followup'             => 'boolean',
         /* True si el mensaje representa un evento interno de cambio de estado (no se envió por WhatsApp). */
-        'is_status_event'         => 'boolean',
-        'requiere_verificacion'   => 'boolean',
+        'is_status_event'                 => 'boolean',
+        /* True si en este mensaje el agente confirmó por primera vez el ingreso a la demo. */
+        'marca_demo_ingreso_confirmado'   => 'boolean',
+        /* True si en este mensaje el agente confirmó por primera vez el fin de la demo. */
+        'marca_demo_terminada_confirmada' => 'boolean',
+        'requiere_verificacion'           => 'boolean',
         'sent_at'                 => 'datetime',
         'read_at'                 => 'datetime',
         'ai_auto_send_at'         => 'datetime',
