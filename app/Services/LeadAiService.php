@@ -28,6 +28,16 @@ use Illuminate\Support\Facades\Log;
  */
 class LeadAiService
 {
+    /** Recursos válidos que Claude puede solicitar via tool. */
+    private const PROTOCOLO_RECURSOS = [
+        'calificacion', 'posicionamiento', 'precios',
+        'demo_agenda', 'demo_ciclo', 'post_demo',
+        'reglas', 'referidos',
+    ];
+
+    /** Máximo de iteraciones del agentic loop de tools. */
+    private const MAX_TOOL_ITERATIONS = 3;
+
     /**
      * Restricción explícita para la primera llamada: el agente no puede inventar rangos horarios
      * sin haber recibido el JSON de disponibilidad en una segunda llamada previa.
@@ -124,28 +134,16 @@ TXT;
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
-        /* Primera llamada a Claude para obtener sugerencia base. */
-        $response = $http->post('https://api.anthropic.com/v1/messages', [
-            'model'      => $model,
-            'max_tokens' => 1000,
-            'system'     => [
-                [
-                    'type'          => 'text',
-                    'text'          => $system,
-                    'cache_control' => ['type' => 'ephemeral'],
-                ],
+        /* Primera llamada a Claude para obtener sugerencia base (con soporte de tool use). */
+        $system_payload = [
+            [
+                'type'          => 'text',
+                'text'          => $system,
+                'cache_control' => ['type' => 'ephemeral'],
             ],
-            'messages'   => [
-                ['role' => 'user', 'content' => $user_content],
-            ],
-        ]);
+        ];
 
-        if ($response->failed()) {
-            Log::error('Anthropic API error', ['status' => $response->status(), 'body' => $response->body()]);
-            throw new \RuntimeException('Error Anthropic HTTP '.$response->status().': '.$response->body());
-        }
-
-        $text   = $this->extract_response_text($response->json());
+        $text = $this->run_with_tools($system_payload, $user_content, 1000, $http, $model);
 
         /* Log de diagnóstico: respuesta cruda de Claude en la primera llamada. */
         Log::debug('LeadAiService [PRIMERA LLAMADA] - respuesta Claude', [
@@ -355,31 +353,16 @@ TXT;
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
-        /* Segunda llamada a Claude con disponibilidad como contexto adicional. */
-        $response = $http->post('https://api.anthropic.com/v1/messages', [
-            'model'      => $model,
-            'max_tokens' => 3000,
-            'system'     => [
-                [
-                    'type'          => 'text',
-                    'text'          => $system,
-                    'cache_control' => ['type' => 'ephemeral'],
-                ],
+        /* Segunda llamada a Claude con disponibilidad como contexto adicional (con soporte de tool use). */
+        $system_payload = [
+            [
+                'type'          => 'text',
+                'text'          => $system,
+                'cache_control' => ['type' => 'ephemeral'],
             ],
-            'messages'   => [
-                ['role' => 'user', 'content' => $user_content],
-            ],
-        ]);
+        ];
 
-        if ($response->failed()) {
-            Log::error('Anthropic API error (segunda llamada con disponibilidad)', [
-                'status' => $response->status(),
-                'body'   => $response->body(),
-            ]);
-            throw new \RuntimeException('Error Anthropic HTTP '.$response->status().': '.$response->body());
-        }
-
-        $text   = $this->extract_response_text($response->json());
+        $text = $this->run_with_tools($system_payload, $user_content, 3000, $http, $model);
 
         /* Log de diagnóstico: respuesta cruda de Claude en la segunda llamada. */
         Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - respuesta Claude', [
@@ -2239,9 +2222,186 @@ TXT;
     }
 
     /**
-     * Arma el system prompt: esqueleto en BD + protocolo completo desde GitHub.
+     * Define la tool get_protocolo_recurso que Claude puede usar para pedir
+     * secciones del protocolo bajo demanda.
      *
-     * Las protocol_entries y placeholders legacy ya no participan del armado.
+     * @return array<int, array<string, mixed>> Definición de tools para la API de Anthropic.
+     */
+    private function build_tools(): array
+    {
+        return [
+            [
+                'name'        => 'get_protocolo_recurso',
+                'description' => 'Devuelve el contenido de un recurso del protocolo de ventas. ' .
+                                 'Usá esta tool cuando necesitás información específica para ' .
+                                 'responder al lead y esa información no está en tu contexto actual.',
+                'input_schema' => [
+                    'type'       => 'object',
+                    'properties' => [
+                        'nombre' => [
+                            'type'        => 'string',
+                            'description' => 'Nombre del recurso. Valores válidos: ' .
+                                            implode(', ', self::PROTOCOLO_RECURSOS),
+                            'enum'        => self::PROTOCOLO_RECURSOS,
+                        ],
+                    ],
+                    'required'   => ['nombre'],
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Ejecuta la tool get_protocolo_recurso y devuelve el contenido del recurso solicitado.
+     *
+     * @param string               $tool_name  Nombre de la tool invocada por Claude.
+     * @param array<string, mixed> $tool_input Parámetros de entrada de la tool.
+     * @return string Contenido del recurso, o mensaje de error si el recurso es desconocido.
+     */
+    private function execute_tool(string $tool_name, array $tool_input): string
+    {
+        if ($tool_name !== 'get_protocolo_recurso') {
+            return 'Error: tool desconocida.';
+        }
+
+        /* Validar que el nombre del recurso sea uno de los válidos. */
+        $nombre = isset($tool_input['nombre']) ? (string) $tool_input['nombre'] : '';
+
+        if (! in_array($nombre, self::PROTOCOLO_RECURSOS, true)) {
+            return 'Error: recurso desconocido. Recursos válidos: ' . implode(', ', self::PROTOCOLO_RECURSOS);
+        }
+
+        $contenido = app(WhatsappProtocolService::class)->getRecurso($nombre);
+
+        if ($contenido === '') {
+            return "El recurso '{$nombre}' no está disponible todavía. Intentá responder con la información que tenés o marcá requiere_verificacion: true.";
+        }
+
+        return $contenido;
+    }
+
+    /**
+     * Ejecuta la llamada a Claude con soporte de tool use.
+     *
+     * Si Claude responde con tool_use, resuelve el recurso solicitado, agrega el resultado
+     * al historial de mensajes y repite hasta MAX_TOOL_ITERATIONS.
+     * Devuelve el texto JSON final de Claude (igual que extract_response_text devolvía antes).
+     *
+     * @param array<int, array<string, mixed>> $system_payload Bloque system con cache_control.
+     * @param string                           $user_content   Contenido del mensaje user inicial.
+     * @param int                              $max_tokens     Límite de tokens de la respuesta.
+     * @param PendingRequest                   $http           Cliente HTTP configurado.
+     * @param string                           $model          Modelo de Claude a usar.
+     *
+     * @throws \RuntimeException Si falla HTTP o se superan las iteraciones sin respuesta final.
+     *
+     * @return string Texto JSON de la respuesta final de Claude.
+     */
+    private function run_with_tools(
+        array $system_payload,
+        string $user_content,
+        int $max_tokens,
+        PendingRequest $http,
+        string $model
+    ): string {
+        /* Historial de mensajes del loop: arranca con el mensaje inicial del usuario. */
+        $messages   = [['role' => 'user', 'content' => $user_content]];
+        $tools      = $this->build_tools();
+        $iterations = 0;
+
+        while ($iterations < self::MAX_TOOL_ITERATIONS) {
+            $iterations++;
+
+            $response = $http->post('https://api.anthropic.com/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => $max_tokens,
+                'system'     => $system_payload,
+                'tools'      => $tools,
+                'messages'   => $messages,
+            ]);
+
+            if ($response->failed()) {
+                Log::error('LeadAiService run_with_tools: Anthropic error', [
+                    'status'    => $response->status(),
+                    'body'      => $response->body(),
+                    'iteration' => $iterations,
+                ]);
+                throw new \RuntimeException('Error Anthropic HTTP ' . $response->status() . ': ' . $response->body());
+            }
+
+            $data        = $response->json();
+            $stop_reason = isset($data['stop_reason']) ? (string) $data['stop_reason'] : '';
+            $content     = isset($data['content']) && is_array($data['content']) ? $data['content'] : [];
+
+            /* Claude terminó sin tool_use: extraer el bloque de texto y retornar. */
+            if ($stop_reason === 'end_turn') {
+                foreach ($content as $block) {
+                    $type = isset($block['type']) ? (string) $block['type'] : '';
+                    if ($type === 'text') {
+                        return (string) $block['text'];
+                    }
+                }
+                return '';
+            }
+
+            /* Claude pausó para usar una tool: ejecutarla y continuar el loop. */
+            if ($stop_reason === 'tool_use') {
+                /* Agregar la respuesta de Claude (con los bloques tool_use) al historial. */
+                $messages[] = ['role' => 'assistant', 'content' => $content];
+
+                /* Procesar cada bloque tool_use y acumular los resultados. */
+                $tool_results = [];
+                foreach ($content as $block) {
+                    $type = isset($block['type']) ? (string) $block['type'] : '';
+                    if ($type !== 'tool_use') {
+                        continue;
+                    }
+
+                    $tool_id    = isset($block['id'])    ? (string) $block['id']    : '';
+                    $tool_name  = isset($block['name'])  ? (string) $block['name']  : '';
+                    $tool_input = isset($block['input']) && is_array($block['input']) ? $block['input'] : [];
+
+                    $recurso_nombre = isset($tool_input['nombre']) ? $tool_input['nombre'] : '?';
+                    Log::debug('LeadAiService: tool_use', [
+                        'tool'    => $tool_name,
+                        'recurso' => $recurso_nombre,
+                        'iter'    => $iterations,
+                    ]);
+
+                    $tool_result  = $this->execute_tool($tool_name, $tool_input);
+                    $tool_results[] = [
+                        'type'        => 'tool_result',
+                        'tool_use_id' => $tool_id,
+                        'content'     => $tool_result,
+                    ];
+                }
+
+                /* Agregar los resultados de las tools al historial para la siguiente iteración. */
+                if (! empty($tool_results)) {
+                    $messages[] = ['role' => 'user', 'content' => $tool_results];
+                }
+
+                continue;
+            }
+
+            /* stop_reason inesperado (p. ej. max_tokens): loguear y salir del loop. */
+            Log::warning('LeadAiService: stop_reason inesperado en run_with_tools', [
+                'stop_reason' => $stop_reason,
+                'iteration'   => $iterations,
+            ]);
+            break;
+        }
+
+        throw new \RuntimeException(
+            'LeadAiService: se superaron las iteraciones de tool use (' . self::MAX_TOOL_ITERATIONS . ') sin respuesta final.'
+        );
+    }
+
+    /**
+     * Arma el system prompt: identidad + system prompt BD + protocolo (modular o completo).
+     *
+     * Intenta primero el system base modular (tool use); si no está sincronizado todavía,
+     * cae al protocolo completo como fallback para no romper el flujo en producción.
      *
      * @return string
      */
@@ -2265,11 +2425,22 @@ TXT;
             $contenido = "IDENTIDAD DEL AGENTE:\n" . trim($agent_identity->description) . "\n\n" . $contenido;
         }
 
-        /** Documento maestro en GitHub; si falla la lectura, solo se usa el esqueleto de BD. */
-        $whatsapp_protocol = app(WhatsappProtocolService::class)->getProtocol();
-        if ($whatsapp_protocol !== '') {
-            $contenido .= "\n\nPROTOCOLO DE WHATSAPP\n";
-            $contenido .= $whatsapp_protocol;
+        /*
+         * Intentar usar el system base modular (tool use).
+         * Si no está sincronizado todavía, caer al protocolo completo para no romper producción.
+         */
+        $system_base = app(WhatsappProtocolService::class)->getSystemBase();
+
+        if ($system_base !== '') {
+            /* Modo tool use: system base pequeño con índice de recursos integrado. */
+            $contenido .= "\n\n" . $system_base;
+        } else {
+            /* Fallback al protocolo completo si el system_base no está en BD todavía. */
+            $whatsapp_protocol = app(WhatsappProtocolService::class)->getProtocol();
+            if ($whatsapp_protocol !== '') {
+                $contenido .= "\n\nPROTOCOLO DE WHATSAPP\n";
+                $contenido .= $whatsapp_protocol;
+            }
         }
 
         /*

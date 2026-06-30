@@ -62,6 +62,52 @@ class AgentPromptSyncService
             'repo_path' => 'comercial/leads_protocolo_whatsapp.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
+        // Archivos del protocolo modular (tool use)
+        [
+            'key'       => 'whatsapp_system_base',
+            'repo_path' => 'agente/protocolo_whatsapp/system_base.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_calificacion',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/calificacion.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_posicionamiento',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/posicionamiento.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_precios',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/precios.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_demo_agenda',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/demo_agenda.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_demo_ciclo',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/demo_ciclo.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_post_demo',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/post_demo.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_reglas',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/reglas.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
+        [
+            'key'       => 'whatsapp_recurso_referidos',
+            'repo_path' => 'agente/protocolo_whatsapp/recursos/referidos.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
     ];
 
     /**
