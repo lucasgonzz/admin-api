@@ -93,7 +93,13 @@ class SupportAiSuggestionService
                 $response = $http->post('https://api.anthropic.com/v1/messages', [
                     'model'      => $model,
                     'max_tokens' => 2000,
-                    'system'     => $system_prompt,
+                    'system'     => [
+                        [
+                            'type'          => 'text',
+                            'text'          => $system_prompt,
+                            'cache_control' => ['type' => 'ephemeral'],
+                        ],
+                    ],
                     'tools'      => $tools,
                     'messages'   => $messages,
                 ]);
@@ -659,6 +665,7 @@ USER;
         $http = Http::withHeaders([
             'x-api-key'         => $api_key,
             'anthropic-version' => '2023-06-01',
+            'anthropic-beta'    => 'prompt-caching-2024-07-31',
             'content-type'      => 'application/json',
         ])->timeout(120);
 
