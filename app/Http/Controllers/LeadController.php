@@ -411,9 +411,16 @@ class LeadController extends Controller
             $query->orderByDesc('created_at');
         }
 
-        // Filtro por estado comercial.
+        // Filtro por estado comercial. Acepta un status único o una lista separada por comas
+        // (ej. "demo_agendada,demo_en_curso") para traer leads en varios estados del pipeline a la vez.
         if ($request->filled('status')) {
-            $query->where('status', $request->input('status'));
+            $status_param = (string) $request->input('status');
+            if (strpos($status_param, ',') !== false) {
+                $statuses = array_values(array_filter(array_map('trim', explode(',', $status_param))));
+                $query->whereIn('status', $statuses);
+            } else {
+                $query->where('status', $status_param);
+            }
         }
 
         // Filtro por sistema destino.
