@@ -113,6 +113,13 @@ class RecallService
     /**
      * Obtiene la transcripción completa de un bot que terminó de grabar.
      *
+     * El endpoint legacy `GET /bot/{id}/transcript/` (API v1.10) ya no está disponible
+     * para workspaces creados en la API nueva (v1.11), que es la que usamos para crear
+     * el bot (recording_config.transcript.provider). En la API nueva la transcripción se
+     * obtiene en dos pasos: 1) Retrieve Bot trae el array `recordings[]`, 2) cada recording
+     * expone `media_shortcuts.transcript.data.download_url`, que es la URL pre-firmada
+     * desde donde se descarga el JSON de utterances (sin necesidad de header de auth).
+     *
      * Devuelve el array de utterances crudas tal como las devuelve Recall,
      * o null si no hay configuración activa o si la petición falla.
      *
@@ -129,19 +136,50 @@ class RecallService
         }
 
         try {
-            $response = Http::withHeaders([
+            /* Paso 1: traer el bot completo, incluye el array recordings[] con media_shortcuts. */
+            $bot_response = Http::withHeaders([
                 'Authorization' => 'Token ' . $config->recall_api_key,
-            ])->get(self::API_BASE . '/bot/' . $bot_id . '/transcript/');
+            ])->get(self::API_BASE . '/bot/' . $bot_id . '/');
 
-            if ($response->failed()) {
-                Log::channel('daily')->warning('[RECALL] Error al obtener transcripción.', [
+            if ($bot_response->failed()) {
+                Log::channel('daily')->warning('[RECALL] Error al obtener bot.', [
                     'bot_id' => $bot_id,
-                    'status' => $response->status(),
+                    'status' => $bot_response->status(),
                 ]);
                 return null;
             }
 
-            return $response->json();
+            $recordings = $bot_response->json('recordings') ?? [];
+            if (empty($recordings)) {
+                Log::channel('daily')->warning('[RECALL] Bot sin recordings.', [
+                    'bot_id' => $bot_id,
+                ]);
+                return null;
+            }
+
+            /* Usar la última recording (por si hubo Start/Stop Recording múltiples). */
+            $recording    = end($recordings);
+            $download_url = $recording['media_shortcuts']['transcript']['data']['download_url'] ?? null;
+
+            if (!$download_url) {
+                Log::channel('daily')->warning('[RECALL] Recording sin transcript disponible.', [
+                    'bot_id' => $bot_id,
+                ]);
+                return null;
+            }
+
+            /* Paso 2: descargar el JSON de utterances desde la URL pre-firmada (sin auth). */
+            $transcript_response = Http::get($download_url);
+
+            if ($transcript_response->failed()) {
+                Log::channel('daily')->warning('[RECALL] Error al descargar transcript desde download_url.', [
+                    'bot_id' => $bot_id,
+                    'status' => $transcript_response->status(),
+                ]);
+                return null;
+            }
+
+            return $transcript_response->json();
         } catch (\Throwable $e) {
             Log::channel('daily')->error('[RECALL] Excepción al obtener transcripción.', [
                 'bot_id' => $bot_id,
@@ -182,3 +220,4 @@ class RecallService
         return implode("\n", $lines);
     }
 }
+
