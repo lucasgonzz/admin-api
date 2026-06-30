@@ -79,6 +79,8 @@ class LeadMessage extends Model
         'lead_reaction_at'        => 'datetime',
         /* Mensaje excluido del historial enviado a Claude (marcado manualmente por el operador). */
         'deleted_from_context'    => 'boolean',
+        /* Array de eventos de notificación a admins disparados por este mensaje. Cada elemento: ['evento' => ..., 'admins' => [...]]. */
+        'admin_notifications'     => 'array',
     ];
 
     /**

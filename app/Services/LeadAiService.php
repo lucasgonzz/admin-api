@@ -1744,7 +1744,10 @@ TXT;
                         $demo_notify_service = new \App\Services\DemoScheduledWhatsappService(
                             new \App\Services\WhatsappSendService()
                         );
-                        $demo_notify_service->notify($lead, $demo_date, $demo_start, $es_reagendado);
+                        $demo_notified = $demo_notify_service->notify($lead, $demo_date, $demo_start, $es_reagendado);
+                        if (! empty($demo_notified)) {
+                            $admin_notifications_log[] = ['evento' => 'Demo agendada', 'admins' => $demo_notified];
+                        }
                     } catch (\Throwable $e) {
                         Log::error('LeadAiService: error al notificar demo agendada por WhatsApp.', [
                             'lead_id'       => $lead->id,
@@ -1764,6 +1767,11 @@ TXT;
         $notificar_ingreso_confirmado = false;
         $notificar_fin_confirmado     = false;
         $notificar_no_ingreso         = false;
+
+        /* Acumula los eventos de notificación a admins disparados por este mensaje.
+         * Cada elemento: ['evento' => string, 'admins' => string[]].
+         * Se persiste en $msg->admin_notifications al finalizar. */
+        $admin_notifications_log = [];
 
         /* Acción: confirmar que el lead ingresó a la demo (inferencia conversacional).
          * Solo válida si el lead está en ingresando_demo o en demo_agendada (tolerante,
@@ -1950,7 +1958,10 @@ TXT;
                 $escalation_service = new \App\Services\LeadEscalationWhatsappService(
                     new \App\Services\WhatsappSendService()
                 );
-                $escalation_service->notify($lead, $motivo_intervencion);
+                $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion);
+                if (! empty($escalation_notified)) {
+                    $admin_notifications_log[] = ['evento' => 'Escalación a humano requerida', 'admins' => $escalation_notified];
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al notificar escalación por WhatsApp.', [
                     'lead_id' => $lead->id,
@@ -2037,7 +2048,10 @@ TXT;
                 $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
                     new \App\Services\WhatsappSendService()
                 );
-                $ciclo_service->notify_ingreso_confirmado($lead->fresh());
+                $ingreso_notified = $ciclo_service->notify_ingreso_confirmado($lead->fresh());
+                if (! empty($ingreso_notified)) {
+                    $admin_notifications_log[] = ['evento' => 'Ingreso a demo confirmado', 'admins' => $ingreso_notified];
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al notificar ingreso_confirmado a admins.', [
                     'lead_id' => $lead->id,
@@ -2051,7 +2065,10 @@ TXT;
                 $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
                     new \App\Services\WhatsappSendService()
                 );
-                $ciclo_service->notify_fin_confirmado($lead->fresh());
+                $fin_notified = $ciclo_service->notify_fin_confirmado($lead->fresh());
+                if (! empty($fin_notified)) {
+                    $admin_notifications_log[] = ['evento' => 'Fin de demo confirmado', 'admins' => $fin_notified];
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al notificar fin_confirmado a admins.', [
                     'lead_id' => $lead->id,
@@ -2077,7 +2094,10 @@ TXT;
                 $ciclo_service = new \App\Services\DemoCicloAdminNotificationService(
                     new \App\Services\WhatsappSendService()
                 );
-                $ciclo_service->notify_no_ingreso($lead->fresh(), 'el lead indicó que no podía ingresar');
+                $no_ingreso_notified = $ciclo_service->notify_no_ingreso($lead->fresh(), 'el lead indicó que no podía ingresar');
+                if (! empty($no_ingreso_notified)) {
+                    $admin_notifications_log[] = ['evento' => 'Lead no pudo ingresar a la demo', 'admins' => $no_ingreso_notified];
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al notificar no_ingreso a admins.', [
                     'lead_id' => $lead->id,
@@ -2111,7 +2131,10 @@ TXT;
                 $verificacion_service = new \App\Services\LeadVerificacionWhatsappService(
                     new \App\Services\WhatsappSendService()
                 );
-                $verificacion_service->notify($lead->fresh(), $msg);
+                $verif_notified = $verificacion_service->notify($lead->fresh(), $msg);
+                if (! empty($verif_notified)) {
+                    $admin_notifications_log[] = ['evento' => 'Requiere verificación humana', 'admins' => $verif_notified];
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al notificar verificacion pendiente por WhatsApp.', [
                     'lead_id'    => $lead->id,
@@ -2119,6 +2142,11 @@ TXT;
                     'error'      => $e->getMessage(),
                 ]);
             }
+        }
+
+        /* Persistir el resumen de notificaciones a admins disparadas por este mensaje, si hubo alguna. */
+        if (! empty($admin_notifications_log)) {
+            $msg->update(['admin_notifications' => $admin_notifications_log]);
         }
 
         /* Programar auto-envío antes del broadcast: el payload Pusher debe incluir ai_auto_send_at. */

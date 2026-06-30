@@ -90,9 +90,9 @@ class DemoCicloAdminNotificationService
      *
      * @param Lead $lead Lead al que se envió el check de ingreso.
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify_check_ingreso_enviado(Lead $lead): void
+    public function notify_check_ingreso_enviado(Lead $lead): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
         $admins = $this->get_subscribed_admins();
@@ -102,7 +102,7 @@ class DemoCicloAdminNotificationService
                 'lead_id' => $lead->id,
             ]);
 
-            return;
+            return [];
         }
 
         /* Identificador legible del lead. */
@@ -114,6 +114,9 @@ class DemoCicloAdminNotificationService
         /* Link directo al modal del lead en admin-spa. */
         $link = $this->build_lead_link($lead);
 
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
+
         /* Enviar a cada admin suscrito. Los errores individuales no cortan el loop. */
         foreach ($admins as $admin) {
             try {
@@ -122,6 +125,9 @@ class DemoCicloAdminNotificationService
                     self::TEMPLATE_CHECK_INGRESO_ENVIADO,
                     [$nombre_lead, $hora_demo, $link]
                 );
+
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
 
                 Log::info('DemoCicloAdminNotificationService: check_ingreso_enviado notificado.', [
                     'lead_id'  => $lead->id,
@@ -135,6 +141,8 @@ class DemoCicloAdminNotificationService
                 ]);
             }
         }
+
+        return $notified;
     }
 
     /**
@@ -148,9 +156,9 @@ class DemoCicloAdminNotificationService
      *
      * @param Lead $lead Lead que confirmó su ingreso a la demo.
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify_ingreso_confirmado(Lead $lead): void
+    public function notify_ingreso_confirmado(Lead $lead): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
         $admins = $this->get_subscribed_admins();
@@ -160,7 +168,7 @@ class DemoCicloAdminNotificationService
                 'lead_id' => $lead->id,
             ]);
 
-            return;
+            return [];
         }
 
         /* Identificador legible del lead. */
@@ -185,6 +193,9 @@ class DemoCicloAdminNotificationService
         /* Link directo al modal del lead en admin-spa. */
         $link = $this->build_lead_link($lead);
 
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
+
         /* Enviar a cada admin suscrito. Los errores individuales no cortan el loop. */
         foreach ($admins as $admin) {
             try {
@@ -193,6 +204,9 @@ class DemoCicloAdminNotificationService
                     self::TEMPLATE_INGRESO_OK,
                     [$nombre_lead, $hora_ingreso, $link]
                 );
+
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
 
                 Log::info('DemoCicloAdminNotificationService: ingreso_confirmado notificado.', [
                     'lead_id'  => $lead->id,
@@ -206,6 +220,8 @@ class DemoCicloAdminNotificationService
                 ]);
             }
         }
+
+        return $notified;
     }
 
     /**
@@ -221,9 +237,9 @@ class DemoCicloAdminNotificationService
      * @param Lead   $lead   Lead que no ingresó a la demo.
      * @param string $motivo Motivo breve del no ingreso (ej. "no respondió al check de ingreso").
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify_no_ingreso(Lead $lead, string $motivo): void
+    public function notify_no_ingreso(Lead $lead, string $motivo): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
         $admins = $this->get_subscribed_admins();
@@ -233,7 +249,7 @@ class DemoCicloAdminNotificationService
                 'lead_id' => $lead->id,
             ]);
 
-            return;
+            return [];
         }
 
         /* Identificador legible del lead. */
@@ -245,6 +261,9 @@ class DemoCicloAdminNotificationService
         /* Link directo al modal del lead en admin-spa. */
         $link = $this->build_lead_link($lead);
 
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
+
         /* Enviar a cada admin suscrito. Los errores individuales no cortan el loop. */
         foreach ($admins as $admin) {
             try {
@@ -253,6 +272,9 @@ class DemoCicloAdminNotificationService
                     self::TEMPLATE_NO_INGRESO,
                     [$nombre_lead, $motivo_limpio, $link]
                 );
+
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
 
                 Log::info('DemoCicloAdminNotificationService: no_ingreso notificado.', [
                     'lead_id'  => $lead->id,
@@ -267,6 +289,8 @@ class DemoCicloAdminNotificationService
                 ]);
             }
         }
+
+        return $notified;
     }
 
     /**
@@ -282,9 +306,9 @@ class DemoCicloAdminNotificationService
      *
      * @param Lead $lead Lead que confirmó el fin de la demo.
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify_fin_confirmado(Lead $lead): void
+    public function notify_fin_confirmado(Lead $lead): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
         $admins = $this->get_subscribed_admins();
@@ -294,7 +318,7 @@ class DemoCicloAdminNotificationService
                 'lead_id' => $lead->id,
             ]);
 
-            return;
+            return [];
         }
 
         /* Identificador legible del lead. */
@@ -315,6 +339,9 @@ class DemoCicloAdminNotificationService
         /* Link directo al modal del lead en admin-spa. */
         $link = $this->build_lead_link($lead);
 
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
+
         /* Enviar a cada admin suscrito. Los errores individuales no cortan el loop. */
         foreach ($admins as $admin) {
             try {
@@ -323,6 +350,9 @@ class DemoCicloAdminNotificationService
                     self::TEMPLATE_TERMINADA,
                     [$nombre_lead, $rubro, $link]
                 );
+
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
 
                 Log::info('DemoCicloAdminNotificationService: fin_confirmado notificado.', [
                     'lead_id'  => $lead->id,
@@ -336,6 +366,8 @@ class DemoCicloAdminNotificationService
                 ]);
             }
         }
+
+        return $notified;
     }
 
     /**
@@ -349,9 +381,9 @@ class DemoCicloAdminNotificationService
      *
      * @param Lead $lead Lead en estado demo_pendiente_de_terminar.
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify_pendiente_terminar(Lead $lead): void
+    public function notify_pendiente_terminar(Lead $lead): array
     {
         /* Obtener admins suscritos con teléfono cargado. */
         $admins = $this->get_subscribed_admins();
@@ -361,7 +393,7 @@ class DemoCicloAdminNotificationService
                 'lead_id' => $lead->id,
             ]);
 
-            return;
+            return [];
         }
 
         /* Identificador legible del lead. */
@@ -373,6 +405,9 @@ class DemoCicloAdminNotificationService
         /* Link directo al modal del lead en admin-spa. */
         $link = $this->build_lead_link($lead);
 
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
+
         /* Enviar a cada admin suscrito. Los errores individuales no cortan el loop. */
         foreach ($admins as $admin) {
             try {
@@ -381,6 +416,9 @@ class DemoCicloAdminNotificationService
                     self::TEMPLATE_PENDIENTE_TERMINAR,
                     [$nombre_lead, $hora_demo, $link]
                 );
+
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
 
                 Log::info('DemoCicloAdminNotificationService: pendiente_terminar notificado.', [
                     'lead_id'  => $lead->id,
@@ -394,6 +432,8 @@ class DemoCicloAdminNotificationService
                 ]);
             }
         }
+
+        return $notified;
     }
 
     /**

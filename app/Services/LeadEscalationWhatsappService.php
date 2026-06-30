@@ -49,9 +49,9 @@ class LeadEscalationWhatsappService
      * @param Lead   $lead   Lead cuya conversación no pudo resolver el agente.
      * @param string $motivo Motivo breve provisto por Claude (campo motivo_intervencion).
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify(Lead $lead, string $motivo): void
+    public function notify(Lead $lead, string $motivo): array
     {
         /* Obtener admins con flag activo y teléfono cargado. */
         $admins = Admin::where('notify_lead_escalation_whatsapp', true)
@@ -63,8 +63,11 @@ class LeadEscalationWhatsappService
             Log::info('LeadEscalationWhatsappService: sin admins suscritos con teléfono cargado.', [
                 'lead_id' => $lead->id,
             ]);
-            return;
+            return [];
         }
+
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
 
         /* Construir identificador legible del lead: nombre > empresa > "Lead #ID". */
         $nombre_lead = '';
@@ -94,6 +97,9 @@ class LeadEscalationWhatsappService
                     [$nombre_lead, $motivo_limpio, $link_lead]
                 );
 
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
+
                 Log::info('LeadEscalationWhatsappService: notificación de escalación enviada.', [
                     'lead_id'   => $lead->id,
                     'admin_id'  => $admin->id,
@@ -108,5 +114,7 @@ class LeadEscalationWhatsappService
                 ]);
             }
         }
+
+        return $notified;
     }
 }

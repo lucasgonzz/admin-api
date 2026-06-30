@@ -49,9 +49,9 @@ class LeadVerificacionWhatsappService
      * @param Lead        $lead    Lead con sugerencia pendiente de verificación manual.
      * @param LeadMessage $message Mensaje sugerido que requiere aprobación del setter.
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify(Lead $lead, LeadMessage $message): void
+    public function notify(Lead $lead, LeadMessage $message): array
     {
         /* Obtener admins con flag activo y teléfono cargado. */
         $admins = Admin::where('notify_verificacion_whatsapp', true)
@@ -64,8 +64,11 @@ class LeadVerificacionWhatsappService
                 'lead_id'    => $lead->id,
                 'message_id' => $message->id,
             ]);
-            return;
+            return [];
         }
+
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
 
         /* Construir identificador legible del lead: nombre > empresa > "Lead #ID". */
         $nombre_lead = '';
@@ -90,6 +93,9 @@ class LeadVerificacionWhatsappService
                     [$nombre_lead, $link_lead]
                 );
 
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
+
                 Log::info('LeadVerificacionWhatsappService: notificación enviada.', [
                     'lead_id'    => $lead->id,
                     'message_id' => $message->id,
@@ -104,5 +110,7 @@ class LeadVerificacionWhatsappService
                 ]);
             }
         }
+
+        return $notified;
     }
 }

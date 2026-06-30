@@ -71,9 +71,9 @@ class DemoScheduledWhatsappService
      * @param string $demo_start    Hora de inicio en formato HH:MM.
      * @param bool   $is_reagendado true si el lead ya tenía una demo previa y cambió el horario.
      *
-     * @return void
+     * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify(Lead $lead, string $demo_date, string $demo_start, bool $is_reagendado = false): void
+    public function notify(Lead $lead, string $demo_date, string $demo_start, bool $is_reagendado = false): array
     {
         /* Elegir el template según si es un alta nueva o un cambio de horario. */
         $template_name = $is_reagendado ? self::TEMPLATE_NAME_REAGENDADO : self::TEMPLATE_NAME;
@@ -88,8 +88,11 @@ class DemoScheduledWhatsappService
             Log::info('DemoScheduledWhatsappService: sin admins suscritos con teléfono.', [
                 'lead_id' => $lead->id,
             ]);
-            return;
+            return [];
         }
+
+        /* Acumula los nombres de admins a los que se envió exitosamente. */
+        $notified = [];
 
         /* Identificador legible del lead: nombre > empresa > "Lead #ID". */
         $nombre_lead = '';
@@ -117,6 +120,9 @@ class DemoScheduledWhatsappService
                     [$nombre_lead, $fecha_legible, $demo_start, $link_lead]
                 );
 
+                /* Registrar al admin como notificado exitosamente. */
+                $notified[] = $admin->name;
+
                 Log::info('DemoScheduledWhatsappService: notificación enviada.', [
                     'lead_id'       => $lead->id,
                     'admin_id'      => $admin->id,
@@ -133,6 +139,8 @@ class DemoScheduledWhatsappService
                 ]);
             }
         }
+
+        return $notified;
     }
 
     /**
