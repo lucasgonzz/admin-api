@@ -904,6 +904,20 @@ class WhatsappWebhookController extends Controller
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $inbound_lead_message->id);
 
+        // Incrementar responded_count en la variante A/B si es la primera respuesta del lead al welcome.
+        if ($lead->welcome_variant_id) {
+            $prev_lead_msgs = LeadMessage::where('lead_id', $lead->id)
+                ->where('sender', 'lead')
+                ->where('id', '<', (int) $inbound_lead_message->id)
+                ->count();
+            if ($prev_lead_msgs === 0) {
+                $ab_variant = \App\Models\MessageVariant::find($lead->welcome_variant_id);
+                if ($ab_variant) {
+                    $ab_variant->increment_responded();
+                }
+            }
+        }
+
         // Notificación WhatsApp a todos los admins suscritos a este lead.
         (new \App\Services\LeadMessageNotificationWhatsappService(
             new \App\Services\WhatsappSendService()
@@ -956,6 +970,14 @@ class WhatsappWebhookController extends Controller
                 $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');
                 $lead->status                     = 'demo_en_curso';
                 $lead->save();
+
+                // Incrementar attended_count en la variante A/B al confirmar ingreso.
+                if ($lead->welcome_variant_id) {
+                    $ab_variant_att = \App\Models\MessageVariant::find($lead->welcome_variant_id);
+                    if ($ab_variant_att) {
+                        $ab_variant_att->increment_attended();
+                    }
+                }
 
                 // Notificar a admins suscritos que el lead confirmó el ingreso.
                 try {

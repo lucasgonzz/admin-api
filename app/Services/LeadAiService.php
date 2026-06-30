@@ -1743,6 +1743,14 @@ TXT;
                         'demo_end'   => $demo_end,
                     ]);
 
+                    // Incrementar scheduled_count en la variante A/B al agendar la demo.
+                    if ($lead->welcome_variant_id) {
+                        $ab_variant_sched = \App\Models\MessageVariant::find($lead->welcome_variant_id);
+                        if ($ab_variant_sched) {
+                            $ab_variant_sched->increment_scheduled();
+                        }
+                    }
+
                     /* Marcar que se debe crear el evento en Google Calendar del closer
                      * después del save() principal del lead. */
                     $google_event_create_needed = true;
