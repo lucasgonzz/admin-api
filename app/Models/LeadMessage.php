@@ -81,6 +81,9 @@ class LeadMessage extends Model
         'deleted_from_context'    => 'boolean',
         /* Array de eventos de notificación a admins disparados por este mensaje. Cada elemento: ['evento' => ..., 'admins' => [...]]. */
         'admin_notifications'     => 'array',
+        /* Timestamps de entrega real de WhatsApp (populated por webhooks de Kapso). */
+        'whatsapp_delivered_at'   => 'datetime',
+        'whatsapp_seen_at'        => 'datetime',
     ];
 
     /**

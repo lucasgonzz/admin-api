@@ -51,6 +51,18 @@ class WhatsappWebhookController extends Controller
     private const INBOUND_EVENT = 'whatsapp.message.received';
 
     /**
+     * Eventos Kapso de estado de entrega de mensajes salientes.
+     * Clave: nombre del evento Kapso. Valor: estado interno normalizado.
+     * El estado 'enviado' no se persiste (se infiere por whatsapp_message_id).
+     */
+    private const STATUS_EVENTS = [
+        'whatsapp.message.sent'      => 'enviado',
+        'whatsapp.message.delivered' => 'entregado',
+        'whatsapp.message.read'      => 'leido',
+        'whatsapp.message.failed'    => 'fallido',
+    ];
+
+    /**
      * Recibe y procesa un evento de webhook de Kapso.
      *
      * @param Request                        $request
@@ -81,6 +93,14 @@ class WhatsappWebhookController extends Controller
         }
 
         $event_type = $this->resolve_event_type($request, $payload);
+
+        // Procesar eventos de estado de entrega de mensajes salientes (entregado / leído / fallido).
+        // Solo afecta LeadMessages; si el wamid no corresponde a ninguno, se ignora sin error.
+        if (array_key_exists((string) $event_type, self::STATUS_EVENTS)) {
+            $this->handle_outbound_status_event((string) $event_type, $payload);
+            return response()->json(['ok' => true], 200);
+        }
+
         if ($event_type !== self::INBOUND_EVENT) {
             return response()->json(['ok' => true], 200);
         }
@@ -186,6 +206,81 @@ class WhatsappWebhookController extends Controller
         }
 
         return response()->json(['ok' => true], 200);
+    }
+
+    /**
+     * Procesa un evento de estado de entrega de un mensaje saliente (entregado / leído / fallido).
+     *
+     * Correlaciona el wamid del payload con lead_messages.whatsapp_message_id.
+     * Si no existe ningún LeadMessage con ese wamid (p.ej. es de soporte o implementación),
+     * retorna sin hacer nada — es un caso esperado, no un error.
+     * Tras actualizar el mensaje dispara LeadConversationUpdated con is_status_update = true
+     * para que el frontend refresque solo el estado visual del bubble, sin tocar badges.
+     *
+     * @param string               $event_type Nombre del evento Kapso (clave de STATUS_EVENTS).
+     * @param array<string, mixed> $payload    Body JSON decodificado del webhook.
+     *
+     * @return void
+     */
+    private function handle_outbound_status_event(string $event_type, array $payload): void
+    {
+        try {
+            // Extraer el wamid de Meta que identifica el mensaje saliente.
+            $wamid = $payload['message']['whatsapp_message_id'] ?? null;
+            if ($wamid === null || $wamid === '') {
+                Log::channel('daily')->warning('WhatsApp webhook: evento de estado sin whatsapp_message_id.', [
+                    'event_type' => $event_type,
+                ]);
+                return;
+            }
+
+            // Buscar el mensaje saliente de lead que corresponde a ese wamid.
+            // Si no existe (p.ej. es de soporte o implementación), ignorar silenciosamente.
+            $message = LeadMessage::query()->where('whatsapp_message_id', $wamid)->first();
+            if ($message === null) {
+                return;
+            }
+
+            // Resolver el estado interno mapeado al evento recibido.
+            $status = self::STATUS_EVENTS[$event_type];
+
+            // El estado 'enviado' se infiere por la presencia de whatsapp_message_id; no persistir.
+            if ($status === 'enviado') {
+                return;
+            }
+
+            // Campos a actualizar según el tipo de evento de entrega.
+            if ($status === 'entregado') {
+                $message->update([
+                    'whatsapp_delivery_status' => 'entregado',
+                    'whatsapp_delivered_at'    => now(),
+                ]);
+            } elseif ($status === 'leido') {
+                // Un mensaje leído siempre fue entregado. Si el evento delivered no llegó antes,
+                // completar whatsapp_delivered_at en el mismo update para mantener consistencia.
+                $updates = [
+                    'whatsapp_delivery_status' => 'leido',
+                    'whatsapp_seen_at'         => now(),
+                ];
+                if ($message->whatsapp_delivered_at === null) {
+                    $updates['whatsapp_delivered_at'] = now();
+                }
+                $message->update($updates);
+            } elseif ($status === 'fallido') {
+                $message->update([
+                    'whatsapp_delivery_status' => 'fallido',
+                ]);
+            }
+
+            // Notificar al frontend del cambio de estado (is_status_update = true para evitar
+            // refresco de badges y fila de grilla — solo actualizar el bubble del mensaje).
+            event(new \App\Events\LeadConversationUpdated((int) $message->lead_id, (int) $message->id, true));
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsApp webhook: error al procesar evento de estado de entrega.', [
+                'event_type' => $event_type,
+                'error'      => $exception->getMessage(),
+            ]);
+        }
     }
 
     /**
