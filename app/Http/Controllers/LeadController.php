@@ -1486,6 +1486,24 @@ class LeadController extends Controller
     }
 
     /**
+     * Activa o desactiva el flag de intervención humana requerida para el lead.
+     * Cuando se desactiva (admin resolvió el problema), NO re-activa claude_auto_reply
+     * automáticamente — el admin lo hace manualmente si lo desea.
+     *
+     * @param int|string $id
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_requiere_intervencion_humana_json($id)
+    {
+        $lead = Lead::query()->with('messages')->findOrFail($id);
+
+        $lead->requiere_intervencion_humana = ! (bool) $lead->requiere_intervencion_humana;
+        $lead->save();
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Marca un mensaje sugerido como aprobado (listo para enviar por el setter).
      *
      * @param int|string $message_id
@@ -2574,6 +2592,35 @@ class LeadController extends Controller
             'ok'       => true,
             'meet_url' => $lead->meet_url,
         ], 200);
+    }
+
+    /**
+     * Manda el bot de Recall.ai a la reunión del lead si no hay uno ya asignado.
+     *
+     * Fire-and-forget: el frontend no espera resultado real, pero este endpoint
+     * responde 200 en todos los casos controlados para no generar errores en consola.
+     *
+     * @param int|string $id ID del lead.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_recall_bot_json($id)
+    {
+        /* Lead objetivo de la reunión Meet. */
+        $lead = Lead::findOrFail($id);
+
+        /* Si el lead ya tiene un bot asignado, no mandar otro. */
+        if (!empty($lead->recall_bot_id)) {
+            return response()->json([
+                'ok'             => true,
+                'already_exists' => true,
+            ], 200);
+        }
+
+        /* Mandar el bot (la función loguea internamente si falla; no lanza excepciones). */
+        app(\App\Services\RecallService::class)->send_bot_for_lead($lead);
+
+        return response()->json(['ok' => true], 200);
     }
 
     /**

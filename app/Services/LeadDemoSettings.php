@@ -66,6 +66,9 @@ class LeadDemoSettings
     /** Clave: minutos desde el check de fin antes de marcar demo_pendiente_de_terminar y avisar a admins. */
     public const KEY_FIN_TIMEOUT_MINUTOS = 'demo_fin_timeout_minutos';
 
+    /** Clave: horas desde el inicio de la demo sin ingreso confirmado antes de revertir a calificado. */
+    public const KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT = 'demo_pendiente_ingreso_horas_timeout';
+
     /** Clave: minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai. */
     public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
 
@@ -117,6 +120,9 @@ class LeadDemoSettings
     /** Valor por defecto: timeout de fin (minutos sin confirmación → demo_pendiente_de_terminar). */
     private const DEFAULT_FIN_TIMEOUT_MINUTOS = 25;
 
+    /** Valor por defecto: 24 horas sin ingreso antes de revertir a calificado. */
+    private const DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT = 24;
+
     /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
     private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
@@ -153,6 +159,7 @@ class LeadDemoSettings
             'ingreso_timeout_minutos'             => self::get_ingreso_timeout_minutos(),
             'fin_seguimiento_minutos'             => self::get_fin_seguimiento_minutos(),
             'fin_timeout_minutos'                 => self::get_fin_timeout_minutos(),
+            'pendiente_ingreso_horas_timeout'     => self::get_pendiente_ingreso_horas_timeout(),
         ];
     }
 
@@ -230,6 +237,12 @@ class LeadDemoSettings
         AdminSetting::set(self::KEY_INGRESO_TIMEOUT_MINUTOS,  (string) self::clamp((int) $data['ingreso_timeout_minutos']));
         AdminSetting::set(self::KEY_FIN_SEGUIMIENTO_MINUTOS,  (string) self::clamp((int) $data['fin_seguimiento_minutos']));
         AdminSetting::set(self::KEY_FIN_TIMEOUT_MINUTOS,      (string) self::clamp((int) $data['fin_timeout_minutos']));
+
+        // Horas sin ingreso antes de revertir demo_pendiente_de_ingreso → calificado (rango propio 1–720, no usa clamp de minutos).
+        AdminSetting::set(
+            self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT,
+            (string) self::clamp_pendiente_ingreso_horas((int) ($data['pendiente_ingreso_horas_timeout'] ?? self::DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT))
+        );
     }
 
     /**
@@ -286,6 +299,9 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_FIN_TIMEOUT_MINUTOS) === null) {
             AdminSetting::set(self::KEY_FIN_TIMEOUT_MINUTOS, (string) self::DEFAULT_FIN_TIMEOUT_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT) === null) {
+            AdminSetting::set(self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT, (string) self::DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT);
         }
     }
 
@@ -504,6 +520,20 @@ class LeadDemoSettings
     }
 
     /**
+     * Horas desde el horario de la demo sin ingreso confirmado antes de revertir el lead a calificado.
+     *
+     * Rango: 1–720 horas (1 hora mínimo, 30 días máximo).
+     *
+     * @return int
+     */
+    public static function get_pendiente_ingreso_horas_timeout(): int
+    {
+        $stored = (int) AdminSetting::get(self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT, (string) self::DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT);
+
+        return self::clamp_pendiente_ingreso_horas($stored);
+    }
+
+    /**
      * Minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai a la reunión.
      *
      * @return int
@@ -527,6 +557,25 @@ class LeadDemoSettings
         }
         if ($value > self::MAX_MINUTOS) {
             return self::MAX_MINUTOS;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Acota las horas de timeout de demo_pendiente_de_ingreso al rango 1–720.
+     *
+     * @param int $value Valor en horas.
+     *
+     * @return int
+     */
+    private static function clamp_pendiente_ingreso_horas(int $value): int
+    {
+        if ($value < 1) {
+            return 1;
+        }
+        if ($value > 720) {
+            return 720;
         }
 
         return $value;

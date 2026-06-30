@@ -124,6 +124,8 @@ class Lead extends Model
         'tiene_sugerencia_pendiente'   => 'boolean',
         // Si false, Claude no genera ni envía sugerencias automáticas para este lead.
         'claude_auto_reply'            => 'boolean',
+        // Flag persistido: Claude (o el admin) marcó que este lead requiere intervención humana.
+        'requiere_intervencion_humana' => 'boolean',
         'requiere_seguimiento'         => 'boolean',
         'tiene_seguimiento_sin_ver'    => 'boolean',
 

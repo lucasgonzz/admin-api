@@ -52,6 +52,9 @@ class Kernel extends ConsoleKernel
         // Pasa a demo_pendiente_de_terminar si el lead no confirmó el fin en el timeout configurado.
         $schedule->command('leads:check-demo-fin-timeout')->everyMinute();
 
+        // Revierte a calificado los leads en demo_pendiente_de_ingreso que superaron el timeout de horas configurado.
+        $schedule->command('leads:check-demo-pendiente-ingreso-timeout')->hourly();
+
         // Manda el bot de Recall.ai a la reunión del closer cuando la llamada está próxima.
         $schedule->command('leads:send-recall-bot')->everyMinute();
 

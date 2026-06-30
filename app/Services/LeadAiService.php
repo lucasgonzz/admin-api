@@ -1806,6 +1806,8 @@ TXT;
                     /* Marcar el flag y registrar el momento exacto de confirmación de fin. */
                     $lead->demo_terminada_confirmada    = true;
                     $lead->demo_terminada_confirmada_at = now('America/Argentina/Buenos_Aires');
+                    /* El closer toma el control tras la demo: Claude deja de responder automáticamente. */
+                    $lead->claude_auto_reply = false;
                     /* Habilitar la notificación a admins (se dispara después del save). */
                     $notificar_fin_confirmado = true;
                     Log::info('LeadAiService: fin de demo confirmado por inferencia.', [
@@ -1877,6 +1879,11 @@ TXT;
         $motivo_intervencion   = isset($parsed['motivo_intervencion']) ? trim((string) $parsed['motivo_intervencion']) : '';
 
         if ($requiere_intervencion) {
+            // Persistir la flag de intervención humana y desactivar respuesta automática de Claude.
+            // Ambos campos se salvan en el único $lead->save() de más abajo.
+            $lead->requiere_intervencion_humana = true;
+            $lead->claude_auto_reply            = false;
+
             try {
                 /* Obtener el admin con is_default_task_assignee = true para notificarlo (si existe). */
                 $default_assignee = \App\Models\Admin::where('is_default_task_assignee', true)->first();
