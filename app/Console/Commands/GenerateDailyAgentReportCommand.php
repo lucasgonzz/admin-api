@@ -166,7 +166,9 @@ class GenerateDailyAgentReportCommand extends Command
         /* 10. Métricas generales del funnel completo (acumulado histórico + nuevos del período). */
         $funnel = [
             'total_leads'       => Lead::count(),
-            'respondieron'      => Lead::whereHas('messages', fn ($q) => $q->where('sender', 'lead'))->count(),
+            'respondieron'      => Lead::whereIn('id', $new_leads->pluck('id'))
+                ->whereHas('messages', fn ($q) => $q->where('sender', 'lead'))
+                ->count(),
             'demo_agendada'     => Lead::whereNotNull('demo_date')->count(),
             'demo_confirmada'   => Lead::where('demo_ingreso_confirmado', true)->count(),
             'demo_terminada'    => Lead::where('demo_terminada_confirmada', true)->count(),
