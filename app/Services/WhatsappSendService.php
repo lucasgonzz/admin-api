@@ -257,6 +257,20 @@ class WhatsappSendService
         $stored_mime = strtolower((string) ($attachment->mime ?? ''));
         $extension = strtolower(pathinfo($absolute_path, PATHINFO_EXTENSION));
 
+        // Si el audio es MP4/M4A, intentar convertirlo a OGG/Opus via ffmpeg.
+        // Esto resuelve el error 131053 de Meta ("audio/mp4 processed as application/octet-stream"):
+        // Chrome graba en fragmented MP4 (fMP4) que Meta acepta como upload pero descarta al procesar.
+        // ffmpeg convierte el fMP4 a OGG/Opus que Meta acepta y entrega correctamente.
+        // Si ffmpeg no está disponible (ej: shared hosting), se continúa con el archivo original.
+        if (strpos($stored_mime, 'mp4') !== false || $extension === 'm4a' || $extension === 'mp4') {
+            $converted = $this->maybe_convert_mp4_to_ogg($absolute_path);
+            if ($converted !== null) {
+                $absolute_path = $converted;
+                $stored_mime = 'audio/ogg';
+                $extension = 'ogg';
+            }
+        }
+
         $whatsapp_mime = $this->resolve_whatsapp_audio_mime($stored_mime, $extension);
         $upload_filename = $this->resolve_whatsapp_audio_upload_filename($extension, $whatsapp_mime);
         $voice_note = $this->should_send_as_whatsapp_voice_note($whatsapp_mime, $extension);
@@ -524,6 +538,73 @@ class WhatsappSendService
         }
 
         return null;
+    }
+
+
+    /**
+     * Intenta convertir un archivo de audio MP4/fMP4 a OGG/Opus usando ffmpeg.
+     *
+     * Chrome y Safari generan fragmented MP4 (fMP4) que Meta acepta como upload pero
+     * descarta silenciosamente al procesar (error 131053: "audio/mp4 processed as
+     * application/octet-stream"). Convertir a OGG/Opus soluciona el problema.
+     *
+     * Si ffmpeg no está disponible (ej: shared hosting sin acceso a exec) devuelve null
+     * y el pipeline continúa con el archivo original sin romper el flujo.
+     *
+     * @param string $absolute_path Ruta absoluta del archivo MP4/M4A de origen.
+     *
+     * @return string|null Ruta del archivo OGG temporal creado, o null si no fue posible convertir.
+     */
+    private function maybe_convert_mp4_to_ogg(string $absolute_path): ?string
+    {
+        // Verificar que exec() esté habilitado y que ffmpeg esté disponible.
+        if (! function_exists('exec')) {
+            return null;
+        }
+
+        $ffmpeg_path = trim((string) shell_exec('which ffmpeg 2>/dev/null'));
+        if ($ffmpeg_path === '') {
+            Log::channel('daily')->info('WhatsappSendService: ffmpeg no disponible, se omite conversión MP4→OGG.', [
+                'path' => $absolute_path,
+            ]);
+
+            return null;
+        }
+
+        $output_path = sys_get_temp_dir() . '/wa_audio_' . uniqid('', true) . '.ogg';
+
+        // Convertir a OGG/Opus (-acodec libopus) con calidad estándar para WhatsApp.
+        // -y sobreescribe si ya existe, -loglevel error suprime output no crítico.
+        $command = escapeshellcmd($ffmpeg_path)
+            . ' -y -i ' . escapeshellarg($absolute_path)
+            . ' -acodec libopus -b:a 32k -ar 16000 -ac 1'
+            . ' -loglevel error '
+            . escapeshellarg($output_path)
+            . ' 2>&1';
+
+        exec($command, $output_lines, $exit_code);
+
+        if ($exit_code !== 0 || ! file_exists($output_path) || filesize($output_path) === 0) {
+            Log::channel('daily')->warning('WhatsappSendService: ffmpeg no pudo convertir MP4→OGG.', [
+                'path'      => $absolute_path,
+                'exit_code' => $exit_code,
+                'output'    => implode(' ', $output_lines),
+            ]);
+
+            if (file_exists($output_path)) {
+                @unlink($output_path);
+            }
+
+            return null;
+        }
+
+        Log::channel('daily')->info('WhatsappSendService: MP4 convertido a OGG via ffmpeg.', [
+            'original' => $absolute_path,
+            'output'   => $output_path,
+            'size'     => filesize($output_path),
+        ]);
+
+        return $output_path;
     }
 
     /**
