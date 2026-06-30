@@ -65,9 +65,10 @@ Estructura exacta a devolver:
     }
   ],
   "escenario_cierre": "A",
-  "proximo_paso": "Descripción del próximo paso acordado.",
-  "transcripcion_completa": "Tommy: hola...\nLead: bien..."
+  "proximo_paso": "Descripción del próximo paso acordado."
 }
+
+No incluyas la transcripción completa en tu respuesta: eso se agrega aparte, fuera de tu JSON.
 
 Para personas_adicionales: detectá si durante la llamada el lead mencionó o presentó a otras personas
 que participan en la decisión de compra o en el negocio (socios, cónyuge, contador, socio comercial, etc.).
@@ -222,8 +223,11 @@ PROMPT;
         try {
             $response = $http->post(self::ANTHROPIC_API_URL, [
                 'model'      => self::MODEL,
-                /* max_tokens generoso para acomodar el JSON completo con la transcripción incluida. */
-                'max_tokens' => 4000,
+                /*
+                 * max_tokens para el JSON estructurado (sin la transcripción, que ya no se le
+                 * pide al modelo que reproduzca: se agrega después en PHP desde $transcript_text).
+                 */
+                'max_tokens' => 3000,
                 'system'     => self::SYSTEM_PROMPT,
                 'messages'   => [
                     ['role' => 'user', 'content' => $transcript_text],
@@ -277,6 +281,13 @@ PROMPT;
                 ]);
                 return null;
             }
+
+            /*
+             * Agregar la transcripción completa al resumen desde PHP (no se le pide a Claude
+             * que la reproduzca: ahorra tokens y evita que el JSON se corte a mitad de camino
+             * cuando la transcripción es larga).
+             */
+            $decoded['transcripcion_completa'] = $transcript_text;
 
             return $decoded;
         } catch (\Throwable $e) {
@@ -355,3 +366,4 @@ PROMPT;
         }
     }
 }
+
