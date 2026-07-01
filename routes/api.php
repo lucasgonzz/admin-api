@@ -25,6 +25,7 @@ use App\Http\Controllers\FollowupRuleController;
 use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\ProtocolEntryController;
+use App\Http\Controllers\SharedDatabaseGroupController;
 use App\Http\Controllers\UpdateCommandController;
 use App\Http\Controllers\UpdateController;
 use App\Http\Controllers\UpdateSeederController;
@@ -108,6 +109,12 @@ Route::prefix('admin')->group(function () {
         Route::post('client', [ClientController::class, 'store_json']);
         Route::put('client/{id}', [ClientController::class, 'update_json']);
         Route::delete('client/{id}', [ClientController::class, 'destroy_json']);
+
+        Route::get('shared-database-groups', [SharedDatabaseGroupController::class, 'index_json']);
+        Route::post('shared-database-groups', [SharedDatabaseGroupController::class, 'store_json']);
+        Route::delete('shared-database-groups/{id}', [SharedDatabaseGroupController::class, 'destroy_json']);
+        Route::post('clients/{id}/shared-database-group', [SharedDatabaseGroupController::class, 'assign_client_json']);
+        Route::delete('clients/{id}/shared-database-group', [SharedDatabaseGroupController::class, 'remove_client_json']);
 
         Route::post('client-api', [ClientApiController::class, 'store_json']);
         Route::put('client-api/{id}', [ClientApiController::class, 'update_json']);

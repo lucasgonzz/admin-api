@@ -31,6 +31,16 @@ class ClientProperties
                 'width' => 64,
             ],
             [
+                'key' => 'shared_database_group_id',
+                'text' => 'Grupo BD compartida',
+                'type' => 'select',
+                'relation' => 'shared_database_group',
+                'relation_label' => 'name',
+                'value' => null,
+                'not_show_on_table' => true,
+                'width' => 180,
+            ],
+            [
                 'key' => 'name',
                 'text' => 'Nombre',
                 'type' => 'text',

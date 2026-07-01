@@ -11,6 +11,7 @@ use App\Models\UpdateCommand;
 use App\Models\UpdateSeeder;
 use App\Models\Version;
 use App\Services\PublishVersionService;
+use App\Services\SharedDatabaseAutoSkipService;
 use App\Services\VersionPathService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -112,6 +113,8 @@ class UpdateController extends BaseController
                 ]);
             }
         }
+
+        $this->apply_shared_database_auto_skip($upgrade);
 
         return redirect()->route('updates.show', $upgrade->id)
                          ->with('success', 'Actualización creada.');
@@ -291,6 +294,8 @@ class UpdateController extends BaseController
                 ]);
             }
         }
+
+        $this->apply_shared_database_auto_skip($upgrade);
 
         return response()->json(['model' => $this->fullModel('update', $upgrade->id)], 201);
     }
@@ -487,5 +492,22 @@ class UpdateController extends BaseController
         if (! $belongs) {
             abort(422, 'La API destino no pertenece al cliente seleccionado.');
         }
+    }
+
+    /**
+     * Marca como skipped los seeders/comandos per_database ya ejecutados
+     * en clientes hermanos del mismo grupo de BD compartida.
+     *
+     * @param ClientVersionUpgrade $upgrade
+     * @return void
+     */
+    protected function apply_shared_database_auto_skip(ClientVersionUpgrade $upgrade)
+    {
+        $service = new SharedDatabaseAutoSkipService();
+        $service->apply($upgrade->load([
+            'client.shared_database_group',
+            'update_seeders.version_seeder',
+            'update_commands.version_command',
+        ]));
     }
 }

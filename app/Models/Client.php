@@ -29,14 +29,22 @@ class Client extends Model
     protected $guarded = [];
 
     protected $casts = [
-        'is_active'  => 'boolean',
-        'user_id'    => 'integer',
+        'is_active'                => 'boolean',
+        'user_id'                  => 'integer',
+        'shared_database_group_id' => 'integer',
         // Datos de configuración recolectados en la Etapa 1 de implementación (para UserSetup).
-        'setup_data' => 'array',
+        'setup_data'               => 'array',
     ];
 
     function scopeWithAll($query) {
-        $query->with('current_version', 'active_client_api', 'client_apis', 'client_employees', 'implementation');
+        $query->with(
+            'current_version',
+            'active_client_api',
+            'client_apis',
+            'client_employees',
+            'implementation',
+            'shared_database_group'
+        );
     }
 
     /**
@@ -106,5 +114,15 @@ class Client extends Model
      */
     public function ecommerce_implementation() {
         return $this->hasOne(EcommerceImplementation::class);
+    }
+
+    /**
+     * Grupo de base de datos compartida al que pertenece este cliente (si aplica).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function shared_database_group()
+    {
+        return $this->belongsTo(SharedDatabaseGroup::class, 'shared_database_group_id');
     }
 }
