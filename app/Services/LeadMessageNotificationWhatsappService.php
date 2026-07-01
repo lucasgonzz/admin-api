@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Log;
 /**
  * Envía un WhatsApp de aviso a los admins suscritos cuando llega un mensaje de un lead.
  *
- * Usa send_template() con la plantilla cc_notif_mensaje_lead para no depender
+ * Usa send_template() con la plantilla cc_notif_mensaje_lead_ para no depender
  * de la ventana de conversación activa de 24hs.
  *
  * Variables de la plantilla (en orden):
@@ -21,8 +21,16 @@ use Illuminate\Support\Facades\Log;
  */
 class LeadMessageNotificationWhatsappService
 {
-    /** Nombre de la plantilla aprobada en Meta Business Manager. */
-    const TEMPLATE_NAME = 'cc_notif_mensaje_lead';
+    /**
+     * Nombre de la plantilla aprobada en Meta Business Manager.
+     *
+     * OJO: el nombre real en Meta lleva un guion bajo final ('...lead_').
+     * Meta lo agregó al crear la plantilla (probablemente por conflicto de
+     * nombre). Si se vuelve a crear la plantilla desde cero, confirmar el
+     * nombre exacto en Administrador de WhatsApp → Administrar plantillas
+     * antes de tocar esta constante.
+     */
+    const TEMPLATE_NAME = 'cc_notif_mensaje_lead_';
 
     /**
      * Servicio de envío de WhatsApp reutilizado por toda la app.
@@ -83,15 +91,28 @@ class LeadMessageNotificationWhatsappService
 
         foreach ($admins as $admin) {
             try {
-                $this->sender->send_template(
+                $message_id = $this->sender->send_template(
                     (string) $admin->phone_number,
                     self::TEMPLATE_NAME,
                     [$nombre, $preview, $link]
                 );
 
+                /* send_template() atrapa sus propias excepciones y devuelve null en vez de
+                 * relanzarlas (ver WhatsappSendService::send_template). Si no revisamos este
+                 * valor acá, un envío fallido (404, template rechazado, etc.) queda logueado
+                 * como "notificación enviada" — exactamente el bug real del 1/7/2026. */
+                if ($message_id === null) {
+                    Log::error('LeadMessageNotificationWhatsappService: envío falló (ver log de WhatsappSendService para el detalle).', [
+                        'lead_id'  => $lead->id,
+                        'admin_id' => $admin->id,
+                    ]);
+                    continue;
+                }
+
                 Log::info('LeadMessageNotificationWhatsappService: notificación enviada.', [
-                    'lead_id'  => $lead->id,
-                    'admin_id' => $admin->id,
+                    'lead_id'    => $lead->id,
+                    'admin_id'   => $admin->id,
+                    'message_id' => $message_id,
                 ]);
             } catch (\Throwable $e) {
                 /* Error individual: se loguea pero no interrumpe las notificaciones al resto de admins. */
