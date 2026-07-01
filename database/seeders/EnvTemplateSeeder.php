@@ -15,7 +15,7 @@ use Illuminate\Database\Seeder;
  * - pusher: configuración de WebSockets Pusher (común entre todos los sistemas).
  * - misc:   drivers de queue, cache y sesión.
  *
- * Idempotente: upsert por key con updateOrCreate (no duplica registros existentes).
+ * Idempotente: crea por key con firstOrCreate (no duplica ni sobreescribe registros existentes).
  */
 class EnvTemplateSeeder extends Seeder
 {
@@ -55,12 +55,13 @@ class EnvTemplateSeeder extends Seeder
             ['key' => 'CACHE_DRIVER',      'value' => 'file',                            'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 2],
             ['key' => 'SESSION_DRIVER',    'value' => 'file',                            'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 3],
             ['key' => 'SESSION_LIFETIME',  'value' => '5256000',                         'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Minutos (~10 años). Sesión web hasta logout.', 'sort_order' => 4],
-            ['key' => 'SANCTUM_EXPIRATION','value' => '',                              'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Ignorado: sanctum.php fuerza tokens sin vencimiento.', 'sort_order' => 5],
+            ['key' => 'ANTHROPIC_API_KEY', 'value' => null,                              'group' => 'misc',   'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'Clave de API de Anthropic para funciones de IA. Configurar el valor en el panel de plantilla .env.', 'sort_order' => 5],
+            ['key' => 'SANCTUM_EXPIRATION','value' => '',                              'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Ignorado: sanctum.php fuerza tokens sin vencimiento.', 'sort_order' => 6],
         ];
 
-        /* Upsert por key: crea o actualiza cada variable sin duplicar. */
+        /* Crea por key solo si no existe: no duplica ni sobreescribe valores editados en el panel. */
         foreach ($rows as $row) {
-            EnvTemplate::updateOrCreate(['key' => $row['key']], $row);
+            EnvTemplate::firstOrCreate(['key' => $row['key']], $row);
         }
     }
 }

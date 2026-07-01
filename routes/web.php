@@ -16,6 +16,19 @@ Route::get('/', function () {
     return redirect()->route('versions.index');
 });
 
+Route::get('/recall', function () {
+    $lead = \App\Models\Lead::find(254);
+    $recall = app(\App\Services\RecallService::class);
+    $utterances = $recall->get_transcript('59a05143-6817-4da8-836a-88669718fb97');
+    if ($utterances) {
+        $text = $recall->format_transcript($utterances);
+        app(\App\Services\CallSummaryService::class)->process_transcript_for_lead($lead, $text);
+        echo "OK, resumen generado\n";
+    } else {
+        echo "Sigue sin poder traer la transcripcion, revisar logs\n";
+    }
+});
+
 // Panel admin (autenticado)
 Route::middleware('auth')->group(function () {
 
