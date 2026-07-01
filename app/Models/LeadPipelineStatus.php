@@ -30,6 +30,7 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_ingreso'    => 'Demo pendiente de ingreso',
         'demo_pendiente_de_terminar'   => 'Demo pendiente de terminar',
         'demo_realizada'               => 'Demo realizada',
+        'closer_activo'                => 'Closer activo',
         'mail2_enviado'                => 'Mail2 enviado',
         'cerrado_ganado'               => 'Cerrado ganado',
         'cerrado_perdido'              => 'Cerrado perdido',
@@ -55,11 +56,35 @@ class LeadPipelineStatus extends Model
         'demo_pendiente_de_ingreso'    => '#dc3545',
         'demo_pendiente_de_terminar'   => '#dc3545',
         'demo_realizada'               => '#0d6efd',
+        'closer_activo'                => '#6f42c1',
         'mail2_enviado'                => '#adb5bd',
         'cerrado_ganado'               => '#495057',
         'cerrado_perdido'              => '#adb5bd',
         'en_pausa'                     => '#adb5bd',
     ];
+
+    /**
+     * Grupo de categoría visual por slug. Los slugs no listados se muestran sin grupo.
+     * `demo_realizada` está ausente deliberadamente: se excluye del selector.
+     */
+    public const DEFAULT_STATUS_GROUPS = [
+        'nuevo'                      => 'Calificación',
+        'contactado'                 => 'Calificación',
+        'calificado'                 => 'Calificación',
+        'demo_agendada'              => 'Demo',
+        'ingresando_demo'            => 'Demo',
+        'demo_en_curso'              => 'Demo',
+        'demo_pendiente_de_ingreso'  => 'Demo',
+        'demo_pendiente_de_terminar' => 'Demo',
+        'closer_activo'              => 'Cierre',
+        'cerrado_ganado'             => 'Cierre',
+        'cerrado_perdido'            => 'Fin',
+        'en_pausa'                   => 'Fin',
+        'mail2_enviado'              => 'Fin',
+    ];
+
+    /** Slug excluido de los selectores de la UI (existe en BD pero es estado técnico interno). */
+    public const SLUG_HIDDEN_FROM_SELECT = 'demo_realizada';
 
     protected $guarded = [];
 
@@ -153,20 +178,26 @@ class LeadPipelineStatus extends Model
     }
 
     /**
-     * Opciones `{ value, text }` para el select de estado en admin-spa.
+     * Opciones `{ value, text, color, group }` para el select de estado en admin-spa.
+     * Excluye `demo_realizada` (estado técnico interno).
      *
-     * @return array<int, array{value: string, text: string}>
+     * @return array<int, array{value: string, text: string, color: string, group: string|null}>
      */
     public static function options_for_meta(): array
     {
         $rows = static::query()->orderBy('sort_order')->orderBy('id')->get();
+
         if ($rows->isEmpty()) {
             $options = [];
             foreach (static::DEFAULT_STATUSES as $slug => $label) {
+                if ($slug === static::SLUG_HIDDEN_FROM_SELECT) {
+                    continue;
+                }
                 $options[] = [
                     'value' => $slug,
                     'text'  => $label,
                     'color' => static::DEFAULT_COLORS[$slug] ?? '#ced4da',
+                    'group' => static::DEFAULT_STATUS_GROUPS[$slug] ?? null,
                 ];
             }
 
@@ -175,10 +206,14 @@ class LeadPipelineStatus extends Model
 
         $options = [];
         foreach ($rows as $row) {
+            if ($row->slug === static::SLUG_HIDDEN_FROM_SELECT) {
+                continue;
+            }
             $options[] = [
                 'value' => $row->slug,
                 'text'  => $row->label,
                 'color' => $row->color ?: (static::DEFAULT_COLORS[$row->slug] ?? '#ced4da'),
+                'group' => static::DEFAULT_STATUS_GROUPS[$row->slug] ?? null,
             ];
         }
 
