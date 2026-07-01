@@ -108,6 +108,11 @@ class AgentPromptSyncService
             'repo_path' => 'agentes/lead/recursos/referidos.md',
             'target'    => self::TARGET_SYNCED_FILE,
         ],
+        [
+            'key'       => 'implementacion_protocolo',
+            'repo_path' => 'prompts_agentes/implementacion_protocolo.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+        ],
     ];
 
     /**
