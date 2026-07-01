@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\ModelProperties\LeadProperties;
 use App\Models\Concerns\HasUuid;
+use App\Models\Concerns\UsesVirtualTime;
 use App\Models\LeadAdminNotification;
 use App\Models\LeadPipelineStatus;
 use Illuminate\Database\Eloquent\Model;
@@ -26,6 +27,7 @@ use Illuminate\Support\Facades\Auth;
 class Lead extends Model
 {
     use HasUuid;
+    use UsesVirtualTime;
 
     /**
      * Estados por defecto del pipeline (legacy; catálogo dinámico en {@see LeadPipelineStatus}).

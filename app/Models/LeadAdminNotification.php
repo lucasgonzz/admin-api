@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\UsesVirtualTime;
 use Illuminate\Database\Eloquent\Relations\Pivot;
 
 /**
@@ -13,6 +14,8 @@ use Illuminate\Database\Eloquent\Relations\Pivot;
  */
 class LeadAdminNotification extends Pivot
 {
+    use UsesVirtualTime;
+
     /** @var string Nombre explícito de la tabla pivot. */
     protected $table = 'lead_admin_notifications';
 

@@ -13,6 +13,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadPartner;
 use App\Models\LeadPipelineStatus;
+use App\Helpers\AppTime;
 use Carbon\Carbon;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
@@ -245,7 +246,7 @@ TXT;
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->whereNotNull('demo_id')
-            ->where('demo_date', '>=', now('America/Argentina/Buenos_Aires')->toDateString())
+            ->where('demo_date', '>=', AppTime::now()->toDateString())
             ->get(['id', 'contact_name', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time'])
             ->map(fn ($lead_row) => [
                 'lead_id'         => $lead_row->id,
@@ -406,7 +407,7 @@ TXT;
          */
         if (empty($calendar_snapshot)) {
             $calendar_snapshot = [
-                'consultado_en' => now()->toIso8601String(),
+                'consultado_en' => AppTime::now()->toIso8601String(),
                 'closers'       => [],
                 'nota'          => 'sin_datos',
             ];
@@ -521,7 +522,7 @@ TXT;
         $demos = \App\Models\Demo::orderBy('id')->get();
 
         /* Instante actual en Argentina. */
-        $now         = now('America/Argentina/Buenos_Aires');
+        $now         = AppTime::now();
         $now_minutes = $now->hour * 60 + $now->minute;
         $today_key   = $now->copy()->startOfDay()->format('Y-m-d');
         /* El cursor arranca en mañana: nunca se ofrece el día actual como opción de demo.
@@ -885,7 +886,7 @@ TXT;
         }
 
         return [
-            'consultado_en' => $base_snapshot['consultado_en'] ?? ($extra_snapshot['consultado_en'] ?? now()->toIso8601String()),
+            'consultado_en' => $base_snapshot['consultado_en'] ?? ($extra_snapshot['consultado_en'] ?? AppTime::now()->toIso8601String()),
             'closers'       => array_values($merged_closers),
         ];
     }
@@ -1185,7 +1186,7 @@ TXT;
         /* Construir lista de días hábiles a partir de HOY. */
         $working_days = [];
         /* Instante actual en Argentina; se usa para filtrar slots de hoy ya pasados. */
-        $now = now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
         /* Minutos transcurridos del día actual (para comparar contra horas de slot). */
         $now_minutes = $now->hour * 60 + $now->minute;
         /* Fecha de hoy (Y-m-d) para detectar el día actual dentro del loop de slots. */
@@ -1786,7 +1787,7 @@ TXT;
                 if (! $lead->demo_ingreso_confirmado) {
                     /* Marcar el flag y registrar el momento exacto de confirmación. */
                     $lead->demo_ingreso_confirmado    = true;
-                    $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');
+                    $lead->demo_ingreso_confirmado_at = AppTime::now();
                     /* Habilitar la notificación a admins (se dispara después del save). */
                     $notificar_ingreso_confirmado = true;
                     Log::info('LeadAiService: ingreso a demo confirmado por inferencia.', [
@@ -1817,7 +1818,7 @@ TXT;
                 if (! $lead->demo_terminada_confirmada) {
                     /* Marcar el flag y registrar el momento exacto de confirmación de fin. */
                     $lead->demo_terminada_confirmada    = true;
-                    $lead->demo_terminada_confirmada_at = now('America/Argentina/Buenos_Aires');
+                    $lead->demo_terminada_confirmada_at = AppTime::now();
                     /* El closer toma el control tras la demo: Claude deja de responder automáticamente. */
                     $lead->claude_auto_reply = false;
                     /* Habilitar la notificación a admins (se dispara después del save). */
@@ -2112,7 +2113,7 @@ TXT;
                 $lead->loadMissing('demo');
                 $mailable = \App\Mail\Helpers\LeadDemoMailHelper::build($lead);
                 \Illuminate\Support\Facades\Mail::to($lead->email)->send($mailable);
-                $lead->update(['demo_mail_sent_at' => now()]);
+                $lead->update(['demo_mail_sent_at' => AppTime::now()]);
                 Log::info('LeadAiService: Mail 1 enviado automáticamente al guardar email del lead.', [
                     'lead_id' => $lead->id,
                     'email'   => $lead->email,
@@ -2552,7 +2553,7 @@ TXT;
          * temporales relativas ("dentro de 5 días", "el viernes que viene", etc.)
          * tanto en la primera como en la segunda llamada.
          */
-        $now_ar    = now('America/Argentina/Buenos_Aires');
+        $now_ar    = AppTime::now();
         $day_names = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
         $fecha_hoy = ucfirst($day_names[$now_ar->dayOfWeek])
             . ' ' . $now_ar->format('d/m/Y')

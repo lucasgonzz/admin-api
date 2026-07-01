@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\UsesVirtualTime;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -9,6 +10,8 @@ use Illuminate\Database\Eloquent\Model;
  */
 class LeadMessage extends Model
 {
+    use UsesVirtualTime;
+
     protected $guarded = [];
 
     /**
@@ -30,7 +33,7 @@ class LeadMessage extends Model
             }
 
             /** Preferir sent_at (webhook WhatsApp) sobre created_at del registro. */
-            $timestamp = $message->sent_at ?? $message->created_at ?? now();
+            $timestamp = $message->sent_at ?? $message->created_at ?? \App\Helpers\AppTime::now();
 
             /** Lead dueño del mensaje: actualizar last_message_at y, si aplica, first_message_at. */
             $lead = Lead::query()->where('id', $message->lead_id)->first();
