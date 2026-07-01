@@ -17,7 +17,8 @@ use Illuminate\Support\Facades\Log;
  *
  * Se ejecuta cada minuto. Busca leads en estado `ingresando_demo` que ya recibieron
  * el check de ingreso pero no confirmaron (`demo_ingreso_confirmado = false`) y
- * superaron el timeout de espera (`demo_ingreso_timeout_minutos` desde el inicio).
+ * superaron el timeout de espera (`demo_ingreso_timeout_minutos` desde el último mensaje
+ * del lead posterior al inicio, o desde el inicio si el lead no respondió).
  *
  * No envía mensaje al lead (Claude ya está gestionando la conversación).
  * Solo cambia el estado para que el equipo lo vea y el comando 097 notifique a admins.
@@ -45,17 +46,11 @@ class CheckDemoIngresoTimeout extends Command
      */
     public function handle(): int
     {
-        /* Minutos de espera desde el inicio antes de considerar el ingreso fallido. */
+        /* Minutos de espera antes de considerar el ingreso fallido (desde último mensaje del lead o inicio). */
         $timeout_minutos = LeadDemoSettings::get_ingreso_timeout_minutos();
 
         /* Momento actual en timezone Argentina. */
         $now = Carbon::now('America/Argentina/Buenos_Aires');
-
-        /*
-         * Límite temporal: el timeout empieza a contar desde el inicio de la demo (demo_datetime).
-         * Un lead cuya demo_datetime es anterior a (now - timeout_minutos) ya superó el plazo.
-         */
-        $limite = $now->copy()->subMinutes($timeout_minutos);
 
         /* Buscar leads en ingresando_demo que no confirmaron y aún no fueron notificados. */
         $candidates = Lead::query()
@@ -82,10 +77,22 @@ class CheckDemoIngresoTimeout extends Command
             }
 
             /*
-             * Verificar que ya pasó el timeout desde el inicio.
-             * Si demo_datetime + timeout_minutos < now, el plazo venció.
+             * Referencia temporal: último mensaje del lead posterior al inicio de la demo.
+             * Si el lead no envió nada desde el check de ingreso, usar el inicio de la demo.
              */
-            if ($demo_datetime->gt($limite)) {
+            $ultimo_lead_msg = \App\Models\LeadMessage::query()
+                ->where('lead_id', $lead->id)
+                ->where('sender', 'lead')
+                ->where('created_at', '>=', $demo_datetime)
+                ->orderByDesc('created_at')
+                ->first();
+
+            $referencia = $ultimo_lead_msg
+                ? $ultimo_lead_msg->created_at->setTimezone('America/Argentina/Buenos_Aires')
+                : $demo_datetime;
+
+            /* El timeout vence cuando referencia + timeout_minutos ya pasó. */
+            if ($referencia->copy()->addMinutes($timeout_minutos)->gt($now)) {
                 continue;
             }
 
