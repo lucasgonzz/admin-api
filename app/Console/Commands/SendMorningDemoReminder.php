@@ -9,6 +9,7 @@ use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Services\SystemErrorWhatsappService;
+use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -92,7 +93,7 @@ class SendMorningDemoReminder extends Command
     public function handle(): int
     {
         // Momento actual en timezone Argentina.
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         // Hora configurada en admin (formato H:i, ej. 09:00).
         $configured_hour = LeadDemoSettings::get_recordatorio_manana_hora();

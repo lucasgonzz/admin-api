@@ -33,6 +33,7 @@ use App\Http\Controllers\VersionController;
 use App\Http\Controllers\Api\AdminUserController;
 use App\Http\Controllers\Api\AdminCalendarConnectionController;
 use App\Http\Controllers\Api\ImplementationFormController;
+use App\Http\Controllers\Api\DebugVirtualTimeController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -418,3 +419,8 @@ Route::prefix('admin')->group(function () {
 
     });
 });
+
+// Debug: control del tiempo virtual (solo accesible en local — el controller aborta 404 en producción)
+Route::get('/debug/virtual-time', [DebugVirtualTimeController::class, 'show']);
+Route::post('/debug/virtual-time', [DebugVirtualTimeController::class, 'set']);
+Route::delete('/debug/virtual-time', [DebugVirtualTimeController::class, 'clear']);

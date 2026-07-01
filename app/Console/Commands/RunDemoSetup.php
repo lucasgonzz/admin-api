@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Lead;
 use App\Services\LeadDemoSettings;
+use App\Helpers\AppTime;
 use App\Services\RunDemoSetupService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -45,7 +46,7 @@ class RunDemoSetup extends Command
         $setup_minutos = LeadDemoSettings::get_setup_minutos_antes();
 
         /* Momento actual en timezone Argentina. */
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         /* Límite superior de la ventana: inicio de demo debe estar dentro de los próximos X minutos. */
         $window_end = $now->copy()->addMinutes($setup_minutos);

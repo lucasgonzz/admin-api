@@ -6,6 +6,7 @@ use App\Models\Lead;
 use App\Services\DemoCicloAdminNotificationService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -50,7 +51,7 @@ class CheckDemoIngresoTimeout extends Command
         $timeout_minutos = LeadDemoSettings::get_ingreso_timeout_minutos();
 
         /* Momento actual en timezone Argentina. */
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         /* Buscar leads en ingresando_demo que no confirmaron y aún no fueron notificados. */
         $candidates = Lead::query()

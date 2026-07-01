@@ -7,6 +7,7 @@ use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Services\SystemErrorWhatsappService;
+use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -66,7 +67,7 @@ class SendDemoReminders extends Command
     public function handle(): int
     {
         // Momento actual y límite superior de la ventana de anticipación (timezone Argentina).
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         // Ventana de anticipación dinámica: se lee del setting configurable para poder ajustarla
         // sin redeploy; si no hay setting configurado, el default del servicio es 15 minutos.

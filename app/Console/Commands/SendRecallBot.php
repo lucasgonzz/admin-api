@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Lead;
 use App\Services\LeadDemoSettings;
+use App\Helpers\AppTime;
 use App\Services\RecallService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -52,7 +53,7 @@ class SendRecallBot extends Command
         $gracia_minutos    = LeadDemoSettings::get_gracia_minutos_post();
 
         /* Momento actual en timezone Argentina (misma lógica que los demás commands de demo). */
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         /* Buscar leads candidatos: demo realizada, con meet_url, sin bot Recall enviado, con fecha de hoy. */
         $candidates = Lead::query()

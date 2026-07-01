@@ -6,6 +6,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\DemoCicloAdminNotificationService;
 use App\Services\LeadBroadcastService;
+use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -62,7 +63,7 @@ class CheckDemoIngress extends Command
     public function handle(): int
     {
         /* Momento actual en timezone Argentina. */
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         /*
          * Ventana de ±2 minutos alrededor del inicio exacto de la demo

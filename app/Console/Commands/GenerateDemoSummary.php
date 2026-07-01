@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\Lead;
+use App\Helpers\AppTime;
 use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -75,7 +76,7 @@ class GenerateDemoSummary extends Command
         $duracion        = LeadDemoSettings::get_duracion_minutos();
 
         /* Momento actual en timezone Argentina. */
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         /* Buscar leads con demo agendada, sin resumen generado aún. */
         $candidates = Lead::query()

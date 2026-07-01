@@ -6,6 +6,7 @@ use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -70,7 +71,7 @@ class CheckDemoFinSeguimiento extends Command
         $seguimiento_minutos = LeadDemoSettings::get_fin_seguimiento_minutos();
 
         /* Momento actual en timezone Argentina. */
-        $now = Carbon::now('America/Argentina/Buenos_Aires');
+        $now = AppTime::now();
 
         /*
          * Referencia: el check de fin se mandó en el momento demo_datetime + duracion.

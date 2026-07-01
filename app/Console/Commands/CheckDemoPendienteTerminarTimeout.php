@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Lead;
 use App\Services\LeadBroadcastService;
+use App\Helpers\AppTime;
 use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -45,7 +46,7 @@ class CheckDemoPendienteTerminarTimeout extends Command
         /* Duración de la demo y timeout configurable desde el fin de la misma. */
         $duracion_minutos = LeadDemoSettings::get_duracion_minutos();
         $timeout_minutos  = LeadDemoSettings::get_pendiente_terminar_timeout_minutos();
-        $now              = Carbon::now('America/Argentina/Buenos_Aires');
+        $now              = AppTime::now();
 
         /* Candidatos: leads en demo_pendiente_de_terminar con fecha y hora de demo cargadas. */
         $candidates = Lead::query()

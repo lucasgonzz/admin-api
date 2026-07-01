@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\Lead;
 use App\Models\LeadPipelineStatus;
 use App\Services\LeadBroadcastService;
+use App\Helpers\AppTime;
 use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -46,7 +47,7 @@ class CheckDemoPendienteIngresoTimeout extends Command
         $horas_timeout = LeadDemoSettings::get_pendiente_ingreso_horas_timeout();
 
         /* Momento actual y límite: demos cuyo inicio fue antes de este instante se revierten. */
-        $now    = Carbon::now('America/Argentina/Buenos_Aires');
+        $now    = AppTime::now();
         $limite = $now->copy()->subHours($horas_timeout);
 
         /*
