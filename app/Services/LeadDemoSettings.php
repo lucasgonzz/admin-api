@@ -69,6 +69,9 @@ class LeadDemoSettings
     /** Clave: horas desde el inicio de la demo sin ingreso confirmado antes de revertir a calificado. */
     public const KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT = 'demo_pendiente_ingreso_horas_timeout';
 
+    /** Clave: minutos desde el fin de la demo antes de pasar demo_pendiente_de_terminar → closer_activo. */
+    public const KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS = 'demo_pendiente_terminar_timeout_minutos';
+
     /** Clave: minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai. */
     public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
 
@@ -123,6 +126,9 @@ class LeadDemoSettings
     /** Valor por defecto: 24 horas sin ingreso antes de revertir a calificado. */
     private const DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT = 24;
 
+    /** Valor por defecto: 120 minutos (2 horas). */
+    private const DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS = 120;
+
     /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
     private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
@@ -160,6 +166,7 @@ class LeadDemoSettings
             'fin_seguimiento_minutos'             => self::get_fin_seguimiento_minutos(),
             'fin_timeout_minutos'                 => self::get_fin_timeout_minutos(),
             'pendiente_ingreso_horas_timeout'     => self::get_pendiente_ingreso_horas_timeout(),
+            'pendiente_terminar_timeout_minutos'  => self::get_pendiente_terminar_timeout_minutos(),
         ];
     }
 
@@ -243,6 +250,8 @@ class LeadDemoSettings
             self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT,
             (string) self::clamp_pendiente_ingreso_horas((int) ($data['pendiente_ingreso_horas_timeout'] ?? self::DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT))
         );
+
+        AdminSetting::set(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::clamp((int) ($data['pendiente_terminar_timeout_minutos'] ?? self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS)));
     }
 
     /**
@@ -302,6 +311,9 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT) === null) {
             AdminSetting::set(self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT, (string) self::DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT);
+        }
+        if (AdminSetting::get(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS);
         }
     }
 
@@ -531,6 +543,18 @@ class LeadDemoSettings
         $stored = (int) AdminSetting::get(self::KEY_PENDIENTE_INGRESO_HORAS_TIMEOUT, (string) self::DEFAULT_PENDIENTE_INGRESO_HORAS_TIMEOUT);
 
         return self::clamp_pendiente_ingreso_horas($stored);
+    }
+
+    /**
+     * Minutos desde el final de la demo antes de pasar demo_pendiente_de_terminar → closer_activo.
+     *
+     * Rango: 0–240 minutos.
+     *
+     * @return int
+     */
+    public static function get_pendiente_terminar_timeout_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS));
     }
 
     /**
