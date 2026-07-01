@@ -618,7 +618,7 @@ TXT;
          * para no romper el flujo de WhatsApp por un error externo. */
         try {
             $google_busy_service = new CloserGoogleCalendarBusyService(
-                new \App\Services\GoogleCalendarOAuthService()
+                app(\App\Services\GoogleCalendarOAuthService::class)
             );
             $google_busy_result = $google_busy_service->get_busy_ranges_for_dates($date_strings);
             $google_busy        = $google_busy_result['ranges'] ?? [];
@@ -723,7 +723,7 @@ TXT;
             /* Agregar también la tercera capa (Google Calendar) para el día extra. */
             try {
                 $google_busy_service_extra = new CloserGoogleCalendarBusyService(
-                    new \App\Services\GoogleCalendarOAuthService()
+                    app(\App\Services\GoogleCalendarOAuthService::class)
                 );
                 $google_busy_extra_result = $google_busy_service_extra->get_busy_ranges_for_dates([$extra_key]);
                 $google_busy_extra        = $google_busy_extra_result['ranges'] ?? [];
@@ -2013,9 +2013,10 @@ TXT;
          */
         if ($google_event_delete_needed || $google_event_create_needed) {
             try {
+                $google_oauth_service = app(GoogleCalendarOAuthService::class);
                 $google_event_service = new CloserGoogleCalendarEventService(
-                    new GoogleCalendarOAuthService(),
-                    new CloserGoogleCalendarBusyService(new GoogleCalendarOAuthService())
+                    $google_oauth_service,
+                    new CloserGoogleCalendarBusyService($google_oauth_service)
                 );
 
                 if ($google_event_delete_needed) {

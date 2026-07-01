@@ -58,6 +58,24 @@ class GoogleCalendarOAuthService
     const OPENID_SCOPE = 'openid';
 
     /**
+     * Servicio de notificación WhatsApp a admins ante errores/eventos del sistema.
+     * Se usa para avisar cuando Google revoca el token del closer (invalid_grant):
+     * si nadie se entera, la capa de disponibilidad de Google Calendar deja de
+     * bloquear horarios del closer sin que nadie lo note.
+     *
+     * @var SystemErrorWhatsappService
+     */
+    protected $error_notifier;
+
+    /**
+     * @param SystemErrorWhatsappService $error_notifier Notificador de eventos/errores del sistema.
+     */
+    public function __construct(SystemErrorWhatsappService $error_notifier)
+    {
+        $this->error_notifier = $error_notifier;
+    }
+
+    /**
      * Construye la URL de consentimiento OAuth2 de Google para que el closer la visite.
      *
      * Usa access_type=offline + prompt=consent para garantizar que Google devuelva
@@ -201,8 +219,27 @@ class GoogleCalendarOAuthService
             $body = $response->json();
             // invalid_grant significa que el usuario revocó el acceso.
             if (isset($body['error']) && $body['error'] === 'invalid_grant') {
-                // Marcar la conexión como inactiva para que no bloquee futuros cálculos.
-                $connection->update(['is_active' => false]);
+                /*
+                 * Update atómico condicionado a is_active=true: si dos llamadas concurrentes
+                 * (ej. cálculo de disponibilidad + panel del closer pidiendo eventos al mismo
+                 * tiempo) pisan la misma conexión, solo UNA de ellas ve filas afectadas > 0.
+                 * Eso evita notificar dos veces la misma revocación y, sobre todo, evita
+                 * volver a notificar en cada intento posterior mientras siga inactiva
+                 * (las siguientes consultas ni siquiera van a encontrar la conexión, porque
+                 * los callers filtran por is_active=true antes de llamar a este método).
+                 */
+                $filas_afectadas = AdminCalendarConnection::where('id', $connection->id)
+                    ->where('is_active', true)
+                    ->update(['is_active' => false]);
+
+                // Mantener el objeto en memoria sincronizado por si el llamador lo sigue usando.
+                $connection->is_active = false;
+
+                if ($filas_afectadas > 0) {
+                    // Recién se detectó la revocación en este momento: notificar una sola vez.
+                    $this->notify_token_revoked($connection);
+                }
+
                 throw new GoogleCalendarTokenRevokedException(
                     (int) $connection->admin_id,
                     'Google Calendar: token revocado por el usuario (invalid_grant).'
@@ -215,6 +252,47 @@ class GoogleCalendarOAuthService
         }
 
         return (string) $response->json('access_token');
+    }
+
+    /**
+     * Notifica a los admins suscritos (notify_send_errors_whatsapp=true) que el token
+     * de Google Calendar de un closer fue revocado y la conexión quedó inactiva.
+     *
+     * Se llama una sola vez por transición activo→inactivo — ver el update atómico
+     * condicionado en get_fresh_access_token() que garantiza esto incluso ante
+     * llamadas concurrentes.
+     *
+     * @param AdminCalendarConnection $connection Conexión que acaba de quedar inactiva.
+     * @return void
+     */
+    protected function notify_token_revoked(AdminCalendarConnection $connection): void
+    {
+        // Nombre del admin si la relación resuelve bien; si falla, degradar a solo el ID.
+        $admin_nombre = null;
+        try {
+            $admin_nombre = $connection->admin ? $connection->admin->name : null;
+        } catch (\Exception $e) {
+            // No es crítico para la notificación: seguir con null.
+        }
+
+        $identificador = $admin_nombre
+            ? ($admin_nombre . ' (admin #' . $connection->admin_id . ')')
+            : ('admin #' . $connection->admin_id);
+
+        $cuenta = $connection->google_account_email
+            ? (' — cuenta ' . $connection->google_account_email)
+            : '';
+
+        $this->error_notifier->notify_send_error(
+            'Google Calendar del closer',
+            'Se desconectó el calendario de ' . $identificador . $cuenta . '. '
+                . 'Google revocó el token (invalid_grant). Motivo más probable: la app está '
+                . 'en modo "Testing" en Google Cloud Console (los tokens expiran a los 7 días '
+                . 'sin importar el uso); también puede ser revocación manual del usuario o '
+                . 'cambio de contraseña de la cuenta Google. Desde ahora esta capa de '
+                . 'disponibilidad NO está bloqueando el calendario de este closer hasta que '
+                . 'se reconecte desde el admin (Usuarios admin).'
+        );
     }
 
     /**
