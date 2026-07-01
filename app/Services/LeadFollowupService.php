@@ -338,20 +338,15 @@ class LeadFollowupService
         $contact_name = $lead->contact_name ?? '';
 
         // Envío directo del template aprobado a través de Kapso/Meta.
+        // El contexto se pasa directo para que, si falla, WhatsappSendService notifique a
+        // los admins de forma centralizada (con throttle de máx 1 aviso cada 10 min).
         $whatsapp_message_id = app(WhatsappSendService::class)->send_template(
             $lead->phone,
             $template->template_name,
             [$contact_name],
-            $template->language_code
+            $template->language_code,
+            "Seguimiento automático - Lead #{$lead->id} ({$lead->contact_name})"
         );
-
-        /* Si el envío falló (id null), notificar a los admins suscritos. */
-        if ($whatsapp_message_id === null) {
-            app(SystemErrorWhatsappService::class)->notify_send_error(
-                "Seguimiento automático - Lead #{$lead->id} ({$lead->contact_name})",
-                "send_template() retornó null para plantilla {$template->template_name}"
-            );
-        }
 
         // Registramos el seguimiento en la conversación del lead (trazabilidad).
         // Usamos el texto real de la plantilla (con nombre sustituido) si está disponible.

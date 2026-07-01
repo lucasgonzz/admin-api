@@ -56,15 +56,23 @@ class WhatsappSendService
     /**
      * Envía un mensaje de texto a un número WhatsApp y retorna el ID de Meta.
      *
-     * @param string $to   Número destino en formato E.164 (+549…).
-     * @param string $body Texto del mensaje.
+     * @param string      $to                        Número destino en formato E.164 (+549…).
+     * @param string      $body                       Texto del mensaje.
+     * @param string|null $context                    Descripción legible para la notificación de fallo
+     *                                                 a admins (ej: "Sugerencia de Claude - Lead #42 (Juan)").
+     *                                                 Si es null se arma una descripción genérica.
+     * @param bool        $skip_failure_notification  Interno: true SOLO cuando este envío es la propia
+     *                                                 notificación de fallo a un admin (evita recursión
+     *                                                 infinita si Kapso está caído y ese envío también falla).
      *
      * @return string|null whatsapp_message_id asignado por Meta, o null si falló.
      */
-    public function send_text(string $to, string $body): ?string
+    public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
     {
-        $context = $this->resolve_send_context();
-        if ($context === null) {
+        $notify_context = $context !== null ? $context : "Envío de texto a {$to}";
+
+        $send_context = $this->resolve_send_context($skip_failure_notification);
+        if ($send_context === null) {
             return null;
         }
 
@@ -74,6 +82,7 @@ class WhatsappSendService
             Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
                 'to' => $to,
             ]);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
 
             return null;
         }
@@ -81,14 +90,15 @@ class WhatsappSendService
         $text_body = trim($body);
         if ($text_body === '') {
             Log::channel('daily')->warning('WhatsappSendService: cuerpo de mensaje vacío.');
+            $this->notify_admins_of_failure($notify_context, 'Cuerpo de mensaje vacío.', $skip_failure_notification);
 
             return null;
         }
 
-        $endpoint = $this->messages_endpoint($context['phone_number_id']);
+        $endpoint = $this->messages_endpoint($send_context['phone_number_id']);
 
         try {
-            $http = KapsoHttpClient::make($context['api_key'], (int) config('services.client_api.timeout', 15));
+            $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
 
             $response = $http
                 ->retry((int) config('services.client_api.retries', 2), 500)
@@ -101,12 +111,18 @@ class WhatsappSendService
                     ],
                 ]);
 
-            return $this->extract_message_id_from_response($response, $normalized_to);
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure($notify_context, 'Kapso/Meta no devolvió message_id (ver logs para detalle).', $skip_failure_notification);
+            }
+
+            return $message_id;
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsappSendService: excepción al enviar texto.', [
                 'to'    => $normalized_to,
                 'error' => $exception->getMessage(),
             ]);
+            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), $skip_failure_notification);
         }
 
         return null;
@@ -118,17 +134,22 @@ class WhatsappSendService
      * Necesario para contactar leads pasadas las 24 hs de su última respuesta,
      * cuando Meta ya no permite mensajes free-form.
      *
-     * @param string   $to            Número destino en formato E.164 (+549…).
-     * @param string   $template_name Nombre exacto de la plantilla aprobada en Meta.
-     * @param array    $variables     Valores de las variables del body, en orden ({{1}}, {{2}}…).
-     * @param string   $language_code Código de idioma de la plantilla en Meta.
+     * @param string      $to            Número destino en formato E.164 (+549…).
+     * @param string      $template_name Nombre exacto de la plantilla aprobada en Meta.
+     * @param array       $variables     Valores de las variables del body, en orden ({{1}}, {{2}}…).
+     * @param string      $language_code Código de idioma de la plantilla en Meta.
+     * @param string|null $context       Descripción legible para la notificación de fallo a admins
+     *                                   (ej: "Seguimiento automático - Lead #42 (Juan)"). Si es null
+     *                                   se arma una descripción genérica con el nombre de la plantilla.
      *
      * @return string|null whatsapp_message_id asignado por Meta, o null si falló.
      */
-    public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR'): ?string
+    public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
     {
-        $context = $this->resolve_send_context();
-        if ($context === null) {
+        $notify_context = $context !== null ? $context : "Envío de plantilla '{$template_name}' a {$to}";
+
+        $send_context = $this->resolve_send_context();
+        if ($send_context === null) {
             return null;
         }
 
@@ -138,6 +159,7 @@ class WhatsappSendService
             Log::channel('daily')->warning('WhatsappSendService: número destino inválido (template).', [
                 'to' => $to,
             ]);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", false);
 
             return null;
         }
@@ -163,22 +185,28 @@ class WhatsappSendService
             ]];
         }
 
-        $endpoint = $this->messages_endpoint($context['phone_number_id']);
+        $endpoint = $this->messages_endpoint($send_context['phone_number_id']);
 
         try {
-            $http = KapsoHttpClient::make($context['api_key'], (int) config('services.client_api.timeout', 15));
+            $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
 
             $response = $http
                 ->retry((int) config('services.client_api.retries', 2), 500)
                 ->post($endpoint, $payload);
 
-            return $this->extract_message_id_from_response($response, $normalized_to);
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure($notify_context, "Kapso/Meta no devolvió message_id para la plantilla {$template_name}.", false);
+            }
+
+            return $message_id;
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsappSendService: excepción al enviar template.', [
                 'to'       => $normalized_to,
                 'template' => $template_name,
                 'error'    => $exception->getMessage(),
             ]);
+            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), false);
         }
 
         return null;
@@ -350,11 +378,17 @@ class WhatsappSendService
                 'status' => $response->status(),
                 'body'   => substr($response->body(), 0, 500),
             ]);
+            $this->notify_admins_of_failure(
+                "Subida de adjunto ({$mime}) a WhatsApp",
+                'Kapso respondió con error al subir el archivo. Status: ' . $response->status(),
+                false
+            );
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsappSendService: excepción al subir media.', [
                 'path'  => $absolute_path,
                 'error' => $exception->getMessage(),
             ]);
+            $this->notify_admins_of_failure("Subida de adjunto ({$mime}) a WhatsApp", $exception->getMessage(), false);
         }
 
         return null;
@@ -402,12 +436,18 @@ class WhatsappSendService
                     'image'             => $image_payload,
                 ]);
 
-            return $this->extract_message_id_from_response($response, $normalized_to);
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure("Envío de imagen a {$to}", 'Kapso/Meta no devolvió message_id.', false);
+            }
+
+            return $message_id;
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsappSendService: excepción al enviar imagen.', [
                 'to'    => $normalized_to,
                 'error' => $exception->getMessage(),
             ]);
+            $this->notify_admins_of_failure("Envío de imagen a {$to}", $exception->getMessage(), false);
         }
 
         return null;
@@ -455,12 +495,18 @@ class WhatsappSendService
                     'audio'             => $audio_payload,
                 ]);
 
-            return $this->extract_message_id_from_response($response, $normalized_to);
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure("Envío de audio a {$to}", 'Kapso/Meta no devolvió message_id.', false);
+            }
+
+            return $message_id;
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsappSendService: excepción al enviar audio.', [
                 'to'    => $normalized_to,
                 'error' => $exception->getMessage(),
             ]);
+            $this->notify_admins_of_failure("Envío de audio a {$to}", $exception->getMessage(), false);
         }
 
         return null;
@@ -684,19 +730,27 @@ class WhatsappSendService
     /**
      * Configuración activa de Kapso para envíos salientes.
      *
+     * @param bool $skip_failure_notification Interno: ver {@see send_text()}.
+     *
      * @return array{api_key: string, phone_number_id: string}|null
      */
-    private function resolve_send_context(): ?array
+    private function resolve_send_context(bool $skip_failure_notification = false): ?array
     {
         $config = WhatsappConfig::getActive();
         if (! $config || ! $config->is_active) {
             Log::channel('daily')->warning('WhatsappSendService: configuración inactiva o inexistente.');
+            $this->notify_admins_of_failure(
+                'Configuración de WhatsApp',
+                'No hay configuración activa de WhatsApp (WhatsappConfig::getActive() es null o is_active=false). Ningún mensaje se está enviando.',
+                $skip_failure_notification
+            );
 
             return null;
         }
 
         // Modo de prueba: cortamos el envío real (devolvemos null) pero sin warning,
         // ya que es un estado esperado. El resto del pipeline (sugerencias, guardado) sigue normal.
+        // No se notifica a admins: no es una falla, es un comportamiento intencional.
         if ($config->test_mode) {
             Log::channel('daily')->info('WhatsappSendService: test_mode activo, mensaje no enviado.');
 
@@ -707,6 +761,11 @@ class WhatsappSendService
         $phone_number_id = trim((string) $config->phone_number_id);
         if ($api_key === '' || $phone_number_id === '') {
             Log::channel('daily')->warning('WhatsappSendService: kapso_api_key o phone_number_id vacíos.');
+            $this->notify_admins_of_failure(
+                'Configuración de WhatsApp',
+                'kapso_api_key o phone_number_id están vacíos en la configuración activa.',
+                $skip_failure_notification
+            );
 
             return null;
         }
@@ -715,6 +774,39 @@ class WhatsappSendService
             'api_key'         => $api_key,
             'phone_number_id' => $phone_number_id,
         ];
+    }
+
+    /**
+     * Notifica a los admins suscritos que un envío de WhatsApp falló.
+     *
+     * Punto único de disparo hacia {@see SystemErrorWhatsappService}, que a su vez agrupa
+     * ráfagas de fallos (máximo 1 WhatsApp cada 10 minutos, ver esa clase para el detalle).
+     *
+     * $skip_failure_notification debe ser true únicamente cuando el envío que falló ES la
+     * propia notificación de fallo hacia un admin (SystemErrorWhatsappService::notify_send_error
+     * llama a send_text() con este flag en true) — evita que un Kapso caído dispare una
+     * recursión de notificaciones fallidas notificando notificaciones fallidas.
+     *
+     * @param string $context                    Descripción legible de qué se intentaba enviar.
+     * @param string $detail                      Detalle del error (excepción, status HTTP, etc.).
+     * @param bool   $skip_failure_notification
+     *
+     * @return void
+     */
+    private function notify_admins_of_failure(string $context, string $detail, bool $skip_failure_notification): void
+    {
+        if ($skip_failure_notification) {
+            return;
+        }
+
+        try {
+            app(SystemErrorWhatsappService::class)->notify_send_error($context, $detail);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsappSendService: excepción al notificar admins de fallo de envío.', [
+                'context' => $context,
+                'error'   => $exception->getMessage(),
+            ]);
+        }
     }
 
     /**

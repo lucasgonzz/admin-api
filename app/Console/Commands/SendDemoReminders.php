@@ -156,16 +156,10 @@ class SendDemoReminders extends Command
                 $phone,
                 self::TEMPLATE_NAME,
                 [$contact_name],
-                'es_AR'
+                'es_AR',
+                "Recordatorio demo - Lead #{$lead->id} ({$lead->contact_name})"
             );
-
-            /* Si el envío falló (id null), notificar a los admins suscritos a errores. */
-            if ($whatsapp_message_id === null) {
-                app(SystemErrorWhatsappService::class)->notify_send_error(
-                    "Recordatorio demo - Lead #{$lead->id} ({$lead->contact_name})",
-                    'send_template() retornó null para plantilla ' . self::TEMPLATE_NAME
-                );
-            }
+            // Si el envío falló, WhatsappSendService ya notifica a admins de forma centralizada.
         } else {
             Log::warning('SendDemoReminders: lead sin teléfono', [
                 'lead_id' => $lead->id,

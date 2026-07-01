@@ -72,12 +72,26 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
         }
 
         try {
-            $send_service->send_suggestion($message);
+            $updated = $send_service->send_suggestion($message);
 
-            Log::channel('daily')->info('AutoSendLeadAiSuggestionJob: sugerencia enviada automáticamente por WhatsApp.', [
-                'message_id' => $this->message_id,
-                'lead_id'    => $message->lead_id,
-            ]);
+            if ((string) $updated->status === 'enviado') {
+                Log::channel('daily')->info('AutoSendLeadAiSuggestionJob: sugerencia enviada automáticamente por WhatsApp.', [
+                    'message_id' => $this->message_id,
+                    'lead_id'    => $message->lead_id,
+                ]);
+            } else {
+                /*
+                 * FIX (bug documentado): antes de este cambio se logueaba "enviada" sin revisar
+                 * el resultado real, incluso cuando send_suggestion() marcaba el mensaje como
+                 * 'rechazado' por un fallo de envío (ej: Meta devolvió 422). send_suggestion()
+                 * ya se encarga de notificar a admins vía WhatsappSendService si correspondía.
+                 */
+                Log::channel('daily')->warning('AutoSendLeadAiSuggestionJob: el envío automático no se confirmó.', [
+                    'message_id'   => $this->message_id,
+                    'lead_id'      => $message->lead_id,
+                    'final_status' => $updated->status,
+                ]);
+            }
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('AutoSendLeadAiSuggestionJob: error al enviar sugerencia.', [
                 'message_id' => $this->message_id,

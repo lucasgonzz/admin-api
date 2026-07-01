@@ -87,13 +87,46 @@ class LeadSuggestionSendService
         }
 
         $whatsapp_message_id = null;
+        $send_failed = false;
+
         if ($phone !== '') {
-            $whatsapp_message_id = $this->send_body($phone, $body);
+            $whatsapp_message_id = $this->send_body($phone, $body, $lead, $message);
+
+            if ($whatsapp_message_id === null) {
+                $send_failed = true;
+                Log::channel('daily')->warning('LeadSuggestionSendService: send_text() retornó null, el envío no se confirmó.', [
+                    'lead_id'    => $lead->id,
+                    'message_id' => $message->id,
+                ]);
+            }
         } else {
+            $send_failed = true;
             Log::channel('daily')->warning('LeadSuggestionSendService: lead sin teléfono.', [
                 'lead_id'    => $lead->id,
                 'message_id' => $message->id,
             ]);
+        }
+
+        /*
+         * FIX: antes de este cambio, un envío fallido (sin teléfono o send_text() devolviendo
+         * null) igual quedaba marcado status='enviado', mintiendo sobre la entrega. Ahora se
+         * trata igual que el caso "ventana de 24hs cerrada": status='rechazado', sin tocar el
+         * pipeline del lead. La notificación a admins ante el fallo de envío en sí ya la maneja
+         * WhatsappSendService de forma centralizada (no se duplica acá).
+         */
+        if ($send_failed) {
+            (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
+
+            $message->update([
+                'status'  => 'rechazado',
+                'sent_at' => null,
+            ]);
+
+            $lead->sync_suggestion_flags();
+
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+            return $message->fresh();
         }
 
         $original_content = (string) $message->content;
@@ -127,21 +160,27 @@ class LeadSuggestionSendService
      * El separador reconocido es "\n---\n" (línea con solo tres guiones).
      * Devuelve el whatsapp_message_id del último mensaje enviado.
      *
-     * @param string $phone
-     * @param string $body
+     * @param string      $phone
+     * @param string      $body
+     * @param Lead        $lead    Para armar el contexto de la notificación de fallo a admins.
+     * @param LeadMessage $message Para armar el contexto de la notificación de fallo a admins.
      *
      * @return string|null
      */
-    private function send_body(string $phone, string $body): ?string
+    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message): ?string
     {
         $parts = array_values(array_filter(
             array_map('trim', preg_split('/\n---\n/', $body)),
             fn($p) => $p !== ''
         ));
 
+        $context = 'Sugerencia de Claude - Lead #' . $lead->id
+            . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
+            . " (mensaje #{$message->id})";
+
         $last_id = null;
         foreach ($parts as $part) {
-            $last_id = $this->whatsapp_send_service->send_text($phone, $part);
+            $last_id = $this->whatsapp_send_service->send_text($phone, $part, $context);
         }
 
         return $last_id;
