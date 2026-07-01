@@ -6,6 +6,7 @@ use App\Models\FollowupRule;
 use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Helpers\AppTime;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 
@@ -186,7 +187,7 @@ class LeadFollowupService
         /** @var FollowupRule $rule */
         $rule = $rules_by_estado->get($lead->status);
         $last_at = $this->last_message_at($lead);
-        $hours = $last_at->diffInHours(Carbon::now());
+        $hours = $last_at->diffInHours(AppTime::now());
         if ($hours < (int) $rule->horas_espera) {
             return null;
         }
@@ -390,7 +391,7 @@ class LeadFollowupService
             return Carbon::parse($m->created_at);
         }
 
-        return $lead->created_at ? Carbon::parse($lead->created_at) : Carbon::now();
+        return $lead->created_at ? Carbon::parse($lead->created_at) : AppTime::now();
     }
 
     /**
@@ -450,3 +451,4 @@ class LeadFollowupService
         return str_replace('{{1}}', $contact_name, $body);
     }
 }
+
