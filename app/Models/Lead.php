@@ -149,6 +149,10 @@ class Lead extends Model
         // Flag: ya se envió el mensaje preguntando si terminó la demo.
         'demo_fin_check_enviado'       => 'boolean',
 
+        // Flag: la demo se dejó abierta en un rango amplio (sin horario puntual); no reservar
+        // automáticamente ventana de llamada para el closer (se coordina aparte, manualmente).
+        'demo_flexible'                => 'boolean',
+
         // Timestamp exacto en que Claude confirmó el ingreso del lead a la demo.
         'demo_ingreso_confirmado_at'        => 'datetime',
 

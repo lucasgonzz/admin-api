@@ -942,7 +942,7 @@ TXT;
         $booked_leads = Lead::whereIn('demo_date', $date_strings)
             ->whereNotNull('demo_start_time')
             ->whereNotNull('demo_id')
-            ->get(['id', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
+            ->get(['id', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time', 'demo_flexible']);
 
         /* Diagnóstico: detalle de cada demo agendada encontrada para las fechas consultadas,
          * como texto plano legible (una línea por demo) en el canal propio 'disponibilidad'.
@@ -986,14 +986,23 @@ TXT;
                 $end_minutes = $start_minutes + $duracion;
             }
 
-            /* Bloqueo por demo: impide que dos leads usen el mismo entorno técnico en simultáneo. */
+            /* Bloqueo por demo: impide que dos leads usen el mismo entorno técnico en simultáneo.
+             * Sin cambios: usa $end_minutes (que ya respeta demo_end_time real, incluido un rango
+             * amplio manual) — esto ya bloqueaba correctamente el caso de demo_flexible. */
             if (isset($blocked_by_demo[$demo_id][$date_key])) {
                 $blocked_by_demo[$demo_id][$date_key][] = [$start_minutes - $setup_antes, $end_minutes + $gracia_post];
             }
 
-            /* Bloqueo del closer: ventana post-gracia en la que el closer atiende a este lead.
-             * Es transversal a todas las demos; aplica a cualquier fecha que esté en el mapa. */
-            if (isset($closer_busy[$date_key])) {
+            /*
+             * Si el lead tiene demo_flexible = true, NO reservar ventana de closer. La demo se le
+             * deja abierta en un rango amplio (ej. todo un día) para que la use cuando pueda; la
+             * llamada del closer se coordina aparte, manualmente, cuando el lead confirma que
+             * terminó — no es una ventana fija post-gracia como en el caso normal. Sin este
+             * chequeo, el sistema reservaba automáticamente una ventana de closer justo después
+             * del fin del rango (ej. justo después de las 18:00), un bloqueo fantasma que le
+             * restaba disponibilidad real a otros leads sin que nadie fuera a usar esa ventana.
+             */
+            if (! $bl->demo_flexible && isset($closer_busy[$date_key])) {
                 /* Inicio de la ventana del closer: cuando el lead queda listo post-gracia. */
                 $closer_start = $end_minutes + $gracia_post;
                 /* Fin de la ventana: inicio + duración estimada de la llamada. */

@@ -243,6 +243,12 @@ class LeadProperties
                 'show'  => true,
             ],
             [
+                'key' => 'demo_flexible',
+                'text' => 'Demo flexible (sin reservar horario de closer)',
+                'type' => 'checkbox',
+                'value' => false,
+            ],
+            [
                 'key' => 'meet_url',
                 'text' => 'URL Google Meet',
                 'type' => 'text',
