@@ -206,13 +206,32 @@ class SearchController
                     && $filter['igual_que'] !== ''
                     && $filter['igual_que'] !== null
                 ) {
-                    $models = $models->where($filter['key'], $filter['igual_que']);
-                    $used_filters[] = [
-                        'key' => $filter['key'],
-                        'operator' => 'igual_que',
-                        'value' => $filter['igual_que'],
-                        'type' => $filter['type'],
-                    ];
+                    if (is_array($filter['igual_que'])) {
+                        /*
+                         * Filtro por grupo de valores (ej. navegación por grupo de estados del
+                         * pipeline de leads, admin-spa prompt 239): en vez de un único valor,
+                         * igual_que trae varios. whereIn en vez de igualdad simple. Un array
+                         * vacío no filtra nada (evita un WHERE IN () armado mal en el frontend
+                         * que devolvería cero filas sin que sea un error real de datos).
+                         */
+                        if (! empty($filter['igual_que'])) {
+                            $models = $models->whereIn($filter['key'], $filter['igual_que']);
+                            $used_filters[] = [
+                                'key' => $filter['key'],
+                                'operator' => 'en',
+                                'value' => $filter['igual_que'],
+                                'type' => $filter['type'],
+                            ];
+                        }
+                    } else {
+                        $models = $models->where($filter['key'], $filter['igual_que']);
+                        $used_filters[] = [
+                            'key' => $filter['key'],
+                            'operator' => 'igual_que',
+                            'value' => $filter['igual_que'],
+                            'type' => $filter['type'],
+                        ];
+                    }
                 } elseif (
                     $filter['type'] == 'checkbox'
                     && isset($filter['checkbox'])
