@@ -51,6 +51,25 @@ Cuando el lead pregunta por disponibilidad en términos generales ("la semana qu
 TXT;
 
     /**
+     * Estados del pipeline que, entre solicitar disponibilidad y terminar la demo, requieren
+     * supervisión humana del mensaje ANTES de enviarse (regla de negocio, 1/7/2026, ver
+     * apply_parsed_response()). Desde el 2/7/2026 también se usa en
+     * requires_agendamiento_verification_gate() para decidir, sin correr ninguna acción,
+     * si hay que diferir el paquete completo (mensaje + acciones) hasta la aprobación humana.
+     * closer_activo en adelante ya es 100% manual (Tommy), no se incluye acá.
+     *
+     * @var string[]
+     */
+    private const ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO = [
+        'solicita_disponibilidad',
+        'demo_agendada',
+        'demo_pendiente_de_ingreso',
+        'ingresando_demo',
+        'demo_en_curso',
+        'demo_pendiente_de_terminar',
+    ];
+
+    /**
      * Convierte minutos del día (0-1439) al formato legible HH:MM.
      * Pensado para los logs de diagnóstico de disponibilidad, donde mostrar
      * minutos crudos (por ejemplo 720) es ilegible frente a "12:00".
@@ -1503,8 +1522,13 @@ TXT;
     /**
      * Crea el LeadMessage y actualiza el estado del lead a partir del JSON de Claude.
      *
-     * Operación compartida entre la primera y segunda llamada a Claude.
-     * Aplica el estado sugerido, marca flags de seguimiento y persiste todo.
+     * Operación compartida entre la primera y segunda llamada a Claude. Punto de entrada
+     * delgado: decide si el paquete (mensaje + acciones) puede aplicarse de una, o si por el
+     * motivo "agendamiento" tiene que quedar pendiente de aprobación humana (ver
+     * requires_agendamiento_verification_gate(), decisión de negocio del 2/7/2026). El chequeo
+     * se hace ANTES de correr guardar_nombre/agendar_demo/etc. para que ninguna acción con
+     * efectos secundarios (WhatsApp a admins, escritura de demo, evento de Google Calendar,
+     * mail) corra todavía cuando el resultado va a quedar pendiente.
      *
      * @param Lead                 $lead        Lead a actualizar.
      * @param array<string, mixed> $parsed      JSON decodificado de la respuesta de Claude.
@@ -1520,7 +1544,74 @@ TXT;
         bool $is_followup,
         ?array $calendar_snapshot = null
     ): LeadMessage {
-        /* Extraer y validar los campos obligatorios de la respuesta. */
+        if ($this->requires_agendamiento_verification_gate($lead, $parsed)) {
+            return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot);
+        }
+
+        return $this->apply_parsed_response($lead, $parsed, $is_followup, $calendar_snapshot);
+    }
+
+    /**
+     * Predice, sin ejecutar ninguna acción ni tocar el lead, si esta respuesta de Claude va a
+     * requerir verificación humana por el motivo "agendamiento" (ver
+     * ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO). Espeja las mismas condiciones que fuerzan el
+     * estado dentro de apply_parsed_response() — agendar_demo, cancelar_demo, confirmar_ingreso,
+     * marcar_no_ingreso — pero sin correr el lock de disponibilidad, sin escribir el lead y sin
+     * disparar notificaciones. confirmar_fin_demo (→ demo_realizada) queda deliberadamente
+     * afuera: ese estado no está en la lista gateada (closer_activo en adelante es 100% manual).
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed
+     *
+     * @return bool
+     */
+    protected function requires_agendamiento_verification_gate(Lead $lead, array $parsed): bool
+    {
+        $estado_raw = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
+        if ($estado_raw !== '') {
+            $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+            if (in_array($pipeline_status->slug, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+                return true;
+            }
+        }
+
+        /* agendar_demo siempre termina en 'demo_agendada' (slot válido) o 'solicita_disponibilidad'
+         * (slot inválido / lock ocupado por otra request) — ambos ya están en la lista gateada. */
+        if (! empty($parsed['agendar_demo'])) {
+            return true;
+        }
+
+        if (! empty($parsed['cancelar_demo'])) {
+            return true;
+        }
+
+        $lead_status = (string) $lead->status;
+
+        /* confirmar_ingreso fuerza el estado a demo_en_curso (ver apply_parsed_response). */
+        if (! empty($parsed['confirmar_ingreso']) && in_array($lead_status, ['ingresando_demo', 'demo_agendada'], true)) {
+            return true;
+        }
+
+        /* marcar_no_ingreso fuerza el estado a demo_pendiente_de_ingreso (ver apply_parsed_response). */
+        if (! empty($parsed['marcar_no_ingreso']) && $lead_status === 'ingresando_demo') {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Valida los campos obligatorios de la respuesta de Claude. Compartido entre
+     * create_pending_agendamiento_message() y apply_parsed_response() para no duplicar la regla.
+     *
+     * @param array<string, mixed> $parsed
+     *
+     * @throws \RuntimeException Si el mensaje o el estado sugerido vienen vacíos.
+     *
+     * @return void
+     */
+    private function validate_parsed_response(array $parsed): void
+    {
         $mensaje    = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
         $estado_raw = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
 
@@ -1533,6 +1624,175 @@ TXT;
         if ($estado_raw === '' || ($mensaje === '' && ! $solicita_disponibilidad_flag)) {
             throw new \RuntimeException('Respuesta de Claude incompleta (mensaje o estado vacío).');
         }
+    }
+
+    /**
+     * Crea el LeadMessage pendiente de aprobación cuando requires_agendamiento_verification_gate()
+     * detecta que el paquete (mensaje + acciones) tiene que esperar aprobación humana. No corre
+     * NINGUNA acción (guardar_nombre, agendar_demo, cancelar_demo, etc.) — se guarda el $parsed
+     * crudo en pending_actions y se aplica recién al aprobar, vía apply_pending_actions(), que
+     * revalida disponibilidad en ese momento (no la de cuando Claude respondió acá).
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed
+     * @param bool                 $is_followup
+     * @param array|null           $calendar_snapshot
+     *
+     * @return LeadMessage
+     */
+    protected function create_pending_agendamiento_message(Lead $lead, array $parsed, bool $is_followup, ?array $calendar_snapshot): LeadMessage
+    {
+        $this->validate_parsed_response($parsed);
+
+        $mensaje_sugerido = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
+        $razonamiento     = isset($parsed['razonamiento']) ? (string) $parsed['razonamiento'] : null;
+        $estado_raw       = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
+        $previous_status  = (string) $lead->status;
+
+        $pipeline_status       = LeadPipelineStatus::ensure_exists($estado_raw);
+        $estado                = $pipeline_status->slug;
+        $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+
+        $msg = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => $mensaje_sugerido,
+            'ai_reasoning'          => $razonamiento,
+            /* Snapshot de eventos Google del closer al ofrecer disponibilidad (debug admin-spa). */
+            'calendar_snapshot'     => $calendar_snapshot
+                ? json_encode($calendar_snapshot, JSON_UNESCAPED_UNICODE)
+                : null,
+            'suggested_lead_status' => $suggested_lead_status,
+            /* $parsed crudo de Claude, sin aplicar; apply_pending_actions() lo consume al aprobar. */
+            'pending_actions'       => $parsed,
+            'status'                => 'sugerido',
+            'is_followup'           => $is_followup,
+            'requiere_verificacion' => true,
+            'sent_at'               => null,
+        ]);
+
+        $lead->tiene_sugerencia_pendiente = true;
+        if ($is_followup) {
+            $lead->requiere_seguimiento      = true;
+            $lead->tiene_seguimiento_sin_ver = true;
+        }
+        $lead->save();
+
+        /* Notificar igual que el camino "agendamiento" ya notifica hoy dentro de apply_parsed_response
+         * (push siempre + WhatsApp opcional vía LeadVerificacionAgendamientoNotificationService). */
+        $admin_notifications_log = [];
+        try {
+            $agendamiento_service = new \App\Services\LeadVerificacionAgendamientoNotificationService(
+                new \App\Services\WhatsappSendService()
+            );
+            $verif_notified = $agendamiento_service->notify($lead->fresh(), $msg);
+            if (! empty($verif_notified)) {
+                $admin_notifications_log[] = ['evento' => 'Requiere verificación (coordinando agenda)', 'admins' => $verif_notified];
+            }
+
+            /* Sonido en el navegador para admins con la pestaña abierta. */
+            event(new \App\Events\LeadVerificacionAgendamientoAlert($lead->fresh(), $msg));
+        } catch (\Throwable $e) {
+            Log::error('LeadAiService: error al notificar verificacion pendiente (acciones diferidas).', [
+                'lead_id'    => $lead->id,
+                'message_id' => $msg->id,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+
+        if (! empty($admin_notifications_log)) {
+            $msg->update(['admin_notifications' => $admin_notifications_log]);
+        }
+
+        /* Mismo timer de respaldo que el flujo normal: si nadie aprueba a tiempo, se envía solo
+         * (con la demora propia y más larga de LeadWhatsappOnboardingSettings). Al dispararse,
+         * AutoSendLeadAiSuggestionJob llama a LeadSuggestionSendService::send_suggestion(), que
+         * ahora aplica pending_actions antes de enviar (ver Paso 3). */
+        (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
+        $msg = $msg->fresh();
+
+        LeadSuggestionCreated::dispatch($lead->id);
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
+
+        return $msg;
+    }
+
+    /**
+     * Aplica las acciones que quedaron pendientes de un mensaje con pending_actions (motivo
+     * agendamiento) tras la aprobación del admin — llamado desde
+     * LeadSuggestionSendService::send_suggestion() antes de enviar por WhatsApp.
+     *
+     * Revalida disponibilidad en este momento, no la de cuando Claude respondió: dentro de
+     * apply_parsed_response(), el bloque de agendar_demo vuelve a llamar build_availability_json()
+     * de forma fresca, con el mismo lock por demo_id que usa el flujo normal (ver el FIX de
+     * colisión de horarios de apply_parsed_response). Actualiza el mensaje pendiente in-place en
+     * vez de crear uno nuevo, para que la conversación no muestre un mensaje duplicado.
+     *
+     * @param LeadMessage $message Mensaje `sugerido` con pending_actions poblado.
+     *
+     * @throws \InvalidArgumentException Si el mensaje no tiene pending_actions válido (ej. ya se aplicó,
+     *                                    o el horario que Claude había ofrecido ya no está disponible).
+     *
+     * @return LeadMessage Mismo mensaje, actualizado in-place con el resultado real de aplicar las acciones.
+     */
+    public function apply_pending_actions(LeadMessage $message): LeadMessage
+    {
+        $parsed = $message->pending_actions;
+        if (empty($parsed) || ! is_array($parsed)) {
+            throw new \InvalidArgumentException('Este mensaje no tiene acciones pendientes de aplicar.');
+        }
+
+        $lead = $message->lead ?? Lead::find($message->lead_id);
+        if ($lead === null) {
+            throw new \InvalidArgumentException('Lead no encontrado para el mensaje.');
+        }
+
+        return $this->apply_parsed_response(
+            $lead,
+            $parsed,
+            (bool) $message->is_followup,
+            null,
+            $message,
+            true
+        );
+    }
+
+    /**
+     * Aplica de una todas las acciones estructuradas del JSON de Claude (guardar_nombre,
+     * guardar_email, cancelar_demo, agendar_demo, confirmar_ingreso, confirmar_fin_demo,
+     * marcar_no_ingreso, sugerir_socio, requiere_intervencion_humana) y crea (o actualiza,
+     * cuando viene de una aprobación diferida) el LeadMessage con el resultado.
+     *
+     * Cuando $for_approval es true (llamado desde apply_pending_actions()), NO se vuelve a forzar
+     * requiere_verificacion=true por el motivo agendamiento (ya se aprobó) ni se programa un nuevo
+     * timer de auto-envío (LeadSuggestionSendService::send_suggestion() ya envía a continuación,
+     * en el mismo request).
+     *
+     * @param Lead                 $lead              Lead a actualizar.
+     * @param array<string, mixed> $parsed            JSON decodificado de la respuesta de Claude.
+     * @param bool                 $is_followup        true si el trigger fue el scheduler de inactividad.
+     * @param array|null           $calendar_snapshot Snapshot de Google Calendar de esta consulta; si es null
+     *                                                 y $existing_message trae uno propio, se conserva el existente.
+     * @param LeadMessage|null     $existing_message  Mensaje pendiente a actualizar in-place, o null para crear uno nuevo.
+     * @param bool                 $for_approval      true cuando se llama tras la aprobación humana de un paquete diferido.
+     *
+     * @throws \RuntimeException Si el mensaje o el estado sugerido vienen vacíos.
+     *
+     * @return LeadMessage Mensaje creado o actualizado con status `sugerido` (sin envío a WhatsApp).
+     */
+    protected function apply_parsed_response(
+        Lead $lead,
+        array $parsed,
+        bool $is_followup,
+        ?array $calendar_snapshot = null,
+        ?LeadMessage $existing_message = null,
+        bool $for_approval = false
+    ): LeadMessage {
+        $this->validate_parsed_response($parsed);
+
+        /* Extraer los campos obligatorios de la respuesta (ya validados por validate_parsed_response). */
+        $mensaje    = isset($parsed['mensaje_sugerido']) ? trim((string) $parsed['mensaje_sugerido']) : '';
+        $estado_raw = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
 
         /* Estado del lead antes de aplicar la sugerencia (para badge en el mensaje). */
         $previous_status = (string) $lead->status;
@@ -2040,20 +2300,20 @@ TXT;
          * aplicándose al lead como suggested_lead_status al enviarse el mensaje, no el estado
          * crudo que sugirió Claude en un primer momento. closer_activo en adelante ya es 100%
          * manual (Tommy), no se toca acá.
+         *
+         * Cuando $for_approval es true, este bloque se salta: el paquete ya pasó por
+         * requires_agendamiento_verification_gate() y fue aprobado por un humano, así que no
+         * corresponde volver a marcarlo como pendiente de verificación (ver apply_pending_actions()).
          */
-        $estados_requieren_supervision_agendamiento = [
-            'solicita_disponibilidad',
-            'demo_agendada',
-            'demo_pendiente_de_ingreso',
-            'ingresando_demo',
-            'demo_en_curso',
-            'demo_pendiente_de_terminar',
-        ];
-        if (in_array($estado, $estados_requieren_supervision_agendamiento, true)) {
+        if (! $for_approval && in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
             $req_verif = true;
         }
 
-        $msg = LeadMessage::create([
+        /* Payload común a la creación (mensaje nuevo) y a la actualización in-place (aprobación
+         * de un paquete diferido, ver $existing_message). calendar_snapshot: si esta llamada no
+         * consultó disponibilidad de nuevo (por ejemplo al aprobar un agendar_demo ya resuelto),
+         * conservar el snapshot que ya tenía el mensaje pendiente en vez de pisarlo con null. */
+        $message_payload = [
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
             'content'               => $mensaje,
@@ -2061,7 +2321,7 @@ TXT;
             /* Snapshot de eventos Google del closer al ofrecer disponibilidad (debug admin-spa). */
             'calendar_snapshot'     => $calendar_snapshot
                 ? json_encode($calendar_snapshot, JSON_UNESCAPED_UNICODE)
-                : null,
+                : ($existing_message ? $existing_message->calendar_snapshot : null),
             'suggested_lead_status'           => $suggested_lead_status,
             /* Marca en el mensaje si el agente confirmó ingreso/fin de demo en esta respuesta. */
             'marca_demo_ingreso_confirmado'   => $notificar_ingreso_confirmado,
@@ -2070,7 +2330,17 @@ TXT;
             'is_followup'           => $is_followup,
             'requiere_verificacion' => $req_verif,
             'sent_at'               => null,
-        ]);
+        ];
+
+        if ($existing_message !== null) {
+            /* Ya se aplicaron las acciones: limpiar pending_actions para que no vuelva a ofrecerse
+             * (y para que la burbuja en admin-spa deje de mostrar el aviso de "acciones pendientes"). */
+            $message_payload['pending_actions'] = null;
+            $existing_message->update($message_payload);
+            $msg = $existing_message;
+        } else {
+            $msg = LeadMessage::create($message_payload);
+        }
 
         $lead->tiene_sugerencia_pendiente = true;
 
@@ -2234,7 +2504,7 @@ TXT;
          */
         if ($req_verif) {
             try {
-                if (in_array($estado, $estados_requieren_supervision_agendamiento, true)) {
+                if (in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
                     $agendamiento_service = new \App\Services\LeadVerificacionAgendamientoNotificationService(
                         new \App\Services\WhatsappSendService()
                     );
@@ -2267,9 +2537,13 @@ TXT;
             $msg->update(['admin_notifications' => $admin_notifications_log]);
         }
 
-        /* Programar auto-envío antes del broadcast: el payload Pusher debe incluir ai_auto_send_at. */
-        (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
-        $msg = $msg->fresh();
+        /* Programar auto-envío antes del broadcast: el payload Pusher debe incluir ai_auto_send_at.
+         * Si $for_approval es true, LeadSuggestionSendService::send_suggestion() ya va a enviar el
+         * mensaje a continuación en el mismo request: programar un timer acá sería redundante. */
+        if (! $for_approval) {
+            (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
+            $msg = $msg->fresh();
+        }
 
         // Notificar a admin-spa vía socket para actualizar la fila del lead en tiempo real.
         LeadSuggestionCreated::dispatch($lead->id);

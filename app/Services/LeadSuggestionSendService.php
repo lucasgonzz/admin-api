@@ -57,6 +57,19 @@ class LeadSuggestionSendService
             throw new \RuntimeException('Lead no encontrado para el mensaje.');
         }
 
+        /*
+         * Mensajes que quedaron pendientes por el motivo "agendamiento" (ver
+         * LeadAiService::requires_agendamiento_verification_gate) no aplicaron todavía ninguna
+         * acción (agendar_demo, guardar_nombre, mail, etc.) — se aplican recién acá, al aprobar,
+         * revalidando disponibilidad en este momento y no la de cuando Claude respondió. Si la
+         * validación falla (ej. el horario ya se ocupó mientras esperaba aprobación), no se envía
+         * nada al lead: el error se propaga para que LeadController devuelva 422 y el admin pida
+         * una sugerencia nueva.
+         */
+        if (! empty($message->pending_actions)) {
+            $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message);
+        }
+
         $body = $edited_content !== null ? trim($edited_content) : trim((string) $message->content);
         if ($body === '') {
             throw new \InvalidArgumentException('El mensaje a enviar no puede estar vacío.');

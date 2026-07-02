@@ -84,6 +84,9 @@ class LeadMessage extends Model
         'deleted_from_context'    => 'boolean',
         /* Array de eventos de notificación a admins disparados por este mensaje. Cada elemento: ['evento' => ..., 'admins' => [...]]. */
         'admin_notifications'     => 'array',
+        /* $parsed crudo de Claude sin aplicar, cuando el mensaje quedó pendiente por el motivo
+           "agendamiento" (ver LeadAiService::requires_agendamiento_verification_gate). Null en el resto de los casos. */
+        'pending_actions'         => 'array',
         /* Timestamps de entrega real de WhatsApp (populated por webhooks de Kapso). */
         'whatsapp_delivered_at'   => 'datetime',
         'whatsapp_seen_at'        => 'datetime',
