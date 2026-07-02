@@ -167,6 +167,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/mark-closer-called', [LeadController::class, 'mark_closer_called_json']);
         Route::post('lead/{id}/toggle-notify-messages', [LeadController::class, 'toggle_notify_messages_json']);
         Route::post('lead/{id}/toggle-pinned', [LeadController::class, 'toggle_pinned_json']);
+        Route::post('lead/{id}/toggle-manual-unread', [LeadController::class, 'toggle_manual_unread_json']);
 
         // Panel del closer: leads filtrados por rol y sección operativa.
         Route::get('closer/panel', [LeadController::class, 'closer_panel_json']);

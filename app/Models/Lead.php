@@ -183,6 +183,10 @@ class Lead extends Model
         // Timestamp de fijado (pin global): null = no fijado; los leads fijados aparecen primero en la tabla.
         'pinned_at'                    => 'datetime',
 
+        // Marca manual "no leído" (estilo WhatsApp) del admin autenticado sobre este lead. Calculado
+        // per-request en scopeWithUnreadLeadMessagesCount, no es una columna real de `leads`.
+        'manually_marked_unread'       => 'boolean',
+
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'              => 'array',
 
@@ -352,11 +356,21 @@ class Lead extends Model
             });
         };
 
-        return $query->withCount([
+        $query->withCount([
             'messages as unread_messages_count' => $unread_filter,
             'messages as unread_count'          => $unread_filter,
             // Actividad total no vista: mensajes de cualquier emisor sin lectura del admin.
             'messages as unseen_count'          => $unseen_filter,
+        ]);
+
+        // Marca manual de "no leído" (estilo WhatsApp) hecha por el admin actual sobre este lead.
+        // Independiente de unread_count/unseen_count: la UI (admin-spa) solo la muestra como punto
+        // sin número cuando ambos contadores reales están en 0 (ver LeadProperties::all(),
+        // clave 'manually_unread_key').
+        return $query->addSelect([
+            'manually_marked_unread' => LeadManualUnreadMark::selectRaw('COUNT(*) > 0')
+                ->whereColumn('lead_manual_unread_marks.lead_id', 'leads.id')
+                ->where('lead_manual_unread_marks.admin_id', $admin_id),
         ]);
     }
 

@@ -1733,7 +1733,8 @@ class LeadController extends Controller
         $admin_id = (int) $request->user()->id;
 
         return response()->json([
-            'unread_total' => LeadBroadcastService::count_unread_for_admin($admin_id),
+            'unread_total'     => LeadBroadcastService::count_unread_for_admin($admin_id),
+            'unread_by_status' => LeadBroadcastService::count_unread_by_status_for_admin($admin_id),
         ], 200);
     }
 
@@ -1753,10 +1754,12 @@ class LeadController extends Controller
         // Admin autenticado que abre la conversación.
         $admin_id = (int) $request->user()->id;
 
-        // Mensajes entrantes del lead (los del setter/sistema no aplican al badge).
+        // FIX (2/7/2026): antes solo se marcaban leídos los mensajes sender=lead, por lo que el
+        // badge gris "actividad no vista" (unseen_count, cuenta cualquier emisor) nunca bajaba a 0
+        // salvo que coincidiera con mensajes del lead también sin leer. Abrir la conversación debe
+        // marcar leído TODO el hilo, no solo lo del lead.
         $message_ids = LeadMessage::query()
             ->where('lead_id', (int) $lead_id)
-            ->where('sender', 'lead')
             ->pluck('id');
 
         // Una fila de lectura por mensaje para este admin (idempotente vía firstOrCreate).
@@ -1768,6 +1771,11 @@ class LeadController extends Controller
                 'read_at' => now(),
             ]);
         }
+
+        // Abrir la conversación también limpia cualquier marca manual de "no leído" (estilo WhatsApp).
+        \App\Models\LeadManualUnreadMark::where('lead_id', (int) $lead_id)
+            ->where('admin_id', $admin_id)
+            ->delete();
 
         LeadBroadcastService::emit_conversation_updated((int) $lead_id);
 
@@ -2277,6 +2285,42 @@ class LeadController extends Controller
             $lead->update(['pinned_at' => null]);
         } else {
             $lead->update(['pinned_at' => now()]);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Marca o desmarca manualmente un lead como "no leído" para el admin autenticado (estilo WhatsApp).
+     *
+     * Es un flag visual independiente de unread_count/unseen_count (mensajes reales sin leer): se
+     * muestra en la grilla como un punto rojo sin número (ver LeadProperties, clave
+     * 'manually_unread_key'), y se limpia automáticamente la próxima vez que ese admin abra la
+     * conversación (ver mark_whatsapp_messages_read_json). Es per-admin: cada admin tiene su propio
+     * estado, igual que el resto del sistema de lectura — no es global como el pin de chat.
+     *
+     * @param Request    $request
+     * @param int|string $id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_manual_unread_json(Request $request, $id)
+    {
+        $lead = Lead::findOrFail($id);
+        $admin_id = (int) $request->user()->id;
+
+        $existing = \App\Models\LeadManualUnreadMark::where('lead_id', $lead->id)
+            ->where('admin_id', $admin_id)
+            ->first();
+
+        if ($existing) {
+            $existing->delete();
+        } else {
+            \App\Models\LeadManualUnreadMark::create([
+                'lead_id'   => $lead->id,
+                'admin_id'  => $admin_id,
+                'marked_at' => now(),
+            ]);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);

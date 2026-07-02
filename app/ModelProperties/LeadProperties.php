@@ -79,10 +79,12 @@ class LeadProperties
             ],
             [
                 /*
-                 * Badge per-usuario doble:
+                 * Badge per-usuario triple:
                  * - Rojo (key): mensajes del lead sin leer por el admin logueado.
                  * - Gris (unseen_count_key): actividad total no vista (cualquier sender).
-                 * Ambos valores vienen de withCount en scopeWithUnreadLeadMessagesCount.
+                 * - Punto sin número (manually_unread_key): marca manual "no leído" estilo WhatsApp,
+                 *   visible solo cuando los dos contadores reales están en 0.
+                 * Los tres valores vienen de scopeWithUnreadLeadMessagesCount en Lead.php.
                  */
                 'key' => 'unread_count',
                 'text' => 'Sin leer',
@@ -93,10 +95,12 @@ class LeadProperties
                 'only_show' => true,
                 'exclude_on_update' => true,
                 'not_persisted_on_model' => true,
-                // Ancho levemente mayor para acomodar los dos badges.
+                // Ancho levemente mayor para acomodar los badges.
                 'width' => 110,
                 // Clave del row que aporta el conteo de actividad total no vista (badge gris).
                 'unseen_count_key' => 'unseen_count',
+                // Clave del row que indica marca manual de "no leído" (punto rojo sin número).
+                'manually_unread_key' => 'manually_marked_unread',
             ],
             // [
             //     /*
