@@ -16,6 +16,7 @@ use App\Models\LeadPipelineStatus;
 use App\Helpers\AppTime;
 use Carbon\Carbon;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -1633,6 +1634,42 @@ TXT;
             }
 
             if ($demo_id && $demo_date !== '' && $demo_start !== '') {
+                /*
+                 * FIX (bug de colisión de horarios — leads 65, 70, 93, 192, 197, 234 en
+                 * producción, detectado 1/7/2026): la validación de disponibilidad (leer
+                 * slots libres + decidir si el pedido de Claude es válido) y la escritura
+                 * del slot en el lead no eran atómicas. Dos leads pidiendo casi al mismo
+                 * tiempo el mismo horario para la misma demo física podían leer el slot como
+                 * libre antes de que cualquiera escribiera, generando colisiones repetidas
+                 * (hasta 3 seguidas con un mismo lead). Se toma un lock exclusivo por demo_id
+                 * (solo hay 3 físicas en el pool) que cubre lectura + validación + escritura,
+                 * así dos requests concurrentes sobre la misma demo física se serializan en
+                 * vez de pisarse. El bloque original (sin cambios de lógica) queda adentro del
+                 * "else" de abajo; se libera en el punto de salida — ver "FIN DEL LOCK" más
+                 * abajo, en el punto 3 de este prompt.
+                 */
+                $demo_slot_lock          = Cache::lock("demo_slot_hold_{$demo_id}", 8);
+                $demo_slot_lock_acquired = $demo_slot_lock->block(5);
+
+                if (! $demo_slot_lock_acquired) {
+                    /* No se pudo tomar el lock en 5s: otra request está asignando esta misma
+                     * demo física en este instante. Se trata igual que un slot recién ocupado,
+                     * reutilizando la misma tercera llamada correctiva que ya existe para ese
+                     * caso, en vez de arriesgar una doble escritura. */
+                    Log::warning('LeadAiService: no se pudo tomar el lock de demo_id para validar/asignar slot (timeout 5s).', [
+                        'lead_id' => $lead->id,
+                        'demo_id' => $demo_id,
+                    ]);
+
+                    $mensaje_correctivo = $this->call_corrective_availability_response($lead, $demo_start, $demo_date, []);
+                    $mensaje            = $mensaje_correctivo !== '' ? $mensaje_correctivo : 'Ese horario se acaba de ocupar. Decime otro día u horario y lo confirmamos.';
+                    $estado_raw         = 'solicita_disponibilidad';
+
+                    $pipeline_status       = LeadPipelineStatus::ensure_exists($estado_raw);
+                    $estado                = $pipeline_status->slug;
+                    $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+                } else {
+
                 /* Validar que el slot exista en la disponibilidad real para esa demo.
                  * Las claves del JSON incluyen el nombre del día ("domingo 2026-06-28"),
                  * pero Claude devuelve demo_date en formato Y-m-d. Buscar la clave que
@@ -1756,6 +1793,14 @@ TXT;
                             'error'         => $e->getMessage(),
                         ]);
                     }
+                }
+                } // cierra el "else" del lock adquirido (ver FIX de colisión de horarios, punto 2)
+
+                /* FIN DEL LOCK: se libera apenas termina la validación + escritura del slot,
+                 * sin retenerlo durante el resto de create_message_and_update_lead (nombre,
+                 * email, etc. no dependen de este demo_id puntual). */
+                if ($demo_slot_lock_acquired) {
+                    $demo_slot_lock->release();
                 }
             }
         }
