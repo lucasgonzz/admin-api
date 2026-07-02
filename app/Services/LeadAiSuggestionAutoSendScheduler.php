@@ -41,10 +41,44 @@ class LeadAiSuggestionAutoSendScheduler
         }
 
         if ($message->requiere_verificacion) {
-            return;
-        }
+            /*
+             * FIX (1/7/2026): antes, CUALQUIER mensaje con requiere_verificacion=true se quedaba
+             * esperando aprobación manual para siempre, sin timer. Eso sigue siendo lo correcto
+             * para el caso de error (ej. fallback de disponibilidad — ahí preferimos que espere
+             * indefinido antes que mandar algo raro solo). Pero para el tramo de coordinación de
+             * agenda (regla de negocio agregada en LeadAiService::create_message_and_update_lead),
+             * se programa un auto-envío igual, con demora propia más larga, para no dejar a un
+             * lead esperando horas si Martín no lo ve a tiempo.
+             */
+            /*
+             * Usar suggested_lead_status (el estado resultante que LeadAiService calculó para
+             * este mensaje) en vez de lead->status directo: al momento de programar el auto-envío,
+             * lead->status todavía es el estado PREVIO — apply_suggested_pipeline_status() recién
+             * lo actualiza cuando el mensaje se envía (ver LeadSuggestionSendService). Si se
+             * chequeara lead->status acá, la primera entrada al tramo (ej. calificado ->
+             * solicita_disponibilidad) no calificaría para el auto-envío de respaldo, justo el
+             * caso de mayor valor. suggested_lead_status es null cuando la sugerencia no cambia
+             * el estado, en cuyo caso el estado resultante sigue siendo el actual del lead.
+             */
+            $lead = $message->lead;
+            $suggested_status = trim((string) $message->suggested_lead_status);
+            $lead_status = $suggested_status !== '' ? $suggested_status : ($lead ? (string) $lead->status : '');
+            $estados_con_auto_send_tras_verificacion = [
+                'solicita_disponibilidad',
+                'demo_agendada',
+                'demo_pendiente_de_ingreso',
+                'ingresando_demo',
+                'demo_en_curso',
+                'demo_pendiente_de_terminar',
+            ];
+            if (! in_array($lead_status, $estados_con_auto_send_tras_verificacion, true)) {
+                return;
+            }
 
-        $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
+            $delay_seconds = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_seconds();
+        } else {
+            $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
+        }
         $message_id = (int) $message->id;
         $auto_send_token = $this->bump_auto_send_token($message_id);
 

@@ -2016,6 +2016,31 @@ TXT;
             }
         }
 
+        /*
+         * REGLA DE NEGOCIO (1/7/2026, decisión de Lucas): desde que un lead entra a coordinar la
+         * agenda de la demo hasta que llega a closer_activo, todo mensaje que arma Claude requiere
+         * revisión humana antes de salir — es el tramo de mayor riesgo (bugs de colisión de
+         * horario y confusión de fecha, ver prompts 226/227) y de leads más valiosos. Se fuerza
+         * sin importar lo que haya devuelto Claude en su propio campo requiere_verificacion.
+         * Se evalúa acá, al final de la función, sobre el $estado ya recalculado por todas las
+         * inferencias conversacionales de arriba (confirmar_ingreso, confirmar_fin_demo,
+         * marcar_no_ingreso, colisión/slot inválido) — es el valor que realmente termina
+         * aplicándose al lead como suggested_lead_status al enviarse el mensaje, no el estado
+         * crudo que sugirió Claude en un primer momento. closer_activo en adelante ya es 100%
+         * manual (Tommy), no se toca acá.
+         */
+        $estados_requieren_supervision_agendamiento = [
+            'solicita_disponibilidad',
+            'demo_agendada',
+            'demo_pendiente_de_ingreso',
+            'ingresando_demo',
+            'demo_en_curso',
+            'demo_pendiente_de_terminar',
+        ];
+        if (in_array($estado, $estados_requieren_supervision_agendamiento, true)) {
+            $req_verif = true;
+        }
+
         $msg = LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
