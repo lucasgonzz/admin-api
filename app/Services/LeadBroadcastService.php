@@ -44,4 +44,45 @@ class LeadBroadcastService
             })
             ->count();
     }
+
+    /**
+     * Suma de mensajes del lead sin leer agrupados por estado (`leads.status`) del lead.
+     *
+     * Cada clave del array devuelto es el slug de estado; el valor es la cantidad total de
+     * mensajes entrantes (sender = lead) sin leer en todos los leads con ese estado.
+     *
+     * @param int $admin_id
+     * @return array<string, int>
+     */
+    public static function count_unread_by_status_for_admin(int $admin_id): array
+    {
+        if ($admin_id < 1) {
+            return [];
+        }
+
+        // Mensajes entrantes sin lectura del admin, agrupados por el estado actual del lead.
+        $rows = LeadMessage::query()
+            ->join('leads', 'leads.id', '=', 'lead_messages.lead_id')
+            ->where('lead_messages.sender', 'lead')
+            ->whereNotExists(function ($query) use ($admin_id) {
+                $query->selectRaw('1')
+                    ->from('lead_message_reads')
+                    ->whereColumn('lead_message_reads.lead_message_id', 'lead_messages.id')
+                    ->where('lead_message_reads.admin_id', $admin_id);
+            })
+            ->groupBy('leads.status')
+            ->selectRaw('leads.status as status, COUNT(*) as unread_count')
+            ->get();
+
+        $result = [];
+        foreach ($rows as $row) {
+            $status = (string) ($row->status ?? '');
+            if ($status === '') {
+                continue;
+            }
+            $result[$status] = (int) ($row->unread_count ?? 0);
+        }
+
+        return $result;
+    }
 }
