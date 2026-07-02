@@ -2197,18 +2197,35 @@ TXT;
             }
         }
 
-        /* Notificar a admins suscritos cuando la sugerencia requiere verificación manual. */
+        /*
+         * Notificar cuando la sugerencia requiere verificación manual. Dos motivos posibles,
+         * dos servicios distintos (ver prompt 230):
+         *   - Agendamiento: el lead está en el tramo solicita_disponibilidad..demo_pendiente_de_terminar
+         *     (regla de negocio forzada más arriba en este método, no un error). Push siempre +
+         *     WhatsApp opcional vía notify_verificacion_agendamiento_whatsapp.
+         *   - Error: cualquier otro caso (ej. fallback de disponibilidad). WhatsApp vía el flag
+         *     viejo notify_verificacion_whatsapp, comportamiento sin cambios.
+         */
         if ($req_verif) {
             try {
-                $verificacion_service = new \App\Services\LeadVerificacionWhatsappService(
-                    new \App\Services\WhatsappSendService()
-                );
-                $verif_notified = $verificacion_service->notify($lead->fresh(), $msg);
+                if (in_array($estado, $estados_requieren_supervision_agendamiento, true)) {
+                    $agendamiento_service = new \App\Services\LeadVerificacionAgendamientoNotificationService(
+                        new \App\Services\WhatsappSendService()
+                    );
+                    $verif_notified = $agendamiento_service->notify($lead->fresh(), $msg);
+                    $evento_label   = 'Requiere verificación (coordinando agenda)';
+                } else {
+                    $verificacion_service = new \App\Services\LeadVerificacionWhatsappService(
+                        new \App\Services\WhatsappSendService()
+                    );
+                    $verif_notified = $verificacion_service->notify($lead->fresh(), $msg);
+                    $evento_label   = 'Requiere verificación humana';
+                }
                 if (! empty($verif_notified)) {
-                    $admin_notifications_log[] = ['evento' => 'Requiere verificación humana', 'admins' => $verif_notified];
+                    $admin_notifications_log[] = ['evento' => $evento_label, 'admins' => $verif_notified];
                 }
             } catch (\Throwable $e) {
-                Log::error('LeadAiService: error al notificar verificacion pendiente por WhatsApp.', [
+                Log::error('LeadAiService: error al notificar verificacion pendiente.', [
                     'lead_id'    => $lead->id,
                     'message_id' => $msg->id,
                     'error'      => $e->getMessage(),

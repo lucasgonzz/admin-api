@@ -43,8 +43,12 @@ class Admin extends Authenticatable
         'notify_demo_scheduled_whatsapp'  => 'boolean',
         // Flag para recibir WhatsApp cuando falla el envío automático de un mensaje del sistema.
         'notify_send_errors_whatsapp'     => 'boolean',
-        // Flag para recibir WhatsApp cuando una sugerencia queda pendiente de verificación manual.
+        // Flag para recibir WhatsApp cuando una sugerencia queda pendiente de verificación manual
+        // por un ERROR (ej. fallback de disponibilidad). No se usa para el motivo "agendamiento".
         'notify_verificacion_whatsapp'    => 'boolean',
+        // Flag para recibir WhatsApp (además del push, que siempre se manda) cuando un mensaje
+        // requiere verificación porque el lead está coordinando agenda (motivo de negocio, no error).
+        'notify_verificacion_agendamiento_whatsapp' => 'boolean',
     ];
 
     /**
