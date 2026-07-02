@@ -22,6 +22,7 @@ class LeadPipelineStatus extends Model
         'nuevo'                        => 'Nuevo',
         'contactado'                   => 'Contactado',
         'calificado'                   => 'Calificado',
+        'solicita_disponibilidad'      => 'Solicita disponibilidad',
         'demo_agendada'                => 'Demo agendada',
         // Subestados del ciclo de vida de la demo (automatizados por el agente).
         'ingresando_demo'              => 'Ingresando a demo',
@@ -71,6 +72,7 @@ class LeadPipelineStatus extends Model
         'nuevo'                      => 'Calificación',
         'contactado'                 => 'Calificación',
         'calificado'                 => 'Calificación',
+        'solicita_disponibilidad'    => 'Calificación',
         'demo_agendada'              => 'Demo',
         'ingresando_demo'            => 'Demo',
         'demo_en_curso'              => 'Demo',
@@ -83,8 +85,13 @@ class LeadPipelineStatus extends Model
         'mail2_enviado'              => 'Fin',
     ];
 
-    /** Slug excluido de los selectores de la UI (existe en BD pero es estado técnico interno). */
-    public const SLUG_HIDDEN_FROM_SELECT = 'demo_realizada';
+    /**
+     * Slugs excluidos de los selectores de la UI (existen en BD pero no deben poder asignarse
+     * manualmente). `demo_realizada` es estado técnico interno del ciclo automatizado de demo.
+     * `mail2_enviado` no se usa (Lucas lo dejó de utilizar, 2/7/2026) — se mantiene en el catálogo
+     * por compatibilidad histórica pero se saca de filtro y de asignación.
+     */
+    public const SLUGS_HIDDEN_FROM_SELECT = ['demo_realizada', 'mail2_enviado'];
 
     protected $guarded = [];
 
@@ -190,7 +197,7 @@ class LeadPipelineStatus extends Model
         if ($rows->isEmpty()) {
             $options = [];
             foreach (static::DEFAULT_STATUSES as $slug => $label) {
-                if ($slug === static::SLUG_HIDDEN_FROM_SELECT) {
+                if (in_array($slug, static::SLUGS_HIDDEN_FROM_SELECT, true)) {
                     continue;
                 }
                 $options[] = [
@@ -206,7 +213,7 @@ class LeadPipelineStatus extends Model
 
         $options = [];
         foreach ($rows as $row) {
-            if ($row->slug === static::SLUG_HIDDEN_FROM_SELECT) {
+            if (in_array($row->slug, static::SLUGS_HIDDEN_FROM_SELECT, true)) {
                 continue;
             }
             $options[] = [
