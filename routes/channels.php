@@ -25,3 +25,8 @@ Broadcast::channel('deployment.{upgradeId}', function ($user, $upgradeId) {
 Broadcast::channel('closer-alerts', function ($user) {
     return $user !== null && $user->is_closer === true;
 });
+
+// Canal privado de verificación por agendamiento: cualquier admin autenticado puede escuchar.
+Broadcast::channel('verificacion-agendamiento-alerts', function ($user) {
+    return $user !== null;
+});

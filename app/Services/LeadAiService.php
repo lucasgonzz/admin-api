@@ -2231,6 +2231,9 @@ TXT;
                     );
                     $verif_notified = $agendamiento_service->notify($lead->fresh(), $msg);
                     $evento_label   = 'Requiere verificación (coordinando agenda)';
+
+                    /* Sonido en el navegador para admins con la pestaña abierta (canal aparte del push/WhatsApp). */
+                    event(new \App\Events\LeadVerificacionAgendamientoAlert($lead->fresh(), $msg));
                 } else {
                     $verificacion_service = new \App\Services\LeadVerificacionWhatsappService(
                         new \App\Services\WhatsappSendService()
