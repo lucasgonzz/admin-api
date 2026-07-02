@@ -999,16 +999,35 @@ class WhatsappWebhookController extends Controller
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $inbound_lead_message->id);
 
-        // Incrementar responded_count en la variante A/B si es la primera respuesta del lead al welcome.
+        /*
+         * FIX (1/7/2026): la condición anterior (`prev_lead_msgs === 0`, es decir "es el
+         * primer mensaje de toda la conversación") nunca se cumplía en la práctica.
+         * `welcome_variant_id` recién se asigna al lead cuando se envía el mensaje de welcome
+         * (con delay, después del primer mensaje del lead) — así que en el primer mensaje del
+         * lead el `if` de afuera no entra (welcome_variant_id todavía null), y en el segundo
+         * mensaje del lead (la respuesta real al welcome) `prev_lead_msgs` ya vale 1, no 0.
+         * Resultado: responded_count quedaba en 0 siempre. La medición correcta es "primera
+         * respuesta del lead que llega DESPUÉS del mensaje de welcome", no "primer mensaje de
+         * toda la conversación".
+         */
         if ($lead->welcome_variant_id) {
-            $prev_lead_msgs = LeadMessage::where('lead_id', $lead->id)
-                ->where('sender', 'lead')
-                ->where('id', '<', (int) $inbound_lead_message->id)
-                ->count();
-            if ($prev_lead_msgs === 0) {
-                $ab_variant = \App\Models\MessageVariant::find($lead->welcome_variant_id);
-                if ($ab_variant) {
-                    $ab_variant->increment_responded();
+            $welcome_message = LeadMessage::where('lead_id', $lead->id)
+                ->where('system_message_kind', 'whatsapp_welcome')
+                ->orderBy('id')
+                ->first();
+
+            if ($welcome_message) {
+                $lead_msgs_after_welcome = LeadMessage::where('lead_id', $lead->id)
+                    ->where('sender', 'lead')
+                    ->where('id', '>', (int) $welcome_message->id)
+                    ->where('id', '<', (int) $inbound_lead_message->id)
+                    ->count();
+
+                if ($lead_msgs_after_welcome === 0) {
+                    $ab_variant = \App\Models\MessageVariant::find($lead->welcome_variant_id);
+                    if ($ab_variant) {
+                        $ab_variant->increment_responded();
+                    }
                 }
             }
         }
