@@ -1784,7 +1784,10 @@ TXT;
                         );
                         $demo_notified = $demo_notify_service->notify($lead, $demo_date, $demo_start, $es_reagendado);
                         if (! empty($demo_notified)) {
-                            $admin_notifications_log[] = ['evento' => 'Demo agendada', 'admins' => $demo_notified];
+                            $admin_notifications_log[] = [
+                                'evento' => $es_reagendado ? 'Demo reagendada' : 'Demo agendada',
+                                'admins' => $demo_notified,
+                            ];
                         }
                     } catch (\Throwable $e) {
                         Log::error('LeadAiService: error al notificar demo agendada por WhatsApp.', [
@@ -2178,19 +2181,33 @@ TXT;
             }
         }
 
-        /* Disparar Mail 1 si se guardó un email nuevo en esta pasada. */
-        if ($email_nuevo) {
+        /*
+         * Disparar Mail 1 (videos + acceso a la demo) en dos casos:
+         *   1. $email_nuevo: primera vez que el lead da su email — comportamiento original.
+         *   2. FIX (1/7/2026): $es_reagendado y el lead ya tiene email cargado — antes esto NO
+         *      reenviaba el mail (solo se reenviaba el email_nuevo), mientras que el evento de
+         *      Google Calendar SÍ se recreaba con el horario nuevo. El lead quedaba con un
+         *      invite de Calendar actualizado y el mail de la demo desactualizado/perdido.
+         */
+        $debe_enviar_mail_demo = $email_nuevo || ($es_reagendado && ! empty($lead->email));
+        if ($debe_enviar_mail_demo) {
             try {
                 $lead->loadMissing('demo');
                 $mailable = \App\Mail\Helpers\LeadDemoMailHelper::build($lead);
                 \Illuminate\Support\Facades\Mail::to($lead->email)->send($mailable);
                 $lead->update(['demo_mail_sent_at' => AppTime::now()]);
-                Log::info('LeadAiService: Mail 1 enviado automáticamente al guardar email del lead.', [
-                    'lead_id' => $lead->id,
-                    'email'   => $lead->email,
+                Log::info('LeadAiService: Mail 1 enviado.', [
+                    'lead_id'       => $lead->id,
+                    'email'         => $lead->email,
+                    'es_reagendado' => $es_reagendado,
+                    'email_nuevo'   => $email_nuevo,
                 ]);
+                $admin_notifications_log[] = [
+                    'evento' => $email_nuevo ? 'Mail de demo enviado' : 'Mail de demo reenviado (reagendado)',
+                    'admins' => [],
+                ];
             } catch (\Throwable $e) {
-                Log::error('LeadAiService: error al enviar Mail 1 automático.', [
+                Log::error('LeadAiService: error al enviar Mail 1.', [
                     'lead_id' => $lead->id,
                     'error'   => $e->getMessage(),
                 ]);
