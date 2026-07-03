@@ -109,10 +109,16 @@ class LeadFollowupService
         /** @var FollowupRule $rule */
         $rule = $rules_by_estado->get($lead->status);
 
+        // FIX (2/7/2026): mismo criterio que en process_lead() — un seguimiento por plantilla fallido
+        // no consume el cupo. Ver comentario completo en process_lead().
         $followups = LeadMessage::query()
             ->where('lead_id', $lead->id)
             ->where('is_followup', true)
             ->where('status', '!=', 'rechazado')
+            ->where(function ($q) {
+                $q->whereNull('followup_template_id')
+                    ->orWhereNotNull('whatsapp_message_id');
+            })
             ->count();
 
         if ($followups >= (int) $rule->max_followups) {
@@ -192,10 +198,19 @@ class LeadFollowupService
             return null;
         }
 
+        // FIX (2/7/2026): un seguimiento por plantilla que falló al enviarse (whatsapp_message_id null)
+        // no debe consumir el cupo de max_followups — el lead nunca lo recibió. Se identifica por tener
+        // followup_template_id seteado (viene de send_followup_via_template) y whatsapp_message_id null.
+        // Los seguimientos que no pasan por plantilla (ej: notify_closer_for_followup, sin
+        // followup_template_id) siguen contando igual que siempre.
         $followups = LeadMessage::query()
             ->where('lead_id', $lead->id)
             ->where('is_followup', true)
             ->where('status', '!=', 'rechazado')
+            ->where(function ($q) {
+                $q->whereNull('followup_template_id')
+                    ->orWhereNotNull('whatsapp_message_id');
+            })
             ->count();
 
         if ($followups >= (int) $rule->max_followups) {
@@ -326,13 +341,28 @@ class LeadFollowupService
     /**
      * Envía un seguimiento directo vía plantilla Meta y registra el mensaje.
      *
+     * Público (no protected) porque BatchLeadAiRecoveryService::retry_failed_followups() (prompt 246) lo
+     * invoca directamente para reintentar, sin pasar por process_lead()/force_followup_now(), un
+     * seguimiento que falló en un intento anterior (mismo lead, misma plantilla ya resuelta).
+     *
+     * FIX (2/7/2026): antes este método marcaba SIEMPRE `status = 'enviado'` sin revisar si
+     * send_template() había devuelto null (falló el envío real). Eso hacía que un seguimiento que nunca
+     * llegó al lead igual consumiera el cupo de max_followups. Ahora, si el envío falla, no se marca
+     * tiene_seguimiento_sin_ver ni se dispara el broadcast (nada cambió todavía para el setter), y el
+     * mensaje queda identificable como fallido por whatsapp_message_id null + followup_template_id no
+     * null. La UI (MessageBubble.vue) ya muestra el banner de error de entrega para ese caso — no hace
+     * falta ningún cambio de frontend.
+     *
      * @param Lead             $lead
      * @param FollowupTemplate $template
-     * @param int              $followup_number Número de seguimiento (1-based) para etiquetar el registro.
+     * @param int              $followup_number Número de seguimiento (1-based). No se usa dentro del
+     *                                            método (se conserva por compatibilidad de firma con las
+     *                                            llamadas existentes); en un reintento manual puede
+     *                                            pasarse 0.
      *
      * @return void
      */
-    protected function send_followup_via_template(Lead $lead, FollowupTemplate $template, int $followup_number): void
+    public function send_followup_via_template(Lead $lead, FollowupTemplate $template, int $followup_number): void
     {
         // Nombre del contacto como variable {{1}} de la plantilla (vacío si no hay).
         $contact_name = $lead->contact_name ?? '';
@@ -348,8 +378,11 @@ class LeadFollowupService
             "Seguimiento automático - Lead #{$lead->id} ({$lead->contact_name})"
         );
 
-        // Registramos el seguimiento en la conversación del lead (trazabilidad).
+        // Registramos el seguimiento en la conversación del lead (trazabilidad), haya fallado o no.
         // Usamos el texto real de la plantilla (con nombre sustituido) si está disponible.
+        // followup_template_id queda grabado siempre: identifica qué plantilla se intentó enviar, tanto
+        // para el fix del conteo de cupo (más arriba en este archivo) como para que un reintento manual
+        // sepa qué plantilla reenviar sin volver a resolverla por estado del lead.
         LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
@@ -357,8 +390,23 @@ class LeadFollowupService
             'status'                => 'enviado',
             'is_followup'           => true,
             'whatsapp_message_id'   => $whatsapp_message_id,
+            'followup_template_id'  => $template->id,
             'requiere_verificacion' => false,
         ]);
+
+        if ($whatsapp_message_id === null) {
+            // Envío fallido: WhatsappSendService ya notificó a los admins de forma centralizada
+            // (throttle de máx 1 aviso cada 10 min). Acá solo logueamos y cortamos: no marcamos
+            // tiene_seguimiento_sin_ver (no hay nada nuevo que el setter deba revisar) ni disparamos
+            // el broadcast — el mensaje sigue apareciendo en el hilo con el banner de error de entrega
+            // que ya renderiza MessageBubble.vue.
+            Log::channel('daily')->warning('LeadFollowupService: seguimiento por plantilla falló al enviarse.', [
+                'lead_id'  => $lead->id,
+                'template' => $template->template_name,
+            ]);
+
+            return;
+        }
 
         // Marcamos que el lead tiene un seguimiento que el setter todavía no vio.
         $lead->tiene_seguimiento_sin_ver = true;
