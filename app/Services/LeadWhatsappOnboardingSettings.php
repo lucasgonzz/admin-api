@@ -99,6 +99,9 @@ class LeadWhatsappOnboardingSettings
 
     public const AUTO_SEND_DELAY_MAX_SECONDS = 3600;
 
+    /** Mínimo para auto-envío en tramo de agendamiento (0 = inmediato). Sin tope superior. */
+    public const VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_SECONDS = 0;
+
     /**
      * Devuelve la configuración completa para el panel (GET settings).
      *
@@ -138,17 +141,10 @@ class LeadWhatsappOnboardingSettings
             self::KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS,
             (string) (int) $data['ai_suggestion_auto_send_delay_seconds']
         );
-        /*
-         * Defensivo: el form de admin-spa todavía no envía este campo (fuera del scope de este
-         * cambio). No forzar su presencia acá evita romper el guardado de esta sección hasta que
-         * se agregue el input correspondiente.
-         */
-        if (array_key_exists('verificacion_agendamiento_auto_send_delay_seconds', $data)) {
-            AdminSetting::set(
-                self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS,
-                (string) (int) $data['verificacion_agendamiento_auto_send_delay_seconds']
-            );
-        }
+        AdminSetting::set(
+            self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS,
+            (string) (int) $data['verificacion_agendamiento_auto_send_delay_seconds']
+        );
     }
 
     /**
@@ -328,14 +324,24 @@ class LeadWhatsappOnboardingSettings
             (string) self::DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS
         );
         $seconds = (int) $raw;
-        if ($seconds < self::AUTO_SEND_DELAY_MIN_SECONDS) {
-            return self::AUTO_SEND_DELAY_MIN_SECONDS;
-        }
-        if ($seconds > self::AUTO_SEND_DELAY_MAX_SECONDS) {
-            return self::AUTO_SEND_DELAY_MAX_SECONDS;
+
+        return self::clamp_verificacion_agendamiento_auto_send_delay($seconds);
+    }
+
+    /**
+     * Acota la demora de auto-envío en agendamiento: solo mínimo 0, sin tope superior.
+     *
+     * @param int $value
+     *
+     * @return int
+     */
+    public static function clamp_verificacion_agendamiento_auto_send_delay(int $value): int
+    {
+        if ($value < self::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_SECONDS) {
+            return self::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_SECONDS;
         }
 
-        return $seconds;
+        return $value;
     }
 
     /**

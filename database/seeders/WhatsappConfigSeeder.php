@@ -27,6 +27,7 @@ class WhatsappConfigSeeder extends Seeder
             'phone_number_id' => '1135644799636575',
             'webhook_secret'  => 'ffb6e70a95b832e0dddfb84adfb4c20e22d74dac1cf02c0c438d7d9bc04bb20b',
             'is_active'       => true,
+            'test_mode'       => true,
         ]);
     }
 }
