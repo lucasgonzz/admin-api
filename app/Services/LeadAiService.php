@@ -199,6 +199,21 @@ TXT;
          */
         $fecha_solicitada = isset($parsed['fecha_solicitada']) ? trim((string) $parsed['fecha_solicitada']) : '';
 
+        /* FIX (bug real, 2/7/2026 — lead 232 "Pablo"): cuando Claude confirma agendar_demo
+         * directamente (sin pasar por solicita_disponibilidad) para una fecha ya acordada en
+         * un turno anterior de la misma conversación, fecha_solicitada nunca llega porque el
+         * prompt solo le pide ese campo a Claude en el camino de solicita_disponibilidad. Sin
+         * este fallback, la segunda llamada arma el JSON de disponibilidad con la ventana de
+         * 3 días por defecto y Claude termina "confirmando" sobre datos que nunca incluyeron
+         * la fecha real — exactamente la causa por la que agendar_demo llegaba con un slot
+         * que el servidor no podía validar. Se usa agendar_demo.demo_date como fuente
+         * alternativa de la fecha objetivo cuando fecha_solicitada viene vacío. */
+        if ($fecha_solicitada === '' && isset($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])) {
+            $fecha_solicitada = isset($parsed['agendar_demo']['demo_date'])
+                ? trim((string) $parsed['agendar_demo']['demo_date'])
+                : '';
+        }
+
         if ($needs_availability_check) {
             try {
                 /* Pasar la fecha solicitada (o null si no viene) para ampliar el rango del JSON. */
@@ -1942,8 +1957,20 @@ TXT;
                 /* Validar que el slot exista en la disponibilidad real para esa demo.
                  * Las claves del JSON incluyen el nombre del día ("domingo 2026-06-28"),
                  * pero Claude devuelve demo_date en formato Y-m-d. Buscar la clave que
-                 * contenga la fecha solicitada. */
-                $availability = $this->build_availability_json();
+                 * contenga la fecha solicitada.
+                 *
+                 * FIX (bug real, 2/7/2026 — lead 232 "Pablo"): antes de este fix, acá se
+                 * llamaba a build_availability_json() sin argumentos, que arma el JSON solo
+                 * con los próximos 3 días hábiles desde mañana. Si $demo_date caía fuera de
+                 * esa ventana (ej. el lead había agendado para la semana siguiente), el slot
+                 * NUNCA aparecía en $slots_demo aunque estuviera libre, y se rechazaba como
+                 * "no disponible" — disparando el camino de slot inválido de más abajo con
+                 * una demo que en realidad sí se podía agendar. Se pasa $demo_date como
+                 * $specific_date para que la consulta cubra el día real que se está
+                 * confirmando (prepare_slot_availability_context ya sabe ampliar el rango
+                 * hasta esa fecha cuando se le pasa). */
+                $availability_snapshot_unused = null;
+                $availability = $this->build_availability_json(3, $availability_snapshot_unused, $demo_date);
                 $slots_demo   = [];
                 $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
                 foreach ($demo_slots_by_date as $date_label => $slots) {
@@ -2586,9 +2613,9 @@ TXT;
             $user_content = "El lead propuso agendar a las {$slot_invalido} para el {$demo_date}, pero ese horario ya no está disponible.\n";
             $user_content .= $alternativas_legibles !== ''
                 ? "Los próximos horarios disponibles son: {$alternativas_legibles}.\n"
-                : "Por ahora no hay horarios disponibles para esa fecha.\n";
-            $user_content .= "Redactá un mensaje natural y breve para el lead disculpándote y ofreciéndole esas alternativas.\n";
-            $user_content .= "No uses `agendar_demo`. Solo devolvé el texto del mensaje, sin JSON, sin estructura, solo el mensaje al lead.";
+                : "No tenés horarios reales para ofrecer en este momento. NO inventes fechas ni horarios bajo ningún motivo — pedile al lead que te confirme qué día prefiere, para volver a consultar la disponibilidad real antes de ofrecerle algo.\n";
+            $user_content .= "Redactá un mensaje natural y breve para el lead disculpándote y ofreciéndole esas alternativas (o pidiéndole que confirme otro día, si no tenés alternativas reales).\n";
+            $user_content .= "No uses `agendar_demo`. Solo devolvé el texto del mensaje, sin JSON, sin estructura, solo el mensaje al lead. Nunca menciones un horario o fecha que no te haya sido dado explícitamente arriba.";
 
             /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
             $system = $this->build_system_prompt();
