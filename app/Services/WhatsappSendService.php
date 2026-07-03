@@ -71,6 +71,51 @@ class WhatsappSendService
     {
         $notify_context = $context !== null ? $context : "Envío de texto a {$to}";
 
+        /*
+         * FIX (test_mode simulado, 3/7/2026): antes, con test_mode activo,
+         * resolve_send_context() devolvía null y este método lo trataba igual que
+         * un fallo real de envío. LeadSuggestionSendService no podía distinguir
+         * "no se envió porque estamos probando" de "no se envió porque falló de
+         * verdad", y marcaba el mensaje como rechazado sin nunca aplicar el
+         * pipeline sugerido por Claude (apply_suggested_pipeline_status()) — el
+         * lead nunca avanzaba de estado en el admin durante pruebas locales.
+         * Ahora, si test_mode está activo, se devuelve un whatsapp_message_id
+         * simulado (prefijo "test-") sin llamar a la API real, para que el resto
+         * del pipeline trate el mensaje como enviado con éxito. Se chequea acá,
+         * antes de resolve_send_context(), porque ese método ya corta a null en
+         * test_mode y no expone el motivo hacia arriba.
+         */
+        $active_config = WhatsappConfig::getActive();
+        if ($active_config && $active_config->is_active && $active_config->test_mode) {
+            $normalized_to = WhatsappNormalizer::normalize($to);
+            $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+            if ($to_digits === '') {
+                Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
+                    'to' => $to,
+                ]);
+                $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
+
+                return null;
+            }
+
+            $text_body = trim($body);
+            if ($text_body === '') {
+                Log::channel('daily')->warning('WhatsappSendService: cuerpo de mensaje vacío.');
+                $this->notify_admins_of_failure($notify_context, 'Cuerpo de mensaje vacío.', $skip_failure_notification);
+
+                return null;
+            }
+
+            $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
+
+            Log::channel('daily')->info('WhatsappSendService: test_mode activo, envío simulado (no se llamó a la API real).', [
+                'to'                       => $normalized_to,
+                'fake_whatsapp_message_id' => $fake_message_id,
+            ]);
+
+            return $fake_message_id;
+        }
+
         $send_context = $this->resolve_send_context($skip_failure_notification);
         if ($send_context === null) {
             return null;
