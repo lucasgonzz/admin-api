@@ -2686,15 +2686,25 @@ class LeadController extends Controller
      */
     public function batch_recover_unanswered_json(BatchLeadAiRecoveryService $service)
     {
-        /* Ejecutar el recovery y obtener los contadores. */
+        /* Ejecutar el recovery de respuestas sin contestar y obtener los contadores. */
         $result = $service->dispatch_unanswered_leads();
 
-        Log::channel('daily')->info('batch_recover_unanswered: recovery iniciado.', $result);
+        /* Además, reintentar seguimientos automáticos por plantilla que se ejecutaron pero nunca
+           llegaron a enviarse (ver LeadFollowupService::send_followup_via_template(), prompt 245, y
+           BatchLeadAiRecoveryService::retry_failed_followups(), prompt 246). */
+        $followups_result = $service->retry_failed_followups();
+
+        Log::channel('daily')->info('batch_recover_unanswered: recovery iniciado.', array_merge($result, [
+            'followups_retried' => $followups_result['retried'],
+            'followups_skipped' => $followups_result['skipped_followups'],
+        ]));
 
         return response()->json([
-            'message'    => 'Recovery iniciado',
-            'dispatched' => $result['dispatched'],
-            'skipped'    => $result['skipped'],
+            'message'           => 'Recovery iniciado',
+            'dispatched'        => $result['dispatched'],
+            'skipped'           => $result['skipped'],
+            'followups_retried' => $followups_result['retried'],
+            'followups_skipped' => $followups_result['skipped_followups'],
         ]);
     }
 }
