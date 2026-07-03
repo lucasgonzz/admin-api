@@ -226,7 +226,11 @@ class WhatsappWebhookController extends Controller
     {
         try {
             // Extraer el wamid de Meta que identifica el mensaje saliente.
-            $wamid = $payload['message']['whatsapp_message_id'] ?? null;
+            // NOTA (2/7/2026): el payload real de Kapso para eventos de estado NO trae
+            // 'whatsapp_message_id' (ese campo solo aparece en la documentación de ejemplo).
+            // El wamid real viaja en 'message.id', igual que en los mensajes entrantes
+            // (ver parse_inbound_message(), que ya lee $message['id']).
+            $wamid = $payload['message']['id'] ?? null;
             if ($wamid === null || $wamid === '') {
                 Log::channel('daily')->warning('WhatsApp webhook: evento de estado sin whatsapp_message_id.', [
                     'event_type' => $event_type,
