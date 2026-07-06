@@ -58,7 +58,7 @@ class LeadMessage extends Model
      *
      * @var array<int, string>
      */
-    protected $appends = ['suggested_lead_status_label'];
+    protected $appends = ['suggested_lead_status_label', 'pending_actions_summary'];
 
     /**
      * Casts de tiempos de estado del mensaje.
@@ -100,6 +100,75 @@ class LeadMessage extends Model
     public function getSuggestedLeadStatusLabelAttribute(): ?string
     {
         return LeadPipelineStatus::label_for($this->suggested_lead_status);
+    }
+
+    /**
+     * Lista legible (en español) de las acciones que se van a ejecutar si se aprueba este
+     * mensaje pendiente (`pending_actions`, motivo agendamiento — ver
+     * LeadAiService::create_pending_agendamiento_message()). Permite que admin-spa muestre a
+     * Martín, antes de aprobar, qué va a pasar realmente (agendar tal día/hora, enviar mail a
+     * tal dirección, cambiar el estado del lead), sin tener que interpretar el JSON crudo.
+     *
+     * @return array<int, string>
+     */
+    public function getPendingActionsSummaryAttribute(): array
+    {
+        $parsed = $this->pending_actions;
+        if (empty($parsed) || ! is_array($parsed)) {
+            return [];
+        }
+
+        $acciones = [];
+
+        /* agendar_demo: mostrar día y hora si vienen presentes en el paquete. */
+        if (! empty($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])) {
+            $agendar_demo = $parsed['agendar_demo'];
+            $demo_date    = isset($agendar_demo['demo_date']) ? trim((string) $agendar_demo['demo_date']) : '';
+            $demo_start   = isset($agendar_demo['demo_start_time']) ? trim((string) $agendar_demo['demo_start_time']) : '';
+            $fecha_legible = '';
+            if ($demo_date !== '') {
+                try {
+                    $fecha_legible = \Carbon\Carbon::createFromFormat('Y-m-d', $demo_date)->format('d/m');
+                } catch (\Throwable $e) {
+                    $fecha_legible = $demo_date;
+                }
+            }
+            $detalle = trim($fecha_legible.($demo_start !== '' ? ' '.$demo_start : ''));
+            $acciones[] = $detalle !== '' ? "Agendar demo: {$detalle}" : 'Agendar demo';
+        }
+
+        /* guardar_email: mostrar la dirección que se va a registrar y usar para el mail de acceso. */
+        $guardar_email = isset($parsed['guardar_email']) ? trim((string) $parsed['guardar_email']) : '';
+        if ($guardar_email !== '') {
+            $acciones[] = "Enviar mail de acceso a la demo a {$guardar_email}";
+        }
+
+        /* cancelar_demo: reagendado en curso. */
+        if (! empty($parsed['cancelar_demo'])) {
+            $acciones[] = 'Cancelar/reagendar la demo actual';
+        }
+
+        /* guardar_nombre: nombre nuevo detectado para el lead. */
+        $guardar_nombre = isset($parsed['guardar_nombre']) ? trim((string) $parsed['guardar_nombre']) : '';
+        if ($guardar_nombre !== '') {
+            $acciones[] = "Guardar nombre del lead: {$guardar_nombre}";
+        }
+
+        /* estado_sugerido: solo si implica un cambio real respecto al estado actual del lead. */
+        $estado_sugerido = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
+        $lead_status     = $this->lead ? (string) $this->lead->status : '';
+        if ($estado_sugerido !== '' && $estado_sugerido !== $lead_status) {
+            $label      = LeadPipelineStatus::label_for($estado_sugerido);
+            $acciones[] = 'Cambiar estado del lead a: '.($label ?? $estado_sugerido);
+        }
+
+        /* requiere_intervencion_humana: alertar que este paquete deriva a revisión manual. */
+        if (! empty($parsed['requiere_intervencion_humana'])) {
+            $motivo     = isset($parsed['motivo_intervencion']) ? trim((string) $parsed['motivo_intervencion']) : '';
+            $acciones[] = 'Requiere intervención humana'.($motivo !== '' ? ": {$motivo}" : '');
+        }
+
+        return $acciones;
     }
 
     /**

@@ -214,13 +214,48 @@ TXT;
                 : '';
         }
 
+        /*
+         * RED DE SEGURIDAD (hueco #2, 6/7/2026): el protocolo solo registra/pide el email en el
+         * tramo final del agendamiento, atado a un slot ya confirmado (agendar_demo presente en el
+         * mismo paquete). Si Claude devuelve guardar_email SIN agendar_demo, está coordinando la
+         * agenda fuera de la secuencia estructurada (casos leads #3 y #5: pidió el mail antes de
+         * confirmar horario, o inventó un horario sin pasar por solicita_disponibilidad). En ese
+         * caso no se confía en la respuesta: se frena el mensaje y se deriva a intervención humana
+         * para que el closer lo maneje al 100%. Excepción: reagendado (cancelar_demo presente),
+         * donde el email ya puede existir y el flujo es distinto.
+         */
+        $guardar_email_raw = isset($parsed['guardar_email']) ? trim((string) $parsed['guardar_email']) : '';
+        $tiene_agendar     = ! empty($parsed['agendar_demo']);
+        if ($guardar_email_raw !== '' && ! $tiene_agendar && ! $cancelar_demo_flag) {
+            Log::channel('daily')->warning('LeadAiService: guardar_email sin agendar_demo — agenda fuera de secuencia, derivando a intervención humana.', [
+                'lead_id'         => $lead->id,
+                'estado_sugerido' => $estado_sugerido,
+                'lead_status'     => (string) $lead->status,
+            ]);
+            $parsed['requiere_intervencion_humana'] = true;
+            $parsed['motivo_intervencion'] = 'El agente intentó registrar el email sin un horario de demo confirmado (agenda fuera de secuencia). Revisar y coordinar el agendamiento manualmente.';
+            /*
+             * Frenar EXPLÍCITAMENTE el mensaje de este turno. El bloque existente de
+             * requiere_intervencion_humana en apply_parsed_response() crea la AdminTask, notifica
+             * y apaga claude_auto_reply (respuestas FUTURAS), pero NO setea requiere_verificacion
+             * sobre el mensaje actual. Sin este flag, el mensaje problemático de este mismo turno se
+             * auto-enviaría igual. Por eso lo forzamos acá.
+             */
+            $parsed['requiere_verificacion'] = true;
+            /* Neutralizar la acción fuera de secuencia para que no se ejecute al diferir/enviar. */
+            $parsed['guardar_email'] = null;
+            /* No disparar la segunda llamada de disponibilidad para este paquete: va a intervención. */
+            $needs_availability_check = false;
+        }
+
         if ($needs_availability_check) {
             try {
                 /* Pasar la fecha solicitada (o null si no viene) para ampliar el rango del JSON. */
                 return $this->generate_suggestion_with_availability(
                     $lead,
                     $is_followup,
-                    $fecha_solicitada !== '' ? $fecha_solicitada : null
+                    $fecha_solicitada !== '' ? $fecha_solicitada : null,
+                    true
                 );
             } catch (\Throwable $e) {
                 Log::error('Error en segunda llamada a Claude (disponibilidad)', [
@@ -257,15 +292,17 @@ TXT;
      * Cuando $specific_date tiene valor (Claude devolvió fecha_solicitada en la primera
      * llamada), se amplía el JSON de disponibilidad para cubrir el rango hasta esa fecha.
      *
-     * @param Lead        $lead          Lead con relación `messages` cargada.
-     * @param bool        $is_followup   true si lo disparó el scheduler de inactividad.
-     * @param string|null $specific_date Fecha objetivo en formato Y-m-d, o null para los 3 días por defecto.
+     * @param Lead        $lead                            Lead con relación `messages` cargada.
+     * @param bool        $is_followup                     true si lo disparó el scheduler de inactividad.
+     * @param string|null $specific_date                   Fecha objetivo en formato Y-m-d, o null para los 3 días por defecto.
+     * @param bool        $came_from_availability_request  true cuando esta llamada nació de solicita_disponibilidad
+     *                                                      en la primera llamada (ver FIX hueco #1, 6/7/2026, más abajo).
      *
      * @throws \RuntimeException Si falla la llamada HTTP o el JSON es inválido.
      *
      * @return LeadMessage Mensaje creado con los horarios sugeridos por Claude.
      */
-    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null): LeadMessage
+    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null, bool $came_from_availability_request = false): LeadMessage
     {
         /* JSON estructurado por demo para que Claude interprete disponibilidad sin regex.
          * Se pasa $specific_date para ampliar el rango cuando el lead pidió una fecha lejana.
@@ -407,6 +444,46 @@ TXT;
         ]);
 
         $parsed = $this->parse_json_response($text);
+
+        /* Salvaguarda de logging (hueco #4, 6/7/2026): auditar coherencia de fecha en el mensaje
+         * final vs. el JSON de disponibilidad, para detectar casos como el lead #3 ("martes 8"
+         * confirmado cuando el slot real era "martes 7"). No bloquea el envío; el refuerzo fuerte
+         * va por protocolo (prompt 268). */
+        Log::channel('daily')->debug('LeadAiService: verificar coherencia de fecha en mensaje de disponibilidad.', [
+            'lead_id'           => $lead->id,
+            'mensaje_sugerido'  => isset($parsed['mensaje_sugerido']) ? (string) $parsed['mensaje_sugerido'] : '',
+            'claves_slots_json' => isset($calendar_snapshot) ? 'ver calendar_snapshot' : null,
+        ]);
+
+        /*
+         * FIX (hueco #1, 6/7/2026): esta respuesta es la SEGUNDA llamada de la cadena de
+         * agendamiento (came_from_availability_request = true). Desde la óptica de Claude la
+         * disponibilidad "ya se resolvió", así que devuelve solicita_disponibilidad: false y
+         * estado calificado. Pero el mensaje resultante es justamente el que ofrece los horarios
+         * al lead y, por regla de negocio, tiene que quedar en el tramo de agenda para que
+         * requiera verificación humana (delay 1800s) antes de enviarse. Se fuerza el estado y la
+         * verificación acá, salvo que Claude ya haya escalado el estado por su cuenta (ej.
+         * demo_agendada tras confirmar el slot, o pidió otra vez disponibilidad porque la fecha
+         * cae fuera del JSON). No pisar esos casos: solo elevar cuando el estado sugerido quedó
+         * por debajo del tramo (típicamente 'calificado' o vacío).
+         */
+        if ($came_from_availability_request) {
+            $estado_segunda = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
+            $ya_pidio_disp  = ! empty($parsed['solicita_disponibilidad']);
+            $ya_en_tramo    = false;
+            if ($estado_segunda !== '') {
+                $ps_segunda  = LeadPipelineStatus::ensure_exists($estado_segunda);
+                $ya_en_tramo = in_array($ps_segunda->slug, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true);
+            }
+            if (! $ya_en_tramo && ! $ya_pidio_disp) {
+                $parsed['estado_sugerido']       = 'solicita_disponibilidad';
+                $parsed['requiere_verificacion'] = true;
+                Log::channel('daily')->debug('LeadAiService: mensaje de disponibilidad elevado a solicita_disponibilidad (herencia de tramo).', [
+                    'lead_id'         => $lead->id,
+                    'estado_original' => $estado_segunda,
+                ]);
+            }
+        }
 
         return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot);
     }
@@ -2519,7 +2596,27 @@ TXT;
          * no existía. Con reagendado, evita el mismo problema si Claude cancela
          * (cancelar_demo) sin coordinar el horario nuevo en la misma respuesta.
          */
-        $debe_enviar_mail_demo = $demo_confirmada_este_turno && ($email_nuevo || ($es_reagendado && ! empty($lead->email)));
+        /*
+         * FIX (hueco #3, 6/7/2026, prompt 267): $demo_confirmada_este_turno (prompt 251) solo es
+         * true cuando agendar_demo se valida EN ESTE MISMO turno. Eso dejaba un hueco: si la demo
+         * ya había quedado agendada en un turno anterior y el email llega recién ahora (turno
+         * distinto, sin agendar_demo en el $parsed actual), el mail nunca se disparaba porque
+         * $demo_confirmada_este_turno quedaba en false — el caso del lead #3. Se agrega
+         * $lead_ya_agendado como fuente alternativa: si el lead ya está en demo_agendada o una
+         * etapa posterior del ciclo de demo, hay un slot confirmado real (de este turno o de uno
+         * anterior) y el mail puede salir igual. No reemplaza $demo_confirmada_este_turno: ambas
+         * protegen contra el caso original (guardar_email suelto sin ningún slot confirmado, ni
+         * ahora ni antes).
+         */
+        $lead_ya_agendado = in_array((string) $lead->status, [
+            'demo_agendada',
+            'demo_pendiente_de_ingreso',
+            'ingresando_demo',
+            'demo_en_curso',
+            'demo_pendiente_de_terminar',
+        ], true);
+        $demo_lista_para_mail  = $demo_confirmada_este_turno || $lead_ya_agendado;
+        $debe_enviar_mail_demo = $demo_lista_para_mail && ($email_nuevo || ($es_reagendado && ! empty($lead->email)));
         if ($debe_enviar_mail_demo) {
             try {
                 $lead->loadMissing('demo');
