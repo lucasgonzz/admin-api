@@ -1756,6 +1756,28 @@ TXT;
         $estado                = $pipeline_status->slug;
         $suggested_lead_status = $estado !== $previous_status ? $estado : null;
 
+        /*
+         * FIX (prompt 275): guardia "no retroceder de tramo". Una vez que el lead entró al tramo de
+         * agenda/demo (solicita_disponibilidad en adelante, hasta antes del cierre manual del closer),
+         * el agente devuelve estado base "calificado" durante toda la coordinación. Eso NO debe hacer
+         * retroceder al lead ni mostrar chip de cambio de estado. Si el estado sugerido tiene menor
+         * rango que el estado actual dentro de ese tramo (y no es un reagendado explícito), se conserva
+         * el estado actual. Reagendado (cancelar_demo presente) sí puede volver a calificado a propósito.
+         */
+        $es_reagendado = ! empty($parsed['cancelar_demo']);
+        if (! $es_reagendado) {
+            $previous_ps       = LeadPipelineStatus::ensure_exists($previous_status);
+            $tramo_agenda_rank = (int) LeadPipelineStatus::ensure_exists('solicita_disponibilidad')->sort_order;
+            $closer_rank       = (int) LeadPipelineStatus::ensure_exists('closer_activo')->sort_order;
+            $prev_rank         = (int) $previous_ps->sort_order;
+            $sug_rank          = (int) $pipeline_status->sort_order;
+
+            if ($prev_rank >= $tramo_agenda_rank && $prev_rank < $closer_rank && $sug_rank < $prev_rank) {
+                $estado                = $previous_status;
+                $suggested_lead_status = null;
+            }
+        }
+
         $msg = LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
@@ -1925,6 +1947,31 @@ TXT;
 
         /* Solo marcamos el mensaje si la sugerencia implica un cambio de estado del lead. */
         $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+
+        /*
+         * FIX (prompt 275): guardia "no retroceder de tramo". Una vez que el lead entró al tramo de
+         * agenda/demo (solicita_disponibilidad en adelante, hasta antes del cierre manual del closer),
+         * el agente devuelve estado base "calificado" durante toda la coordinación. Eso NO debe hacer
+         * retroceder al lead ni mostrar chip de cambio de estado. Si el estado sugerido tiene menor
+         * rango que el estado actual dentro de ese tramo (y no es un reagendado explícito), se conserva
+         * el estado actual. Reagendado (cancelar_demo presente) sí puede volver a calificado a propósito.
+         */
+        /* Nota: nombre distinto de la variable $es_reagendado que se declara más abajo (línea ~2015)
+         * para el flag de reagendado real de la demo (usado en el template del mail); esta es solo
+         * una lectura puntual de $parsed para la guardia de arriba, no debe pisar esa otra variable. */
+        $es_reagendado_pipeline_guard = ! empty($parsed['cancelar_demo']);
+        if (! $es_reagendado_pipeline_guard) {
+            $previous_ps       = LeadPipelineStatus::ensure_exists($previous_status);
+            $tramo_agenda_rank = (int) LeadPipelineStatus::ensure_exists('solicita_disponibilidad')->sort_order;
+            $closer_rank       = (int) LeadPipelineStatus::ensure_exists('closer_activo')->sort_order;
+            $prev_rank         = (int) $previous_ps->sort_order;
+            $sug_rank          = (int) $pipeline_status->sort_order;
+
+            if ($prev_rank >= $tramo_agenda_rank && $prev_rank < $closer_rank && $sug_rank < $prev_rank) {
+                $estado                = $previous_status;
+                $suggested_lead_status = null;
+            }
+        }
 
         /* --- Procesar acciones estructuradas devueltas por Claude --- */
 
@@ -2470,6 +2517,20 @@ TXT;
          * de un paquete diferido, ver $existing_message). calendar_snapshot: si esta llamada no
          * consultó disponibilidad de nuevo (por ejemplo al aprobar un agendar_demo ya resuelto),
          * conservar el snapshot que ya tenía el mensaje pendiente en vez de pisarlo con null. */
+        /*
+         * FIX (prompt 275): al aprobar un mensaje diferido, el estado del lead ya fue avanzado en la
+         * creación del mensaje (ej. solicita_disponibilidad se aplica al toque en
+         * create_pending_agendamiento_message). Recalcular suggested_lead_status contra ese estado ya
+         * avanzado lo deja en null y borra el chip de cambio de estado que el mensaje mostró al crearse.
+         * Cuando esto pasa (aprobación de un mensaje existente y el recálculo lo anularía), preservar el
+         * valor que el mensaje ya tenía guardado.
+         */
+        if ($for_approval && $existing_message !== null
+            && $suggested_lead_status === null
+            && ! empty($existing_message->suggested_lead_status)) {
+            $suggested_lead_status = $existing_message->suggested_lead_status;
+        }
+
         $message_payload = [
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
