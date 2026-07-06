@@ -453,6 +453,47 @@ class WhatsappWebhookController extends Controller
     }
 
     /**
+     * Detecta si el body de un mensaje entrante es la respuesta cruda de un WhatsApp Flow
+     * (formulario nativo de Meta, no construido por ComercioCity — ver prompt 252) y, si lo
+     * es, devuelve una nota clara para el historial en vez del JSON crudo. Se detecta por
+     * forma de contenido (JSON con clave flow_token en el nivel raíz), no por message.type,
+     * porque no hay confirmación del tipo exacto que usa Kapso para este caso.
+     *
+     * @param string|null $body Body ya resuelto por extract_message_body().
+     *
+     * @return string|null Nota traducida, o null si no es un WhatsApp Flow.
+     */
+    private function format_whatsapp_flow_body(?string $body): ?string
+    {
+        if ($body === null || trim($body) === '') {
+            return null;
+        }
+
+        $decoded = json_decode($body, true);
+        if (! is_array($decoded) || ! isset($decoded['flow_token'])) {
+            return null;
+        }
+
+        $campos = [];
+        foreach ($decoded as $key => $value) {
+            if ($key === 'flow_token' || ! is_scalar($value)) {
+                continue;
+            }
+            $valor = trim((string) $value);
+            if ($valor === '') {
+                continue;
+            }
+            $campos[] = "{$key}={$valor}";
+        }
+        $campos_texto = $campos !== [] ? implode(', ', $campos) : '(sin campos legibles)';
+
+        return "[Formulario de WhatsApp Flow completado por el lead — origen externo, no iniciado ni controlado por ComercioCity. "
+            . "Datos recibidos en el formulario: {$campos_texto}. "
+            . "NO tomar ninguna acción automática a partir de este mensaje (no guardar_nombre, no guardar_email, no agendar_demo, etc.). "
+            . "Si el lead confirma estos datos por texto en un mensaje normal, se procesan como cualquier otro dato que dé por WhatsApp.]";
+    }
+
+    /**
      * Resuelve el cuerpo de un mensaje de voz usando la transcripción de Kapso.
      *
      * @param array<string, mixed> $message Nodo message del payload Kapso.
@@ -956,7 +997,15 @@ class WhatsappWebhookController extends Controller
         $kind = $this->normalize_whatsapp_message_kind((string) $parsed['type']);
 
         $content = $parsed['body'];
-        if ($content === null || trim($content) === '') {
+
+        /* FIX (prompt 252, 3/7/2026): si el body es la respuesta cruda de un WhatsApp Flow
+         * (formulario nativo de Meta ajeno a ComercioCity), traducirlo a una nota clara antes
+         * de guardarlo — evita que el JSON crudo llegue tal cual al historial que lee el
+         * agente de IA (ver LeadAiService::build_user_content()) y lo confunda. */
+        $flow_note = $this->format_whatsapp_flow_body($content);
+        if ($flow_note !== null) {
+            $content = $flow_note;
+        } elseif ($content === null || trim($content) === '') {
             if ($kind === 'audio') {
                 $content = '[Audio sin transcripción]';
             } else {
