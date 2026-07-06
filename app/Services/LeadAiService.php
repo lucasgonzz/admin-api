@@ -2969,11 +2969,12 @@ TXT;
     }
 
     /**
-     * Arma el system prompt: identidad + system prompt BD + protocolo (modular o completo).
+     * Arma el system prompt: identidad + system prompt BD + system base modular (tool use).
      *
-     * Intenta primero el system base modular (tool use); si no está sincronizado todavía,
-     * cae al protocolo completo como fallback para no romper el flujo en producción.
+     * Requiere que el system base modular esté sincronizado; si no lo está, lanza
+     * RuntimeException en vez de caer a un fallback (ver prompt 271).
      *
+     * @throws \RuntimeException Si el system base modular no está sincronizado en BD.
      * @return string
      */
     protected function build_system_prompt(): string
@@ -2997,22 +2998,27 @@ TXT;
         }
 
         /*
-         * Intentar usar el system base modular (tool use).
-         * Si no está sincronizado todavía, caer al protocolo completo para no romper producción.
+         * El agente opera exclusivamente en modo modular (tool use): el system base (índice de
+         * recursos) más los recursos que Claude pide bajo demanda. El protocolo monolítico viejo
+         * (comercial/leads_protocolo_whatsapp.md) fue deprecado el 6/7/2026 (ver prompt 271): la
+         * estructura modular cubre todo su contenido vigente y el viejo tenía reglas
+         * desactualizadas. Ya no se usa como fallback: si el system base no está sincronizado,
+         * es un error de configuración que hay que resolver sincronizando los prompts del agente,
+         * NO operar con un protocolo viejo silenciosamente.
          */
         $system_base = app(WhatsappProtocolService::class)->getSystemBase();
 
-        if ($system_base !== '') {
-            /* Modo tool use: system base pequeño con índice de recursos integrado. */
-            $contenido .= "\n\n" . $system_base;
-        } else {
-            /* Fallback al protocolo completo si el system_base no está en BD todavía. */
-            $whatsapp_protocol = app(WhatsappProtocolService::class)->getProtocol();
-            if ($whatsapp_protocol !== '') {
-                $contenido .= "\n\nPROTOCOLO DE WHATSAPP\n";
-                $contenido .= $whatsapp_protocol;
-            }
+        if ($system_base === '') {
+            throw new \RuntimeException(
+                'El system base modular del agente de leads no está sincronizado (whatsapp_system_base '
+                . 'vacío en SyncedGithubFile). Sincronizá los prompts del agente desde Cuenta → '
+                . '"Prompts desde GitHub" antes de generar sugerencias. El protocolo monolítico viejo '
+                . 'fue deprecado (ver prompt 271) y ya no se usa como fallback.'
+            );
         }
+
+        /* Modo tool use: system base pequeño con índice de recursos integrado. */
+        $contenido .= "\n\n" . $system_base;
 
         /*
          * Regla de código adicional (prompt 151): refuerza que sin JSON de disponibilidad

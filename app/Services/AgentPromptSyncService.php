@@ -60,12 +60,6 @@ class AgentPromptSyncService
             'target'    => self::TARGET_AI_SYSTEM_PROMPT,
             'label'     => 'System prompt base (formato JSON de respuesta)',
         ],
-        [
-            'key'       => 'leads_protocolo_whatsapp',
-            'repo_path' => 'comercial/leads_protocolo_whatsapp.md', // sin cambios — fallback técnico
-            'target'    => self::TARGET_SYNCED_FILE,
-            'label'     => 'Protocolo de ventas por WhatsApp (fallback técnico)',
-        ],
         // Archivos del agente de leads (agentes/lead/)
         [
             'key'       => 'whatsapp_system_base',

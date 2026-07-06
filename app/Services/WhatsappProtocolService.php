@@ -28,6 +28,12 @@ class WhatsappProtocolService
     /**
      * Devuelve el texto del protocolo leído desde base de datos.
      *
+     * @deprecated El protocolo monolítico (comercial/leads_protocolo_whatsapp.md) fue deprecado
+     * el 6/7/2026 (ver prompt 271): el agente de leads opera exclusivamente en modo modular
+     * (getSystemBase() + getRecurso()), que cubre todo su contenido vigente. Este método ya no
+     * tiene llamadores en LeadAiService y queda solo por compatibilidad hasta confirmar que no
+     * lo usa nadie más; no agregar llamadores nuevos.
+     *
      * @return string Contenido del markdown o string vacío si aún no fue sincronizado.
      */
     public function getProtocol(): string
