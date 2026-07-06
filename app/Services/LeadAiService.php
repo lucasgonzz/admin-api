@@ -1659,6 +1659,17 @@ TXT;
      */
     protected function requires_agendamiento_verification_gate(Lead $lead, array $parsed): bool
     {
+        /*
+         * FIX (6/7/2026, decisión de Lucas — zona manual por estado del lead): si el lead YA está
+         * en el tramo de agenda (solicita_disponibilidad en adelante), cualquier respuesta se
+         * difiere y requiere aprobación, sin importar a qué estado apunte el mensaje. Cierra el
+         * hueco donde, con el lead ya en solicita_disponibilidad, Claude sugería un estado fuera
+         * del tramo (ej. en_pausa, cerrado_perdido) y ese mensaje se auto-enviaba sin supervisión.
+         */
+        if (in_array((string) $lead->status, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+            return true;
+        }
+
         $estado_raw = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
         if ($estado_raw !== '') {
             $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
@@ -1768,6 +1779,22 @@ TXT;
             $lead->requiere_seguimiento      = true;
             $lead->tiene_seguimiento_sin_ver = true;
         }
+
+        /*
+         * FIX (6/7/2026, decisión de Lucas): solicita_disponibilidad es la ÚNICA transición que se
+         * aplica al lead de forma automática, en el mismo momento en que el agente detecta el
+         * pedido de horarios — aunque el mensaje quede pendiente de aprobación. Así el lead entra
+         * al filtro "Solicita disponibilidad" que mira el setter, sin esperar a que se apruebe el
+         * mensaje. El resto del tramo (demo_agendada, ciclo de demo) NO se aplica acá: su estado
+         * cambia recién al aprobar (ver apply_pending_actions / apply_parsed_response). El badge de
+         * cambio de estado se conserva porque suggested_lead_status ya se calculó contra el estado
+         * previo, y apply_suggested_pipeline_status() tiene guardia para no repetir el save.
+         * $estado y $previous_status ya están calculados más arriba en este mismo método.
+         */
+        if ($estado === 'solicita_disponibilidad' && $estado !== $previous_status) {
+            $lead->status = 'solicita_disponibilidad';
+        }
+
         $lead->save();
 
         /* Notificar igual que el camino "agendamiento" ya notifica hoy dentro de apply_parsed_response
@@ -2426,7 +2453,16 @@ TXT;
          * requires_agendamiento_verification_gate() y fue aprobado por un humano, así que no
          * corresponde volver a marcarlo como pendiente de verificación (ver apply_pending_actions()).
          */
-        if (! $for_approval && in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+        /*
+         * Regla de negocio (1/7/2026, ampliada 6/7/2026): en el tramo de agenda —y en general una
+         * vez que el lead salió de la zona automática (nuevo/contactado/calificado)— todo mensaje
+         * requiere revisión humana antes de salir. Se fuerza sin importar lo que haya devuelto
+         * Claude en su propio campo requiere_verificacion. La segunda condición cubre estados
+         * manuales fuera del tramo de agenda (closer_activo en adelante, o cualquier estado
+         * avanzado) que no pasan por el gate de diferimiento.
+         */
+        $lead_en_zona_automatica = in_array((string) $lead->status, ['nuevo', 'contactado', 'calificado'], true);
+        if (! $for_approval && (in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true) || ! $lead_en_zona_automatica)) {
             $req_verif = true;
         }
 
