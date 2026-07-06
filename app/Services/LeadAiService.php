@@ -1855,6 +1855,19 @@ TXT;
         $es_reagendado = false;
 
         /*
+         * FIX (mail de demo sin autorización, 3/7/2026, prompt 251): el protocolo
+         * (agentes/lead/recursos/demo_agenda.md, Paso 4) exige que guardar_email y
+         * agendar_demo viajen juntos en la misma respuesta de Claude — el mail de acceso
+         * a la demo (Mail 1) solo debe salir cuando la demo quedó realmente confirmada y
+         * validada contra disponibilidad EN ESTE MISMO TURNO. Antes de este fix, el envío
+         * del mail dependía únicamente de que hubiera un guardar_email nuevo (o un
+         * reagendado con mail ya cargado), sin verificar que el agendar_demo del mismo
+         * turno haya sido válido. Se marca true únicamente en el bloque de agendar_demo
+         * exitoso (slot validado contra disponibilidad real), más abajo en este método.
+         */
+        $demo_confirmada_este_turno = false;
+
+        /*
          * Variables para coordinar las operaciones de Google Calendar event DESPUÉS del save() principal.
          * Se usan flags para evitar llamadas parciales al servicio antes de que el lead esté persistido.
          */
@@ -2029,6 +2042,10 @@ TXT;
                     $estado                = $pipeline_status->slug;
                     $suggested_lead_status = $estado !== $previous_status ? $estado : null;
                 } else {
+                    /* FIX (prompt 251): slot validado contra disponibilidad real y a punto de
+                     * persistirse — recién acá es cierto que hay una demo confirmada este turno. */
+                    $demo_confirmada_este_turno = true;
+
                     /* Fin de demo: inicio + duración configurada (Claude no debe enviar demo_end_time). */
                     $duracion  = LeadDemoSettings::get_duracion_minutos();
                     $demo_end  = Carbon::createFromFormat('H:i', $demo_start)
@@ -2494,8 +2511,15 @@ TXT;
          *      reenviaba el mail (solo se reenviaba el email_nuevo), mientras que el evento de
          *      Google Calendar SÍ se recreaba con el horario nuevo. El lead quedaba con un
          *      invite de Calendar actualizado y el mail de la demo desactualizado/perdido.
+         *
+         * FIX (prompt 251, 3/7/2026): ninguno de los dos casos alcanza por sí solo — además
+         * se exige $demo_confirmada_este_turno (ver flag más arriba). Sin esto, un
+         * guardar_email suelto (sin agendar_demo validado en el mismo turno, ej. un dato
+         * raro colado en el historial) disparaba el mail con datos de acceso a una demo que
+         * no existía. Con reagendado, evita el mismo problema si Claude cancela
+         * (cancelar_demo) sin coordinar el horario nuevo en la misma respuesta.
          */
-        $debe_enviar_mail_demo = $email_nuevo || ($es_reagendado && ! empty($lead->email));
+        $debe_enviar_mail_demo = $demo_confirmada_este_turno && ($email_nuevo || ($es_reagendado && ! empty($lead->email)));
         if ($debe_enviar_mail_demo) {
             try {
                 $lead->loadMissing('demo');
