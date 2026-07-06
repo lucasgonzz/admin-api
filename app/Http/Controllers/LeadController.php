@@ -2475,7 +2475,10 @@ class LeadController extends Controller
      */
     public function closer_panel_json()
     {
-        /* Sección 1: demos en curso o recién finalizadas (requieren acción del closer). */
+        /* Fecha de hoy (zona horaria de la app) para separar "Hoy" de "Agendadas". */
+        $today = now()->toDateString();
+
+        /* Estados de demo en curso / recién finalizada: siempre van a "Hoy" (acción inmediata). */
         $en_curso_statuses = [
             'demo_en_curso',
             'ingresando_demo',
@@ -2483,24 +2486,39 @@ class LeadController extends Controller
             'demo_pendiente_de_ingreso',
             'demo_realizada',
         ];
+
+        /*
+         * Columna 1 "Hoy": demos en curso (cualquier fecha) + demos agendadas cuya fecha
+         * sea hoy o anterior. Las agendadas vencidas (fecha pasada, nunca realizadas) se
+         * incluyen acá a propósito para que no desaparezcan del panel.
+         */
         $en_curso = Lead::withAll()
-            ->whereIn('status', $en_curso_statuses)
+            ->where(function ($q) use ($en_curso_statuses, $today) {
+                $q->whereIn('status', $en_curso_statuses)
+                  ->orWhere(function ($q2) use ($today) {
+                      $q2->where('status', 'demo_agendada')
+                         ->whereDate('demo_date', '<=', $today);
+                  });
+            })
             ->orderBy('demo_date')
             ->orderBy('demo_start_time')
             ->get();
 
-        /* Sección 2: demos agendadas o leads que pidieron disponibilidad. */
-        $agendadas_statuses = ['demo_agendada'];
+        /* Columna 2 "Demos agendadas": solo demo_agendada de mañana en adelante. */
         $agendadas = Lead::withAll()
-            ->whereIn('status', $agendadas_statuses)
+            ->where('status', 'demo_agendada')
+            ->whereDate('demo_date', '>', $today)
             ->orderBy('demo_date')
             ->orderBy('demo_start_time')
             ->get();
 
-        /* Sección 3: seguimiento post-llamada con resumen de Recall.ai. */
+        /*
+         * Columna 3 "En seguimiento": todos los leads en closer_activo, tengan o no
+         * resumen de llamada. Antes se exigia call_summary != null, lo que ocultaba los
+         * leads que el closer activa a mano (demos no realizadas en tiempo y forma).
+         */
         $seguimiento = Lead::withAll()
             ->where('status', 'closer_activo')
-            ->whereNotNull('call_summary')
             ->orderBy('closer_called_at', 'desc')
             ->get();
 
