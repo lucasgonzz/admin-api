@@ -23,7 +23,8 @@ class LeadAiSuggestionAutoSendScheduler
     /**
      * Encola el envío automático de una sugerencia recién creada por Claude.
      *
-     * No programa mensajes que requieren verificación manual.
+     * Los mensajes que requieren verificación (tramo de agenda) usan su propia demora de respaldo,
+     * salvo que el lead esté derivado a intervención humana (en ese caso no se programa nada).
      * Con demora 0 encola el envío de inmediato (sin timer ni ai_auto_send_at).
      *
      * @param LeadMessage $message Mensaje en estado `sugerido`.
@@ -42,19 +43,23 @@ class LeadAiSuggestionAutoSendScheduler
 
         if ($message->requiere_verificacion) {
             /*
-             * FIX (6/7/2026, decisión de Lucas): NINGÚN mensaje que requiere verificación se
-             * auto-envía. Desde que un lead entra a solicita_disponibilidad, cada mensaje y cada
-             * acción los aprueba un humano — sin timer de respaldo. Esto REVIERTE el auto-envío de
-             * respaldo del tramo de agenda (delay 1800s) que había introducido el prompt 267: la
-             * regla de negocio cambió a supervisión total. El mensaje queda pendiente hasta que el
-             * admin lo aprueba desde admin-spa (ver LeadSuggestionSendService::send_suggestion). La
-             * red de seguridad para que no se enfríe un lead se resuelve por notificación al setter,
-             * no por auto-envío.
+             * Decisión de Lucas (6/7/2026, revisada - prompt 276): los mensajes de verificación de agenda
+             * vuelven a tener auto-envío de RESPALDO con su propia demora (más larga y configurable). Es
+             * una red de seguridad para que un lead no se enfríe si el setter no llega a aprobar a tiempo,
+             * NO el comportamiento default.
+             *
+             * RESGUARDO: si el lead fue derivado a intervención humana (requiere_intervencion_humana, o
+             * claude_auto_reply apagado), el respaldo NO aplica: ese mensaje espera aprobación humana sí o
+             * sí y nunca se auto-envía.
              */
-            return;
+            $lead = $message->lead;
+            if ($lead && ((bool) $lead->requiere_intervencion_humana === true || (bool) $lead->claude_auto_reply === false)) {
+                return;
+            }
+            $delay_seconds = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_seconds();
+        } else {
+            $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
         }
-
-        $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
         $message_id = (int) $message->id;
         $auto_send_token = $this->bump_auto_send_token($message_id);
 
