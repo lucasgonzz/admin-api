@@ -32,4 +32,18 @@ class AgentPromptSyncController extends Controller
             'results' => $results,
         ], $all_ok ? 200 : 500);
     }
+
+    /**
+     * GET /settings/agent-prompts/files
+     * Devuelve la lista real de archivos sincronizables (fuente: AgentPromptSyncService::FILES),
+     * para que el frontend la muestre sin texto hardcodeado.
+     *
+     * @return JsonResponse
+     */
+    public function files(): JsonResponse
+    {
+        return response()->json([
+            'files' => AgentPromptSyncService::files_summary(),
+        ]);
+    }
 }

@@ -41,79 +41,109 @@ class AgentPromptSyncService
      *   - key:       clave interna estable (para SyncedGithubFile y logs)
      *   - repo_path: ruta del archivo dentro del repositorio
      *   - target:    a qué modelo/clave persiste (ver constantes TARGET_*)
+     *   - label:     etiqueta legible para mostrar en el admin
      *
      * Agregar un archivo nuevo = sumar una entrada acá, sin tocar el resto del flujo.
      *
-     * @var array<int, array{key: string, repo_path: string, target: string}>
+     * @var array<int, array{key: string, repo_path: string, target: string, label: string}>
      */
     const FILES = [
         [
             'key'       => 'setter_identidad',
             'repo_path' => 'agentes/lead/identidad.md', // antes: prompts_agentes/setter_identidad.md
             'target'    => self::TARGET_AGENT_IDENTITY,
+            'label'     => 'Identidad del agente (quién es Martín)',
         ],
         [
             'key'       => 'setter_system_prompt',
             'repo_path' => 'agentes/lead/instrucciones_operativas.md', // antes: prompts_agentes/setter_system_prompt.md
             'target'    => self::TARGET_AI_SYSTEM_PROMPT,
+            'label'     => 'System prompt base (formato JSON de respuesta)',
         ],
         [
             'key'       => 'leads_protocolo_whatsapp',
             'repo_path' => 'comercial/leads_protocolo_whatsapp.md', // sin cambios — fallback técnico
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Protocolo de ventas por WhatsApp (fallback técnico)',
         ],
         // Archivos del agente de leads (agentes/lead/)
         [
             'key'       => 'whatsapp_system_base',
             'repo_path' => 'agentes/lead/recursos/README.md', // antes: agente/protocolo_whatsapp/system_base.md
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Índice de recursos disponibles (tool use)',
         ],
         [
             'key'       => 'whatsapp_recurso_calificacion',
             'repo_path' => 'agentes/lead/recursos/calificacion.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: calificación de leads',
         ],
         [
             'key'       => 'whatsapp_recurso_posicionamiento',
             'repo_path' => 'agentes/lead/recursos/posicionamiento.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: posicionamiento',
         ],
         [
             'key'       => 'whatsapp_recurso_precios',
             'repo_path' => 'agentes/lead/recursos/precios.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: precios',
         ],
         [
             'key'       => 'whatsapp_recurso_demo_agenda',
             'repo_path' => 'agentes/lead/recursos/demo_agenda.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: agenda de demo',
         ],
         [
             'key'       => 'whatsapp_recurso_demo_ciclo',
             'repo_path' => 'agentes/lead/recursos/demo_ciclo.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: ciclo de demo',
         ],
         [
             'key'       => 'whatsapp_recurso_post_demo',
             'repo_path' => 'agentes/lead/recursos/post_demo.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: post demo',
         ],
         [
             'key'       => 'whatsapp_recurso_reglas',
             'repo_path' => 'agentes/lead/recursos/reglas.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: reglas del agente',
         ],
         [
             'key'       => 'whatsapp_recurso_referidos',
             'repo_path' => 'agentes/lead/recursos/referidos.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso: referidos',
         ],
         [
             'key'       => 'implementacion_protocolo',
             'repo_path' => 'prompts_agentes/implementacion_protocolo.md',
             'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Protocolo de implementación',
         ],
     ];
+
+    /**
+     * Devuelve la lista de archivos sincronizables con su etiqueta legible,
+     * para que el frontend pueda mostrarla sin duplicar esta información a mano.
+     *
+     * @return array<int, array{repo_path: string, label: string}>
+     */
+    public static function files_summary(): array
+    {
+        return array_map(function (array $file) {
+            return [
+                'repo_path' => $file['repo_path'],
+                'label'     => $file['label'],
+            ];
+        }, self::FILES);
+    }
 
     /**
      * Descarga todos los archivos y actualiza la BD.

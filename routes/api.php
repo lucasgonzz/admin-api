@@ -329,6 +329,7 @@ Route::prefix('admin')->group(function () {
 
         // Sincroniza identidad y system prompt del agente desde GitHub a la BD.
         Route::post('settings/agent-prompts/sync', [\App\Http\Controllers\Api\AgentPromptSyncController::class, 'sync']);
+        Route::get('settings/agent-prompts/files', [\App\Http\Controllers\Api\AgentPromptSyncController::class, 'files']);
 
         // Configuración de demos: duración, márgenes de setup/gracia y tiempos de automatizaciones.
         Route::get('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'show']);
