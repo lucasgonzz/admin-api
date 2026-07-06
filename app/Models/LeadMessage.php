@@ -87,6 +87,11 @@ class LeadMessage extends Model
         /* $parsed crudo de Claude sin aplicar, cuando el mensaje quedó pendiente por el motivo
            "agendamiento" (ver LeadAiService::requires_agendamiento_verification_gate). Null en el resto de los casos. */
         'pending_actions'         => 'array',
+        /* Lista legible (en español) de las acciones que efectivamente se aplicaron al enviar/aprobar
+           este mensaje (agendar demo, guardar email, guardar nombre, cambio de estado, etc.). Se setea
+           en LeadAiService::apply_parsed_response() a partir de LeadMessage::build_actions_summary().
+           Null cuando el mensaje no ejecutó ninguna acción estructurada (prompt 277). */
+        'applied_actions_summary' => 'array',
         /* Timestamps de entrega real de WhatsApp (populated por webhooks de Kapso). */
         'whatsapp_delivered_at'   => 'datetime',
         'whatsapp_seen_at'        => 'datetime',
@@ -103,17 +108,18 @@ class LeadMessage extends Model
     }
 
     /**
-     * Lista legible (en español) de las acciones que se van a ejecutar si se aprueba este
-     * mensaje pendiente (`pending_actions`, motivo agendamiento — ver
-     * LeadAiService::create_pending_agendamiento_message()). Permite que admin-spa muestre a
-     * Martín, antes de aprobar, qué va a pasar realmente (agendar tal día/hora, enviar mail a
-     * tal dirección, cambiar el estado del lead), sin tener que interpretar el JSON crudo.
+     * Arma la lista legible (en español) de acciones a partir de un $parsed de Claude.
+     * Compartido entre el resumen "pendiente" (pending_actions_summary) y el registro de
+     * acciones "ejecutadas" (applied_actions_summary, seteado por LeadAiService al finalizar).
+     *
+     * @param array<string, mixed>|null $parsed      Paquete crudo devuelto/aplicado por Claude.
+     * @param string|null               $lead_status Estado actual del lead (para decidir si el
+     *                                                cambio de estado es real).
      *
      * @return array<int, string>
      */
-    public function getPendingActionsSummaryAttribute(): array
+    public static function build_actions_summary(?array $parsed, ?string $lead_status): array
     {
-        $parsed = $this->pending_actions;
         if (empty($parsed) || ! is_array($parsed)) {
             return [];
         }
@@ -156,7 +162,7 @@ class LeadMessage extends Model
 
         /* estado_sugerido: solo si implica un cambio real respecto al estado actual del lead. */
         $estado_sugerido = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
-        $lead_status     = $this->lead ? (string) $this->lead->status : '';
+        $lead_status     = (string) $lead_status;
         if ($estado_sugerido !== '' && $estado_sugerido !== $lead_status) {
             $label      = LeadPipelineStatus::label_for($estado_sugerido);
             $acciones[] = 'Cambiar estado del lead a: '.($label ?? $estado_sugerido);
@@ -169,6 +175,25 @@ class LeadMessage extends Model
         }
 
         return $acciones;
+    }
+
+    /**
+     * Lista legible (en español) de las acciones que se van a ejecutar si se aprueba este
+     * mensaje pendiente (`pending_actions`, motivo agendamiento — ver
+     * LeadAiService::create_pending_agendamiento_message()). Permite que admin-spa muestre a
+     * Martín, antes de aprobar, qué va a pasar realmente (agendar tal día/hora, enviar mail a
+     * tal dirección, cambiar el estado del lead), sin tener que interpretar el JSON crudo.
+     *
+     * @return array<int, string>
+     */
+    public function getPendingActionsSummaryAttribute(): array
+    {
+        $parsed = $this->pending_actions;
+        if (empty($parsed) || ! is_array($parsed)) {
+            return [];
+        }
+
+        return static::build_actions_summary($parsed, $this->lead ? (string) $this->lead->status : '');
     }
 
     /**

@@ -2531,6 +2531,12 @@ TXT;
             $suggested_lead_status = $existing_message->suggested_lead_status;
         }
 
+        /* Registro de acciones ejecutadas por este mensaje, para mostrarlas en la burbuja una vez
+         * aprobado/enviado (prompt 277). Se computa desde el mismo $parsed que se acaba de aplicar.
+         * Se pasa $previous_status como "lead_status" de referencia para que el ítem "Cambiar estado"
+         * refleje el cambio respecto al estado que el lead tenía ANTES de aplicar este mensaje. */
+        $applied_actions_summary = \App\Models\LeadMessage::build_actions_summary($parsed, $previous_status);
+
         $message_payload = [
             'lead_id'               => $lead->id,
             'sender'                => 'sistema',
@@ -2548,6 +2554,9 @@ TXT;
             'is_followup'           => $is_followup,
             'requiere_verificacion' => $req_verif,
             'sent_at'               => null,
+            /* Acciones efectivamente aplicadas por este mensaje (prompt 277), persistidas para
+             * seguir mostrándose en la burbuja aunque pending_actions ya se haya limpiado a null. */
+            'applied_actions_summary' => ! empty($applied_actions_summary) ? $applied_actions_summary : null,
         ];
 
         if ($existing_message !== null) {
