@@ -115,6 +115,20 @@ class FollowupTemplatesSeeder extends Seeder
                 'body_template'              => 'Hola {{1}}, último mensaje de mi parte. Si en algún momento querés terminar de ver la demo o charlar con alguien del equipo, escribime. Quedamos disponibles.',
                 'solo_si_ingreso_confirmado' => true,
             ],
+            // Plantilla MANUAL-ONLY de recuperación: "la falla fue nuestra" (caso Lead #253, 7/7/2026).
+            // estado='manual_recuperacion' es un valor centinela que NO es ningún estado real del
+            // pipeline (nuevo/contactado/calificado/demo_agendada/etc.) — por diseño, para que
+            // LeadFollowupService::find_template_for() (que filtra por ->where('estado', $lead->status))
+            // JAMÁS la seleccione automáticamente. Solo aparece en el selector manual del footer de la
+            // conversación (TemplatePickerModal.vue, sección "Todas las plantillas", que lista por
+            // activa=true sin filtrar por estado). dia_numero=1 es arbitrario, no se usa para ordenar
+            // ningún seguimiento automático de esta fila.
+            [
+                'estado'        => 'manual_recuperacion',
+                'dia_numero'    => 1,
+                'template_name' => 'cc_recuperacion_demora_propia',
+                'body_template' => 'Hola {{1}}! Perdoná la demora... se nos pasó tu mensaje y recién lo estoy viendo. ¿Seguís interesado? Si querés lo retomamos justo por donde habíamos quedado.',
+            ],
         ];
 
         foreach ($templates as $row) {
