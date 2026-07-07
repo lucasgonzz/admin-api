@@ -141,8 +141,13 @@ class LeadFollowupService
         $template = $this->find_template_for($lead->status, $followup_number, $ingreso_confirmado);
 
         if ($template !== null) {
-            $this->send_followup_via_template($fresh, $template, $followup_number);
-            $via = 'template';
+            if (in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+                $this->create_pending_followup_for_verification($fresh, $template, $followup_number);
+                $via = 'verificacion';
+            } else {
+                $this->send_followup_via_template($fresh, $template, $followup_number);
+                $via = 'template';
+            }
         } else {
             if (in_array($fresh->status, self::ESTADOS_CLOSER, true)) {
                 // Para demo_realizada y mail2_enviado: notificar al closer en vez de envío automático.
@@ -239,8 +244,15 @@ class LeadFollowupService
         $template = $this->find_template_for($lead->status, $followup_number, $ingreso_confirmado);
 
         if ($template !== null) {
-            // Hay plantilla aprobada: enviamos directo por WhatsApp sin pasar por Claude.
-            $this->send_followup_via_template($fresh, $template, $followup_number);
+            if (in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+                // Tramo de agenda (solicita_disponibilidad en adelante): el seguimiento NO se auto-envía.
+                // Se crea como sugerencia pendiente de aprobación del setter y se enviará por su plantilla
+                // al aprobar / al vencer el timer de respaldo (ver create_pending_followup_for_verification).
+                $this->create_pending_followup_for_verification($fresh, $template, $followup_number);
+            } else {
+                // Fuera del tramo: envío directo por plantilla como siempre.
+                $this->send_followup_via_template($fresh, $template, $followup_number);
+            }
         } else {
             if (in_array($fresh->status, self::ESTADOS_CLOSER, true)) {
                 // Para demo_realizada y mail2_enviado: notificar al closer en vez de envío automático.
@@ -336,6 +348,83 @@ class LeadFollowupService
         $index = $followup_number - 1;
 
         return $templates->get($index);
+    }
+
+    /**
+     * Crea el seguimiento como sugerencia PENDIENTE de aprobación del setter, sin enviarlo.
+     *
+     * Aplica a los leads que ya están en el tramo de agenda (solicita_disponibilidad en adelante,
+     * ver LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO): en ese tramo, la regla de
+     * negocio (6/7/2026) es que cada mensaje al lead lo aprueba un humano. Este método deja el
+     * seguimiento en estado 'sugerido' + requiere_verificacion, guardando followup_template_id para
+     * que, al aprobarlo (o al vencer el timer de respaldo), se envíe por su plantilla Meta —
+     * LeadSuggestionSendService::send_suggestion() detecta el seguimiento y usa send_template() en vez
+     * de send_text(), imprescindible porque la ventana de 24hs suele estar cerrada cuando dispara un
+     * seguimiento.
+     *
+     * Mecánicamente se comporta igual que un mensaje de verificación conversacional del tramo: mismas
+     * notificaciones (push + WhatsApp opcional + sonido) y mismo timer de auto-envío de respaldo
+     * (LeadAiSuggestionAutoSendScheduler, que ya respeta el guard de intervención humana del prompt 276).
+     *
+     * @param Lead             $lead
+     * @param FollowupTemplate $template
+     * @param int              $followup_number
+     *
+     * @return void
+     */
+    protected function create_pending_followup_for_verification(Lead $lead, FollowupTemplate $template, int $followup_number): void
+    {
+        $msg = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => $this->render_template_body($template, $lead),
+            'status'                => 'sugerido',
+            'is_followup'           => true,
+            'followup_template_id'  => $template->id,
+            'requiere_verificacion' => true,
+            'whatsapp_message_id'   => null,
+            'sent_at'               => null,
+        ]);
+
+        /*
+         * Marca la sugerencia pendiente para que el scheduler no genere otro seguimiento mientras
+         * espera aprobación (process_lead() corta temprano si tiene_sugerencia_pendiente). NO se marca
+         * tiene_seguimiento_sin_ver: ese flag es para seguimientos YA enviados sin revisar; acá el aviso
+         * es el badge violeta de "por aprobar" (prompt 284).
+         */
+        $lead->tiene_sugerencia_pendiente = true;
+        $lead->requiere_seguimiento       = true;
+        $lead->save();
+
+        /* Aviso al setter: mismo combo que un mensaje de verificación conversacional del tramo
+         * (push siempre + WhatsApp opcional + sonido en el navegador). */
+        try {
+            $agendamiento_service = new LeadVerificacionAgendamientoNotificationService(
+                new WhatsappSendService()
+            );
+            $agendamiento_service->notify($lead->fresh(), $msg);
+            event(new \App\Events\LeadVerificacionAgendamientoAlert($lead->fresh(), $msg));
+        } catch (\Throwable $e) {
+            Log::error('LeadFollowupService: error al notificar seguimiento pendiente de verificación.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $msg->id,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+
+        /* Timer de auto-envío de respaldo (mismo que los mensajes de verificación conversacional). El
+         * scheduler ya respeta el guard de intervención humana (prompt 276). Al vencer, send_suggestion()
+         * enviará el seguimiento por su plantilla. */
+        (new LeadAiSuggestionAutoSendScheduler())->schedule_for_suggested_message($msg);
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
+
+        Log::info('LeadFollowupService: seguimiento del tramo de agenda creado como pendiente de verificación.', [
+            'lead_id'         => $lead->id,
+            'estado'          => $lead->status,
+            'followup_number' => $followup_number,
+            'template'        => $template->template_name,
+        ]);
     }
 
     /**

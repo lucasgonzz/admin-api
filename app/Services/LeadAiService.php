@@ -60,7 +60,7 @@ TXT;
      *
      * @var string[]
      */
-    private const ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO = [
+    public const ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO = [
         'solicita_disponibilidad',
         'demo_agendada',
         'demo_pendiente_de_ingreso',

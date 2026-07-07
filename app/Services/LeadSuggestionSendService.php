@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadPipelineStatus;
@@ -55,6 +56,18 @@ class LeadSuggestionSendService
 
         if ($lead === null) {
             throw new \RuntimeException('Lead no encontrado para el mensaje.');
+        }
+
+        /*
+         * Seguimiento por plantilla pendiente de aprobación (tramo de agenda, prompt 283). Se reenvía
+         * SIEMPRE por su plantilla Meta guardada (send_template), no por send_text: los seguimientos
+         * disparan justamente cuando el lead quedó en silencio, así que la ventana de 24hs suele estar
+         * cerrada y send_text daría 422. La plantilla no admite texto editado, así que $edited_content
+         * se ignora en este camino (el setter aprueba o rechaza; para escribir algo propio, rechaza y
+         * responde manualmente).
+         */
+        if ($message->is_followup && ! empty($message->followup_template_id)) {
+            return $this->send_followup_suggestion_via_template($message, $lead);
         }
 
         /*
@@ -273,5 +286,80 @@ class LeadSuggestionSendService
             ->where('sender', 'lead')
             ->where('created_at', '>=', now()->subHours(24))
             ->exists();
+    }
+
+    /**
+     * Aprueba y envía un seguimiento pendiente por su plantilla Meta guardada.
+     *
+     * Camino separado de send_text porque los seguimientos se disparan con el lead en silencio (ventana
+     * de 24hs cerrada). Al aprobar (o al vencer el timer de respaldo), se envía la plantilla con el
+     * nombre del contacto como {{1}}. Marca 'enviado' con whatsapp_message_id si Kapso confirma; si
+     * falla, 'rechazado' (WhatsappSendService ya notificó a los admins de forma centralizada).
+     *
+     * @param LeadMessage $message
+     * @param Lead        $lead
+     *
+     * @return LeadMessage
+     */
+    private function send_followup_suggestion_via_template(LeadMessage $message, Lead $lead): LeadMessage
+    {
+        $template = FollowupTemplate::query()->find($message->followup_template_id);
+        $phone    = trim((string) $lead->phone);
+
+        if ($template === null || $phone === '') {
+            Log::channel('daily')->warning('LeadSuggestionSendService: seguimiento sin plantilla o sin teléfono, no enviado.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message->id,
+            ]);
+
+            (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
+            $message->update(['status' => 'rechazado', 'sent_at' => null]);
+            $lead->sync_suggestion_flags();
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+            return $message->fresh();
+        }
+
+        $contact_name = trim((string) ($lead->contact_name ?? ''));
+
+        $context = 'Seguimiento aprobado - Lead #' . $lead->id
+            . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '');
+
+        $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+            $phone,
+            $template->template_name,
+            [$contact_name],
+            $template->language_code,
+            $context
+        );
+
+        (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
+
+        if ($whatsapp_message_id === null) {
+            Log::channel('daily')->warning('LeadSuggestionSendService: seguimiento aprobado falló al enviarse por plantilla.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message->id,
+                'template'   => $template->template_name,
+            ]);
+
+            $message->update(['status' => 'rechazado', 'sent_at' => null]);
+            $lead->sync_suggestion_flags();
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+            return $message->fresh();
+        }
+
+        $message->update([
+            'status'              => 'enviado',
+            'sent_at'             => now(),
+            'whatsapp_message_id' => $whatsapp_message_id,
+        ]);
+
+        /* Un seguimiento normalmente no cambia el pipeline, pero respetamos suggested_lead_status si existe. */
+        $this->apply_suggested_pipeline_status($lead, $message);
+        $lead->sync_suggestion_flags();
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        return $message->fresh();
     }
 }
