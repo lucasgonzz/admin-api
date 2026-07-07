@@ -183,6 +183,10 @@ class Lead extends Model
         // Timestamp de fijado (pin global): null = no fijado; los leads fijados aparecen primero en la tabla.
         'pinned_at'                    => 'datetime',
 
+        // Timestamp de "pendiente de revisión" (global): null = no pendiente; con fecha = fila roja en la
+        // grilla (botón de revisión, prompt 302). Se limpia al abrir la conversación.
+        'pendiente_revision_at'        => 'datetime',
+
         // Marca manual "no leído" (estilo WhatsApp) del admin autenticado sobre este lead. Calculado
         // per-request en scopeWithUnreadLeadMessagesCount, no es una columna real de `leads`.
         'manually_marked_unread'       => 'boolean',
