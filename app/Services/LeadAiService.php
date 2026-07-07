@@ -2035,6 +2035,18 @@ TXT;
         $demo_confirmada_este_turno = false;
 
         /*
+         * FIX (coherencia del path correctivo de slot inválido — detectado en testing 6/7/2026,
+         * lead #10): cuando el servidor descarta el agendar_demo porque el slot no está disponible
+         * (o no pudo tomar el lock), el mensaje se reescribe a la disculpa correctiva y el estado se
+         * fuerza a solicita_disponibilidad, PERO el resumen de acciones (applied_actions_summary) y el
+         * badge de cambio de estado se seguían computando desde el $parsed original de Claude (que
+         * todavía trae agendar_demo + estado_sugerido: demo_agendada). Resultado: el mensaje decía
+         * "ese horario se ocupó" y al mismo tiempo mostraba "Agendar demo 08:00" y "Demo agendada".
+         * Este flag marca que el agendar se descartó, para sanear el resumen y no restaurar el badge
+         * viejo más abajo. */
+        $agendar_descartado_por_slot_invalido = false;
+
+        /*
          * Variables para coordinar las operaciones de Google Calendar event DESPUÉS del save() principal.
          * Se usan flags para evitar llamadas parciales al servicio antes de que el lead esté persistido.
          */
@@ -2128,6 +2140,7 @@ TXT;
                     $mensaje_correctivo = $this->call_corrective_availability_response($lead, $demo_start, $demo_date, []);
                     $mensaje            = $mensaje_correctivo !== '' ? $mensaje_correctivo : 'Ese horario se acaba de ocupar. Decime otro día u horario y lo confirmamos.';
                     $estado_raw         = 'solicita_disponibilidad';
+                    $agendar_descartado_por_slot_invalido = true;
 
                     $pipeline_status       = LeadPipelineStatus::ensure_exists($estado_raw);
                     $estado                = $pipeline_status->slug;
@@ -2178,6 +2191,8 @@ TXT;
                      * mentirosa, se hace una tercera llamada correctiva a Claude (aislada del
                      * historial) para que redacte una disculpa natural con las alternativas reales.
                      */
+                    $agendar_descartado_por_slot_invalido = true;
+
                     $mensaje_correctivo = $this->call_corrective_availability_response(
                         $lead,
                         $demo_start,
@@ -2543,7 +2558,8 @@ TXT;
          */
         if ($for_approval && $existing_message !== null
             && $suggested_lead_status === null
-            && ! empty($existing_message->suggested_lead_status)) {
+            && ! empty($existing_message->suggested_lead_status)
+            && ! $agendar_descartado_por_slot_invalido) {
             $suggested_lead_status = $existing_message->suggested_lead_status;
         }
 
@@ -2551,7 +2567,16 @@ TXT;
          * aprobado/enviado (prompt 277). Se computa desde el mismo $parsed que se acaba de aplicar.
          * Se pasa $previous_status como "lead_status" de referencia para que el ítem "Cambiar estado"
          * refleje el cambio respecto al estado que el lead tenía ANTES de aplicar este mensaje. */
-        $applied_actions_summary = \App\Models\LeadMessage::build_actions_summary($parsed, $previous_status);
+        /* Coherencia con el path correctivo de slot inválido: si el agendar se descartó, el
+         * resumen no debe listar "Agendar demo" ni "Cambiar estado a Demo agendada" (que salían
+         * del $parsed original de Claude). Se computa sobre una copia saneada que refleja lo que
+         * realmente pasó: sin agendar_demo y con el estado neutro que se forzó. */
+        $parsed_para_resumen = $parsed;
+        if ($agendar_descartado_por_slot_invalido) {
+            unset($parsed_para_resumen['agendar_demo']);
+            $parsed_para_resumen['estado_sugerido'] = 'solicita_disponibilidad';
+        }
+        $applied_actions_summary = \App\Models\LeadMessage::build_actions_summary($parsed_para_resumen, $previous_status);
 
         $message_payload = [
             'lead_id'               => $lead->id,
