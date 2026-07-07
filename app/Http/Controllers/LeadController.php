@@ -17,6 +17,7 @@ use App\Models\ProtocolEntry;
 use App\Events\LeadAiSuggestionFinished;
 use App\Events\LeadAiSuggestionGenerating;
 use App\Services\LeadAiService;
+use App\Services\LeadConversationErrorLogger;
 use App\Services\WhatsappSendService;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadAiSuggestionScheduler;
@@ -1038,6 +1039,13 @@ class LeadController extends Controller
                     'error'   => $e->getMessage(),
                 ]);
 
+                // Registrar el fallo de envío en la conversación del lead.
+                (new LeadConversationErrorLogger())->log(
+                    (int) $lead->id,
+                    'No se pudo enviar el mensaje por WhatsApp',
+                    $e->getMessage()
+                );
+
                 return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp: '.$e->getMessage()], 422);
             }
         }
@@ -1353,6 +1361,13 @@ class LeadController extends Controller
                 ]);
             }
 
+            // Registrar el error también en la conversación del lead (además del log y del aviso a admins de arriba).
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo generar la sugerencia de Claude',
+                $e->getMessage()
+            );
+
             return response()->json([
                 'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),
                 'model'   => $this->fullModel('lead', $lead->id),
@@ -1418,6 +1433,13 @@ class LeadController extends Controller
                     'exception' => $notify_exception->getMessage(),
                 ]);
             }
+
+            // Registrar el error también en la conversación del lead (además del log y del aviso a admins de arriba).
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo generar la sugerencia de Claude',
+                $e->getMessage()
+            );
 
             return response()->json([
                 'message' => 'No se pudo generar la sugerencia: '.$e->getMessage(),
@@ -1534,6 +1556,13 @@ class LeadController extends Controller
                 'message_id' => $message_id,
             ]);
 
+            // Registrar el fallo de envío en la conversación del lead.
+            (new LeadConversationErrorLogger())->log(
+                (int) $message->lead_id,
+                'No se pudo enviar la sugerencia por WhatsApp',
+                $exception->getMessage()
+            );
+
             return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp.'], 422);
         }
 
@@ -1568,6 +1597,13 @@ class LeadController extends Controller
             Log::error('LeadController@approve_message_with_edit_json: '.$exception->getMessage(), [
                 'message_id' => $message_id,
             ]);
+
+            // Registrar el fallo de envío en la conversación del lead.
+            (new LeadConversationErrorLogger())->log(
+                (int) $message->lead_id,
+                'No se pudo enviar la sugerencia por WhatsApp',
+                $exception->getMessage()
+            );
 
             return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp.'], 422);
         }
@@ -2454,6 +2490,13 @@ class LeadController extends Controller
                     'template_name' => $template_name,
                     'error'         => $e->getMessage(),
                 ]);
+
+                /* Registrar el fallo de envío en la conversación del lead. */
+                (new LeadConversationErrorLogger())->log(
+                    (int) $lead->id,
+                    'No se pudo enviar la plantilla por WhatsApp',
+                    $e->getMessage()
+                );
 
                 return response()->json(['message' => 'No se pudo enviar la plantilla por WhatsApp: ' . $e->getMessage()], 422);
             }
