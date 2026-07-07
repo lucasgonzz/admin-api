@@ -494,6 +494,14 @@ class LeadFollowupService
                 'template' => $template->template_name,
             ]);
 
+            // Deja asentado en el hilo que el seguimiento automático falló al enviarse (prompt 299),
+            // para que quede visible al operador aunque nadie haya disparado la acción.
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo enviar el seguimiento automático por WhatsApp',
+                'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
+            );
+
             return;
         }
 

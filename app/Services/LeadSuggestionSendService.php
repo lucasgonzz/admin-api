@@ -109,6 +109,14 @@ class LeadSuggestionSendService
 
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
+            // Deja asentado en el hilo que la sugerencia no se pudo enviar (prompt 299), para
+            // que quede visible tanto en aprobación manual como en auto-envío de respaldo.
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo enviar la sugerencia por WhatsApp',
+                'La ventana de 24hs de WhatsApp está cerrada (el lead no escribió en las últimas 24hs).'
+            );
+
             return $message->fresh();
         }
 
@@ -151,6 +159,14 @@ class LeadSuggestionSendService
             $lead->sync_suggestion_flags();
 
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+            // Deja asentado en el hilo que el envío no se confirmó (prompt 299): sin teléfono
+            // o error de conexión con WhatsApp/Kapso.
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo enviar la sugerencia por WhatsApp',
+                'El envío no se confirmó (lead sin teléfono o error de conexión con WhatsApp/Kapso).'
+            );
 
             return $message->fresh();
         }
@@ -345,6 +361,14 @@ class LeadSuggestionSendService
             $message->update(['status' => 'rechazado', 'sent_at' => null]);
             $lead->sync_suggestion_flags();
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+            // Deja asentado en el hilo que el seguimiento (aprobado por el setter o auto-enviado)
+            // falló al enviarse por su plantilla (prompt 299).
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo enviar el seguimiento por WhatsApp',
+                'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
+            );
 
             return $message->fresh();
         }

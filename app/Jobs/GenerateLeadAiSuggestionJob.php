@@ -125,6 +125,14 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
                     'exception' => $notify_exception->getMessage(),
                 ]);
             }
+
+            // Deja asentado el error en el hilo de la conversación (prompt 299), para que el operador
+            // vea que la sugerencia automática de Claude falló, aunque nadie haya disparado la acción.
+            (new \App\Services\LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo generar la sugerencia automática de Claude',
+                $exception->getMessage()
+            );
         } finally {
             event(new LeadAiSuggestionFinished($this->lead_id));
         }
