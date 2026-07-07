@@ -70,6 +70,9 @@ class LeadMessage extends Model
         'is_followup'             => 'boolean',
         /* True si el mensaje representa un evento interno de cambio de estado (no se envió por WhatsApp). */
         'is_status_event'                 => 'boolean',
+        /* True si el mensaje es un registro de ERROR de sistema (fallo de envío o de generación) que se
+           muestra en el hilo como bloque rojo. Va siempre junto con is_status_event=true. */
+        'is_error'                        => 'boolean',
         /* True si en este mensaje el agente confirmó por primera vez el ingreso a la demo. */
         'marca_demo_ingreso_confirmado'   => 'boolean',
         /* True si en este mensaje el agente confirmó por primera vez el fin de la demo. */
