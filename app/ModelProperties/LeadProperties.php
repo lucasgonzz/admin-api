@@ -101,6 +101,8 @@ class LeadProperties
                 'unseen_count_key' => 'unseen_count',
                 // Clave del row que indica marca manual de "no leído" (punto rojo sin número).
                 'manually_unread_key' => 'manually_marked_unread',
+                // Clave del row que aporta el conteo de seguimientos por aprobar (badge violeta, prompt 285).
+                'pending_followups_count_key' => 'pending_followups_count',
             ],
             // [
             //     /*

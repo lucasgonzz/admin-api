@@ -361,6 +361,13 @@ class Lead extends Model
             'messages as unread_count'          => $unread_filter,
             // Actividad total no vista: mensajes de cualquier emisor sin lectura del admin.
             'messages as unseen_count'          => $unseen_filter,
+            // Seguimientos por aprobar (badge violeta en la columna "Sin leer"): mensajes is_followup
+            // que quedaron pendientes de aprobación del setter (prompt 283). Global, no per-admin:
+            // cualquier admin puede aprobarlos, así que no se filtra por lead_message_reads.
+            'messages as pending_followups_count' => function ($sub) {
+                $sub->where('is_followup', true)
+                    ->where('status', 'sugerido');
+            },
         ]);
 
         // Marca manual de "no leído" (estilo WhatsApp) hecha por el admin actual sobre este lead.
