@@ -29,6 +29,7 @@ use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
 use App\Services\BatchLeadAiRecoveryService;
+use App\Services\LeadPendingReviewService;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
 use Illuminate\Http\Request;
@@ -1777,6 +1778,14 @@ class LeadController extends Controller
             ->where('admin_id', $admin_id)
             ->delete();
 
+        // Abrir la conversación también quita la marca de "pendiente de revisión" (global, botón de
+        // revisión — prompt 295): al entrar, el operador ya toma la acción, así que la fila deja de
+        // estar roja para todos.
+        Lead::query()
+            ->where('id', (int) $lead_id)
+            ->whereNotNull('pendiente_revision_at')
+            ->update(['pendiente_revision_at' => null]);
+
         LeadBroadcastService::emit_conversation_updated((int) $lead_id);
 
         return response()->json(['model' => $this->fullModel('lead', $lead_id)], 200);
@@ -2690,6 +2699,29 @@ class LeadController extends Controller
         app(\App\Services\RecallService::class)->send_bot_for_lead($lead);
 
         return response()->json(['ok' => true], 200);
+    }
+
+    /**
+     * Marca como pendientes de revisión los leads sin responder o con un error de envío/generación
+     * sin resolver. No envía ni genera nada (reemplaza el recovery masivo viejo). El frontend usa los
+     * contadores para el toast y refresca la grilla para pintar las filas marcadas en rojo.
+     *
+     * @param LeadPendingReviewService $service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function mark_pending_review_json(LeadPendingReviewService $service)
+    {
+        $result = $service->mark_pending_leads();
+
+        Log::channel('daily')->info('mark_pending_review: marcado de pendientes disparado.', $result);
+
+        return response()->json([
+            'message'        => 'Leads marcados para revisión',
+            'marcados'       => $result['marcados'],
+            'ya_marcados'    => $result['ya_marcados'],
+            'sin_pendientes' => $result['sin_pendientes'],
+        ]);
     }
 
     /**
