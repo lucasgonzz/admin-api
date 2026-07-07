@@ -187,6 +187,10 @@ class Lead extends Model
         // per-request en scopeWithUnreadLeadMessagesCount, no es una columna real de `leads`.
         'manually_marked_unread'       => 'boolean',
 
+        // Fila amarilla en la grilla de leads: true si el lead tiene ≥1 mensaje pendiente de verificación
+        // del setter (requiere_verificacion + sugerido). Calculado en scopeWithUnreadLeadMessagesCount.
+        'row_warning'                  => 'boolean',
+
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'              => 'array',
 
@@ -378,6 +382,18 @@ class Lead extends Model
             'manually_marked_unread' => LeadManualUnreadMark::selectRaw('COUNT(*) > 0')
                 ->whereColumn('lead_manual_unread_marks.lead_id', 'leads.id')
                 ->where('lead_manual_unread_marks.admin_id', $admin_id),
+
+            // Resaltado AMARILLO de la fila en la grilla de leads (fila que necesita revisión del setter,
+            // ver prompt 295). Global (no per-admin): true si el lead tiene AL MENOS un mensaje pendiente
+            // de verificación — requiere_verificacion = true + status = 'sugerido' (aún sin aprobar,
+            // rechazar ni enviar). Cubre los dos casos sin distinción: (a) escalación conversacional del
+            // agente (requiere_verificacion), y (b) todo el tramo de agenda desde solicita_disponibilidad
+            // en adelante (los prompts 272/228 fuerzan requiere_verificacion en esos mensajes). Baja solo
+            // cuando el mensaje sale de 'sugerido' (aprobado / rechazado / auto-enviado por el respaldo).
+            'row_warning' => \App\Models\LeadMessage::selectRaw('COUNT(*) > 0')
+                ->whereColumn('lead_messages.lead_id', 'leads.id')
+                ->where('lead_messages.requiere_verificacion', true)
+                ->where('lead_messages.status', 'sugerido'),
         ]);
     }
 
