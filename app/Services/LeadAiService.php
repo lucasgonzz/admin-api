@@ -308,7 +308,7 @@ TXT;
          * Se pasa $specific_date para ampliar el rango cuando el lead pidió una fecha lejana.
          * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
         $calendar_snapshot    = null;
-        $availability_data    = $this->build_availability_json(3, $calendar_snapshot, $specific_date);
+        $availability_data    = $this->build_availability_json(3, $calendar_snapshot, $specific_date, $lead->id);
 
         /*
          * Ampliar snapshot con demos agendadas, slots enviados a Claude y config del closer
@@ -504,11 +504,11 @@ TXT;
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = 3, &$calendar_snapshot = null, ?string $specific_date = null): array
+    public function build_availability_json(int $days_ahead = 3, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
          * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango. */
-        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date);
+        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date, $exclude_lead_id);
 
         /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
         $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
@@ -586,7 +586,7 @@ TXT;
      *
      * @return array<string, mixed>
      */
-    protected function prepare_slot_availability_context(int $days_ahead = 3, ?string $specific_date = null): array
+    protected function prepare_slot_availability_context(int $days_ahead = 3, ?string $specific_date = null, ?int $exclude_lead_id = null): array
     {
         /* Parámetros de configuración de demos. */
         $duracion    = LeadDemoSettings::get_duracion_minutos();
@@ -718,7 +718,7 @@ TXT;
 
         /* Rangos bloqueados por demo y rangos de closer ocupado para los días iniciales.
          * Ambas estructuras se construyen en un solo recorrido sobre la misma query de leads. */
-        $load_result     = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post);
+        $load_result     = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post, $exclude_lead_id);
         $blocked_by_demo = $load_result['blocked_by_demo'];
         $closer_busy     = $load_result['closer_busy'];
 
@@ -825,7 +825,7 @@ TXT;
             $dates_map[$extra_key] = $cursor->copy();
 
             /* Cargar bloqueos del día extra y fusionarlos con los ya existentes. */
-            $extra_result = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post);
+            $extra_result = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post, $exclude_lead_id);
             foreach ($demos as $demo) {
                 $blocked_by_demo[$demo->id][$extra_key] = $extra_result['blocked_by_demo'][$demo->id][$extra_key] ?? [];
             }
@@ -1023,7 +1023,7 @@ TXT;
      *   closer_busy: array<string, array<int, array{0: int, 1: int}>>
      * }
      */
-    protected function load_blocked_ranges_by_demo($demos, array $date_strings, int $duracion, int $setup_antes, int $gracia_post): array
+    protected function load_blocked_ranges_by_demo($demos, array $date_strings, int $duracion, int $setup_antes, int $gracia_post, ?int $exclude_lead_id = null): array
     {
         /* Inicializar estructura vacía por demo y fecha. */
         $blocked_by_demo = [];
@@ -1050,9 +1050,25 @@ TXT;
         /* Leads con demo en las fechas solicitadas.
          * demo_date es una columna DATE pura (sin hora ni timezone), por lo que se compara
          * directamente con whereIn sin ninguna conversión de zona horaria. */
-        $booked_leads = Lead::whereIn('demo_date', $date_strings)
+        $booked_query = Lead::whereIn('demo_date', $date_strings)
             ->whereNotNull('demo_start_time')
-            ->whereNotNull('demo_id')
+            ->whereNotNull('demo_id');
+
+        /* FIX (auto-colisión de horarios — detectado en testing 6/7/2026, lead #10):
+         * la disponibilidad se calculaba contra TODAS las demos agendadas, incluida la del
+         * propio lead que se está atendiendo. Cuando un lead ya tenía una demo (reconfirmar el
+         * mismo slot, reagendar, o cualquier re-disparo del agendamiento en la misma
+         * conversación), su propia reserva bloqueaba su propio horario y el slot se rechazaba
+         * como "no disponible" — un choque del lead consigo mismo, que disparaba la tercera
+         * llamada correctiva y reescribía el mensaje ya aprobado por el operador. Al excluir su
+         * propia demo, un lead nunca colisiona contra sí mismo; sigue chocando con las de otros
+         * leads. Un lead tiene a lo sumo una demo (su propia fila), que se sobreescribe al
+         * agendar de nuevo, así que nunca hay doble reserva para el mismo lead. */
+        if ($exclude_lead_id !== null) {
+            $booked_query->where('id', '!=', $exclude_lead_id);
+        }
+
+        $booked_leads = $booked_query
             ->get(['id', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time', 'demo_flexible']);
 
         /* Diagnóstico: detalle de cada demo agendada encontrada para las fechas consultadas,
@@ -2134,7 +2150,7 @@ TXT;
                  * confirmando (prepare_slot_availability_context ya sabe ampliar el rango
                  * hasta esa fecha cuando se le pasa). */
                 $availability_snapshot_unused = null;
-                $availability = $this->build_availability_json(3, $availability_snapshot_unused, $demo_date);
+                $availability = $this->build_availability_json(3, $availability_snapshot_unused, $demo_date, $lead->id);
                 $slots_demo   = [];
                 $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
                 foreach ($demo_slots_by_date as $date_label => $slots) {
