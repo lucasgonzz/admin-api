@@ -355,6 +355,22 @@ TXT;
         $availability_context = "DISPONIBILIDAD DE DEMOS (JSON):\n"
             .json_encode($availability_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
+        /* Disponibilidad ya agrupada en rangos legibles por fecha, para que el agente la OFREZCA
+         * como bloques por turno ("de 8 a 9 de la mañana, y de 13 a 16:30 de la tarde") en vez de
+         * enumerar todos los slots. El agrupamiento en bloques contiguos lo hace el backend de forma
+         * determinista (no el modelo): la disponibilidad puede tener huecos, así que un rango a secas
+         * ofrecería horarios inexistentes. El JSON de arriba se sigue usando SOLO para validar el
+         * horario que elige el lead y para el demo_id. */
+        $disponibilidad_legible = $this->format_availability_readable($availability_data);
+        if (! empty($disponibilidad_legible)) {
+            $availability_context .= "\n\nDISPONIBILIDAD EN RANGOS LEGIBLES (usar ESTO para ofrecer horarios, NO enumerar los slots del JSON):";
+            foreach ($disponibilidad_legible as $date_label => $texto) {
+                if ($texto !== '') {
+                    $availability_context .= "\n- {$date_label}: {$texto}";
+                }
+            }
+        }
+
         /*
          * Detectar si el último mensaje del lead contiene un horario concreto propuesto.
          * Se usa solo como pista adicional; Claude debe cruzar con el JSON de arriba.
@@ -389,6 +405,7 @@ TXT;
         $availability_context .= "\n- Si el slot NO está disponible: informale al lead con naturalidad y ofrecé las alternativas más cercanas disponibles.";
         $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
         $availability_context .= "\n- Nunca confirmes un horario que no aparezca en el JSON de disponibilidad.";
+        $availability_context .= "\n- Para OFRECER horarios al lead, usá SIEMPRE el texto de 'DISPONIBILIDAD EN RANGOS LEGIBLES' (bloques por turno) — nunca enumeres todos los slots del JSON uno por uno, queda un mensaje larguísimo y robótico. El JSON granular es solo para validar el horario que el lead elige y para el demo_id.";
 
         if ($lead_proposed_time !== '') {
             $availability_context .= "\n- El lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en el JSON de disponibilidad.";
@@ -568,6 +585,143 @@ TXT;
             'duration_demo_minutos' => $context['duracion'],
             'demos'                 => $demos_json,
         ];
+    }
+
+    /**
+     * A partir del JSON de disponibilidad (build_availability_json), arma por cada fecha un texto
+     * legible con los horarios agrupados en bloques contiguos y partidos por turno (mañana/tarde),
+     * para que el agente los ofrezca como rangos ("de 8 a 9 de la mañana, y de 13 a 16:30 de la
+     * tarde") en vez de enumerar todos los slots.
+     *
+     * La unión se hace entre demos (un horario es ofrecible si está libre en cualquier demo física).
+     * El corte de bloque usa la frecuencia de slots configurada: dos horarios consecutivos pertenecen
+     * al mismo bloque solo si están separados por <= frecuencia_slots_min; cualquier hueco mayor abre
+     * un bloque nuevo. Los slots se separan primero por turno (mañana < 12:00, tarde >= 12:00) y luego
+     * se agrupan, para que ningún bloque cruce el mediodía. Un bloque de un solo horario se expresa
+     * como "a las HH" en vez de "de HH a HH".
+     *
+     * @param array<string, mixed> $availability_data Estructura devuelta por build_availability_json().
+     *
+     * @return array<string, string> Mapa "día Y-m-d" => texto legible (o '' si no hay slots ese día).
+     */
+    private function format_availability_readable(array $availability_data): array
+    {
+        $frecuencia = (int) LeadDemoSettings::get_frecuencia_slots_minutos();
+        if ($frecuencia <= 0) {
+            $frecuencia = 30;
+        }
+
+        $demos = isset($availability_data['demos']) && is_array($availability_data['demos'])
+            ? $availability_data['demos']
+            : [];
+
+        /* Unir los slots de todas las demos por fecha (ofrecible si está libre en cualquiera). */
+        $slots_por_fecha = [];
+        foreach ($demos as $demo_slots_by_date) {
+            if (! is_array($demo_slots_by_date)) {
+                continue;
+            }
+            foreach ($demo_slots_by_date as $date_label => $slots) {
+                if (! is_array($slots)) {
+                    continue;
+                }
+                if (! isset($slots_por_fecha[$date_label])) {
+                    $slots_por_fecha[$date_label] = [];
+                }
+                foreach ($slots as $slot) {
+                    /* Clave por valor para deduplicar entre demos. */
+                    $slots_por_fecha[$date_label][(string) $slot] = true;
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($slots_por_fecha as $date_label => $slot_set) {
+            /* Pasar cada "HH:MM" a minutos desde medianoche. */
+            $minutos = [];
+            foreach (array_keys($slot_set) as $hhmm) {
+                if (preg_match('/^(\d{1,2}):(\d{2})$/', (string) $hhmm, $m)) {
+                    $minutos[] = (int) $m[1] * 60 + (int) $m[2];
+                }
+            }
+            if (empty($minutos)) {
+                $result[$date_label] = '';
+                continue;
+            }
+            sort($minutos, SORT_NUMERIC);
+
+            /* Separar por turno ANTES de agrupar, para que ningún bloque cruce el mediodía. */
+            $manana = [];
+            $tarde  = [];
+            foreach ($minutos as $mn) {
+                if ($mn < 12 * 60) {
+                    $manana[] = $mn;
+                } else {
+                    $tarde[] = $mn;
+                }
+            }
+
+            $partes = array_merge(
+                $this->describe_slot_blocks($manana, $frecuencia, 'de la mañana'),
+                $this->describe_slot_blocks($tarde, $frecuencia, 'de la tarde')
+            );
+
+            $result[$date_label] = implode(', y ', $partes);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Agrupa una lista de minutos ya ordenada en bloques contiguos (corte cuando el salto supera la
+     * frecuencia) y devuelve la descripción legible de cada bloque, con la etiqueta de turno dada.
+     *
+     * @param int[]  $minutos_ordenados Minutos desde medianoche, ordenados ascendente.
+     * @param int    $frecuencia        Frecuencia de slots en minutos (separación esperada entre contiguos).
+     * @param string $turno             Etiqueta de turno ("de la mañana" / "de la tarde").
+     *
+     * @return string[] Descripciones de cada bloque contiguo.
+     */
+    private function describe_slot_blocks(array $minutos_ordenados, int $frecuencia, string $turno): array
+    {
+        if (empty($minutos_ordenados)) {
+            return [];
+        }
+
+        $partes = [];
+        $inicio = $minutos_ordenados[0];
+        $prev   = $minutos_ordenados[0];
+        $count  = count($minutos_ordenados);
+
+        for ($i = 1; $i < $count; $i++) {
+            if ($minutos_ordenados[$i] - $prev > $frecuencia) {
+                $partes[] = $this->describe_single_block($inicio, $prev, $turno);
+                $inicio   = $minutos_ordenados[$i];
+            }
+            $prev = $minutos_ordenados[$i];
+        }
+        $partes[] = $this->describe_single_block($inicio, $prev, $turno);
+
+        return $partes;
+    }
+
+    /**
+     * Describe un bloque contiguo como texto legible. Un bloque de un solo horario ("desde" ==
+     * "hasta") se expresa como "a las HH"; un rango como "de HH a HH". Ambos con el turno.
+     *
+     * @param int    $desde Minuto de inicio del bloque.
+     * @param int    $hasta Minuto de fin del bloque (último slot ofrecible).
+     * @param string $turno Etiqueta de turno.
+     *
+     * @return string
+     */
+    private function describe_single_block(int $desde, int $hasta, string $turno): string
+    {
+        if ($desde === $hasta) {
+            return 'a las ' . self::format_minutes_to_hhmm($desde) . ' ' . $turno;
+        }
+
+        return 'de ' . self::format_minutes_to_hhmm($desde) . ' a ' . self::format_minutes_to_hhmm($hasta) . ' ' . $turno;
     }
 
     /**
