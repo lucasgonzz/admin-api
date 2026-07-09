@@ -82,6 +82,10 @@ class CheckDemoFin extends Command
          */
         $candidates = Lead::query()
             ->where('status', 'demo_en_curso')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_check_fin_demo', true)
             ->where('demo_fin_check_enviado', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')

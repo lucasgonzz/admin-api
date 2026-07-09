@@ -56,6 +56,10 @@ class CheckDemoIngresoTimeout extends Command
         /* Buscar leads en ingresando_demo que no confirmaron y aún no fueron notificados. */
         $candidates = Lead::query()
             ->where('status', 'ingresando_demo')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_check_ingreso_demo', true)
             ->where('demo_check_ingreso_enviado', true)
             ->where('demo_ingreso_confirmado', false)
             ->where('demo_no_ingreso_notificado', false)

@@ -57,6 +57,10 @@ class CheckDemoPendienteIngresoTimeout extends Command
          */
         $candidates = Lead::query()
             ->where('status', 'demo_pendiente_de_ingreso')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_check_ingreso_demo', true)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->get();

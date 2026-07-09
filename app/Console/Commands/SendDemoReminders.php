@@ -78,6 +78,10 @@ class SendDemoReminders extends Command
         // demo_date es DATE (sin hora ni timezone), ya guardada como fecha calendario de Argentina.
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_recordatorio_demo', true)
             ->where('recordatorio_demo_enviado', false)
             ->where('tiene_sugerencia_pendiente', false)
             ->whereNotNull('demo_date')

@@ -81,6 +81,10 @@ class GenerateDemoSummary extends Command
         /* Buscar leads con demo agendada, sin resumen generado aún. */
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_resumen_closer', true)
             ->where(function ($q) {
                 $q->whereNull('demo_summary')->orWhere('demo_summary', '');
             })

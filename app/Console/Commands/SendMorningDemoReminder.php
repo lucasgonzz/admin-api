@@ -108,6 +108,12 @@ class SendMorningDemoReminder extends Command
         // Leads candidatos: demo agendada hoy, sin recordatorio de mañana enviado.
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            // Nota: el resumen matinal a admins (send_morning_summary_to_admins) no se
+            // gatea acá porque no es un mensaje al lead, es una notificación interna al equipo.
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_recordatorio_demo', true)
             ->where('recordatorio_manana_enviado', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')

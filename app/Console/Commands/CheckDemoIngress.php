@@ -76,6 +76,10 @@ class CheckDemoIngress extends Command
         /* Buscar leads con demo agendada, sin check enviado y sin sugerencia pendiente. */
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
+            // Gate del prompt 322: la automatización solo corre si el master y el flag
+            // específico de esta operación están activos para el lead (prompt 318).
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_check_ingreso_demo', true)
             ->where('demo_check_ingreso_enviado', false)
             ->where('tiene_sugerencia_pendiente', false)
             ->whereNotNull('demo_date')
