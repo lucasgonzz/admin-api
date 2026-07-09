@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\MetaController;
 use App\Http\Controllers\ClientApiController;
 use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
 use App\Http\Controllers\DemoController;
@@ -110,6 +111,10 @@ Route::prefix('admin')->group(function () {
         Route::post('client', [ClientController::class, 'store_json']);
         Route::put('client/{id}', [ClientController::class, 'update_json']);
         Route::delete('client/{id}', [ClientController::class, 'destroy_json']);
+
+        // Configuración fiscal (AFIP) propia de ComercioCity: fila única, GET/PUT.
+        Route::get('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'show_json']);
+        Route::put('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'update_json']);
 
         Route::get('shared-database-groups', [SharedDatabaseGroupController::class, 'index_json']);
         Route::post('shared-database-groups', [SharedDatabaseGroupController::class, 'store_json']);

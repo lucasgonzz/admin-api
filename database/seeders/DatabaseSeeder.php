@@ -48,6 +48,8 @@ class DatabaseSeeder extends Seeder
             ImplementationDefaultAdminSeeder::class,
             // Tiempo de espera antes de procesar archivos recibidos en la Etapa 4.
             ImplementationFileWaitSeeder::class,
+            // Fila única de configuración fiscal (AFIP) propia de ComercioCity.
+            ComerciocityAfipConfigSeeder::class,
         ]);
 
         // Plantilla base de variables .env: solo siembra si la tabla está vacía.
