@@ -8,16 +8,18 @@ use App\Models\MensualidadInvoice;
 use App\Http\Controllers\Pdf\MensualidadFacturaPdf;
 use App\Services\Afip\AfipFacturacionService;
 use App\Services\ClientMensualidadService;
+use App\Services\ClientMensualidadSyncService;
 use Illuminate\Http\Request;
 
 /**
  * API JSON para consultar y actualizar la mensualidad de un Client desde admin
- * (prompt 329), y para emitir su Factura C contra AFIP/WSFE (prompt 331). El
- * cálculo del total es autónomo: no llama a la empresa-api del cliente (esa
- * sincronización opcional vive aparte en el prompt 335). Toda la lógica de
- * cálculo vive en ClientMensualidadService y toda la lógica de facturación
- * vive en AfipFacturacionService; este controller solo valida el request y
- * arma la respuesta.
+ * (prompt 329), para emitir su Factura C contra AFIP/WSFE (prompt 331), y para
+ * la capa OPCIONAL de sincronización con la empresa-api del cliente (prompt
+ * 335: traer conteos vivos / empujar fecha de pago). El cálculo del total
+ * sigue siendo autónomo (no depende de esta sincronización). Toda la lógica
+ * de cálculo vive en ClientMensualidadService, la de facturación en
+ * AfipFacturacionService y la de sync en ClientMensualidadSyncService; este
+ * controller solo valida el request y arma la respuesta.
  */
 class ClientMensualidadController extends Controller
 {
@@ -127,5 +129,39 @@ class ClientMensualidadController extends Controller
         // (mismo patrón que `SaleAfipTicketPdf`), por lo que la respuesta HTTP
         // efectiva la resuelve FPDF directamente enviando los headers de PDF.
         new MensualidadFacturaPdf($invoice, $config);
+    }
+
+    /**
+     * Trae del empresa-api del cliente los conteos vivos (empleados,
+     * ecommerce, mercado libre, tienda nube) y datos fiscales, para que el
+     * front precargue el formulario de mensualidad sin cargarlos a mano
+     * (prompt 335, capa opcional). No persiste nada por sí solo: Lucas
+     * revisa y confirma con el botón "Guardar" habitual.
+     *
+     * @param  int|string                  $clientId
+     * @param  ClientMensualidadSyncService $sync_service Inyectado por el IoC de Laravel.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function traer_del_cliente_json($clientId, ClientMensualidadSyncService $sync_service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        return response()->json($sync_service->traer_del_cliente($client));
+    }
+
+    /**
+     * Empuja al empresa-api del cliente la fecha de próximo pago y los
+     * precios actuales guardados en admin, para que el cliente no tenga que
+     * cargarlos a mano en su propio sistema (prompt 335, capa opcional).
+     *
+     * @param  int|string                  $clientId
+     * @param  ClientMensualidadSyncService $sync_service Inyectado por el IoC de Laravel.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function actualizar_en_cliente_json($clientId, ClientMensualidadSyncService $sync_service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        return response()->json($sync_service->actualizar_en_cliente($client));
     }
 }

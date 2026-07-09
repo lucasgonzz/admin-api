@@ -142,6 +142,9 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
+        // Sincronización OPCIONAL con la empresa-api del cliente: traer conteos vivos / empujar fecha de pago (prompt 335).
+        Route::post('client/{clientId}/mensualidad/traer-del-cliente', [ClientMensualidadController::class, 'traer_del_cliente_json']);
+        Route::post('client/{clientId}/mensualidad/actualizar-en-cliente', [ClientMensualidadController::class, 'actualizar_en_cliente_json']);
         // PDF de una Factura C ya emitida y autorizada (prompt 332).
         Route::get('client/{clientId}/factura/{invoiceId}/pdf', [ClientMensualidadController::class, 'factura_pdf']);
 
@@ -157,6 +160,10 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/send-presentation-mail', [LeadController::class, 'send_presentation_mail_json']);
         Route::post('lead/{id}/send-followup-mail', [LeadController::class, 'send_followup_mail_json']);
         Route::post('lead/{id}/run-demo-setup', [LeadController::class, 'run_demo_setup_json']);
+        // Disponibilidad de demos/horarios para el panel de verificación (prompt 321).
+        Route::get('lead/{id}/panel-availability', [LeadController::class, 'panel_availability_json']);
+        // Persistencia de toggles de automatización por lead desde el modal de operaciones (prompt 321).
+        Route::patch('lead/{id}/automations', [LeadController::class, 'update_lead_automations_json']);
         Route::post('lead/{id}/promote', [LeadController::class, 'store_promote_json']);
         Route::post('lead/{id}/promote-to-client', [LeadController::class, 'promote_to_client_json']);
         Route::post('lead/{id}/run-user-setup', [LeadController::class, 'run_user_setup_json']);
