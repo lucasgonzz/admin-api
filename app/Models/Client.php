@@ -34,6 +34,18 @@ class Client extends Model
         'shared_database_group_id' => 'integer',
         // Datos de configuración recolectados en la Etapa 1 de implementación (para UserSetup).
         'setup_data'               => 'array',
+        // Mensualidad (gestionada en admin, prompt 328/329): inputs manuales + total calculado.
+        'cantidad_empleados'       => 'integer',
+        'tiene_ecommerce'          => 'boolean',
+        'tiene_mercado_libre'      => 'boolean',
+        'tiene_tienda_nube'        => 'boolean',
+        'precio_plan'              => 'decimal:2',
+        'precio_por_cuenta'        => 'decimal:2',
+        'precio_ecommerce'         => 'decimal:2',
+        'precio_mercado_libre'     => 'decimal:2',
+        'precio_tienda_nube'       => 'decimal:2',
+        'total_mensualidad'        => 'decimal:2',
+        'payment_expired_at'       => 'date',
     ];
 
     function scopeWithAll($query) {
