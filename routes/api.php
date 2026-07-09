@@ -205,6 +205,8 @@ Route::prefix('admin')->group(function () {
 
         Route::put('lead-message/{id}/approve', [LeadController::class, 'approve_message_json']);
         Route::put('lead-message/{id}/approve-with-edit', [LeadController::class, 'approve_message_with_edit_json']);
+        /* Aprobación con acciones editadas por el admin (final_actions) + log de override (prompt 320). */
+        Route::put('lead-message/{id}/approve-with-actions', [LeadController::class, 'approve_message_with_actions_json']);
         Route::put('lead-message/{id}/reject', [LeadController::class, 'reject_message_json']);
         Route::put('lead-message/{id}/cancel-auto-send', [LeadController::class, 'cancel_auto_send_message_json']);
         /* Alterna si el mensaje se incluye o se excluye del historial enviado a Claude. */

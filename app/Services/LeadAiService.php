@@ -2089,15 +2089,37 @@ TXT;
      * colisión de horarios de apply_parsed_response). Actualiza el mensaje pendiente in-place en
      * vez de crear uno nuevo, para que la conversación no muestre un mensaje duplicado.
      *
-     * @param LeadMessage $message Mensaje `sugerido` con pending_actions poblado.
+     * FIX (prompt 320): además de las pending_actions originales de Claude, el admin puede haber
+     * editado/desactivado acciones antes de aprobar (payload `final_actions`, ver contrato abajo).
+     * Cuando viene, se mergea sobre la base de Claude (el admin manda) y se guarda el diff en
+     * `actions_override_log` del mensaje, para poder auditar después dónde el agente se equivocó.
+     *
+     * Contrato de `$final_actions` (armado por admin-spa):
+     * ```
+     * final_actions: {
+     *   estado_sugerido: string|null,               // null = no tocó el estado, se conserva el de Claude
+     *   agendar_demo: {demo_id, demo_date, demo_start_time} | null, // null = admin desactivó la demo
+     *   forzar_slot: bool,                           // true = agendar aunque el slot figure ocupado
+     *   enviar_mail_demo: bool,                       // Mail 1 on/off (solo aplica si hay demo)
+     *   guardar_nombre: string|null,
+     *   guardar_email: string|null,
+     *   cancelar_demo: bool,
+     *   requiere_intervencion_humana: bool,
+     *   motivo_intervencion: string|null
+     * }
+     * ```
+     *
+     * @param LeadMessage $message       Mensaje `sugerido` con pending_actions poblado.
+     * @param array|null  $final_actions Acciones editadas por el admin (opcional); ver contrato arriba.
      *
      * @throws \InvalidArgumentException Si el mensaje no tiene pending_actions válido (ej. ya se aplicó,
      *                                    o el horario que Claude había ofrecido ya no está disponible).
      *
      * @return LeadMessage Mismo mensaje, actualizado in-place con el resultado real de aplicar las acciones.
      */
-    public function apply_pending_actions(LeadMessage $message): LeadMessage
+    public function apply_pending_actions(LeadMessage $message, ?array $final_actions = null): LeadMessage
     {
+        /* Base = lo que Claude había sugerido originalmente (pending_actions). */
         $parsed = $message->pending_actions;
         if (empty($parsed) || ! is_array($parsed)) {
             throw new \InvalidArgumentException('Este mensaje no tiene acciones pendientes de aplicar.');
@@ -2108,9 +2130,98 @@ TXT;
             throw new \InvalidArgumentException('Lead no encontrado para el mensaje.');
         }
 
+        /* Paquete efectivo a aplicar: por defecto, el de Claude sin cambios. */
+        $parsed_efectivo = $parsed;
+
+        if ($final_actions !== null) {
+            /* Campos del contrato `final_actions` que tienen equivalente directo en el esquema de
+             * Claude ($parsed) y se mergean 1 a 1: el admin manda sobre lo sugerido. */
+
+            /* estado_sugerido: null significa "el admin no tocó el estado" (se conserva el de
+             * Claude), porque apply_parsed_response()/validate_parsed_response() exige un estado
+             * no vacío para poder procesar el paquete. */
+            if (array_key_exists('estado_sugerido', $final_actions)) {
+                $estado_admin = $final_actions['estado_sugerido'];
+                if ($estado_admin !== null && trim((string) $estado_admin) !== '') {
+                    $parsed_efectivo['estado_sugerido'] = $estado_admin;
+                }
+            }
+
+            /* agendar_demo: el admin puede desactivarla (null) o dejar la que Claude propuso editada
+             * (array con demo_id/demo_date/demo_start_time). En ambos casos, manda directo. */
+            if (array_key_exists('agendar_demo', $final_actions)) {
+                $parsed_efectivo['agendar_demo'] = $final_actions['agendar_demo'];
+            }
+
+            /* guardar_nombre / guardar_email: string editable o null para suprimir la acción.
+             * Nota: un valor null en el array hace que isset() lo trate como "no seteado" más abajo
+             * en apply_parsed_response(), que es exactamente el comportamiento de "acción desactivada". */
+            if (array_key_exists('guardar_nombre', $final_actions)) {
+                $parsed_efectivo['guardar_nombre'] = $final_actions['guardar_nombre'];
+            }
+            if (array_key_exists('guardar_email', $final_actions)) {
+                $parsed_efectivo['guardar_email'] = $final_actions['guardar_email'];
+            }
+
+            /* cancelar_demo / requiere_intervencion_humana: flags booleanas, el admin las prende o apaga. */
+            if (array_key_exists('cancelar_demo', $final_actions)) {
+                $parsed_efectivo['cancelar_demo'] = (bool) $final_actions['cancelar_demo'];
+            }
+            if (array_key_exists('requiere_intervencion_humana', $final_actions)) {
+                $parsed_efectivo['requiere_intervencion_humana'] = (bool) $final_actions['requiere_intervencion_humana'];
+            }
+            if (array_key_exists('motivo_intervencion', $final_actions)) {
+                $parsed_efectivo['motivo_intervencion'] = $final_actions['motivo_intervencion'];
+            }
+
+            /* forzar_slot / enviar_mail_demo: no existen en el esquema de Claude, son flags nuevas del
+             * admin que apply_parsed_response() lee directo de $parsed (ver bloques agendar_demo y
+             * Mail 1). Default: no forzar, y enviar el mail (comportamiento actual) si no viene. */
+            $parsed_efectivo['forzar_slot']      = ! empty($final_actions['forzar_slot']);
+            $parsed_efectivo['enviar_mail_demo']  = array_key_exists('enviar_mail_demo', $final_actions)
+                ? (bool) $final_actions['enviar_mail_demo']
+                : true;
+
+            /* --- Diff campo por campo (base de Claude vs efectivo del admin), para auditoría --- */
+            $diff              = [];
+            $campos_a_comparar = [
+                'estado_sugerido',
+                'agendar_demo',
+                'guardar_nombre',
+                'guardar_email',
+                'cancelar_demo',
+                'requiere_intervencion_humana',
+                'motivo_intervencion',
+            ];
+            foreach ($campos_a_comparar as $campo) {
+                $valor_claude = $parsed[$campo] ?? null;
+                $valor_admin  = $parsed_efectivo[$campo] ?? null;
+                /* Comparación laxa a propósito: normaliza diferencias de tipo (ej. "1" vs true)
+                 * que no representan un cambio real de decisión del admin. */
+                if ($valor_claude != $valor_admin) {
+                    $diff[] = [
+                        'campo'               => $campo,
+                        'sugerido_por_claude' => $valor_claude,
+                        'elegido_por_admin'   => $valor_admin,
+                    ];
+                }
+            }
+            /* forzar_slot / enviar_mail_demo no tienen base en Claude (siempre false/true implícito);
+             * solo se registran en el diff cuando el admin las usó activamente. */
+            if (! empty($parsed_efectivo['forzar_slot'])) {
+                $diff[] = ['campo' => 'forzar_slot', 'sugerido_por_claude' => false, 'elegido_por_admin' => true];
+            }
+            if ($parsed_efectivo['enviar_mail_demo'] === false) {
+                $diff[] = ['campo' => 'enviar_mail_demo', 'sugerido_por_claude' => true, 'elegido_por_admin' => false];
+            }
+
+            /* Persistir el diff en el mensaje (null si el admin no cambió nada realmente). */
+            $message->actions_override_log = ! empty($diff) ? $diff : null;
+        }
+
         return $this->apply_parsed_response(
             $lead,
-            $parsed,
+            $parsed_efectivo,
             (bool) $message->is_followup,
             null,
             $message,
@@ -2313,6 +2424,16 @@ TXT;
                 $demo_start = str_pad($start_match[1], 2, '0', STR_PAD_LEFT).':'.$start_match[2];
             }
 
+            /*
+             * FIX (prompt 320): flag `forzar_slot` del admin (agendar/reagendar demo a mano desde
+             * la aprobación con acciones editadas). Cuando viene true, se saltea únicamente la
+             * validación de "el slot figura en la lista de libres" más abajo — el lock exclusivo por
+             * demo_id se sigue tomando igual, así que dos requests concurrentes sobre la misma demo
+             * física siguen serializándose. Solo aplica al camino de slot no disponible; si no se
+             * pudo tomar el lock (timeout), se trata igual que hoy (ver bloque siguiente).
+             */
+            $forzar_slot = ! empty($parsed['forzar_slot']);
+
             if ($demo_id && $demo_date !== '' && $demo_start !== '') {
                 /*
                  * FIX (bug de colisión de horarios — leads 65, 70, 93, 192, 197, 234 en
@@ -2378,7 +2499,10 @@ TXT;
                     }
                 }
 
-                if (! in_array($demo_start, $slots_demo, true)) {
+                /* Slot presente en la disponibilidad real leída recién arriba. */
+                $slot_disponible = in_array($demo_start, $slots_demo, true);
+
+                if (! $slot_disponible && ! $forzar_slot) {
                     Log::error('LeadAiService: Claude devolvió un agendar_demo con slot no disponible. Se ignora.', [
                         'lead_id'            => $lead->id,
                         'demo_id'            => $demo_id,
@@ -2428,6 +2552,18 @@ TXT;
                     $estado                = $pipeline_status->slug;
                     $suggested_lead_status = $estado !== $previous_status ? $estado : null;
                 } else {
+                    /* FIX (prompt 320): si se llegó acá por forzar_slot (el slot NO estaba en la
+                     * disponibilidad real, el admin decidió agendarlo igual), dejar constancia en el
+                     * log — no es el camino normal de slot validado. */
+                    if (! $slot_disponible && $forzar_slot) {
+                        Log::warning('LeadAiService: slot forzado por admin (no figuraba en disponibilidad real).', [
+                            'lead_id'    => $lead->id,
+                            'demo_id'    => $demo_id,
+                            'demo_date'  => $demo_date,
+                            'demo_start' => $demo_start,
+                        ]);
+                    }
+
                     /* FIX (prompt 251): slot validado contra disponibilidad real y a punto de
                      * persistirse — recién acá es cierto que hay una demo confirmada este turno. */
                     $demo_confirmada_este_turno = true;
@@ -2967,7 +3103,15 @@ TXT;
             'demo_pendiente_de_terminar',
         ], true);
         $demo_lista_para_mail  = $demo_confirmada_este_turno || $lead_ya_agendado;
-        $debe_enviar_mail_demo = $demo_lista_para_mail && ($email_nuevo || ($es_reagendado && ! empty($lead->email)));
+        /*
+         * FIX (prompt 320): `enviar_mail_demo` es una flag del paquete efectivo de acciones
+         * (viene de final_actions del admin al aprobar). Si no está presente (flujos viejos, o
+         * ejecución automática sin aprobación editada), se comporta como hoy: enviar siempre que
+         * corresponda. Si el admin la puso en false, se suprime el Mail 1 aunque el resto de las
+         * condiciones (demo lista + email nuevo/reagendado) se cumplan.
+         */
+        $enviar_mail_demo_flag = array_key_exists('enviar_mail_demo', $parsed) ? (bool) $parsed['enviar_mail_demo'] : true;
+        $debe_enviar_mail_demo = $demo_lista_para_mail && ($email_nuevo || ($es_reagendado && ! empty($lead->email))) && $enviar_mail_demo_flag;
         if ($debe_enviar_mail_demo) {
             try {
                 $lead->loadMissing('demo');

@@ -36,10 +36,14 @@ class LeadSuggestionSendService
      *
      * @param LeadMessage $message       Mensaje en estado `sugerido`.
      * @param string|null $edited_content Texto final; si es null se usa content del mensaje.
+     * @param array|null  $final_actions  Paquete de acciones editado por el admin (prompt 320, ver
+     *                                    contrato `final_actions` en LeadAiService::apply_pending_actions()).
+     *                                    Si es null se aplican las acciones originales de Claude
+     *                                    (comportamiento sin cambios).
      *
      * @return LeadMessage
      */
-    public function send_suggestion(LeadMessage $message, ?string $edited_content = null): LeadMessage
+    public function send_suggestion(LeadMessage $message, ?string $edited_content = null, ?array $final_actions = null): LeadMessage
     {
         if ((string) $message->sender !== 'sistema') {
             throw new \InvalidArgumentException('Solo se pueden enviar sugerencias del sistema.');
@@ -80,7 +84,7 @@ class LeadSuggestionSendService
          * una sugerencia nueva.
          */
         if (! empty($message->pending_actions)) {
-            $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message);
+            $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message, $final_actions);
         }
 
         $body = $edited_content !== null ? trim($edited_content) : trim((string) $message->content);

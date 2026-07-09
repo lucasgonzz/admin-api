@@ -1612,6 +1612,61 @@ class LeadController extends Controller
     }
 
     /**
+     * Aprueba un mensaje sugerido aplicando las acciones EDITADAS por el admin (en vez de las
+     * originales de Claude) y, opcionalmente, un texto final editado. Espeja
+     * approve_message_with_edit_json() pero además acepta `final_actions` (ver contrato en el
+     * prompt 320): el admin puede activar/desactivar/editar cada acción (estado sugerido, agendar
+     * demo, forzar un slot que figure ocupado, suprimir el Mail 1, guardar nombre/email, cancelar
+     * demo, marcar intervención humana) antes de que se apliquen de verdad. LeadAiService guarda
+     * el diff entre lo sugerido por Claude y lo que quedó vigente en `actions_override_log` del
+     * mensaje, para poder revisar después dónde el agente se equivocó.
+     *
+     * @param int|string $message_id
+     * @param Request $request Puede incluir `edited_content` (texto final, opcional) y
+     *                          `final_actions` (objeto con las acciones efectivas, opcional).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function approve_message_with_actions_json($message_id, Request $request, LeadSuggestionSendService $send_service)
+    {
+        $message = LeadMessage::query()->with('lead')->findOrFail($message_id);
+        if ($message->status !== 'sugerido') {
+            return response()->json(['message' => 'Solo se pueden enviar mensajes sugeridos de la IA.'], 422);
+        }
+
+        /* Texto final editado por el admin: opcional, se pisa el sugerido por Claude si viene no vacío. */
+        $edited_content_raw = trim((string) $request->input('edited_content', ''));
+        $edited_content      = $edited_content_raw !== '' ? $edited_content_raw : null;
+
+        /* Paquete de acciones editado por el admin (ver contrato `final_actions` del prompt 320).
+         * Si no viene, se aplican las acciones originales de Claude (mismo comportamiento que
+         * approve_message_json / approve_message_with_edit_json). */
+        $final_actions_raw = $request->input('final_actions');
+        $final_actions      = is_array($final_actions_raw) ? $final_actions_raw : null;
+
+        try {
+            $send_service->send_suggestion($message, $edited_content, $final_actions);
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        } catch (\Throwable $exception) {
+            Log::error('LeadController@approve_message_with_actions_json: '.$exception->getMessage(), [
+                'message_id' => $message_id,
+            ]);
+
+            // Registrar el fallo de envío en la conversación del lead.
+            (new LeadConversationErrorLogger())->log(
+                (int) $message->lead_id,
+                'No se pudo enviar la sugerencia por WhatsApp',
+                $exception->getMessage()
+            );
+
+            return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp.'], 422);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
      * Marca un mensaje sugerido como rechazado y recalcula flags del lead.
      *
      * @param int|string $message_id
