@@ -126,6 +126,16 @@ class Lead extends Model
         'tiene_sugerencia_pendiente'   => 'boolean',
         // Si false, Claude no genera ni envía sugerencias automáticas para este lead.
         'claude_auto_reply'            => 'boolean',
+
+        // Master del ciclo de demo: false = "lo manejo yo, no automatices nada" (prompt 318).
+        'automatizaciones_demo_activas' => 'boolean',
+        // Toggles puntuales de automatización por lead (prompt 318): permiten apagar una
+        // automatización específica del ciclo de demo sin afectar al resto.
+        'auto_recordatorio_demo'       => 'boolean',
+        'auto_check_ingreso_demo'      => 'boolean',
+        'auto_check_fin_demo'          => 'boolean',
+        'auto_resumen_closer'          => 'boolean',
+
         // Flag persistido: Claude (o el admin) marcó que este lead requiere intervención humana.
         'requiere_intervencion_humana' => 'boolean',
         'requiere_seguimiento'         => 'boolean',

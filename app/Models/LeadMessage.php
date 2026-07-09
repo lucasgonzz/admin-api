@@ -95,6 +95,10 @@ class LeadMessage extends Model
            en LeadAiService::apply_parsed_response() a partir de LeadMessage::build_actions_summary().
            Null cuando el mensaje no ejecutó ninguna acción estructurada (prompt 277). */
         'applied_actions_summary' => 'array',
+        /* Diff entre lo que sugirió Claude y lo que el admin dejó al aprobar (editó/desactivó
+           acciones antes de aprobar). Cada elemento: ['campo' => ..., 'sugerido_por_claude' => ...,
+           'elegido_por_admin' => ...]. Null cuando el admin no cambió ninguna acción (prompt 318). */
+        'actions_override_log'    => 'array',
         /* Timestamps de entrega real de WhatsApp (populated por webhooks de Kapso). */
         'whatsapp_delivered_at'   => 'datetime',
         'whatsapp_seen_at'        => 'datetime',
