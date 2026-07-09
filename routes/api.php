@@ -142,6 +142,8 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
+        // PDF de una Factura C ya emitida y autorizada (prompt 332).
+        Route::get('client/{clientId}/factura/{invoiceId}/pdf', [ClientMensualidadController::class, 'factura_pdf']);
 
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
