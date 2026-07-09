@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\MetaController;
 use App\Http\Controllers\ClientApiController;
 use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
@@ -135,6 +136,10 @@ Route::prefix('admin')->group(function () {
         Route::post('client/{clientId}/employees/sync-from-empresa', [ClientEmployeeController::class, 'sync_from_empresa_json']);
         Route::put('client/{clientId}/employees/{employeeId}', [ClientEmployeeController::class, 'update_for_client_json']);
         Route::delete('client/{clientId}/employees/{employeeId}', [ClientEmployeeController::class, 'destroy_for_client_json']);
+
+        // Mensualidad del cliente (inputs manuales + total calculado de forma autónoma, prompt 329).
+        Route::get('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'show_json']);
+        Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
 
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
