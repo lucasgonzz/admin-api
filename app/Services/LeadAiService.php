@@ -1806,7 +1806,30 @@ TXT;
         bool $is_followup,
         ?array $calendar_snapshot = null
     ): LeadMessage {
-        if ($this->requires_agendamiento_verification_gate($lead, $parsed)) {
+        /*
+         * GENERALIZACIÓN (prompt 319, 9/7/2026): hasta acá solo el tramo de agenda difería sus
+         * acciones (pending_actions sin aplicar) hasta la aprobación humana. Lucas quiere que
+         * CUALQUIER mensaje que vaya a quedar retenido para aprobación difiera igual, para que el
+         * panel de "esto es lo que va a pasar" (y su edición) sirva en todos los casos. Un mensaje
+         * se considera "retenido para verificación" si se cumple cualquiera de estas tres condiciones:
+         *
+         *   1. El tramo de agenda lo exige (comportamiento histórico, ver
+         *      requires_agendamiento_verification_gate()).
+         *   2. Claude pidió verificación explícita en su propia respuesta (requiere_verificacion: true).
+         *   3. La demora general de auto-envío está configurada > 0 (KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS
+         *      en LeadWhatsappOnboardingSettings): si CUALQUIER mensaje va a esperar ese timer antes
+         *      de salir, también debe diferir sus acciones para que el admin pueda revisarlas/editarlas
+         *      antes de que surtan efecto. Hoy esa demora está en 0 (envío inmediato), así que esta
+         *      condición no aplica en producción salvo que Lucas la suba.
+         *
+         * Si ninguna aplica, el mensaje se envía de inmediato y aplica sus acciones en el acto,
+         * como siempre (apply_parsed_response()).
+         */
+        $retenido_para_verificacion = $this->requires_agendamiento_verification_gate($lead, $parsed)
+            || ! empty($parsed['requiere_verificacion'])
+            || LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds() > 0;
+
+        if ($retenido_para_verificacion) {
             return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot);
         }
 
@@ -1900,11 +1923,19 @@ TXT;
     }
 
     /**
-     * Crea el LeadMessage pendiente de aprobación cuando requires_agendamiento_verification_gate()
-     * detecta que el paquete (mensaje + acciones) tiene que esperar aprobación humana. No corre
-     * NINGUNA acción (guardar_nombre, agendar_demo, cancelar_demo, etc.) — se guarda el $parsed
-     * crudo en pending_actions y se aplica recién al aprobar, vía apply_pending_actions(), que
-     * revalida disponibilidad en ese momento (no la de cuando Claude respondió acá).
+     * Crea el LeadMessage pendiente de aprobación cuando create_message_and_update_lead() detecta
+     * que el paquete (mensaje + acciones) tiene que esperar aprobación humana — ya sea por el tramo
+     * de agenda, por requiere_verificacion explícito de Claude, o por demora general de auto-envío
+     * (ver GENERALIZACIÓN en create_message_and_update_lead(), prompt 319). No corre NINGUNA acción
+     * (guardar_nombre, agendar_demo, cancelar_demo, etc.) — se guarda el $parsed crudo en
+     * pending_actions y se aplica recién al aprobar, vía apply_pending_actions(), que revalida
+     * disponibilidad en ese momento (no la de cuando Claude respondió acá).
+     *
+     * La notificación al admin usa el mismo criterio que apply_parsed_response(): si el estado
+     * sugerido/actual cae dentro del tramo de agenda (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO) se
+     * notifica con LeadVerificacionAgendamientoNotificationService (incluye alerta de sonido); fuera
+     * del tramo se reutiliza LeadVerificacionWhatsappService, el mismo canal que ya usa
+     * apply_parsed_response() para requiere_verificacion fuera de agenda. No se inventa un canal nuevo.
      *
      * @param Lead                 $lead
      * @param array<string, mixed> $parsed
@@ -1989,20 +2020,39 @@ TXT;
 
         $lead->save();
 
-        /* Notificar igual que el camino "agendamiento" ya notifica hoy dentro de apply_parsed_response
-         * (push siempre + WhatsApp opcional vía LeadVerificacionAgendamientoNotificationService). */
+        /*
+         * GENERALIZACIÓN (prompt 319): antes este bloque solo cubría el tramo de agenda. Ahora
+         * $msg puede quedar diferido también fuera de ese tramo (requiere_verificacion explícito
+         * de Claude, o demora general de auto-envío > 0). Se elige el canal de notificación con el
+         * mismo criterio que ya usa apply_parsed_response() para requiere_verificacion: dentro del
+         * tramo de agenda va por LeadVerificacionAgendamientoNotificationService (con alerta de
+         * sonido); fuera del tramo se reutiliza LeadVerificacionWhatsappService, sin inventar un
+         * canal nuevo.
+         */
+        $es_tramo_agenda = in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true);
+
         $admin_notifications_log = [];
         try {
-            $agendamiento_service = new \App\Services\LeadVerificacionAgendamientoNotificationService(
-                new \App\Services\WhatsappSendService()
-            );
-            $verif_notified = $agendamiento_service->notify($lead->fresh(), $msg);
-            if (! empty($verif_notified)) {
-                $admin_notifications_log[] = ['evento' => 'Requiere verificación (coordinando agenda)', 'admins' => $verif_notified];
+            if ($es_tramo_agenda) {
+                $agendamiento_service = new \App\Services\LeadVerificacionAgendamientoNotificationService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $verif_notified = $agendamiento_service->notify($lead->fresh(), $msg);
+                $evento_label   = 'Requiere verificación (coordinando agenda)';
+
+                /* Sonido en el navegador para admins con la pestaña abierta (solo tramo de agenda). */
+                event(new \App\Events\LeadVerificacionAgendamientoAlert($lead->fresh(), $msg));
+            } else {
+                $verificacion_service = new \App\Services\LeadVerificacionWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $verif_notified = $verificacion_service->notify($lead->fresh(), $msg);
+                $evento_label   = 'Requiere verificación humana';
             }
 
-            /* Sonido en el navegador para admins con la pestaña abierta. */
-            event(new \App\Events\LeadVerificacionAgendamientoAlert($lead->fresh(), $msg));
+            if (! empty($verif_notified)) {
+                $admin_notifications_log[] = ['evento' => $evento_label, 'admins' => $verif_notified];
+            }
         } catch (\Throwable $e) {
             Log::error('LeadAiService: error al notificar verificacion pendiente (acciones diferidas).', [
                 'lead_id'    => $lead->id,
