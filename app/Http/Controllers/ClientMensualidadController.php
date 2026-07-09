@@ -3,15 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\Client;
+use App\Services\Afip\AfipFacturacionService;
 use App\Services\ClientMensualidadService;
 use Illuminate\Http\Request;
 
 /**
  * API JSON para consultar y actualizar la mensualidad de un Client desde admin
- * (prompt 329). El cálculo del total es autónomo: no llama a la empresa-api
- * del cliente (esa sincronización opcional vive aparte en el prompt 335).
- * Toda la lógica de cálculo y persistencia vive en ClientMensualidadService;
- * este controller solo valida el request y arma la respuesta.
+ * (prompt 329), y para emitir su Factura C contra AFIP/WSFE (prompt 331). El
+ * cálculo del total es autónomo: no llama a la empresa-api del cliente (esa
+ * sincronización opcional vive aparte en el prompt 335). Toda la lógica de
+ * cálculo vive en ClientMensualidadService y toda la lógica de facturación
+ * vive en AfipFacturacionService; este controller solo valida el request y
+ * arma la respuesta.
  */
 class ClientMensualidadController extends Controller
 {
@@ -64,5 +67,28 @@ class ClientMensualidadController extends Controller
         $service->guardar($client, $validated);
 
         return response()->json($service->estado($client));
+    }
+
+    /**
+     * Emite la Factura C de la mensualidad de un cliente contra AFIP (WSFE)
+     * para el período indicado (prompt 331). Si el período ya fue autorizado
+     * anteriormente, no vuelve a emitir: devuelve el registro existente con
+     * `ya_facturado = true`.
+     *
+     * @param  Request                $request
+     * @param  int|string             $clientId
+     * @param  AfipFacturacionService $service   Inyectado por el IoC de Laravel.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function emitir_factura_json(Request $request, $clientId, AfipFacturacionService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        // Período a facturar: por default, el mes/año actual ('YYYY-MM').
+        $periodo = $request->input('periodo', date('Y-m'));
+
+        $resultado = $service->emitir($client, $periodo);
+
+        return response()->json($resultado);
     }
 }

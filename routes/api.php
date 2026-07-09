@@ -140,6 +140,8 @@ Route::prefix('admin')->group(function () {
         // Mensualidad del cliente (inputs manuales + total calculado de forma autónoma, prompt 329).
         Route::get('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'show_json']);
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
+        // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
+        Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
 
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
