@@ -8,6 +8,7 @@ use App\Mail\Helpers\LeadFollowupMailHelper;
 use App\Mail\Helpers\LeadDemoMailHelper;
 use App\Models\Client;
 use App\Models\AdminSetting;
+use App\Models\Demo;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadMessageAttachment;
@@ -820,6 +821,93 @@ class LeadController extends Controller
             'message' => 'No se pudo crear la demo: ' . $lead->demo_setup_last_error,
             'model' => $this->fullModel('lead', $lead->id),
         ], 422);
+    }
+
+    /**
+     * Datos de disponibilidad para el panel de verificación del lead (prompt 321): catálogo de
+     * demos del pool (id + label) y los slots libres por demo/fecha, para poblar el selector de
+     * entorno y el calendario de horarios al editar o forzar el agendamiento manualmente.
+     *
+     * Reutiliza LeadAiService::build_availability_json() (el mismo cálculo que usa Claude para
+     * ofrecer horarios), pasando exclude_lead_id = $lead->id para que la demo ya asignada al
+     * propio lead no aparezca bloqueada contra sí misma (FIX prompt 279).
+     *
+     * @param int|string $lead_id Lead sobre el que se calcula la disponibilidad.
+     * @param LeadAiService $ai_service Servicio con la lógica de cálculo de slots (inyectado).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function panel_availability_json($lead_id, LeadAiService $ai_service)
+    {
+        // Lead objetivo: solo se usa su id, para excluirlo del bloqueo contra su propia demo.
+        $lead = Lead::findOrFail($lead_id);
+
+        // Snapshot de calendario de Google (no se usa acá, solo interesa la disponibilidad calculada).
+        $calendar_snapshot = null;
+        // Disponibilidad de los próximos 3 días, sin fecha específica solicitada por el lead.
+        $availability = $ai_service->build_availability_json(3, $calendar_snapshot, null, (int) $lead->id);
+
+        // Catálogo de demos del pool con label legible: se usa erp_spa_url, misma convención
+        // que ya usa admin-spa para mostrar una demo (ver Leads.vue::demo_client_label).
+        $demos = Demo::orderBy('id')->get();
+        $demos_json = [];
+        foreach ($demos as $demo) {
+            $demos_json[] = [
+                'demo_id' => (int) $demo->id,
+                'label'   => $demo->erp_spa_url,
+            ];
+        }
+
+        // El servicio arma las claves de fecha como "nombre_dia Y-m-d" (ej. "domingo 2026-06-28"),
+        // formato que usan otros consumidores de build_availability_json y que no se debe tocar ahí.
+        // Este endpoint remapea las claves a Y-m-d puro para cumplir el contrato del panel, sin
+        // asumir una posición fija del substring dentro de la clave original.
+        $slots_por_demo = [];
+        foreach (($availability['demos'] ?? []) as $demo_id => $fechas) {
+            $slots_por_demo[$demo_id] = [];
+            foreach ($fechas as $fecha_legible => $horarios) {
+                preg_match('/\d{4}-\d{2}-\d{2}/', $fecha_legible, $match_fecha);
+                $fecha_key = $match_fecha[0] ?? $fecha_legible;
+                $slots_por_demo[$demo_id][$fecha_key] = $horarios;
+            }
+        }
+
+        return response()->json([
+            'demos' => $demos_json,
+            // Slots por demo_id => { 'Y-m-d' => ['HH:MM', ...] }, según el contrato del panel.
+            'slots' => $slots_por_demo,
+        ], 200);
+    }
+
+    /**
+     * Persiste los toggles de automatización por lead (prompt 318) desde el modal de operaciones
+     * del panel de verificación: el maestro que agrupa todo (automatizaciones_demo_activas) y los
+     * cuatro específicos (recordatorio de demo, checks de ingreso/fin, resumen para el closer).
+     *
+     * Cada flag se castea explícitamente a boolean porque puede llegar como string/0/1 según el
+     * cliente HTTP; si no viene en el request, se conserva el valor actual del lead.
+     *
+     * @param Request $request
+     * @param int|string $lead_id
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function update_lead_automations_json(Request $request, $lead_id)
+    {
+        // Lead objetivo cuyos flags de automatización se actualizan.
+        $lead = Lead::findOrFail($lead_id);
+
+        $lead->update([
+            'automatizaciones_demo_activas' => (bool) $request->input('automatizaciones_demo_activas', $lead->automatizaciones_demo_activas),
+            'auto_recordatorio_demo'        => (bool) $request->input('auto_recordatorio_demo', $lead->auto_recordatorio_demo),
+            'auto_check_ingreso_demo'       => (bool) $request->input('auto_check_ingreso_demo', $lead->auto_check_ingreso_demo),
+            'auto_check_fin_demo'           => (bool) $request->input('auto_check_fin_demo', $lead->auto_check_fin_demo),
+            'auto_resumen_closer'           => (bool) $request->input('auto_resumen_closer', $lead->auto_resumen_closer),
+        ]);
+
+        // Se devuelve el lead completo (fullModel) para que el store del frontend actualice
+        // los flags y cualquier otra relación que dependa de ellos en un solo golpe.
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
     }
 
     /**
