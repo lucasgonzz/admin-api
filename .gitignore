@@ -2,6 +2,9 @@
 /public/hot
 /public/storage
 /storage/*.key
+/storage/app/afip/**/*.crt
+/storage/app/afip/**/*.key
+/storage/app/afip/**/*.pem
 /vendor
 .env
 .env.backup
