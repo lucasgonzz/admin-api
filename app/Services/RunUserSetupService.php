@@ -167,7 +167,7 @@ class RunUserSetupService
         $inbound_api_key = Str::random(40);
 
         // Obtener la última versión publicada para asignarla al cliente.
-        $latest_version = \App\Models\Version::where('status', 'publicada')
+        $latest_version = \App\Models\Version::where('status', 'published')
             ->orderByDesc('id')
             ->first();
 
