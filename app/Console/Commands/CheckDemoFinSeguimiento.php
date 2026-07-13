@@ -28,6 +28,13 @@ use Illuminate\Support\Facades\Log;
 class CheckDemoFinSeguimiento extends Command
 {
     /**
+     * Nombre del template Meta aprobado para el seguimiento de fin de demo (prompt 353).
+     *
+     * @var string
+     */
+    private const TEMPLATE_NAME = 'cc_check_fin_seguimiento_demo';
+
+    /**
      * Nombre del comando artisan.
      *
      * @var string
@@ -116,15 +123,21 @@ class CheckDemoFinSeguimiento extends Command
                 continue;
             }
 
-            /* Texto natural del seguimiento (único). */
+            /* Texto del seguimiento (prompt 353: plantilla Meta aprobada, no depende de ventana 24hs). */
             $contact_name = $lead->contact_name ?? 'cliente';
-            $content      = "{$contact_name}, ¿pudiste terminar de recorrer la demo?";
+            $content      = "¡Hola {$contact_name}! ¿Pudiste terminar de recorrer la demo?";
 
             /* Enviar por WhatsApp si el lead tiene teléfono. */
             $whatsapp_message_id = null;
             $phone = trim((string) $lead->phone);
             if ($phone !== '') {
-                $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $content);
+                $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+                    $phone,
+                    self::TEMPLATE_NAME,
+                    [$contact_name],
+                    'es_AR',
+                    "Seguimiento fin de demo - Lead #{$lead->id} ({$lead->contact_name})"
+                );
             } else {
                 Log::warning('CheckDemoFinSeguimiento: lead sin teléfono', [
                     'lead_id' => $lead->id,

@@ -27,6 +27,13 @@ use Illuminate\Support\Facades\Log;
 class CheckDemoFin extends Command
 {
     /**
+     * Nombre del template Meta aprobado para el check de fin de demo (prompt 353).
+     *
+     * @var string
+     */
+    private const TEMPLATE_NAME = 'cc_check_fin_demo';
+
+    /**
      * Nombre del comando artisan.
      *
      * @var string
@@ -117,14 +124,20 @@ class CheckDemoFin extends Command
                 continue;
             }
 
-            /* Enviar check de fin directo por WhatsApp (texto libre, ventana activa). */
+            /* Enviar check de fin por WhatsApp (prompt 353: plantilla Meta aprobada, no depende de ventana 24hs). */
             $contact_name = $lead->contact_name ?? 'cliente';
             $content = "¡Hola {$contact_name}! ¿Pudiste recorrer la demo completa? 😊";
 
             $whatsapp_message_id = null;
             $phone = trim((string) $lead->phone);
             if ($phone !== '') {
-                $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $content);
+                $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+                    $phone,
+                    self::TEMPLATE_NAME,
+                    [$contact_name],
+                    'es_AR',
+                    "Check de fin de demo - Lead #{$lead->id} ({$lead->contact_name})"
+                );
             } else {
                 Log::warning('CheckDemoFin: lead sin teléfono', [
                     'lead_id' => $lead->id,

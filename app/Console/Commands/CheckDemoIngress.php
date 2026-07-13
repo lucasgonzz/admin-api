@@ -26,6 +26,13 @@ use Illuminate\Support\Facades\Log;
 class CheckDemoIngress extends Command
 {
     /**
+     * Nombre del template Meta aprobado para el check de ingreso (prompt 353).
+     *
+     * @var string
+     */
+    private const TEMPLATE_NAME = 'cc_check_ingreso_demo';
+
+    /**
      * Nombre del comando artisan.
      *
      * @var string
@@ -112,15 +119,21 @@ class CheckDemoIngress extends Command
             /* Transicionar el lead a ingresando_demo antes de enviar el mensaje. */
             $lead->update(['status' => 'ingresando_demo']);
 
-            /* Texto natural del check de ingreso (texto libre, ventana 24hs activa). */
+            /* Texto del check de ingreso (prompt 353: plantilla Meta aprobada, no depende de ventana 24hs). */
             $contact_name = $lead->contact_name ?? 'cliente';
-            $content      = "{$contact_name}, ¿cómo vas? ¿Pudiste entrar a la demo?";
+            $content      = "¡Hola {$contact_name}! ¿Cómo vas? ¿Pudiste entrar a la demo?";
 
             /* Enviar por WhatsApp si el lead tiene teléfono. */
             $whatsapp_message_id = null;
             $phone = trim((string) $lead->phone);
             if ($phone !== '') {
-                $whatsapp_message_id = $this->whatsapp_send_service->send_text($phone, $content);
+                $whatsapp_message_id = $this->whatsapp_send_service->send_template(
+                    $phone,
+                    self::TEMPLATE_NAME,
+                    [$contact_name],
+                    'es_AR',
+                    "Check de ingreso - Lead #{$lead->id} ({$lead->contact_name})"
+                );
             } else {
                 Log::warning('CheckDemoIngress: lead sin teléfono', [
                     'lead_id' => $lead->id,
