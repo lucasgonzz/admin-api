@@ -459,13 +459,42 @@ class DemoUpdateService
             . '[' . now()->format('H:i:s') . '] ' . $line . "\n";
 
         if (strlen($log) > self::MAX_LOG_CHARS) {
-            // Se conserva la cola: el final del log es lo que sirve para diagnosticar.
+            /* Se conserva la cola: el final del log es lo que sirve para diagnosticar.
+             *
+             * CORRECCIÓN (13/7/2026): substr() corta por BYTES, no por caracteres. Un corte
+             * a ciegas puede caer en medio de un carácter UTF-8 multibyte (tildes, "ñ" — el
+             * log tiene texto en español: "compilación", "descomprimida", etc.) y dejar una
+             * secuencia inválida colgando al principio de la cola. MySQL en utf8mb4 estricto
+             * rechaza esa fila con "Incorrect string value" — el mismo tipo de fallo de
+             * save() que causó el bug original (log colgado en `ejecutandose` para siempre).
+             * trim_utf8_lead() descarta los bytes de continuación sueltos que puedan quedar
+             * al principio tras el corte. */
             $log = "[...log recortado: superó " . self::MAX_LOG_CHARS . " caracteres...]\n"
-                . substr($log, -self::MAX_LOG_CHARS);
+                . $this->trim_utf8_lead(substr($log, -self::MAX_LOG_CHARS));
         }
 
         $this->demo_update->log = $log;
         $this->demo_update->save();
+    }
+
+    /**
+     * Descarta bytes de continuación UTF-8 (0x80–0xBF) sueltos al principio de un string.
+     * Necesario cuando un substr() por bytes corta en medio de un carácter multibyte y deja
+     * el primer byte del string resultante siendo una continuación sin su byte líder.
+     *
+     * @param  string  $text
+     * @return string
+     */
+    private function trim_utf8_lead(string $text): string
+    {
+        $offset = 0;
+        $length = strlen($text);
+
+        while ($offset < $length && (ord($text[$offset]) & 0xC0) === 0x80) {
+            $offset++;
+        }
+
+        return $offset > 0 ? substr($text, $offset) : $text;
     }
 
     // =========================================================================
