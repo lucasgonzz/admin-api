@@ -685,7 +685,7 @@ class ImplementationConversationService
                     // Usar la versión asignada al cliente; si no tiene, buscar la última publicada.
                     $version_id = $client->current_version_id;
                     if (!$version_id) {
-                        $latest_version = \App\Models\Version::where('status', 'publicada')
+                        $latest_version = \App\Models\Version::where('status', 'published')
                             ->orderByDesc('id')
                             ->first();
                         $version_id = $latest_version ? $latest_version->id : null;
@@ -4195,7 +4195,7 @@ class ImplementationConversationService
         }
 
         // Versión publicada más reciente disponible.
-        $latest_version = Version::where('status', 'publicada')
+        $latest_version = Version::where('status', 'published')
             ->orderByDesc('id')
             ->first();
 
