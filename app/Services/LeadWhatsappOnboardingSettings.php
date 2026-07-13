@@ -33,14 +33,17 @@ class LeadWhatsappOnboardingSettings
     public const KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS = 'lead_whatsapp_ai_suggestion_auto_send_delay_seconds';
 
     /**
-     * Clave: segundos hasta enviar automáticamente una sugerencia con requiere_verificacion=true
+     * Clave: MINUTOS hasta enviar automáticamente una sugerencia con requiere_verificacion=true
      * cuando el lead está en el tramo de coordinación de agenda (solicita_disponibilidad hasta
      * demo_pendiente_de_terminar). Separada de KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS porque
      * ese campo explícitamente NO aplica a mensajes que requieren verificación — este es un
      * mecanismo de auto-envío distinto, pensado como red de seguridad si Martín no llega a
      * revisar a tiempo, no como comportamiento default.
+     *
+     * Decisión de Lucas (13/7/2026): esta es la ÚNICA demora de esta clase que se mide en
+     * minutos (antes en segundos, ver migración 2026_07_13_110000). El resto sigue en segundos.
      */
-    public const KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS = 'lead_whatsapp_verificacion_agendamiento_auto_send_delay_seconds';
+    public const KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES = 'lead_whatsapp_verificacion_agendamiento_auto_send_delay_minutes';
 
     /** Placeholder documentado en plantillas editables desde admin-spa. */
     public const PLACEHOLDER_NOMBRE = '{nombre}';
@@ -80,9 +83,9 @@ class LeadWhatsappOnboardingSettings
 
     /**
      * Demora por defecto antes de enviar automáticamente una sugerencia que requiere verificación
-     * en el tramo de coordinación de agenda, si nadie la revisó a tiempo (segundos). 30 minutos.
+     * en el tramo de coordinación de agenda, si nadie la revisó a tiempo (minutos). 30 minutos.
      */
-    private const DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS = 1800;
+    private const DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES = 30;
 
     /** Mínimo y máximo permitidos para demora del mensaje de bienvenida (segundos). 0 = envío inmediato. */
     public const DELAY_MIN_SECONDS = 0;
@@ -99,8 +102,8 @@ class LeadWhatsappOnboardingSettings
 
     public const AUTO_SEND_DELAY_MAX_SECONDS = 3600;
 
-    /** Mínimo para auto-envío en tramo de agendamiento (0 = inmediato). Sin tope superior. */
-    public const VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_SECONDS = 0;
+    /** Mínimo para auto-envío en tramo de agendamiento, en minutos (0 = inmediato). Sin tope superior. */
+    public const VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_MINUTES = 0;
 
     /**
      * Devuelve la configuración completa para el panel (GET settings).
@@ -117,7 +120,7 @@ class LeadWhatsappOnboardingSettings
             'welcome_delay_seconds'        => self::get_welcome_delay_seconds(),
             'ai_suggestion_delay_seconds'         => self::get_ai_suggestion_delay_seconds(),
             'ai_suggestion_auto_send_delay_seconds' => self::get_ai_suggestion_auto_send_delay_seconds(),
-            'verificacion_agendamiento_auto_send_delay_seconds' => self::get_verificacion_agendamiento_auto_send_delay_seconds(),
+            'verificacion_agendamiento_auto_send_delay_minutes' => self::get_verificacion_agendamiento_auto_send_delay_minutes(),
             'placeholder_nombre'                  => self::PLACEHOLDER_NOMBRE,
         ];
     }
@@ -142,8 +145,8 @@ class LeadWhatsappOnboardingSettings
             (string) (int) $data['ai_suggestion_auto_send_delay_seconds']
         );
         AdminSetting::set(
-            self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS,
-            (string) (int) $data['verificacion_agendamiento_auto_send_delay_seconds']
+            self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
+            (string) (int) $data['verificacion_agendamiento_auto_send_delay_minutes']
         );
     }
 
@@ -178,10 +181,10 @@ class LeadWhatsappOnboardingSettings
                 (string) self::DEFAULT_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS
             );
         }
-        if (AdminSetting::get(self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS) === null) {
+        if (AdminSetting::get(self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES) === null) {
             AdminSetting::set(
-                self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS,
-                (string) self::DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS
+                self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
+                (string) self::DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES
             );
         }
     }
@@ -311,34 +314,34 @@ class LeadWhatsappOnboardingSettings
     }
 
     /**
-     * Segundos hasta auto-envío de una sugerencia con requiere_verificacion=true en el tramo de
+     * Minutos hasta auto-envío de una sugerencia con requiere_verificacion=true en el tramo de
      * coordinación de agenda (solicita_disponibilidad..demo_pendiente_de_terminar). Ver constante
-     * KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS para el porqué de un campo separado.
+     * KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES para el porqué de un campo separado.
      *
      * @return int
      */
-    public static function get_verificacion_agendamiento_auto_send_delay_seconds(): int
+    public static function get_verificacion_agendamiento_auto_send_delay_minutes(): int
     {
         $raw = AdminSetting::get(
-            self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS,
-            (string) self::DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_SECONDS
+            self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
+            (string) self::DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES
         );
-        $seconds = (int) $raw;
+        $minutes = (int) $raw;
 
-        return self::clamp_verificacion_agendamiento_auto_send_delay($seconds);
+        return self::clamp_verificacion_agendamiento_auto_send_delay_minutes($minutes);
     }
 
     /**
-     * Acota la demora de auto-envío en agendamiento: solo mínimo 0, sin tope superior.
+     * Acota la demora de auto-envío en agendamiento (minutos): solo mínimo 0, sin tope superior.
      *
      * @param int $value
      *
      * @return int
      */
-    public static function clamp_verificacion_agendamiento_auto_send_delay(int $value): int
+    public static function clamp_verificacion_agendamiento_auto_send_delay_minutes(int $value): int
     {
-        if ($value < self::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_SECONDS) {
-            return self::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_SECONDS;
+        if ($value < self::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_MINUTES) {
+            return self::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_MINUTES;
         }
 
         return $value;

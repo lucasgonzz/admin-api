@@ -56,7 +56,10 @@ class LeadAiSuggestionAutoSendScheduler
             if ($lead && ((bool) $lead->requiere_intervencion_humana === true || (bool) $lead->claude_auto_reply === false)) {
                 return;
             }
-            $delay_seconds = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_seconds();
+            // La config de origen está en minutos (decisión 13/7/2026); se convierte a segundos acá
+            // porque el resto del método sigue trabajando con segundos (addSeconds, log, etc).
+            $delay_minutes = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_minutes();
+            $delay_seconds = $delay_minutes * 60;
         } else {
             $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
         }
