@@ -125,10 +125,18 @@ class ClientMensualidadController extends Controller
 
         $config = ComerciocityAfipConfig::current();
 
-        // `MensualidadFacturaPdf` hace `Output()` + `exit` en su propio constructor
-        // (mismo patrón que `SaleAfipTicketPdf`), por lo que la respuesta HTTP
-        // efectiva la resuelve FPDF directamente enviando los headers de PDF.
-        new MensualidadFacturaPdf($invoice, $config);
+        // `MensualidadFacturaPdf` arma el documento en su constructor y expone
+        // el contenido vía `contenido()` (destino 'S' de FPDF). A diferencia
+        // del patrón original de `SaleAfipTicketPdf` (Output()+exit directo),
+        // acá se envuelve en una Response real de Laravel para que pase por
+        // el middleware de CORS: admin-spa consume esta API desde otro
+        // origen, y una respuesta que se salta el kernel de Laravel nunca
+        // lleva el header Access-Control-Allow-Origin.
+        $pdf = new MensualidadFacturaPdf($invoice, $config);
+
+        return response($pdf->contenido(), 200)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', 'inline; filename="factura_'.$invoice->cbte_numero.'.pdf"');
     }
 
     /**
