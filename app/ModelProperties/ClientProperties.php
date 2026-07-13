@@ -30,13 +30,18 @@ class ClientProperties
                 'value' => null,
                 'width' => 64,
             ],
+            /**
+             * FK del grupo de BD compartida.
+             * No se edita como select genérico: la UI está en
+             * admin-spa SharedDatabaseGroup.vue (extra-props del cliente).
+             * Sin `relation` evita el GET /meta/shared_database_group (404).
+             */
             [
                 'key' => 'shared_database_group_id',
                 'text' => 'Grupo BD compartida',
-                'type' => 'select',
-                'relation' => 'shared_database_group',
-                'relation_label' => 'name',
+                'type' => 'number',
                 'value' => null,
+                'show' => false,
                 'not_show_on_table' => true,
                 'width' => 180,
             ],
