@@ -67,9 +67,25 @@ class MensualidadFacturaPdf extends fpdf
         $this->print_table();
         $this->print_totales();
         $this->print_pie_fiscal();
+    }
 
-        $this->Output();
-        exit;
+    /**
+     * Devuelve el PDF ya armado como string (destino 'S' de FPDF), en vez
+     * de imprimirlo directo con `Output()`+`exit`. Se agregó porque el
+     * patrón original (heredado de `SaleAfipTicketPdf`, empresa-api) hace
+     * `header()`+echo a mano y salta por completo el kernel de Laravel:
+     * al no devolver nunca un `Response`, el middleware de CORS
+     * (`HandleCors`) no llega a correr, y desde admin-spa (origen distinto
+     * a admin-api) el navegador bloquea la respuesta por faltarle
+     * `Access-Control-Allow-Origin`. Devolviendo el contenido como string,
+     * el controlador arma una `Response` normal que sí pasa por el
+     * pipeline completo de Laravel.
+     *
+     * @return string
+     */
+    public function contenido()
+    {
+        return $this->Output('S');
     }
 
     /**
