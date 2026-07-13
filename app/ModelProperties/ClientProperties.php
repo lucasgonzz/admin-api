@@ -13,6 +13,21 @@ class ClientProperties
     public static function all()
     {
         return [
+            /**
+             * Separador de grupo: confina TODO el formulario básico (ID, nombre,
+             * empleados, APIs, versión, etc.) a su propia pestaña "Básico".
+             *
+             * Sin al menos un `group_title`, `ModelModal` (common-vue/model/Index.vue)
+             * evalúa `has_group_props = false`, y entonces `should_show_group_form`
+             * devuelve true SIEMPRE por la rama `!has_group_props && has_extra_tabs`
+             * — es decir, el formulario se renderiza encima de cada pestaña extra
+             * (Instalaciones / Ecommerce / Mensualidad) en vez de tener la suya.
+             * Todas las props que siguen, al no declarar `group_title` propio, caen
+             * en este grupo por el fallback `first_group_title`.
+             */
+            [
+                'group_title' => 'Básico',
+            ],
             // [
             //     'key' => 'id',
             //     'text' => 'N°',
