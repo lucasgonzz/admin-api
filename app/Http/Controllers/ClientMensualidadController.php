@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Client;
 use App\Models\ComerciocityAfipConfig;
 use App\Models\MensualidadInvoice;
+use App\Models\MensualidadInvoicePdfAccessToken;
 use App\Http\Controllers\Pdf\MensualidadFacturaPdf;
 use App\Services\Afip\AfipFacturacionService;
 use App\Services\ClientMensualidadService;
@@ -123,6 +124,107 @@ class ClientMensualidadController extends Controller
             ], 422);
         }
 
+        return $this->build_factura_pdf_response($invoice);
+    }
+
+    /**
+     * Emite un token de un solo uso (vida corta: 2 minutos) que autoriza la
+     * vista en vivo del PDF de una Factura C sin pasar por `auth:sanctum`
+     * (prompt 362). Ruta autenticada por Bearer normal: admin-spa la pide
+     * para armar el `window.open` a `factura_pdf_view` inmediatamente.
+     *
+     * Aplica la misma validación de autorización AFIP que `factura_pdf()`:
+     * no tiene sentido emitir un token de acceso para un PDF que ni siquiera
+     * se puede generar.
+     *
+     * @param  int|string $clientId
+     * @param  int|string $invoiceId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function factura_pdf_access_token_json($clientId, $invoiceId)
+    {
+        $invoice = MensualidadInvoice::with('client')
+            ->where('client_id', $clientId)
+            ->findOrFail($invoiceId);
+
+        // Misma validación de `factura_pdf()`: sin CAE no hay nada que ver.
+        if ($invoice->resultado !== 'A' || empty($invoice->cae)) {
+            return response()->json([
+                'error' => 'Esta factura no está autorizada por AFIP (sin CAE), no se puede generar el PDF.',
+            ], 422);
+        }
+
+        // Token opaco de un solo uso (mismo mecanismo que `SalePdfAccessToken` de empresa-api).
+        $token = bin2hex(random_bytes(32));
+
+        MensualidadInvoicePdfAccessToken::create([
+            'token' => $token,
+            'mensualidad_invoice_id' => $invoice->id,
+            // 2 minutos alcanzan de sobra: admin-spa lo consume al toque para
+            // abrir la pestaña, no es un link para compartir ni guardar.
+            'expires_at' => now()->addMinutes(2),
+        ]);
+
+        return response()->json(['token' => $token], 200);
+    }
+
+    /**
+     * Vista en vivo del PDF de una Factura C (prompt 362): ruta pública
+     * (fuera del grupo `auth:sanctum`) gateada por un token de un solo uso
+     * emitido por `factura_pdf_access_token_json()`. Existe porque una
+     * navegación directa del navegador (`window.open`) no puede mandar el
+     * header `Authorization` que sí agrega el interceptor de axios.
+     *
+     * @param  int|string $clientId
+     * @param  int|string $invoiceId
+     * @param  string     $token
+     * @return \Illuminate\Http\Response
+     */
+    public function factura_pdf_view($clientId, $invoiceId, $token)
+    {
+        // Token válido = existe, corresponde a esta factura, no fue usado
+        // todavía y no venció (2 minutos desde su emisión).
+        $access = MensualidadInvoicePdfAccessToken::where('token', $token)
+            ->where('mensualidad_invoice_id', $invoiceId)
+            ->whereNull('used_at')
+            ->where('expires_at', '>', now())
+            ->first();
+
+        if (! $access) {
+            abort(403);
+        }
+
+        // De un solo uso: se marca consumido antes de servir el PDF (igual
+        // que hace tienda-api con `SalePdfAccessToken`), así una segunda
+        // request con el mismo token ya no encuentra un `$access` válido.
+        $access->used_at = now();
+        $access->save();
+
+        $invoice = MensualidadInvoice::with('client')
+            ->where('client_id', $clientId)
+            ->findOrFail($invoiceId);
+
+        // Misma validación de autorización AFIP que el resto de los endpoints de PDF.
+        if ($invoice->resultado !== 'A' || empty($invoice->cae)) {
+            return response()->json([
+                'error' => 'Esta factura no está autorizada por AFIP (sin CAE), no se puede generar el PDF.',
+            ], 422);
+        }
+
+        return $this->build_factura_pdf_response($invoice);
+    }
+
+    /**
+     * Arma la respuesta HTTP con el PDF de una Factura C ya validada como
+     * autorizada por AFIP. Extraído de `factura_pdf()` (prompt 332) para que
+     * tanto la ruta autenticada como la vista pública gateada por token
+     * (prompt 362) compartan la misma lógica de armado de la respuesta.
+     *
+     * @param  MensualidadInvoice $invoice Comprobante ya validado (con `client` cargado).
+     * @return \Illuminate\Http\Response
+     */
+    private function build_factura_pdf_response(MensualidadInvoice $invoice)
+    {
         $config = ComerciocityAfipConfig::current();
 
         // `MensualidadFacturaPdf` arma el documento en su constructor y expone

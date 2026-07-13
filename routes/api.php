@@ -61,6 +61,15 @@ Route::prefix('form')->group(function () {
 });
 
 /*
+| Vista en vivo del PDF de una Factura C de mensualidad (prompt 362): pública
+| (fuera de `auth:sanctum`) porque una navegación directa del navegador
+| (window.open) no puede mandar el header Authorization. Se gatea con un
+| token de un solo uso, de vida corta (2 min), emitido por la ruta autenticada
+| `client/{clientId}/factura/{invoiceId}/pdf-access-token` (ver grupo admin).
+*/
+Route::get('client/{clientId}/factura/{invoiceId}/pdf-view/{token}', [ClientMensualidadController::class, 'factura_pdf_view']);
+
+/*
 | Callback desde empresa-api cliente (inbound)
 */
 Route::middleware('admin.inbound.key')
@@ -148,6 +157,8 @@ Route::prefix('admin')->group(function () {
         Route::post('client/{clientId}/mensualidad/actualizar-en-cliente', [ClientMensualidadController::class, 'actualizar_en_cliente_json']);
         // PDF de una Factura C ya emitida y autorizada (prompt 332).
         Route::get('client/{clientId}/factura/{invoiceId}/pdf', [ClientMensualidadController::class, 'factura_pdf']);
+        // Token de un solo uso para la vista en vivo del PDF sin auth:sanctum (prompt 362).
+        Route::post('client/{clientId}/factura/{invoiceId}/pdf-access-token', [ClientMensualidadController::class, 'factura_pdf_access_token_json']);
 
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
