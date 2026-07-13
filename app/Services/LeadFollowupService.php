@@ -459,7 +459,9 @@ class LeadFollowupService
         // Envío directo del template aprobado a través de Kapso/Meta.
         // El contexto se pasa directo para que, si falla, WhatsappSendService notifique a
         // los admins de forma centralizada (con throttle de máx 1 aviso cada 10 min).
-        $whatsapp_message_id = app(WhatsappSendService::class)->send_template(
+        // Se retiene la instancia ($sender) para poder leer su last_send_error si el envío falla (prompt 336).
+        $sender = app(WhatsappSendService::class);
+        $whatsapp_message_id = $sender->send_template(
             $lead->phone,
             $template->template_name,
             [$contact_name],
@@ -481,6 +483,8 @@ class LeadFollowupService
             'whatsapp_message_id'   => $whatsapp_message_id,
             'followup_template_id'  => $template->id,
             'requiere_verificacion' => false,
+            // Motivo real del fallo (prompt 336): solo se persiste si el envío no se confirmó.
+            'whatsapp_send_error'   => $whatsapp_message_id === null ? $sender->last_send_error : null,
         ]);
 
         if ($whatsapp_message_id === null) {
@@ -495,11 +499,13 @@ class LeadFollowupService
             ]);
 
             // Deja asentado en el hilo que el seguimiento automático falló al enviarse (prompt 299),
-            // para que quede visible al operador aunque nadie haya disparado la acción.
+            // para que quede visible al operador aunque nadie haya disparado la acción. Se usa el motivo
+            // real capturado por WhatsappSendService (prompt 336), con fallback al texto genérico si no
+            // se pudo capturar ninguno.
             (new LeadConversationErrorLogger())->log(
                 (int) $lead->id,
                 'No se pudo enviar el seguimiento automático por WhatsApp',
-                'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
+                $sender->last_send_error ?: 'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
             );
 
             return;

@@ -105,8 +105,10 @@ class LeadSuggestionSendService
             (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
 
             $message->update([
-                'status'  => 'rechazado',
-                'sent_at' => null,
+                'status'              => 'rechazado',
+                'sent_at'             => null,
+                // Motivo conocido en este call site, no viene de WhatsappSendService (prompt 336).
+                'whatsapp_send_error' => 'Ventana de 24hs de WhatsApp cerrada (el lead no escribió en las últimas 24hs).',
             ]);
 
             $lead->sync_suggestion_flags();
@@ -126,12 +128,16 @@ class LeadSuggestionSendService
 
         $whatsapp_message_id = null;
         $send_failed = false;
+        // Motivo real del fallo (prompt 336): se completa recién si send_failed queda en true.
+        $error_detail = null;
 
         if ($phone !== '') {
             $whatsapp_message_id = $this->send_body($phone, $body, $lead, $message);
 
             if ($whatsapp_message_id === null) {
                 $send_failed = true;
+                // El motivo real quedó capturado en la instancia de WhatsappSendService al fallar send_text().
+                $error_detail = $this->whatsapp_send_service->last_send_error;
                 Log::channel('daily')->warning('LeadSuggestionSendService: send_text() retornó null, el envío no se confirmó.', [
                     'lead_id'    => $lead->id,
                     'message_id' => $message->id,
@@ -139,6 +145,7 @@ class LeadSuggestionSendService
             }
         } else {
             $send_failed = true;
+            $error_detail = 'El lead no tiene teléfono cargado.';
             Log::channel('daily')->warning('LeadSuggestionSendService: lead sin teléfono.', [
                 'lead_id'    => $lead->id,
                 'message_id' => $message->id,
@@ -156,20 +163,21 @@ class LeadSuggestionSendService
             (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
 
             $message->update([
-                'status'  => 'rechazado',
-                'sent_at' => null,
+                'status'              => 'rechazado',
+                'sent_at'             => null,
+                'whatsapp_send_error' => $error_detail,
             ]);
 
             $lead->sync_suggestion_flags();
 
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
-            // Deja asentado en el hilo que el envío no se confirmó (prompt 299): sin teléfono
-            // o error de conexión con WhatsApp/Kapso.
+            // Deja asentado en el hilo que el envío no se confirmó (prompt 299), con el motivo real
+            // capturado (prompt 336) o el texto genérico como fallback.
             (new LeadConversationErrorLogger())->log(
                 (int) $lead->id,
                 'No se pudo enviar la sugerencia por WhatsApp',
-                'El envío no se confirmó (lead sin teléfono o error de conexión con WhatsApp/Kapso).'
+                $error_detail ?: 'El envío no se confirmó (lead sin teléfono o error de conexión con WhatsApp/Kapso).'
             );
 
             return $message->fresh();
@@ -333,7 +341,12 @@ class LeadSuggestionSendService
             ]);
 
             (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
-            $message->update(['status' => 'rechazado', 'sent_at' => null]);
+            $message->update([
+                'status'              => 'rechazado',
+                'sent_at'             => null,
+                // Motivo conocido en este call site (prompt 336): no hubo intento de envío real.
+                'whatsapp_send_error' => 'Seguimiento sin plantilla o lead sin teléfono.',
+            ]);
             $lead->sync_suggestion_flags();
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
@@ -362,16 +375,22 @@ class LeadSuggestionSendService
                 'template'   => $template->template_name,
             ]);
 
-            $message->update(['status' => 'rechazado', 'sent_at' => null]);
+            $message->update([
+                'status'              => 'rechazado',
+                'sent_at'             => null,
+                // Motivo real capturado por WhatsappSendService (prompt 336).
+                'whatsapp_send_error' => $this->whatsapp_send_service->last_send_error,
+            ]);
             $lead->sync_suggestion_flags();
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
             // Deja asentado en el hilo que el seguimiento (aprobado por el setter o auto-enviado)
-            // falló al enviarse por su plantilla (prompt 299).
+            // falló al enviarse por su plantilla (prompt 299), con el motivo real o el texto
+            // genérico como fallback.
             (new LeadConversationErrorLogger())->log(
                 (int) $lead->id,
                 'No se pudo enviar el seguimiento por WhatsApp',
-                'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
+                $this->whatsapp_send_service->last_send_error ?: 'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
             );
 
             return $message->fresh();

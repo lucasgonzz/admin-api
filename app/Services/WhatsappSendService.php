@@ -14,6 +14,17 @@ use Illuminate\Support\Facades\Storage;
 class WhatsappSendService
 {
     /**
+     * Motivo del último fallo de envío de esta instancia (excepción, status HTTP, validación, etc.).
+     * Lo lee el llamador tras recibir null de send_text()/send_template() para persistirlo en el LeadMessage
+     * (prompt 336). Se resetea a null al inicio de cada send_text()/send_template() y se setea en
+     * notify_admins_of_failure(), único punto por el que pasan todos los caminos de fallo. Null si el
+     * último envío de esta instancia fue exitoso.
+     *
+     * @var string|null
+     */
+    public $last_send_error = null;
+
+    /**
      * Envía un mensaje de soporte según kind y adjuntos (audio, imagen o texto).
      *
      * @param string         $to      Número destino E.164.
@@ -69,6 +80,9 @@ class WhatsappSendService
      */
     public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
     {
+        // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla (prompt 336).
+        $this->last_send_error = null;
+
         $notify_context = $context !== null ? $context : "Envío de texto a {$to}";
 
         /*
@@ -191,6 +205,9 @@ class WhatsappSendService
      */
     public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
     {
+        // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla (prompt 336).
+        $this->last_send_error = null;
+
         $notify_context = $context !== null ? $context : "Envío de plantilla '{$template_name}' a {$to}";
 
         $send_context = $this->resolve_send_context();
@@ -840,6 +857,10 @@ class WhatsappSendService
      */
     private function notify_admins_of_failure(string $context, string $detail, bool $skip_failure_notification): void
     {
+        // Captura el motivo del fallo para que el llamador pueda adjuntarlo al LeadMessage (prompt 336).
+        // Punto único: todos los caminos de fallo de send_text()/send_template() pasan por acá.
+        $this->last_send_error = $detail;
+
         if ($skip_failure_notification) {
             return;
         }
