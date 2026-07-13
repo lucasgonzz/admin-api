@@ -27,16 +27,29 @@ use Illuminate\Support\Str;
  */
 class PromoteLeadToClientService
 {
+    /** @var RunUserSetupService */
+    protected $run_user_setup_service;
+
+    /** @var TaskFromTemplatesService */
+    protected $task_service;
+
+    /** @var SubdomainSuggestionService */
+    protected $subdomain_service;
+
     /**
      * @param RunUserSetupService         $run_user_setup_service  Para crear/actualizar el Client.
      * @param TaskFromTemplatesService    $task_service            Para crear tareas automáticas.
      * @param SubdomainSuggestionService  $subdomain_service       Para sugerir subdominio vía Claude.
      */
     public function __construct(
-        protected RunUserSetupService        $run_user_setup_service,
-        protected TaskFromTemplatesService   $task_service,
-        protected SubdomainSuggestionService $subdomain_service
-    ) {}
+        RunUserSetupService $run_user_setup_service,
+        TaskFromTemplatesService $task_service,
+        SubdomainSuggestionService $subdomain_service
+    ) {
+        $this->run_user_setup_service = $run_user_setup_service;
+        $this->task_service           = $task_service;
+        $this->subdomain_service      = $subdomain_service;
+    }
 
     /**
      * Ejecuta la promoción del Lead a Client y genera las tareas del proceso 'lead_a_cliente'.
