@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Jobs\RunClientInstallationJob;
 use App\Models\Client;
 use App\Models\ClientInstallation;
+use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
 use App\Models\Version;
 use Illuminate\Http\JsonResponse;
@@ -81,6 +82,50 @@ class ClientInstallationController extends Controller
         $installation->load(['client', 'client_api', 'version', 'deployment_logs']);
 
         return response()->json(['model' => $installation], 201);
+    }
+
+    /**
+     * Devuelve una instalación puntual con todas sus relaciones.
+     *
+     * Usado por el modal de gestión (admin-spa) para refrescar estado y logs
+     * sin depender del listado completo del cliente.
+     *
+     * @param  ClientInstallation  $installation  Instalación resuelta por route model binding.
+     * @return JsonResponse  { model: ClientInstallation }
+     */
+    public function show(ClientInstallation $installation): JsonResponse
+    {
+        // Carga las relaciones necesarias para el modal de gestión (mismo shape que store/start).
+        $installation->load(['client', 'client_api', 'version', 'deployment_logs']);
+
+        return response()->json(['model' => $installation]);
+    }
+
+    /**
+     * Elimina una instalación y sus deployment_logs asociados.
+     *
+     * No permite eliminar una instalación en estado 'instalando': hay un
+     * RunClientInstallationJob corriendo en background sobre ese registro y
+     * borrarlo a mitad de camino lo dejaría escribiendo sobre un modelo inexistente.
+     *
+     * @param  ClientInstallation  $installation  Instalación a eliminar.
+     * @return JsonResponse  { deleted: true } o { error: string } (422 si está en curso)
+     */
+    public function destroy(ClientInstallation $installation): JsonResponse
+    {
+        // Bloquea el borrado mientras el job de instalación está corriendo en background.
+        if ($installation->status === 'instalando') {
+            return response()->json([
+                'error' => 'No se puede eliminar una instalación en curso. Esperá a que termine o falle, o revisá el proceso en el VPS antes de forzar el borrado.',
+            ], 422);
+        }
+
+        // deployment_logs no tiene FK en BD (convención del proyecto: sin FK, integridad en Eloquent), hay que limpiarlo a mano.
+        DeploymentLog::where('client_installation_id', $installation->id)->delete();
+
+        $installation->delete();
+
+        return response()->json(['deleted' => true]);
     }
 
     /**

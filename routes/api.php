@@ -411,6 +411,8 @@ Route::prefix('admin')->group(function () {
         Route::get('installations', [ClientInstallationController::class, 'index_all']);
         Route::get('clients/{client}/installations', [ClientInstallationController::class, 'index']);
         Route::post('clients/{client}/installations', [ClientInstallationController::class, 'store']);
+        Route::get('client-installations/{installation}', [ClientInstallationController::class, 'show']);
+        Route::delete('client-installations/{installation}', [ClientInstallationController::class, 'destroy']);
         Route::put('client-installations/{installation}/env-values', [ClientInstallationController::class, 'update_env_values']);
         Route::post('client-installations/{installation}/start', [ClientInstallationController::class, 'start']);
 
