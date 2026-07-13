@@ -99,6 +99,48 @@ class ClientMensualidadController extends Controller
     }
 
     /**
+     * Devuelve el historial completo de Facturas C (intentos de emisión)
+     * de un cliente, más reciente primero (prompt 364). Incluye también los
+     * intentos rechazados ('R') con su `error_message`, para que Lucas pueda
+     * ver qué pasó en cada intento, no solo el último emitido en la sesión
+     * actual del modal (que hoy vive únicamente en memoria del frontend).
+     *
+     * No se seleccionan las columnas `request`/`response` (SOAP crudo de
+     * AFIP): son pesadas y no le sirven a la UI. El botón "Ver PDF" de cada
+     * fila (prompt 365) reutiliza tal cual `factura_pdf_access_token_json()`
+     * y `factura_pdf_view()` (prompt 362), que ya validan por `invoiceId`.
+     *
+     * @param  int|string $clientId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function facturas_json($clientId)
+    {
+        // Todas las filas de mensualidad_invoices de este cliente (cada una
+        // es un intento de emisión, autorizado o rechazado), sin los campos
+        // SOAP crudos, ordenadas de la más reciente a la más antigua.
+        $facturas = MensualidadInvoice::query()
+            ->where('client_id', $clientId)
+            ->orderByDesc('created_at')
+            ->get([
+                'id',
+                'periodo',
+                'cbte_tipo',
+                'cbte_letra',
+                'cbte_numero',
+                'punto_venta',
+                'importe_total',
+                'cae',
+                'cae_expired_at',
+                'resultado',
+                'error_message',
+                'afip_produccion',
+                'created_at',
+            ]);
+
+        return response()->json(['facturas' => $facturas], 200);
+    }
+
+    /**
      * Devuelve el PDF de una Factura C ya emitida (prompt 331), replicando el
      * layout fiscal de `SaleAfipTicketPdf`/`AfipQrPdf` de empresa-api pero
      * simplificado a un único ítem (`MensualidadFacturaPdf`, prompt 332).

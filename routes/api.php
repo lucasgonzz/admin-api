@@ -152,6 +152,8 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
+        // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
+        Route::get('client/{clientId}/facturas', [ClientMensualidadController::class, 'facturas_json']);
         // Sincronización OPCIONAL con la empresa-api del cliente: traer conteos vivos / empujar fecha de pago (prompt 335).
         Route::post('client/{clientId}/mensualidad/traer-del-cliente', [ClientMensualidadController::class, 'traer_del_cliente_json']);
         Route::post('client/{clientId}/mensualidad/actualizar-en-cliente', [ClientMensualidadController::class, 'actualizar_en_cliente_json']);
