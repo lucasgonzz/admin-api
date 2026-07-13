@@ -99,6 +99,13 @@ class MensualidadFacturaPdf extends fpdf
      */
     protected function print_header()
     {
+        // Réplica de `SaleAfipTicketPdf::__Header()`: sin este reset, el
+        // cursor arranca en el margen default de FPDF (10mm) en vez de
+        // 5mm, y todo el contenido del header queda corrido respecto de
+        // las líneas del recuadro (que usan coordenadas absolutas fijas),
+        // superponiéndose con el recuadro de la letra del comprobante.
+        $this->SetXY(5, 5);
+
         $this->SetFont('Arial', 'B', 14);
         $this->Cell(200, 10, 'ORIGINAL', 'T-B', 0, 'C');
 
@@ -202,8 +209,11 @@ class MensualidadFacturaPdf extends fpdf
         $this->SetFont('Arial', '', 8);
         $this->Cell(50, 5, (string) $this->client->afip_condicion_iva, 0, 1, 'L');
 
-        $this->SetX(80);
+        // Ojo con el orden: SetY() resetea X al margen izquierdo por default,
+        // por eso va primero acá (si no, pisa el SetX(80) siguiente y este
+        // bloque termina renderizando encima de la columna de CUIT).
         $this->SetY(53);
+        $this->SetX(80);
         $this->SetFont('Arial', 'B', 8);
         $this->Cell(47, 5, 'Apellido y Nombre / Razón Social:', 0, 0, 'L');
         $this->SetFont('Arial', '', 8);
