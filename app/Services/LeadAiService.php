@@ -47,7 +47,7 @@ class LeadAiService
      */
     private const PROHIBICION_RANGO_HORARIO_SIN_JSON = <<<'TXT'
 ⚠️ PROHIBIDO — Nunca anunciar un rango de horario propio sin JSON de disponibilidad:
-Cuando el lead pregunta por disponibilidad en términos generales ("la semana que viene por la tarde", "¿podés mañana?", "¿tenés algo el finde?") sin mencionar un día puntual, la única acción válida es devolver solicita_disponibilidad: true con fecha_solicitada en el primer día hábil del rango pedido. NO responder con frases como "tengo disponibilidad de X a Y hs" ni ninguna variante que afirme conocer el horario disponible. Esa información solo puede venir del JSON que el sistema devuelve en la segunda llamada. Si el agente no tiene ese JSON en el contexto actual, no tiene información de disponibilidad.
+Cuando el lead pregunta por disponibilidad en términos generales ("la semana que viene por la tarde", "¿podés mañana?", "¿tenés algo el finde?") sin mencionar un día puntual, la única acción válida es devolver solicita_disponibilidad: true con dia_solicitado (vocabulario cerrado: 'manana', 'pasado_manana', un día de semana, un día de semana con sufijo _proximo, o '+N' días — nunca una fecha calculada por vos). NO responder con frases como "tengo disponibilidad de X a Y hs" ni ninguna variante que afirme conocer el horario disponible. Esa información solo puede venir del JSON que el sistema devuelve en la segunda llamada. Si el agente no tiene ese JSON en el contexto actual, no tiene información de disponibilidad.
 TXT;
 
     /**
@@ -203,26 +203,40 @@ TXT;
         $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada' || $cancelar_demo_flag;
 
         /*
-         * Si Claude pidió disponibilidad, puede haber devuelto también una fecha específica
-         * (fecha_solicitada en formato Y-m-d) para que el sistema consulte ese día puntual
-         * cuando está fuera del rango de los 3 días hábiles por defecto.
+         * PHP resuelve la fecha (prompt 350, lead #12, 13/7/2026). Claude devuelve
+         * `dia_solicitado` (vocabulario cerrado, ej. 'jueves', 'manana', '+5') y NUNCA un
+         * Y-m-d: resolve_dia_solicitado() lo traduce a fecha concreta con Carbon, sin que
+         * el modelo tenga que hacer aritmética de calendario (la causa raíz del bug: Claude
+         * calculó "jueves" como dos fechas distintas, ambas incorrectas, en el mismo turno).
          */
-        $fecha_solicitada = isset($parsed['fecha_solicitada']) ? trim((string) $parsed['fecha_solicitada']) : '';
+        $fecha_solicitada = (string) $this->resolve_dia_solicitado(
+            isset($parsed['dia_solicitado']) ? $parsed['dia_solicitado'] : null
+        );
 
-        /* FIX (bug real, 2/7/2026 — lead 232 "Pablo"): cuando Claude confirma agendar_demo
-         * directamente (sin pasar por solicita_disponibilidad) para una fecha ya acordada en
-         * un turno anterior de la misma conversación, fecha_solicitada nunca llega porque el
-         * prompt solo le pide ese campo a Claude en el camino de solicita_disponibilidad. Sin
-         * este fallback, la segunda llamada arma el JSON de disponibilidad con la ventana de
-         * 3 días por defecto y Claude termina "confirmando" sobre datos que nunca incluyeron
-         * la fecha real — exactamente la causa por la que agendar_demo llegaba con un slot
-         * que el servidor no podía validar. Se usa agendar_demo.demo_date como fuente
-         * alternativa de la fecha objetivo cuando fecha_solicitada viene vacío. */
-        if ($fecha_solicitada === '' && isset($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])) {
-            $fecha_solicitada = isset($parsed['agendar_demo']['demo_date'])
-                ? trim((string) $parsed['agendar_demo']['demo_date'])
-                : '';
+        /* Diagnóstico: si Claude devolvió el campo viejo y prohibido `fecha_solicitada` sin
+         * `dia_solicitado`, se ignora a propósito (no se usa como fecha) y queda logueado para
+         * poder auditar si el prompt operativo sigue sin actualizarse en algún lado. */
+        if ($fecha_solicitada === '' && ! empty($parsed['fecha_solicitada'])) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Claude devolvió fecha_solicitada (campo prohibido) y no devolvió dia_solicitado. Se ignora la fecha y se usa la ventana por defecto.',
+                [
+                    'lead_id'          => $lead->id,
+                    'fecha_solicitada' => $parsed['fecha_solicitada'],
+                ]
+            );
         }
+
+        /*
+         * FIX (bug real, 2/7/2026 — lead 232 "Pablo") — ELIMINADO (prompt 350, 13/7/2026,
+         * lead #12): este fallback tomaba agendar_demo.demo_date (una fecha que puede venir
+         * directamente de una alucinación de Claude) y la usaba para definir qué días
+         * consultar en la segunda llamada. Eso es exactamente lo que pasó con el lead #12: el
+         * servidor terminaba validando la fecha inventada contra una ventana de disponibilidad
+         * construida a partir de esa misma fecha inventada. Con la ventana fija de 7 días
+         * corridos (prompt 349) el motivo original del fallback — una demo ya acordada que
+         * caía fuera de la ventana de 3 días — desaparece: la fecha real de cualquier demo ya
+         * acordada está casi siempre dentro de la ventana por defecto.
+         */
 
         /*
          * RED DE SEGURIDAD (hueco #2, 6/7/2026): el protocolo solo registra/pide el email en el
@@ -299,8 +313,9 @@ TXT;
      * construye el contexto y repite la llamada a la API para que Claude confirme
      * o rechace ese horario y sugiera alternativas si es necesario.
      *
-     * Cuando $specific_date tiene valor (Claude devolvió fecha_solicitada en la primera
-     * llamada), se amplía el JSON de disponibilidad para cubrir el rango hasta esa fecha.
+     * Cuando $specific_date tiene valor (Claude devolvió dia_solicitado en la primera llamada
+     * y PHP lo resolvió a Y-m-d con resolve_dia_solicitado()), se amplía el JSON de
+     * disponibilidad para cubrir el rango hasta esa fecha.
      *
      * @param Lead        $lead                            Lead con relación `messages` cargada.
      * @param bool        $is_followup                     true si lo disparó el scheduler de inactividad.
@@ -362,7 +377,14 @@ TXT;
         $calendar_snapshot['slots_disponibles'] = $availability_data['demos'] ?? [];
         $calendar_snapshot['closer_config']    = $closer_config;
 
-        $availability_context = "DISPONIBILIDAD DE DEMOS (JSON):\n"
+        /* Bloque CALENDARIO (prompt 350, lead #12, 13/7/2026): tabla de fechas resuelta por PHP,
+         * antes del JSON. Es barato de generar y le saca a Claude toda excusa para calcular una
+         * fecha por su cuenta — el bug de origen fue Claude razonando "hoy es lunes 13/07/2026,
+         * jueves es 15/07/2026" (mal) y después "17/07/2026" (mal otra vez, en el mismo turno). */
+        $availability_context = "CALENDARIO (resuelto por el sistema — NO calcular fechas, leer de acá):\n";
+        $availability_context .= $this->build_tabla_fechas();
+
+        $availability_context .= "\n\nDISPONIBILIDAD DE DEMOS (JSON):\n"
             .json_encode($availability_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
         /* Disponibilidad ya agrupada en rangos legibles por fecha, para que el agente la OFREZCA
@@ -416,6 +438,11 @@ TXT;
         $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
         $availability_context .= "\n- Nunca confirmes un horario que no aparezca en el JSON de disponibilidad.";
         $availability_context .= "\n- Para OFRECER horarios al lead, usá SIEMPRE el texto de 'DISPONIBILIDAD EN RANGOS LEGIBLES' (bloques por turno) — nunca enumeres todos los slots del JSON uno por uno, queda un mensaje larguísimo y robótico. El JSON granular es solo para validar el horario que el lead elige y para el demo_id.";
+        $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
+        $availability_context .= "\n- demo_date se COPIA LITERALMENTE de la parte Y-m-d de una clave del JSON de disponibilidad. No se escribe de memoria, no se deduce, no se calcula.";
+        $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
+        $availability_context .= "\n- Si la fecha o el horario que querés confirmar no están en el JSON, NO confirmes nada: informale al lead con naturalidad y ofrecé las alternativas reales más cercanas que sí figuren.";
+        $availability_context .= "\n- El servidor verifica cada agendar_demo contra los slots que te mandó. Un horario que no salga exactamente de esta lista se descarta y el mensaje no sale — no hay forma de forzarlo.";
 
         if ($lead_proposed_time !== '') {
             $availability_context .= "\n- El lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en el JSON de disponibilidad.";
@@ -425,13 +452,14 @@ TXT;
          * Instrucción crítica para la segunda llamada: Claude ya tiene los slots en el JSON.
          * Se reemplaza la prohibición absoluta de solicita_disponibilidad por una regla
          * matizada: solo puede devolverla si el lead pidió una fecha que NO está en el JSON
-         * (demasiado lejana), junto con fecha_solicitada para que el sistema la consulte.
-         * Para cualquier fecha que SÍ aparece en el JSON (con o sin slots), debe responder
+         * (demasiado lejana), junto con dia_solicitado (vocabulario cerrado) para que el
+         * sistema la resuelva y la consulte. Para cualquier fecha que SÍ aparece en el JSON
+         * (con o sin slots), debe responder
          * directamente sin volver a pedir disponibilidad.
          */
         $availability_context .= "\n\n⚠️ ATENCIÓN - SEGUNDA LLAMADA: El sistema YA te trajo los horarios disponibles en el JSON de arriba.";
         $availability_context .= "\n- Si la fecha que pidió el lead SÍ aparece en el JSON (con o sin slots): usá esa info. Si tiene slots, ofrecelos. Si aparece SIN slots, significa que no hay disponibilidad ese día: informá al lead y ofrecé alternativas cercanas del JSON. NO vuelvas a pedir disponibilidad para una fecha que ya está en el JSON.";
-        $availability_context .= "\n- Si la fecha que pidió el lead NO aparece en el JSON (pidió un día más lejano que los que trae el JSON): devolvé solicita_disponibilidad: true junto con fecha_solicitada en formato Y-m-d, para que el sistema consulte ese día puntual. Usá la FECHA Y HORA ACTUAL del contexto para calcular la fecha exacta que pide el lead (ej: 'dentro de 5 días', 'el viernes que viene').";
+        $availability_context .= "\n- Si el lead pidió un día que NO aparece en el JSON (más lejano que la ventana que te mandamos): devolvé solicita_disponibilidad: true junto con dia_solicitado. NUNCA una fecha: dia_solicitado acepta solo estos valores — 'manana', 'pasado_manana', un día de semana ('lunes'..'domingo', que el sistema resuelve como la próxima ocurrencia a partir de mañana), un día de semana con sufijo _proximo ('jueves_proximo' = el jueves de la semana siguiente), o '+N' (N días desde hoy, ej. '+10'). El sistema calcula la fecha; vos no.";
         $availability_context .= "\n- Si el lead pidió un día sin especificar hora (ej: 'el sábado') y ese día está en el JSON con slots: ofrecele directamente los horarios disponibles de ese día.";
         $availability_context .= "\n- Si el lead pidió un horario concreto disponible: confirmalo aclarando si es mañana o tarde, y pedile el email (Paso 3 del protocolo).";
 
@@ -472,15 +500,24 @@ TXT;
 
         $parsed = $this->parse_json_response($text);
 
-        /* Salvaguarda de logging (hueco #4, 6/7/2026): auditar coherencia de fecha en el mensaje
-         * final vs. el JSON de disponibilidad, para detectar casos como el lead #3 ("martes 8"
-         * confirmado cuando el slot real era "martes 7"). No bloquea el envío; el refuerzo fuerte
-         * va por protocolo (prompt 268). */
-        Log::channel('daily')->debug('LeadAiService: verificar coherencia de fecha en mensaje de disponibilidad.', [
-            'lead_id'           => $lead->id,
-            'mensaje_sugerido'  => isset($parsed['mensaje_sugerido']) ? (string) $parsed['mensaje_sugerido'] : '',
-            'claves_slots_json' => isset($calendar_snapshot) ? 'ver calendar_snapshot' : null,
-        ]);
+        /*
+         * GUARD DURO (lead #12, 13/7/2026): el payload de Claude no es autoritativo sobre el
+         * calendario. Antes de dejar que un agendar_demo siga viaje (y sobre todo antes de que el
+         * mensaje que confirma ese horario quede escrito y con countdown de auto-envío), se verifica
+         * que la fecha y la hora existan LITERALMENTE en los slots que el servidor le mandó a Claude
+         * en esta misma llamada. No se re-consulta el calendario: se compara contra $availability_data,
+         * que es exactamente lo que el modelo tuvo delante. Cualquier otra cosa es una alucinación.
+         */
+        $parsed = $this->descartar_agendamiento_fuera_de_slots($lead, $parsed, $availability_data);
+
+        /*
+         * COHERENCIA DE FECHA BLOQUEANTE (hueco #4, 6/7/2026 — ahora bloqueante desde el prompt
+         * 350, lead #12, 13/7/2026): antes este check solo logueaba. El slot puede ser válido (pasó
+         * el guard de arriba) y aun así el TEXTO del mensaje nombrarle al lead un día de semana
+         * distinto al que quedó reservado — exactamente el caso del lead #12, cuyo mensaje decía
+         * "jueves 17" cuando el 17 de julio de 2026 era viernes. En ese caso el agendamiento se
+         * conserva (el slot es real), pero el mensaje se deriva a revisión humana antes de salir. */
+        $parsed = $this->verificar_coherencia_dia_mensaje($lead, $parsed);
 
         /*
          * FIX (hueco #1, 6/7/2026): esta respuesta es la SEGUNDA llamada de la cadena de
@@ -513,6 +550,349 @@ TXT;
         }
 
         return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot);
+    }
+
+    /**
+     * Traduce el `dia_solicitado` que devuelve Claude (vocabulario cerrado, sin fechas) a una
+     * fecha Y-m-d concreta, calculada por PHP con Carbon en timezone Argentina.
+     *
+     * Claude NO calcula fechas. Nunca. En testing (lead #12, 13/7/2026) calculó dos veces mal el
+     * día de la semana en el mismo turno ("jueves" → 15/07 y después 17/07, cuando era el 16/07),
+     * y sobre esa fecha inventada terminó confirmándole un horario al lead. La aritmética de
+     * calendario es determinista y no tiene por qué pasar por un modelo de lenguaje.
+     *
+     * Vocabulario aceptado (case-insensitive, tolerante a acentos y guiones bajos):
+     *   - 'manana' / 'mañana'                 → mañana
+     *   - 'pasado_manana' / 'pasado mañana'   → hoy + 2
+     *   - 'lunes' .. 'domingo'                → próxima ocurrencia de ese día de semana, contando desde MAÑANA
+     *                                           (si hoy es lunes, 'lunes' = el lunes que viene, nunca hoy)
+     *   - 'lunes_proximo' .. 'domingo_proximo'→ la ocurrencia SIGUIENTE a la anterior (una semana más)
+     *   - '+N' (N entero, 1..60)              → hoy + N días
+     *
+     * Cualquier otro valor (incluido un Y-m-d, que Claude tiene prohibido emitir) devuelve null:
+     * sin fecha específica, la ventana por defecto de 7 días de build_availability_json() ya cubre
+     * el caso, y Claude puede volver a pedir disponibilidad en el turno siguiente.
+     *
+     * @param string|null $dia Valor crudo de `dia_solicitado` en el JSON de Claude.
+     *
+     * @return string|null Fecha Y-m-d, o null si no se pudo resolver.
+     */
+    protected function resolve_dia_solicitado(?string $dia): ?string
+    {
+        if ($dia === null) {
+            return null;
+        }
+
+        $raw = trim((string) $dia);
+        if ($raw === '') {
+            return null;
+        }
+
+        /* Normalizar: minúsculas, sin acentos, espacios → guion bajo. */
+        $norm = mb_strtolower($raw, 'UTF-8');
+        $norm = strtr($norm, [
+            'á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ñ' => 'n', 'ü' => 'u',
+        ]);
+        $norm = preg_replace('/[\s\-]+/', '_', $norm);
+        $norm = trim((string) $norm, '_');
+
+        $now      = AppTime::now()->startOfDay();
+        $tomorrow = $now->copy()->addDay();
+
+        if ($norm === 'manana') {
+            return $tomorrow->format('Y-m-d');
+        }
+
+        if ($norm === 'pasado_manana') {
+            return $now->copy()->addDays(2)->format('Y-m-d');
+        }
+
+        /* '+N' o 'N' días desde hoy. */
+        if (preg_match('/^\+?(\d{1,2})$/', $norm, $m_dias)) {
+            $n = (int) $m_dias[1];
+            if ($n >= 1 && $n <= 60) {
+                return $now->copy()->addDays($n)->format('Y-m-d');
+            }
+
+            return null;
+        }
+
+        /* Días de semana (convención Carbon: 0=domingo .. 6=sábado). */
+        $dias_semana = [
+            'domingo'   => 0,
+            'lunes'     => 1,
+            'martes'    => 2,
+            'miercoles' => 3,
+            'jueves'    => 4,
+            'viernes'   => 5,
+            'sabado'    => 6,
+        ];
+
+        $es_proximo = false;
+        $clave      = $norm;
+        if (preg_match('/^(.+)_proximo$/', $norm, $m_prox)) {
+            $es_proximo = true;
+            $clave      = $m_prox[1];
+        }
+
+        if (! isset($dias_semana[$clave])) {
+            return null;
+        }
+
+        /* Próxima ocurrencia de ese día de semana contando desde MAÑANA (nunca hoy: la regla de
+         * negocio es que jamás se agenda para el día en curso). */
+        $target = $tomorrow->copy();
+        $limite = 0;
+        while ($target->dayOfWeek !== $dias_semana[$clave] && $limite < 7) {
+            $target->addDay();
+            $limite++;
+        }
+
+        if ($es_proximo) {
+            $target->addWeek();
+        }
+
+        return $target->format('Y-m-d');
+    }
+
+    /**
+     * Descarta un `agendar_demo` cuya fecha u hora no figure EXACTAMENTE entre los slots que el
+     * servidor le envió a Claude en esta llamada.
+     *
+     * Distingue dos fallas, ambas observadas en el lead #12 (13/7/2026):
+     *   a) FECHA fuera de la ventana enviada  → Claude inventó un día que ni siquiera vio.
+     *   b) HORA no disponible en esa fecha    → Claude ofreció un horario que el sistema descartó
+     *                                            (por Google Calendar, otra demo, o el horario del closer).
+     *
+     * En ambos casos el paquete de agendamiento se descarta entero (agendar_demo + guardar_email,
+     * que por protocolo viajan juntos), el estado baja a `solicita_disponibilidad` y el mensaje se
+     * reemplaza por una respuesta correctiva con las alternativas reales. Si la llamada correctiva
+     * falla, el paquete queda sin mensaje y se deriva a intervención humana: preferimos que Martín
+     * escriba a mano antes que mandarle al lead una confirmación de un horario que no existe.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed            Paquete JSON parseado de Claude.
+     * @param array<string, mixed> $availability_data Salida de build_availability_json() de ESTA llamada.
+     *
+     * @return array<string, mixed> Paquete corregido.
+     */
+    protected function descartar_agendamiento_fuera_de_slots(Lead $lead, array $parsed, array $availability_data): array
+    {
+        if (empty($parsed['agendar_demo']) || ! is_array($parsed['agendar_demo'])) {
+            return $parsed;
+        }
+
+        $agendar    = $parsed['agendar_demo'];
+        $demo_id    = isset($agendar['demo_id'])         ? (int) $agendar['demo_id']                 : 0;
+        $demo_date  = isset($agendar['demo_date'])       ? trim((string) $agendar['demo_date'])      : '';
+        $demo_start = isset($agendar['demo_start_time']) ? trim((string) $agendar['demo_start_time']) : '';
+
+        /* Normalizar hora a HH:MM (mismo criterio que apply_parsed_response()). */
+        if ($demo_start !== '' && preg_match('/(\d{1,2}):(\d{2})/', $demo_start, $m_hora)) {
+            $demo_start = str_pad($m_hora[1], 2, '0', STR_PAD_LEFT) . ':' . $m_hora[2];
+        }
+
+        $demos_json = isset($availability_data['demos']) && is_array($availability_data['demos'])
+            ? $availability_data['demos']
+            : [];
+
+        /* Fechas (Y-m-d) efectivamente enviadas a Claude, y slots de la demo elegida en esa fecha.
+         * Las claves del JSON vienen como "jueves 2026-07-16": se extrae el Y-m-d del final. */
+        $fechas_enviadas = [];
+        $slots_de_esa_demo_y_fecha = [];
+
+        foreach ($demos_json as $demo_id_json => $slots_por_fecha) {
+            if (! is_array($slots_por_fecha)) {
+                continue;
+            }
+            foreach ($slots_por_fecha as $date_label => $slots) {
+                if (! preg_match('/(\d{4}-\d{2}-\d{2})$/', (string) $date_label, $m_fecha)) {
+                    continue;
+                }
+                $fecha = $m_fecha[1];
+                $fechas_enviadas[$fecha] = true;
+
+                if ((int) $demo_id_json === $demo_id && $fecha === $demo_date && is_array($slots)) {
+                    $slots_de_esa_demo_y_fecha = array_map('strval', $slots);
+                }
+            }
+        }
+
+        $fecha_en_ventana = ($demo_date !== '' && isset($fechas_enviadas[$demo_date]));
+        $hora_disponible  = ($demo_start !== '' && in_array($demo_start, $slots_de_esa_demo_y_fecha, true));
+
+        if ($demo_id > 0 && $fecha_en_ventana && $hora_disponible) {
+            /* Todo en orden: la fecha y la hora salen de los slots que le mandamos nosotros. */
+            return $parsed;
+        }
+
+        $motivo = ! $fecha_en_ventana
+            ? 'fecha fuera de la ventana enviada a Claude'
+            : (! $hora_disponible ? 'horario no disponible en esa fecha' : 'demo_id inválido');
+
+        Log::channel('disponibilidad')->error(
+            '[DISPONIBILIDAD] agendar_demo DESCARTADO: ' . $motivo . '. Claude confirmó un slot que el sistema nunca le ofreció.',
+            [
+                'lead_id'                   => $lead->id,
+                'demo_id'                   => $demo_id,
+                'demo_date'                 => $demo_date,
+                'demo_start_time'           => $demo_start,
+                'fechas_enviadas'           => array_keys($fechas_enviadas),
+                'slots_de_esa_demo_y_fecha' => $slots_de_esa_demo_y_fecha,
+                'mensaje_sugerido_original' => isset($parsed['mensaje_sugerido']) ? $parsed['mensaje_sugerido'] : '',
+                'razonamiento_original'     => isset($parsed['razonamiento']) ? $parsed['razonamiento'] : '',
+            ]
+        );
+
+        /* El paquete de agendamiento se cae entero. guardar_email va atado a agendar_demo por
+         * protocolo (regla 4 del recurso demo_agenda): si no hay slot, no hay email que guardar. */
+        $parsed['agendar_demo']  = null;
+        $parsed['guardar_email'] = null;
+
+        /* Mensaje correctivo con las alternativas reales (misma llamada aislada que ya se usa
+         * cuando el slot se ocupa entre la sugerencia y la aprobación). */
+        $mensaje_correctivo = $this->call_corrective_availability_response(
+            $lead,
+            $demo_start,
+            $demo_date,
+            $slots_de_esa_demo_y_fecha
+        );
+
+        if ($mensaje_correctivo !== '') {
+            $parsed['mensaje_sugerido'] = $mensaje_correctivo;
+        } else {
+            $parsed['mensaje_sugerido']             = '';
+            $parsed['requiere_intervencion_humana'] = true;
+        }
+
+        $parsed['estado_sugerido']       = 'solicita_disponibilidad';
+        $parsed['requiere_verificacion'] = true;
+        $parsed['nota_para_setter']      = 'El sistema descartó un agendamiento que la IA confirmó sin respaldo ('
+            . $motivo . ': ' . ($demo_date !== '' ? $demo_date : 'sin fecha') . ' ' . ($demo_start !== '' ? $demo_start : 'sin hora')
+            . '). Revisá el horario con el lead antes de enviar.';
+
+        return $parsed;
+    }
+
+    /**
+     * Verifica que el día de semana mencionado en el texto del mensaje coincida con el
+     * `demo_date` que efectivamente quedó confirmado (el que ya pasó el guard de
+     * descartar_agendamiento_fuera_de_slots(), o sea: un slot real).
+     *
+     * Antes (hueco #4, 6/7/2026) este check solo logueaba. Pasa a ser bloqueante desde el
+     * prompt 350 (lead #12, 13/7/2026): el slot puede ser válido y el TEXTO igual nombrarle
+     * al lead un día de semana distinto ("jueves 17" cuando el 17 de julio de 2026 era
+     * viernes). En ese caso no se descarta el agendamiento (el slot es real, no hay nada que
+     * corregir del lado del calendario), pero el mensaje no puede salir solo: se deriva a
+     * revisión humana antes de enviarse.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed Paquete ya procesado por descartar_agendamiento_fuera_de_slots().
+     *
+     * @return array<string, mixed> Paquete, con banderas de verificación si hay discrepancia.
+     */
+    protected function verificar_coherencia_dia_mensaje(Lead $lead, array $parsed): array
+    {
+        /* Si el agendamiento no sobrevivió al guard anterior, no hay nada que verificar acá. */
+        if (empty($parsed['agendar_demo']) || ! is_array($parsed['agendar_demo'])) {
+            return $parsed;
+        }
+
+        $demo_date = isset($parsed['agendar_demo']['demo_date'])
+            ? trim((string) $parsed['agendar_demo']['demo_date'])
+            : '';
+
+        if ($demo_date === '' || ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $demo_date)) {
+            return $parsed;
+        }
+
+        $mensaje = isset($parsed['mensaje_sugerido']) ? (string) $parsed['mensaje_sugerido'] : '';
+        if (trim($mensaje) === '') {
+            return $parsed;
+        }
+
+        /* Nombre del día (en español) que corresponde a demo_date, calculado por PHP con Carbon. */
+        $dias_nombre  = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+        $fecha_carbon = Carbon::createFromFormat('Y-m-d', $demo_date);
+        $dia_correcto = $dias_nombre[$fecha_carbon->dayOfWeek];
+
+        /* Patrones case-insensitive, tolerantes a la falta de tilde en "miércoles"/"sábado". */
+        $patrones = [
+            'domingo'   => '/domingo/i',
+            'lunes'     => '/lunes/i',
+            'martes'    => '/martes/i',
+            'miércoles' => '/mi[eé]rcoles/i',
+            'jueves'    => '/jueves/i',
+            'viernes'   => '/viernes/i',
+            'sábado'    => '/s[aá]bado/i',
+        ];
+
+        /* Buscar todos los días de semana mencionados en el mensaje (puede haber cero, uno o varios). */
+        $dias_mencionados = [];
+        foreach ($patrones as $nombre => $patron) {
+            if (preg_match($patron, $mensaje)) {
+                $dias_mencionados[] = $nombre;
+            }
+        }
+
+        if (count($dias_mencionados) === 0) {
+            /* No menciona ningún día de semana: no hay ambigüedad que verificar. */
+            return $parsed;
+        }
+
+        if (count($dias_mencionados) === 1 && $dias_mencionados[0] === $dia_correcto) {
+            /* Menciona exactamente un día y coincide con la fecha confirmada: OK. */
+            return $parsed;
+        }
+
+        /* Discrepancia (o más de un día mencionado): el slot es válido, pero el texto puede
+         * confundir al lead sobre qué día quedó reservado. Se conserva el agendamiento y se
+         * deriva el mensaje a revisión humana antes de enviarlo. */
+        Log::channel('disponibilidad')->error(
+            '[DISPONIBILIDAD] Discrepancia entre el día mencionado en el mensaje y demo_date confirmado.',
+            [
+                'lead_id'          => $lead->id,
+                'demo_date'        => $demo_date,
+                'dia_correcto'     => $dia_correcto,
+                'dias_mencionados' => $dias_mencionados,
+                'mensaje_sugerido' => $mensaje,
+            ]
+        );
+
+        $parsed['requiere_verificacion']        = true;
+        $parsed['requiere_intervencion_humana'] = true;
+        $parsed['nota_para_setter']             = 'El mensaje menciona un día de semana que no coincide con la fecha confirmada ('
+            . $dia_correcto . ' ' . $demo_date . '). Revisá el texto antes de enviarlo.';
+
+        return $parsed;
+    }
+
+    /**
+     * Arma la tabla de fechas resueltas por PHP (hoy + próximos 10 días corridos), con el
+     * nombre del día en español, para inyectarla al principio del contexto de disponibilidad.
+     *
+     * Es barato de generar y le saca a Claude toda excusa para calcular una fecha por su
+     * cuenta (ver PROHIBIDO calcular fechas en generate_suggestion_with_availability()).
+     *
+     * @return string Tabla en texto plano, una línea por día.
+     */
+    protected function build_tabla_fechas(): string
+    {
+        /* Nombres de día en español, mismo orden que usa Carbon (0=domingo..6=sábado). */
+        $dias_nombre = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+        $hoy         = AppTime::now()->startOfDay();
+
+        $lineas   = [];
+        $lineas[] = 'hoy: ' . $dias_nombre[$hoy->dayOfWeek] . ' ' . $hoy->format('Y-m-d')
+            . ' (NO agendable — nunca se agenda para el día en curso)';
+
+        /* Próximos 10 días corridos a partir de mañana. */
+        for ($i = 1; $i <= 10; $i++) {
+            $dia        = $hoy->copy()->addDays($i);
+            $lineas[]   = $dias_nombre[$dia->dayOfWeek] . ' ' . $dia->format('Y-m-d');
+        }
+
+        return implode("\n", $lineas);
     }
 
     /**
@@ -901,14 +1281,16 @@ TXT;
         }
 
         /* Log de diagnóstico: ventana efectiva de fechas consultadas, para poder auditar
-         * de un vistazo (sin recorrer el JSON completo) qué rango se le mandó a Claude y
-         * si fecha_solicitada amplió la ventana por defecto (bug lead #12, 13/7/2026). */
+         * de un vistazo (sin recorrer el JSON completo) qué rango se le mandó a Claude y si
+         * el dia_solicitado resuelto por PHP amplió la ventana por defecto (bug lead #12,
+         * 13/7/2026). $specific_date acá ya es la fecha Y-m-d resuelta, nunca lo que Claude
+         * mandó crudo. */
         Log::channel('disponibilidad')->info(
             '[DISPONIBILIDAD] Ventana consultada: '
             . (empty($date_strings) ? '(vacía)' : reset($date_strings) . ' a ' . end($date_strings))
             . ' — ' . count($date_strings) . ' día(s) con horario configurado'
             . ' (ventana pedida: ' . $days_ahead . ' días corridos desde mañana'
-            . ($specific_date !== null ? ', fecha_solicitada: ' . $specific_date : '')
+            . ($specific_date !== null ? ', fecha_resuelta: ' . $specific_date : '')
             . ')'
         );
 
