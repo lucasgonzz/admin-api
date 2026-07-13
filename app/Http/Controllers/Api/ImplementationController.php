@@ -119,6 +119,13 @@ class ImplementationController extends Controller
         // Cargar todas las relaciones requeridas para el panel de detalle.
         $implementation->load(['client', 'stages', 'stages.config', 'messages']);
 
+        // Resumen legible de las respuestas del formulario web de la Etapa 1 (para el panel).
+        $mapper = new \App\Services\ImplementationFormMapper();
+        $form   = $mapper->read_form_responses($implementation);
+
+        $implementation->form_responses = $form;
+        $implementation->form_summary   = $mapper->build_summary($form);
+
         return response()->json(['model' => $implementation], 200);
     }
 

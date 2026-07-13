@@ -203,6 +203,17 @@ class ImplementationFormController extends Controller
         $implementation->form_submitted_at = now();
         $implementation->save();
 
+        // Traducir las respuestas del formulario a setup_data + empleados + responsable de migración.
+        // Best-effort: un fallo acá no debe impedir que el formulario quede registrado como enviado.
+        try {
+            (new \App\Services\ImplementationFormMapper())->apply($implementation);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('ImplementationFormController@submit: fallo el mapeo del formulario.', [
+                'implementation_id' => $implementation->id,
+                'error'             => $exception->getMessage(),
+            ]);
+        }
+
         // Despachar el job que procesará el formulario con el delay configurado en settings.
         ProcessImplementationFormSubmit::dispatch($implementation->id);
 

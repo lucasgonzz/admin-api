@@ -5,7 +5,6 @@ namespace App\Jobs;
 use App\Models\Implementation;
 use App\Services\ImplementationConversationService;
 use App\Services\ImplementationSettings;
-use App\Services\ImplementationUserSetupService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -20,9 +19,13 @@ use Illuminate\Support\Facades\Log;
  * para dar tiempo entre el envío del formulario y el primer contacto automático por WhatsApp.
  *
  * Flujo:
- * 1. Dispara ImplementationUserSetupService para configurar empresa-api con los datos del formulario.
- * 2. Llama a ImplementationConversationService::handle_form_submitted para enviar el mensaje WhatsApp
+ * 1. Llama a ImplementationConversationService::handle_form_submitted para enviar el mensaje WhatsApp
  *    de confirmación al cliente y avanzar al stage 2.
+ *
+ * Nota: el UserSetup (ImplementationUserSetupService::trigger_user_setup) ya NO se dispara acá.
+ * Se disparaba dos veces (acá y en handle_stage_advance() al entrar a la Etapa 2), y además
+ * pegarle a la client_api en la Etapa 1 fallaba porque el sistema recién se instala en la Etapa 2.
+ * Queda a cargo únicamente de ImplementationConversationService::handle_stage_advance().
  */
 class ProcessImplementationFormSubmit implements ShouldQueue
 {
@@ -69,16 +72,6 @@ class ProcessImplementationFormSubmit implements ShouldQueue
         Log::channel('daily')->info('ProcessImplementationFormSubmit: procesando formulario enviado.', [
             'implementation_id' => $this->implementation_id,
         ]);
-
-        // Configurar la empresa en empresa-api con los datos del formulario (best-effort).
-        try {
-            (new ImplementationUserSetupService())->trigger_user_setup($implementation);
-        } catch (\Throwable $exception) {
-            Log::channel('daily')->error('ProcessImplementationFormSubmit: fallo trigger_user_setup.', [
-                'implementation_id' => $this->implementation_id,
-                'error'             => $exception->getMessage(),
-            ]);
-        }
 
         // Enviar mensaje de confirmación al cliente y avanzar a la siguiente etapa.
         try {
