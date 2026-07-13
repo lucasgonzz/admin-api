@@ -25,6 +25,15 @@ use phpseclib3\Net\SSH2;
 class DemoUpdateService
 {
     /**
+     * Tope de caracteres del campo `log`. Al superarlo se conserva la cola (lo último
+     * es siempre lo más relevante para diagnosticar) y se descarta el principio.
+     *
+     * La columna es LONGTEXT (4 GB), pero append_log() reescribe el string completo en
+     * cada línea: un log ilimitado significa writes cada vez más pesados.
+     */
+    const MAX_LOG_CHARS = 2000000;
+
+    /**
      * Registro DemoUpdate que se está procesando.
      *
      * @var DemoUpdate
@@ -110,12 +119,33 @@ class DemoUpdateService
             $this->demo_update->finished_at = now();
             $this->demo_update->save();
         } catch (\Throwable $e) {
-            // Registra la línea de error en el log antes de persistir el fallo.
-            $this->append_log('ERROR: ' . $e->getMessage());
+            /* CRÍTICO (13/7/2026): el estado se persiste PRIMERO. La versión anterior llamaba a
+             * append_log() como primera instrucción del catch — y cuando la excepción original
+             * ERA un fallo de escritura del log (columna TEXT desbordada), el append volvía a
+             * tirar, las líneas siguientes nunca corrían, y el DemoUpdate quedaba en
+             * `ejecutandose` para siempre. El log es información; el estado es la máquina.
+             *
+             * Se recarga desde la BD para descartar cualquier valor de `log` en memoria que pueda
+             * ser el causante mismo de la excepción. Así el UPDATE del estado no arrastra la celda rota. */
+            $fresh = DemoUpdate::find($this->demo_update->id);
+            if ($fresh !== null) {
+                $fresh->status      = 'fallido';
+                $fresh->finished_at = now();
+                $fresh->save();
+                $this->demo_update = $fresh;
+            }
 
-            $this->demo_update->status      = 'fallido';
-            $this->demo_update->finished_at = now();
-            $this->demo_update->save();
+            /* Recién ahora se intenta dejar constancia del error en el log. Si esto falla,
+             * da igual: el registro ya quedó marcado como fallido. */
+            try {
+                $this->append_log('ERROR: ' . $e->getMessage());
+            } catch (\Throwable $log_error) {
+                \Log::error('DemoUpdateService: no se pudo escribir el error en el log del DemoUpdate.', [
+                    'demo_update_id' => $this->demo_update->id,
+                    'error_original' => $e->getMessage(),
+                    'error_al_logue' => $log_error->getMessage(),
+                ]);
+            }
 
             throw $e;
         }
@@ -416,13 +446,25 @@ class DemoUpdateService
      * Agrega una línea al campo log del DemoUpdate con timestamp [H:i:s] y persiste.
      * Cada llamada es un save() inmediato para que el log sea visible en tiempo real.
      *
+     * Si el log supera MAX_LOG_CHARS se conserva solo la cola, con un marcador que deja
+     * constancia del recorte. Antes de este guard (13/7/2026) el log desbordaba la columna
+     * TEXT y el SQLSTATE[22001] resultante mataba el job dejándolo en `ejecutandose`.
+     *
      * @param  string  $line  Texto de la línea a agregar
      * @return void
      */
     private function append_log(string $line): void
     {
-        $this->demo_update->log = ($this->demo_update->log ?? '')
+        $log = ($this->demo_update->log === null ? '' : $this->demo_update->log)
             . '[' . now()->format('H:i:s') . '] ' . $line . "\n";
+
+        if (strlen($log) > self::MAX_LOG_CHARS) {
+            // Se conserva la cola: el final del log es lo que sirve para diagnosticar.
+            $log = "[...log recortado: superó " . self::MAX_LOG_CHARS . " caracteres...]\n"
+                . substr($log, -self::MAX_LOG_CHARS);
+        }
+
+        $this->demo_update->log = $log;
         $this->demo_update->save();
     }
 
@@ -1137,7 +1179,9 @@ class DemoUpdateService
             return;
         }
 
-        $max_chunk = 3500;
+        // Con la columna log ya en LONGTEXT no hay riesgo de desborde; se sube el chunk
+        // a 8000 caracteres para reducir la cantidad de save() por salida remota larga (13/7/2026).
+        $max_chunk = 8000;
         if (strlen($output) <= $max_chunk) {
             $this->append_log("[{$step}] {$output}");
 

@@ -88,15 +88,17 @@ class DemoUpdateProperties
                 'only_show' => true,
                 'width'     => 150,
             ],
-            [
-                // Log acumulado del pipeline; no se muestra en tabla, solo en detalle.
-                'key'              => 'log',
-                'text'             => 'Log',
-                'type'             => 'textarea',
-                'value'            => null,
-                'only_show'        => true,
-                'not_show_on_table' => true,
-            ],
+            /*
+             * NO agregar una propiedad `log` acá. El log se renderiza exclusivamente en la pestaña
+             * Operaciones (admin-spa: components/demo_update/extra-props/OperationsPanel.vue), que lo
+             * lee del modelo completo que devuelve GET /demo-update/{id} y lo muestra parseado en una
+             * consola con timestamps y colores por nivel.
+             *
+             * Declararlo acá lo hacía renderizar TAMBIÉN como textarea de texto plano arriba del modal:
+             * decenas de miles de caracteres de salida cruda de webpack, con la consola buena enterrada
+             * varias pantallas más abajo (13/7/2026). Mismo criterio que ClientVersionUpgradeProperties,
+             * que tampoco expone su log en el meta.
+             */
         ];
     }
 }
