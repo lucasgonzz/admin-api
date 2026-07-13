@@ -9,6 +9,7 @@ use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
 use App\Models\WhatsappConfig;
+use App\Services\ImplementationActionService;
 use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
 use App\Services\KapsoHttpClient;
@@ -514,6 +515,8 @@ class ImplementationController extends Controller
             'implementation_id'   => $implementation->id,
             'stage_number'        => $implementation->current_stage,
             'direction'           => 'inbound',
+            // Teléfono remitente (necesario para la ventana de 24 h): el del dueño en esta simulación.
+            'phone'               => (string) ($implementation->client->phone ?? ''),
             'body'                => $content,
             'whatsapp_message_id' => null,
             'sent_at'             => now(),
@@ -575,6 +578,8 @@ class ImplementationController extends Controller
             'implementation_id'   => $implementation->id,
             'stage_number'        => $implementation->current_stage,
             'direction'           => 'outbound',
+            // Teléfono destino: necesario para calcular la ventana de 24 h por persona.
+            'phone'               => $phone,
             'body'                => $content,
             'whatsapp_message_id' => $whatsapp_message_id,
             'sent_at'             => now(),
@@ -587,5 +592,78 @@ class ImplementationController extends Controller
         );
 
         return response()->json(['model' => $message], 201);
+    }
+
+    /**
+     * Estado completo del panel de acciones manuales de una implementación: las 6 acciones
+     * con su destinatario, si la ventana de 24 h está abierta y cuándo se ejecutó cada una
+     * por última vez.
+     *
+     * @param Implementation $implementation Implementación destino (route model binding).
+     *
+     * @return JsonResponse
+     */
+    public function actions_state(Implementation $implementation): JsonResponse
+    {
+        $state = (new ImplementationActionService())->state($implementation);
+
+        return response()->json($state, 200);
+    }
+
+    /**
+     * Preview de una acción manual: qué se va a enviar, a quién, y si hace falta plantilla.
+     *
+     * @param Request        $request        Petición con `stage` opcional en la query string (solo 'progreso').
+     * @param Implementation $implementation Implementación destino (route model binding).
+     * @param string         $action         Clave de la acción (ver ImplementationActionService::ACTIONS).
+     *
+     * @return JsonResponse
+     */
+    public function action_preview(Request $request, Implementation $implementation, string $action): JsonResponse
+    {
+        // Etapa opcional (solo aplica a 'progreso'); null si no vino en la query.
+        $stage = $request->has('stage') ? (int) $request->query('stage') : null;
+
+        try {
+            $preview = (new ImplementationActionService())->preview($implementation, $action, $stage);
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->json($preview, 200);
+    }
+
+    /**
+     * Ejecuta una acción manual: envía el mensaje (o corre el UserSetup) y registra la ejecución.
+     *
+     * Devuelve además el modelo fresco de la implementación para que el panel se refresque
+     * sin necesidad de otra llamada.
+     *
+     * @param Request        $request        Petición con `content` (texto editado, opcional) y `stage` (opcional).
+     * @param Implementation $implementation Implementación destino (route model binding).
+     * @param string         $action         Clave de la acción (ver ImplementationActionService::ACTIONS).
+     *
+     * @return JsonResponse
+     */
+    public function action_execute(Request $request, Implementation $implementation, string $action): JsonResponse
+    {
+        // Texto editado por el admin (opcional) y etapa seleccionada (opcional, solo 'progreso').
+        $content = $request->input('content');
+        $stage   = $request->has('stage') ? (int) $request->input('stage') : null;
+
+        try {
+            $result = (new ImplementationActionService())->execute($implementation, $action, $content, $stage);
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        if (! $result['ok']) {
+            return response()->json(['message' => $result['message']], 422);
+        }
+
+        return response()->json([
+            'result' => $result,
+            'model'  => $implementation->fresh()->load(['stages', 'stages.config', 'client', 'messages']),
+        ], 200);
     }
 }

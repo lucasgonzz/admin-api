@@ -152,19 +152,32 @@ class ImplementationConversationService
         // Teléfono del remitente para enviar el link del formulario.
         $phone = (string) $parsed['from'];
 
+        $this->send_outbound($implementation, 1, $phone, $this->build_form_link_body($implementation));
+    }
+
+    /**
+     * Cuerpo del mensaje con el link del formulario de configuración (Etapa 1).
+     *
+     * Usado tanto por handle_stage_1() (modo auto) como por ImplementationActionService
+     * (modo manual, acción 'form_link').
+     *
+     * @param Implementation $implementation
+     *
+     * @return string
+     */
+    public function build_form_link_body(Implementation $implementation): string
+    {
         // Construir el link personalizado del formulario usando el token de esta implementación.
         $form_base_url = ImplementationSettings::get_form_url();
         $form_token    = (string) ($implementation->form_token ?? '');
         $form_url      = rtrim($form_base_url, '/') . '/' . $form_token;
 
         // Mensaje con el link al formulario - no distingue entre señal positiva y preguntas.
-        $message = "Bien, vamos con el primer paso.\n\n"
+        return "Bien, vamos con el primer paso.\n\n"
             . "Completá este formulario con la información de tu empresa. "
             . "No te va a llevar más de 5 minutos y podés hacerlo cuando puedas 🙂\n\n"
             . $form_url . "\n\n"
             . "Avisame cuando lo hayas enviado.";
-
-        $this->send_outbound($implementation, 1, $phone, $message);
     }
 
     /**
@@ -869,7 +882,27 @@ class ImplementationConversationService
             return;
         }
 
-        // Nombre del cliente y del responsable para personalizar el mensaje.
+        // Registrar estado de acumulación activa y persistir antes de enviar el mensaje.
+        $data['current_question'] = 'collecting_files';
+        $stage->data              = $data;
+        $stage->save();
+
+        $this->send_outbound($implementation, 3, $contact_phone, $this->build_files_request_body($implementation));
+    }
+
+    /**
+     * Cuerpo del mensaje de pedido de archivos (Excels + logo) para el responsable de migración.
+     *
+     * Usado tanto por send_stage_3_opening() (modo auto) como por ImplementationActionService
+     * (modo manual, acción 'pedir_archivos').
+     *
+     * @param Implementation $implementation
+     *
+     * @return string
+     */
+    public function build_files_request_body(Implementation $implementation): string
+    {
+        // Nombre del cliente para personalizar el mensaje.
         $client      = $implementation->client ?? Client::find($implementation->client_id);
         $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
@@ -880,17 +913,13 @@ class ImplementationConversationService
         $stage_1_data = $stage_1 !== null && is_array($stage_1->data) ? $stage_1->data : [];
         $responsable  = trim((string) ($stage_1_data['migration_responsible_name'] ?? ''));
 
-        // Generar la lista de progreso para incluir en el mensaje de apertura.
+        // Generar la lista de progreso para incluir en el mensaje.
         $progress_list = $this->build_progress_list($implementation);
 
-        // Registrar estado de acumulación activa y persistir antes de enviar el mensaje.
-        $data['current_question'] = 'collecting_files';
-        $stage->data              = $data;
-        $stage->save();
-
-        // Construir el mensaje de apertura incluyendo la lista de archivos requeridos.
+        // Construir el mensaje incluyendo la lista de archivos requeridos.
         $responsable_saludo = $responsable !== '' ? $responsable : 'Hola';
-        $question_text = "{$progress_list}\n\n"
+
+        return "{$progress_list}\n\n"
             . "{$responsable_saludo}, ¡el sistema ya está instalado con la configuración de {$client_name}! 🎉\n\n"
             . "Ahora necesito que nos envíes los archivos con la información del negocio:\n\n"
             . "📦 Artículos o productos (Excel)\n"
@@ -898,8 +927,6 @@ class ImplementationConversationService
             . "🏭 Proveedores (Excel)\n"
             . "🖼️ Logo de la empresa (imagen cuadrada)\n\n"
             . "Podés enviarlos directamente por acá, de a uno o todos juntos. Si no tenés alguno, avisame y arrancamos igual.";
-
-        $this->send_outbound($implementation, 3, $contact_phone, $question_text);
     }
 
     // -------------------------------------------------------------------------
@@ -1964,6 +1991,27 @@ class ImplementationConversationService
             return;
         }
 
+        // Registrar la primera pregunta pendiente y persistir.
+        $data['current_question'] = 'system_delivered';
+        $stage->data              = $data;
+        $stage->save();
+
+        $this->send_outbound($implementation, 5, $owner_phone, $this->build_delivery_body($implementation));
+    }
+
+    /**
+     * Cuerpo del mensaje de entrega del sistema (Etapa 5): acceso ya cargado con los datos del cliente.
+     *
+     * Usado tanto por send_stage_5_opening() (modo auto) como por ImplementationActionService
+     * (modo manual, acción 'entrega').
+     *
+     * @param Implementation $implementation
+     *
+     * @return string
+     */
+    public function build_delivery_body(Implementation $implementation): string
+    {
+        $client      = $implementation->client ?? Client::find($implementation->client_id);
         $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
         // Leer datos de acceso del stage 2 (instalación): link, usuario y contraseña provisional.
@@ -1973,9 +2021,9 @@ class ImplementationConversationService
         $stage_2_data = $stage_2 !== null && is_array($stage_2->data) ? $stage_2->data : [];
 
         // Link del sistema, usuario y contraseña; pueden estar vacíos si instalación no completó datos.
-        $link_sistema   = trim((string) ($stage_2_data['system_url'] ?? ''));
-        $usuario        = trim((string) ($stage_2_data['admin_username'] ?? ''));
-        $contrasena     = trim((string) ($stage_2_data['admin_password'] ?? ''));
+        $link_sistema = trim((string) ($stage_2_data['system_url'] ?? ''));
+        $usuario      = trim((string) ($stage_2_data['admin_username'] ?? ''));
+        $contrasena   = trim((string) ($stage_2_data['admin_password'] ?? ''));
 
         if ($link_sistema === '' || $usuario === '' || $contrasena === '') {
             Log::channel('daily')->warning('ImplementationConversationService: datos de acceso incompletos en stage 2 para apertura de Etapa 5.', [
@@ -1985,17 +2033,12 @@ class ImplementationConversationService
             ]);
         }
 
-        // Generar la lista de progreso para incluir en el mensaje de apertura.
+        // Generar la lista de progreso para incluir en el mensaje.
         $progress_list = $this->build_progress_list($implementation);
-
-        // Registrar la primera pregunta pendiente y persistir.
-        $data['current_question'] = 'system_delivered';
-        $stage->data              = $data;
-        $stage->save();
 
         // Construir el mensaje con los datos de acceso (si están disponibles).
         if ($link_sistema !== '' && $usuario !== '' && $contrasena !== '') {
-            $mensaje = "{$progress_list}\n\n"
+            return "{$progress_list}\n\n"
                 . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
                 . "Podés ingresar desde acá: {$link_sistema}\n"
                 . "Usuario: {$usuario}\n"
@@ -2004,14 +2047,12 @@ class ImplementationConversationService
                 . "Podés trabajar en paralelo con ambos durante el tiempo que necesites. "
                 . "Cuando estés listo para hacer el pase definitivo, nos avisás y hacemos una migración final con toda la información actualizada.\n\n"
                 . "¿Alguna duda antes de empezar a explorar?";
-        } else {
-            $mensaje = "{$progress_list}\n\n"
-                . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
-                . "En breve te enviamos los datos de acceso para que puedas ingresar.\n\n"
-                . "¿Alguna duda antes de empezar?";
         }
 
-        $this->send_outbound($implementation, 5, $owner_phone, $mensaje);
+        return "{$progress_list}\n\n"
+            . "{$client_name}, ¡tu sistema ya está listo con toda tu información cargada! 🎉\n\n"
+            . "En breve te enviamos los datos de acceso para que puedas ingresar.\n\n"
+            . "¿Alguna duda antes de empezar?";
     }
 
     /**
@@ -3784,6 +3825,33 @@ class ImplementationConversationService
     }
 
     /**
+     * Cuerpo del mensaje de presentación (equivalente en texto de la plantilla cc_implementacion_bienvenida).
+     *
+     * Usado tanto por send_welcome_template() (modo auto, se persiste como texto plano equivalente
+     * al de la plantilla Meta) como por ImplementationActionService (modo manual, acción 'presentacion').
+     *
+     * @param Implementation $implementation Implementación cuyo cliente se está presentando.
+     *
+     * @return string
+     */
+    public function build_welcome_body(Implementation $implementation): string
+    {
+        // Nombre del cliente para personalizar el saludo; fallback genérico si no está cargado.
+        $implementation->loadMissing('client');
+        $client      = $implementation->client;
+        $client_name = $client ? $client->resolve_display_name() : 'cliente';
+        if ($client_name === '') {
+            $client_name = 'cliente';
+        }
+
+        return "Hola {$client_name}, ¿cómo estás?\n\n"
+            . "Soy Martín, te escribo porque voy a ser el encargado de tu implementación en ComercioCity. "
+            . "Mi trabajo es acompañarte en todo el proceso: cargar la información de tu negocio, migrar tus datos y dejarte operando en la plataforma.\n\n"
+            . "Vamos a ir paso a paso, y cualquier duda que tengas en el camino me la podés consultar acá mismo por este chat.\n\n"
+            . "¿Arrancamos?";
+    }
+
+    /**
      * Envía la plantilla de bienvenida `cc_implementacion_bienvenida` al iniciar la implementación.
      *
      * Best-effort: si falta teléfono o falla Kapso, se loguea y no se interrumpe el inicio.
@@ -3832,11 +3900,7 @@ class ImplementationConversationService
             );
 
             // Texto plano equivalente para mostrar en el hilo del admin.
-            $body = "Hola {$client_name}, ¿cómo estás?\n\n"
-                . "Soy Martín, te escribo porque voy a ser el encargado de tu implementación en ComercioCity. "
-                . "Mi trabajo es acompañarte en todo el proceso: cargar la información de tu negocio, migrar tus datos y dejarte operando en la plataforma.\n\n"
-                . "Vamos a ir paso a paso, y cualquier duda que tengas en el camino me la podés consultar acá mismo por este chat.\n\n"
-                . "¿Arrancamos?";
+            $body = $this->build_welcome_body($implementation);
 
             // Persistir sin reenviar texto: el ID proviene del send_template anterior.
             $this->send_outbound($implementation, 1, $phone, $body, $whatsapp_message_id);
@@ -3851,6 +3915,66 @@ class ImplementationConversationService
     // -------------------------------------------------------------------------
     // Formulario público de configuración (Stage 1 via link)
     // -------------------------------------------------------------------------
+
+    /**
+     * Checklist de progreso de las 8 etapas.
+     *
+     * Usado tanto por handle_form_submitted() (modo auto, siempre con $stage = 1) como por
+     * ImplementationActionService (modo manual, acción 'progreso' con selector de etapa).
+     *
+     * Las etapas con stage_number < $stage o con status === 'completed' van con ✅; el
+     * resto con ⬜. Esto permite marcar como avanzadas etapas que todavía no cerraron su
+     * registro de estado (p. ej. la etapa recién completada, si el caller la marcó justo
+     * antes de llamar a este método).
+     *
+     * @param Implementation $implementation
+     * @param int            $stage Etapa hasta la cual se considera avanzado el proceso.
+     *
+     * @return string
+     */
+    public function build_progress_body(Implementation $implementation, int $stage): string
+    {
+        // Nombres legibles de las 8 etapas fijas del flujo.
+        $etapas = [
+            1 => 'Información de la empresa',
+            2 => 'Instalación del sistema',
+            3 => 'Recolección de archivos',
+            4 => 'Migración de datos',
+            5 => 'Entrega del sistema',
+            6 => 'Capacitación',
+            7 => 'Vinculación con ARCA/AFIP',
+            8 => 'Videollamada de capacitación',
+        ];
+
+        $implementation->loadMissing(['client', 'stages']);
+
+        // Nombre del cliente para personalizar el saludo; fallback genérico si no está cargado.
+        $client      = $implementation->client;
+        $client_name = $client ? $client->resolve_display_name() : 'cliente';
+        if ($client_name === '') {
+            $client_name = 'cliente';
+        }
+
+        // Mapear número de etapa → estado actual para consulta O(1).
+        $stages_map = [];
+        $implementation->stages->each(function ($s) use (&$stages_map) {
+            $stages_map[(int) $s->stage_number] = (string) $s->status;
+        });
+
+        // Construir líneas del checklist con ícono según el criterio de avance descrito arriba.
+        $progress_lines = [];
+        foreach ($etapas as $number => $label) {
+            $status = $stages_map[$number] ?? 'pending';
+            $icon   = ($number < $stage || $status === 'completed') ? '✅' : '⬜';
+            $progress_lines[] = "{$icon} {$number}. {$label}";
+        }
+
+        $progress_text = implode("\n", $progress_lines);
+
+        return "¡Perfecto, {$client_name}! Ya recibimos toda la información de tu empresa 🎉\n\n"
+            . "Tu progreso:\n{$progress_text}\n\n"
+            . "Nuestro equipo ya está trabajando en la instalación. Te aviso cuando esté lista.";
+    }
 
     /**
      * Procesa el formulario de configuración enviado por el cliente.
@@ -3893,49 +4017,9 @@ class ImplementationConversationService
             return;
         }
 
-        // Nombre del cliente para personalizar el mensaje.
-        $client_name = $client->resolve_display_name();
-        if ($client_name === '') {
-            $client_name = 'cliente';
-        }
-
-        // Generar lista de progreso de las 8 etapas; etapa 1 ya completada (✅).
-        $etapas = [
-            1 => 'Información de la empresa',
-            2 => 'Instalación del sistema',
-            3 => 'Recolección de archivos',
-            4 => 'Migración de datos',
-            5 => 'Entrega del sistema',
-            6 => 'Capacitación',
-            7 => 'Vinculación con ARCA/AFIP',
-            8 => 'Videollamada de capacitación',
-        ];
-
-        // Cargar las etapas reales para marcar cuáles están completadas.
-        $stages_map = [];
-        $implementation->stages->each(function ($stage) use (&$stages_map) {
-            $stages_map[(int) $stage->stage_number] = $stage->status;
-        });
-
-        // Construir líneas del resumen de progreso con íconos de estado.
-        $progress_lines = [];
-        foreach ($etapas as $number => $label) {
-            $status = $stages_map[$number] ?? 'pending';
-            // Etapa 1 se considera completed porque acaba de enviarse el formulario.
-            $icon = ($number === 1 || $status === 'completed') ? '✅' : '⬜';
-            $progress_lines[] = "{$icon} {$number}. {$label}";
-        }
-
-        // Mensaje de confirmación de recepción del formulario.
-        $progress_text = implode("\n", $progress_lines);
-        $body          = "¡Perfecto, {$client_name}! Ya recibimos toda la información de tu empresa 🎉\n\n"
-            . "Tu progreso:\n{$progress_text}\n\n"
-            . "Nuestro equipo ya está trabajando en la instalación. Te aviso cuando esté lista.";
-
-        // Enviar el mensaje por WhatsApp.
-        $this->send_outbound($implementation, 1, $phone, $body, null);
-
-        // Marcar el stage 1 como completado.
+        // Marcar el stage 1 como completado ANTES de construir el checklist de progreso:
+        // build_progress_body() marca con ✅ las etapas con status === 'completed', y la
+        // etapa 1 debe figurar así apenas se recibe el formulario.
         $stage_1 = $implementation->stages->first(function ($s) {
             return (int) $s->stage_number === 1;
         });
@@ -3945,6 +4029,12 @@ class ImplementationConversationService
             $stage_1->completed_at = now();
             $stage_1->save();
         }
+
+        // Mensaje de confirmación de recepción del formulario con el checklist de progreso.
+        $body = $this->build_progress_body($implementation, 1);
+
+        // Enviar el mensaje por WhatsApp.
+        $this->send_outbound($implementation, 1, $phone, $body, null);
 
         // Actualizar current_stage a 2 en la implementación.
         $implementation->current_stage = 2;
@@ -4001,6 +4091,8 @@ class ImplementationConversationService
             'implementation_id'   => $implementation->id,
             'stage_number'        => $stage_number,
             'direction'           => 'outbound',
+            // Teléfono destino: necesario para calcular la ventana de 24 h por persona.
+            'phone'               => $phone,
             'body'                => $body,
             'whatsapp_message_id' => $whatsapp_message_id,
             'sent_at'             => now(),
@@ -4010,6 +4102,31 @@ class ImplementationConversationService
             (int) $implementation->id,
             (int) $outbound_message->id
         );
+    }
+
+    /**
+     * Envía un texto ya redactado y lo persiste en el hilo de la implementación.
+     *
+     * Punto de entrada público usado por ImplementationActionService (modo manual): el
+     * texto ya viene armado (por un build_*_body() o editado por el admin en el panel),
+     * por lo que este método solo delega en send_outbound() sin volver a construir nada.
+     *
+     * @param Implementation $implementation      Implementación asociada al mensaje.
+     * @param int            $stage_number        Número de etapa del mensaje.
+     * @param string         $phone               Teléfono destino E.164.
+     * @param string         $body                Texto ya redactado a enviar.
+     * @param string|null    $whatsapp_message_id ID de Meta si el envío ya ocurrió (p. ej. plantilla).
+     *
+     * @return void
+     */
+    public function send_manual_outbound(
+        Implementation $implementation,
+        int $stage_number,
+        string $phone,
+        string $body,
+        ?string $whatsapp_message_id = null
+    ): void {
+        $this->send_outbound($implementation, $stage_number, $phone, $body, $whatsapp_message_id);
     }
 
     // -------------------------------------------------------------------------

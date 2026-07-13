@@ -26,9 +26,11 @@ class ImplementationUserSetupService
      *
      * @param Implementation $implementation Implementación que avanzó a la Etapa 3.
      *
-     * @return void
+     * @return array{ok: bool, message: string} Resultado de la ejecución: ok según
+     *     $response->successful(), message con el motivo del fallo o la confirmación de éxito.
+     *     Los llamadores existentes que ignoran el retorno siguen funcionando sin cambios.
      */
-    public function trigger_user_setup(Implementation $implementation): void
+    public function trigger_user_setup(Implementation $implementation): array
     {
         // Cliente dueño de la implementación.
         $client = $implementation->client ?? Client::find($implementation->client_id);
@@ -37,7 +39,7 @@ class ImplementationUserSetupService
             Log::channel('daily')->warning('ImplementationUserSetupService: cliente no encontrado; no se ejecuta UserSetup.', [
                 'implementation_id' => $implementation->id,
             ]);
-            return;
+            return ['ok' => false, 'message' => 'No se encontró el cliente de la implementación.'];
         }
 
         // URL de la API del cliente (empresa-api desplegada): destino del setup remoto.
@@ -50,7 +52,7 @@ class ImplementationUserSetupService
                 'implementation_id' => $implementation->id,
                 'client_id'         => $client->id,
             ]);
-            return;
+            return ['ok' => false, 'message' => 'El cliente todavía no tiene una client_api activa configurada.'];
         }
 
         // Construir el payload completo a partir de los datos del cliente y setup_data.
@@ -74,15 +76,23 @@ class ImplementationUserSetupService
                     'endpoint'          => $endpoint,
                     'status'            => $response->status(),
                 ]);
-            } else {
-                Log::channel('daily')->warning('ImplementationUserSetupService: UserSetup respondió con error.', [
-                    'implementation_id' => $implementation->id,
-                    'client_id'         => $client->id,
-                    'endpoint'          => $endpoint,
-                    'status'            => $response->status(),
-                    'body'              => mb_substr((string) $response->body(), 0, 500),
-                ]);
+
+                return ['ok' => true, 'message' => 'Configuración aplicada correctamente.'];
             }
+
+            Log::channel('daily')->warning('ImplementationUserSetupService: UserSetup respondió con error.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $client->id,
+                'endpoint'          => $endpoint,
+                'status'            => $response->status(),
+                'body'              => mb_substr((string) $response->body(), 0, 500),
+            ]);
+
+            return [
+                'ok'      => false,
+                'message' => 'La client_api respondió con error (status ' . $response->status() . '): '
+                    . mb_substr((string) $response->body(), 0, 300),
+            ];
         } catch (\Throwable $exception) {
             // No bloquear el flujo de implementación si el setup remoto falla.
             Log::channel('daily')->error('ImplementationUserSetupService: excepción al ejecutar UserSetup.', [
@@ -91,17 +101,23 @@ class ImplementationUserSetupService
                 'endpoint'          => $endpoint,
                 'message'           => $exception->getMessage(),
             ]);
+
+            return ['ok' => false, 'message' => 'Error de conexión con la client_api: ' . $exception->getMessage()];
         }
     }
 
     /**
      * Construye el payload del UserSetup a partir del cliente y su setup_data.
      *
+     * Público (antes privado) para que ImplementationActionService pueda mostrar en el
+     * preview de la acción 'user_setup' el payload real que se va a enviar, sin duplicar
+     * esta lógica de armado.
+     *
      * @param Client $client Cliente con setup_data poblado en la Etapa 1.
      *
      * @return array<string, mixed>
      */
-    private function build_payload(Client $client): array
+    public function build_payload(Client $client): array
     {
         // Datos de configuración recolectados (cast 'array' en el modelo Client).
         $setup_data = is_array($client->setup_data) ? $client->setup_data : [];

@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int         $implementation_id Implementación asociada.
  * @property int         $stage_number      Etapa en la que se registró el mensaje.
  * @property string      $direction         inbound | outbound.
+ * @property string|null $phone             Teléfono E.164 de la contraparte (destino en outbound, remitente en inbound).
  * @property string      $body              Contenido del mensaje.
  * @property string|null $whatsapp_message_id Id externo para idempotencia.
  */

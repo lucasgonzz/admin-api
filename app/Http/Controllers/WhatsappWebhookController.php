@@ -589,6 +589,8 @@ class WhatsappWebhookController extends Controller
             'implementation_id'   => $implementation->id,
             'stage_number'        => (int) $implementation->current_stage,
             'direction'           => 'inbound',
+            // Teléfono remitente: necesario para calcular la ventana de 24 h por persona.
+            'phone'               => $parsed['from'],
             'body'                => $body,
             'whatsapp_message_id' => $parsed['message_id'],
             'sent_at'             => $this->resolve_message_datetime($parsed['timestamp']),

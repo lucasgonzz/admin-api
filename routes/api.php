@@ -372,6 +372,10 @@ Route::prefix('admin')->group(function () {
         Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
         Route::post('implementation/{implementation}/simulate-inbound', [\App\Http\Controllers\Api\ImplementationController::class, 'simulate_inbound']);
         Route::post('implementation/{implementation}/send-message', [\App\Http\Controllers\Api\ImplementationController::class, 'send_message']);
+        // Acciones manuales del flujo de implementación (preview + envío) y ventana de 24 h.
+        Route::get('implementation/{implementation}/actions', [\App\Http\Controllers\Api\ImplementationController::class, 'actions_state']);
+        Route::get('implementation/{implementation}/actions/{action}/preview', [\App\Http\Controllers\Api\ImplementationController::class, 'action_preview']);
+        Route::post('implementation/{implementation}/actions/{action}', [\App\Http\Controllers\Api\ImplementationController::class, 'action_execute']);
         Route::delete('implementation/{implementation}', [\App\Http\Controllers\Api\ImplementationController::class, 'destroy']);
 
         Route::post('client/{client}/implementation/start', [\App\Http\Controllers\Api\ImplementationController::class, 'start']);
