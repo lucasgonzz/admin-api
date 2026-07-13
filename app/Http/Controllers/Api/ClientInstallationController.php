@@ -65,7 +65,7 @@ class ClientInstallationController extends Controller
     public function store(Client $client): JsonResponse
     {
         // Versión publicada más reciente disponible para instalar.
-        $latest_version = Version::where('status', 'publicada')
+        $latest_version = Version::where('status', 'published')
             ->orderByDesc('id')
             ->first();
 
