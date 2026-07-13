@@ -70,6 +70,16 @@ TXT;
     ];
 
     /**
+     * Cantidad de días CORRIDOS (no hábiles) que cubre el JSON de disponibilidad que se le
+     * envía a Claude, contados desde mañana. Se eligió una ventana amplia (7 días) para que
+     * la fecha que pida el lead esté prácticamente siempre dentro del JSON: antes, con una
+     * ventana de 3 días hábiles, un pedido para "el jueves" podía caer fuera del rango y
+     * Claude terminaba confirmando un horario que el sistema nunca le ofreció (lead #12,
+     * 13/7/2026). El costo en tokens de 7 días de slots es marginal frente al resto del prompt.
+     */
+    const DIAS_DISPONIBILIDAD = 7;
+
+    /**
      * Convierte minutos del día (0-1439) al formato legible HH:MM.
      * Pensado para los logs de diagnóstico de disponibilidad, donde mostrar
      * minutos crudos (por ejemplo 720) es ilegible frente a "12:00".
@@ -308,7 +318,7 @@ TXT;
          * Se pasa $specific_date para ampliar el rango cuando el lead pidió una fecha lejana.
          * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
         $calendar_snapshot    = null;
-        $availability_data    = $this->build_availability_json(3, $calendar_snapshot, $specific_date, $lead->id);
+        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id);
 
         /*
          * Ampliar snapshot con demos agendadas, slots enviados a Claude y config del closer
@@ -515,13 +525,15 @@ TXT;
      * cálculo del rango desde mañana hasta esa fecha, para que Claude tenga contexto completo
      * de días intermedios al buscar una fecha lejana.
      *
-     * @param int         $days_ahead        Cantidad mínima de días hábiles a incluir (default: 3; ignorado si $specific_date es válida).
+     * @param int         $days_ahead        Cantidad de días CORRIDOS (no hábiles) a incluir desde mañana
+     *                                       (default: self::DIAS_DISPONIBILIDAD = 7). $specific_date puede
+     *                                       ampliar este rango, nunca recortarlo.
      * @param array|null  $calendar_snapshot Referencia opcional para recibir el snapshot de Google Calendar.
      * @param string|null $specific_date     Fecha objetivo en formato Y-m-d, o null para comportamiento por defecto.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = 3, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null): array
+    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
          * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango. */
@@ -730,17 +742,23 @@ TXT;
      * Centraliza la lógica compartida entre get_available_slots() y build_availability_json().
      * Si algún día queda sin slots libres en la unión de demos, agrega un día hábil extra.
      *
-     * Cuando se provee $specific_date, en lugar de calcular los próximos $days_ahead días
-     * hábiles, se calcula el rango desde mañana hasta esa fecha inclusive (solo días con
-     * horario configurado). Esto permite que Claude tenga contexto de todo el rango intermedio
-     * para una fecha lejana solicitada por el lead.
+     * Cuando se provee $specific_date, la fecha objetivo AMPLÍA la ventana en vez de
+     * recortarla: el rango recorrido va desde mañana hasta el mayor entre
+     * (mañana + $days_ahead - 1 días) y la fecha solicitada, inclusive (solo días con
+     * horario configurado). Esto evita que una fecha pedida por el lead cercana a hoy
+     * achique la ventana y deje afuera días que el lead podía llegar a pedir después
+     * (causa raíz del bug del lead #12, 13/7/2026).
      *
-     * @param int         $days_ahead    Cantidad mínima de días hábiles a incluir (ignorado si $specific_date es válida).
+     * @param int         $days_ahead    Cantidad de días CORRIDOS (no hábiles) a recorrer desde mañana.
+     *                                   Antes representaba días hábiles a juntar; desde el 13/7/2026
+     *                                   representa el largo fijo de la ventana en días corridos
+     *                                   (self::DIAS_DISPONIBILIDAD). Los días sin horario configurado
+     *                                   se excluyen del resultado pero no extienden el recorrido.
      * @param string|null $specific_date Fecha objetivo en formato Y-m-d, o null para comportamiento por defecto.
      *
      * @return array<string, mixed>
      */
-    protected function prepare_slot_availability_context(int $days_ahead = 3, ?string $specific_date = null, ?int $exclude_lead_id = null): array
+    protected function prepare_slot_availability_context(int $days_ahead = self::DIAS_DISPONIBILIDAD, ?string $specific_date = null, ?int $exclude_lead_id = null): array
     {
         /* Parámetros de configuración de demos. */
         $duracion    = LeadDemoSettings::get_duracion_minutos();
@@ -820,10 +838,17 @@ TXT;
             $tomorrow = $now->copy()->startOfDay()->addDay();
 
             if ($target_date !== null && $target_date->gte($tomorrow)) {
-                /* Recorrer desde mañana hasta la fecha objetivo inclusive, incluyendo solo
+                /* La ventana por defecto (N días corridos desde mañana) es el PISO: una fecha
+                 * pedida dentro de ese rango no la achica. Solo una fecha posterior la extiende.
+                 * Antes, una fecha_solicitada cercana recortaba la ventana y dejaba afuera días
+                 * que el lead sí podía llegar a pedir — causa raíz del bug del lead #12 (13/7/2026). */
+                $ventana_default_fin = $tomorrow->copy()->addDays($days_ahead - 1);
+                $end_date            = $target_date->gt($ventana_default_fin) ? $target_date->copy() : $ventana_default_fin;
+
+                /* Recorrer desde mañana hasta $end_date inclusive, incluyendo solo
                  * días con horario configurado. */
                 $cursor_specific = $tomorrow->copy();
-                while ($cursor_specific->lte($target_date)) {
+                while ($cursor_specific->lte($end_date)) {
                     $dow_s       = $cursor_specific->dayOfWeek;
                     $horario_dia = ($dow_s === 0) ? $horario_dom : (($dow_s === 6) ? $horario_sab : $horario_lv);
                     if ($horario_dia !== '') {
@@ -835,16 +860,19 @@ TXT;
                 /* Si el rango produjo al menos un día hábil, usarlo; de lo contrario caer al default. */
                 if (! empty($working_days)) {
                     $use_specific_date = true;
-                    /* Adelantar el cursor principal al día siguiente de la fecha objetivo
+                    /* Adelantar el cursor principal al día siguiente del fin de ventana
                      * para que la lógica de "día extra" arranque desde ahí si es necesaria. */
-                    $cursor = $target_date->copy()->addDay();
+                    $cursor = $end_date->copy()->addDay();
                 }
             }
         }
 
-        /* Comportamiento por defecto: próximos $days_ahead días hábiles desde mañana. */
+        /* Comportamiento por defecto: ventana fija de $days_ahead días CORRIDOS desde mañana.
+         * A diferencia del comportamiento anterior (días hábiles a juntar), acá el recorrido
+         * tiene largo fijo: un día sin horario configurado consume su lugar en la ventana y
+         * se descarta, en vez de forzar al cursor a seguir avanzando más allá de los N días. */
         if (! $use_specific_date) {
-            while (count($working_days) < $days_ahead) {
+            for ($i = 0; $i < $days_ahead; $i++) {
                 /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). */
                 $dow = $cursor->dayOfWeek;
                 /* Horario laboral del closer según el día de la semana evaluado. */
@@ -857,7 +885,9 @@ TXT;
                     $horario_dia = $horario_lv;
                 }
 
-                /* Incluir el día solo si tiene rango horario configurado (no vacío). */
+                /* Incluir el día solo si tiene rango horario configurado (no vacío).
+                 * A diferencia del comportamiento anterior, un día sin horario NO extiende la
+                 * ventana: consume su lugar en los N días corridos y se descarta. */
                 if ($horario_dia !== '') {
                     $working_days[] = $cursor->copy();
                 }
@@ -869,6 +899,18 @@ TXT;
         foreach ($working_days as $day) {
             $date_strings[] = $day->format('Y-m-d');
         }
+
+        /* Log de diagnóstico: ventana efectiva de fechas consultadas, para poder auditar
+         * de un vistazo (sin recorrer el JSON completo) qué rango se le mandó a Claude y
+         * si fecha_solicitada amplió la ventana por defecto (bug lead #12, 13/7/2026). */
+        Log::channel('disponibilidad')->info(
+            '[DISPONIBILIDAD] Ventana consultada: '
+            . (empty($date_strings) ? '(vacía)' : reset($date_strings) . ' a ' . end($date_strings))
+            . ' — ' . count($date_strings) . ' día(s) con horario configurado'
+            . ' (ventana pedida: ' . $days_ahead . ' días corridos desde mañana'
+            . ($specific_date !== null ? ', fecha_solicitada: ' . $specific_date : '')
+            . ')'
+        );
 
         /* Rangos bloqueados por demo y rangos de closer ocupado para los días iniciales.
          * Ambas estructuras se construyen en un solo recorrido sobre la misma query de leads. */
@@ -1408,11 +1450,14 @@ TXT;
      * Un slot está ocupado si existe un lead con `demo_date` en esa fecha
      * y `demo_start_time` que coincide con el inicio del bloque.
      *
-     * @param int $days_ahead Cantidad mínima de días hábiles a incluir (default: 3).
+     * @param int $days_ahead Cantidad de días CORRIDOS (no hábiles) a incluir desde mañana
+     *                        (default: self::DIAS_DISPONIBILIDAD). Antes representaba días hábiles
+     *                        a juntar; desde el 13/7/2026 es el largo fijo de la ventana en días
+     *                        corridos (ver prepare_slot_availability_context()).
      *
      * @return array<string, string[]> Mapa fecha (Y-m-d) → array de slots disponibles ('HH:MM').
      */
-    public function get_available_slots(int $days_ahead = 3): array
+    public function get_available_slots(int $days_ahead = self::DIAS_DISPONIBILIDAD): array
     {
         /* Obtener todas las demos registradas para el cálculo multi-demo. */
         $demos = \App\Models\Demo::orderBy('id')->get();
@@ -1468,11 +1513,14 @@ TXT;
      * Un slot está ocupado si existe un lead con `demo_date` en esa fecha
      * y `demo_start_time` que coincide con el inicio del bloque.
      *
-     * @param int $days_ahead Cantidad mínima de días hábiles a incluir (default: 3).
+     * @param int $days_ahead Cantidad de días CORRIDOS (no hábiles) a incluir desde mañana
+     *                        (default: self::DIAS_DISPONIBILIDAD). Antes representaba días hábiles
+     *                        a juntar; desde el 13/7/2026 es el largo fijo de la ventana en días
+     *                        corridos, en línea con get_available_slots() y build_availability_json().
      *
      * @return array<string, string[]> Mapa fecha (Y-m-d) → array de slots disponibles ('HH:MM').
      */
-    public function get_available_slots_legacy(int $days_ahead = 3): array
+    public function get_available_slots_legacy(int $days_ahead = self::DIAS_DISPONIBILIDAD): array
     {
         /* Construir lista de días hábiles a partir de HOY. */
         $working_days = [];
@@ -2488,7 +2536,7 @@ TXT;
                  * confirmando (prepare_slot_availability_context ya sabe ampliar el rango
                  * hasta esa fecha cuando se le pasa). */
                 $availability_snapshot_unused = null;
-                $availability = $this->build_availability_json(3, $availability_snapshot_unused, $demo_date, $lead->id);
+                $availability = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $availability_snapshot_unused, $demo_date, $lead->id);
                 $slots_demo   = [];
                 $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
                 foreach ($demo_slots_by_date as $date_label => $slots) {
