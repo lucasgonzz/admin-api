@@ -68,4 +68,49 @@ class ComerciocityAfipConfigController extends Controller
 
         return response()->json($config);
     }
+
+    /**
+     * Sube (o reemplaza) el logo personalizado que se imprime en la Factura C
+     * de mensualidad (`MensualidadFacturaPdf`), en el encabezado y en el pie
+     * de página. Se persiste en `public/afip/` con nombre fijo `logo_custom.{ext}`
+     * (sobrescribible) y se guarda la ruta relativa en `logo_path`. Si no se
+     * carga ninguno, el PDF sigue usando el `logo.jpg` default (sin regresión).
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse
+     */
+    public function upload_logo_json(Request $request): JsonResponse
+    {
+        // Validación acotada: solo imágenes jpg/jpeg/png de hasta 2MB, ya que
+        // es un archivo público sin más control que el de este endpoint.
+        $request->validate([
+            'logo' => 'required|image|mimes:jpg,jpeg,png|max:2048',
+        ]);
+
+        $config = ComerciocityAfipConfig::current();
+
+        $file = $request->file('logo');
+        $extension = $file->extension();
+
+        // Si ya había un logo cargado con una extensión distinta a la nueva,
+        // borramos el archivo viejo para no dejar basura acumulada en
+        // `public/afip/` (ej. pasar de `logo_custom.jpg` a `logo_custom.png`).
+        if (! empty($config->logo_path)) {
+            $previous_path = public_path(ltrim($config->logo_path, '/'));
+            $previous_extension = pathinfo($previous_path, PATHINFO_EXTENSION);
+            if ($previous_extension !== $extension && @file_exists($previous_path)) {
+                @unlink($previous_path);
+            }
+        }
+
+        // Persistimos el archivo con nombre fijo (sobrescribible) en el mismo
+        // directorio público donde ya vive el logo default.
+        $file->move(public_path('afip'), 'logo_custom.'.$extension);
+
+        $config->logo_path = '/afip/logo_custom.'.$extension;
+        $config->save();
+
+        return response()->json($config);
+    }
 }

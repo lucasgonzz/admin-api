@@ -149,8 +149,11 @@ class MensualidadFacturaPdf extends fpdf
             $this->Cell(25, 4, date_format($this->config->inicio_actividades, 'd/m/Y'), 0, 1, 'L');
         }
 
-        // Logo de ComercioCity, si existe en el disco.
-        $logo_path = public_path().'/afip/logo.jpg';
+        // Logo de ComercioCity: usa el personalizado (prompt 360) si fue
+        // cargado desde admin-spa; si no, cae al default `logo.jpg` de siempre.
+        $logo_path = !empty($this->config->logo_path)
+            ? public_path(ltrim($this->config->logo_path, '/'))
+            : public_path().'/afip/logo.jpg';
         if (@file_exists($logo_path)) {
             $this->Image($logo_path, 5, 15.2, 35, 35);
         }
@@ -344,7 +347,11 @@ class MensualidadFacturaPdf extends fpdf
 
         $this->y += $img_width + 2;
 
-        $logo_path = public_path().'/afip/logo.jpg';
+        // Mismo criterio que en `print_header()`: logo personalizado si existe,
+        // si no el default `logo.jpg`.
+        $logo_path = !empty($this->config->logo_path)
+            ? public_path(ltrim($this->config->logo_path, '/'))
+            : public_path().'/afip/logo.jpg';
         if (@file_exists($logo_path)) {
             $this->Image($logo_path, $img_start_x, $this->y, 30, 15);
             $this->y += 15;

@@ -116,6 +116,7 @@ Route::prefix('admin')->group(function () {
         // Configuración fiscal (AFIP) propia de ComercioCity: fila única, GET/PUT.
         Route::get('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'show_json']);
         Route::put('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'update_json']);
+        Route::post('comerciocity-afip-config/logo', [ComerciocityAfipConfigController::class, 'upload_logo_json']);
 
         Route::get('shared-database-groups', [SharedDatabaseGroupController::class, 'index_json']);
         Route::post('shared-database-groups', [SharedDatabaseGroupController::class, 'store_json']);
