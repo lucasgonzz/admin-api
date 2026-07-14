@@ -375,16 +375,38 @@ class InstallationService
         );
         $this->log('upload_api', 'composer install en VPS completado', 'success');
 
-        // ZIP: en instalación inicial NO se excluyen public/ ni storage/.
-        // Se excluyen .env (se generará en step_write_env), vendor/ (se instala vía composer)
-        // y bootstrap/cache/ (para no arrastrar config/rutas cacheadas del VPS de builds).
+        // ZIP: en instalación inicial NO se excluyen public/ ni storage/ (a diferencia de un upgrade).
+        // Sí se excluyen:
+        //   .env             — se genera en step_write_env
+        //   vendor/          — se instala vía composer en el hosting
+        //   bootstrap/cache/ — para no arrastrar config/rutas cacheadas del VPS de builds
+        //   .git/            — el hosting no necesita el historial del repo
+        //   *.zip            — CRÍTICO: si un ZIP huérfano de una corrida anterior quedó en el
+        //                     directorio de builds, zip -r lo mete adentro del nuevo paquete y el
+        //                     tamaño crece en bola de nieve hasta romper la descarga SFTP.
+        //   tests/, database/super-budgets/, database/seeders/{articles,truvari,subcategories,sales}/
+        //                   — datasets y tests que el cliente no necesita (igual que DeploymentService)
         $zip_name      = 'api_install_' . $this->installation->uuid . '.zip';
         $api_zip_remote = $api_build_path . '/' . $zip_name;
         $this->reconnect_build_vps();
+
+        // Housekeeping: borra ZIPs huérfanos de corridas anteriores (propias y de DeploymentService).
+        // El filtro por antigüedad evita pisar el paquete de un deploy que esté corriendo en paralelo.
+        $this->exec_build_ssh(
+            'upload_api',
+            'cd ' . escapeshellarg($api_build_path)
+            . " && find . -maxdepth 1 -name 'api_*.zip' -mmin +120 -delete 2>&1"
+        );
+
         $zip_command = 'cd ' . escapeshellarg($api_build_path)
             . ' && rm -f ' . escapeshellarg($zip_name)
             . ' && zip -r ' . escapeshellarg($zip_name) . ' . '
-            . "--exclude='.env' --exclude='vendor/*' --exclude='bootstrap/cache/*' 2>&1";
+            . "--exclude='.env' --exclude='vendor/*' --exclude='bootstrap/cache/*'"
+            . " --exclude='.git/*' --exclude='*.zip' --exclude='tests/*'"
+            . " --exclude='database/super-budgets/*' --exclude='database/seeders/articles/*'"
+            . " --exclude='database/seeders/truvari/*' --exclude='database/seeders/subcategories/*'"
+            . " --exclude='database/seeders/sales/*'"
+            . " 2>&1";
         $this->exec_build_ssh('upload_api', $zip_command, true, true);
 
         $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
@@ -811,6 +833,17 @@ class InstallationService
         if ($size_bytes < 500) {
             throw new \RuntimeException(
                 "ZIP inválido o vacío en VPS ({$size_bytes} bytes): {$remote_zip_path}"
+            );
+        }
+
+        // Cota superior: un paquete sano ronda las decenas/centenas de MB. Si se dispara, algo se
+        // coló en el empaquetado (típicamente un ZIP huérfano). Cortar acá evita una descarga SFTP
+        // de varios GB que revienta con "Expected NET_SFTP_DATA or NET_SFTP_STATUS".
+        $max_bytes = (int) config('services.deploy.max_zip_bytes', 1073741824);
+        if ($size_bytes > $max_bytes) {
+            throw new \RuntimeException(
+                "ZIP sospechosamente grande en VPS ({$size_bytes} bytes, máximo {$max_bytes}): "
+                . "{$remote_zip_path}. Revisá que no haya archivos huérfanos en el directorio de builds."
             );
         }
 
