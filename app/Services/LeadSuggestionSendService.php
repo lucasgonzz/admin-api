@@ -40,10 +40,16 @@ class LeadSuggestionSendService
      *                                    contrato `final_actions` en LeadAiService::apply_pending_actions()).
      *                                    Si es null se aplican las acciones originales de Claude
      *                                    (comportamiento sin cambios).
+     * @param bool        $is_auto_send   FIX (prompt 337): true cuando llama AutoSendLeadAiSuggestionJob
+     *                                    (respaldo automático, sin revisión humana), false (default) cuando
+     *                                    llama un endpoint de aprobación humana. Con pending_actions y
+     *                                    true, nunca se ejecutan acciones con efecto externo
+     *                                    (agendar_demo/cancelar_demo/Mail 1) a ciegas — ver Caso A/B en
+     *                                    el cuerpo del método.
      *
      * @return LeadMessage
      */
-    public function send_suggestion(LeadMessage $message, ?string $edited_content = null, ?array $final_actions = null): LeadMessage
+    public function send_suggestion(LeadMessage $message, ?string $edited_content = null, ?array $final_actions = null, bool $is_auto_send = false): LeadMessage
     {
         if ((string) $message->sender !== 'sistema') {
             throw new \InvalidArgumentException('Solo se pueden enviar sugerencias del sistema.');
@@ -75,6 +81,20 @@ class LeadSuggestionSendService
         }
 
         /*
+         * FIX (prompt 337): resguardo del respaldo automático. Antes de aplicar cualquier acción
+         * pendiente, si esto es un auto-envío (job, sin revisión humana) y el paquete trae
+         * agendar_demo o cancelar_demo, se corta acá (Caso A): el texto de Claude confirma un
+         * horario al lead y no hay forma segura de mandarlo sin persistir la reserva. El mensaje
+         * queda `sugerido` sin tocar, a la espera de que un humano lo apruebe desde el panel.
+         */
+        if ($is_auto_send && ! empty($message->pending_actions)) {
+            $pending_actions = $message->pending_actions;
+            if (! empty($pending_actions['agendar_demo']) || ! empty($pending_actions['cancelar_demo'])) {
+                return $this->handle_auto_send_agendamiento_gate($message, $lead);
+            }
+        }
+
+        /*
          * Mensajes que quedaron pendientes por el motivo "agendamiento" (ver
          * LeadAiService::requires_agendamiento_verification_gate) no aplicaron todavía ninguna
          * acción (agendar_demo, guardar_nombre, mail, etc.) — se aplican recién acá, al aprobar,
@@ -84,7 +104,33 @@ class LeadSuggestionSendService
          * una sugerencia nueva.
          */
         if (! empty($message->pending_actions)) {
+            if ($is_auto_send) {
+                /*
+                 * FIX (prompt 337): Caso B del respaldo automático. Llegar hasta acá ya significa
+                 * que el paquete NO trae agendar_demo ni cancelar_demo (se filtró arriba), así que
+                 * es seguro auto-enviar el texto — pero solo aplicando acciones sin efecto externo.
+                 * Se arma un `final_actions` mínimo que desactiva explícitamente agendar_demo y
+                 * cancelar_demo (por si vinieran igual en el paquete crudo) y fuerza
+                 * enviar_mail_demo=false (el Mail 1 de acceso a la demo nunca sale sin aprobación
+                 * humana, aunque guardar_email haya guardado un email nuevo). El resto de las
+                 * acciones (guardar_nombre, guardar_email, estado_sugerido,
+                 * requiere_intervencion_humana/motivo_intervencion) no se tocan acá: al no venir en
+                 * este array, apply_pending_actions() conserva el valor original de Claude.
+                 */
+                $final_actions = [
+                    'agendar_demo'     => null,
+                    'cancelar_demo'    => false,
+                    'enviar_mail_demo' => false,
+                ];
+            }
+
             $message = app(\App\Services\LeadAiService::class)->apply_pending_actions($message, $final_actions);
+
+            if ($is_auto_send) {
+                // El mensaje salió por WhatsApp sin que nadie lo revisara: Lucas quiere verlo en
+                // la fila roja de la grilla (mismo mecanismo que el Caso A, columna del prompt 301).
+                $this->mark_lead_pending_review($lead);
+            }
         }
 
         $body = $edited_content !== null ? trim($edited_content) : trim((string) $message->content);
@@ -408,5 +454,77 @@ class LeadSuggestionSendService
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return $message->fresh();
+    }
+
+    /**
+     * Caso A del respaldo automático (prompt 337): el paquete de acciones pendientes trae
+     * agendar_demo o cancelar_demo. El texto de Claude confirma (o cancela) un horario al lead, así
+     * que no hay forma segura de enviarlo sin persistir la reserva — se corta el auto-envío entero
+     * y queda en manos de un humano.
+     *
+     * No se envía nada por WhatsApp: el mensaje queda `sugerido` con pending_actions intacto (sigue
+     * aprobable desde el panel). Se limpia el countdown (ai_auto_send_at) y se cancela el token de
+     * respaldo, se marca el lead para revisión, se deja constancia en el hilo, y se notifica a los
+     * admins reutilizando el mismo canal que ya avisa la verificación pendiente de agendamiento.
+     *
+     * @param LeadMessage $message Mensaje `sugerido` con pending_actions de agendamiento.
+     * @param Lead        $lead    Lead dueño del mensaje.
+     *
+     * @return LeadMessage Mismo mensaje, sin cambios de estado (sigue `sugerido`).
+     */
+    private function handle_auto_send_agendamiento_gate(LeadMessage $message, Lead $lead): LeadMessage
+    {
+        // Cancela el token del job (invalida cualquier reintento ya encolado) y limpia
+        // ai_auto_send_at: la burbuja no debe seguir mostrando un countdown que nunca va a disparar.
+        (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
+
+        $this->mark_lead_pending_review($lead);
+
+        // Deja constancia en el hilo del motivo por el que el respaldo no auto-envió este mensaje.
+        (new LeadConversationErrorLogger())->log(
+            (int) $lead->id,
+            'Mensaje de agendamiento sin aprobar',
+            'El respaldo automático no envía este mensaje porque agenda o cancela una demo: requiere aprobación humana desde el panel.'
+        );
+
+        // Mismo canal que ya usa la verificación pendiente de agendamiento (push + WhatsApp a admins
+        // suscritos); no se inventa un canal nuevo para este aviso.
+        try {
+            (new LeadVerificacionAgendamientoNotificationService())->notify($lead, $message);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->error('LeadSuggestionSendService: error al notificar respaldo retenido (Caso A, prompt 337).', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message->id,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        Log::channel('daily')->info('LeadSuggestionSendService: auto-envío de respaldo retenido (Caso A, agendamiento sin aprobar).', [
+            'lead_id'    => $lead->id,
+            'message_id' => $message->id,
+        ]);
+
+        return $message->fresh();
+    }
+
+    /**
+     * Marca el lead como pendiente de revisión (columna del prompt 301), sin pisar una marca
+     * previa. Se usa cuando el respaldo automático actuó sin que nadie lo mirara: Caso A (no se
+     * envió nada, quedó esperando aprobación) y Caso B (se envió, pero sin revisión humana).
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    private function mark_lead_pending_review(Lead $lead): void
+    {
+        if ($lead->pendiente_revision_at !== null) {
+            return;
+        }
+
+        $lead->pendiente_revision_at = now();
+        $lead->save();
     }
 }

@@ -67,12 +67,18 @@ class AutoSendLeadAiSuggestionJob implements ShouldQueue
             return;
         }
 
-        if ($message->requiere_verificacion) {
-            return;
-        }
-
+        /*
+         * FIX (prompt 337): antes de este cambio había acá un `return` que cortaba en seco todo
+         * mensaje de verificación (tramo de agenda) — el resultado era que esos mensajes nunca se
+         * auto-enviaban aunque la burbuja mostrara un countdown ("se envía solo en X"). Ahora el
+         * job SIEMPRE intenta el auto-envío, pero avisándole a send_suggestion() que es un
+         * respaldo automático (4º parámetro $is_auto_send) para que decida caso por caso: si el
+         * paquete de acciones trae agendar_demo/cancelar_demo no se envía nada (Caso A, requiere
+         * aprobación humana); si no, se envía aplicando solo las acciones sin efecto externo
+         * (Caso B). Ver LeadSuggestionSendService::send_suggestion() para el detalle de ambos casos.
+         */
         try {
-            $updated = $send_service->send_suggestion($message);
+            $updated = $send_service->send_suggestion($message, null, null, true);
 
             if ((string) $updated->status === 'enviado') {
                 Log::channel('daily')->info('AutoSendLeadAiSuggestionJob: sugerencia enviada automáticamente por WhatsApp.', [

@@ -56,6 +56,22 @@ class LeadAiSuggestionAutoSendScheduler
             if ($lead && ((bool) $lead->requiere_intervencion_humana === true || (bool) $lead->claude_auto_reply === false)) {
                 return;
             }
+
+            /*
+             * FIX (prompt 337): si el paquete de acciones pendientes trae agendar_demo o
+             * cancelar_demo, el texto de Claude confirma (o cancela) un horario al lead — ese
+             * mensaje espera aprobación humana sí o sí, nunca respaldo automático (ver Caso A de
+             * LeadSuggestionSendService::send_suggestion()). No tiene sentido mostrarle al setter
+             * un countdown ("se envía solo en X") que después el job va a frenar en seco: directo
+             * no se programa nada acá (ni ai_auto_send_at ni el job). El Caso A del job queda
+             * igual como red de seguridad para mensajes que ya hubieran quedado programados antes
+             * de este cambio.
+             */
+            $pending_actions = $message->pending_actions;
+            if (! empty($pending_actions['agendar_demo']) || ! empty($pending_actions['cancelar_demo'])) {
+                return;
+            }
+
             // La config de origen está en minutos (decisión 13/7/2026); se convierte a segundos acá
             // porque el resto del método sigue trabajando con segundos (addSeconds, log, etc).
             $delay_minutes = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_minutes();
