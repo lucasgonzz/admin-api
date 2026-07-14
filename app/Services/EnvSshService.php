@@ -151,8 +151,15 @@ class EnvSshService
         $env_file = $api_path . '/.env';
 
         foreach ($vars_to_update as $key => $value) {
-            /* Escapa el valor nuevo para usarlo de forma segura como reemplazo en sed. */
-            $escaped_value = $this->escape_sed_replacement($value);
+            /*
+             * Formatea el valor antes de escribirlo: si contiene espacios u otros caracteres
+             * especiales, lo envuelve en comillas dobles. Sin esto, phpdotenv rechaza el archivo
+             * completo (ej: MAIL_FROM_NAME=ComercioCity Sistemas → "unexpected whitespace").
+             */
+            $formatted_value = $this->format_env_value((string) $value);
+
+            /* Escapa el valor ya formateado para usarlo de forma segura como reemplazo en sed. */
+            $escaped_value = $this->escape_sed_replacement($formatted_value);
 
             /*
              * Verifica si la key existe en el .env del cliente.
@@ -173,7 +180,7 @@ class EnvSshService
                  * La key no existe: la agrega al final del archivo.
                  * Formato: echo "KEY=valor" >> /path/.env
                  */
-                $append_cmd = 'echo ' . escapeshellarg($key . '=' . $value) . ' >> ' . escapeshellarg($env_file);
+                $append_cmd = 'echo ' . escapeshellarg($key . '=' . $formatted_value) . ' >> ' . escapeshellarg($env_file);
                 $this->ssh->exec($append_cmd);
             }
         }
@@ -221,6 +228,43 @@ class EnvSshService
         }
 
         return $value;
+    }
+
+    /**
+     * Formatea un valor para escribirlo en el .env de manera que phpdotenv pueda parsearlo.
+     *
+     * phpdotenv rechaza el archivo completo si un valor sin comillas contiene espacios u otros
+     * caracteres especiales. Ejemplo real: MAIL_FROM_NAME=ComercioCity Sistemas provocaba
+     * "Failed to parse dotenv file. Encountered unexpected whitespace at [ComercioCity Sistemas]"
+     * y hacía fallar cualquier comando artisan (package:discover, migrate, etc.).
+     *
+     * Reglas:
+     * - Valor vacío → se escribe vacío, sin comillas.
+     * - Valor "simple" (letras, números, _ . - / : @) → se escribe tal cual.
+     * - Cualquier otro valor → se envuelve en comillas dobles, escapando \ y ".
+     *
+     * @param  string  $value  Valor crudo a escribir en el .env.
+     * @return string  Valor listo para escribirse después del signo = .
+     */
+    private function format_env_value(string $value): string
+    {
+        /* Valor vacío: se escribe vacío, sin comillas. */
+        if ($value === '') {
+            return '';
+        }
+
+        /* Valores simples no necesitan comillas. */
+        if (preg_match('/^[A-Za-z0-9_.\-\/:@]+$/', $value) === 1) {
+            return $value;
+        }
+
+        /* Escapa backslashes primero para no doble-escapar las comillas. */
+        $escaped = str_replace('\\', '\\\\', $value);
+
+        /* Escapa comillas dobles internas. */
+        $escaped = str_replace('"', '\\"', $escaped);
+
+        return '"' . $escaped . '"';
     }
 
     /**
