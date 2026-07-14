@@ -550,6 +550,17 @@ class InstallationService
         $this->log('finalize_api', 'Limpiando cache de bootstrap...');
         $this->reconnect_hosting_ssh();
 
+        // bootstrap/cache/ se excluye del ZIP de instalación (step_upload_api) para no
+        // arrastrar caches del VPS de builds. En una instalación desde cero el directorio
+        // no existe todavía en el hosting, y tanto package:discover (acá) como el boot de
+        // Laravel en runtime exigen que esté presente y con permiso de escritura.
+        $this->exec_hosting_ssh(
+            'finalize_api',
+            'cd ' . escapeshellarg($api_path)
+            . ' && mkdir -p bootstrap/cache && chmod 775 bootstrap/cache 2>&1',
+            false
+        );
+
         // rm por shell (no artisan): un config.php cacheado inválido rompería cualquier comando.
         $this->exec_hosting_ssh(
             'finalize_api',
@@ -1371,3 +1382,4 @@ class InstallationService
         return $deployment_log;
     }
 }
+
