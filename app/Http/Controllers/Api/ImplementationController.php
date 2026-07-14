@@ -416,14 +416,23 @@ class ImplementationController extends Controller
          */
         $assigned_admin_id = (int) AdminSetting::get('implementation_assigned_admin_id', 0) ?: null;
 
+        // Modo de automatización por defecto para implementaciones nuevas ('manual' | 'auto').
+        // Se lee de un setting global para poder reactivar la automatización sin deploy (prompt 342).
+        $automation_mode = (string) AdminSetting::get('implementation_automation_mode', 'manual');
+
+        if ($automation_mode !== 'auto') {
+            $automation_mode = 'manual';
+        }
+
         /** Implementación creada con etapa 1 en curso. */
-        $implementation = DB::transaction(function () use ($client, $assigned_admin_id) {
+        $implementation = DB::transaction(function () use ($client, $assigned_admin_id, $automation_mode) {
             $implementation = Implementation::create([
                 'client_id'          => $client->id,
                 'status'             => 'in_progress',
                 'current_stage'      => 1,
                 'started_at'         => now(),
                 'assigned_admin_id'  => $assigned_admin_id,
+                'automation_mode'    => $automation_mode,
             ]);
 
             // Crear las ocho etapas en estado pendiente.
@@ -452,13 +461,16 @@ class ImplementationController extends Controller
         $implementation->save();
 
         // Plantilla de bienvenida por WhatsApp: best-effort, no bloquea la respuesta JSON.
-        try {
-            (new ImplementationConversationService())->send_welcome_template($implementation);
-        } catch (\Throwable $exception) {
-            Log::error('ImplementationController@start: fallo envío plantilla bienvenida.', [
-                'implementation_id' => $implementation->id,
-                'error'             => $exception->getMessage(),
-            ]);
+        // En modo manual la presentación la envía Martín desde el panel (prompt 343).
+        if ($implementation->is_automated()) {
+            try {
+                (new ImplementationConversationService())->send_welcome_template($implementation);
+            } catch (\Throwable $exception) {
+                Log::error('ImplementationController@start: fallo envío plantilla bienvenida.', [
+                    'implementation_id' => $implementation->id,
+                    'error'             => $exception->getMessage(),
+                ]);
+            }
         }
 
         return response()->json([
@@ -665,5 +677,28 @@ class ImplementationController extends Controller
             'result' => $result,
             'model'  => $implementation->fresh()->load(['stages', 'stages.config', 'client', 'messages']),
         ], 200);
+    }
+
+    /**
+     * Cambia el modo de automatización de una implementación ('manual' | 'auto').
+     *
+     * @param Request        $request        Petición con el campo 'automation_mode'.
+     * @param Implementation $implementation Implementación destino.
+     *
+     * @return JsonResponse
+     */
+    public function update_automation_mode(Request $request, Implementation $implementation): JsonResponse
+    {
+        // Solo se aceptan los dos valores válidos; cualquier otro valor se rechaza.
+        $mode = (string) $request->input('automation_mode', '');
+
+        if (! in_array($mode, ['manual', 'auto'], true)) {
+            return response()->json(['message' => 'Modo inválido. Valores permitidos: manual, auto.'], 422);
+        }
+
+        $implementation->automation_mode = $mode;
+        $implementation->save();
+
+        return response()->json(['model' => $implementation->fresh()], 200);
     }
 }

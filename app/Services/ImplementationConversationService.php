@@ -64,6 +64,14 @@ class ImplementationConversationService
      */
     public function handle(Implementation $implementation, array $parsed): void
     {
+        // Modo manual: no se auto-responde nada. El mensaje entrante ya quedó persistido y visible
+        // en el hilo del panel; Martín decide qué responder. Los archivos igual se acumulan en
+        // silencio para que el panel pueda listarlos (sin timer, sin clasificación, sin respuesta).
+        if (! $implementation->is_automated()) {
+            $this->accumulate_inbound_in_manual_mode($implementation, $parsed);
+            return;
+        }
+
         // Etapa actual: determina qué handler ejecutar.
         $current_stage = (int) $implementation->current_stage;
 
@@ -120,6 +128,55 @@ class ImplementationConversationService
             'implementation_id' => $implementation->id,
             'current_stage'     => $current_stage,
         ]);
+    }
+
+    /**
+     * Acumula un mensaje entrante en el data de la etapa activa sin responder nada (modo manual).
+     *
+     * Solo aplica a la Etapa 3 (recolección de archivos): los adjuntos se guardan en
+     * `pending_files` para que el panel de admin los liste. No programa el debounce,
+     * no clasifica con Claude y no envía ningún mensaje.
+     *
+     * @param Implementation       $implementation
+     * @param array<string, mixed> $parsed
+     *
+     * @return void
+     */
+    private function accumulate_inbound_in_manual_mode(Implementation $implementation, array $parsed): void
+    {
+        // Solo interesa acumular archivos, y solo durante la etapa de recolección.
+        if ((int) $implementation->current_stage !== 3) {
+            return;
+        }
+
+        $message_type = (string) ($parsed['type'] ?? 'text');
+
+        if ($message_type !== 'document' && $message_type !== 'image') {
+            return;
+        }
+
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 3)
+            ->first();
+
+        if ($stage === null) {
+            return;
+        }
+
+        $data = is_array($stage->data) ? $stage->data : [];
+
+        $pending_files   = is_array($data['pending_files'] ?? null) ? $data['pending_files'] : [];
+        $pending_files[] = [
+            'filename'    => (string) ($parsed['inbound_media']['filename'] ?? ''),
+            'type'        => (string) ($parsed['inbound_media']['mime'] ?? ''),
+            'url'         => (string) ($parsed['inbound_media']['url'] ?? ''),
+            'received_at' => now()->toISOString(),
+        ];
+
+        $data['pending_files'] = $pending_files;
+
+        $stage->data = $data;
+        $stage->save();
     }
 
     // -------------------------------------------------------------------------
@@ -679,6 +736,18 @@ class ImplementationConversationService
      */
     public function handle_stage_advance(Implementation $implementation, int $new_stage): void
     {
+        // Modo manual: avanzar de etapa no manda ningún mensaje ni dispara jobs automáticos.
+        // Se conserva únicamente el efecto colateral no-comunicacional de la Etapa 2 (crear la
+        // ClientInstallation para que aparezca en el módulo de Instalaciones) — el resto de las
+        // acciones (notificar admin, WhatsApp, jobs de import, etc.) quedan para el panel (prompt 343).
+        if (! $implementation->is_automated()) {
+            if ($new_stage === 2) {
+                $this->ensure_client_installation($implementation);
+            }
+
+            return;
+        }
+
         if ($new_stage === 2) {
             // Etapa 2: instalación manual. Notificar al admin + disparar UserSetup + crear ClientInstallation.
             $client      = $implementation->client ?? Client::find($implementation->client_id);
@@ -689,34 +758,12 @@ class ImplementationConversationService
 
             // Disparar el UserSetup remoto en empresa-api con los datos del formulario de la Etapa 1.
             // No bloquea el flujo si falla (el servicio captura y loguea cualquier error).
+            // Importante: solo se dispara en modo automático (ver ensure_client_installation() para
+            // el comportamiento manual, que no lo llama porque la client_api todavía no existe).
             (new ImplementationUserSetupService())->trigger_user_setup($implementation);
 
             // Crear automáticamente la ClientInstallation para que aparezca en el módulo de Instalaciones.
-            if ($client !== null) {
-                $existing = ClientInstallation::where('client_id', $client->id)->first();
-                if ($existing === null) {
-                    // Usar la versión asignada al cliente; si no tiene, buscar la última publicada.
-                    $version_id = $client->current_version_id;
-                    if (!$version_id) {
-                        $latest_version = \App\Models\Version::where('status', 'published')
-                            ->orderByDesc('id')
-                            ->first();
-                        $version_id = $latest_version ? $latest_version->id : null;
-                    }
-
-                    ClientInstallation::create([
-                        'client_id'     => $client->id,
-                        'client_api_id' => $client->active_client_api_id ?? null,
-                        'version_id'    => $version_id,
-                        'status'        => 'pendiente',
-                    ]);
-
-                    Log::channel('daily')->info('ImplementationConversationService: ClientInstallation creada al avanzar a Etapa 2.', [
-                        'implementation_id' => $implementation->id,
-                        'client_id'         => $client->id,
-                    ]);
-                }
-            }
+            $this->ensure_client_installation($implementation);
 
             return;
         }
@@ -757,6 +804,53 @@ class ImplementationConversationService
             $this->send_stage_opening_message($implementation, 8);
             return;
         }
+    }
+
+    /**
+     * Crea la `ClientInstallation` del cliente si todavía no existe, al entrar a la Etapa 2.
+     *
+     * Efecto colateral no-comunicacional (no manda mensajes ni dispara jobs): se ejecuta
+     * tanto en modo automático como en modo manual, porque es lo que hace aparecer al
+     * cliente en el módulo de Instalaciones para que el equipo pueda instalar el sistema.
+     *
+     * @param Implementation $implementation Implementación que acaba de avanzar a la Etapa 2.
+     *
+     * @return void
+     */
+    private function ensure_client_installation(Implementation $implementation): void
+    {
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+
+        if ($client === null) {
+            return;
+        }
+
+        $existing = ClientInstallation::where('client_id', $client->id)->first();
+
+        if ($existing !== null) {
+            return;
+        }
+
+        // Usar la versión asignada al cliente; si no tiene, buscar la última publicada.
+        $version_id = $client->current_version_id;
+        if (!$version_id) {
+            $latest_version = \App\Models\Version::where('status', 'published')
+                ->orderByDesc('id')
+                ->first();
+            $version_id = $latest_version ? $latest_version->id : null;
+        }
+
+        ClientInstallation::create([
+            'client_id'     => $client->id,
+            'client_api_id' => $client->active_client_api_id ?? null,
+            'version_id'    => $version_id,
+            'status'        => 'pendiente',
+        ]);
+
+        Log::channel('daily')->info('ImplementationConversationService: ClientInstallation creada al avanzar a Etapa 2.', [
+            'implementation_id' => $implementation->id,
+            'client_id'         => $client->id,
+        ]);
     }
 
     /**
@@ -4017,9 +4111,15 @@ class ImplementationConversationService
             return;
         }
 
+        // Modo de automatización de esta implementación: gatea el mensaje de progreso y el
+        // avance automático a la Etapa 2 (prompt 342). En modo manual el formulario solo
+        // marca la etapa 1 como completada; Martín decide desde el panel cuándo avanzar.
+        $is_automated = $implementation->is_automated();
+
         // Marcar el stage 1 como completado ANTES de construir el checklist de progreso:
         // build_progress_body() marca con ✅ las etapas con status === 'completed', y la
-        // etapa 1 debe figurar así apenas se recibe el formulario.
+        // etapa 1 debe figurar así apenas se recibe el formulario. Se hace siempre, en
+        // ambos modos: es la señal que lee el badge "listo para avanzar" del panel.
         $stage_1 = $implementation->stages->first(function ($s) {
             return (int) $s->stage_number === 1;
         });
@@ -4030,29 +4130,37 @@ class ImplementationConversationService
             $stage_1->save();
         }
 
-        // Mensaje de confirmación de recepción del formulario con el checklist de progreso.
-        $body = $this->build_progress_body($implementation, 1);
+        if ($is_automated) {
+            // Mensaje de confirmación de recepción del formulario con el checklist de progreso.
+            $body = $this->build_progress_body($implementation, 1);
 
-        // Enviar el mensaje por WhatsApp.
-        $this->send_outbound($implementation, 1, $phone, $body, null);
+            // Enviar el mensaje por WhatsApp.
+            $this->send_outbound($implementation, 1, $phone, $body, null);
 
-        // Actualizar current_stage a 2 en la implementación.
-        $implementation->current_stage = 2;
-        $implementation->save();
+            // Actualizar current_stage a 2 en la implementación.
+            $implementation->current_stage = 2;
+            $implementation->save();
 
-        // Activar stage 2 en la tabla de etapas.
-        $stage_2 = $implementation->stages->first(function ($s) {
-            return (int) $s->stage_number === 2;
-        });
+            // Activar stage 2 en la tabla de etapas.
+            $stage_2 = $implementation->stages->first(function ($s) {
+                return (int) $s->stage_number === 2;
+            });
 
-        if ($stage_2 !== null && $stage_2->status !== 'completed') {
-            $stage_2->status     = 'in_progress';
-            $stage_2->started_at = now();
-            $stage_2->save();
+            if ($stage_2 !== null && $stage_2->status !== 'completed') {
+                $stage_2->status     = 'in_progress';
+                $stage_2->started_at = now();
+                $stage_2->save();
+            }
+
+            // Disparar acciones automáticas al avanzar a la Etapa 2 (envío de mensaje de instalación).
+            $this->handle_stage_advance($implementation, 2);
+        } else {
+            // Modo manual: la implementación se queda en la Etapa 1 con la etapa completada.
+            // El panel muestra "listo para avanzar" y Martín aprieta "Avanzar etapa" cuando corresponde.
+            Log::channel('daily')->info('ImplementationConversationService: formulario recibido en modo manual — sin mensaje ni avance automático.', [
+                'implementation_id' => $implementation->id,
+            ]);
         }
-
-        // Disparar acciones automáticas al avanzar a la Etapa 2 (envío de mensaje de instalación).
-        $this->handle_stage_advance($implementation, 2);
 
         Log::channel('daily')->info('ImplementationConversationService: handle_form_submitted completado.', [
             'implementation_id' => $implementation->id,

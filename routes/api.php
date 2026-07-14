@@ -387,6 +387,8 @@ Route::prefix('admin')->group(function () {
         Route::post('implementation/{implementation}/advance-stage', [\App\Http\Controllers\Api\ImplementationController::class, 'advance_stage']);
         Route::post('implementation/{implementation}/simulate-inbound', [\App\Http\Controllers\Api\ImplementationController::class, 'simulate_inbound']);
         Route::post('implementation/{implementation}/send-message', [\App\Http\Controllers\Api\ImplementationController::class, 'send_message']);
+        // Cambio de modo de automatización ('manual' | 'auto') — prompt 342.
+        Route::put('implementation/{implementation}/automation-mode', [\App\Http\Controllers\Api\ImplementationController::class, 'update_automation_mode']);
         // Acciones manuales del flujo de implementación (preview + envío) y ventana de 24 h.
         Route::get('implementation/{implementation}/actions', [\App\Http\Controllers\Api\ImplementationController::class, 'actions_state']);
         Route::get('implementation/{implementation}/actions/{action}/preview', [\App\Http\Controllers\Api\ImplementationController::class, 'action_preview']);

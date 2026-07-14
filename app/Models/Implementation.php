@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int         $client_id      Cliente dueño.
  * @property int         $current_stage  Etapa actual (1–8).
  * @property string      $status         pending | in_progress | completed | paused.
+ * @property string      $automation_mode manual | auto. Gatea los puntos de disparo automático (prompt 342).
  * @property string|null $migration_contact_phone Teléfono del responsable de migración.
  * @property string|null $form_token     UUID v4 para acceso público al formulario de configuración.
  * @property \Illuminate\Support\Carbon|null $started_at
@@ -54,6 +55,18 @@ class Implementation extends Model
     public function scopeWithAll($query)
     {
         $query->with(['client', 'stages', 'messages']);
+    }
+
+    /**
+     * Indica si esta implementación ejecuta el flujo automático (mensajes y avances sin intervención).
+     *
+     * Default: false (modo manual — Martín orquesta cada paso desde el panel).
+     *
+     * @return bool
+     */
+    public function is_automated(): bool
+    {
+        return ((string) ($this->automation_mode ?? 'manual')) === 'auto';
     }
 
     /**
