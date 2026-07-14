@@ -129,6 +129,57 @@ class FollowupTemplatesSeeder extends Seeder
                 'template_name' => 'cc_recuperacion_demora_propia',
                 'body_template' => 'Hola {{1}}! Perdoná la demora... se nos pasó tu mensaje y recién lo estoy viendo. ¿Seguís interesado? Si querés lo retomamos justo por donde habíamos quedado.',
             ],
+
+            // ------------------------------------------------------------------
+            // Plantillas MANUAL-ONLY de recuperación de conversación.
+            // estado='manual_recuperacion' es un centinela: no es ningún estado real del
+            // pipeline, así que find_template_for() nunca las selecciona automáticamente.
+            // ------------------------------------------------------------------
+            [
+                'estado'        => 'manual_recuperacion',
+                'dia_numero'    => 2,
+                'template_name' => 'cc_retomamos_conversacion',
+                'body_template' => 'Hola {{1}}! Quedó nuestra conversación por la mitad y no quiero que se pierda. ¿Te parece si la retomamos por donde habíamos quedado?',
+                // activa=false hasta que Meta apruebe la plantilla. Lucas la activa desde el panel
+                // de plantillas (Cuenta > Plantillas de seguimiento) cuando esté aprobada.
+                'activa'        => false,
+            ],
+            [
+                'estado'        => 'manual_recuperacion',
+                'dia_numero'    => 3,
+                'template_name' => 'cc_recuperacion_motivo',
+                // {{2}} = motivo de la demora. Lo redacta Claude leyendo la conversación
+                // (ver LeadRecoveryReasonService, prompt 390) o lo escribe el admin a mano.
+                'body_template' => 'Hola {{1}}! Perdoná la demora en responderte, {{2}}. ¿Retomamos por donde habíamos quedado?',
+                'activa'        => false,
+            ],
+
+            // ------------------------------------------------------------------
+            // Plantillas del ciclo de demo que YA existen y están aprobadas en Meta, pero que
+            // hasta ahora vivían solo hardcodeadas en los Commands (CheckDemoIngress,
+            // CheckDemoFin, CheckDemoFinSeguimiento). Se registran acá con el estado centinela
+            // 'manual_check_demo' ÚNICAMENTE para que el setter las pueda enviar a mano desde el
+            // selector de la conversación cuando la ventana de 24hs ya está cerrada.
+            // Los Commands NO cambian: siguen usando su propia constante TEMPLATE_NAME.
+            // ------------------------------------------------------------------
+            [
+                'estado'        => 'manual_check_demo',
+                'dia_numero'    => 1,
+                'template_name' => 'cc_check_ingreso_demo',
+                'body_template' => '¡Hola {{1}}! ¿Cómo vas? ¿Pudiste entrar a la demo?',
+            ],
+            [
+                'estado'        => 'manual_check_demo',
+                'dia_numero'    => 2,
+                'template_name' => 'cc_check_fin_demo',
+                'body_template' => '¡Hola {{1}}! ¿Pudiste recorrer la demo completa? 😊',
+            ],
+            [
+                'estado'        => 'manual_check_demo',
+                'dia_numero'    => 3,
+                'template_name' => 'cc_check_fin_seguimiento_demo',
+                'body_template' => '¡Hola {{1}}! ¿Pudiste terminar de recorrer la demo?',
+            ],
         ];
 
         foreach ($templates as $row) {

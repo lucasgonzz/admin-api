@@ -48,6 +48,18 @@ class PendingSeedersService
                 },
             ],
             [
+                'class'       => 'FollowupTemplatesSeeder',
+                'description' => 'Plantillas manuales de recuperación de conversación y de chequeo de demo (followup_templates sin cc_recuperacion_motivo)',
+                'is_pending'  => function () {
+                    /*
+                     * Se chequea la fila más nueva del seeder. Si falta, es que el seeder no corrió
+                     * en producción — que es exactamente lo que pasó con cc_recuperacion_demora_propia
+                     * (prompt 303): el código estaba pusheado y la fila nunca llegó a la base.
+                     */
+                    return ! FollowupTemplate::where('template_name', 'cc_recuperacion_motivo')->exists();
+                },
+            ],
+            [
                 'class'       => 'TaskTemplateSeeder',
                 'description' => 'Plantillas de tareas automáticas para el proceso lead → cliente (task_templates vacía)',
                 'is_pending'  => function () {
