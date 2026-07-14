@@ -25,8 +25,9 @@ use phpseclib3\Net\SSH2;
  *   1. compile_spa   — igual a DeploymentService
  *   2. upload_spa    — igual a DeploymentService
  *   3. upload_api    — sin excluir public/ ni storage/ (instalación inicial)
- *   4. write_env     — genera el .env combinando variables comunes + manuales
- *   5. run_user_setup — dispara RunUserSetupService con el lead promovido del cliente
+ *   4. write_env     — genera el .env desde la plantilla base + valores manuales
+ *   5. finalize_api  — corre los scripts de artisan que composer no ejecutó (ya con .env)
+ *   6. run_user_setup — dispara RunUserSetupService con el lead promovido del cliente
  */
 class InstallationService
 {
@@ -75,6 +76,7 @@ class InstallationService
         'upload_spa',
         'upload_api',
         'write_env',
+        'finalize_api',
         'run_user_setup',
     ];
 
@@ -171,6 +173,9 @@ class InstallationService
                     break;
                 case 'write_env':
                     $this->step_write_env();
+                    break;
+                case 'finalize_api':
+                    $this->step_finalize_api();
                     break;
                 case 'run_user_setup':
                     $this->step_run_user_setup();
@@ -371,14 +376,15 @@ class InstallationService
         $this->log('upload_api', 'composer install en VPS completado', 'success');
 
         // ZIP: en instalación inicial NO se excluyen public/ ni storage/.
-        // Solo se excluyen .env (se generará en step_write_env) y vendor/ (se instala vía composer).
+        // Se excluyen .env (se generará en step_write_env), vendor/ (se instala vía composer)
+        // y bootstrap/cache/ (para no arrastrar config/rutas cacheadas del VPS de builds).
         $zip_name      = 'api_install_' . $this->installation->uuid . '.zip';
         $api_zip_remote = $api_build_path . '/' . $zip_name;
         $this->reconnect_build_vps();
         $zip_command = 'cd ' . escapeshellarg($api_build_path)
             . ' && rm -f ' . escapeshellarg($zip_name)
             . ' && zip -r ' . escapeshellarg($zip_name) . ' . '
-            . "--exclude='.env' --exclude='vendor/*' 2>&1";
+            . "--exclude='.env' --exclude='vendor/*' --exclude='bootstrap/cache/*' 2>&1";
         $this->exec_build_ssh('upload_api', $zip_command, true, true);
 
         $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
@@ -410,8 +416,10 @@ class InstallationService
         );
         $this->log('upload_api', 'API descomprimida en el hosting');
 
-        // Corre composer install en el hosting (con scripts; el .env aún no existe, se crea en write_env).
-        $this->log('upload_api', 'Corriendo composer install en hosting...');
+        // Corre composer install en el hosting SIN scripts: el .env todavía no existe (se crea en
+        // step_write_env) y los scripts de post-autoload-dump (artisan package:discover) bootean
+        // Laravel, que revienta sin variables de entorno. Los scripts se corren en step_finalize_api.
+        $this->log('upload_api', 'Corriendo composer install en hosting (sin scripts; el .env aún no existe)...');
         $this->reconnect_hosting_ssh();
         $this->exec_hosting_ssh(
             'upload_api',
@@ -437,9 +445,13 @@ class InstallationService
      * Etapa 4: genera y escribe el .env de la API del cliente en el hosting.
      *
      * Combina (en orden de prioridad):
-     *   a) Variables is_common = true de la tabla env_templates (valor del template base).
+     *   a) TODAS las variables de la tabla env_templates con su valor de plantilla base.
      *   b) Variables is_manual_on_create = true cuyos valores vienen de installation->env_manual_values.
      *   c) APP_URL generada automáticamente desde la URL de la ClientApi.
+     *
+     * Importante: NO se filtra por is_common. Ese flag significa "se contrasta con los clientes al
+     * actualizar" (ver EnvTemplate), no "se escribe en el .env". Filtrar por is_common dejaba fuera
+     * todo el grupo app (APP_NAME, APP_ENV, APP_KEY, APP_DEBUG), generando un .env inservible.
      *
      * Si el archivo .env no existe aún en el hosting, lo crea con touch antes de escribir.
      *
@@ -449,12 +461,12 @@ class InstallationService
     {
         $this->log('write_env', 'Generando .env para la instalación inicial...');
 
-        // a) Variables comunes del template base.
-        $common_templates = EnvTemplate::where('is_common', true)->get();
+        // a) Plantilla base completa, ordenada por grupo y posición.
+        $base_templates = EnvTemplate::orderBy('group')->orderBy('sort_order')->get();
 
         // Array KEY => valor que se escribirá en el .env.
         $vars_to_write = [];
-        foreach ($common_templates as $template) {
+        foreach ($base_templates as $template) {
             $vars_to_write[$template->key] = (string) ($template->value ?? '');
         }
 
@@ -495,7 +507,72 @@ class InstallationService
     }
 
     /**
-     * Etapa 5: dispara el user-setup inicial usando el lead promovido del cliente.
+     * Etapa 5: ejecuta en el hosting los comandos de artisan que composer no corrió.
+     *
+     * composer install se ejecuta con --no-scripts porque en ese momento todavía no hay .env
+     * (ver build_composer_install_command). Recién acá, con el .env ya escrito, se puede bootear
+     * Laravel: se limpia el cache de bootstrap, se regenera el manifest de paquetes descubiertos
+     * (bootstrap/cache/packages.php y services.php) y se crea el symlink de storage.
+     *
+     * @return void
+     * @throws \RuntimeException Si package:discover falla (la API no podría bootear).
+     */
+    private function step_finalize_api()
+    {
+        $api_path = $this->get_api_path();
+
+        $this->log('finalize_api', 'Limpiando cache de bootstrap...');
+        $this->reconnect_hosting_ssh();
+
+        // rm por shell (no artisan): un config.php cacheado inválido rompería cualquier comando.
+        $this->exec_hosting_ssh(
+            'finalize_api',
+            'cd ' . escapeshellarg($api_path)
+            . ' && rm -f bootstrap/cache/config.php bootstrap/cache/routes-*.php'
+            . ' bootstrap/cache/packages.php bootstrap/cache/services.php 2>&1',
+            false
+        );
+
+        // Regenera el manifest de paquetes: es lo que composer habría hecho en post-autoload-dump.
+        $this->log('finalize_api', 'Ejecutando artisan package:discover...');
+        $discover_output = $this->exec_hosting_ssh(
+            'finalize_api',
+            'cd ' . escapeshellarg($api_path) . ' && php artisan package:discover --no-ansi 2>&1',
+            true,
+            true
+        );
+        $this->log('finalize_api', $this->truncate_for_log($discover_output));
+        $this->log('finalize_api', 'Paquetes descubiertos correctamente', 'success');
+
+        // Symlink public/storage -> storage/app/public. Solo en instalación inicial.
+        // No es crítico: si ya existe, artisan devuelve error y no se corta la instalación.
+        $this->log('finalize_api', 'Creando symlink de storage...');
+        $storage_link_output = $this->exec_hosting_ssh(
+            'finalize_api',
+            'cd ' . escapeshellarg($api_path) . ' && php artisan storage:link --no-ansi 2>&1',
+            false
+        );
+        $this->log('finalize_api', $this->truncate_for_log($storage_link_output));
+
+        // Limpieza final de caches de aplicación.
+        $clear_commands = [
+            'config:clear',
+            'cache:clear',
+            'view:clear',
+            'route:clear',
+        ];
+        foreach ($clear_commands as $clear_command) {
+            $this->exec_hosting_ssh(
+                'finalize_api',
+                'cd ' . escapeshellarg($api_path) . ' && php artisan ' . $clear_command . ' --no-ansi 2>&1',
+                false
+            );
+        }
+        $this->log('finalize_api', 'API finalizada y lista para bootear', 'success');
+    }
+
+    /**
+     * Etapa 6: dispara el user-setup inicial usando el lead promovido del cliente.
      *
      * Busca el Lead que tiene promoted_client_id = client->id y delega en RunUserSetupService.
      *
@@ -1154,19 +1231,23 @@ class InstallationService
     /**
      * Arma el comando composer install para un directorio remoto.
      *
+     * En instalación inicial SIEMPRE se usa --no-scripts, tanto en el VPS de builds como en el
+     * hosting del cliente: en ninguno de los dos existe un .env al momento de correr composer, y
+     * el script post-autoload-dump (artisan package:discover) bootea Laravel y falla sin entorno.
+     * Los comandos de artisan se ejecutan después, en step_finalize_api(), ya con el .env escrito.
+     *
      * @param  string  $work_dir
-     * @param  bool    $skip_scripts  true en VPS de build; false en hosting del cliente
+     * @param  bool    $is_vps  true en VPS de builds (envuelve el comando); false en hosting
      * @return string
      */
-    private function build_composer_install_command(string $work_dir, bool $skip_scripts): string
+    private function build_composer_install_command(string $work_dir, bool $is_vps): string
     {
         $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
         $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
             . escapeshellarg($composer_bin)
-            . ' install --no-dev --optimize-autoloader --no-interaction --no-ansi';
-        if ($skip_scripts) {
-            $flags .= ' --no-scripts';
+            . ' install --no-dev --optimize-autoloader --no-interaction --no-ansi --no-scripts';
 
+        if ($is_vps) {
             return $this->build_vps_command($work_dir, $flags);
         }
 
