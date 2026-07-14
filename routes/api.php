@@ -186,6 +186,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
         Route::post('lead/{id}/send-direct-message', [LeadController::class, 'send_direct_message_json']);
         Route::post('lead/{lead_id}/send-template', [LeadController::class, 'send_template_json']);
+        Route::post('lead/{lead_id}/suggest-recovery-reason', [LeadController::class, 'suggest_recovery_reason_json']);
         Route::post('lead/{id}/send-direct-audio', [LeadController::class, 'send_direct_audio_json']);
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);

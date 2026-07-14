@@ -19,6 +19,7 @@ use App\Events\LeadAiSuggestionFinished;
 use App\Events\LeadAiSuggestionGenerating;
 use App\Services\LeadAiService;
 use App\Services\LeadConversationErrorLogger;
+use App\Services\LeadRecoveryReasonService;
 use App\Services\WhatsappSendService;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadAiSuggestionScheduler;
@@ -2662,6 +2663,23 @@ class LeadController extends Controller
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Sugiere con IA el motivo de la demora ({{2}} de cc_recuperacion_motivo),
+     * leyendo la conversación real del lead.
+     *
+     * Nunca falla: si Anthropic no responde, el servicio devuelve un motivo genérico.
+     *
+     * @param  int|string                 $lead_id
+     * @param  LeadRecoveryReasonService  $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function suggest_recovery_reason_json($lead_id, LeadRecoveryReasonService $service)
+    {
+        $lead = Lead::query()->findOrFail($lead_id);
+
+        return response()->json(['motivo' => $service->suggest($lead)], 200);
     }
 
     /**
