@@ -327,7 +327,17 @@ class RunUserSetupService
     }
 
     /**
-     * Resuelve la URL del empresa-api productivo: primero Client.api_url, luego lead.api_url (legacy).
+     * Resuelve la URL del empresa-api productivo del cliente.
+     *
+     * Orden de prioridad (de más a menos confiable):
+     *   1. $client->active_client_api->url — la ClientApi activa del cliente, fuente actual
+     *      de verdad (tabla client_apis + clients.active_client_api_id).
+     *   2. $client->api_url — columna legacy en clients, se mantiene por compatibilidad
+     *      con clientes que todavía no migraron a client_apis.
+     *   3. $lead->api_url — legacy del flujo viejo de promoción de leads.
+     *
+     * Devuelve la primera no vacía. PHP 7.4: no se usa el operador nullsafe (?->),
+     * se valida con !== null antes de acceder a ->url.
      *
      * @param Lead   $lead
      * @param Client $client
@@ -336,12 +346,22 @@ class RunUserSetupService
      */
     protected function resolve_production_api_url(Lead $lead, Client $client)
     {
+        // 1) ClientApi activa del cliente (relación active_client_api definida en Client.php).
+        $active_client_api = $client->active_client_api;
+        if ($active_client_api !== null) {
+            $active_api_url = rtrim(trim((string) ($active_client_api->url ?? '')), '/');
+            if ($active_api_url !== '') {
+                return $active_api_url;
+            }
+        }
+
+        // 2) Columna legacy en clients.api_url.
         $client_url = rtrim(trim((string) ($client->api_url ?? '')), '/');
         if ($client_url !== '') {
             return $client_url;
         }
 
-        // Compatibilidad con leads promovidos por el flujo antiguo que guardaban api_url en el lead.
+        // 3) Compatibilidad con leads promovidos por el flujo antiguo que guardaban api_url en el lead.
         return rtrim(trim((string) ($lead->api_url ?? '')), '/');
     }
 

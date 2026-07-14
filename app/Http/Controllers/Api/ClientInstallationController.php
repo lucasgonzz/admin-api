@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Jobs\RunClientInstallationJob;
 use App\Models\Client;
+use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
@@ -79,6 +80,82 @@ class ClientInstallationController extends Controller
         ]);
 
         // Recarga con relaciones para devolver al frontend.
+        $installation->load(['client', 'client_api', 'version', 'deployment_logs']);
+
+        return response()->json(['model' => $installation], 201);
+    }
+
+    /**
+     * Crea una nueva instalación en estado 'pendiente' desde la raíz del módulo de
+     * instalaciones (Installations.vue), sin pasar por la pestaña del cliente.
+     *
+     * A diferencia de store(), acá el cliente, la API destino y la versión se reciben
+     * explícitamente en el request (con fallback a los valores activos del cliente si
+     * no se informan), en vez de asumir siempre la API activa y la última versión.
+     *
+     * @param  Request  $request  { client_id, client_api_id?, version_id? }
+     * @return JsonResponse  { model: ClientInstallation } o { error: string } (422)
+     */
+    public function store_global(Request $request): JsonResponse
+    {
+        // Validación de entrada: client_id obligatorio y debe existir; client_api_id y
+        // version_id son opcionales (se resuelven con fallback más abajo).
+        $request->validate([
+            'client_id'     => 'required|integer|exists:clients,id',
+            'client_api_id' => 'nullable|integer',
+            'version_id'    => 'nullable|integer',
+        ]);
+
+        // Cliente destino de la nueva instalación.
+        $client = Client::findOrFail($request->input('client_id'));
+
+        // Resuelve client_api_id: el del request si viene y pertenece al cliente; si no,
+        // el que tenga activo el cliente en su perfil.
+        $client_api_id = $request->input('client_api_id');
+        if ($client_api_id !== null) {
+            // No confiar en el client_id que venga en el request: se valida contra la
+            // ClientApi real que corresponde al client_api_id recibido.
+            $client_api = ClientApi::find($client_api_id);
+            if ($client_api === null || (int) $client_api->client_id !== (int) $client->id) {
+                return response()->json([
+                    'error' => 'La API indicada no pertenece al cliente seleccionado.',
+                ], 422);
+            }
+        } else {
+            $client_api_id = $client->active_client_api_id;
+        }
+
+        if (empty($client_api_id)) {
+            return response()->json([
+                'error' => 'El cliente no tiene API destino: informala en el request o cargá una API activa en su perfil.',
+            ], 422);
+        }
+
+        // Resuelve version_id: la del request si viene; si no, la última versión publicada
+        // (misma lógica que store()).
+        $version_id = $request->input('version_id');
+        if ($version_id === null) {
+            $latest_version = Version::where('status', 'published')
+                ->orderByDesc('id')
+                ->first();
+            $version_id = $latest_version ? $latest_version->id : null;
+        }
+
+        if (empty($version_id)) {
+            return response()->json([
+                'error' => 'No hay versión para instalar: informala en el request o publicá una versión primero.',
+            ], 422);
+        }
+
+        // Crea la instalación con estado inicial 'pendiente'.
+        $installation = ClientInstallation::create([
+            'client_id'     => $client->id,
+            'client_api_id' => $client_api_id,
+            'version_id'    => $version_id,
+            'status'        => 'pendiente',
+        ]);
+
+        // Recarga con relaciones para devolver al frontend (mismo shape que store()).
         $installation->load(['client', 'client_api', 'version', 'deployment_logs']);
 
         return response()->json(['model' => $installation], 201);

@@ -430,6 +430,9 @@ Route::prefix('admin')->group(function () {
 
         // Instalaciones iniciales de sistema para clientes.
         Route::get('installations', [ClientInstallationController::class, 'index_all']);
+        // Creación global: cliente, API destino y versión se reciben explícitos en el body
+        // (a diferencia de clients/{client}/installations, que fuerza la API activa y la última versión).
+        Route::post('installations', [ClientInstallationController::class, 'store_global']);
         Route::get('clients/{client}/installations', [ClientInstallationController::class, 'index']);
         Route::post('clients/{client}/installations', [ClientInstallationController::class, 'store']);
         Route::get('client-installations/{installation}', [ClientInstallationController::class, 'show']);

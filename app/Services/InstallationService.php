@@ -8,7 +8,6 @@ use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
-use App\Models\Lead;
 use Illuminate\Support\Collection;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
@@ -18,8 +17,16 @@ use phpseclib3\Net\SSH2;
  *
  * A diferencia de DeploymentService (actualizaciones), este servicio instala
  * desde cero: no requiere versión previa, no corre migraciones de actualización,
- * sino que sube el código completo (public/ y storage/ incluidos), escribe el
- * .env desde la plantilla base + valores manuales, y dispara el user-setup inicial.
+ * sino que sube el código completo (public/ y storage/ incluidos) y escribe el
+ * .env desde la plantilla base + valores manuales.
+ *
+ * Importante: esta instalación deja el SPA y la API instalados y booteando,
+ * nada más. El user-setup (alta del User inicial en empresa-api) NO forma parte
+ * de este pipeline: es un paso posterior y manual que se dispara desde el módulo
+ * de Leads (RunUserSetupService), una vez confirmado que la instalación quedó
+ * completa. Antes el user-setup era la etapa 6 y su fallo marcaba toda la
+ * instalación como 'fallida' aunque el sistema hubiera quedado perfectamente
+ * instalado — por eso se sacó del pipeline.
  *
  * Pipeline de pasos en orden:
  *   1. compile_spa   — igual a DeploymentService
@@ -27,7 +34,6 @@ use phpseclib3\Net\SSH2;
  *   3. upload_api    — sin excluir public/ ni storage/ (instalación inicial)
  *   4. write_env     — genera el .env desde la plantilla base + valores manuales
  *   5. finalize_api  — corre los scripts de artisan que composer no ejecutó (ya con .env)
- *   6. run_user_setup — dispara RunUserSetupService con el lead promovido del cliente
  */
 class InstallationService
 {
@@ -77,7 +83,8 @@ class InstallationService
         'upload_api',
         'write_env',
         'finalize_api',
-        'run_user_setup',
+        // 'run_user_setup' eliminado del pipeline (prompt 396): el user-setup es un paso
+        // posterior y manual disparado desde el módulo de Leads, no parte de la instalación.
     ];
 
     /**
@@ -176,9 +183,6 @@ class InstallationService
                     break;
                 case 'finalize_api':
                     $this->step_finalize_api();
-                    break;
-                case 'run_user_setup':
-                    $this->step_run_user_setup();
                     break;
             }
         }
@@ -591,51 +595,6 @@ class InstallationService
             );
         }
         $this->log('finalize_api', 'API finalizada y lista para bootear', 'success');
-    }
-
-    /**
-     * Etapa 6: dispara el user-setup inicial usando el lead promovido del cliente.
-     *
-     * Busca el Lead que tiene promoted_client_id = client->id y delega en RunUserSetupService.
-     *
-     * @return void
-     */
-    private function step_run_user_setup()
-    {
-        $this->log('run_user_setup', 'Buscando lead promovido del cliente...');
-
-        $client = $this->installation->client;
-
-        // Lead promovido: el que tiene promoted_client_id apuntando a este cliente.
-        $lead = \App\Models\Lead::where('promoted_client_id', $client->id)->first();
-
-        if ($lead === null) {
-            $this->log(
-                'run_user_setup',
-                'No se encontró lead promovido para el cliente. Se omite el user-setup.',
-                'info'
-            );
-            return;
-        }
-
-        $this->log('run_user_setup', "Lead encontrado: #{$lead->id} — {$lead->business_name}");
-
-        try {
-            $run_user_setup_service = new RunUserSetupService();
-            $result_lead = $run_user_setup_service->run($lead);
-
-            // RunUserSetupService actualiza user_setup_status en el lead.
-            if ($result_lead->user_setup_status === 'exitoso') {
-                $this->log('run_user_setup', 'User-setup completado exitosamente', 'success');
-            } else {
-                $error = $result_lead->user_setup_last_error ?? 'Estado desconocido';
-                $this->log('run_user_setup', "User-setup falló: {$error}", 'error');
-                throw new \RuntimeException("User-setup falló: {$error}");
-            }
-        } catch (\Throwable $e) {
-            $this->log('run_user_setup', 'Error en user-setup: ' . $e->getMessage(), 'error');
-            throw $e;
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
