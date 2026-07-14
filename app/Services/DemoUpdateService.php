@@ -6,7 +6,6 @@ use App\Models\ClientSshCredential;
 use App\Models\Demo;
 use App\Models\DemoUpdate;
 use App\Models\Version;
-use Illuminate\Support\Facades\Http;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
 
@@ -14,10 +13,13 @@ use phpseclib3\Net\SSH2;
  * Ejecuta el pipeline completo de actualización de una demo en hosting compartido.
  *
  * Pipeline de etapas:
- *   1. step_compile_spa()    — checkout en VPS + npm ci + npm run build
- *   2. step_upload_spa()     — zip dist/ → sftp download → sftp upload al hosting
- *   3. step_upload_api()     — checkout en VPS + composer install + zip → sftp → hosting
- *   4. step_run_demo_setup() — HTTP POST al endpoint admin-sync/demo-setup de la demo
+ *   1. step_compile_spa()     — checkout en VPS + npm ci + npm run build
+ *   2. step_upload_spa()      — zip dist/ → sftp download → sftp upload al hosting
+ *   3. step_upload_api()      — checkout en VPS + composer install + zip → sftp → hosting
+ *   4. step_run_migrations()  — limpia caché de Laravel + `php artisan migrate --force` en el hosting
+ *
+ * El demo-setup NO forma parte de este pipeline (decisión del 14/7/2026): corre `migrate:fresh`
+ * y vaciaría la base de la demo. Se dispara solo desde el módulo de Leads.
  *
  * Los helpers SSH/SFTP están copiados de DeploymentService para que este service
  * sea completamente autónomo (sin dependencia de herencia).
@@ -112,7 +114,7 @@ class DemoUpdateService
             $this->step_compile_spa();
             $this->step_upload_spa();
             $this->step_upload_api();
-            $this->step_run_demo_setup();
+            $this->step_run_migrations();
 
             // Pipeline exitoso: actualizar timestamps y estado.
             $this->demo_update->status      = 'completado';
@@ -409,33 +411,63 @@ class DemoUpdateService
     }
 
     /**
-     * Etapa 4: Dispara el endpoint admin-sync/demo-setup en la API de la demo
-     * para que se ejecute el pipeline de reset/setup de datos.
-     * Lanza excepción si la respuesta HTTP no es exitosa.
+     * Etapa 4: limpia el caché de Laravel y corre las migraciones pendientes en el API de la demo.
+     *
+     * IMPORTANTE (14/7/2026): esta etapa reemplazó a step_run_demo_setup(). El demo-setup NUNCA
+     * corre como parte de una actualización de demo: DemoSetupHelper::run() arranca con
+     * `migrate:fresh`, o sea que vaciaría la base de la demo entera en cada actualización. El
+     * demo-setup se dispara exclusivamente desde el módulo de Leads, cuando corresponde para cada
+     * lead.
+     *
+     * Pero subir código nuevo sin migrar deja el schema viejo, y cualquier versión con migraciones
+     * pendientes rompe la demo (columna inexistente → 500 en cualquier request). Por eso el
+     * pipeline sí corre migraciones: actualizar demo = código + schema. Los datos son problema del
+     * demo-setup.
+     *
+     * `migrate --force` es incremental y no destructivo: solo aplica las migraciones que faltan.
      *
      * @return void
      */
-    private function step_run_demo_setup(): void
+    private function step_run_migrations(): void
     {
-        $erp_api_url = rtrim((string) $this->demo->erp_api_url, '/');
-        $endpoint    = $erp_api_url . '/api/admin-sync/demo-setup';
-        $this->append_log("[run_demo_setup] POST {$endpoint}");
+        // Path del API de la demo en hosting compartido, con el mismo criterio que step_upload_api().
+        $slug     = $this->slug_from_url((string) $this->demo->erp_spa_url);
+        $api_path = "domains/comerciocity.com/public_html/{$slug}/api";
 
-        // Payload vacío: en este contexto no hay Lead, el endpoint trabaja solo.
-        $response = Http::withHeaders(['Accept' => 'application/json'])
-            ->timeout((int) config('services.client_api.timeout', 15) * 20)
-            ->post($endpoint, []);
+        // step_upload_api() termina con reconnect_build_vps(), así que la sesión SSH activa
+        // al cerrar esa etapa es la del VPS, no la del hosting: hay que reconectar acá.
+        $this->connect_hosting_ssh();
 
-        $body = $response->body();
-        $this->append_log('[run_demo_setup] HTTP ' . $response->status() . ': ' . substr($body, 0, 500));
-
-        if (! $response->successful()) {
-            throw new \RuntimeException(
-                'Error en demo-setup: HTTP ' . $response->status() . ' — ' . substr($body, 0, 300)
+        // El caché de config/rutas/vistas apunta al código viejo: limpiarlo antes de migrar.
+        $this->append_log('[run_migrations] Limpiando caché de Laravel...');
+        $clear_commands = [
+            'config:clear',
+            'cache:clear',
+            'view:clear',
+            'route:clear',
+        ];
+        foreach ($clear_commands as $clear_command) {
+            // must_succeed = false: un caché ya inexistente hace que artisan devuelva error y no es
+            // motivo para abortar una actualización que por lo demás salió bien.
+            $this->exec_hosting_ssh(
+                'run_migrations',
+                'cd ' . escapeshellarg($api_path) . ' && php artisan ' . $clear_command . ' --no-ansi 2>&1',
+                false
             );
         }
+        $this->append_log('[run_migrations] Caché limpiado');
 
-        $this->append_log('[run_demo_setup] Demo setup completado exitosamente');
+        // must_succeed = true: si una migración falla, la demo queda con schema roto y el
+        // DemoUpdate tiene que marcarse como fallido. long_running = true: una migración pesada
+        // puede superar el timeout estándar de 10s de phpseclib.
+        $this->append_log('[run_migrations] Corriendo migraciones pendientes...');
+        $this->exec_hosting_ssh(
+            'run_migrations',
+            'cd ' . escapeshellarg($api_path) . ' && php artisan migrate --force --no-ansi 2>&1',
+            true,
+            true
+        );
+        $this->append_log('[run_migrations] Migraciones completadas');
     }
 
     // =========================================================================

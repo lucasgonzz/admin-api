@@ -12,7 +12,9 @@ use Illuminate\Queue\SerializesModels;
 
 /**
  * Job en cola que ejecuta el pipeline completo de actualización de una demo:
- * compilación del SPA, subida del SPA, subida del API y demo-setup remoto.
+ * compilación del SPA, subida del SPA, subida del API y migraciones en el hosting.
+ *
+ * El demo-setup NO forma parte de este pipeline: se dispara desde el módulo de Leads.
  */
 class RunDemoUpdateJob implements ShouldQueue
 {
