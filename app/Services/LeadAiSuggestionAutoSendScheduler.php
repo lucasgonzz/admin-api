@@ -77,7 +77,11 @@ class LeadAiSuggestionAutoSendScheduler
             $delay_minutes = LeadWhatsappOnboardingSettings::get_verificacion_agendamiento_auto_send_delay_minutes();
             $delay_seconds = $delay_minutes * 60;
         } else {
-            $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds();
+            // Sin verificación = envío inmediato, sin demora. Se eliminó la demora general de auto-envío
+            // (decisión de Lucas, 15/7/2026): la única demora del sistema es la de los mensajes que
+            // requieren verificación (rama de arriba, en minutos). El bloque `if ($delay_seconds <= 0)`
+            // de más abajo despacha el envío inmediato.
+            $delay_seconds = 0;
         }
         $message_id = (int) $message->id;
         $auto_send_token = $this->bump_auto_send_token($message_id);

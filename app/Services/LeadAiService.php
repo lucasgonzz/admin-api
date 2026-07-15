@@ -2246,18 +2246,15 @@ TXT;
          *   1. El tramo de agenda lo exige (comportamiento histórico, ver
          *      requires_agendamiento_verification_gate()).
          *   2. Claude pidió verificación explícita en su propia respuesta (requiere_verificacion: true).
-         *   3. La demora general de auto-envío está configurada > 0 (KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS
-         *      en LeadWhatsappOnboardingSettings): si CUALQUIER mensaje va a esperar ese timer antes
-         *      de salir, también debe diferir sus acciones para que el admin pueda revisarlas/editarlas
-         *      antes de que surtan efecto. Hoy esa demora está en 0 (envío inmediato), así que esta
-         *      condición no aplica en producción salvo que Lucas la suba.
+         *   3. El lead tiene requiere_verificacion_mensajes = true (toggle por-lead / auto-encendido al
+         *      entrar al tramo de agenda, ver Lead::booted, prompt 406).
          *
          * Si ninguna aplica, el mensaje se envía de inmediato y aplica sus acciones en el acto,
          * como siempre (apply_parsed_response()).
          */
         $retenido_para_verificacion = $this->requires_agendamiento_verification_gate($lead, $parsed)
             || ! empty($parsed['requiere_verificacion'])
-            || LeadWhatsappOnboardingSettings::get_ai_suggestion_auto_send_delay_seconds() > 0;
+            || (bool) $lead->requiere_verificacion_mensajes;
 
         if ($retenido_para_verificacion) {
             return $this->create_pending_agendamiento_message($lead, $parsed, $is_followup, $calendar_snapshot);
@@ -3344,15 +3341,15 @@ TXT;
          * corresponde volver a marcarlo como pendiente de verificación (ver apply_pending_actions()).
          */
         /*
-         * Regla de negocio (1/7/2026, ampliada 6/7/2026): en el tramo de agenda —y en general una
-         * vez que el lead salió de la zona automática (nuevo/contactado/calificado)— todo mensaje
-         * requiere revisión humana antes de salir. Se fuerza sin importar lo que haya devuelto
-         * Claude en su propio campo requiere_verificacion. La segunda condición cubre estados
-         * manuales fuera del tramo de agenda (closer_activo en adelante, o cualquier estado
-         * avanzado) que no pasan por el gate de diferimiento.
+         * Regla de negocio (actualizada 15/7/2026, prompt 407): la verificación ya no depende de si
+         * el lead salió de la "zona automática" por estado. Ahora la maneja el flag por-lead
+         * requiere_verificacion_mensajes (toggle manual / auto-encendido al entrar al tramo de
+         * agenda, ver Lead::booted, prompt 406), sumado al tramo de agenda propiamente dicho
+         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), que sigue forzando verificación como
+         * respaldo del gate de agendamiento.
          */
-        $lead_en_zona_automatica = in_array((string) $lead->status, ['nuevo', 'contactado', 'calificado'], true);
-        if (! $for_approval && (in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true) || ! $lead_en_zona_automatica)) {
+        if (! $for_approval && ((bool) $lead->requiere_verificacion_mensajes
+            || in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true))) {
             $req_verif = true;
         }
 

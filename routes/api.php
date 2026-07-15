@@ -194,6 +194,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
         Route::post('lead/{id}/toggle-claude-auto-reply', [LeadController::class, 'toggle_claude_auto_reply_json']);
         Route::post('lead/{id}/toggle-requiere-intervencion-humana', [LeadController::class, 'toggle_requiere_intervencion_humana_json']);
+        Route::post('lead/{id}/toggle-requiere-verificacion-mensajes', [LeadController::class, 'toggle_requiere_verificacion_mensajes_json']);
         Route::post('lead/{id}/mark-followup-suggestion-seen', [LeadController::class, 'mark_followup_suggestion_seen_json']);
         Route::post('lead/{id}/mark-whatsapp-messages-read', [LeadController::class, 'mark_whatsapp_messages_read_json']);
         Route::post('lead/{id}/send-demo-reminder', [LeadController::class, 'send_demo_reminder_json']);

@@ -1624,6 +1624,25 @@ class LeadController extends Controller
     }
 
     /**
+     * Activa o desactiva la verificación de mensajes del lead. Cuando está en true, todo mensaje que
+     * arme Claude para este lead se retiene para verificación humana antes de enviarse, en cualquier
+     * estado. Cuando está en false, los mensajes se envían al instante. Se auto-enciende al entrar al
+     * tramo de agenda (ver Lead::booted, prompt 406); acá se lo prende/apaga a mano desde el header.
+     *
+     * @param int|string $id
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_requiere_verificacion_mensajes_json($id)
+    {
+        $lead = Lead::query()->with('messages')->findOrFail($id);
+
+        $lead->requiere_verificacion_mensajes = ! (bool) $lead->requiere_verificacion_mensajes;
+        $lead->save();
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Marca un mensaje sugerido como aprobado (listo para enviar por el setter).
      *
      * @param int|string $message_id
