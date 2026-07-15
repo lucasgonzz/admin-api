@@ -29,16 +29,12 @@ class LeadWhatsappOnboardingSettings
     /** Clave: segundos de inactividad del lead antes de pedir sugerencia a Claude (debounce). */
     public const KEY_AI_SUGGESTION_DELAY_SECONDS = 'lead_whatsapp_ai_suggestion_delay_seconds';
 
-    /** Clave: segundos hasta enviar automáticamente una sugerencia no confirmada (0 = envío inmediato). */
-    public const KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS = 'lead_whatsapp_ai_suggestion_auto_send_delay_seconds';
-
     /**
-     * Clave: MINUTOS hasta enviar automáticamente una sugerencia con requiere_verificacion=true
-     * cuando el lead está en el tramo de coordinación de agenda (solicita_disponibilidad hasta
-     * demo_pendiente_de_terminar). Separada de KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS porque
-     * ese campo explícitamente NO aplica a mensajes que requieren verificación — este es un
-     * mecanismo de auto-envío distinto, pensado como red de seguridad si Martín no llega a
-     * revisar a tiempo, no como comportamiento default.
+     * Clave: MINUTOS hasta enviar automáticamente una sugerencia con requiere_verificacion=true.
+     * Es la ÚNICA demora de auto-envío que existe en el sistema: aplica a todo mensaje que
+     * requiere verificación, ya sea por el flag `requiere_verificacion_mensajes` del lead, por
+     * estar en el tramo de coordinación de agenda, o por `requiere_verificacion` devuelto por
+     * Claude. Sin verificación, el envío es inmediato (no hay demora que configurar).
      *
      * Decisión de Lucas (13/7/2026): esta es la ÚNICA demora de esta clase que se mide en
      * minutos (antes en segundos, ver migración 2026_07_13_110000). El resto sigue en segundos.
@@ -78,9 +74,6 @@ class LeadWhatsappOnboardingSettings
     /** Demora por defecto antes de pedir sugerencia IA tras mensajes del lead (segundos). */
     private const DEFAULT_AI_SUGGESTION_DELAY_SECONDS = 60;
 
-    /** Demora por defecto antes de enviar automáticamente una sugerencia pendiente (0 = envío inmediato). */
-    private const DEFAULT_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS = 120;
-
     /**
      * Demora por defecto antes de enviar automáticamente una sugerencia que requiere verificación
      * en el tramo de coordinación de agenda, si nadie la revisó a tiempo (minutos). 30 minutos.
@@ -96,11 +89,6 @@ class LeadWhatsappOnboardingSettings
     public const AI_SUGGESTION_DELAY_MIN_SECONDS = 0;
 
     public const AI_SUGGESTION_DELAY_MAX_SECONDS = 3600;
-
-    /** Mínimo y máximo para auto-envío de sugerencias (0 = envío inmediato sin espera humana). */
-    public const AUTO_SEND_DELAY_MIN_SECONDS = 0;
-
-    public const AUTO_SEND_DELAY_MAX_SECONDS = 3600;
 
     /** Mínimo para auto-envío en tramo de agendamiento, en minutos (0 = inmediato). Sin tope superior. */
     public const VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_MINUTES = 0;
@@ -119,7 +107,6 @@ class LeadWhatsappOnboardingSettings
             'welcome_message_without_name' => self::get_welcome_message_without_name(),
             'welcome_delay_seconds'        => self::get_welcome_delay_seconds(),
             'ai_suggestion_delay_seconds'         => self::get_ai_suggestion_delay_seconds(),
-            'ai_suggestion_auto_send_delay_seconds' => self::get_ai_suggestion_auto_send_delay_seconds(),
             'verificacion_agendamiento_auto_send_delay_minutes' => self::get_verificacion_agendamiento_auto_send_delay_minutes(),
             'placeholder_nombre'                  => self::PLACEHOLDER_NOMBRE,
         ];
@@ -140,10 +127,6 @@ class LeadWhatsappOnboardingSettings
         AdminSetting::set(self::KEY_WELCOME_WITHOUT_NAME, trim((string) $data['welcome_message_without_name']));
         AdminSetting::set(self::KEY_WELCOME_DELAY_SECONDS, (string) (int) $data['welcome_delay_seconds']);
         AdminSetting::set(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) (int) $data['ai_suggestion_delay_seconds']);
-        AdminSetting::set(
-            self::KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS,
-            (string) (int) $data['ai_suggestion_auto_send_delay_seconds']
-        );
         AdminSetting::set(
             self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
             (string) (int) $data['verificacion_agendamiento_auto_send_delay_minutes']
@@ -174,12 +157,6 @@ class LeadWhatsappOnboardingSettings
         }
         if (AdminSetting::get(self::KEY_AI_SUGGESTION_DELAY_SECONDS) === null) {
             AdminSetting::set(self::KEY_AI_SUGGESTION_DELAY_SECONDS, (string) self::DEFAULT_AI_SUGGESTION_DELAY_SECONDS);
-        }
-        if (AdminSetting::get(self::KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS) === null) {
-            AdminSetting::set(
-                self::KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS,
-                (string) self::DEFAULT_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS
-            );
         }
         if (AdminSetting::get(self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES) === null) {
             AdminSetting::set(
@@ -290,33 +267,8 @@ class LeadWhatsappOnboardingSettings
     }
 
     /**
-     * Segundos tras crear una sugerencia de Claude antes de enviarla por WhatsApp sin confirmación del setter.
-     *
-     * 0 envía la sugerencia de inmediato sin espera del setter.
-     *
-     * @return int
-     */
-    public static function get_ai_suggestion_auto_send_delay_seconds(): int
-    {
-        $raw = AdminSetting::get(
-            self::KEY_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS,
-            (string) self::DEFAULT_AI_SUGGESTION_AUTO_SEND_DELAY_SECONDS
-        );
-        $seconds = (int) $raw;
-        if ($seconds < self::AUTO_SEND_DELAY_MIN_SECONDS) {
-            return self::AUTO_SEND_DELAY_MIN_SECONDS;
-        }
-        if ($seconds > self::AUTO_SEND_DELAY_MAX_SECONDS) {
-            return self::AUTO_SEND_DELAY_MAX_SECONDS;
-        }
-
-        return $seconds;
-    }
-
-    /**
-     * Minutos hasta auto-envío de una sugerencia con requiere_verificacion=true en el tramo de
-     * coordinación de agenda (solicita_disponibilidad..demo_pendiente_de_terminar). Ver constante
-     * KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES para el porqué de un campo separado.
+     * Minutos hasta auto-envío de una sugerencia con requiere_verificacion=true. Es la única
+     * demora de auto-envío del sistema; ver constante KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES.
      *
      * @return int
      */
