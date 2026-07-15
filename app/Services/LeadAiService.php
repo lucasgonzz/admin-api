@@ -2757,26 +2757,47 @@ TXT;
 
         /* --- Procesar acciones estructuradas devueltas por Claude --- */
 
-        /* Acción: guardar nombre del lead si no tiene uno y Claude lo identificó con certeza. */
-        $guardar_nombre = isset($parsed['guardar_nombre']) ? trim((string) $parsed['guardar_nombre']) : '';
-        if ($guardar_nombre !== '' && empty($lead->contact_name)) {
+        /*
+         * Acción: guardar nombre del lead.
+         * - Flujo automático de Claude ($for_approval = false): solo se completa si el lead NO tiene
+         *   nombre (guard anti-alucinación: Claude no pisa un nombre bueno por su cuenta).
+         * - FIX (prompt 410): en APROBACIÓN HUMANA ($for_approval = true) el admin revisó el panel, así
+         *   que puede CORREGIR un nombre ya cargado. Solo se escribe si el valor realmente cambió.
+         */
+        $guardar_nombre       = isset($parsed['guardar_nombre']) ? trim((string) $parsed['guardar_nombre']) : '';
+        $puede_pisar_contacto = $for_approval;
+        $tenia_nombre_previo  = ! empty($lead->contact_name);
+        if ($guardar_nombre !== ''
+            && ($puede_pisar_contacto || ! $tenia_nombre_previo)
+            && $guardar_nombre !== (string) $lead->contact_name) {
             $lead->contact_name = $guardar_nombre;
             Log::info('LeadAiService: nombre del lead guardado vía acción estructurada.', [
-                'lead_id' => $lead->id,
-                'nombre'  => $guardar_nombre,
+                'lead_id'      => $lead->id,
+                'nombre'       => $guardar_nombre,
+                'sobreescrito' => $tenia_nombre_previo,
             ]);
         }
 
-        /* Acción: guardar email del lead si no tiene uno y el valor parece válido. */
-        $guardar_email = isset($parsed['guardar_email']) ? trim((string) $parsed['guardar_email']) : '';
+        /*
+         * Acción: guardar email del lead. Mismo criterio que el nombre (prompt 410): en aprobación
+         * humana el admin puede corregir un email ya cargado; en el flujo automático solo se completa
+         * si estaba vacío. Al corregirlo se marca $email_nuevo para que el Mail 1 salga a la dirección
+         * corregida (ver disparo del Mail 1 más abajo en este método).
+         */
+        $guardar_email       = isset($parsed['guardar_email']) ? trim((string) $parsed['guardar_email']) : '';
+        $tenia_email_previo  = ! empty($lead->email);
         /* Bandera para disparar Mail 1 después del save. */
         $email_nuevo = false;
-        if ($guardar_email !== '' && filter_var($guardar_email, FILTER_VALIDATE_EMAIL) && empty($lead->email)) {
+        if ($guardar_email !== ''
+            && filter_var($guardar_email, FILTER_VALIDATE_EMAIL)
+            && ($puede_pisar_contacto || ! $tenia_email_previo)
+            && $guardar_email !== (string) $lead->email) {
             $lead->email = $guardar_email;
             $email_nuevo = true;
             Log::info('LeadAiService: email del lead guardado vía acción estructurada.', [
-                'lead_id' => $lead->id,
-                'email'   => $guardar_email,
+                'lead_id'      => $lead->id,
+                'email'        => $guardar_email,
+                'sobreescrito' => $tenia_email_previo,
             ]);
         }
 
