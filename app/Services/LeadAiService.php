@@ -2563,6 +2563,14 @@ TXT;
         /* Paquete efectivo a aplicar: por defecto, el de Claude sin cambios. */
         $parsed_efectivo = $parsed;
 
+        /*
+         * FIX (prompt 409): true cuando el admin eligió, desde el panel, un estado DISTINTO al que
+         * sugirió Claude. Viaja a apply_parsed_response() para que, si ese estado colapsa
+         * suggested_lead_status a null (porque coincide con el estado ACTUAL del lead: caso "dejar
+         * como está"), NO se restaure el estado crudo de Claude y por ende no se re-aplique al enviar.
+         */
+        $admin_override_estado = false;
+
         if ($final_actions !== null) {
             /* Campos del contrato `final_actions` que tienen equivalente directo en el esquema de
              * Claude ($parsed) y se mergean 1 a 1: el admin manda sobre lo sugerido. */
@@ -2574,6 +2582,17 @@ TXT;
                 $estado_admin = $final_actions['estado_sugerido'];
                 if ($estado_admin !== null && trim((string) $estado_admin) !== '') {
                     $parsed_efectivo['estado_sugerido'] = $estado_admin;
+                    /*
+                     * FIX (prompt 409): solo es override real si el admin eligió un estado DISTINTO al
+                     * que sugirió Claude. Si dejó el que Claude proponía, no es override (se respeta el
+                     * fallback de badge de apply_parsed_response). Si es distinto, la bandera evita que
+                     * ese fallback restaure el estado crudo de Claude cuando el admin pidió a propósito
+                     * conservar el estado actual (estado elegido == estado actual → suggested null).
+                     */
+                    $estado_claude = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
+                    if (trim((string) $estado_admin) !== $estado_claude) {
+                        $admin_override_estado = true;
+                    }
                 }
             }
 
@@ -2655,7 +2674,8 @@ TXT;
             (bool) $message->is_followup,
             null,
             $message,
-            true
+            true,
+            $admin_override_estado
         );
     }
 
@@ -2688,7 +2708,8 @@ TXT;
         bool $is_followup,
         ?array $calendar_snapshot = null,
         ?LeadMessage $existing_message = null,
-        bool $for_approval = false
+        bool $for_approval = false,
+        bool $admin_override_estado = false
     ): LeadMessage {
         $this->validate_parsed_response($parsed);
 
@@ -3326,10 +3347,17 @@ TXT;
          * Cuando esto pasa (aprobación de un mensaje existente y el recálculo lo anularía), preservar el
          * valor que el mensaje ya tenía guardado.
          */
+        /*
+         * FIX (prompt 409): si el admin eligió a propósito un estado distinto al de Claude y ese
+         * estado coincide con el actual del lead (suggested_lead_status quedó null = "no mover"), NO
+         * restaurar el estado crudo de Claude. De lo contrario apply_suggested_pipeline_status() lo
+         * re-aplicaría al enviar y pisaría la decisión del admin de conservar el estado.
+         */
         if ($for_approval && $existing_message !== null
             && $suggested_lead_status === null
             && ! empty($existing_message->suggested_lead_status)
-            && ! $agendar_descartado_por_slot_invalido) {
+            && ! $agendar_descartado_por_slot_invalido
+            && ! $admin_override_estado) {
             $suggested_lead_status = $existing_message->suggested_lead_status;
         }
 
