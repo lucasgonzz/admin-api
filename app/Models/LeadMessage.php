@@ -58,7 +58,7 @@ class LeadMessage extends Model
      *
      * @var array<int, string>
      */
-    protected $appends = ['suggested_lead_status_label', 'pending_actions_summary'];
+    protected $appends = ['suggested_lead_status_label', 'pending_actions_summary', 'sent_by_admin_name'];
 
     /**
      * Casts de tiempos de estado del mensaje.
@@ -112,6 +112,25 @@ class LeadMessage extends Model
     public function getSuggestedLeadStatusLabelAttribute(): ?string
     {
         return LeadPipelineStatus::label_for($this->suggested_lead_status);
+    }
+
+    /**
+     * Nombre del admin que envió/aprobó este mensaje, para mostrar en la burbuja
+     * del admin-spa (prompt 403). Solo se resuelve si la relación ya viene eager-loaded (la carga
+     * la relación messages() del Lead); en cualquier otro contexto devuelve null sin
+     * consultar la BD, para no generar N+1 al serializar hilos largos.
+     *
+     * @return string|null
+     */
+    public function getSentByAdminNameAttribute()
+    {
+        // Guarda: si la relación no fue eager-loaded, no disparar una consulta nueva por mensaje.
+        if (! $this->relationLoaded('sent_by_admin')) {
+            return null;
+        }
+        $admin = $this->getRelation('sent_by_admin');
+
+        return $admin ? (string) $admin->name : null;
     }
 
     /**
@@ -211,6 +230,17 @@ class LeadMessage extends Model
     public function lead()
     {
         return $this->belongsTo(Lead::class);
+    }
+
+    /**
+     * Admin que envió o aprobó este mensaje saliente (null si lo auto-envió la IA
+     * o si es historial importado). Ver columna sent_by_admin_id (prompt 403).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function sent_by_admin()
+    {
+        return $this->belongsTo(Admin::class, 'sent_by_admin_id');
     }
 
     /**

@@ -46,10 +46,13 @@ class LeadSuggestionSendService
      *                                    true, nunca se ejecutan acciones con efecto externo
      *                                    (agendar_demo/cancelar_demo/Mail 1) a ciegas — ver Caso A/B en
      *                                    el cuerpo del método.
+     * @param int|null    $sent_by_admin_id (prompt 403) Admin que aprobó la sugerencia desde el panel
+     *                                    (Auth::id() del endpoint approve_*). Null cuando el auto-envío
+     *                                    de respaldo la manda sin revisión humana.
      *
      * @return LeadMessage
      */
-    public function send_suggestion(LeadMessage $message, ?string $edited_content = null, ?array $final_actions = null, bool $is_auto_send = false): LeadMessage
+    public function send_suggestion(LeadMessage $message, ?string $edited_content = null, ?array $final_actions = null, bool $is_auto_send = false, ?int $sent_by_admin_id = null): LeadMessage
     {
         if ((string) $message->sender !== 'sistema') {
             throw new \InvalidArgumentException('Solo se pueden enviar sugerencias del sistema.');
@@ -77,7 +80,7 @@ class LeadSuggestionSendService
          * responde manualmente).
          */
         if ($message->is_followup && ! empty($message->followup_template_id)) {
-            return $this->send_followup_suggestion_via_template($message, $lead);
+            return $this->send_followup_suggestion_via_template($message, $lead, $sent_by_admin_id);
         }
 
         /*
@@ -234,6 +237,8 @@ class LeadSuggestionSendService
             'status'              => 'enviado',
             'sent_at'             => now(),
             'whatsapp_message_id' => $whatsapp_message_id,
+            // Admin que aprobó esta sugerencia desde el panel (null si fue auto-envío de la IA, prompt 403).
+            'sent_by_admin_id'    => $sent_by_admin_id,
         ];
 
         if ($edited_content !== null && trim($edited_content) !== '' && trim($edited_content) !== $original_content) {
@@ -372,10 +377,12 @@ class LeadSuggestionSendService
      *
      * @param LeadMessage $message
      * @param Lead        $lead
+     * @param int|null    $sent_by_admin_id (prompt 403) Admin que aprobó el seguimiento desde el panel;
+     *                                       null cuando lo aprobó el respaldo automático.
      *
      * @return LeadMessage
      */
-    private function send_followup_suggestion_via_template(LeadMessage $message, Lead $lead): LeadMessage
+    private function send_followup_suggestion_via_template(LeadMessage $message, Lead $lead, ?int $sent_by_admin_id = null): LeadMessage
     {
         $template = FollowupTemplate::query()->find($message->followup_template_id);
         $phone    = trim((string) $lead->phone);
@@ -446,6 +453,8 @@ class LeadSuggestionSendService
             'status'              => 'enviado',
             'sent_at'             => now(),
             'whatsapp_message_id' => $whatsapp_message_id,
+            // Admin que aprobó este seguimiento desde el panel (null si fue el respaldo automático, prompt 403).
+            'sent_by_admin_id'    => $sent_by_admin_id,
         ]);
 
         /* Un seguimiento normalmente no cambia el pipeline, pero respetamos suggested_lead_status si existe. */

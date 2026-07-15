@@ -1149,6 +1149,8 @@ class LeadController extends Controller
             'sent_at'               => now(),
             'is_followup'           => false,
             'requiere_verificacion' => false,
+            // Admin autor del mensaje directo (prompt 403).
+            'sent_by_admin_id'      => (int) $request->user()->id,
         ]);
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
@@ -1230,6 +1232,8 @@ class LeadController extends Controller
             'sent_at'               => now(),
             'is_followup'           => false,
             'requiere_verificacion' => false,
+            // Admin autor del audio directo (prompt 403).
+            'sent_by_admin_id'      => (int) $request->user()->id,
         ]);
 
         // Adjunto persistido: habilita la reproducción en la conversación vía public_url firmado.
@@ -1657,7 +1661,8 @@ class LeadController extends Controller
         }
 
         try {
-            $send_service->send_suggestion($message);
+            // Admin autenticado que aprobó la sugerencia desde el panel (prompt 403).
+            $send_service->send_suggestion($message, null, null, false, (int) Auth::id());
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (\Throwable $exception) {
@@ -1699,7 +1704,8 @@ class LeadController extends Controller
         }
 
         try {
-            $send_service->send_suggestion($message, $edited_content);
+            // Admin autenticado que aprobó (con texto editado) la sugerencia desde el panel (prompt 403).
+            $send_service->send_suggestion($message, $edited_content, null, false, (int) Auth::id());
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (\Throwable $exception) {
@@ -1754,7 +1760,8 @@ class LeadController extends Controller
         $final_actions      = is_array($final_actions_raw) ? $final_actions_raw : null;
 
         try {
-            $send_service->send_suggestion($message, $edited_content, $final_actions);
+            // Admin autenticado que aprobó (con acciones editadas) la sugerencia desde el panel (prompt 403).
+            $send_service->send_suggestion($message, $edited_content, $final_actions, false, (int) Auth::id());
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (\Throwable $exception) {
@@ -2676,6 +2683,8 @@ class LeadController extends Controller
             'sent_at'               => now(),
             'is_followup'           => false,
             'requiere_verificacion' => false,
+            // Admin que envió la plantilla a mano (prompt 403).
+            'sent_by_admin_id'      => (int) $request->user()->id,
         ]);
 
         /* Notificar a todos los clientes conectados que la conversación cambió. */

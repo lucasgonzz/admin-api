@@ -562,7 +562,12 @@ class Lead extends Model
      */
     public function messages()
     {
-        return $this->hasMany(LeadMessage::class, 'lead_id')->with('attachments')->orderBy('id');
+        // sent_by_admin:id,name (prompt 403) se eager-loadea solo acá (el hilo completo del lead),
+        // no en notification_messages()/scopeWithAllForList(): esos listados no muestran el nombre
+        // del emisor y el accessor sent_by_admin_name ya devuelve null por la guarda relationLoaded.
+        return $this->hasMany(LeadMessage::class, 'lead_id')
+            ->with(['attachments', 'sent_by_admin:id,name'])
+            ->orderBy('id');
     }
 
     /**
