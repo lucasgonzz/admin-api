@@ -3590,7 +3590,26 @@ TXT;
          * condiciones (demo lista + email nuevo/reagendado) se cumplan.
          */
         $enviar_mail_demo_flag = array_key_exists('enviar_mail_demo', $parsed) ? (bool) $parsed['enviar_mail_demo'] : true;
-        $debe_enviar_mail_demo = $demo_lista_para_mail && ($email_nuevo || ($es_reagendado && ! empty($lead->email))) && $enviar_mail_demo_flag;
+        /*
+         * FIX (prompt 411): permitir que el check "enviar Mail 1" FUERCE el envío, no solo lo suprima.
+         * Antes $enviar_mail_demo_flag solo entraba como `&& $flag` sobre un disparo que exigía
+         * $email_nuevo o reagendado; si el lead ya tenía el email cargado y se agendaba la demo desde
+         * el panel, tildar el check no mandaba nada. Ahora, SOLO en aprobación humana ($for_approval,
+         * para no cambiar el flujo automático de Claude), con el check en true, demo lista, email
+         * cargado y el Mail 1 todavía no enviado (demo_mail_sent_at vacío), se dispara igual. La
+         * guardia de demo_mail_sent_at evita reenvíos accidentales.
+         */
+        $mail_forzado_por_admin = $for_approval
+            && array_key_exists('enviar_mail_demo', $parsed)
+            && (bool) $parsed['enviar_mail_demo'] === true
+            && $demo_lista_para_mail
+            && ! empty($lead->email)
+            && empty($lead->demo_mail_sent_at);
+        $debe_enviar_mail_demo = (
+            $demo_lista_para_mail
+            && ($email_nuevo || ($es_reagendado && ! empty($lead->email)))
+            && $enviar_mail_demo_flag
+        ) || $mail_forzado_por_admin;
         if ($debe_enviar_mail_demo) {
             try {
                 $lead->loadMissing('demo');
