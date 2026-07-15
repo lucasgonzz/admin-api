@@ -45,6 +45,23 @@ class Lead extends Model
     ];
 
     /**
+     * Estados en los que la verificación de mensajes se auto-enciende (latch): desde que el lead
+     * entra a solicita_disponibilidad hasta closer_activo, inclusive. Incluye demo_realizada y
+     * closer_activo, que NO están en LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO
+     * (esa const, más corta, la usa el gate de agendamiento y no se toca). Ver latch en booted().
+     */
+    public const ESTADOS_VENTANA_VERIFICACION_MENSAJES = [
+        'solicita_disponibilidad',
+        'demo_agendada',
+        'ingresando_demo',
+        'demo_en_curso',
+        'demo_pendiente_de_ingreso',
+        'demo_pendiente_de_terminar',
+        'demo_realizada',
+        'closer_activo',
+    ];
+
+    /**
      * Slugs válidos del pipeline (catálogo en BD o defaults).
      *
      * @return array<int, string>
@@ -74,6 +91,29 @@ class Lead extends Model
             }
             if (empty($lead->address_3)) {
                 $lead->address_3 = 'Sucursal 3';
+            }
+        });
+
+        // Auto-activación de la verificación de mensajes al ENTRAR a la ventana de verificación
+        // (solicita_disponibilidad → closer_activo). Latch de una sola vez: si el lead cruza desde un
+        // estado FUERA de la ventana hacia uno DENTRO, se enciende requiere_verificacion_mensajes. No se
+        // vuelve a forzar después (si el admin lo apaga estando en la ventana, queda apagado — decisión de
+        // Lucas, 15/7/2026, el toggle es libremente apagable). Tampoco se apaga al salir de la ventana: una
+        // vez encendida, persiste hasta que el admin la apague. La red de las ACCIONES de agenda no depende
+        // de esto: el gate de agendamiento de LeadAiService las retiene por su cuenta.
+        static::saving(function (Lead $lead) {
+            if (! $lead->isDirty('status')) {
+                return;
+            }
+
+            $ventana  = self::ESTADOS_VENTANA_VERIFICACION_MENSAJES;
+            $nuevo    = (string) $lead->status;
+            $anterior = (string) $lead->getOriginal('status');
+
+            $entra_a_la_ventana = in_array($nuevo, $ventana, true) && ! in_array($anterior, $ventana, true);
+
+            if ($entra_a_la_ventana && ! (bool) $lead->requiere_verificacion_mensajes) {
+                $lead->requiere_verificacion_mensajes = true;
             }
         });
 
@@ -138,6 +178,10 @@ class Lead extends Model
 
         // Flag persistido: Claude (o el admin) marcó que este lead requiere intervención humana.
         'requiere_intervencion_humana' => 'boolean',
+        // Toggle por lead: si true, todo mensaje de Claude se retiene para verificación humana antes
+        // de salir (en cualquier estado). Si false, envío inmediato. Se auto-enciende (latch) al entrar
+        // a la ventana solicita_disponibilidad → closer_activo. Default false. Consumido por LeadAiService (407).
+        'requiere_verificacion_mensajes' => 'boolean',
         'requiere_seguimiento'         => 'boolean',
         'tiene_seguimiento_sin_ver'    => 'boolean',
 
