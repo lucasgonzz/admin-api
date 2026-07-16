@@ -67,24 +67,15 @@ class LeadProperties
             //     'width' => 100,
             // ],
             [
-                'key' => 'tiene_seguimiento_sin_ver',
-                'text' => 'Alerta seg.',
-                'type' => 'alert_badge',
-                'value' => false,
-                'show' => true,
-                'table_only' => true,
-                'width' => 110,
-                // Clave del row que aporta la cantidad de seguimientos enviados para el badge.
-                'badge_count_key' => 'followup_count',
-            ],
-            [
                 /*
-                 * Badge per-usuario triple:
-                 * - Rojo (key): mensajes del lead sin leer por el admin logueado.
-                 * - Gris (unseen_count_key): actividad total no vista (cualquier sender).
+                 * Badge triple de la columna "Sin leer" (rediseño prompt 420, 15/7/2026):
+                 * - Gris (key): mensajes del lead sin leer por el admin logueado (per-admin).
+                 * - Rojo (pending_verification_count_key): mensajes por verificar, global
+                 *   (requiere_verificacion = true + status = 'sugerido', mismo criterio que row_warning).
+                 * - Amarillo (failed_send_count_key): mensajes con error de envío sin resolver, global.
                  * - Punto sin número (manually_unread_key): marca manual "no leído" estilo WhatsApp,
-                 *   visible solo cuando los dos contadores reales están en 0.
-                 * Los tres valores vienen de scopeWithUnreadLeadMessagesCount en Lead.php.
+                 *   visible solo cuando el contador gris está en 0.
+                 * Los cuatro valores vienen de scopeWithUnreadLeadMessagesCount en Lead.php.
                  */
                 'key' => 'unread_count',
                 'text' => 'Sin leer',
@@ -97,12 +88,12 @@ class LeadProperties
                 'not_persisted_on_model' => true,
                 // Ancho levemente mayor para acomodar los badges.
                 'width' => 110,
-                // Clave del row que aporta el conteo de actividad total no vista (badge gris).
-                'unseen_count_key' => 'unseen_count',
+                // Clave del row que aporta el conteo de mensajes por verificar (badge rojo).
+                'pending_verification_count_key' => 'pending_verification_count',
+                // Clave del row que aporta el conteo de errores de envío sin resolver (badge amarillo).
+                'failed_send_count_key' => 'failed_send_count',
                 // Clave del row que indica marca manual de "no leído" (punto rojo sin número).
                 'manually_unread_key' => 'manually_marked_unread',
-                // Clave del row que aporta el conteo de seguimientos por aprobar (badge violeta, prompt 285).
-                'pending_followups_count_key' => 'pending_followups_count',
             ],
             // [
             //     /*

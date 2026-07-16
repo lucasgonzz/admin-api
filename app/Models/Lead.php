@@ -291,13 +291,6 @@ class Lead extends Model
             'partners'
         );
         $query->withUnreadLeadMessagesCount();
-        // Conteo de seguimientos enviados (mensajes is_followup no rechazados) para el badge de la tabla.
-        $query->withCount([
-            'messages as followup_count' => function ($sub) {
-                $sub->where('is_followup', true)
-                    ->where('status', '!=', 'rechazado');
-            },
-        ]);
     }
 
     /**
@@ -318,13 +311,6 @@ class Lead extends Model
             'notification_messages'
         );
         $query->withUnreadLeadMessagesCount();
-        // Conteo de seguimientos enviados (mensajes is_followup no rechazados) para el badge de la tabla.
-        $query->withCount([
-            'messages as followup_count' => function ($sub) {
-                $sub->where('is_followup', true)
-                    ->where('status', '!=', 'rechazado');
-            },
-        ]);
     }
 
     /**
@@ -378,14 +364,17 @@ class Lead extends Model
     }
 
     /**
-     * Agrega el conteo de mensajes del lead (sender = lead) sin leer para el admin autenticado.
+     * Agrega los conteos que alimentan los tres badges de la columna "Sin leer" de la tabla de leads
+     * (rediseño prompt 420, 15/7/2026), más la marca manual y la fila de alerta.
      *
-     * El conteo es per-usuario: un mensaje cuenta como no leído mientras no exista
-     * su registro en lead_message_reads para el admin logueado.
-     *
-     * Expone dos alias con el mismo valor para mantener compatibilidad:
-     * - `unread_messages_count`: usado por la pestaña Conversación para auto-marcar leído.
-     * - `unread_count`: usado por el badge de la fila en la tabla de leads.
+     * - `unread_messages_count` / `unread_count`: mensajes del lead (sender = lead) sin leer para el
+     *   admin autenticado (per-usuario). Alimenta el badge GRIS. `unread_messages_count` lo sigue
+     *   usando la pestaña Conversación para auto-marcar leído; `unread_count` es el que consume el
+     *   badge de la tabla.
+     * - `pending_verification_count`: mensajes por verificar (badge ROJO). Global (no per-admin),
+     *   mismo criterio que `row_warning` (requiere_verificacion = true + status = 'sugerido').
+     * - `failed_send_count`: mensajes con error de envío sin resolver (badge AMARILLO). Global,
+     *   replica `LeadPendingReviewService::tiene_error_sin_resolver()` en SQL.
      *
      * @param \Illuminate\Database\Eloquent\Builder $query
      *
@@ -407,35 +396,22 @@ class Lead extends Model
                 });
         };
 
-        // Filtro nuevo: TODOS los mensajes (cualquier sender) sin registro de lectura del admin.
-        // Alimenta el badge gris "actividad no vista" en la tabla de leads.
-        $unseen_filter = function ($sub) use ($admin_id) {
-            $sub->whereNotExists(function ($exists) use ($admin_id) {
-                $exists->selectRaw('1')
-                    ->from('lead_message_reads')
-                    ->whereColumn('lead_message_reads.lead_message_id', 'lead_messages.id')
-                    ->where('lead_message_reads.admin_id', $admin_id);
-            });
-        };
-
         $query->withCount([
             'messages as unread_messages_count' => $unread_filter,
             'messages as unread_count'          => $unread_filter,
-            // Actividad total no vista: mensajes de cualquier emisor sin lectura del admin.
-            'messages as unseen_count'          => $unseen_filter,
-            // Seguimientos por aprobar (badge violeta en la columna "Sin leer"): mensajes is_followup
-            // que quedaron pendientes de aprobación del setter (prompt 283). Global, no per-admin:
-            // cualquier admin puede aprobarlos, así que no se filtra por lead_message_reads.
-            'messages as pending_followups_count' => function ($sub) {
-                $sub->where('is_followup', true)
+            // Badge ROJO de la columna "Sin leer": mensajes por verificar. Global (no per-admin):
+            // mismo criterio que row_warning (requiere_verificacion = true + status = 'sugerido').
+            // Cualquier admin ve la misma alerta; baja cuando el mensaje sale de 'sugerido'
+            // (aprobado / rechazado / auto-enviado).
+            'messages as pending_verification_count' => function ($sub) {
+                $sub->where('requiere_verificacion', true)
                     ->where('status', 'sugerido');
             },
         ]);
 
         // Marca manual de "no leído" (estilo WhatsApp) hecha por el admin actual sobre este lead.
-        // Independiente de unread_count/unseen_count: la UI (admin-spa) solo la muestra como punto
-        // sin número cuando ambos contadores reales están en 0 (ver LeadProperties::all(),
-        // clave 'manually_unread_key').
+        // Independiente de unread_count: la UI (admin-spa) solo la muestra como punto sin número
+        // cuando el contador real está en 0 (ver LeadProperties::all(), clave 'manually_unread_key').
         return $query->addSelect([
             'manually_marked_unread' => LeadManualUnreadMark::selectRaw('COUNT(*) > 0')
                 ->whereColumn('lead_manual_unread_marks.lead_id', 'leads.id')
@@ -452,6 +428,30 @@ class Lead extends Model
                 ->whereColumn('lead_messages.lead_id', 'leads.id')
                 ->where('lead_messages.requiere_verificacion', true)
                 ->where('lead_messages.status', 'sugerido'),
+
+            // Badge AMARILLO de la columna "Sin leer": mensajes salientes cuyo envío al lead falló y el
+            // error sigue SIN RESOLVER. Global (no per-admin). Dos fuentes de error:
+            //   (a) registro de error de sistema (is_error = true) — fallo de envío o de generación de IA;
+            //   (b) mensaje saliente con entrega fallida confirmada por Kapso (whatsapp_delivery_status = 'fallido').
+            // "Sin resolver" replica LeadPendingReviewService::tiene_error_sin_resolver: el mensaje de error
+            // no tiene NINGUNA actividad real posterior (otro mensaje del mismo lead, con id mayor, que NO sea
+            // evento de estado). Si después hubo un reintento exitoso o el lead respondió, el error se considera
+            // resuelto y deja de contar. Los registros is_error son is_status_event = true, así que un error
+            // más nuevo no "resuelve" a otro error (no cuenta como actividad real).
+            'failed_send_count' => \App\Models\LeadMessage::selectRaw('COUNT(*)')
+                ->whereColumn('lead_messages.lead_id', 'leads.id')
+                ->where(function ($error_source) {
+                    $error_source->where('is_error', true)
+                        ->orWhere('whatsapp_delivery_status', 'fallido');
+                })
+                ->whereNotExists(function ($posterior) {
+                    // Actividad real posterior: mensaje del MISMO lead, id mayor, que NO sea evento de estado.
+                    $posterior->selectRaw('1')
+                        ->from('lead_messages as lm_post')
+                        ->whereColumn('lm_post.lead_id', 'lead_messages.lead_id')
+                        ->whereColumn('lm_post.id', '>', 'lead_messages.id')
+                        ->where('lm_post.is_status_event', false);
+                }),
         ]);
     }
 
