@@ -271,9 +271,16 @@ class WhatsappWebhookController extends Controller
                 }
                 $message->update($updates);
             } elseif ($status === 'fallido') {
-                $message->update([
-                    'whatsapp_delivery_status' => 'fallido',
-                ]);
+                $updates = ['whatsapp_delivery_status' => 'fallido'];
+
+                // Motivo legible del fallo, si Kapso/Meta lo incluye en el payload. Solo se guarda si se
+                // pudo extraer algo, para no pisar un motivo ya capturado en el call site del envío.
+                $reason = $this->extract_delivery_failure_reason($payload);
+                if ($reason !== '') {
+                    $updates['whatsapp_send_error'] = $reason;
+                }
+
+                $message->update($updates);
             }
 
             // Notificar al frontend del cambio de estado (is_status_update = true para evitar
@@ -285,6 +292,77 @@ class WhatsappWebhookController extends Controller
                 'error'      => $exception->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Extrae un motivo legible del fallo de entrega desde el payload de estado de Kapso/Meta.
+     *
+     * La estructura del error no está garantizada en una única ruta, así que se prueban las claves
+     * conocidas de forma defensiva: primero el array de errores estilo Meta (code / title /
+     * error_data.details) en distintas ubicaciones que puede reenviar Kapso, luego campos planos
+     * de motivo. Devuelve cadena vacía si no encuentra nada aprovechable.
+     *
+     * @param array<string, mixed> $payload
+     *
+     * @return string
+     */
+    private function extract_delivery_failure_reason(array $payload)
+    {
+        // Posibles ubicaciones del array de errores estilo Meta dentro del payload reenviado por Kapso.
+        $error_arrays = array(
+            isset($payload['message']['errors']) ? $payload['message']['errors'] : null,
+            isset($payload['errors']) ? $payload['errors'] : null,
+            isset($payload['data']['errors']) ? $payload['data']['errors'] : null,
+            isset($payload['status']['errors']) ? $payload['status']['errors'] : null,
+        );
+
+        foreach ($error_arrays as $errors) {
+            if (! is_array($errors) || empty($errors)) {
+                continue;
+            }
+            // Tomar el primer error del array (Meta suele mandar uno).
+            $first = reset($errors);
+            if (! is_array($first)) {
+                continue;
+            }
+
+            $parts = array();
+            if (isset($first['code']) && $first['code'] !== '') {
+                $parts[] = 'Código ' . $first['code'];
+            }
+            if (isset($first['title']) && trim((string) $first['title']) !== '') {
+                $parts[] = trim((string) $first['title']);
+            }
+            // Detalle fino de Meta (error_data.details) o message/reason planos.
+            $detail = '';
+            if (isset($first['error_data']['details']) && trim((string) $first['error_data']['details']) !== '') {
+                $detail = trim((string) $first['error_data']['details']);
+            } elseif (isset($first['message']) && trim((string) $first['message']) !== '') {
+                $detail = trim((string) $first['message']);
+            } elseif (isset($first['reason']) && trim((string) $first['reason']) !== '') {
+                $detail = trim((string) $first['reason']);
+            }
+            if ($detail !== '') {
+                $parts[] = $detail;
+            }
+
+            if (! empty($parts)) {
+                return implode(' — ', $parts);
+            }
+        }
+
+        // Fallback: campos de motivo planos que algunos proveedores mandan en la raíz.
+        $flat_keys = array('failure_reason', 'error_message', 'reason');
+        foreach ($flat_keys as $key) {
+            if (isset($payload[$key]) && trim((string) $payload[$key]) !== '') {
+                return trim((string) $payload[$key]);
+            }
+            if (isset($payload['message'][$key]) && trim((string) $payload['message'][$key]) !== '') {
+                return trim((string) $payload['message'][$key]);
+            }
+        }
+
+        return '';
     }
 
     /**
