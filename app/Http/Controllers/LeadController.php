@@ -1910,6 +1910,16 @@ class LeadController extends Controller
         // el navegador no vuelve a pedir el archivo mientras la URL firmada siga siendo válida.
         $headers['Cache-Control'] = 'private, max-age=172800';
 
+        // Parámetro opcional (viaja dentro de la firma) que fuerza descarga en vez de inline:
+        // usado por el download_url de LeadMessageAttachment para documentos/archivos que
+        // deben bajarse con su nombre real en lugar de abrirse en el navegador.
+        $disposition = strtolower(trim((string) $request->query('disposition', '')));
+        if ($disposition === 'attachment') {
+            // Fuerza descarga con Content-Disposition: attachment y el nombre real del archivo.
+            return Storage::disk($disk)->download($path, $download_name, $headers);
+        }
+
+        // Por defecto, inline (imágenes y videos se muestran/reproducen en la misma página).
         return Storage::disk($disk)->response($path, $download_name, $headers);
     }
 

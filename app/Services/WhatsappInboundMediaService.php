@@ -306,6 +306,12 @@ class WhatsappInboundMediaService
             'path'            => $stored_path,
             'mime'            => $mime !== '' ? $mime : null,
             'size'            => strlen($binary),
+            // Nombre real del archivo tal como lo mandó el lead (parseado del webhook Kapso más
+            // arriba en $media['filename']); null si Kapso no lo informó, para caer al basename
+            // del path generado en disco (ver LeadMessageAttachment::getDisplayFilenameAttribute).
+            'original_filename' => (isset($media['filename']) && trim((string) $media['filename']) !== '')
+                ? trim((string) $media['filename'])
+                : null,
         ]);
 
         Log::channel('daily')->info('WhatsappInboundMediaService: adjunto de lead persistido.', [

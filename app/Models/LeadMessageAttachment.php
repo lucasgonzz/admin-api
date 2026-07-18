@@ -22,7 +22,7 @@ class LeadMessageAttachment extends Model
      *
      * @var array<int, string>
      */
-    protected $appends = ['public_url', 'display_filename'];
+    protected $appends = ['public_url', 'display_filename', 'download_url'];
 
     /**
      * Scope estándar de compatibilidad con fullModel.
@@ -71,12 +71,20 @@ class LeadMessageAttachment extends Model
     }
 
     /**
-     * Nombre de archivo legible derivado del path persistido en disco public.
+     * Nombre de archivo legible: prioriza el nombre real que mandó el lead (original_filename);
+     * si no vino en el webhook, cae al basename del path generado en disco (comportamiento previo).
      *
      * @return string|null
      */
     public function getDisplayFilenameAttribute(): ?string
     {
+        // Nombre original persistido desde el webhook Kapso (prompt 464); es el que preferimos
+        // mostrar/descargar porque es el que el lead reconoce.
+        $original = trim((string) ($this->original_filename ?? ''));
+        if ($original !== '') {
+            return $original;
+        }
+
         $path = trim((string) ($this->path ?? ''));
         if ($path === '') {
             return null;
@@ -85,5 +93,26 @@ class LeadMessageAttachment extends Model
         $basename = basename($path);
 
         return $basename !== '' ? $basename : null;
+    }
+
+    /**
+     * URL firmada que fuerza la descarga (Content-Disposition: attachment) con el nombre real
+     * del archivo, agregando el parámetro disposition=attachment a la misma ruta firmada que
+     * public_url (que se mantiene sin ese parámetro para el modo inline).
+     *
+     * @return string|null
+     */
+    public function getDownloadUrlAttribute(): ?string
+    {
+        $path = trim((string) ($this->path ?? ''));
+        if ($path === '' || ! $this->id) {
+            return null;
+        }
+
+        return URL::temporarySignedRoute(
+            'lead.message.attachment.file',
+            now()->addHours(24),
+            ['id' => $this->id, 'disposition' => 'attachment']
+        );
     }
 }
