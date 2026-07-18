@@ -76,20 +76,65 @@ class CloserGoogleCalendarEventService
             return;
         }
 
+        // Calcular horario del evento: inicio = fin de la demo, fin = gracia + llamada closer.
+        [$event_start, $event_end] = $this->calculate_event_times($lead);
+
+        // Construir el cuerpo del evento para la API de Google Calendar (incluye Google Meet).
+        $event_body = $this->build_event_body($lead, $event_start, $event_end);
+
+        // sendUpdates=all solo si hay email del lead (Google envía la invitación al lead).
+        $lead_tiene_email = ! empty($lead->email);
+
+        // Crear el evento en Google Calendar usando el método compartido (maneja sus propias excepciones).
+        $result = $this->execute_calendar_event_creation($connection, $event_body, $lead_tiene_email);
+
+        // Si falló (403, error HTTP o excepción), execute_calendar_event_creation ya logueó el motivo.
+        if ($result === null) {
+            return;
+        }
+
+        // Persistir google_event_id y meet_url en el lead usando update() (solo esos campos).
+        $update_data = ['google_event_id' => $result['google_event_id']];
+        if ($result['meet_url']) {
+            $update_data['meet_url'] = $result['meet_url'];
+        }
+        $lead->update($update_data);
+
+        Log::channel('disponibilidad')->info(
+            '[CALENDAR_EVENT] Evento creado en Google Calendar del closer.'
+            . ' lead_id=' . $lead->id
+            . ' google_event_id=' . $result['google_event_id']
+            . ' meet_url=' . ($result['meet_url'] ?? 'no generada')
+            . ' event_start=' . $event_start->toDateTimeString()
+            . ' event_end=' . $event_end->toDateTimeString()
+        );
+
+        // Invalidar la caché de disponibilidad para que el próximo cálculo vea el nuevo evento.
+        $this->busy_service->flush_cache_for_date(
+            $lead->demo_date->format('Y-m-d')
+        );
+    }
+
+    /**
+     * Crea un evento en el Google Calendar de una conexión dada y devuelve el id del evento
+     * y el link de Meet extraídos de la respuesta de Google. No persiste nada — el llamador
+     * decide dónde guardar el resultado (Lead o LeadCall según el caso).
+     *
+     * @param AdminCalendarConnection $connection  Conexión activa del closer.
+     * @param array                   $event_body  Body ya armado para la API de Google Calendar.
+     * @param bool                    $send_updates Si true, agrega sendUpdates=all (solo si hay attendees).
+     *
+     * @return array{google_event_id: ?string, meet_url: ?string}|null null si falló (403, error HTTP, excepción).
+     */
+    protected function execute_calendar_event_creation(AdminCalendarConnection $connection, array $event_body, bool $send_updates): ?array
+    {
         try {
-            // Calcular horario del evento: inicio = fin de la demo, fin = gracia + llamada closer.
-            [$event_start, $event_end] = $this->calculate_event_times($lead);
-
-            // Construir el cuerpo del evento para la API de Google Calendar (incluye Google Meet).
-            $event_body = $this->build_event_body($lead, $event_start, $event_end);
-
             // Obtener access_token fresco para la llamada.
             $access_token = $this->oauth_service->get_fresh_access_token($connection);
 
-            // Query params: conferenceDataVersion=1 habilita Google Meet; sendUpdates=all solo si hay email del lead.
-            $lead_tiene_email = ! empty($lead->email);
-            $query_params     = 'conferenceDataVersion=1';
-            if ($lead_tiene_email) {
+            // Query params: conferenceDataVersion=1 habilita Google Meet; sendUpdates=all solo si hay attendees.
+            $query_params = 'conferenceDataVersion=1';
+            if ($send_updates) {
                 $query_params .= '&sendUpdates=all';
             }
 
@@ -110,7 +155,7 @@ class CloserGoogleCalendarEventService
                     . ' El closer debe desconectarse y reconectarse para obtener el nuevo permiso.'
                     . ' admin_id=' . $connection->admin_id
                 );
-                return;
+                return null;
             }
 
             if ($response->failed()) {
@@ -120,10 +165,10 @@ class CloserGoogleCalendarEventService
                     . ' HTTP=' . $response->status()
                     . ' body=' . substr($response->body(), 0, 500)
                 );
-                return;
+                return null;
             }
 
-            // Persistir google_event_id y meet_url en el lead usando update().
+            // Extraer google_event_id de la respuesta.
             $google_event_id = $response->json('id');
 
             // Extraer meet_url de la respuesta de Google (entryPointType === video).
@@ -136,32 +181,94 @@ class CloserGoogleCalendarEventService
                 }
             }
 
-            $update_data = ['google_event_id' => $google_event_id];
-            if ($meet_url) {
-                $update_data['meet_url'] = $meet_url;
-            }
-            $lead->update($update_data);
-
-            Log::channel('disponibilidad')->info(
-                '[CALENDAR_EVENT] Evento creado en Google Calendar del closer.'
-                . ' lead_id=' . $lead->id
-                . ' google_event_id=' . $google_event_id
-                . ' meet_url=' . ($meet_url ?? 'no generada')
-                . ' event_start=' . $event_start->toDateTimeString()
-                . ' event_end=' . $event_end->toDateTimeString()
-            );
-
-            // Invalidar la caché de disponibilidad para que el próximo cálculo vea el nuevo evento.
-            $this->busy_service->flush_cache_for_date(
-                $lead->demo_date->format('Y-m-d')
-            );
+            return ['google_event_id' => $google_event_id, 'meet_url' => $meet_url];
         } catch (\Throwable $e) {
             Log::channel('disponibilidad')->error(
                 '[CALENDAR_EVENT] Excepción al crear evento en Google Calendar.'
-                . ' lead_id=' . $lead->id
+                . ' admin_id=' . $connection->admin_id
                 . ' error=' . $e->getMessage()
             );
+            return null;
         }
+    }
+
+    /**
+     * Crea un evento "ad-hoc" en el Google Calendar del closer para una llamada que arranca
+     * AHORA (no ligada a una demo agendada): duración = LeadDemoSettings::get_duracion_llamada_closer_minutos().
+     * No persiste nada en el Lead — el llamador decide dónde guardar el resultado (normalmente
+     * en una fila de LeadCall). Best-effort: si el closer no tiene calendario conectado o falla
+     * la llamada a Google, devuelve null sin lanzar excepción.
+     *
+     * @param Lead $lead Lead para el cual se crea la llamada.
+     *
+     * @return array{google_event_id: ?string, meet_url: ?string}|null
+     */
+    public function create_ad_hoc_meet_now(Lead $lead): ?array
+    {
+        // Obtener la conexión activa del closer (misma lógica que el flujo de agendamiento normal).
+        $connection = $this->get_closer_connection();
+        if (! $connection) {
+            return null;
+        }
+
+        // Zona horaria de Argentina (sin DST, siempre -03:00).
+        $tz = 'America/Argentina/Buenos_Aires';
+
+        // El evento ad-hoc arranca ahora mismo y dura lo que dura una llamada de closer configurada.
+        $event_start      = Carbon::now($tz);
+        $duracion_llamada = LeadDemoSettings::get_duracion_llamada_closer_minutos();
+        $event_end        = $event_start->copy()->addMinutes($duracion_llamada);
+
+        // Nombre del lead para el summary y la descripción del evento.
+        $lead_nombre = trim(($lead->name ?? '') . ' ' . ($lead->last_name ?? ''));
+        if ($lead_nombre === '') {
+            $lead_nombre = 'Lead #' . $lead->id;
+        }
+
+        // Invitados: si el lead tiene email, Google envía la invitación con el link de Meet.
+        $attendees = [];
+        if (! empty($lead->email)) {
+            $attendees[] = ['email' => $lead->email];
+        }
+
+        // Cuerpo simplificado del evento ad-hoc (no depende de demo_date/demo_start_time).
+        $event_body = [
+            'summary'     => '[CC] Llamada con ' . $lead_nombre,
+            'description' => 'Lead: ' . $lead_nombre . "\n"
+                . 'Llamada ad-hoc creada manualmente desde el panel del closer.',
+            'start'       => [
+                'dateTime' => $event_start->toIso8601String(),
+                'timeZone' => $tz,
+            ],
+            'end'         => [
+                'dateTime' => $event_end->toIso8601String(),
+                'timeZone' => $tz,
+            ],
+            'colorId'        => '2',
+            'conferenceData' => [
+                'createRequest' => [
+                    'requestId'             => 'cc-lead-' . $lead->id . '-adhoc-' . time(),
+                    'conferenceSolutionKey' => ['type' => 'hangoutsMeet'],
+                ],
+            ],
+        ];
+        if (! empty($attendees)) {
+            $event_body['attendees'] = $attendees;
+        }
+
+        // Crear el evento vía el método compartido; no se persiste nada en el Lead acá.
+        $result = $this->execute_calendar_event_creation($connection, $event_body, ! empty($attendees));
+
+        if ($result !== null) {
+            Log::channel('disponibilidad')->info(
+                '[CALENDAR_EVENT] Evento ad-hoc creado en Google Calendar del closer.'
+                . ' lead_id=' . $lead->id
+                . ' google_event_id=' . ($result['google_event_id'] ?? 'null')
+                . ' meet_url=' . ($result['meet_url'] ?? 'no generada')
+            );
+        }
+
+        return $result;
     }
 
     /**
