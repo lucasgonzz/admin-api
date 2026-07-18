@@ -203,6 +203,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/send-demo-reminder', [LeadController::class, 'send_demo_reminder_json']);
         Route::post('lead/{id}/check-demo-ingress', [LeadController::class, 'check_demo_ingress_json']);
         Route::post('lead/{id}/check-demo-fin', [LeadController::class, 'check_demo_fin_json']);
+        Route::post('lead/{id}/force-calendar-event', [LeadController::class, 'force_calendar_event_json']);
         Route::post('lead/{id}/force-followup', [LeadController::class, 'force_followup_json']);
         Route::post('lead/{id}/generate-demo-summary', [LeadController::class, 'generate_demo_summary_json']);
         Route::post('lead/{id}/mark-closer-called', [LeadController::class, 'mark_closer_called_json']);

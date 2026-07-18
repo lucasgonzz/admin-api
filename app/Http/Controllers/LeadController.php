@@ -35,6 +35,7 @@ use App\Services\BatchLeadAiRecoveryService;
 use App\Services\LeadPendingReviewService;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
+use App\Services\CloserGoogleCalendarEventService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
@@ -2523,6 +2524,46 @@ class LeadController extends Controller
         ]);
 
         \App\Events\LeadSuggestionCreated::dispatch($lead->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Fuerza la (re)creación del evento de calendario del closer para este lead y, con eso,
+     * la obtención de su link de Meet -- son la misma operación en Google Calendar. Usa
+     * recreate_event_for_lead() para no dejar eventos duplicados si el lead ya tenía uno:
+     * borra el anterior (si existía) y crea uno limpio. Requiere que el lead ya tenga
+     * demo_date y demo_start_time cargados (si no, no hay con qué calcular el horario
+     * del evento del closer).
+     *
+     * @param int|string                      $id
+     * @param CloserGoogleCalendarEventService $calendar_service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function force_calendar_event_json($id, CloserGoogleCalendarEventService $calendar_service)
+    {
+        /* Lead objetivo al que se le va a forzar el evento/Meet. */
+        $lead = Lead::findOrFail($id);
+
+        /* Sin fecha/hora de demo cargadas no hay con qué calcular el horario del evento del closer. */
+        if (empty($lead->demo_date) || empty($lead->demo_start_time)) {
+            return response()->json([
+                'message' => 'El lead todavía no tiene fecha y hora de demo cargadas.',
+            ], 422);
+        }
+
+        /* Guardar el evento y fecha anteriores antes de recrear, para poder invalidar/eliminar el viejo. */
+        $old_google_event_id = $lead->google_event_id;
+        $old_demo_date       = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : null;
+
+        /* recreate_event_for_lead() elimina el evento anterior (si existía) y crea uno nuevo limpio,
+         * evitando así eventos duplicados en el calendario del closer. */
+        $calendar_service->recreate_event_for_lead($lead, $old_google_event_id, $old_demo_date);
+
+        // recreate_event_for_lead() persiste el nuevo google_event_id/meet_url internamente
+        // (vía create_event_for_lead() -> $lead->update()); recargar para devolver el modelo fresco.
+        $lead->refresh();
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
     }
