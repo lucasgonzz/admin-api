@@ -473,7 +473,9 @@ class InstallationService
      * Combina (en orden de prioridad):
      *   a) TODAS las variables de la tabla env_templates con su valor de plantilla base.
      *   b) Variables is_manual_on_create = true cuyos valores vienen de installation->env_manual_values.
-     *   c) APP_URL generada automáticamente desde la URL de la ClientApi.
+     *   c) APP_URL generada automáticamente desde la URL de la ClientApi (sin /public).
+     *   d) SANCTUM_STATEFUL_DOMAINS / SANCTUM_STATEFUL_CORS derivadas del spa_url de la ClientApi.
+     *   e) USER_ID = clients.user_id (bloque ComercioCity) del cliente instalado.
      *
      * Importante: NO se filtra por is_common. Ese flag significa "se contrasta con los clientes al
      * actualizar" (ver EnvTemplate), no "se escribe en el .env". Filtrar por is_common dejaba fuera
@@ -507,9 +509,25 @@ class InstallationService
             }
         }
 
-        // c) APP_URL: generada desde la URL de la API con la misma lógica de get_api_url_for_env().
-        $app_url = $this->get_api_url_for_env();
-        $vars_to_write['APP_URL'] = $app_url;
+        // c) APP_URL: URL cruda de la API del cliente, SIN /public (a diferencia de VUE_APP_API_URL).
+        $vars_to_write['APP_URL'] = rtrim((string) $this->target_api->url, '/');
+
+        // d) Variables de sesión/Sanctum derivadas del SPA (spa_url) de la ClientApi destino.
+        //    SANCTUM_STATEFUL_DOMAINS = host del SPA (sin esquema); SANCTUM_STATEFUL_CORS = URL completa.
+        $spa_url = rtrim(trim((string) $this->target_api->spa_url), '/');
+        if ($spa_url !== '') {
+            $spa_host = parse_url($spa_url, PHP_URL_HOST);
+            if (is_string($spa_host) && $spa_host !== '') {
+                $vars_to_write['SANCTUM_STATEFUL_DOMAINS'] = $spa_host;
+            }
+            $vars_to_write['SANCTUM_STATEFUL_CORS'] = $spa_url;
+        }
+
+        // e) USER_ID = bloque ComercioCity del cliente (clients.user_id).
+        $installation_client = $this->installation->client;
+        if ($installation_client !== null && $installation_client->user_id !== null && (int) $installation_client->user_id > 0) {
+            $vars_to_write['USER_ID'] = (string) $installation_client->user_id;
+        }
 
         $this->log(
             'write_env',

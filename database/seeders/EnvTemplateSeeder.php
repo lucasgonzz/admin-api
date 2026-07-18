@@ -57,6 +57,16 @@ class EnvTemplateSeeder extends Seeder
             ['key' => 'SESSION_LIFETIME',  'value' => '5256000',                         'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Minutos (~10 años). Sesión web hasta logout.', 'sort_order' => 4],
             ['key' => 'ANTHROPIC_API_KEY', 'value' => null,                              'group' => 'misc',   'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'Clave de API de Anthropic para funciones de IA. Configurar el valor en el panel de plantilla .env.', 'sort_order' => 5],
             ['key' => 'SANCTUM_EXPIRATION','value' => '',                              'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Ignorado: sanctum.php fuerza tokens sin vencimiento.', 'sort_order' => 6],
+            // Dominio de la cookie de sesión: estático, común a todos los clientes (Sanctum SPA auth).
+            ['key' => 'SESSION_DOMAIN',          'value' => '.comerciocity.com',    'group' => 'misc', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'Dominio de la cookie de sesión — común a todos los clientes (Sanctum SPA auth).', 'sort_order' => 7],
+            // Nombre de la cookie de sesión: estático, común a todos los clientes.
+            ['key' => 'SESSION_COOKIE',          'value' => 'comerciocity_session', 'group' => 'misc', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'Nombre de la cookie de sesión — común a todos los clientes.',                        'sort_order' => 8],
+            // Host del SPA (spa_url) de la ClientApi: se autocompleta al generar el .env de cada instalación.
+            ['key' => 'SANCTUM_STATEFUL_DOMAINS','value' => null,                   'group' => 'misc', 'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Se autocompleta con el host del SPA (spa_url) del ClientApi al generar el .env.',        'sort_order' => 9],
+            // URL completa del SPA (spa_url) de la ClientApi: se autocompleta al generar el .env de cada instalación.
+            ['key' => 'SANCTUM_STATEFUL_CORS',   'value' => null,                   'group' => 'misc', 'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Se autocompleta con la URL del SPA (spa_url) del ClientApi al generar el .env.',        'sort_order' => 10],
+            // Bloque ComercioCity del cliente (clients.user_id): se autocompleta al generar el .env de cada instalación.
+            ['key' => 'USER_ID',                 'value' => null,                   'group' => 'misc', 'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Se autocompleta con clients.user_id (bloque ComercioCity) al generar el .env.',       'sort_order' => 11],
         ];
 
         /* Crea por key solo si no existe: no duplica ni sobreescribe valores editados en el panel. */
