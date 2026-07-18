@@ -152,6 +152,29 @@ class ImplementationUserSetupService
         // Mapear dollar_prices → cotizar_precios_en_dolares (ya presente en setup_data, se reafirma).
         $payload['cotizar_precios_en_dolares'] = ($setup_data['cotizar_precios_en_dolares'] ?? false) === true;
 
+        // Email para el User del ERP: setup_data (formulario nuevo) y, si falta, el email del lead (demo).
+        $payload_email = isset($payload['email']) ? trim((string) $payload['email']) : '';
+        if ($payload_email === '') {
+            $lead = \App\Models\Lead::where('promoted_client_id', $client->id)->first();
+            if ($lead !== null) {
+                $lead_email = trim((string) ($lead->email ?? ''));
+                if ($lead_email !== '') {
+                    $payload['email'] = $lead_email;
+                }
+            }
+        }
+
+        // doc_number: si no vino del formulario, dejarlo como string vacío explícito (el ERP lo toma como null).
+        if (! isset($payload['doc_number'])) {
+            $payload['doc_number'] = '';
+        }
+
+        // Los flags de dólar (costos_en_dolares, ventas_en_dolares, cotizar_precios_en_dolares),
+        // las redes (facebook, instagram), price_lists_detail (nombre + margen por lista) y
+        // payment_discounts (método + tipo + porcentaje) viajan por el spread de setup_data
+        // y son consumidos por UserSetupHelper en empresa-api. Si setup_data no los trae
+        // (cliente viejo), el ERP usa defaults.
+
         return $payload;
     }
 
