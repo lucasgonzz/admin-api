@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessImplementationFormSubmit;
 use App\Models\Implementation;
+use App\Models\ImplementationPaymentMethodOption;
 use App\Models\ImplementationStage;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -89,10 +90,15 @@ class ImplementationFormController extends Controller
         // Respuestas parciales del formulario web (autoguardados previos) o vacío.
         $form_data = $this->read_form_responses($stage);
 
+        // Opciones de métodos de pago disponibles en el select del formulario.
+        $payment_method_options = ImplementationPaymentMethodOption::orderBy('position')
+            ->get(['key', 'label']);
+
         return response()->json([
-            'submitted'   => false,
-            'client_name' => $client_name,
-            'form_data'   => $form_data,
+            'submitted'                => false,
+            'client_name'              => $client_name,
+            'form_data'                => $form_data,
+            'payment_method_options'   => $payment_method_options,
         ], 200);
     }
 

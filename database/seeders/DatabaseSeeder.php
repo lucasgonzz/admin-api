@@ -38,6 +38,8 @@ class DatabaseSeeder extends Seeder
             ImplementationStageConfigSeeder::class,
             // Catálogo de las 5 etapas del flujo de implementación de la tienda online.
             EcommerceImplementationStageConfigSeeder::class,
+            // Métodos de pago disponibles en el formulario público de configuración.
+            ImplementationPaymentMethodOptionSeeder::class,
             AiSystemPromptSeeder::class,
             /* Identidad del agente Martín inyectada dinámicamente en el system prompt de Claude. */
             AgentIdentitySeeder::class,
