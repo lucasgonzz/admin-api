@@ -13,23 +13,28 @@ use Illuminate\Support\Facades\DB;
  * Política:
  * - user_id base por sistema debe ser múltiplo de 100.
  * - no puede repetirse entre sistemas.
- * - se sugiere el siguiente bloque libre en base al histórico de leads.
+ * - se sugiere el siguiente bloque libre en base al mayor user_id ya asignado a un cliente.
  */
 class UserIdBlockAllocatorService
 {
     /**
      * Calcula el siguiente block_start sugerido.
-     * Considera el máximo entre leads, clients con user_id y bloques ya reservados,
-     * y avanza al siguiente múltiplo de 100 libre.
+     * Ancla en el máximo user_id ya asignado a un cliente real (fuente de verdad de
+     * los bloques en uso) y avanza al siguiente múltiplo de 100 libre.
      *
      * @return int
      */
     public function suggest_next_block_start()
     {
-        $max_user_id = $this->get_max_numeric_user_id_for_allocation();
-        $candidate = $this->next_multiple_of_100($max_user_id + 1);
+        // Ancla = el user_id más alto YA asignado a un cliente real. El próximo bloque es ese + 100.
+        // (Antes se tomaba el máximo entre leads, clients y bloques reservados; un lead con un
+        // user_id numérico basura — ej. un teléfono guardado por error — disparaba el valor a
+        // decenas de miles y todos los clientes nuevos heredaban ese arrastre.)
+        $max_client_user_id = $this->get_max_client_user_id();
+        $candidate = $this->next_multiple_of_100($max_client_user_id + 1);
 
-        // Si ya está reservado, avanzamos de 100 en 100 hasta encontrar libre
+        // Salvaguarda de colisión: si ese bloque ya está reservado (ventana de creación en
+        // paralelo de otro lead), avanzar de 100 en 100 hasta uno libre.
         while ($this->is_block_reserved($candidate)) {
             $candidate += 100;
         }
@@ -121,37 +126,15 @@ class UserIdBlockAllocatorService
     }
 
     /**
-     * Ancla máximo para sugerir bloques: leads, clients.user_id y reservas en user_id_blocks.
+     * Mayor user_id (bloque ComercioCity) ya asignado a un cliente.
      *
      * @return int
      */
-    private function get_max_numeric_user_id_for_allocation()
+    private function get_max_client_user_id()
     {
-        $max_lead = $this->get_max_numeric_user_id_from_leads();
-
-        $max_client = (int) (Client::query()
+        return (int) (Client::query()
             ->whereNotNull('user_id')
             ->max('user_id') ?? 0);
-
-        $max_block = (int) (UserIdBlock::query()->max('block_start') ?? 0);
-
-        return max($max_lead, $max_client, $max_block);
-    }
-
-    /**
-     * Obtiene el mayor user_id numérico guardado en leads.
-     *
-     * @return int
-     */
-    private function get_max_numeric_user_id_from_leads()
-    {
-        $max = Lead::query()
-            ->whereNotNull('user_id')
-            ->whereRaw("user_id REGEXP '^[0-9]+$'")
-            ->selectRaw('MAX(CAST(user_id AS UNSIGNED)) as max_user_id')
-            ->value('max_user_id');
-
-        return $max ? (int) $max : 0;
     }
 
     /**
