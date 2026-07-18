@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Lead;
+use App\Models\LeadCall;
 use App\Models\RecallConfig;
 use App\Services\CallSummaryService;
 use App\Services\RecallService;
@@ -28,7 +28,7 @@ class RecallWebhookController extends Controller
      * Flujo:
      * 1. Validar firma HMAC si hay webhook_secret configurado.
      * 2. Ignorar eventos que no sean `bot.done`.
-     * 3. Buscar el lead por recall_bot_id.
+     * 3. Buscar la llamada (LeadCall) por recall_bot_id.
      * 4. Obtener la transcripción de Recall y formatearla.
      * 5. Delegar a CallSummaryService para extraer el resumen y notificar al equipo.
      *
@@ -78,10 +78,10 @@ class RecallWebhookController extends Controller
             return response()->json(['ok' => true]);
         }
 
-        /* Buscar el lead que tiene asignado este bot de Recall. */
-        $lead = Lead::where('recall_bot_id', $bot_id)->first();
-        if (!$lead) {
-            Log::channel('daily')->warning('[RECALL_WEBHOOK] No se encontró lead para el bot_id.', [
+        /* Buscar la LLAMADA que tiene asignado este bot de Recall (no el lead directamente). */
+        $call = LeadCall::where('recall_bot_id', $bot_id)->first();
+        if (!$call) {
+            Log::channel('daily')->warning('[RECALL_WEBHOOK] No se encontró llamada para el bot_id.', [
                 'bot_id' => $bot_id,
             ]);
             return response()->json(['ok' => true]);
@@ -91,7 +91,7 @@ class RecallWebhookController extends Controller
         $utterances = $recall_service->get_transcript($bot_id);
         if (empty($utterances)) {
             Log::channel('daily')->warning('[RECALL_WEBHOOK] Transcripción vacía o nula.', [
-                'lead_id' => $lead->id,
+                'lead_id' => $call->lead_id,
                 'bot_id'  => $bot_id,
             ]);
             return response()->json(['ok' => true]);
@@ -101,7 +101,7 @@ class RecallWebhookController extends Controller
         $transcript_text = $recall_service->format_transcript($utterances);
 
         /* Procesar la transcripción: extrae el resumen con Claude y notifica al equipo. */
-        $call_summary_service->process_transcript_for_lead($lead, $transcript_text);
+        $call_summary_service->process_transcript_for_call($call, $transcript_text);
 
         return response()->json(['ok' => true]);
     }

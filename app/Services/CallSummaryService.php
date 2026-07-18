@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Admin;
 use App\Models\Lead;
+use App\Models\LeadCall;
 use App\Models\LeadPartner;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -100,19 +101,23 @@ PROMPT;
     }
 
     /**
-     * Procesa la transcripción del lead: extrae el resumen con Claude, lo persiste
-     * en el lead y notifica al equipo por WhatsApp.
+     * Procesa la transcripción de la llamada: extrae el resumen con Claude, lo persiste
+     * en la llamada (LeadCall) y notifica al equipo por WhatsApp.
      *
      * Esta es la función principal del servicio, pensada para llamarse desde el
      * webhook de Recall cuando el bot termina la reunión.
      *
-     * @param Lead   $lead            Lead al que pertenece la llamada.
-     * @param string $transcript_text Transcripción formateada en texto plano ("Speaker: texto\n...").
+     * @param LeadCall $call            Llamada (LeadCall) a la que pertenece la transcripción.
+     * @param string   $transcript_text Transcripción formateada en texto plano ("Speaker: texto\n...").
      *
      * @return void
      */
-    public function process_transcript_for_lead(Lead $lead, string $transcript_text): void
+    public function process_transcript_for_call(LeadCall $call, string $transcript_text): void
     {
+        /* Cargar el lead dueño de la llamada (sin re-consultar si ya viene eager-loaded). */
+        $call->loadMissing('lead');
+        $lead = $call->lead;
+
         Log::channel('daily')->info('[CALL_SUMMARY] Procesando transcripción.', [
             'lead_id'          => $lead->id,
             'transcript_chars' => strlen($transcript_text),
@@ -128,11 +133,16 @@ PROMPT;
             return;
         }
 
-        /* Persistir el resumen en el lead. */
-        $lead->update(['call_summary' => $summary]);
+        /* Persistir el resumen, la transcripción completa y el nuevo estado en la llamada. */
+        $call->update([
+            'call_summary' => $summary,
+            'transcript'   => $transcript_text,
+            'estado'       => 'completada',
+        ]);
 
-        Log::channel('daily')->info('[CALL_SUMMARY] Resumen guardado en el lead.', [
+        Log::channel('daily')->info('[CALL_SUMMARY] Resumen guardado en la llamada.', [
             'lead_id'          => $lead->id,
+            'call_id'          => $call->id,
             'escenario_cierre' => $summary['escenario_cierre'] ?? null,
         ]);
 
@@ -155,6 +165,7 @@ PROMPT;
 
                 LeadPartner::create([
                     'lead_id'              => $lead->id,
+                    'lead_call_id'         => $call->id,
                     'name'                 => $nombre !== '' ? $nombre : null,
                     'phone'                => $telefono !== '' ? $telefono : null,
                     'notes'                => $rol !== '' ? "Rol: {$rol}" : null,
@@ -176,10 +187,15 @@ PROMPT;
         }
 
         /* Generar sugerencia de seguimiento para el closer basada en el resumen de la llamada. */
-        app(CloserFollowupService::class)->generate_followup_from_summary($lead);
+        app(CloserFollowupService::class)->generate_followup_from_summary($lead, $summary);
 
         /* Notificar al equipo por WhatsApp. */
         $this->notify_team($lead, $summary);
+
+        /* Transición de estado del lead a closer_activo tras procesar la llamada (solo si no lo estaba ya). */
+        if ((string) $lead->status !== 'closer_activo') {
+            $lead->update(['status' => 'closer_activo']);
+        }
     }
 
     /**

@@ -58,9 +58,6 @@ class Kernel extends ConsoleKernel
         // Pasa a closer_activo los leads en demo_pendiente_de_terminar que superaron el timeout desde el fin de la demo.
         $schedule->command('leads:check-demo-pendiente-terminar-timeout')->everyMinute();
 
-        // Manda el bot de Recall.ai a la reunión del closer cuando la llamada está próxima.
-        $schedule->command('leads:send-recall-bot')->everyMinute();
-
         // Genera el reporte diario del agente a la hora configurada en admin_settings.
         // La hora se lee cada vez que corre el scheduler; si cambió desde la última corrida, usa la nueva.
         $report_hour = (int) \App\Models\AdminSetting::get('agent_report_hour', 8);

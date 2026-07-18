@@ -33,21 +33,13 @@ class CloserFollowupService
      * tiene_sugerencia_pendiente=true y emite un evento de conversación actualizada
      * para refrescar el panel en tiempo real.
      *
-     * @param Lead $lead Lead para el cual generar el seguimiento.
+     * @param Lead  $lead    Lead para el cual generar el seguimiento.
+     * @param array $summary Resumen estructurado de la llamada (extraído por CallSummaryService).
      *
      * @return void
      */
-    public function generate_followup_from_summary(Lead $lead): void
+    public function generate_followup_from_summary(Lead $lead, array $summary): void
     {
-        /* Necesitamos call_summary para poder generar el mensaje. */
-        $summary = $lead->call_summary;
-        if (empty($summary)) {
-            Log::channel('daily')->info('[CLOSER_FOLLOWUP] Sin call_summary, no se genera seguimiento.', [
-                'lead_id' => $lead->id,
-            ]);
-            return;
-        }
-
         /* Datos del resumen usados para construir el prompt. */
         $escenario    = $summary['escenario_cierre'] ?? null;
         $proximo_paso = (string) ($summary['proximo_paso'] ?? '');

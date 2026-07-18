@@ -3221,8 +3221,14 @@ class LeadController extends Controller
         /* Buscar el lead con todas sus relaciones para que el servicio tenga el contexto completo. */
         $lead = Lead::withAll()->findOrFail($id);
 
-        /* Generar la sugerencia de seguimiento con Claude. */
-        app(\App\Services\CloserFollowupService::class)->generate_followup_from_summary($lead);
+        /* Resumen a usar: el de la llamada completada más reciente del lead. */
+        $latest_call = $lead->calls()->whereNotNull('call_summary')->orderByDesc('id')->first();
+        if (!$latest_call) {
+            return response()->json(['message' => 'El lead todavía no tiene ninguna llamada con resumen.'], 422);
+        }
+
+        /* Generar la sugerencia de seguimiento con Claude a partir del resumen de esa llamada. */
+        app(\App\Services\CloserFollowupService::class)->generate_followup_from_summary($lead, $latest_call->call_summary);
 
         /* Refrescar el lead para incluir el nuevo mensaje en la respuesta. */
         $lead->refresh();
@@ -3254,10 +3260,8 @@ class LeadController extends Controller
     }
 
     /**
-     * Manda el bot de Recall.ai a la reunión del lead si no hay uno ya asignado.
-     *
-     * Fire-and-forget: el frontend no espera resultado real, pero este endpoint
-     * responde 200 en todos los casos controlados para no generar errores en consola.
+     * Endpoint retirado (grupo 117): el bot ahora se manda por llamada (LeadCall) vía
+     * LeadCallController (calls/join, calls/new, calls/{id}/send-bot).
      *
      * @param int|string $id ID del lead.
      *
@@ -3265,21 +3269,11 @@ class LeadController extends Controller
      */
     public function send_recall_bot_json($id)
     {
-        /* Lead objetivo de la reunión Meet. */
-        $lead = Lead::findOrFail($id);
-
-        /* Si el lead ya tiene un bot asignado, no mandar otro. */
-        if (!empty($lead->recall_bot_id)) {
-            return response()->json([
-                'ok'             => true,
-                'already_exists' => true,
-            ], 200);
-        }
-
-        /* Mandar el bot (la función loguea internamente si falla; no lanza excepciones). */
-        app(\App\Services\RecallService::class)->send_bot_for_lead($lead);
-
-        return response()->json(['ok' => true], 200);
+        /* Endpoint retirado (grupo 117): el bot ahora se manda por llamada (LeadCall) vía
+         * LeadCallController (calls/join, calls/new, calls/{id}/send-bot). Este método
+         * escribía recall_bot_id en el lead, que el webhook nuevo ya no rutea. Se deja como
+         * no-op 200 para no romper llamadas viejas del frontend. */
+        return response()->json(['ok' => true, 'retired' => true], 200);
     }
 
     /**
