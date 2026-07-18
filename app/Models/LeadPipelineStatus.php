@@ -66,7 +66,6 @@ class LeadPipelineStatus extends Model
 
     /**
      * Grupo de categoría visual por slug. Los slugs no listados se muestran sin grupo.
-     * `demo_realizada` está ausente deliberadamente: se excluye del selector.
      */
     public const DEFAULT_STATUS_GROUPS = [
         'nuevo'                      => 'Calificación',
@@ -78,6 +77,7 @@ class LeadPipelineStatus extends Model
         'demo_en_curso'              => 'Demo',
         'demo_pendiente_de_ingreso'  => 'Demo',
         'demo_pendiente_de_terminar' => 'Demo',
+        'demo_realizada'             => 'Demo',
         'closer_activo'              => 'Cierre',
         'cerrado_ganado'             => 'Cierre',
         'cerrado_perdido'            => 'Fin',
@@ -87,11 +87,13 @@ class LeadPipelineStatus extends Model
 
     /**
      * Slugs excluidos de los selectores de la UI (existen en BD pero no deben poder asignarse
-     * manualmente). `demo_realizada` es estado técnico interno del ciclo automatizado de demo.
-     * `mail2_enviado` no se usa (Lucas lo dejó de utilizar, 2/7/2026) — se mantiene en el catálogo
-     * por compatibilidad histórica pero se saca de filtro y de asignación.
+     * manualmente). `mail2_enviado` no se usa (Lucas lo dejó de utilizar, 2/7/2026) -- se
+     * mantiene en el catálogo por compatibilidad histórica pero se saca de filtro y de
+     * asignación. `demo_realizada` YA NO está acá (17/7/2026): ahora es asignable a mano
+     * desde datos básicos del lead -- asignarlo manualmente es justamente lo que hace que
+     * el lead aparezca en la columna "Hoy" del panel del closer.
      */
-    public const SLUGS_HIDDEN_FROM_SELECT = ['demo_realizada', 'mail2_enviado'];
+    public const SLUGS_HIDDEN_FROM_SELECT = ['mail2_enviado'];
 
     protected $guarded = [];
 
@@ -186,7 +188,7 @@ class LeadPipelineStatus extends Model
 
     /**
      * Opciones `{ value, text, color, group }` para el select de estado en admin-spa.
-     * Excluye `demo_realizada` (estado técnico interno).
+     * Excluye los slugs listados en `SLUGS_HIDDEN_FROM_SELECT`.
      *
      * @return array<int, array{value: string, text: string, color: string, group: string|null}>
      */
