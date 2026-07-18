@@ -25,6 +25,7 @@ use App\Http\Controllers\WhatsappWebhookController;
 use App\Http\Controllers\RecallWebhookController;
 use App\Http\Controllers\FollowupRuleController;
 use App\Http\Controllers\FollowupTemplateController;
+use App\Http\Controllers\LeadCallController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\ProtocolEntryController;
 use App\Http\Controllers\SharedDatabaseGroupController;
@@ -222,6 +223,11 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/closer-accept-alert', [LeadController::class, 'closer_accept_alert_json']);
         Route::post('lead/{id}/generate-closer-followup', [LeadController::class, 'generate_closer_followup_json']);
         Route::post('lead/{id}/send-recall-bot', [LeadController::class, 'send_recall_bot_json']);
+
+        // Ciclo de llamadas del closer con el lead (unirse/nueva reunión/mandar bot manual): LeadCallController (prompt 491).
+        Route::post('lead/{id}/calls/join', [LeadCallController::class, 'join_json']);
+        Route::post('lead/{id}/calls/new', [LeadCallController::class, 'create_new_json']);
+        Route::post('lead/{id}/calls/{call_id}/send-bot', [LeadCallController::class, 'send_bot_json']);
 
         Route::get('message-variant', [\App\Http\Controllers\Api\MessageVariantController::class, 'index_json']);
         Route::post('message-variant', [\App\Http\Controllers\Api\MessageVariantController::class, 'store_json']);
