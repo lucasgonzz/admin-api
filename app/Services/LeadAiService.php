@@ -3513,18 +3513,6 @@ TXT;
                     'error'   => $e->getMessage(),
                 ]);
             }
-
-            /* Disparar alerta "Tomar llamada" al closer: modal broadcast + WhatsApp + fallbacks automáticos.
-             * Se ejecuta solo la primera vez que se confirma el fin de la demo (bandera $notificar_fin_confirmado). */
-            try {
-                $closer_alert_service = new \App\Services\CloserAlertService();
-                $closer_alert_service->fire_alert($lead->fresh());
-            } catch (\Throwable $e) {
-                Log::error('LeadAiService: error al disparar alerta del closer.', [
-                    'lead_id' => $lead->id,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
         }
 
         if ($notificar_no_ingreso) {
