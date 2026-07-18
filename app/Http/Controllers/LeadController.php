@@ -1433,6 +1433,154 @@ class LeadController extends Controller
     }
 
     /**
+     * Envía un documento (PDF/Excel/Word/etc.) directamente al lead por WhatsApp desde el panel de admin (prompt 466).
+     *
+     * Calcado de `send_direct_image_json`: el documento llega como archivo multipart (campo `document`,
+     * fallback `file`), se valida que NO sea una imagen ni un audio (esos van por sus endpoints propios),
+     * se valida el tamaño (tope 100 MB de la Cloud API de WhatsApp), se persiste el binario en disco
+     * `public`, se crea el LeadMessage como `setter` con kind `document` (con `caption` opcional como
+     * contenido) y su LeadMessageAttachment (guardando el nombre original del archivo), y se envía
+     * reutilizando `WhatsappSendService::send_document_attachment` (ahora público, prompt 466). El
+     * mensaje queda guardado aunque WhatsApp esté en test_mode o el lead no tenga teléfono (en esos
+     * casos el envío devuelve null sin ser error).
+     *
+     * @param Request             $request               Debe incluir el archivo en `document` (o `file`)
+     *                                                    y opcionalmente `caption` (texto libre).
+     * @param int|string          $lead_id
+     * @param WhatsappSendService $whatsapp_send_service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_direct_document_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
+    {
+        // El frontend sube el documento en el campo `document`; aceptamos `file` como fallback (mismo patrón que imagen/audio).
+        $uploaded_file = $request->file('document') ?: $request->file('file');
+        if ($uploaded_file === null || ! $uploaded_file->isValid()) {
+            return response()->json(['message' => 'No se recibió un archivo de documento válido.'], 422);
+        }
+
+        // Mime real del archivo subido.
+        $mime = strtolower((string) $uploaded_file->getMimeType());
+
+        // Si finfo no pudo detectar el mime real (devuelve application/octet-stream), usamos el mime
+        // reportado por el cliente como safety net, siempre que no venga vacío.
+        if ($mime === 'application/octet-stream') {
+            $client_mime = strtolower((string) $uploaded_file->getClientMimeType());
+            if ($client_mime !== '') {
+                $mime = $client_mime;
+            }
+        }
+
+        // Este endpoint es solo para documentos: las imágenes y audios tienen sus propios endpoints
+        // (send-direct-image / send-direct-audio), que aplican su propia validación y envío.
+        if (strpos($mime, 'image/') === 0 || strpos($mime, 'audio/') === 0) {
+            return response()->json(['message' => 'Este archivo debe enviarse como imagen o audio, no como documento (mime: '.$mime.').'], 422);
+        }
+
+        // Límite de 100 MB: tope de documento de la Cloud API de WhatsApp. El límite práctico real lo
+        // impone upload_max_filesize/post_max_size de PHP; si el archivo es más grande, la request
+        // muere antes de llegar acá con un 413 (esperable, no se maneja en este método).
+        $max_bytes = 100 * 1024 * 1024;
+        if ($uploaded_file->getSize() > $max_bytes) {
+            return response()->json(['message' => 'El documento supera el tamaño máximo permitido (100 MB).'], 422);
+        }
+
+        // Caption opcional: si viene vacío, se guarda como null (no como string vacío).
+        $caption = trim((string) $request->input('caption', ''));
+        if ($caption === '') {
+            $caption = null;
+        }
+
+        // Lead destino del documento.
+        $lead = Lead::query()->findOrFail($lead_id);
+
+        // Nombre original del archivo: es el nombre con el que el lead lo recibe por WhatsApp y con
+        // el que el admin lo descarga después desde la conversación.
+        $original_name = trim((string) $uploaded_file->getClientOriginalName());
+        if ($original_name === '') {
+            $original_name = 'documento';
+        }
+
+        // Extensión para el nombre de archivo en disco (no se expone al lead, solo uso interno).
+        $ext = strtolower((string) $uploaded_file->getClientOriginalExtension());
+        if ($ext === '') {
+            $ext = 'bin';
+        }
+
+        // Guardamos el binario en disco public bajo el mismo directorio que los mensajes del lead.
+        $directory = 'lead_messages/' . $lead->id;
+        $stored_name = 'out_doc_' . now()->format('Ymd_His') . '_' . substr(md5(uniqid('', true)), 0, 8) . '.' . $ext;
+        $stored_path = $directory . '/' . $stored_name;
+        Storage::disk('public')->put($stored_path, file_get_contents($uploaded_file->getRealPath()));
+
+        // Mensaje saliente: kind document + content con el caption (o placeholder si no hay caption).
+        $message = LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'setter',
+            'kind'                  => 'document',
+            'content'               => ($caption !== null && $caption !== '') ? $caption : '[Documento enviado]',
+            'status'                => 'enviado',
+            'sent_at'               => now(),
+            'is_followup'           => false,
+            'requiere_verificacion' => false,
+            // Admin autor del documento directo (mismo patrón que imagen/audio/texto).
+            'sent_by_admin_id'      => (int) $request->user()->id,
+        ]);
+
+        // Adjunto persistido: habilita la visualización/descarga en la conversación vía public_url
+        // firmado, conservando el nombre original con el que el lead lo recibió.
+        $attachment = LeadMessageAttachment::create([
+            'lead_message_id'   => $message->id,
+            'disk'              => 'public',
+            'path'              => $stored_path,
+            'mime'              => $mime,
+            'size'              => Storage::disk('public')->size($stored_path),
+            'original_filename' => $original_name,
+        ]);
+
+        // Envío real por WhatsApp reutilizando el servicio de documento (ahora público, prompt 466):
+        // sube media + envía type document con el nombre original del archivo.
+        $phone = trim((string) ($lead->phone ?? ''));
+        if ($phone !== '') {
+            try {
+                $whatsapp_message_id = $whatsapp_send_service->send_document_attachment($phone, $attachment, $original_name, $mime);
+                if ($whatsapp_message_id !== null && $whatsapp_message_id !== '') {
+                    $message->update(['whatsapp_message_id' => $whatsapp_message_id]);
+                }
+
+                // Si Meta rechazó el upload silenciosamente (null), no dejar el mensaje en la UI como enviado.
+                if ($whatsapp_message_id === null) {
+                    $whatsapp_config = \App\Models\WhatsappConfig::getActive();
+                    $is_test_mode = $whatsapp_config && $whatsapp_config->test_mode;
+                    if (! $is_test_mode) {
+                        Log::warning('LeadController@send_direct_document_json: documento guardado pero WhatsApp send retornó null (revisar logs de WhatsappSendService).', [
+                            'lead_id'    => $lead_id,
+                            'attachment' => $attachment->id,
+                        ]);
+                        $message->delete();
+                        $attachment->delete();
+                        Storage::disk('public')->delete($stored_path);
+
+                        return response()->json(['message' => 'El documento se guardó correctamente pero no se pudo enviar a WhatsApp. Revisá los logs para más detalles.'], 422);
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::error('LeadController@send_direct_document_json: error WhatsApp.', [
+                    'lead_id' => $lead_id,
+                    'error'   => $e->getMessage(),
+                ]);
+
+                // El mensaje y su adjunto ya quedaron persistidos; informamos el fallo de envío sin borrarlos.
+                return response()->json(['message' => 'No se pudo enviar el documento por WhatsApp: '.$e->getMessage()], 422);
+            }
+        }
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Deriva la extensión del audio saliente a partir del mime real del archivo subido.
      *
      * Mantiene coherencia con los formatos que reconoce WhatsappSendService al reenviar el audio.

@@ -575,7 +575,9 @@ class WhatsappSendService
     }
 
     /**
-     * Envía un archivo como documento (fallback para formatos no soportados como audio nativo).
+     * Envía un archivo como documento (fallback para formatos no soportados como audio nativo,
+     * y también usado directamente por LeadController@send_direct_document_json — prompt 466 —
+     * para el envío de documentos, por eso el método es público).
      *
      * @param string      $to
      * @param object      $attachment
@@ -584,7 +586,7 @@ class WhatsappSendService
      *
      * @return string|null
      */
-    private function send_document_attachment(string $to, $attachment, ?string $filename = null, ?string $mime = null): ?string
+    public function send_document_attachment(string $to, $attachment, ?string $filename = null, ?string $mime = null): ?string
     {
         $context = $this->resolve_send_context();
         if ($context === null) {
