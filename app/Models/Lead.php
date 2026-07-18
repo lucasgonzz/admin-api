@@ -121,6 +121,11 @@ class Lead extends Model
             $lead->personalized_demo_videos()->delete();
             $lead->messages()->delete();
             $lead->partners()->delete();
+            // Borrado en cascada (a nivel Eloquent, sin FK) de las llamadas del closer con este
+            // lead (refactor "múltiples llamadas por lead", prompt 484). Los socios ya se borran
+            // arriba vía partners() y siguen colgando también de lead_id, así que no hace falta
+            // un borrado extra por llamada acá.
+            $lead->calls()->delete();
         });
     }
 
@@ -543,6 +548,17 @@ class Lead extends Model
     public function confirmed_partners()
     {
         return $this->hasMany(LeadPartner::class, 'lead_id')->where('pending_confirmation', false);
+    }
+
+    /**
+     * Llamadas del closer con este lead (múltiples, refactor prompt 484), de la más vieja a la
+     * más nueva.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function calls()
+    {
+        return $this->hasMany(LeadCall::class, 'lead_id')->orderBy('id');
     }
 
     /**

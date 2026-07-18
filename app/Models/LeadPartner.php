@@ -36,6 +36,17 @@ class LeadPartner extends Model
     }
 
     /**
+     * Llamada del closer en la que se detectó/cargó este socio (null si no está atado a una
+     * llamada puntual, ej. carga manual o socio histórico previo al refactor de prompt 484).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function call()
+    {
+        return $this->belongsTo(LeadCall::class, 'lead_call_id');
+    }
+
+    /**
      * Socios ya confirmados por el closer (no pendientes de alta).
      *
      * @param \Illuminate\Database\Eloquent\Builder $query
