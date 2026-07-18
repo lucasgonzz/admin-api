@@ -56,9 +56,16 @@ class LeadMessageAttachment extends Model
             return null;
         }
 
+        // Expiración anclada al inicio del día calendario (no a "ahora"): todas las URLs
+        // firmadas generadas para este adjunto durante el mismo día quedan IDÉNTICAS (mismo
+        // timestamp de expiración -> misma firma -> mismo string de URL). Antes usaba
+        // now()->addHours(24), que generaba un expires distinto en cada serialización (a
+        // veces con 1 segundo de diferencia) y el navegador interpretaba cada URL como una
+        // imagen nueva, re-descargándola en cada refetch/polling/evento de Pusher — causa
+        // del "too many attempts" reportado por Lucas (17/7/2026).
         return URL::temporarySignedRoute(
             'lead.message.attachment.file',
-            now()->addHours(24),
+            now()->startOfDay()->addDays(2),
             ['id' => $this->id]
         );
     }

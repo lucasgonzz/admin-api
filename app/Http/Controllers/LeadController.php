@@ -1906,6 +1906,9 @@ class LeadController extends Controller
         if ($mime !== '') {
             $headers['Content-Type'] = $mime;
         }
+        // Misma ventana que la firma de la URL (LeadMessageAttachment::getPublicUrlAttribute):
+        // el navegador no vuelve a pedir el archivo mientras la URL firmada siga siendo válida.
+        $headers['Cache-Control'] = 'private, max-age=172800';
 
         return Storage::disk($disk)->response($path, $download_name, $headers);
     }
