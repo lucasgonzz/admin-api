@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Lead;
+use App\Models\LeadCall;
 use App\Models\RecallConfig;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -55,11 +56,38 @@ class RecallService
             return;
         }
 
+        /* Crear el bot en Recall.ai a través del método compartido; devuelve null si falla. */
+        $bot_id = $this->create_bot_for_meeting_url($lead->meet_url);
+        if ($bot_id === null) {
+            return;
+        }
+
+        /* Persistir el ID del bot en el lead para rastrear la transcripción. */
+        $lead->update(['recall_bot_id' => $bot_id]);
+
+        Log::channel('daily')->info('[RECALL] Bot creado y enviado a la reunión.', [
+            'lead_id'  => $lead->id,
+            'bot_id'   => $bot_id,
+            'meet_url' => $lead->meet_url,
+        ]);
+    }
+
+    /**
+     * Crea un bot de Recall.ai para una URL de Meet dada y devuelve su id, o null si falla
+     * (sin config activa, error de red, error HTTP). No persiste nada — el llamador decide
+     * dónde guardar el bot_id (Lead o LeadCall según el caso).
+     *
+     * @param string $meeting_url URL de Google Meet a la que se manda el bot.
+     *
+     * @return string|null
+     */
+    private function create_bot_for_meeting_url(string $meeting_url): ?string
+    {
         /* Obtener la configuración activa de Recall; si no hay, nada que hacer. */
         $config = $this->get_config();
         if (!$config) {
             Log::channel('daily')->warning('[RECALL] No hay RecallConfig activa configurada.');
-            return;
+            return null;
         }
 
         try {
@@ -68,46 +96,71 @@ class RecallService
                 'Authorization' => 'Token ' . $config->recall_api_key,
                 'Content-Type'  => 'application/json',
             ])->post(self::API_BASE . '/bot/', [
-                'meeting_url'      => $lead->meet_url,
+                'meeting_url'      => $meeting_url,
                 'recording_config' => [
                     'transcript' => [
                         'provider' => [
-                            /* Usar el transcriptor asíncrono de Recall con idioma español. */
-                            // 'recallai_async' => [
-                            //     'language_code' => 'es',
-                            // ],
                             'recallai_streaming' => ['language_code' => 'es']
                         ],
                     ],
                 ],
-                /* Nombre del bot visible en la reunión para el lead y el closer. */
                 'bot_name' => 'ComercioCity',
             ]);
 
             if ($response->failed()) {
                 Log::channel('daily')->warning('[RECALL] Error al crear bot.', [
-                    'lead_id' => $lead->id,
-                    'status'  => $response->status(),
-                    'body'    => substr($response->body(), 0, 500),
+                    'meeting_url' => $meeting_url,
+                    'status'      => $response->status(),
+                    'body'        => substr($response->body(), 0, 500),
                 ]);
-                return;
+                return null;
             }
 
-            /* Persistir el ID del bot en el lead para rastrear la transcripción. */
-            $bot_id = $response->json('id');
-            $lead->update(['recall_bot_id' => $bot_id]);
-
-            Log::channel('daily')->info('[RECALL] Bot creado y enviado a la reunión.', [
-                'lead_id'  => $lead->id,
-                'bot_id'   => $bot_id,
-                'meet_url' => $lead->meet_url,
-            ]);
+            return $response->json('id');
         } catch (\Throwable $e) {
             Log::channel('daily')->error('[RECALL] Excepción al crear bot.', [
-                'lead_id' => $lead->id,
-                'error'   => $e->getMessage(),
+                'meeting_url' => $meeting_url,
+                'error'       => $e->getMessage(),
             ]);
+            return null;
         }
+    }
+
+    /**
+     * Manda el bot de Recall.ai a la reunión de una LeadCall puntual.
+     * Persiste recall_bot_id en la llamada (no en el lead). Best-effort:
+     * si falla, loguea y no lanza excepción.
+     *
+     * @param LeadCall $call Llamada a la que se envía el bot; debe tener meet_url asignada.
+     *
+     * @return void
+     */
+    public function send_bot_for_call(LeadCall $call): void
+    {
+        /* Verificar que la llamada tenga URL de reunión para enviar el bot. */
+        if (empty($call->meet_url)) {
+            Log::channel('daily')->warning('[RECALL] No se puede mandar bot: llamada sin meet_url.', [
+                'lead_call_id' => $call->id,
+                'lead_id'      => $call->lead_id,
+            ]);
+            return;
+        }
+
+        /* Crear el bot en Recall.ai a través del método compartido; devuelve null si falla. */
+        $bot_id = $this->create_bot_for_meeting_url($call->meet_url);
+        if ($bot_id === null) {
+            return;
+        }
+
+        /* Persistir el ID del bot en la llamada (no en el lead). */
+        $call->update(['recall_bot_id' => $bot_id]);
+
+        Log::channel('daily')->info('[RECALL] Bot creado y enviado a la reunión (por llamada).', [
+            'lead_call_id' => $call->id,
+            'lead_id'      => $call->lead_id,
+            'bot_id'       => $bot_id,
+            'meet_url'     => $call->meet_url,
+        ]);
     }
 
     /**
