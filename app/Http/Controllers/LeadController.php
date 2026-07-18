@@ -3065,36 +3065,26 @@ class LeadController extends Controller
      */
     public function closer_panel_json()
     {
-        /* Fecha de hoy (zona horaria de la app) para separar "Hoy" de "Agendadas". */
+        /* Fecha de hoy (zona horaria de la app), se mantiene para la columna "Demos agendadas". */
         $today = now()->toDateString();
 
-        /* Estados de demo en curso / recién finalizada: siempre van a "Hoy" (acción inmediata). */
-        $en_curso_statuses = [
-            'demo_en_curso',
-            'ingresando_demo',
-            'demo_pendiente_de_terminar',
-            'demo_pendiente_de_ingreso',
-            'demo_realizada',
-        ];
-
         /*
-         * Columna 1 "Hoy": demos en curso (cualquier fecha) + demos agendadas cuya fecha
-         * sea hoy o anterior. Las agendadas vencidas (fecha pasada, nunca realizadas) se
-         * incluyen acá a propósito para que no desaparezcan del panel.
+         * Columna 1 "Hoy": SOLO leads que ya hicieron la demo (demo_realizada) y todavía
+         * no tuvieron ninguna llamada del closer (lead_calls vacío). Decisión 17/7/2026:
+         * el closer ya no ve el ciclo de demo en curso -- eso lo maneja Martín manualmente
+         * desde el panel de leads. Apenas el lead tiene su primera LeadCall, sale de acá
+         * (la llamada queda en estado 'pendiente' hasta que llegue la transcripción, y
+         * mientras tanto el lead ya no aparece en ninguna columna del panel del closer --
+         * es un estado de transición corto, mientras dura la llamada).
          */
         $en_curso = Lead::withAll()
-            ->where(function ($q) use ($en_curso_statuses, $today) {
-                $q->whereIn('status', $en_curso_statuses)
-                  ->orWhere(function ($q2) use ($today) {
-                      $q2->where('status', 'demo_agendada')
-                         ->whereDate('demo_date', '<=', $today);
-                  });
-            })
+            ->where('status', 'demo_realizada')
+            ->whereDoesntHave('calls')
             ->orderBy('demo_date')
             ->orderBy('demo_start_time')
             ->get();
 
-        /* Columna 2 "Demos agendadas": solo demo_agendada de mañana en adelante. */
+        /* Columna 2 "Demos agendadas": sin cambios -- demo_agendada de mañana en adelante. */
         $agendadas = Lead::withAll()
             ->where('status', 'demo_agendada')
             ->whereDate('demo_date', '>', $today)
@@ -3103,11 +3093,14 @@ class LeadController extends Controller
             ->get();
 
         /*
-         * Columna 3 "En seguimiento": todos los leads en closer_activo, tengan o no
-         * resumen de llamada. Antes se exigia call_summary != null, lo que ocultaba los
-         * leads que el closer activa a mano (demos no realizadas en tiempo y forma).
+         * Columna 3 "En seguimiento": leads en closer_activo, con TODAS sus llamadas
+         * (resumen, transcripción y socios propios de cada una) para que el frontend
+         * pueda listarlas individualmente en vez de mostrar un solo resumen agregado.
          */
         $seguimiento = Lead::withAll()
+            ->with(['calls' => function ($q) {
+                $q->with('partners')->orderBy('id');
+            }])
             ->where('status', 'closer_activo')
             ->orderBy('closer_called_at', 'desc')
             ->get();
