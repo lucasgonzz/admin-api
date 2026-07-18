@@ -37,7 +37,9 @@ class ImplementationFormController extends Controller
     private const FORM_FIELD_KEYS = [
         'price_mode',
         'price_lists',
-        'dollar_prices',
+        'costos_en_dolares',
+        'cotizar_precios_en_dolares',
+        'ventas_en_dolares',
         'stock_mode',
         'deposit_names',
         'payment_discounts',
@@ -46,7 +48,10 @@ class ImplementationFormController extends Controller
         'default_cuenta_corriente',
         'company_name',
         'address_company',
-        'social_networks',
+        'facebook',
+        'instagram',
+        'email',
+        'doc_number',
         'employees',
         'migration_responsible',
         '_current_section',
@@ -89,6 +94,20 @@ class ImplementationFormController extends Controller
 
         // Respuestas parciales del formulario web (autoguardados previos) o vacío.
         $form_data = $this->read_form_responses($stage);
+
+        // Precargar el email del lead (el que se uso para agendar la demo) si el cliente todavia no cargo uno.
+        $has_email = is_array($form_data) && isset($form_data['email']) && trim((string) $form_data['email']) !== '';
+        if (! $has_email && $implementation->client !== null) {
+            $lead = \App\Models\Lead::where('promoted_client_id', $implementation->client->id)->first();
+            if ($lead !== null) {
+                $lead_email = trim((string) ($lead->email ?? ''));
+                if ($lead_email !== '') {
+                    // $form_data puede ser un stdClass vacio (se serializa como {}); normalizar a array para inyectar.
+                    $form_data = is_array($form_data) ? $form_data : array();
+                    $form_data['email'] = $lead_email;
+                }
+            }
+        }
 
         // Opciones de métodos de pago disponibles en el select del formulario.
         $payment_method_options = ImplementationPaymentMethodOption::orderBy('position')

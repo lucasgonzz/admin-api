@@ -102,23 +102,26 @@ class ImplementationFormMapper
         $deposit_rows = is_array($form['deposit_names'] ?? null) ? $form['deposit_names'] : [];
         $discounts    = is_array($form['payment_discounts'] ?? null) ? $form['payment_discounts'] : [];
 
-        // Redes sociales en texto libre: se intenta separar instagram y facebook.
-        $social = (string) ($form['social_networks'] ?? '');
-
         return [
-            // Empresa.
+            // Empresa: facebook e instagram ahora vienen como campos separados del formulario
+            // (antes se derivaban de un texto libre 'social_networks' con extract_social()).
             'company_name'    => (string) ($form['company_name'] ?? ''),
             'address_company' => (string) ($form['address_company'] ?? ''),
-            'social_networks' => $social,
-            'instagram'       => $this->extract_social($social, 'instagram'),
-            'facebook'        => $this->extract_social($social, 'facebook'),
+            'facebook'        => (string) ($form['facebook'] ?? ''),
+            'instagram'       => (string) ($form['instagram'] ?? ''),
+            'email'           => (string) ($form['email'] ?? ''),
+            'doc_number'      => (string) ($form['doc_number'] ?? ''),
 
             // Precios: la bandera para el sistema y los nombres en texto para price_type_1..3.
-            'use_price_lists'            => ((string) ($form['price_mode'] ?? '')) === 'lists',
-            'price_lists'                => $this->rows_to_string($price_rows),
+            'use_price_lists'    => ((string) ($form['price_mode'] ?? '')) === 'lists',
+            'price_lists'        => $this->rows_to_string($price_rows),
             // Detalle completo (con márgenes) para que el admin lo vea; empresa-api lo ignora.
-            'price_lists_detail'         => $price_rows,
-            'cotizar_precios_en_dolares' => ((string) ($form['dollar_prices'] ?? '')) === 'yes',
+            'price_lists_detail' => $price_rows,
+
+            // Dólar: tres preguntas independientes del formulario (antes era una sola 'dollar_prices').
+            'costos_en_dolares'          => ((string) ($form['costos_en_dolares'] ?? '')) === 'yes',
+            'ventas_en_dolares'          => ((string) ($form['ventas_en_dolares'] ?? '')) === 'yes',
+            'cotizar_precios_en_dolares' => ((string) ($form['cotizar_precios_en_dolares'] ?? '')) === 'yes',
 
             // Stock: bandera + nombres en texto para address_1..3.
             'use_deposits'  => ((string) ($form['stock_mode'] ?? '')) === 'deposits',
@@ -157,34 +160,6 @@ class ImplementationFormMapper
         }
 
         return implode(', ', $names);
-    }
-
-    /**
-     * Busca en el texto libre de redes sociales la línea correspondiente a una red.
-     *
-     * @param string $text    Texto libre cargado por el cliente.
-     * @param string $network 'instagram' | 'facebook'.
-     *
-     * @return string Línea encontrada o cadena vacía.
-     */
-    private function extract_social(string $text, string $network): string
-    {
-        $lines = preg_split('/[\r\n,;]+/', $text) ?: [];
-
-        foreach ($lines as $line) {
-            $clean = trim((string) $line);
-
-            if ($clean === '') {
-                continue;
-            }
-
-            // PHP 7.4: sin str_contains.
-            if (stripos($clean, $network) !== false) {
-                return $clean;
-            }
-        }
-
-        return '';
     }
 
     /**
