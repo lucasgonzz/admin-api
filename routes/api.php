@@ -188,6 +188,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{lead_id}/send-template', [LeadController::class, 'send_template_json']);
         Route::post('lead/{lead_id}/suggest-recovery-reason', [LeadController::class, 'suggest_recovery_reason_json']);
         Route::post('lead/{id}/send-direct-audio', [LeadController::class, 'send_direct_audio_json']);
+        Route::post('lead/{id}/send-direct-image', [LeadController::class, 'send_direct_image_json']);
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
         Route::post('lead/{id}/resume-with-claude', [LeadController::class, 'resume_with_claude_json']);
