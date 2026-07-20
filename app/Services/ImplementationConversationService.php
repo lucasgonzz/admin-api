@@ -807,28 +807,30 @@ class ImplementationConversationService
     }
 
     /**
-     * Crea la `ClientInstallation` del cliente si todavía no existe, al entrar a la Etapa 2.
+     * Crea la `ClientInstallation` del cliente si todavía no existe.
      *
-     * Efecto colateral no-comunicacional (no manda mensajes ni dispara jobs): se ejecuta
-     * tanto en modo automático como en modo manual, porque es lo que hace aparecer al
-     * cliente en el módulo de Instalaciones para que el equipo pueda instalar el sistema.
+     * Efecto colateral no-comunicacional (no manda mensajes ni dispara jobs). Idempotente:
+     * si el cliente ya tiene una instalación, la devuelve sin crear una nueva.
      *
-     * @param Implementation $implementation Implementación que acaba de avanzar a la Etapa 2.
+     * Se usa tanto al avanzar a la Etapa 2 (flujo automático y manual) como desde la acción
+     * manual `crear_instalacion` del panel (ImplementationActionService).
      *
-     * @return void
+     * @param Implementation $implementation
+     *
+     * @return array{created: bool, installation: \App\Models\ClientInstallation|null}
      */
-    private function ensure_client_installation(Implementation $implementation): void
+    public function ensure_client_installation(Implementation $implementation): array
     {
         $client = $implementation->client ?? Client::find($implementation->client_id);
 
         if ($client === null) {
-            return;
+            return ['created' => false, 'installation' => null];
         }
 
         $existing = ClientInstallation::where('client_id', $client->id)->first();
 
         if ($existing !== null) {
-            return;
+            return ['created' => false, 'installation' => $existing];
         }
 
         // Usar la versión asignada al cliente; si no tiene, buscar la última publicada.
@@ -840,7 +842,7 @@ class ImplementationConversationService
             $version_id = $latest_version ? $latest_version->id : null;
         }
 
-        ClientInstallation::create([
+        $installation = ClientInstallation::create([
             'client_id'     => $client->id,
             'client_api_id' => $client->active_client_api_id ?? null,
             'version_id'    => $version_id,
@@ -851,6 +853,8 @@ class ImplementationConversationService
             'implementation_id' => $implementation->id,
             'client_id'         => $client->id,
         ]);
+
+        return ['created' => true, 'installation' => $installation];
     }
 
     /**

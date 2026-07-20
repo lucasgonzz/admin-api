@@ -17,6 +17,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property \Illuminate\Support\Carbon|null $started_at
  * @property \Illuminate\Support\Carbon|null $completed_at
  * @property \Illuminate\Support\Carbon|null $form_submitted_at Fecha/hora de envío definitivo del formulario.
+ * @property \Illuminate\Support\Carbon|null $user_setup_executed_at Momento en que se aplicó el UserSetup con éxito (lock del botón, prompt 477).
  */
 class Implementation extends Model
 {
@@ -43,6 +44,8 @@ class Implementation extends Model
         'completed_at'      => 'datetime',
         'form_submitted_at' => 'datetime',
         'status'            => 'string',
+        // Lock del botón de UserSetup (prompt 477): NULL = todavía no se aplicó con éxito.
+        'user_setup_executed_at' => 'datetime',
     ];
 
     /**

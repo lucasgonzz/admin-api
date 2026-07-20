@@ -659,12 +659,14 @@ class ImplementationController extends Controller
      */
     public function action_execute(Request $request, Implementation $implementation, string $action): JsonResponse
     {
-        // Texto editado por el admin (opcional) y etapa seleccionada (opcional, solo 'progreso').
+        // Texto editado por el admin (opcional), etapa seleccionada (opcional, solo 'progreso')
+        // y override de lock (opcional, solo 'user_setup': re-aplicar aunque ya se haya aplicado).
         $content = $request->input('content');
         $stage   = $request->has('stage') ? (int) $request->input('stage') : null;
+        $force   = (bool) $request->input('force', false);
 
         try {
-            $result = (new ImplementationActionService())->execute($implementation, $action, $content, $stage);
+            $result = (new ImplementationActionService())->execute($implementation, $action, $content, $stage, $force);
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Client;
+use App\Models\ClientInstallation;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
@@ -22,28 +23,31 @@ use App\Models\ImplementationStage;
 class ImplementationActionService
 {
     /** Acciones válidas del flujo manual. */
-    private const ACTIONS = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'user_setup'];
+    private const ACTIONS = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'user_setup', 'crear_instalacion'];
 
     /** Nombre legible de cada acción para el panel. */
     private const LABELS = [
-        'presentacion'   => 'Presentación',
-        'form_link'      => 'Link del formulario',
-        'progreso'       => 'Progreso',
-        'pedir_archivos' => 'Pedido de archivos',
-        'entrega'        => 'Entrega del sistema',
-        'user_setup'     => 'Configuración del sistema (UserSetup)',
+        'presentacion'      => 'Presentación',
+        'form_link'         => 'Link del formulario',
+        'progreso'          => 'Progreso',
+        'pedir_archivos'    => 'Pedido de archivos',
+        'entrega'           => 'Entrega del sistema',
+        'user_setup'        => 'Configuración del sistema (UserSetup)',
+        'crear_instalacion' => 'Crear instalación',
     ];
 
     /**
      * Etapa típica de cada acción (solo sugerencia para la UI vía `available`; ninguna
-     * acción se bloquea por etapa). `progreso` no tiene etapa fija: siempre disponible.
+     * acción se bloquea por etapa, salvo `user_setup` que además tiene el gate real de
+     * `user_setup_gate()`). `progreso` no tiene etapa fija: siempre disponible.
      */
     private const TYPICAL_STAGE = [
-        'presentacion'   => 1,
-        'form_link'      => 1,
-        'user_setup'     => 2,
-        'pedir_archivos' => 3,
-        'entrega'        => 5,
+        'presentacion'      => 1,
+        'form_link'         => 1,
+        'user_setup'        => 2,
+        'crear_instalacion' => 2,
+        'pedir_archivos'    => 3,
+        'entrega'           => 5,
     ];
 
     /** Única plantilla de WhatsApp aprobada hoy para el flujo manual. */
@@ -119,14 +123,44 @@ class ImplementationActionService
         foreach (self::ACTIONS as $action) {
             $recipient_key = $action === 'pedir_archivos' ? 'migration' : 'owner';
 
+            // Estado de bloqueo (solo user_setup lo usa hoy; el resto queda en false/null).
+            $blocked        = false;
+            $blocked_reason = null;
+            $can_force      = false;
+            $executed_at    = null;
+
+            if ($action === 'user_setup') {
+                $executed_at = $implementation->user_setup_executed_at !== null
+                    ? $implementation->user_setup_executed_at->toISOString()
+                    : null;
+
+                if ($executed_at !== null) {
+                    // Ya se aplicó con éxito: bloqueado, pero se puede re-aplicar con force (el front confirma).
+                    $blocked        = true;
+                    $blocked_reason = 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. Usá "Forzar" para volver a aplicarlo.';
+                    $can_force      = true;
+                } else {
+                    $gate = $this->user_setup_gate($implementation);
+                    if (! $gate['enabled']) {
+                        $blocked        = true;
+                        $blocked_reason = $gate['reason'];
+                        $can_force      = false;
+                    }
+                }
+            }
+
             $actions[] = [
                 'key'              => $action,
                 'label'            => self::LABELS[$action],
                 'available'        => $this->is_available_for_stage($action, $current_stage),
                 'recipient_label'  => $this->resolve_recipient_label($action),
-                // 'user_setup' no depende de la ventana de WhatsApp: no envía mensaje.
-                'window_open'      => $action === 'user_setup' ? true : $windows[$recipient_key]['open'],
+                // 'user_setup' y 'crear_instalacion' no dependen de la ventana de WhatsApp: no envían mensaje.
+                'window_open'      => in_array($action, ['user_setup', 'crear_instalacion'], true) ? true : $windows[$recipient_key]['open'],
                 'last_executed_at' => $this->last_executed_at($actions_log, $action),
+                'blocked'          => $blocked,
+                'blocked_reason'   => $blocked_reason,
+                'can_force'        => $can_force,
+                'executed_at'      => $executed_at,
             ];
         }
 
@@ -167,6 +201,11 @@ class ImplementationActionService
             return $this->preview_user_setup($implementation);
         }
 
+        // 'crear_instalacion' no manda WhatsApp: el body describe qué se va a crear.
+        if ($action === 'crear_instalacion') {
+            return $this->preview_crear_instalacion($implementation);
+        }
+
         $recipient_phone = $this->resolve_recipient_phone($implementation, $action);
         $recipient_label = $this->resolve_recipient_label($action);
 
@@ -200,24 +239,56 @@ class ImplementationActionService
      * @param string         $action
      * @param string|null    $content Texto editado por el admin; si es null se usa el del preview.
      * @param int|null       $stage   Solo para 'progreso'.
+     * @param bool           $force   Override del lock de 'user_setup' (re-aplicar aunque ya se haya aplicado).
      *
      * @return array{ok: bool, message: string}
      */
-    public function execute(Implementation $implementation, string $action, ?string $content = null, ?int $stage = null): array
+    public function execute(Implementation $implementation, string $action, ?string $content = null, ?int $stage = null, bool $force = false): array
     {
         $this->assert_valid_action($action);
 
         $implementation->loadMissing(['client', 'stages']);
 
-        // 'user_setup' no manda WhatsApp: delega directamente en el servicio de setup remoto.
+        // 'user_setup' no manda WhatsApp: valida gate + lock y delega en el servicio de setup remoto.
         if ($action === 'user_setup') {
+            // El gate (formulario + Etapa 2 + instalación completada) se exige SIEMPRE, incluso con force:
+            // forzar saltea el lock de "ya se aplicó", no la condición de que la API tiene que responder.
+            $gate = $this->user_setup_gate($implementation);
+            if (! $gate['enabled']) {
+                return ['ok' => false, 'message' => $gate['reason']];
+            }
+
+            // Lock: si ya se aplicó con éxito y no viene force, no se re-ejecuta.
+            if ($implementation->user_setup_executed_at !== null && ! $force) {
+                return [
+                    'ok'      => false,
+                    'message' => 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i')
+                        . ". Reintentá con \"Forzar\" si necesitás re-aplicarlo.",
+                ];
+            }
+
             $result = $this->user_setup_service->trigger_user_setup($implementation);
 
             if ($result['ok']) {
+                // Registrar el momento de aplicación (lock) y la acción para los checklists.
+                $implementation->user_setup_executed_at = now();
+                $implementation->save();
                 $this->register_action($implementation, $action);
             }
 
             return $result;
+        }
+
+        // 'crear_instalacion' no manda WhatsApp: crea la ClientInstallation de forma idempotente.
+        if ($action === 'crear_instalacion') {
+            $outcome = $this->conversation_service->ensure_client_installation($implementation);
+
+            if ($outcome['created']) {
+                $this->register_action($implementation, $action);
+                return ['ok' => true, 'message' => 'Instalación creada. Ya aparece en el módulo de Instalaciones.'];
+            }
+
+            return ['ok' => true, 'message' => 'La instalación de este cliente ya existía; no se creó una nueva.'];
         }
 
         $preview = $this->preview($implementation, $action, $stage);
@@ -380,6 +451,40 @@ class ImplementationActionService
         ];
     }
 
+    /**
+     * Preview de la acción 'crear_instalacion': no manda WhatsApp. El body describe si se va a
+     * crear la ClientInstallation del cliente o si ya existe (la acción es idempotente).
+     *
+     * @param Implementation $implementation
+     *
+     * @return array{action: string, body: string, recipient_phone: string, recipient_label: string, window_open: bool, requires_template: bool, template_name: string|null, editable: bool}
+     */
+    private function preview_crear_instalacion(Implementation $implementation): array
+    {
+        $existing = ClientInstallation::where('client_id', $implementation->client_id)
+            ->orderByDesc('id')
+            ->first();
+
+        if ($existing !== null) {
+            $body = 'Este cliente ya tiene una instalación creada (estado actual: ' . $existing->status . '). '
+                . 'Crear de nuevo no hace nada: la acción es idempotente.';
+        } else {
+            $body = 'Se va a crear la instalación del cliente en estado "pendiente" para que aparezca en el '
+                . 'módulo de Instalaciones y el equipo pueda instalar el sistema. No se envía ningún mensaje al cliente.';
+        }
+
+        return [
+            'action'            => 'crear_instalacion',
+            'body'              => $body,
+            'recipient_phone'   => '',
+            'recipient_label'   => '—',
+            'window_open'       => true,
+            'requires_template' => false,
+            'template_name'     => null,
+            'editable'          => false,
+        ];
+    }
+
     // -------------------------------------------------------------------------
     // Destinatarios
     // -------------------------------------------------------------------------
@@ -458,6 +563,54 @@ class ImplementationActionService
     // -------------------------------------------------------------------------
     // Disponibilidad, modo de automatización y registro de ejecuciones
     // -------------------------------------------------------------------------
+
+    /**
+     * Condiciones para poder aplicar el UserSetup.
+     *
+     * El UserSetup le pega a la client_api del cliente con la config del formulario, así que
+     * exige TRES cosas (el gate real; el lock por user_setup_executed_at se evalúa aparte):
+     *   1) El formulario de la Etapa 1 ya se completó (si no, el payload no tiene datos reales).
+     *   2) La implementación avanzó a la Etapa 2 (current_stage >= 2) — el UserSetup corre DENTRO
+     *      de la Etapa 2, después de instalar; no requiere que la Etapa 2 esté "completada"
+     *      (eso sería contradictorio: la Etapa 2 se cierra recién después de aplicar el UserSetup).
+     *   3) La ClientInstallation del cliente está en 'completada' (la API ya responde).
+     *
+     * Devuelve el primer motivo de bloqueo encontrado, o enabled=true si se cumplen las tres.
+     *
+     * @param Implementation $implementation
+     *
+     * @return array{enabled: bool, reason: string|null}
+     */
+    private function user_setup_gate(Implementation $implementation): array
+    {
+        // 1) Formulario de la Etapa 1 completo.
+        $form_done = $implementation->form_submitted_at !== null;
+        if (! $form_done) {
+            $stage_1 = ImplementationStage::where('implementation_id', $implementation->id)
+                ->where('stage_number', 1)
+                ->first();
+            $form_done = $stage_1 !== null && $stage_1->status === 'completed';
+        }
+        if (! $form_done) {
+            return ['enabled' => false, 'reason' => 'Todavía no se completó el formulario (Etapa 1).'];
+        }
+
+        // 2) La implementación llegó a la Etapa 2.
+        if ((int) $implementation->current_stage < 2) {
+            return ['enabled' => false, 'reason' => 'La implementación todavía no avanzó a la Etapa 2.'];
+        }
+
+        // 3) La instalación del cliente terminó (la API responde).
+        $installation = ClientInstallation::where('client_id', $implementation->client_id)
+            ->orderByDesc('id')
+            ->first();
+
+        if ($installation === null || $installation->status !== 'completada') {
+            return ['enabled' => false, 'reason' => "El sistema todavía no terminó de instalarse (la instalación no está en 'completada')."];
+        }
+
+        return ['enabled' => true, 'reason' => null];
+    }
 
     /**
      * Indica si una acción corresponde a la etapa actual (solo sugerencia para la UI:
