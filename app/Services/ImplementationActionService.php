@@ -50,6 +50,9 @@ class ImplementationActionService
         'entrega'           => 5,
     ];
 
+    /** Acciones que no envían WhatsApp (efecto interno): no llevan botones Copiar/Enviar en el panel. */
+    private const SIDE_EFFECT_ACTIONS = ['user_setup', 'crear_instalacion'];
+
     /** Única plantilla de WhatsApp aprobada hoy para el flujo manual. */
     private const WELCOME_TEMPLATE_NAME = 'cc_implementacion_bienvenida';
 
@@ -161,6 +164,8 @@ class ImplementationActionService
                 'blocked_reason'   => $blocked_reason,
                 'can_force'        => $can_force,
                 'executed_at'      => $executed_at,
+                'typical_stage'    => self::TYPICAL_STAGE[$action] ?? null,
+                'kind'             => in_array($action, self::SIDE_EFFECT_ACTIONS, true) ? 'side_effect' : 'message',
             ];
         }
 
