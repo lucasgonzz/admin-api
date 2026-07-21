@@ -2106,9 +2106,11 @@ class LeadController extends Controller
     }
 
     /**
-     * Cancela el envío automático programado de una sugerencia y la marca como no enviada.
+     * Cancela el envío automático programado de una sugerencia y la marca como rechazada.
      *
-     * Claude verá la sugerencia en el historial como no enviada al lead.
+     * Aplica a sugerencias normales y a seguimientos del tramo de agenda
+     * (LeadFollowupService::create_pending_followup_for_verification) que tienen
+     * auto-envío programado. Claude verá la sugerencia en el historial como rechazada.
      *
      * @param int|string $message_id
      *
@@ -2120,10 +2122,6 @@ class LeadController extends Controller
 
         if ((string) $message->sender !== 'sistema') {
             return response()->json(['message' => 'Solo aplica a sugerencias del sistema.'], 422);
-        }
-
-        if ($message->is_followup) {
-            return response()->json(['message' => 'Las sugerencias de seguimiento no tienen envío automático.'], 422);
         }
 
         if ((string) $message->status !== 'sugerido') {
