@@ -48,4 +48,14 @@ class ClientEcommerce extends Model
     {
         return $this->belongsTo(Client::class);
     }
+
+    /**
+     * Corridas del pipeline de instalación/actualización de esta tienda.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function installations()
+    {
+        return $this->hasMany(ClientEcommerceInstallation::class);
+    }
 }
