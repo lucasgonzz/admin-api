@@ -20,13 +20,16 @@ use phpseclib3\Net\SSH2;
  *     online_configuration de la tienda vía HTTP.
  *   - tienda-api corre PHP 8.4 en el hosting del cliente; esta clase (admin-api) sigue en PHP 7.4.
  *
- * Esta clase SOLO cubre `mode = 'install'`. Las actualizaciones (`mode = 'update'`, recompilar y
- * resubir sin tocar .env) son responsabilidad de EcommerceDeploymentService (prompt 585, pendiente).
+ * Esta clase cubre `mode = 'install'`. Las actualizaciones (`mode = 'update'`, recompilar y
+ * resubir sin tocar .env) las maneja `EcommerceDeploymentService` (prompt 585), que EXTIENDE esta
+ * clase para reutilizar sus pasos y helpers (ensure_spa_cloned, compile_spa, upload_spa, SSH/SFTP,
+ * paths) sin duplicarlos — por eso las propiedades y métodos de abajo son `protected` en vez de
+ * `private`. `expected_mode()` es el único punto que la subclase sobrescribe para validar su mode.
  *
  * Deuda técnica (prioridad media, a registrar): los helpers de SSH/SFTP/ZIP de esta clase están
- * duplicados desde InstallationService (empresa) porque esos métodos son privados y no existe hoy
- * un trait/base compartida entre ambos pipelines de deploy. Sería valioso extraer un
- * `DeploySshHelpers` común en una refactorización aparte; no se hace acá para no tocar el pipeline
+ * duplicados desde InstallationService (empresa) porque esos métodos son privados ahí y no existe
+ * hoy un trait/base compartida entre el pipeline de empresa y el de ecommerce. Sería valioso extraer
+ * un `DeploySshHelpers` común en una refactorización aparte; no se hace acá para no tocar el pipeline
  * de empresa (que ya está en producción) dentro de un prompt de ecommerce.
  *
  * Pipeline de pasos en orden:
@@ -47,49 +50,49 @@ class EcommerceInstallationService
      *
      * @var ClientEcommerceInstallation
      */
-    private $installation;
+    protected $installation;
 
     /**
      * Tienda (ecommerce) que se está instalando.
      *
      * @var \App\Models\ClientEcommerce
      */
-    private $ecommerce;
+    protected $ecommerce;
 
     /**
      * Cliente dueño de la tienda (para leer company_name, user_id y la API de empresa).
      *
      * @var \App\Models\Client
      */
-    private $client;
+    protected $client;
 
     /**
      * Sesión SSH activa al hosting compartido del cliente (phpseclib).
      *
      * @var SSH2|null
      */
-    private $ssh;
+    protected $ssh;
 
     /**
      * Sesión SSH al VPS de builds (donde se clona/compila tienda-spa y se prepara tienda-api).
      *
      * @var SSH2|null
      */
-    private $build_ssh;
+    protected $build_ssh;
 
     /**
      * Prefijo estándar de rutas en el hosting compartido (igual que InstallationService).
      *
      * @var string
      */
-    private const HOSTING_PREFIX = 'domains/comerciocity.com/public_html/';
+    protected const HOSTING_PREFIX = 'domains/comerciocity.com/public_html/';
 
     /**
      * Orden de etapas del pipeline de instalación del ecommerce.
      *
      * @var array<int, string>
      */
-    private $steps = [
+    protected $steps = [
         'ensure_spa_cloned',
         'compile_spa',
         'upload_spa',
@@ -120,10 +123,37 @@ class EcommerceInstallationService
             throw new \RuntimeException('La tienda no tiene cliente asociado.');
         }
 
-        if ($this->installation->mode !== 'install') {
+        $this->assert_expected_mode();
+    }
+
+    /**
+     * Mode que maneja esta clase ('install'). EcommerceDeploymentService (prompt 585) sobrescribe
+     * este método para devolver 'update' y reutilizar el resto del pipeline/constructor sin
+     * duplicar la carga de relaciones ni las validaciones de arriba.
+     *
+     * @return string
+     */
+    protected function expected_mode(): string
+    {
+        return 'install';
+    }
+
+    /**
+     * Valida que el mode de la corrida coincida con el que maneja esta clase (o la subclase que
+     * sobrescriba expected_mode()). Evita que una corrida 'install' se procese como 'update' o
+     * viceversa.
+     *
+     * @return void
+     * @throws \RuntimeException  Si el mode no coincide con expected_mode().
+     */
+    protected function assert_expected_mode(): void
+    {
+        $expected = $this->expected_mode();
+        if ($this->installation->mode !== $expected) {
+            $class_name = static::class;
             throw new \RuntimeException(
-                "EcommerceInstallationService solo maneja mode='install'. "
-                . "Esta corrida es mode='{$this->installation->mode}': usar EcommerceDeploymentService."
+                "{$class_name} solo maneja mode='{$expected}'. "
+                . "Esta corrida es mode='{$this->installation->mode}'."
             );
         }
     }
@@ -172,7 +202,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function execute_steps()
+    protected function execute_steps()
     {
         foreach ($this->steps as $step) {
             switch ($step) {
@@ -211,7 +241,7 @@ class EcommerceInstallationService
      * @return void
      * @throws \RuntimeException  Si no está clonado y falta configurar el repo git de origen.
      */
-    private function step_ensure_spa_cloned()
+    protected function step_ensure_spa_cloned()
     {
         $this->connect_build_vps();
 
@@ -266,7 +296,7 @@ class EcommerceInstallationService
      * @return void
      * @throws \RuntimeException  Si el build de npm no finaliza correctamente.
      */
-    private function step_compile_spa()
+    protected function step_compile_spa()
     {
         $this->connect_build_vps();
 
@@ -357,7 +387,7 @@ class EcommerceInstallationService
      * @param  string  $logo_url
      * @return void
      */
-    private function step_generate_pwa_icons(string $spa_build_path, string $logo_url)
+    protected function step_generate_pwa_icons(string $spa_build_path, string $logo_url)
     {
         $this->log('compile_spa', 'Generando íconos PWA desde el logo del cliente...');
 
@@ -443,7 +473,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function step_upload_spa()
+    protected function step_upload_spa()
     {
         $this->connect_build_vps();
 
@@ -503,7 +533,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function step_upload_api()
+    protected function step_upload_api()
     {
         $this->connect_build_vps();
 
@@ -619,7 +649,7 @@ class EcommerceInstallationService
      * @return void
      * @throws \RuntimeException  Si el cliente no tiene una ClientApi activa (empresa) para clonar DB/APP_KEY.
      */
-    private function step_write_env()
+    protected function step_write_env()
     {
         $this->log('write_env', 'Generando .env de tienda-api para la instalación inicial...');
 
@@ -695,7 +725,7 @@ class EcommerceInstallationService
      * @return void
      * @throws \RuntimeException  Si package:discover falla (la API no podría bootear).
      */
-    private function step_finalize()
+    protected function step_finalize()
     {
         $api_path = $this->get_api_path();
 
@@ -761,7 +791,7 @@ class EcommerceInstallationService
      *
      * @return array{0: string, 1: string|null}  [primary_color, logo_url|null]
      */
-    private function fetch_online_configuration_branding(): array
+    protected function fetch_online_configuration_branding(): array
     {
         $default_color = trim((string) config('services.deploy_tienda.default_theme_color', '#c5111d'));
         $commerce_id   = $this->client->user_id;
@@ -828,7 +858,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function pwa_display_name(): string
+    protected function pwa_display_name(): string
     {
         $name = trim((string) ($this->client->company_name ?? ''));
         if ($name === '') {
@@ -851,7 +881,7 @@ class EcommerceInstallationService
      * @param  string  $display_name
      * @return void
      */
-    private function patch_spa_vue_config(string $spa_build_path, string $theme_color, string $display_name)
+    protected function patch_spa_vue_config(string $spa_build_path, string $theme_color, string $display_name)
     {
         $vue_config_file = $spa_build_path . '/vue.config.js';
 
@@ -883,7 +913,7 @@ class EcommerceInstallationService
      * @param  string  $value
      * @return string
      */
-    private function escape_sed_replacement(string $value): string
+    protected function escape_sed_replacement(string $value): string
     {
         $value = str_replace('\\', '\\\\', $value);
         $value = str_replace('/', '\\/', $value);
@@ -902,7 +932,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function connect_build_vps()
+    protected function connect_build_vps()
     {
         $this->disconnect_build_vps();
 
@@ -920,7 +950,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function disconnect_build_vps(): void
+    protected function disconnect_build_vps(): void
     {
         if ($this->build_ssh !== null) {
             $this->build_ssh->disconnect();
@@ -933,7 +963,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function reconnect_build_vps(): void
+    protected function reconnect_build_vps(): void
     {
         $this->connect_build_vps();
     }
@@ -943,7 +973,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function connect_hosting_ssh(): void
+    protected function connect_hosting_ssh(): void
     {
         $this->disconnect_hosting_ssh();
 
@@ -961,7 +991,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function disconnect_hosting_ssh(): void
+    protected function disconnect_hosting_ssh(): void
     {
         if ($this->ssh !== null) {
             $this->ssh->disconnect();
@@ -974,7 +1004,7 @@ class EcommerceInstallationService
      *
      * @return void
      */
-    private function reconnect_hosting_ssh(): void
+    protected function reconnect_hosting_ssh(): void
     {
         $this->connect_hosting_ssh();
     }
@@ -988,7 +1018,7 @@ class EcommerceInstallationService
      * @param  bool    $long_running
      * @return string
      */
-    private function exec_build_ssh(
+    protected function exec_build_ssh(
         string $step,
         string $command,
         bool $must_succeed = true,
@@ -1006,7 +1036,7 @@ class EcommerceInstallationService
      * @param  bool    $long_running
      * @return string
      */
-    private function exec_hosting_ssh(
+    protected function exec_hosting_ssh(
         string $step,
         string $command,
         bool $must_succeed = true,
@@ -1025,7 +1055,7 @@ class EcommerceInstallationService
      * @param  bool    $long_running
      * @return string
      */
-    private function exec_ssh_session(
+    protected function exec_ssh_session(
         SSH2 $ssh,
         string $step,
         string $command,
@@ -1068,7 +1098,7 @@ class EcommerceInstallationService
      * @param  string  $credential_type
      * @return SFTP
      */
-    private function open_sftp_session(string $credential_type): SFTP
+    protected function open_sftp_session(string $credential_type): SFTP
     {
         $credential = ClientSshCredential::where('type', $credential_type)->firstOrFail();
         $sftp       = new SFTP($credential->host, (int) $credential->port);
@@ -1088,7 +1118,7 @@ class EcommerceInstallationService
      * @param  string  $step
      * @return int  Tamaño en bytes
      */
-    private function verify_zip_on_vps(string $remote_zip_path, string $step): int
+    protected function verify_zip_on_vps(string $remote_zip_path, string $step): int
     {
         $this->exec_build_ssh(
             $step,
@@ -1131,7 +1161,7 @@ class EcommerceInstallationService
      * @param  string  $step
      * @return void
      */
-    private function sftp_download_file(
+    protected function sftp_download_file(
         SFTP $sftp,
         string $remote_path,
         string $local_path,
@@ -1165,7 +1195,7 @@ class EcommerceInstallationService
      * @param  string  $step
      * @return void
      */
-    private function sftp_upload_file(
+    protected function sftp_upload_file(
         SFTP $sftp,
         string $local_path,
         string $remote_path,
@@ -1196,7 +1226,7 @@ class EcommerceInstallationService
      * @param  string  $remote_path
      * @return int|false
      */
-    private function sftp_remote_file_size(SFTP $sftp, string $remote_path)
+    protected function sftp_remote_file_size(SFTP $sftp, string $remote_path)
     {
         $file_size = $sftp->filesize($remote_path);
         if ($file_size !== false) {
@@ -1219,7 +1249,7 @@ class EcommerceInstallationService
      * @param  string  $step
      * @return void
      */
-    private function assert_local_zip_file(string $local_path, int $expected_bytes, string $step): void
+    protected function assert_local_zip_file(string $local_path, int $expected_bytes, string $step): void
     {
         if (! is_file($local_path)) {
             throw new \RuntimeException("No existe el archivo local: {$local_path}");
@@ -1266,7 +1296,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function get_ecommerce_api_url_for_env(): string
+    protected function get_ecommerce_api_url_for_env(): string
     {
         $api_url = rtrim((string) $this->ecommerce->api_url, '/');
         if (substr($api_url, -7) !== '/public') {
@@ -1281,7 +1311,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function get_spa_docroot(): string
+    protected function get_spa_docroot(): string
     {
         $spa_path = trim((string) $this->ecommerce->spa_path, '/');
         if ($spa_path === '') {
@@ -1296,7 +1326,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function get_api_path(): string
+    protected function get_api_path(): string
     {
         $api_path = trim((string) $this->ecommerce->api_path, '/');
         if ($api_path === '') {
@@ -1311,7 +1341,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function builds_spa_path(): string
+    protected function builds_spa_path(): string
     {
         return (string) config('services.deploy_tienda.builds_spa_path', '/home/builds/tienda-spa');
     }
@@ -1321,7 +1351,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function builds_api_path(): string
+    protected function builds_api_path(): string
     {
         return (string) config('services.deploy_tienda.builds_api_path', '/home/builds/tienda-api');
     }
@@ -1331,7 +1361,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function spa_output_dir_name(): string
+    protected function spa_output_dir_name(): string
     {
         $dir = trim((string) config('services.deploy.spa_output_dir', 'dist'));
         $dir = trim($dir, '/');
@@ -1350,7 +1380,7 @@ class EcommerceInstallationService
      * @param  string  $spa_url
      * @return string
      */
-    private function build_spa_env_file_content(string $api_url, string $spa_url): string
+    protected function build_spa_env_file_content(string $api_url, string $spa_url): string
     {
         $env_vars = [
             'VUE_APP_API_URL'      => $api_url,
@@ -1381,7 +1411,7 @@ class EcommerceInstallationService
      * @param  string  $temp_zip_path   Ruta absoluta del ZIP ya subido (fuera del docroot).
      * @return string
      */
-    private function build_spa_atomic_deploy_shell(string $spa_docroot, string $temp_zip_path): string
+    protected function build_spa_atomic_deploy_shell(string $spa_docroot, string $temp_zip_path): string
     {
         $staging_dir = $spa_docroot . '__new_' . $this->installation->uuid;
         $old_dir     = $spa_docroot . '__old_' . $this->installation->uuid;
@@ -1411,7 +1441,7 @@ class EcommerceInstallationService
      * @param  string  $spa_output_dir
      * @return void
      */
-    private function assert_spa_dist_directory_on_vps(string $spa_build_path, string $spa_output_dir): void
+    protected function assert_spa_dist_directory_on_vps(string $spa_build_path, string $spa_output_dir): void
     {
         $check_cmd = $this->build_vps_command(
             $spa_build_path,
@@ -1437,7 +1467,7 @@ class EcommerceInstallationService
      * @param  string  $npm_bin
      * @return void
      */
-    private function assert_vps_npm_available(string $spa_build_path, string $npm_bin): void
+    protected function assert_vps_npm_available(string $spa_build_path, string $npm_bin): void
     {
         $check_cmd = $this->build_vps_command(
             $spa_build_path,
@@ -1462,7 +1492,7 @@ class EcommerceInstallationService
      * @param  string  $npm_script
      * @return string
      */
-    private function build_vps_npm_run_command(string $npm_bin, string $npm_script): string
+    protected function build_vps_npm_run_command(string $npm_bin, string $npm_script): string
     {
         $parts        = [];
         $node_options = trim((string) config('services.deploy.node_options', '--openssl-legacy-provider'));
@@ -1480,7 +1510,7 @@ class EcommerceInstallationService
      *
      * @return string
      */
-    private function build_vps_node_preamble(): string
+    protected function build_vps_node_preamble(): string
     {
         $custom = trim((string) config('services.deploy.build_shell_preamble', ''));
         if ($custom !== '') {
@@ -1514,7 +1544,7 @@ class EcommerceInstallationService
      * @param  string  $script
      * @return string
      */
-    private function wrap_vps_bash_script(string $script): string
+    protected function wrap_vps_bash_script(string $script): string
     {
         if (filter_var(config('services.deploy.vps_use_login_shell_only', false), FILTER_VALIDATE_BOOLEAN)) {
             return 'bash -lc ' . escapeshellarg($script) . ' 2>&1';
@@ -1535,7 +1565,7 @@ class EcommerceInstallationService
      * @param  string  $command_after_cd
      * @return string
      */
-    private function build_vps_command(string $work_dir, string $command_after_cd): string
+    protected function build_vps_command(string $work_dir, string $command_after_cd): string
     {
         $script = $this->build_vps_node_preamble()
             . '; cd ' . escapeshellarg($work_dir)
@@ -1555,7 +1585,7 @@ class EcommerceInstallationService
      * @param  bool    $is_vps  true en VPS de builds (envuelve el comando); false en hosting
      * @return string
      */
-    private function build_composer_install_command(string $work_dir, bool $is_vps): string
+    protected function build_composer_install_command(string $work_dir, bool $is_vps): string
     {
         $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
         $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
@@ -1575,7 +1605,7 @@ class EcommerceInstallationService
      * @param  string  $output
      * @return bool
      */
-    private function remote_output_indicates_failure(string $output): bool
+    protected function remote_output_indicates_failure(string $output): bool
     {
         $needles = [
             'Your requirements could not be resolved',
@@ -1605,7 +1635,7 @@ class EcommerceInstallationService
      * @param  string  $output
      * @return bool
      */
-    private function spa_npm_build_output_indicates_success(string $output): bool
+    protected function spa_npm_build_output_indicates_success(string $output): bool
     {
         if (stripos($output, 'Failed to compile') !== false) {
             return false;
@@ -1628,7 +1658,7 @@ class EcommerceInstallationService
      * @param  string  $output
      * @return void
      */
-    private function log_remote_output(string $step, string $output): void
+    protected function log_remote_output(string $step, string $output): void
     {
         $output = trim($output);
         if ($output === '') {
@@ -1656,7 +1686,7 @@ class EcommerceInstallationService
      * @param  int     $max
      * @return string
      */
-    private function truncate_for_log(string $text, int $max = 500): string
+    protected function truncate_for_log(string $text, int $max = 500): string
     {
         $text = trim($text);
         if (strlen($text) <= $max) {
@@ -1675,7 +1705,7 @@ class EcommerceInstallationService
      * @param  string  $level
      * @return \App\Models\EcommerceDeploymentLog
      */
-    private function log(string $step, string $line, string $level = 'info')
+    protected function log(string $step, string $line, string $level = 'info')
     {
         return $this->installation->add_log($step, $line, $level);
     }

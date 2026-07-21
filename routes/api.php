@@ -416,6 +416,14 @@ Route::prefix('admin')->group(function () {
         Route::post('ecommerce-implementation/{ecommerce_implementation}/advance-stage', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'advance_stage']);
         Route::delete('ecommerce-implementation/{ecommerce_implementation}', [\App\Http\Controllers\Api\EcommerceImplementationController::class, 'destroy']);
 
+        // Instalación/actualización del ecommerce (tienda-spa + tienda-api): job en cola +
+        // endpoints de estado/logs para el polling del panel (prompts 583/584/585).
+        Route::get('ecommerce-installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'index_json']);
+        Route::get('client-ecommerce/{client_ecommerce}/installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'show_json']);
+        Route::post('client-ecommerce/{client_ecommerce}/installations/start-install', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_install_json']);
+        Route::post('ecommerce-installations/start-update', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_update_json']);
+        Route::get('ecommerce-installations/{installation}/logs', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'logs_json']);
+
         // Configuración de implementaciones: admin asignado por defecto.
         Route::get('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show']);
         Route::put('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update']);
