@@ -139,4 +139,20 @@ return [
         ),
     ],
 
+    // Pipeline de instalación/actualización del ecommerce (tienda-spa + tienda-api), prompt 584.
+    // Reutiliza las credenciales SSH 'vps' y 'shared_hosting' ya usadas por 'deploy' (empresa);
+    // solo agrega las rutas propias de los repos de tienda en el VPS de builds.
+    'deploy_tienda' => [
+        // Repo git de tienda-spa a clonar la primera vez (ensure_spa_cloned). Rama siempre master.
+        'spa_git_repo' => env('DEPLOY_TIENDA_SPA_GIT_REPO', ''),
+        // Ruta del clone de tienda-spa en el VPS de builds.
+        'builds_spa_path' => env('DEPLOY_TIENDA_BUILDS_SPA_PATH', '/home/builds/tienda-spa'),
+        // Ruta del clone de tienda-api en el VPS de builds (se asume ya clonado, igual que empresa-api).
+        'builds_api_path' => env('DEPLOY_TIENDA_BUILDS_API_PATH', '/home/builds/tienda-api'),
+        // Color de fallback cuando falla la lectura del online_configuration o falta primary_color.
+        'default_theme_color' => env('DEPLOY_TIENDA_DEFAULT_THEME_COLOR', '#c5111d'),
+        // Timeout (segundos) para la consulta en vivo a GET {api_url}/api/commerce/{commerce_id}.
+        'commerce_config_timeout' => env('DEPLOY_TIENDA_COMMERCE_CONFIG_TIMEOUT', 5),
+    ],
+
 ];
