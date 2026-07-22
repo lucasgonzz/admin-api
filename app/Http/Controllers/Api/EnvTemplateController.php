@@ -20,19 +20,58 @@ use Illuminate\Validation\Rule;
 class EnvTemplateController extends Controller
 {
     /**
-     * Devuelve todas las variables del template de empresa-api ordenadas por grupo y orden.
+     * Scopes válidos para la plantilla .env (lista blanca).
      *
-     * Nota (prompt 580): la tabla env_templates ahora también contiene la plantilla de
-     * tienda-api (scope='tienda'). Esta pantalla siempre gestionó la de empresa-api, por
-     * eso se filtra explícitamente por scope='empresa' para preservar el comportamiento
-     * actual sin mezclar ambas plantillas.
+     * 'empresa' es el sistema ERP, 'tienda' es el ecommerce. Cualquier valor
+     * fuera de esta lista cae a 'empresa' (ver resolve_scope()) para preservar
+     * la compatibilidad de los clientes que todavía no mandan el parámetro.
+     */
+    private const VALID_SCOPES = ['empresa', 'tienda'];
+
+    /**
+     * Resuelve el scope solicitado por el request contra la lista blanca.
      *
+     * Lee el parámetro 'scope' (query string en GET, campo del body en POST).
+     * Si viene vacío o no es uno de los valores admitidos, devuelve 'empresa'
+     * por default, que es el comportamiento histórico de este controller
+     * antes de que existiera el scope de tienda (prompt 190/01).
+     *
+     * @param  Request  $request  Request actual.
+     * @return string  'empresa' o 'tienda'.
+     */
+    protected function resolve_scope(Request $request): string
+    {
+        $scope = $request->input('scope');
+
+        /* Si no está en la lista blanca, cae al default histórico ('empresa'). */
+        if (! in_array($scope, self::VALID_SCOPES, true)) {
+            return 'empresa';
+        }
+
+        return $scope;
+    }
+
+    /**
+     * Devuelve todas las variables del template del scope solicitado, ordenadas por grupo y orden.
+     *
+     * Nota (prompt 580): la tabla env_templates contiene tanto la plantilla de empresa-api
+     * (scope='empresa') como la de tienda-api (scope='tienda').
+     *
+     * Nota (prompt 190/01): antes esta pantalla gestionaba únicamente la de empresa-api y el
+     * filtro estaba hardcodeado; ahora sirve a las dos pantallas (empresa y tienda) según el
+     * parámetro `scope` recibido en el query string. Sin `scope` (o con un valor desconocido)
+     * se comporta exactamente igual que antes: devuelve solo empresa.
+     *
+     * @param  Request  $request  { scope?: 'empresa'|'tienda' }
      * @return JsonResponse  { models: EnvTemplate[] }
      */
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
-        /* Trae todas las variables de empresa ordenadas por grupo y sort_order para la UI. */
-        $templates = EnvTemplate::where('scope', 'empresa')
+        /* Resuelve el scope pedido (default 'empresa' si no viene o es inválido). */
+        $scope = $this->resolve_scope($request);
+
+        /* Trae todas las variables del scope resuelto, ordenadas por grupo y sort_order para la UI. */
+        $templates = EnvTemplate::where('scope', $scope)
             ->orderBy('group')
             ->orderBy('sort_order')
             ->get();
@@ -43,23 +82,28 @@ class EnvTemplateController extends Controller
     /**
      * Crea una nueva variable en la plantilla .env.
      *
-     * La key se normaliza a mayúsculas y se valida que no exista previamente.
-     * Devuelve la lista completa actualizada para que el frontend se re-sincronice.
+     * La key se normaliza a mayúsculas y se valida que no exista previamente dentro del
+     * mismo scope. Devuelve la lista completa actualizada (del mismo scope) para que el
+     * frontend se re-sincronice.
      *
-     * @param  Request  $request  { key, value, group, is_common, is_manual_on_create, notes, sort_order }
+     * @param  Request  $request  { key, value, group, is_common, is_manual_on_create, notes, sort_order, scope? }
      * @return JsonResponse  { models: EnvTemplate[] }
      */
     public function store(Request $request): JsonResponse
     {
+        /* Resuelve el scope pedido (default 'empresa' si no viene o es inválido). */
+        $scope = $this->resolve_scope($request);
+
         $request->validate([
             /*
-             * key único solo dentro de scope='empresa' (prompt 580): la columna `key` ya
-             * no es unique global en la tabla porque tienda-api reutiliza keys de empresa
-             * (APP_NAME, DB_HOST, etc.) en su propio scope.
+             * key único solo dentro del scope resuelto (prompt 580 / 190-01): la columna
+             * `key` ya no es unique global en la tabla porque tienda-api reutiliza keys de
+             * empresa (APP_NAME, DB_HOST, etc.) en su propio scope. Una key puede repetirse
+             * entre scopes distintos, pero no dentro del mismo.
              */
             'key'                 => [
                 'required', 'string', 'max:120',
-                Rule::unique('env_templates', 'key')->where('scope', 'empresa'),
+                Rule::unique('env_templates', 'key')->where('scope', $scope),
             ],
             'value'               => 'nullable|string',
             'group'               => 'required|string|max:80',
@@ -74,16 +118,16 @@ class EnvTemplateController extends Controller
             'key'                 => strtoupper(trim($request->input('key'))),
             'value'               => $request->input('value') ?: null,
             'group'               => trim($request->input('group')),
-            // Esta pantalla gestiona la plantilla de empresa-api (ver nota en index()).
-            'scope'               => 'empresa',
+            // Scope resuelto del request (prompt 190/01): 'empresa' o 'tienda'.
+            'scope'               => $scope,
             'is_common'           => (bool) $request->input('is_common'),
             'is_manual_on_create' => (bool) $request->input('is_manual_on_create'),
             'notes'               => $request->input('notes') ?: null,
             'sort_order'          => (int) $request->input('sort_order'),
         ]);
 
-        /* Devuelve la lista completa (empresa) ordenada para que el frontend refleje el nuevo registro. */
-        $templates = EnvTemplate::where('scope', 'empresa')->orderBy('group')->orderBy('sort_order')->get();
+        /* Devuelve la lista completa del scope resuelto, ordenada, para que el frontend refleje el nuevo registro. */
+        $templates = EnvTemplate::where('scope', $scope)->orderBy('group')->orderBy('sort_order')->get();
 
         return response()->json(['models' => $templates], 201);
     }
@@ -92,9 +136,17 @@ class EnvTemplateController extends Controller
      * Actualiza masivamente las variables del template en una sola llamada.
      *
      * Recibe un array `items[]` con los campos editables de cada variable.
-     * Actualiza cada una por ID y devuelve la lista completa actualizada.
+     * Actualiza cada una por ID y devuelve la lista completa actualizada, filtrada
+     * por el scope resuelto del request.
      *
-     * @param  Request  $request  { items: [{ id, value, is_common, is_manual_on_create, notes, group, sort_order }] }
+     * Nota (prompt 190/01 — fix de bug): antes este método no validaba a qué scope
+     * pertenecía cada id recibido, y el `return` final devolvía TODAS las filas sin
+     * filtrar (empresa + tienda mezcladas), pisando el estado de la pantalla que no
+     * hizo el guardado. Ahora se valida que cada id pertenezca al scope resuelto
+     * ANTES de tocar la base (si alguno no pertenece, no se actualiza nada) y la
+     * lista devuelta se filtra por ese mismo scope.
+     *
+     * @param  Request  $request  { items: [{ id, value, is_common, is_manual_on_create, notes, group, sort_order }], scope? }
      * @return JsonResponse  { models: EnvTemplate[] }
      */
     public function bulk_update(Request $request): JsonResponse
@@ -110,8 +162,29 @@ class EnvTemplateController extends Controller
             'items.*.sort_order'       => 'required|integer',
         ]);
 
+        /* Resuelve el scope pedido (default 'empresa' si no viene o es inválido). */
+        $scope = $this->resolve_scope($request);
+
+        $items = $request->input('items');
+
+        /* IDs recibidos en el request, para verificar de una sola vez que todos pertenezcan al scope. */
+        $ids = [];
+        foreach ($items as $item) {
+            $ids[] = $item['id'];
+        }
+
+        /* Cuenta cuántos de esos ids realmente pertenecen al scope resuelto. */
+        $matching_count = EnvTemplate::whereIn('id', $ids)->where('scope', $scope)->count();
+
+        /* Si algún id no pertenece al scope, se rechaza todo el batch sin tocar la base. */
+        if ($matching_count !== count($ids)) {
+            return response()->json([
+                'message' => 'Se intentó guardar variables que no pertenecen a esta plantilla.',
+            ], 422);
+        }
+
         /* Procesa cada item del array y actualiza su registro en BD. */
-        foreach ($request->input('items') as $item) {
+        foreach ($items as $item) {
             $template = EnvTemplate::findOrFail($item['id']);
 
             /* Actualiza únicamente los campos editables desde la UI. */
@@ -124,8 +197,8 @@ class EnvTemplateController extends Controller
             $template->save();
         }
 
-        /* Devuelve la lista completa actualizada para que el frontend refleje los cambios. */
-        $templates = EnvTemplate::orderBy('group')->orderBy('sort_order')->get();
+        /* Devuelve la lista completa del scope resuelto para que el frontend refleje los cambios (fix del bug de mezcla). */
+        $templates = EnvTemplate::where('scope', $scope)->orderBy('group')->orderBy('sort_order')->get();
 
         return response()->json(['models' => $templates]);
     }
@@ -174,7 +247,10 @@ class EnvTemplateController extends Controller
             $env_ssh_service->disconnect();
         }
 
-        /* Recupera solo las variables del template de empresa marcadas como comunes. */
+        /* Solo scope 'empresa' (prompt 190/01): compara contra el .env real de la API de empresa
+         * del cliente vía EnvSshService::get_api_path(ClientApi); tienda vive en otra ruta
+         * (ClientEcommerce::resolve_api_path()) y su comparación es un flujo distinto, fuera de
+         * alcance acá. No parametrizar este método por scope. */
         $common_templates = EnvTemplate::where('scope', 'empresa')->where('is_common', true)->get();
 
         /* Compara cada variable común contra el valor en el .env real del cliente. */
@@ -218,7 +294,9 @@ class EnvTemplateController extends Controller
      */
     public function check_diff_all(Client $client): JsonResponse
     {
-        /* Recupera solo las variables del template de empresa marcadas como comunes. */
+        /* Solo scope 'empresa' (prompt 190/01): compara contra el .env real de las APIs de
+         * empresa del cliente; tienda vive en otra ruta (ClientEcommerce::resolve_api_path())
+         * y es un flujo distinto, fuera de alcance acá. No parametrizar este método por scope. */
         $common_templates = EnvTemplate::where('scope', 'empresa')->where('is_common', true)->get();
 
         /* Obtiene todas las APIs del cliente para iterar sobre ellas. */
@@ -298,7 +376,9 @@ class EnvTemplateController extends Controller
             'keys.*' => 'required|string',
         ]);
 
-        /* Obtiene los templates de empresa para las keys solicitadas, indexados por key. */
+        /* Solo scope 'empresa' (prompt 190/01): escribe en el .env real de las APIs de empresa
+         * del cliente; tienda vive en otra ruta (ClientEcommerce::resolve_api_path()) y es un
+         * flujo distinto, fuera de alcance acá. No parametrizar este método por scope. */
         $keys_to_apply = $request->input('keys');
         $templates     = EnvTemplate::where('scope', 'empresa')->whereIn('key', $keys_to_apply)->get()->keyBy('key');
 
@@ -369,7 +449,9 @@ class EnvTemplateController extends Controller
             ->where('client_id', $client->id)
             ->firstOrFail();
 
-        /* Recupera los templates de empresa para las keys solicitadas. */
+        /* Solo scope 'empresa' (prompt 190/01): escribe en el .env real de la API de empresa
+         * del cliente; tienda vive en otra ruta (ClientEcommerce::resolve_api_path()) y es un
+         * flujo distinto, fuera de alcance acá. No parametrizar este método por scope. */
         $keys_to_apply = $request->input('keys');
         $templates     = EnvTemplate::where('scope', 'empresa')->whereIn('key', $keys_to_apply)->get()->keyBy('key');
 
