@@ -84,6 +84,18 @@ Route::middleware('admin.inbound.key')
     });
 
 /*
+|--------------------------------------------------------------------------
+| Ingesta de tareas creadas por Claude (protegida por X-Claude-Task-Key)
+|--------------------------------------------------------------------------
+*/
+Route::middleware('claude.task.key')
+    ->prefix('claude')
+    ->group(function () {
+        Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');
+        Route::post('task', 'Api\ClaudeTaskIngestController@store_json');
+    });
+
+/*
 | Admin SPA: token Sanctum (prefijo admin)
 */
 Route::prefix('admin')->group(function () {

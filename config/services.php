@@ -155,4 +155,13 @@ return [
         'commerce_config_timeout' => env('DEPLOY_TIENDA_COMMERCE_CONFIG_TIMEOUT', 5),
     ],
 
+    // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).
+    // Si la clave no está definida, el endpoint queda cerrado: no se acepta ninguna request.
+    'claude_task_ingest' => [
+        'key' => env('CLAUDE_TASK_INGEST_KEY'),
+        // Admin que figura como creador de las tareas que crea Claude. Si no se define,
+        // se usa el primer admin con is_default_task_assignee, y si no hay, el primer admin.
+        'default_creator_admin_id' => env('CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID'),
+    ],
+
 ];

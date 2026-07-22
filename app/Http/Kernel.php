@@ -64,5 +64,7 @@ class Kernel extends HttpKernel
         'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,
         'verified' => \Illuminate\Auth\Middleware\EnsureEmailIsVerified::class,
         'admin.inbound.key' => \App\Http\Middleware\AdminInboundKey::class,
+        // Endpoint de ingesta de tareas creadas por Claude desde la conversación (grupo 180).
+        'claude.task.key' => \App\Http\Middleware\ClaudeTaskKey::class,
     ];
 }
