@@ -156,6 +156,14 @@ return [
         'default_theme_color' => env('DEPLOY_TIENDA_DEFAULT_THEME_COLOR', '#c5111d'),
         // Timeout (segundos) para la consulta en vivo a GET {api_url}/api/commerce/{commerce_id}.
         'commerce_config_timeout' => env('DEPLOY_TIENDA_COMMERCE_CONFIG_TIMEOUT', 5),
+        // Binario de PHP explícito para correr artisan en tienda-api en el hosting compartido.
+        // El php de PATH está atado a PHP 7.4 (admin-api) via CloudLinux cl.selector;
+        // tienda-api necesita PHP 8.4+ y el Composer platform_check aborta si usa el binario 7.4.
+        'php_bin' => env('DEPLOY_TIENDA_PHP_BIN', '/opt/alt/php84/usr/bin/php'),
+        // Ruta del script composer en el hosting compartido, para invocarlo explícitamente con
+        // el php_bin correcto en lugar de depender del wrapper 'composer' bare de PATH.
+        // Criterio estándar en hosting que requiere una versión específica de PHP (confirmado con Lucas, 22/7/2026).
+        'composer_script' => env('DEPLOY_TIENDA_COMPOSER_SCRIPT', '/usr/local/bin/composer'),
     ],
 
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).

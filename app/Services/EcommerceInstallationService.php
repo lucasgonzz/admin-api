@@ -804,6 +804,12 @@ class EcommerceInstallationService
     {
         $api_path = $this->get_api_path();
 
+        // Resuelve el binario de PHP configurado para tienda-api. En hosting compartido con
+        // CloudLinux, el php de PATH apunta a PHP 7.4 (necesario para admin-api), pero
+        // tienda-api requiere PHP 8.4+. Sin usar el binario explícito, el Composer platform_check
+        // aborta durante artisan package:discover.
+        $php_bin = escapeshellarg(trim((string) config('services.deploy_tienda.php_bin', '/opt/alt/php84/usr/bin/php')));
+
         $this->log('finalize', 'Limpiando cache de bootstrap...');
         $this->reconnect_hosting_ssh();
 
@@ -825,7 +831,7 @@ class EcommerceInstallationService
         $this->log('finalize', 'Ejecutando artisan package:discover...');
         $discover_output = $this->exec_hosting_ssh(
             'finalize',
-            'cd ' . escapeshellarg($api_path) . ' && php artisan package:discover --no-ansi 2>&1',
+            'cd ' . escapeshellarg($api_path) . ' && ' . $php_bin . ' artisan package:discover --no-ansi 2>&1',
             true,
             true
         );
@@ -835,7 +841,7 @@ class EcommerceInstallationService
         $this->log('finalize', 'Creando symlink de storage...');
         $storage_link_output = $this->exec_hosting_ssh(
             'finalize',
-            'cd ' . escapeshellarg($api_path) . ' && php artisan storage:link --no-ansi 2>&1',
+            'cd ' . escapeshellarg($api_path) . ' && ' . $php_bin . ' artisan storage:link --no-ansi 2>&1',
             false
         );
         $this->log('finalize', $this->truncate_for_log($storage_link_output));
@@ -845,7 +851,7 @@ class EcommerceInstallationService
         foreach ($clear_commands as $clear_command) {
             $this->exec_hosting_ssh(
                 'finalize',
-                'cd ' . escapeshellarg($api_path) . ' && php artisan ' . $clear_command . ' --no-ansi 2>&1',
+                'cd ' . escapeshellarg($api_path) . ' && ' . $php_bin . ' artisan ' . $clear_command . ' --no-ansi 2>&1',
                 false
             );
         }
@@ -1737,20 +1743,36 @@ class EcommerceInstallationService
      * .env al momento de correr composer, y el script post-autoload-dump bootea el framework.
      * El resto de los comandos de artisan corren después, en step_finalize(), con el .env ya escrito.
      *
+     * En el hosting compartido (is_vps=false), invoca explícitamente {php_bin} {composer_script}
+     * en lugar del binario bare 'composer' de PATH, porque ese wrapper puede no usar la versión de
+     * PHP correcta para tienda-api (ver config/services.php > deploy_tienda.php_bin/composer_script).
+     *
+     * En VPS de builds (is_vps=true) se mantiene el comportamiento original: composer bare de PATH,
+     * ya que esa infraestructura no tiene la restricción de CloudLinux que sí existe en hosting compartido.
+     *
      * @param  string  $work_dir
-     * @param  bool    $is_vps  true en VPS de builds (envuelve el comando); false en hosting
+     * @param  bool    $is_vps  true en VPS de builds (envuelve el comando); false en hosting compartido
      * @return string
      */
     protected function build_composer_install_command(string $work_dir, bool $is_vps): string
     {
-        $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
-        $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
-            . escapeshellarg($composer_bin)
-            . ' install --no-dev --optimize-autoloader --no-interaction --no-ansi --no-scripts';
-
         if ($is_vps) {
+            // VPS de builds: usar composer bare del PATH (comportamiento original, sin cambios).
+            $composer_bin = trim((string) config('services.deploy.composer_bin', 'composer'));
+            $flags        = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
+                . escapeshellarg($composer_bin)
+                . ' install --no-dev --optimize-autoloader --no-interaction --no-ansi --no-scripts';
+
             return $this->build_vps_command($work_dir, $flags);
         }
+
+        // Hosting compartido (is_vps=false): usar php_bin + composer_script configurados.
+        // Criterio estándar en hosting con versión específica de PHP (confirmado con Lucas, 22/7/2026).
+        $php_bin = escapeshellarg(trim((string) config('services.deploy_tienda.php_bin', '/opt/alt/php84/usr/bin/php')));
+        $composer_script = escapeshellarg(trim((string) config('services.deploy_tienda.composer_script', '/usr/local/bin/composer')));
+        $flags = 'COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_MEMORY_LIMIT=-1 '
+            . $php_bin . ' ' . $composer_script
+            . ' install --no-dev --optimize-autoloader --no-interaction --no-ansi --no-scripts';
 
         return 'cd ' . escapeshellarg($work_dir) . ' && ' . $flags . ' 2>&1';
     }
