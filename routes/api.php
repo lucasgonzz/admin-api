@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AdminTaskController;
+use App\Http\Controllers\AdminTaskNotificationController;
 use App\Http\Controllers\TaskTemplateController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AdminSearchProxyController;
@@ -345,6 +346,11 @@ Route::prefix('admin')->group(function () {
         Route::put('task/reorder', [AdminTaskController::class, 'reorder_json']);
         Route::put('task/{id}', [AdminTaskController::class, 'update_json']);
         Route::delete('task/{id}', [AdminTaskController::class, 'destroy_json']);
+
+        // Avisos in-app de asignación de tareas (admin_task_notifications).
+        Route::get('task-notification/pending', [AdminTaskNotificationController::class, 'pending_json']);
+        Route::post('task-notification/seen-all', [AdminTaskNotificationController::class, 'mark_all_seen_json']);
+        Route::post('task-notification/{id}/seen', [AdminTaskNotificationController::class, 'mark_seen_json']);
 
         // Soporte tipo bandeja estilo Front.
         Route::get('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'index']);

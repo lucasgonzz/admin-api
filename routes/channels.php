@@ -30,3 +30,9 @@ Broadcast::channel('closer-alerts', function ($user) {
 Broadcast::channel('verificacion-agendamiento-alerts', function ($user) {
     return $user !== null;
 });
+
+// Canal privado por admin: por acá viajan los avisos in-app de tareas asignadas.
+// Cada admin solo puede escuchar el suyo (compara su propio id contra el del canal).
+Broadcast::channel('admin.{admin_id}', function ($user, $admin_id) {
+    return $user !== null && (int) $user->id === (int) $admin_id;
+});

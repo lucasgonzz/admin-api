@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Controller;
 use App\Models\Admin;
 use App\Models\AdminTask;
+use App\Services\AdminTaskNotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Gestiona las tareas internas del panel administrativo.
@@ -92,6 +94,18 @@ class AdminTaskController extends Controller
         // Sincronizar la pivot de asignación múltiple con los ids resueltos.
         $task->assigned_admins()->sync($assigned_ids);
 
+        // Crear los avisos in-app (+ broadcast + Web Push) para los asignados. Envuelto
+        // en try/catch: un fallo acá no debe impedir que la tarea recién creada se
+        // termine de guardar y se devuelva al frontend.
+        try {
+            AdminTaskNotificationService::create_for_task($task);
+        } catch (\Throwable $e) {
+            Log::error('AdminTaskController: fallo al crear notificaciones de tarea nueva.', [
+                'task_id' => $task->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
         // Incrementar sort_order de todas las demás tareas para mantener consistencia.
         AdminTask::where('id', '!=', $task->id)->increment('sort_order');
 
@@ -161,9 +175,32 @@ class AdminTaskController extends Controller
         // pivot ni la columna legacy para no borrar asignaciones por accidente.
         $assigned_ids = $this->resolve_assigned_admin_ids($request);
         if ($assigned_ids !== null) {
+            // Ids asignados ANTES de tocar la pivot: hace falta para saber quiénes son
+            // "nuevos" y notificarles solo a ellos (no volver a avisar a los que ya
+            // estaban asignados).
+            $previous_assigned_ids = $task->assigned_admins()->pluck('admins.id')->map(function ($id) {
+                return (int) $id;
+            })->toArray();
+
             // Columna legacy sincronizada a propósito con el primer id de la lista.
             $task->assigned_admin_id = count($assigned_ids) > 0 ? $assigned_ids[0] : null;
             $task->assigned_admins()->sync($assigned_ids);
+
+            // Nuevos asignados: los que están en la lista resuelta pero no estaban antes.
+            $new_assigned_ids = array_values(array_diff($assigned_ids, $previous_assigned_ids));
+
+            if (!empty($new_assigned_ids)) {
+                // Notificar solo a los admins recién agregados. Envuelto en try/catch:
+                // un fallo acá no debe impedir que la edición de la tarea se guarde.
+                try {
+                    AdminTaskNotificationService::create_for_task($task, $new_assigned_ids);
+                } catch (\Throwable $e) {
+                    Log::error('AdminTaskController: fallo al crear notificaciones de tarea editada.', [
+                        'task_id' => $task->id,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+            }
         }
 
         $task->save();
