@@ -127,6 +127,90 @@ class ImplementationController extends Controller
         $implementation->form_responses = $form;
         $implementation->form_summary   = $mapper->build_summary($form);
 
+        // Opciones de método de pago para el select de la tabla de descuentos/recargos del panel
+        // de edición (mismo modelo y orden que ImplementationFormController::show()).
+        $implementation->payment_method_options = \App\Models\ImplementationPaymentMethodOption::orderBy('position')->get();
+
+        return response()->json(['model' => $implementation], 200);
+    }
+
+    /**
+     * Actualiza las respuestas del formulario de la Etapa 1 desde el panel de admin.
+     *
+     * A diferencia de `ImplementationFormController::save()/submit()` (formulario público por
+     * token, con merge parcial), este endpoint reemplaza por completo la clave `form_responses`
+     * del stage 1 con el objeto recibido, ya que el frontend de edición (Prompt 03) envía siempre
+     * el objeto completo editado. Preserva cualquier otra clave existente en `data` (por ejemplo
+     * `_current_section`).
+     *
+     * Tras guardar, vuelve a correr `ImplementationFormMapper::apply()` para mantener sincronizados
+     * `client->setup_data` y los empleados. Ese re-mapeo es best-effort: si falla, se loguea pero
+     * no impide la respuesta, porque la edición ya quedó persistida en el stage.
+     *
+     * Importante: este endpoint NO dispara el UserSetup remoto hacia empresa-api. El re-push de
+     * configuración al ERP del cliente sigue siendo una acción manual desde el botón
+     * "Re-aplicar configuración" del panel.
+     *
+     * @param Request        $request        Petición con el campo `form_responses` (objeto).
+     * @param Implementation $implementation Implementación destino (route model binding).
+     *
+     * @return JsonResponse
+     */
+    public function update_form_responses(Request $request, Implementation $implementation): JsonResponse
+    {
+        // Respuestas editadas recibidas desde el panel; deben ser un objeto/array asociativo.
+        $form_responses = $request->input('form_responses');
+
+        if (! is_array($form_responses)) {
+            return response()->json([
+                'message' => 'form_responses es obligatorio y debe ser un objeto.',
+            ], 422);
+        }
+
+        // Ubicar el stage 1 (etapa de recolección del formulario web).
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 1)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->error('ImplementationController@update_form_responses: stage 1 no encontrado.', [
+                'implementation_id' => $implementation->id,
+            ]);
+
+            return response()->json(['message' => 'Etapa del formulario no encontrada.'], 422);
+        }
+
+        // Data actual del stage (o vacío), preservando otras claves distintas de form_responses.
+        $stage_data = is_array($stage->data) ? $stage->data : [];
+
+        // Reemplazo completo de la clave form_responses con el objeto editado recibido.
+        $stage_data['form_responses'] = $form_responses;
+
+        $stage->data = $stage_data;
+        $stage->save();
+
+        // Re-correr el mapper para mantener sincronizados client->setup_data y los empleados.
+        // Best-effort: un fallo acá no debe impedir la respuesta, la edición ya quedó guardada.
+        try {
+            (new \App\Services\ImplementationFormMapper())->apply($implementation);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('ImplementationController@update_form_responses: fallo el re-mapeo.', [
+                'implementation_id' => $implementation->id,
+                'error'             => $exception->getMessage(),
+            ]);
+        }
+
+        // Recargar el modelo fresco con las mismas relaciones y atributos virtuales que show(),
+        // para que el frontend pueda repintar la tabla sin un GET extra.
+        $implementation = $implementation->fresh()->load(['client', 'stages', 'stages.config', 'messages']);
+
+        $mapper = new \App\Services\ImplementationFormMapper();
+        $form   = $mapper->read_form_responses($implementation);
+
+        $implementation->form_responses         = $form;
+        $implementation->form_summary           = $mapper->build_summary($form);
+        $implementation->payment_method_options = \App\Models\ImplementationPaymentMethodOption::orderBy('position')->get();
+
         return response()->json(['model' => $implementation], 200);
     }
 
