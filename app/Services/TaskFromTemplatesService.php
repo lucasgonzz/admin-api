@@ -37,7 +37,9 @@ class TaskFromTemplatesService
             // Convertir checklist (array de strings) al formato {text, done} de AdminTask.todos.
             $todos = $this->build_todos_from_checklist($template->checklist);
 
-            AdminTask::create([
+            // Crear la tarea; se guarda en variable para poder sincronizar la pivot
+            // de asignación múltiple justo después.
+            $task = AdminTask::create([
                 // Admin autenticado que disparó el proceso de promoción.
                 'created_by_admin_id' => $creator->id,
                 // Admin asignado resuelto por nombre; puede ser null si no se encontró.
@@ -52,7 +54,14 @@ class TaskFromTemplatesService
                 'is_done'             => false,
                 // El orden de la plantilla define la posición inicial en la lista de tareas.
                 'sort_order'          => $template->orden,
+                // Origen de la tarea: generada automáticamente a partir de una plantilla de proceso.
+                'created_via'         => 'template',
             ]);
+
+            // Sincronizar la pivot de asignación múltiple con el admin resuelto (si hay uno).
+            if ($assigned_admin_id !== null) {
+                $task->assigned_admins()->sync([$assigned_admin_id]);
+            }
         }
     }
 
