@@ -821,11 +821,44 @@ class DeploymentService
         $body = $response->body();
         $this->log('update_default_version', 'HTTP ' . $response->status() . ': ' . substr($body, 0, 2000));
 
-        if (! $response->successful()) {
-            throw new \RuntimeException(
-                'Error al actualizar versión por defecto en empresa-api: HTTP ' . $response->status()
-            );
+        // Caso exitoso: empresa-api confirmó el cambio de versión/URL por defecto.
+        if ($response->successful()) {
+            $this->upgrade->update([
+                'default_version_sync_status'  => 'success',
+                'default_version_sync_message' => null,
+            ]);
+            return;
         }
+
+        /*
+         * 404 = la ruta admin-sync/update-default-version no existe en esta instancia de empresa-api
+         * (cliente con una versión vieja que todavía no tiene el endpoint). No se trata como error del
+         * deployment: se deja seguir el pipeline (incluido step_complete(), que igual activa la
+         * ClientApi destino en el admin) y se registra como pendiente de acción manual.
+         */
+        if ($response->status() === 404) {
+            // Mensaje para el operador: qué pasó y qué falta hacer manualmente en el cliente.
+            $manual_message = 'empresa-api de este cliente no tiene el endpoint update-default-version '
+                . '(versión desactualizada). La versión activa ya se actualizó en el admin, pero hace '
+                . 'falta cambiar manualmente el link de la versión estable en el servidor del cliente: '
+                . "SPA {$spa_url} | API {$api_url}.";
+
+            // Nivel 'error' a propósito para que la línea se vea en rojo en el panel (no hay nivel
+            // 'warning' intermedio hoy en el helper de colores del frontend); no es un error real
+            // del deployment, el detalle correcto para el usuario vive en default_version_sync_message.
+            $this->log('update_default_version', $manual_message, 'error');
+
+            $this->upgrade->update([
+                'default_version_sync_status'  => 'manual_required',
+                'default_version_sync_message' => $manual_message,
+            ]);
+            return;
+        }
+
+        // Cualquier otro código (401 api_key inválida, 500 real, etc.): error genuino del deployment.
+        throw new \RuntimeException(
+            'Error al actualizar versión por defecto en empresa-api: HTTP ' . $response->status()
+        );
     }
 
     /**
