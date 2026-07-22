@@ -145,6 +145,52 @@ class EcommerceInstallationController extends BaseController
     }
 
     /**
+     * Dispara una instalación desde cero (`mode = 'install'`) resolviendo el `ClientEcommerce`
+     * a partir del cliente, para el submódulo global "Instalaciones > Ecommerce" (a diferencia de
+     * `start_install_json`, que requiere conocer de antemano el id del `ClientEcommerce` y se usa
+     * desde el detalle embebido de un cliente puntual).
+     *
+     * @param  Request  $request  { client_id }
+     * @return JsonResponse  { model: ClientEcommerceInstallation } o { error: string } (404/422)
+     */
+    public function start_install_for_client_json(Request $request): JsonResponse
+    {
+        $client_id = $request->input('client_id');
+        if (empty($client_id)) {
+            return response()->json(['error' => 'Falta client_id.'], 422);
+        }
+
+        $client = Client::find($client_id);
+        if ($client === null) {
+            return response()->json(['error' => 'Cliente no encontrado.'], 404);
+        }
+
+        $client_ecommerce = $client->client_ecommerce;
+        if ($client_ecommerce === null) {
+            return response()->json([
+                'error' => 'El cliente no tiene una tienda (ecommerce) configurada.',
+            ], 422);
+        }
+
+        $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
+        if ($conflict_response !== null) {
+            return $conflict_response;
+        }
+
+        $installation = ClientEcommerceInstallation::create([
+            'client_ecommerce_id' => $client_ecommerce->id,
+            'mode'                => 'install',
+            'status'              => 'pendiente',
+        ]);
+
+        RunEcommerceInstallationJob::dispatch($installation->uuid);
+
+        return response()->json([
+            'model' => $this->fullModel('client_ecommerce_installation', $installation->id),
+        ], 201);
+    }
+
+    /**
      * Líneas de log de una corrida ordenadas por `created_at`, para el polling del panel.
      *
      * @param  ClientEcommerceInstallation  $installation  Resuelta por route model binding.

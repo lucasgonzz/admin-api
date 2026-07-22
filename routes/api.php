@@ -424,6 +424,7 @@ Route::prefix('admin')->group(function () {
         Route::get('client-ecommerce/{client_ecommerce}/installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'show_json']);
         Route::post('client-ecommerce/{client_ecommerce}/installations/start-install', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_install_json']);
         Route::post('ecommerce-installations/start-update', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_update_json']);
+        Route::post('ecommerce-installations/start-install', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_install_for_client_json']);
         Route::get('ecommerce-installations/{installation}/logs', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'logs_json']);
 
         // Configuración de implementaciones: admin asignado por defecto.
