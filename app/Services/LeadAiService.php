@@ -3282,20 +3282,56 @@ TXT;
                     }
                 }
 
-                \App\Models\AdminTask::create([
+                /* Se crea sin asignar por defecto: la asignación real (si corresponde) se
+                 * resuelve más abajo vía la pivot admin_task_assignees. "Sin asignar" significa
+                 * que la puede tomar cualquier admin, no que la vean todos (corrección de Lucas,
+                 * grupo 180 prompt 05). */
+                $task = \App\Models\AdminTask::create([
                     'created_by_admin_id' => $created_by_admin_id,
-                    'assigned_admin_id'   => null,   /* Sin asignar: visible para todos en el badge */
+                    'assigned_admin_id'   => null,
                     'lead_id'             => $lead->id,
                     'title'               => $task_title,
                     'content'             => $task_content,
                     'todos'               => null,
                     'is_done'             => false,
                     'sort_order'          => 0,
+                    /* Origen de la tarea: alerta automática generada por LeadAiService. */
+                    'created_via'         => 'lead_alert',
                 ]);
 
+                /* Regla nueva (grupo 180, prompt 05): las tareas que nacen de conversaciones de
+                 * leads se asignan a todos los admins marcados como "setter". Si no hay ninguno
+                 * configurado, la tarea queda sin asignar (comportamiento previo, "la puede
+                 * tomar cualquiera") y no se rompe nada. */
+                $setter_ids = \App\Services\AdminTaskAssignmentResolver::for_lead_task();
+                if (! empty($setter_ids)) {
+                    $task->assigned_admins()->sync($setter_ids);
+
+                    /* Mantener sincronizada la columna legacy assigned_admin_id con el primer id
+                     * de la lista, mismo criterio que el resto de los orígenes de AdminTask
+                     * (AdminTaskController, ClaudeTaskIngestController). */
+                    $task->assigned_admin_id = $setter_ids[0];
+                    $task->save();
+                }
+
+                /* Notificaciones in-app (+ broadcast / Web Push) para los admins asignados (o
+                 * todos, si quedó sin asignar). Envuelto en try/catch propio: un fallo acá no
+                 * debe impedir que la tarea recién creada quede persistida ni que el mensaje del
+                 * lead se siga procesando. */
+                try {
+                    \App\Services\AdminTaskNotificationService::create_for_task($task);
+                } catch (\Throwable $e) {
+                    Log::error('LeadAiService: error al crear notificaciones de tarea de alerta.', [
+                        'lead_id' => $lead->id,
+                        'task_id' => $task->id,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+
                 Log::info('LeadAiService: tarea de alerta creada por intervención humana requerida.', [
-                    'lead_id' => $lead->id,
-                    'motivo'  => $task_content,
+                    'lead_id'            => $lead->id,
+                    'motivo'             => $task_content,
+                    'assigned_admin_ids' => $setter_ids,
                 ]);
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al crear tarea de alerta de intervención humana.', [
