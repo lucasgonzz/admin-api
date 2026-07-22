@@ -444,6 +444,7 @@ Route::prefix('admin')->group(function () {
         Route::post('ecommerce-installations/start-update', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_update_json']);
         Route::post('ecommerce-installations/start-install', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_install_for_client_json']);
         Route::get('ecommerce-installations/{installation}/logs', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'logs_json']);
+        Route::delete('ecommerce-installations/{installation}', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'destroy_json']);
 
         // Configuración de implementaciones: admin asignado por defecto.
         Route::get('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show']);

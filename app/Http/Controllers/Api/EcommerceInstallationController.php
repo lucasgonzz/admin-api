@@ -8,6 +8,7 @@ use App\Models\Client;
 use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\EcommerceDeploymentLog;
 use App\Models\EnvTemplate;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -229,6 +230,33 @@ class EcommerceInstallationController extends BaseController
             'status' => $installation->status,
             'models' => $logs,
         ]);
+    }
+
+    /**
+     * Elimina una corrida de instalación/actualización y sus deployment_logs asociados.
+     *
+     * No permite eliminar una corrida en estado 'instalando': hay un
+     * RunEcommerceInstallationJob corriendo en background sobre ese registro y
+     * borrarlo a mitad de camino lo dejaría escribiendo sobre un modelo inexistente.
+     *
+     * @param  ClientEcommerceInstallation  $installation  Corrida a eliminar.
+     * @return JsonResponse  { deleted: true } o { error: string } (422 si está en curso)
+     */
+    public function destroy_json(ClientEcommerceInstallation $installation): JsonResponse
+    {
+        // Bloquea el borrado mientras el job de instalación/actualización está corriendo en background.
+        if ($installation->status === 'instalando') {
+            return response()->json([
+                'error' => 'No se puede eliminar una corrida en curso. Esperá a que termine o falle, o revisá el proceso en el VPS antes de forzar el borrado.',
+            ], 422);
+        }
+
+        // ecommerce_deployment_logs no tiene FK en BD (convención del proyecto: sin FK, integridad en Eloquent), hay que limpiarlo a mano.
+        EcommerceDeploymentLog::where('client_ecommerce_installation_id', $installation->id)->delete();
+
+        $installation->delete();
+
+        return response()->json(['deleted' => true]);
     }
 
     /**
