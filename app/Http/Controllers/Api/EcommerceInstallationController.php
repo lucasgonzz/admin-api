@@ -62,6 +62,12 @@ class EcommerceInstallationController extends BaseController
      */
     public function start_install_json(ClientEcommerce $client_ecommerce): JsonResponse
     {
+        // Configuración mínima de la tienda (URL de SPA/API y dominio resoluble) antes de arrancar.
+        $config_response = $this->assert_ecommerce_is_configured($client_ecommerce);
+        if ($config_response !== null) {
+            return $config_response;
+        }
+
         // No permitir solapar con una corrida ya en curso de esta misma tienda.
         $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
         if ($conflict_response !== null) {
@@ -111,19 +117,10 @@ class EcommerceInstallationController extends BaseController
             ], 422);
         }
 
-        // Configuración mínima requerida para poder actualizar: la tienda ya tiene que estar
-        // instalada (una actualización no crea nada desde cero).
-        $missing_fields = [];
-        foreach (['domain', 'spa_url', 'api_url'] as $field) {
-            if (empty($client_ecommerce->{$field})) {
-                $missing_fields[] = $field;
-            }
-        }
-        if (! empty($missing_fields)) {
-            return response()->json([
-                'error' => 'La tienda del cliente no está configurada todavía (faltan: '
-                    . implode(', ', $missing_fields) . '). Instalala primero antes de actualizar.',
-            ], 422);
+        // Configuración mínima de la tienda (URL de SPA/API y dominio resoluble) antes de arrancar.
+        $config_response = $this->assert_ecommerce_is_configured($client_ecommerce);
+        if ($config_response !== null) {
+            return $config_response;
         }
 
         $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
@@ -170,6 +167,12 @@ class EcommerceInstallationController extends BaseController
             return response()->json([
                 'error' => 'El cliente no tiene una tienda (ecommerce) configurada.',
             ], 422);
+        }
+
+        // Configuración mínima de la tienda (URL de SPA/API y dominio resoluble) antes de arrancar.
+        $config_response = $this->assert_ecommerce_is_configured($client_ecommerce);
+        if ($config_response !== null) {
+            return $config_response;
         }
 
         $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
@@ -225,6 +228,47 @@ class EcommerceInstallationController extends BaseController
 
         return response()->json([
             'error' => 'Ya hay una corrida de instalación/actualización en curso para esta tienda.',
+        ], 422);
+    }
+
+    /**
+     * Valida que la tienda tenga la configuración mínima cargada para poder arrancar cualquier
+     * corrida (instalación o actualización): URL del SPA, URL de la API y un dominio resoluble.
+     *
+     * Se usa `resolve_domain()` (no la columna cruda `domain`) porque un cliente puede tener
+     * cargada la URL del SPA y todavía no el campo `domain` a mano: en ese caso el dominio se
+     * deriva solo de la URL y no hace falta pedirlo aparte.
+     *
+     * Unifica la validación que antes solo tenía `start_update_json()`: los tres endpoints de
+     * arranque (`start_install_json`, `start_update_json`, `start_install_for_client_json`) la
+     * llaman siempre antes de `assert_no_running_installation()`.
+     *
+     * @param  ClientEcommerce  $client_ecommerce
+     * @return JsonResponse|null  Respuesta 422 si falta configuración; null si está todo cargado.
+     */
+    protected function assert_ecommerce_is_configured(ClientEcommerce $client_ecommerce): ?JsonResponse
+    {
+        // Campos mínimos: URL del SPA, URL de la API, y un dominio que se pueda resolver
+        // (a mano en `domain` o derivado del host de `spa_url`).
+        $missing_fields = [];
+        if (empty($client_ecommerce->spa_url)) {
+            $missing_fields[] = 'URL del SPA';
+        }
+        if (empty($client_ecommerce->api_url)) {
+            $missing_fields[] = 'URL de la API';
+        }
+        if ($client_ecommerce->resolve_domain() === '') {
+            $missing_fields[] = 'dominio';
+        }
+
+        if (empty($missing_fields)) {
+            return null;
+        }
+
+        return response()->json([
+            'error' => 'La tienda del cliente no está configurada todavía (falta: '
+                . implode(', ', $missing_fields)
+                . '). Cargalo en la sección "Tienda online (ecommerce)" del perfil del cliente en el admin.',
         ], 422);
     }
 }

@@ -81,11 +81,18 @@ class EcommerceInstallationService
     protected $build_ssh;
 
     /**
-     * Prefijo estándar de rutas en el hosting compartido (igual que InstallationService).
+     * Prefijo estándar de rutas en el hosting compartido.
+     *
+     * A diferencia de `InstallationService` (empresa), donde cada cliente es un subdirectorio
+     * dentro del dominio fijo `comerciocity.com`, la tienda NO funciona así: cada ecommerce vive
+     * en su propio dominio de Hostinger (convención de Lucas, 22/7/2026). Por eso acá el prefijo
+     * es solo `domains/` — el resto de la ruta (`{dominio}/public_html` para el SPA y
+     * `{dominio}/public_html/api` para tienda-api) lo arman los helpers `resolve_spa_path()` /
+     * `resolve_api_path()` de `ClientEcommerce` a partir del dominio real de cada tienda.
      *
      * @var string
      */
-    protected const HOSTING_PREFIX = 'domains/comerciocity.com/public_html/';
+    protected const HOSTING_PREFIX = 'domains/';
 
     /**
      * Orden de etapas del pipeline de instalación del ecommerce.
@@ -502,9 +509,13 @@ class EcommerceInstallationService
         $this->log('upload_spa', 'ZIP descargado al servidor de admin');
 
         // Sube el ZIP a una ruta TEMPORAL en el hosting (nunca directo al docroot en vivo).
+        // Se usa resolve_spa_path() (no la columna cruda spa_path, que puede estar vacía) para que
+        // el dirname() no dé basura: dirname('') devolvería '.' y armaría una ruta inválida.
+        // dirname('{dominio}/public_html') da '{dominio}', o sea que el ZIP queda en
+        // domains/{dominio}/, fuera del docroot público.
         $spa_docroot   = $this->get_spa_docroot();
         $temp_zip_name = 'dist_' . $this->installation->uuid . '.zip';
-        $temp_zip_path = self::HOSTING_PREFIX . dirname($this->ecommerce->spa_path) . '/' . $temp_zip_name;
+        $temp_zip_path = self::HOSTING_PREFIX . dirname($this->ecommerce->resolve_spa_path()) . '/' . $temp_zip_name;
 
         $sftp_hosting = $this->open_sftp_session('shared_hosting');
         $this->sftp_upload_file($sftp_hosting, $local_zip, $temp_zip_path, 'upload_spa');
@@ -1313,9 +1324,13 @@ class EcommerceInstallationService
      */
     protected function get_spa_docroot(): string
     {
-        $spa_path = trim((string) $this->ecommerce->spa_path, '/');
+        // Se usa resolve_spa_path() en vez de la columna cruda: deriva la ruta del dominio de la
+        // tienda cuando no hay un spa_path cargado a mano (ver App\Models\ClientEcommerce).
+        $spa_path = trim((string) $this->ecommerce->resolve_spa_path(), '/');
         if ($spa_path === '') {
-            throw new \RuntimeException('La tienda no tiene spa_path configurado.');
+            throw new \RuntimeException(
+                'La tienda no tiene cargada ni la URL del SPA ni el dominio en el perfil del cliente del admin.'
+            );
         }
 
         return self::HOSTING_PREFIX . $spa_path;
@@ -1328,9 +1343,12 @@ class EcommerceInstallationService
      */
     protected function get_api_path(): string
     {
-        $api_path = trim((string) $this->ecommerce->api_path, '/');
+        // Idem get_spa_docroot(): resolve_api_path() deriva del dominio si no hay api_path cargado.
+        $api_path = trim((string) $this->ecommerce->resolve_api_path(), '/');
         if ($api_path === '') {
-            throw new \RuntimeException('La tienda no tiene api_path configurado.');
+            throw new \RuntimeException(
+                'La tienda no tiene cargada ni la URL del SPA ni el dominio en el perfil del cliente del admin.'
+            );
         }
 
         return self::HOSTING_PREFIX . $api_path;
