@@ -87,7 +87,7 @@ class VersionController extends BaseController
 
         if ($for_select) {
             $q = Version::query()
-                ->select(['id', 'version', 'title', 'status'])
+                ->select(['id', 'version', 'title', 'status', 'published_at'])
                 ->orderBy('id', 'desc');
         } else {
             $q = Version::query()->withAll()->orderBy('id', 'desc');
