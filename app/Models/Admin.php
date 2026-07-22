@@ -37,6 +37,10 @@ class Admin extends Authenticatable
         'is_default_task_assignee' => 'boolean',
         // Flag que identifica al admin como closer (responsable de llamadas post-demo).
         'is_closer'                => 'boolean',
+        // Flag que identifica al admin como setter: las tareas que se generan a partir
+        // de conversaciones de leads se asignan automáticamente a todos los admins con
+        // este flag activo. Distinto de is_default_task_assignee (preselección manual).
+        'es_setter'                => 'boolean',
         // Flag para recibir WhatsApp cuando el agente escala una conversación de lead.
         'notify_lead_escalation_whatsapp' => 'boolean',
         // Flag para recibir WhatsApp cuando se agenda una demo.
@@ -61,6 +65,17 @@ class Admin extends Authenticatable
 
     function scopeWithAll($query) {
         // placeholder para mantener consistencia con empresa-api
+    }
+
+    /**
+     * Tareas internas del panel administrativo asignadas a este admin
+     * (asignación múltiple, vía la tabla pivot admin_task_assignees).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany
+     */
+    public function assigned_tasks()
+    {
+        return $this->belongsToMany(AdminTask::class, 'admin_task_assignees', 'admin_id', 'admin_task_id');
     }
 
     /**
