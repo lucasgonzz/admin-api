@@ -7,6 +7,8 @@ use App\Jobs\RunEcommerceInstallationJob;
 use App\Models\Client;
 use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
+use App\Models\ClientSshCredential;
+use App\Models\EnvTemplate;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -68,6 +70,14 @@ class EcommerceInstallationController extends BaseController
             return $config_response;
         }
 
+        // Requisitos del entorno de deploy (credenciales SSH, plantilla de .env, API activa) antes
+        // de encolar el job: si falta algo, se corta acá con un 422 legible en vez de a mitad de la
+        // corrida (ver assert_deploy_prerequisites()).
+        $prerequisites_response = $this->assert_deploy_prerequisites($client_ecommerce, 'install');
+        if ($prerequisites_response !== null) {
+            return $prerequisites_response;
+        }
+
         // No permitir solapar con una corrida ya en curso de esta misma tienda.
         $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
         if ($conflict_response !== null) {
@@ -123,6 +133,12 @@ class EcommerceInstallationController extends BaseController
             return $config_response;
         }
 
+        // Requisitos del entorno de deploy antes de encolar (ver assert_deploy_prerequisites()).
+        $prerequisites_response = $this->assert_deploy_prerequisites($client_ecommerce, 'update');
+        if ($prerequisites_response !== null) {
+            return $prerequisites_response;
+        }
+
         $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
         if ($conflict_response !== null) {
             return $conflict_response;
@@ -173,6 +189,12 @@ class EcommerceInstallationController extends BaseController
         $config_response = $this->assert_ecommerce_is_configured($client_ecommerce);
         if ($config_response !== null) {
             return $config_response;
+        }
+
+        // Requisitos del entorno de deploy antes de encolar (ver assert_deploy_prerequisites()).
+        $prerequisites_response = $this->assert_deploy_prerequisites($client_ecommerce, 'install');
+        if ($prerequisites_response !== null) {
+            return $prerequisites_response;
         }
 
         $conflict_response = $this->assert_no_running_installation($client_ecommerce->id);
@@ -270,5 +292,69 @@ class EcommerceInstallationController extends BaseController
                 . implode(', ', $missing_fields)
                 . '). Cargalo en la sección "Tienda online (ecommerce)" del perfil del cliente en el admin.',
         ], 422);
+    }
+
+    /**
+     * Valida, antes de encolar el job, que el entorno de deploy tenga lo mínimo para completar la
+     * corrida sin morir a mitad de camino: credenciales SSH del VPS de builds y del hosting
+     * compartido (siempre), y en instalaciones desde cero además la plantilla de `.env` de tienda
+     * y una API de empresa activa en el cliente (de ahí sale la DB y la APP_KEY que se copian al
+     * `.env` de tienda-api).
+     *
+     * Se llama siempre después de `assert_ecommerce_is_configured()` y antes de
+     * `assert_no_running_installation()` en los tres endpoints de arranque
+     * (`start_install_json`, `start_update_json`, `start_install_for_client_json`).
+     *
+     * Si falla más de una verificación, se reporta la primera (mismo criterio que
+     * `assert_ecommerce_is_configured()`).
+     *
+     * @param  ClientEcommerce  $client_ecommerce
+     * @param  string  $mode  'install' o 'update'. Las verificaciones de plantilla de .env y API
+     *                        de empresa activa solo aplican a 'install' (el pipeline de 'update'
+     *                        no reescribe el .env de tienda-api).
+     * @return JsonResponse|null  Respuesta 422 si falta algo del entorno; null si se puede continuar.
+     */
+    protected function assert_deploy_prerequisites(ClientEcommerce $client_ecommerce, string $mode): ?JsonResponse
+    {
+        // Credenciales SSH del VPS donde se compila tienda-spa/tienda-api. Sin esta fila el job
+        // muere adentro de connect_build_vps() con un ModelNotFoundException de Eloquent.
+        $has_vps_credential = ClientSshCredential::where('type', 'vps')->exists();
+        if (! $has_vps_credential) {
+            return response()->json([
+                'error' => 'Faltan las credenciales SSH del VPS de builds. Cargalas en el admin antes de arrancar la instalación.',
+            ], 422);
+        }
+
+        // Credenciales SSH del hosting compartido donde se sube tienda-spa/tienda-api ya compilado.
+        // Sin esta fila el job muere adentro de connect_hosting_ssh() con el mismo tipo de error.
+        $has_hosting_credential = ClientSshCredential::where('type', 'shared_hosting')->exists();
+        if (! $has_hosting_credential) {
+            return response()->json([
+                'error' => 'Faltan las credenciales SSH del hosting compartido. Cargalas en el admin antes de arrancar la instalación.',
+            ], 422);
+        }
+
+        // Las dos verificaciones siguientes solo aplican a instalaciones desde cero: el pipeline
+        // de 'update' no vuelve a escribir el .env de tienda-api, así que no las necesita.
+        if ($mode === 'install') {
+            // Plantilla base del .env de tienda ('scope' = 'tienda'). Si no hay filas, el .env sale
+            // con lo mínimo indispensable y tienda-api queda instalada pero sin bootear.
+            $has_tienda_env_template = EnvTemplate::where('scope', 'tienda')->exists();
+            if (! $has_tienda_env_template) {
+                return response()->json([
+                    'error' => 'No hay una plantilla de .env de tienda cargada. Cargala o corré el seeder de plantillas de tienda en admin-api antes de arrancar la instalación.',
+                ], 422);
+            }
+
+            // API de empresa activa del cliente: de su .env se copian DB_DATABASE, DB_USERNAME,
+            // DB_PASSWORD y APP_KEY para el .env de tienda-api (misma base de datos física).
+            if ($client_ecommerce->client === null || $client_ecommerce->client->active_client_api === null) {
+                return response()->json([
+                    'error' => 'La tienda toma la base de datos y la clave de la aplicación del .env de la API de empresa del cliente, así que el cliente necesita una API activa seleccionada en su perfil.',
+                ], 422);
+            }
+        }
+
+        return null;
     }
 }
