@@ -155,6 +155,32 @@ class ClientProperties
                 'width' => 220,
                 'wrap_content' => true,
             ],
+            // Sección "Tienda online (ecommerce)" del modal del cliente (grupo 188, prompt 03).
+            // La primera propiedad dispara el render del componente custom, que dibuja los dos
+            // campos (URL del SPA y URL de la API). La segunda queda con 'show' => false solo
+            // para que build_draft() (model/Index.vue) siembre su clave en el borrador y viaje
+            // en el guardado; el componente custom es el que la edita, no un input suelto acá.
+            // Ambas llevan 'not_persisted_on_model' porque no son columnas de 'clients': las
+            // escribe ClientController::sync_ecommerce_urls_from_request() sobre ClientEcommerce.
+            [
+                'key' => 'ecommerce_spa_url',
+                'text' => 'Tienda online (ecommerce)',
+                'type' => 'custom',
+                'custom_component' => 'client_ecommerce_urls',
+                'value' => '',
+                'full_width' => true,
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+            ],
+            [
+                'key' => 'ecommerce_api_url',
+                'text' => 'URL de la API de la tienda',
+                'type' => 'text',
+                'value' => '',
+                'show' => false,
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+            ],
             // [
             //     'key' => 'api_key',
             //     'text' => 'API key',
