@@ -26,8 +26,24 @@ class EnvTemplateSeeder extends Seeder
      */
     public function run()
     {
-        /* Registros actuales de env_templates, en orden de aparición. */
-        $rows = [
+        /* Crea por key solo si no existe: no duplica ni sobreescribe valores editados en el panel. */
+        foreach (self::rows() as $row) {
+            EnvTemplate::firstOrCreate(['key' => $row['key'], 'scope' => 'empresa'], $row);
+        }
+    }
+
+    /**
+     * Filas de la plantilla base de empresa-api (scope='empresa').
+     *
+     * Expuesto como método estático (prompt 580) para que EnvTemplateTiendaSeeder pueda
+     * reutilizar los valores comunes (PUSHER_*, MAIL_*) sin hardcodear secretos nuevos.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function rows(): array
+    {
+        /* Registros actuales de env_templates (scope='empresa'), en orden de aparición. */
+        return [
             ['key' => 'APP_NAME',          'value' => 'ComercioCity',                    'group' => 'app',    'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 1],
             ['key' => 'APP_ENV',           'value' => 'production',                      'group' => 'app',    'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 2],
             ['key' => 'APP_KEY',           'value' => 'base64:x+eR5AISRu5bbFdIE3wiMlWv2LWBM5pv8Q5XBj5jeDg=', 'group' => 'app', 'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,               'sort_order' => 3],
@@ -68,10 +84,5 @@ class EnvTemplateSeeder extends Seeder
             // Bloque ComercioCity del cliente (clients.user_id): se autocompleta al generar el .env de cada instalación.
             ['key' => 'USER_ID',                 'value' => null,                   'group' => 'misc', 'is_common' => false, 'is_manual_on_create' => false, 'notes' => 'Se autocompleta con clients.user_id (bloque ComercioCity) al generar el .env.',       'sort_order' => 11],
         ];
-
-        /* Crea por key solo si no existe: no duplica ni sobreescribe valores editados en el panel. */
-        foreach ($rows as $row) {
-            EnvTemplate::firstOrCreate(['key' => $row['key']], $row);
-        }
     }
 }

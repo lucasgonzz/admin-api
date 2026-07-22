@@ -9,6 +9,7 @@ use App\Models\EnvTemplate;
 use App\Services\EnvSshService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
 /**
  * Gestión de la plantilla base de variables .env del sistema.
@@ -19,14 +20,20 @@ use Illuminate\Http\Request;
 class EnvTemplateController extends Controller
 {
     /**
-     * Devuelve todas las variables del template ordenadas por grupo y orden.
+     * Devuelve todas las variables del template de empresa-api ordenadas por grupo y orden.
+     *
+     * Nota (prompt 580): la tabla env_templates ahora también contiene la plantilla de
+     * tienda-api (scope='tienda'). Esta pantalla siempre gestionó la de empresa-api, por
+     * eso se filtra explícitamente por scope='empresa' para preservar el comportamiento
+     * actual sin mezclar ambas plantillas.
      *
      * @return JsonResponse  { models: EnvTemplate[] }
      */
     public function index(): JsonResponse
     {
-        /* Trae todas las variables ordenadas por grupo y sort_order para la UI. */
-        $templates = EnvTemplate::orderBy('group')
+        /* Trae todas las variables de empresa ordenadas por grupo y sort_order para la UI. */
+        $templates = EnvTemplate::where('scope', 'empresa')
+            ->orderBy('group')
             ->orderBy('sort_order')
             ->get();
 
@@ -45,7 +52,15 @@ class EnvTemplateController extends Controller
     public function store(Request $request): JsonResponse
     {
         $request->validate([
-            'key'                 => 'required|string|max:120|unique:env_templates,key',
+            /*
+             * key único solo dentro de scope='empresa' (prompt 580): la columna `key` ya
+             * no es unique global en la tabla porque tienda-api reutiliza keys de empresa
+             * (APP_NAME, DB_HOST, etc.) en su propio scope.
+             */
+            'key'                 => [
+                'required', 'string', 'max:120',
+                Rule::unique('env_templates', 'key')->where('scope', 'empresa'),
+            ],
             'value'               => 'nullable|string',
             'group'               => 'required|string|max:80',
             'is_common'           => 'required|boolean',
@@ -59,14 +74,16 @@ class EnvTemplateController extends Controller
             'key'                 => strtoupper(trim($request->input('key'))),
             'value'               => $request->input('value') ?: null,
             'group'               => trim($request->input('group')),
+            // Esta pantalla gestiona la plantilla de empresa-api (ver nota en index()).
+            'scope'               => 'empresa',
             'is_common'           => (bool) $request->input('is_common'),
             'is_manual_on_create' => (bool) $request->input('is_manual_on_create'),
             'notes'               => $request->input('notes') ?: null,
             'sort_order'          => (int) $request->input('sort_order'),
         ]);
 
-        /* Devuelve la lista completa ordenada para que el frontend refleje el nuevo registro. */
-        $templates = EnvTemplate::orderBy('group')->orderBy('sort_order')->get();
+        /* Devuelve la lista completa (empresa) ordenada para que el frontend refleje el nuevo registro. */
+        $templates = EnvTemplate::where('scope', 'empresa')->orderBy('group')->orderBy('sort_order')->get();
 
         return response()->json(['models' => $templates], 201);
     }
@@ -157,8 +174,8 @@ class EnvTemplateController extends Controller
             $env_ssh_service->disconnect();
         }
 
-        /* Recupera solo las variables del template marcadas como comunes. */
-        $common_templates = EnvTemplate::where('is_common', true)->get();
+        /* Recupera solo las variables del template de empresa marcadas como comunes. */
+        $common_templates = EnvTemplate::where('scope', 'empresa')->where('is_common', true)->get();
 
         /* Compara cada variable común contra el valor en el .env real del cliente. */
         $diffs = [];
@@ -201,8 +218,8 @@ class EnvTemplateController extends Controller
      */
     public function check_diff_all(Client $client): JsonResponse
     {
-        /* Recupera solo las variables del template marcadas como comunes. */
-        $common_templates = EnvTemplate::where('is_common', true)->get();
+        /* Recupera solo las variables del template de empresa marcadas como comunes. */
+        $common_templates = EnvTemplate::where('scope', 'empresa')->where('is_common', true)->get();
 
         /* Obtiene todas las APIs del cliente para iterar sobre ellas. */
         $client_apis = $client->client_apis;
@@ -281,9 +298,9 @@ class EnvTemplateController extends Controller
             'keys.*' => 'required|string',
         ]);
 
-        /* Obtiene los templates para las keys solicitadas, indexados por key. */
+        /* Obtiene los templates de empresa para las keys solicitadas, indexados por key. */
         $keys_to_apply = $request->input('keys');
-        $templates     = EnvTemplate::whereIn('key', $keys_to_apply)->get()->keyBy('key');
+        $templates     = EnvTemplate::where('scope', 'empresa')->whereIn('key', $keys_to_apply)->get()->keyBy('key');
 
         /* Construye el array KEY => valor_del_template para escribir en cada .env. */
         $vars_to_write = [];
@@ -352,9 +369,9 @@ class EnvTemplateController extends Controller
             ->where('client_id', $client->id)
             ->firstOrFail();
 
-        /* Recupera los templates para las keys solicitadas. */
+        /* Recupera los templates de empresa para las keys solicitadas. */
         $keys_to_apply = $request->input('keys');
-        $templates     = EnvTemplate::whereIn('key', $keys_to_apply)->get()->keyBy('key');
+        $templates     = EnvTemplate::where('scope', 'empresa')->whereIn('key', $keys_to_apply)->get()->keyBy('key');
 
         /* Construye el array KEY => valor_del_template para escribir en el .env del cliente. */
         $vars_to_write = [];

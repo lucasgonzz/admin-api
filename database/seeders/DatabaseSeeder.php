@@ -54,10 +54,18 @@ class DatabaseSeeder extends Seeder
             ComerciocityAfipConfigSeeder::class,
         ]);
 
-        // Plantilla base de variables .env: solo siembra si la tabla está vacía.
-        if (EnvTemplate::count() === 0) {
+        // Plantilla base de variables .env de empresa-api: solo siembra si no hay filas de ese scope.
+        if (EnvTemplate::where('scope', 'empresa')->count() === 0) {
             $this->call([
                 EnvTemplateSeeder::class,
+            ]);
+        }
+
+        // Plantilla .env de tienda-api (prompt 580): solo siembra si no hay filas de ese scope.
+        // updateOrCreate por key+scope la hace idempotente igual que EnvTemplateSeeder.
+        if (EnvTemplate::where('scope', 'tienda')->count() === 0) {
+            $this->call([
+                EnvTemplateTiendaSeeder::class,
             ]);
         }
 

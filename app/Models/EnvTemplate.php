@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property string $key                  Nombre de la variable (ej: MAIL_HOST).
  * @property string|null $value           Valor del template base.
  * @property string|null $group           Grupo funcional: mail, pusher, db, app, misc.
+ * @property string $scope                Ámbito de la variable: 'empresa' (default) o 'tienda'.
  * @property bool   $is_common            Contraste al actualizar clientes.
  * @property bool   $is_manual_on_create  Recordatorio al crear sistema nuevo.
  * @property string|null $notes           Notas internas para el operador.
@@ -24,6 +25,12 @@ class EnvTemplate extends Model
 {
     /**
      * Permite asignación masiva de todos los campos.
+     *
+     * Nota: este modelo usa $guarded = [] (no $fillable) para permitir asignación
+     * masiva de todos los atributos, incluida la columna `scope` agregada luego
+     * (migración add_scope_to_env_templates_table): al no existir un array
+     * $fillable explícito no hace falta declarar `scope` en ningún lado para que
+     * sea mass-assignable.
      *
      * @var array<int, string>
      */

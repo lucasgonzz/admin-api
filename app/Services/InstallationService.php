@@ -471,7 +471,9 @@ class InstallationService
      * Etapa 4: genera y escribe el .env de la API del cliente en el hosting.
      *
      * Combina (en orden de prioridad):
-     *   a) TODAS las variables de la tabla env_templates con su valor de plantilla base.
+     *   a) TODAS las variables de la tabla env_templates con scope='empresa' (prompt 580: la
+     *      tabla ahora también contiene la plantilla de tienda-api con scope='tienda', que
+     *      NO debe mezclarse acá) y su valor de plantilla base.
      *   b) Variables is_manual_on_create = true cuyos valores vienen de installation->env_manual_values.
      *   c) APP_URL generada automáticamente desde la URL de la ClientApi (sin /public).
      *   d) SANCTUM_STATEFUL_DOMAINS / SANCTUM_STATEFUL_CORS derivadas del spa_url de la ClientApi.
@@ -489,8 +491,10 @@ class InstallationService
     {
         $this->log('write_env', 'Generando .env para la instalación inicial...');
 
-        // a) Plantilla base completa, ordenada por grupo y posición.
-        $base_templates = EnvTemplate::orderBy('group')->orderBy('sort_order')->get();
+        // a) Plantilla base completa de empresa-api, ordenada por grupo y posición.
+        //    Se filtra scope='empresa' (prompt 580) para no mezclar con las filas de
+        //    la plantilla de tienda-api, que ahora conviven en la misma tabla.
+        $base_templates = EnvTemplate::where('scope', 'empresa')->orderBy('group')->orderBy('sort_order')->get();
 
         // Array KEY => valor que se escribirá en el .env.
         $vars_to_write = [];
@@ -500,7 +504,11 @@ class InstallationService
 
         // b) Variables manuales: los valores los cargó el operador en env_manual_values.
         $env_manual_values = $this->installation->env_manual_values ?? [];
-        $manual_templates  = EnvTemplate::where('is_manual_on_create', true)->get()->keyBy('key');
+        // Igual que arriba: scope='empresa' para no traer variables manuales de tienda-api.
+        $manual_templates  = EnvTemplate::where('scope', 'empresa')
+            ->where('is_manual_on_create', true)
+            ->get()
+            ->keyBy('key');
 
         foreach ($manual_templates as $key => $template) {
             // Solo aplica las claves que tienen valor en env_manual_values.
