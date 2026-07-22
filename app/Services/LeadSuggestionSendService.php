@@ -11,6 +11,18 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Envía por WhatsApp un mensaje sugerido por Claude tras aprobación del setter en admin-spa.
+ *
+ * FIX (prompt 366, lead #440, 22/7/2026): una sugerencia partida en varios mensajes tiene tres
+ * desenlaces posibles, no dos. Antes de este cambio solo existían "nada enviado" (rechazado) y
+ * "todo enviado" (enviado); una sugerencia de 4 partes que llegó hasta la 3ra y falló la 4ta con
+ * un 409 de Kapso ("otro mensaje en vuelo para esta conversación") se registraba igual como
+ * "rechazado" — el hilo mostraba el bloque rojo "No se pudo enviar" pese a que el lead sí había
+ * recibido y respondido al contenido. Ahora existe el caso intermedio de **envío parcial**
+ * (0 < partes enviadas < partes totales): se registra `status = 'enviado'` con
+ * `sent_parts_count`/`total_parts_count`/`partial_send_pending`, se aplica igual el pipeline
+ * sugerido y se deja constancia clara en el hilo de cuántos mensajes llegaron. Además,
+ * `send_body()` ahora espacia el envío de cada parte y reintenta con backoff ante fallos
+ * transitorios (409/429/5xx), para que el 409 de Kapso deje de ser la causa habitual del caso C.
  */
 class LeadSuggestionSendService
 {
@@ -175,19 +187,22 @@ class LeadSuggestionSendService
             return $message->fresh();
         }
 
-        $whatsapp_message_id = null;
+        // Resultado real del envío por partes (prompt 366): a diferencia del string|null anterior,
+        // ahora send_body() informa cuántas partes salieron y cuántas había en total, lo que
+        // habilita el caso C (envío parcial) más abajo.
+        $send_result = null;
         $send_failed = false;
         // Motivo real del fallo (prompt 336): se completa recién si send_failed queda en true.
         $error_detail = null;
 
         if ($phone !== '') {
-            $whatsapp_message_id = $this->send_body($phone, $body, $lead, $message);
+            $send_result = $this->send_body($phone, $body, $lead, $message);
 
-            if ($whatsapp_message_id === null) {
+            if ($send_result['sent_parts'] === 0) {
                 $send_failed = true;
                 // El motivo real quedó capturado en la instancia de WhatsappSendService al fallar send_text().
-                $error_detail = $this->whatsapp_send_service->last_send_error;
-                Log::channel('daily')->warning('LeadSuggestionSendService: send_text() retornó null, el envío no se confirmó.', [
+                $error_detail = $send_result['error'];
+                Log::channel('daily')->warning('LeadSuggestionSendService: send_body() no envió ninguna parte.', [
                     'lead_id'    => $lead->id,
                     'message_id' => $message->id,
                 ]);
@@ -202,11 +217,10 @@ class LeadSuggestionSendService
         }
 
         /*
-         * FIX: antes de este cambio, un envío fallido (sin teléfono o send_text() devolviendo
-         * null) igual quedaba marcado status='enviado', mintiendo sobre la entrega. Ahora se
-         * trata igual que el caso "ventana de 24hs cerrada": status='rechazado', sin tocar el
-         * pipeline del lead. La notificación a admins ante el fallo de envío en sí ya la maneja
-         * WhatsappSendService de forma centralizada (no se duplica acá).
+         * Caso A (prompt 366): no salió ninguna parte (o el lead no tiene teléfono). Comportamiento
+         * idéntico al de antes de este fix: status='rechazado', sin tocar el pipeline del lead. La
+         * notificación a admins ante el fallo de envío en sí ya la maneja WhatsappSendService de
+         * forma centralizada (no se duplica acá).
          */
         if ($send_failed) {
             (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
@@ -232,14 +246,32 @@ class LeadSuggestionSendService
             return $message->fresh();
         }
 
+        // Caso C (prompt 366, lead #440): salieron algunas partes pero no todas. Ni "rechazado"
+        // (el lead sí recibió contenido real) ni "enviado" a secas (faltan partes por mandar).
+        $is_partial_send = $send_result['sent_parts'] < $send_result['total_parts'];
+
         $original_content = (string) $message->content;
         $update_payload = [
             'status'              => 'enviado',
             'sent_at'             => now(),
-            'whatsapp_message_id' => $whatsapp_message_id,
+            'whatsapp_message_id' => $send_result['last_message_id'],
             // Admin que aprobó esta sugerencia desde el panel (null si fue auto-envío de la IA, prompt 403).
             'sent_by_admin_id'    => $sent_by_admin_id,
+            // Contabilidad del envío por partes (prompt 366): null/null/null en el caso completo (B).
+            'sent_parts_count'    => $send_result['sent_parts'],
+            'total_parts_count'   => $send_result['total_parts'],
+            'partial_send_pending' => $is_partial_send ? $send_result['pending_text'] : null,
         ];
+
+        if ($is_partial_send) {
+            // Motivo legible del corte, mismo formato que usa LeadConversationErrorLogger más abajo.
+            $update_payload['whatsapp_send_error'] = sprintf(
+                'Envío parcial: salieron los primeros %d de %d mensajes. El resto no se envió: %s.',
+                $send_result['sent_parts'],
+                $send_result['total_parts'],
+                $send_result['error'] ?: 'motivo no determinado'
+            );
+        }
 
         if ($edited_content !== null && trim($edited_content) !== '' && trim($edited_content) !== $original_content) {
             $update_payload['edited_content'] = trim($edited_content);
@@ -250,7 +282,30 @@ class LeadSuggestionSendService
 
         $message->update($update_payload);
 
+        // El estado sugerido se aplica tanto en el envío completo (B) como en el parcial (C): en
+        // ambos casos el lead recibió contenido real y avanzó la conversación. Solo el caso A (nada
+        // enviado) deja el pipeline intacto.
         $this->apply_suggested_pipeline_status($lead, $message);
+
+        if ($is_partial_send) {
+            // Un envío parcial siempre necesita ojo humano: marca el lead en la fila destacada de
+            // la grilla (mismo mecanismo que ya usa el respaldo automático sin revisión, prompt 337).
+            $this->mark_lead_pending_review($lead);
+
+            // Deja constancia en el hilo de qué llegó y qué no, en tono claro y no alarmista (no es
+            // un bloque rojo de "falló todo": el lead sí recibió contenido).
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'Envío parcial de la sugerencia',
+                sprintf(
+                    'El lead recibió los primeros %d de %d mensajes. Los %d en adelante no se enviaron y quedaron pendientes para mandar a mano. Motivo: %s.',
+                    $send_result['sent_parts'],
+                    $send_result['total_parts'],
+                    $send_result['sent_parts'] + 1,
+                    $send_result['error'] ?: 'motivo no determinado'
+                )
+            );
+        }
 
         $lead->sync_suggestion_flags();
 
@@ -263,32 +318,110 @@ class LeadSuggestionSendService
      * Envía el cuerpo al número dado, partiéndolo en mensajes separados si contiene "---".
      *
      * El separador reconocido es "\n---\n" (línea con solo tres guiones).
-     * Devuelve el whatsapp_message_id del último mensaje enviado.
+     *
+     * FIX (prompt 366, lead #440, 22/7/2026): antes este método enviaba las partes en un foreach
+     * sin ninguna pausa entre una y otra, y devolvía solo el id de la última parte — si la última
+     * fallaba (típicamente 409 de Kapso por "otro mensaje en vuelo"), el llamador interpretaba el
+     * null como "no se envió nada" aunque las anteriores hubieran salido bien. Ahora:
+     *   - se espera 1200ms entre parte y parte exitosa (le da tiempo a Kapso a liberar el
+     *     bloqueo de "in-flight" de la conversación, que es la causa de raíz del 409);
+     *   - cada parte se reintenta hasta 3 veces con backoff (1500ms / 3500ms) cuando el fallo es
+     *     transitorio (409/429/5xx, ver WhatsappSendService::last_send_was_transient());
+     *   - si una parte no sale tras los 3 intentos, se corta el envío ahí (no tiene sentido mandar
+     *     la parte 5 si la 4 nunca llegó) y se devuelve el detalle exacto de qué salió y qué no,
+     *     para que send_suggestion() pueda registrar un envío parcial en vez de mentir con
+     *     "rechazado" o "enviado" a secas.
      *
      * @param string      $phone
      * @param string      $body
      * @param Lead        $lead    Para armar el contexto de la notificación de fallo a admins.
      * @param LeadMessage $message Para armar el contexto de la notificación de fallo a admins.
      *
-     * @return string|null
+     * @return array{sent_parts:int, total_parts:int, last_message_id:string|null, pending_text:string|null, error:string|null}
      */
-    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message): ?string
+    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message): array
     {
+        // Split idéntico al comportamiento anterior: separador "\n---\n", trim y descarte de partes vacías.
         $parts = array_values(array_filter(
             array_map('trim', preg_split('/\n---\n/', $body)),
             fn($p) => $p !== ''
         ));
 
+        $total_parts = count($parts);
+
         $context = 'Sugerencia de Claude - Lead #' . $lead->id
             . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
             . " (mensaje #{$message->id})";
 
-        $last_id = null;
-        foreach ($parts as $part) {
-            $last_id = $this->whatsapp_send_service->send_text($phone, $part, $context);
+        // Id de la última parte enviada con éxito hasta el momento.
+        $last_message_id = null;
+        // Cantidad de partes que efectivamente salieron.
+        $sent_parts = 0;
+        // Motivo del corte, solo se completa si alguna parte falla tras agotar los reintentos.
+        $error = null;
+
+        foreach ($parts as $index => $part) {
+            $part_sent = false;
+
+            // Hasta 3 intentos por parte. Los intermedios pasan skip_failure_notification=true
+            // para que un reintento que después sale bien no dispare la notificación de fallo a
+            // los admins (solo el último intento, si también falla, notifica de verdad).
+            for ($attempt = 1; $attempt <= 3; $attempt++) {
+                $is_last_attempt = $attempt === 3;
+
+                $message_id = $this->whatsapp_send_service->send_text($phone, $part, $context, ! $is_last_attempt);
+
+                if ($message_id !== null) {
+                    $last_message_id = $message_id;
+                    $sent_parts++;
+                    $part_sent = true;
+                    break;
+                }
+
+                // Fallo transitorio (409 "in-flight" de Kapso es el caso central) y todavía quedan
+                // intentos: esperar con backoff creciente antes de reintentar la misma parte.
+                if (! $is_last_attempt && $this->whatsapp_send_service->last_send_was_transient()) {
+                    usleep($attempt === 1 ? 1500000 : 3500000);
+                    continue;
+                }
+
+                // Fallo no transitorio, o ya era el último intento: no tiene sentido seguir
+                // reintentando esta parte.
+                break;
+            }
+
+            if (! $part_sent) {
+                // Se agotaron los intentos (o el fallo no era transitorio): cortar acá. El texto
+                // pendiente incluye esta parte (la que falló) más todas las que quedaron sin
+                // intentar, para que el setter las pueda mandar a mano.
+                $error = $this->whatsapp_send_service->last_send_error;
+                $pending_text = implode("\n---\n", array_slice($parts, $index));
+
+                return [
+                    'sent_parts'       => $sent_parts,
+                    'total_parts'      => $total_parts,
+                    'last_message_id'  => $last_message_id,
+                    'pending_text'     => $pending_text,
+                    'error'            => $error,
+                ];
+            }
+
+            // Pausa entre partes exitosas (NO después de la última): es la prevención de raíz del
+            // 409 de Kapso ("Another message is already in-flight for this conversation"), le da
+            // tiempo a liberar el bloqueo de la conversación antes de mandar la siguiente parte.
+            // Sin este comentario un futuro lector podría borrar el usleep por "innecesario".
+            if ($index < $total_parts - 1) {
+                usleep(1200000);
+            }
         }
 
-        return $last_id;
+        return [
+            'sent_parts'      => $sent_parts,
+            'total_parts'     => $total_parts,
+            'last_message_id' => $last_message_id,
+            'pending_text'    => null,
+            'error'           => null,
+        ];
     }
 
     /**

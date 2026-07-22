@@ -25,6 +25,19 @@ class WhatsappSendService
     public $last_send_error = null;
 
     /**
+     * Código de status HTTP del último fallo de send_text()/send_template() (409, 429, 500, etc.),
+     * cuando se pudo determinar. Lo lee el llamador (LeadSuggestionSendService::send_body(), prompt
+     * 366 / fix lead #440) tras recibir null de send_text() para decidir, vía last_send_was_transient(),
+     * si el fallo es transitorio (típicamente el 409 de Kapso "otro mensaje en vuelo para esta
+     * conversación") y conviene reintentar con backoff, o si es un rechazo definitivo. Se resetea a
+     * null en el mismo punto que $last_send_error (arranque de send_text()/send_template()). Null si
+     * el último envío de esta instancia fue exitoso o si no se pudo determinar el status HTTP.
+     *
+     * @var int|null
+     */
+    public $last_send_status_code = null;
+
+    /**
      * Envía un mensaje de soporte según kind y adjuntos (audio, imagen o texto).
      *
      * @param string         $to      Número destino E.164.
@@ -82,6 +95,8 @@ class WhatsappSendService
     {
         // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla (prompt 336).
         $this->last_send_error = null;
+        // Resetea el status HTTP del fallo anterior por el mismo motivo (prompt 366, fix lead #440).
+        $this->last_send_status_code = null;
 
         $notify_context = $context !== null ? $context : "Envío de texto a {$to}";
 
@@ -181,10 +196,44 @@ class WhatsappSendService
                 'to'    => $normalized_to,
                 'error' => $exception->getMessage(),
             ]);
+
+            /*
+             * Captura del status HTTP real del fallo (prompt 366, fix lead #440), ANTES de
+             * notify_admins_of_failure(): el llamador (LeadSuggestionSendService::send_body())
+             * lo necesita para decidir si conviene reintentar (409/429/5xx transitorios) o cortar
+             * de una. Vía principal: la RequestException de Laravel trae la Response real adjunta.
+             */
+            if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+                $this->last_send_status_code = (int) $exception->response->status();
+            } else {
+                // Respaldo: algunas excepciones de Guzzle no llegan como RequestException con
+                // response adjunta, pero el mensaje trae el texto "status code XXX" igual (así lo
+                // formatea Guzzle/Laravel, y es literalmente lo que se vio en el log de producción).
+                if (preg_match('/status code (\d{3})/', $exception->getMessage(), $matches)) {
+                    $this->last_send_status_code = (int) $matches[1];
+                }
+            }
+
             $this->notify_admins_of_failure($notify_context, $exception->getMessage(), $skip_failure_notification);
         }
 
         return null;
+    }
+
+    /**
+     * Indica si el último fallo de send_text() es transitorio y tiene sentido reintentarlo
+     * después de esperar (no un error de configuración ni un rechazo definitivo de Meta).
+     *
+     * 409 es el caso central: Kapso responde "Another message is already in-flight for this
+     * conversation" cuando llega un envío mientras otro de la misma conversación sigue en vuelo.
+     * Es seguro reintentarlo: el 409 significa que el mensaje NO se encoló, así que no puede
+     * duplicarse en el WhatsApp del destinatario.
+     *
+     * @return bool
+     */
+    public function last_send_was_transient(): bool
+    {
+        return in_array($this->last_send_status_code, [409, 429, 500, 502, 503, 504], true);
     }
 
     /**
@@ -207,6 +256,8 @@ class WhatsappSendService
     {
         // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla (prompt 336).
         $this->last_send_error = null;
+        // Resetea el status HTTP del fallo anterior por el mismo motivo (prompt 366, fix lead #440).
+        $this->last_send_status_code = null;
 
         $notify_context = $context !== null ? $context : "Envío de plantilla '{$template_name}' a {$to}";
 
