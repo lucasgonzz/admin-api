@@ -48,15 +48,48 @@ class Client extends Model
         'payment_expired_at'       => 'date',
     ];
 
+    /**
+     * Atributos calculados (accessors) que viajan serializados junto a las
+     * columnas de la tabla. Resuelven contra la relación `client_ecommerce`
+     * ya cargada por scopeWithAll(), sin disparar consultas extra.
+     *
+     * @var array<int, string>
+     */
+    protected $appends = ['ecommerce_spa_url', 'ecommerce_api_url'];
+
     function scopeWithAll($query) {
+        // Se agrega 'client_ecommerce' (eager load) para que los accessors
+        // ecommerce_spa_url / ecommerce_api_url no disparen una consulta
+        // extra por cliente al listar (index_json) o mostrar (show_json).
         $query->with(
             'current_version',
             'active_client_api',
             'client_apis',
             'client_employees',
             'implementation',
-            'shared_database_group'
+            'shared_database_group',
+            'client_ecommerce'
         );
+    }
+
+    /**
+     * URL del SPA de la tienda online del cliente (accessor: ecommerce_spa_url).
+     *
+     * @return string  Vacío si el cliente todavía no tiene ClientEcommerce.
+     */
+    public function getEcommerceSpaUrlAttribute()
+    {
+        return $this->client_ecommerce ? (string) ($this->client_ecommerce->spa_url ?? '') : '';
+    }
+
+    /**
+     * URL de la API de la tienda online del cliente (accessor: ecommerce_api_url).
+     *
+     * @return string  Vacío si el cliente todavía no tiene ClientEcommerce.
+     */
+    public function getEcommerceApiUrlAttribute()
+    {
+        return $this->client_ecommerce ? (string) ($this->client_ecommerce->api_url ?? '') : '';
     }
 
     /**
