@@ -70,19 +70,15 @@ class EcommerceDeploymentService extends EcommerceInstallationService
         $api_build_path = $this->builds_api_path();
         $this->log('upload_api', 'Preparando tienda-api en VPS de builds (actualización, última de master)');
 
-        // Siempre trae la última de master (mismo criterio que step_ensure_spa_cloned del SPA):
-        // no hay selección de tag/versión para el ecommerce.
-        $this->exec_build_ssh(
+        // Siempre trae la última de master (mismo criterio que step_ensure_spa_cloned del SPA); si
+        // por algún motivo el clone no existe en este VPS, lo clona (prompt 189/01) en vez de morir
+        // con un cd a un directorio inexistente.
+        $this->ensure_repo_cloned(
             'upload_api',
-            'cd ' . escapeshellarg($api_build_path) . ' && git fetch origin master 2>&1'
-        );
-        $this->exec_build_ssh(
-            'upload_api',
-            'cd ' . escapeshellarg($api_build_path) . ' && git checkout master 2>&1'
-        );
-        $this->exec_build_ssh(
-            'upload_api',
-            'cd ' . escapeshellarg($api_build_path) . ' && git reset --hard origin/master 2>&1'
+            $api_build_path,
+            trim((string) config('services.deploy_tienda.api_git_repo', '')),
+            'tienda-api',
+            'DEPLOY_TIENDA_API_GIT_REPO'
         );
 
         $this->log('upload_api', 'Corriendo composer install en VPS...');

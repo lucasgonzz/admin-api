@@ -14,8 +14,9 @@ use phpseclib3\Net\SSH2;
  *
  * Espeja a InstallationService (empresa), con las diferencias propias del ecommerce:
  *   - Un solo dominio por cliente (sin swap v1/v2): el SPA va a la raíz del dominio, la API a "/api".
- *   - tienda-spa hay que clonarlo en el VPS la primera vez (no está clonado todavía, a diferencia
- *     de empresa-spa/empresa-api que ya vienen clonados de fábrica en el VPS de builds).
+ *   - tienda-spa y tienda-api hay que clonarlos en el VPS la primera vez (no están clonados todavía,
+ *     a diferencia de empresa-spa/empresa-api que ya vienen clonados de fábrica en el VPS de builds).
+ *     Ambos clonados usan el mismo helper `ensure_repo_cloned()` (prompt 189/01).
  *   - El build necesita branding por cliente (color + nombre + íconos PWA), leído en vivo del
  *     online_configuration de la tienda vía HTTP.
  *   - tienda-api corre PHP 8.4 en el hosting del cliente; esta clase (admin-api) sigue en PHP 7.4.
@@ -38,7 +39,8 @@ use phpseclib3\Net\SSH2;
  *   2. compile_spa       — branding en vivo (color/nombre/logo), .env del SPA, patch de
  *                          vue.config.js, generación de íconos PWA, npm ci + npm run build.
  *   3. upload_spa        — zip de dist/, subida y despliegue con mv atómico en la raíz del dominio.
- *   4. upload_api        — sube tienda-api a la subcarpeta /api y corre composer install --no-scripts.
+ *   4. upload_api        — clona/actualiza tienda-api en el VPS (ensure_repo_cloned), sube el
+ *                          código a la subcarpeta /api y corre composer install --no-scripts.
  *   5. write_env         — genera el .env de tienda-api (plantilla scope=tienda + DB/APP_KEY de
  *                          la empresa del mismo cliente).
  *   6. finalize          — bootstrap/cache, package:discover, symlink storage, limpieza de caches.
@@ -242,8 +244,8 @@ class EcommerceInstallationService
     /**
      * Etapa 1: asegura que tienda-spa esté clonado en el VPS de builds (rama master).
      *
-     * Si el directorio ya tiene un .git, se asume clonado y se actualiza a la última de master
-     * (fetch + checkout master + reset --hard origin/master). Si no existe, se clona desde cero.
+     * Envoltorio finito: conecta al VPS de builds y delega toda la lógica de clonado/actualización
+     * en `ensure_repo_cloned()` (compartida con `upload_api()` para tienda-api, prompt 189/01).
      *
      * @return void
      * @throws \RuntimeException  Si no está clonado y falta configurar el repo git de origen.
@@ -252,49 +254,106 @@ class EcommerceInstallationService
     {
         $this->connect_build_vps();
 
-        $spa_path = $this->builds_spa_path();
+        $this->ensure_repo_cloned(
+            'ensure_spa_cloned',
+            $this->builds_spa_path(),
+            trim((string) config('services.deploy_tienda.spa_git_repo', '')),
+            'tienda-spa',
+            'DEPLOY_TIENDA_SPA_GIT_REPO'
+        );
+    }
 
+    /**
+     * Deja un repo del VPS de builds en la última de master, clonándolo si es la primera vez.
+     *
+     * Concentra la lógica que antes vivía duplicada dentro de `step_ensure_spa_cloned()` (tienda-spa)
+     * y al principio de `step_upload_api()` (tienda-api), para que ambos repos del VPS de builds se
+     * resuelvan igual (prompt 189/01: antes solo se clonaba tienda-spa, y encima solo si estaba
+     * definida la variable de entorno; tienda-api se asumía ya clonada y la corrida moría más
+     * adelante con un `cd` a un directorio inexistente).
+     *
+     * Requiere una sesión SSH al VPS de builds ya abierta (`connect_build_vps()` corrido por el
+     * llamador antes de invocar este helper).
+     *
+     * @param  string  $step             Etapa del pipeline bajo la que se loguean los comandos
+     *                                    (para que el progreso siga apareciendo en la etapa correcta
+     *                                    del panel de seguimiento, sin agregar una etapa nueva).
+     * @param  string  $repo_path        Ruta absoluta del clone en el VPS de builds.
+     * @param  string  $git_repo         URL del repo git de origen (config `deploy_tienda.*_git_repo`).
+     * @param  string  $repo_label       Nombre legible del repo para los logs/mensajes ("tienda-spa",
+     *                                   "tienda-api").
+     * @param  string  $env_var_name     Nombre de la variable de entorno que hay que definir en el
+     *                                   `.env` de admin-api si el repo no está clonado y falta
+     *                                   configurar el origen (se cita literal en el mensaje de error).
+     * @return void
+     * @throws \RuntimeException  Si no está clonado y falta el repo de origen, o si la ruta destino
+     *                            existe pero no es un repo git válido.
+     */
+    protected function ensure_repo_cloned(
+        string $step,
+        string $repo_path,
+        string $git_repo,
+        string $repo_label,
+        string $env_var_name
+    ): void {
         // Verifica si el directorio ya es un repo git clonado.
-        $check_cmd = 'test -d ' . escapeshellarg($spa_path . '/.git') . ' && echo SPA_CLONED || echo SPA_NOT_CLONED';
-        $check_output = $this->exec_build_ssh('ensure_spa_cloned', $check_cmd, false);
+        $check_cmd = 'test -d ' . escapeshellarg($repo_path . '/.git') . ' && echo REPO_CLONED || echo REPO_NOT_CLONED';
+        $check_output = $this->exec_build_ssh($step, $check_cmd, false);
 
-        if (stripos($check_output, 'SPA_CLONED') !== false) {
+        if (stripos($check_output, 'REPO_CLONED') !== false) {
             // Ya clonado: siempre trae la última de master (sin selección de tag/versión).
-            $this->log('ensure_spa_cloned', 'tienda-spa ya está clonado; actualizando a la última de master');
+            $this->log($step, "{$repo_label} ya está clonado; actualizando a la última de master");
             $this->exec_build_ssh(
-                'ensure_spa_cloned',
-                'cd ' . escapeshellarg($spa_path) . ' && git fetch origin master 2>&1'
+                $step,
+                'cd ' . escapeshellarg($repo_path) . ' && git fetch origin master 2>&1'
             );
             $this->exec_build_ssh(
-                'ensure_spa_cloned',
-                'cd ' . escapeshellarg($spa_path) . ' && git checkout master 2>&1'
+                $step,
+                'cd ' . escapeshellarg($repo_path) . ' && git checkout master 2>&1'
             );
             $this->exec_build_ssh(
-                'ensure_spa_cloned',
-                'cd ' . escapeshellarg($spa_path) . ' && git reset --hard origin/master 2>&1'
+                $step,
+                'cd ' . escapeshellarg($repo_path) . ' && git reset --hard origin/master 2>&1'
             );
-            $this->log('ensure_spa_cloned', 'tienda-spa actualizado a origin/master', 'success');
+            $this->log($step, "{$repo_label} quedó en la última de master", 'success');
 
             return;
         }
 
-        // No está clonado: primera instalación de ecommerce en este VPS.
-        $git_repo = trim((string) config('services.deploy_tienda.spa_git_repo', ''));
+        // No está clonado: primera instalación de ecommerce en este VPS (o el repo se movió/perdió).
         if ($git_repo === '') {
             throw new \RuntimeException(
-                'tienda-spa no está clonado en el VPS y falta configurar DEPLOY_TIENDA_SPA_GIT_REPO.'
+                "{$repo_label} no está clonado en {$repo_path} del VPS de builds y falta configurar "
+                . "{$env_var_name} en el .env de admin-api. Alternativa manual: clonarlo una única vez "
+                . "en el VPS con git clone --branch master " . '<repo> ' . "{$repo_path}."
             );
         }
 
-        $this->log('ensure_spa_cloned', 'tienda-spa no está clonado; clonando rama master...');
+        // Caso borde: la ruta destino existe pero no tiene .git (clone cortado a la mitad, o carpeta
+        // creada a mano). git clone fallaría con "destination path already exists and is not an
+        // empty directory", un error críptico que no explica qué hay que hacer.
+        $exists_cmd = 'test -e ' . escapeshellarg($repo_path) . ' && echo REPO_PATH_EXISTS || echo REPO_PATH_FREE';
+        $exists_output = $this->exec_build_ssh($step, $exists_cmd, false);
+        if (stripos($exists_output, 'REPO_PATH_EXISTS') !== false) {
+            throw new \RuntimeException(
+                "La ruta {$repo_path} del VPS de builds existe pero no es un repo git válido "
+                . "(no tiene .git). Hay que borrarla o repararla a mano antes de reintentar la corrida."
+            );
+        }
+
+        $this->log($step, "{$repo_label} no está clonado; clonando rama master...");
         $this->exec_build_ssh(
-            'ensure_spa_cloned',
+            $step,
+            'mkdir -p ' . escapeshellarg(dirname($repo_path)) . ' 2>&1'
+        );
+        $this->exec_build_ssh(
+            $step,
             'git clone --branch master --single-branch '
-            . escapeshellarg($git_repo) . ' ' . escapeshellarg($spa_path) . ' 2>&1',
+            . escapeshellarg($git_repo) . ' ' . escapeshellarg($repo_path) . ' 2>&1',
             true,
             true
         );
-        $this->log('ensure_spa_cloned', 'tienda-spa clonado correctamente', 'success');
+        $this->log($step, "{$repo_label} clonado correctamente", 'success');
     }
 
     /**
@@ -551,17 +610,15 @@ class EcommerceInstallationService
         $api_build_path = $this->builds_api_path();
         $this->log('upload_api', 'Preparando tienda-api en VPS de builds (última de master)');
 
-        $this->exec_build_ssh(
+        // Clona tienda-api si es la primera vez en este VPS (misma lógica que tienda-spa, prompt
+        // 189/01: antes se asumía ya clonada y la corrida moría acá con un cd a un directorio
+        // inexistente cuando no lo estaba).
+        $this->ensure_repo_cloned(
             'upload_api',
-            'cd ' . escapeshellarg($api_build_path) . ' && git fetch origin master 2>&1'
-        );
-        $this->exec_build_ssh(
-            'upload_api',
-            'cd ' . escapeshellarg($api_build_path) . ' && git checkout master 2>&1'
-        );
-        $this->exec_build_ssh(
-            'upload_api',
-            'cd ' . escapeshellarg($api_build_path) . ' && git reset --hard origin/master 2>&1'
+            $api_build_path,
+            trim((string) config('services.deploy_tienda.api_git_repo', '')),
+            'tienda-api',
+            'DEPLOY_TIENDA_API_GIT_REPO'
         );
 
         $this->log('upload_api', 'Corriendo composer install en VPS...');
@@ -1365,7 +1422,8 @@ class EcommerceInstallationService
     }
 
     /**
-     * Ruta del clone tienda-api en el VPS de builds (se asume ya clonado, igual que empresa-api).
+     * Ruta del clone tienda-api en el VPS de builds (se clona la primera vez desde upload_api(),
+     * vía ensure_repo_cloned(); prompt 189/01 — ya no se asume clonado de antemano).
      *
      * @return string
      */

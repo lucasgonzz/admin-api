@@ -145,6 +145,9 @@ return [
     'deploy_tienda' => [
         // Repo git de tienda-spa a clonar la primera vez (ensure_spa_cloned). Rama siempre master.
         'spa_git_repo' => env('DEPLOY_TIENDA_SPA_GIT_REPO', ''),
+        // Repo git de tienda-api a clonar la primera vez en el VPS de builds (ensure_repo_cloned,
+        // usado desde upload_api). Rama siempre master. Simétrico a spa_git_repo (prompt 189/01).
+        'api_git_repo' => env('DEPLOY_TIENDA_API_GIT_REPO', ''),
         // Ruta del clone de tienda-spa en el VPS de builds.
         'builds_spa_path' => env('DEPLOY_TIENDA_BUILDS_SPA_PATH', '/home/builds/tienda-spa'),
         // Ruta del clone de tienda-api en el VPS de builds (se asume ya clonado, igual que empresa-api).
