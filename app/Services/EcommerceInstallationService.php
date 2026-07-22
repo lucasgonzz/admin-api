@@ -660,7 +660,14 @@ class EcommerceInstallationService
         $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
         $this->log('upload_api', 'ZIP descargado al servidor de admin');
 
-        $api_path     = $this->get_api_path();
+        $api_path = $this->get_api_path();
+
+        // Prompt 191/01: asegura que el directorio destino exista en el hosting ANTES de subir el
+        // ZIP por SFTP. En instalación normal ya lo crea unzip/mkdir de etapas previas, pero si el
+        // deploy del SPA se ejecutó antes y se llevó puesta la carpeta /api (bug del mismo prompt),
+        // esto la reconstruye en vez de morir con un SFTP put a un directorio inexistente.
+        $this->ensure_hosting_api_directory('upload_api');
+
         $remote_zip   = "{$api_path}/{$zip_name}";
         $sftp_hosting = $this->open_sftp_session('shared_hosting');
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
@@ -1274,7 +1281,14 @@ class EcommerceInstallationService
 
         $uploaded = $sftp->put($remote_path, $local_path, SFTP::SOURCE_LOCAL_FILE);
         if ($uploaded === false) {
-            throw new \RuntimeException("SFTP put falló al subir {$remote_path}");
+            // Directorio padre del destino: la causa más común de este fallo es que no exista en
+            // el hosting (prompt 191/01) — nombrarlo explícitamente ahorra tener que leer el
+            // stacktrace completo para darse cuenta.
+            $remote_parent_dir = dirname($remote_path);
+            throw new \RuntimeException(
+                "SFTP put falló al subir {$remote_path}. Causa más común: el directorio destino "
+                . "\"{$remote_parent_dir}\" no existe en el hosting."
+            );
         }
 
         $remote_size = $this->sftp_remote_file_size($sftp, $remote_path);
@@ -1412,6 +1426,29 @@ class EcommerceInstallationService
     }
 
     /**
+     * Se asegura de que el directorio de tienda-api exista en el hosting antes de subir el ZIP
+     * por SFTP (prompt 191/01). El swap atómico del SPA (`build_spa_atomic_deploy_shell()`) ya
+     * preserva esta carpeta cuando existe, pero si una tienda quedó rota por el bug de este mismo
+     * prompt (o por cualquier otro motivo el directorio no está creado), el `mkdir -p` la
+     * reconstruye en vez de dejar que el SFTP `put` falle contra un path inexistente.
+     *
+     * Reconecta/reabre la sesión SSH al hosting antes de correr el comando (mismo criterio que el
+     * resto de los pasos de este servicio tras operaciones largas o entre etapas).
+     *
+     * @param  string  $step  Nombre de la etapa del pipeline, para el log en vivo de la corrida.
+     * @return void
+     */
+    protected function ensure_hosting_api_directory(string $step): void
+    {
+        // Ruta absoluta destino en el hosting (con el prefijo domains/ ya resuelto).
+        $api_path = $this->get_api_path();
+
+        $this->log($step, "Asegurando que exista el directorio de tienda-api en el hosting ({$api_path})");
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh($step, 'mkdir -p ' . escapeshellarg($api_path));
+    }
+
+    /**
      * Ruta del clone tienda-spa en el VPS de builds.
      *
      * @return string
@@ -1492,6 +1529,46 @@ class EcommerceInstallationService
         $staging_dir = $spa_docroot . '__new_' . $this->installation->uuid;
         $old_dir     = $spa_docroot . '__old_' . $this->installation->uuid;
 
+        // ADVERTENCIA para el próximo que toque este método (bug real, 22/7/2026): por la
+        // convención de subdominios de Hostinger, tienda-api suele vivir ANIDADA dentro del
+        // docroot del SPA (`{dominio}/public_html/api`, ver ClientEcommerce::resolve_api_path()).
+        // El swap de abajo reemplaza `public_html` entero por el `dist/` nuevo del SPA y borraba
+        // (antes de este fix) todo lo que hubiera en el docroot viejo con un `rm -rf "$OLD"` — eso
+        // se llevaba puesta la API instalada del cliente. En una actualización esto es catastrófico:
+        // borra `.env`, `storage/` y `vendor/` de una tienda ya funcionando sin poder reconstruirse
+        // sola (ver `EcommerceDeploymentService::step_upload_api()`, que sube solo código). Por eso,
+        // antes del `rm -rf`, se rescata del docroot viejo cualquier entrada que no venga en el
+        // `dist/` nuevo: el subpath de la API (si está anidada) y `.well-known/` (validaciones SSL).
+        $preserve_entries = [];
+
+        // Subpath de la API dentro del docroot del SPA (p.ej. "api"), o '' si no está anidada
+        // (cliente con API en dominio/carpeta aparte: no hay nada que preservar de más).
+        $api_subpath = $this->ecommerce->api_subpath_inside_spa_docroot();
+        if ($api_subpath !== '') {
+            $preserve_entries[] = $api_subpath;
+        }
+
+        // .well-known/ (validaciones de certificado SSL) también cuelga directo del docroot y se
+        // pierde con el mismo rm -rf si no se preserva explícitamente.
+        $preserve_entries[] = '.well-known';
+
+        // Arma, para cada entrada a preservar, el bloque de shell que la mueve de vuelta desde
+        // "$OLD" a "$DOCROOT" solo si existe en el viejo y todavía no existe en el nuevo (si el
+        // dist/ del SPA trajera su propia versión de esa ruta, gana la nueva). Cada bloque queda
+        // detrás de un `if [ -e ... ]` para que la ausencia de la entrada no aborte el script con
+        // `set -e` activo.
+        $preserve_shell = '';
+        foreach ($preserve_entries as $entry) {
+            $entry_escaped = escapeshellarg($entry);
+            // mkdir -p del padre por si la entrada tuviera más de un nivel (hoy "api" es un solo
+            // nivel, pero no se asume): dirname de un valor de un nivel da ".", mkdir -p "." es no-op.
+            $preserve_shell .= 'if [ -e "$OLD/' . $entry . '" ] && [ ! -e "$DOCROOT/' . $entry . '" ]; then '
+                . 'mkdir -p "$(dirname "$DOCROOT/' . $entry . '")"; '
+                . 'mv "$OLD/' . $entry . '" "$DOCROOT/' . $entry . '"; '
+                . 'echo SPA_PRESERVED ' . $entry_escaped . '; '
+                . 'fi; ';
+        }
+
         return 'set -e; '
             . 'STAGING=' . escapeshellarg($staging_dir) . '; '
             . 'DOCROOT=' . escapeshellarg($spa_docroot) . '; '
@@ -1505,7 +1582,10 @@ class EcommerceInstallationService
             . 'mkdir -p "$(dirname "$DOCROOT")"; '
             . 'if [ -d "$DOCROOT" ]; then mv "$DOCROOT" "$OLD"; fi; '
             . 'mv "$STAGING" "$DOCROOT"; '
-            // Limpieza: contenido anterior y ZIP temporal.
+            // Rescata del docroot viejo lo que el dist/ nuevo no trae (tienda-api anidada,
+            // .well-known/), ANTES de borrar "$OLD" definitivamente.
+            . $preserve_shell
+            // Limpieza: contenido anterior (ya sin lo preservado) y ZIP temporal.
             . 'rm -rf "$OLD" "$ZIP"; '
             . 'echo SPA_DEPLOY_OK 2>&1';
     }

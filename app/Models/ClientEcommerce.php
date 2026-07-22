@@ -184,4 +184,44 @@ class ClientEcommerce extends Model
 
         return $domain.'/public_html/api';
     }
+
+    /**
+     * Tramo de resolve_api_path() que queda anidado ADENTRO de resolve_spa_path() (prompt 191/01).
+     *
+     * Por la convención de subdominios de Hostinger confirmada el 22/7/2026 (ver
+     * `resolve_api_path()`), lo normal es que tienda-api viva dentro del docroot del SPA
+     * (`{dominio}/public_html/api`). Ese subpath hay que preservarlo explícitamente cuando el
+     * deploy del SPA reemplaza el docroot entero (`build_spa_atomic_deploy_shell()` en
+     * `EcommerceInstallationService`), porque de lo contrario el `rm -rf` del docroot viejo se
+     * lleva puesta la API instalada del cliente.
+     *
+     * Devuelve cadena vacía cuando no hay nada que preservar: si algún cliente tiene la API
+     * cargada a mano en un dominio o carpeta separada del SPA (caso legítimo, columnas `spa_path`/
+     * `api_path` con valores independientes), no hay anidamiento y el deploy debe comportarse
+     * exactamente como antes de este fix, sin preservar nada de más.
+     *
+     * @return string  Subpath relativo (sin barra inicial ni final), o '' si la API no está anidada.
+     */
+    public function api_subpath_inside_spa_docroot(): string
+    {
+        // Normaliza ambos paths sin barras al inicio/fin para poder compararlos como texto plano.
+        $spa_path = trim((string) $this->resolve_spa_path(), '/');
+        $api_path = trim((string) $this->resolve_api_path(), '/');
+
+        // Sin dominio/paths cargados no hay nada que resolver.
+        if ($spa_path === '' || $api_path === '') {
+            return '';
+        }
+
+        // La API está anidada solo si su path arranca exactamente con "{spa_path}/". Si no
+        // matchea (API en otro dominio, o mismo string que el SPA sin subcarpeta), no hay
+        // anidamiento: se devuelve vacío para no preservar nada que no corresponda.
+        $spa_prefix = $spa_path . '/';
+        if (substr($api_path, 0, strlen($spa_prefix)) !== $spa_prefix) {
+            return '';
+        }
+
+        // Resto del path después del prefijo del SPA (con la convención actual, "api").
+        return substr($api_path, strlen($spa_prefix));
+    }
 }

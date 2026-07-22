@@ -122,7 +122,14 @@ class EcommerceDeploymentService extends EcommerceInstallationService
         $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
         $this->log('upload_api', 'ZIP descargado al servidor de admin');
 
-        $api_path     = $this->get_api_path();
+        $api_path = $this->get_api_path();
+
+        // Prompt 191/01: aunque la preservación del swap del SPA (build_spa_atomic_deploy_shell())
+        // debería garantizar que este directorio siga existiendo, una actualización sobre una
+        // tienda que ya quedó rota por el bug de este mismo prompt (o cualquier otra causa externa)
+        // tiene que poder reconstruir el directorio en vez de morir en el SFTP put.
+        $this->ensure_hosting_api_directory('upload_api');
+
         $remote_zip   = "{$api_path}/{$zip_name}";
         $sftp_hosting = $this->open_sftp_session('shared_hosting');
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
