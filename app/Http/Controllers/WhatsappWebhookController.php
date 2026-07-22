@@ -533,15 +533,23 @@ class WhatsappWebhookController extends Controller
     /**
      * Detecta si el body de un mensaje entrante es la respuesta cruda de un WhatsApp Flow
      * (formulario nativo de Meta, no construido por ComercioCity — ver prompt 252) y, si lo
-     * es, devuelve una nota clara para el historial en vez del JSON crudo. Se detecta por
-     * forma de contenido (JSON con clave flow_token en el nivel raíz), no por message.type,
-     * porque no hay confirmación del tipo exacto que usa Kapso para este caso.
+     * es, devuelve una **nota corta y legible para el humano** para guardar en el historial en
+     * vez del JSON crudo. Se detecta por forma de contenido (JSON con clave flow_token en el
+     * nivel raíz), no por message.type, porque no hay confirmación del tipo exacto que usa
+     * Kapso para este caso.
+     *
+     * FIX (grupo 186, prompt 02, 22/7/2026): antes esta nota incluía además el bloque de
+     * instrucciones dirigidas a la IA ("NO tomar ninguna acción automática...", ver prompt 252),
+     * y el setter lo veía tal cual en el chat del lead. Ahora esta nota queda corta y sin esas
+     * instrucciones; el bloque completo para la IA se reconstruye en
+     * LeadAiService::build_user_content() a partir del `kind = 'flow'` (ver
+     * LeadAiService::FLOW_NOTE_INSTRUCCION), usando esta misma nota como base.
      *
      * @param string|null $body Body ya resuelto por extract_message_body().
      *
-     * @return string|null Nota traducida, o null si no es un WhatsApp Flow.
+     * @return string|null Nota corta traducida, o null si no es un WhatsApp Flow.
      */
-    private function format_whatsapp_flow_body(?string $body): ?string
+    private function format_whatsapp_flow_note(?string $body): ?string
     {
         if ($body === null || trim($body) === '') {
             return null;
@@ -565,10 +573,7 @@ class WhatsappWebhookController extends Controller
         }
         $campos_texto = $campos !== [] ? implode(', ', $campos) : '(sin campos legibles)';
 
-        return "[Formulario de WhatsApp Flow completado por el lead — origen externo, no iniciado ni controlado por ComercioCity. "
-            . "Datos recibidos en el formulario: {$campos_texto}. "
-            . "NO tomar ninguna acción automática a partir de este mensaje (no guardar_nombre, no guardar_email, no agendar_demo, etc.). "
-            . "Si el lead confirma estos datos por texto en un mensaje normal, se procesan como cualquier otro dato que dé por WhatsApp.]";
+        return "Formulario de WhatsApp Flow completado por el lead. Datos recibidos: {$campos_texto}";
     }
 
     /**
@@ -1078,13 +1083,19 @@ class WhatsappWebhookController extends Controller
 
         $content = $parsed['body'];
 
-        /* FIX (prompt 252, 3/7/2026): si el body es la respuesta cruda de un WhatsApp Flow
-         * (formulario nativo de Meta ajeno a ComercioCity), traducirlo a una nota clara antes
-         * de guardarlo — evita que el JSON crudo llegue tal cual al historial que lee el
-         * agente de IA (ver LeadAiService::build_user_content()) y lo confunda. */
-        $flow_note = $this->format_whatsapp_flow_body($content);
+        /* FIX (prompt 252, 3/7/2026; corregido en grupo 186 prompt 02, 22/7/2026): si el body es
+         * la respuesta cruda de un WhatsApp Flow (formulario nativo de Meta ajeno a
+         * ComercioCity), no se guarda el JSON crudo. Se guarda una nota corta y legible para el
+         * humano (para que el setter vea de un vistazo qué completó el lead, sin instrucciones
+         * internas de IA en el chat) y se fuerza `kind = 'flow'` para ese registro, pisando lo
+         * que haya devuelto normalize_whatsapp_message_kind(). El bloque completo de
+         * instrucciones para la IA (la prohibición de tomar acciones automáticas) ya no vive
+         * acá: se reconstruye en LeadAiService::build_user_content() a partir de ese `kind`,
+         * componiéndolo con esta misma nota corta guardada en base. */
+        $flow_note = $this->format_whatsapp_flow_note($content);
         if ($flow_note !== null) {
             $content = $flow_note;
+            $kind = 'flow';
         } elseif ($content === null || trim($content) === '') {
             if ($kind === 'audio') {
                 $content = '[Audio sin transcripción]';
