@@ -462,6 +462,9 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/implementation-form-contact-delay', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_contact_delay']);
         Route::put('settings/implementation-form-contact-delay', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_contact_delay']);
 
+        Route::get('settings/implementation-google-cuota-default', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_google_cuota_default']);
+        Route::put('settings/implementation-google-cuota-default', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_google_cuota_default']);
+
         // Configuración de implementaciones: URL base del formulario público de configuración.
         Route::get('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_url']);
         Route::put('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_url']);

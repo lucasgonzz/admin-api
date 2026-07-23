@@ -80,4 +80,21 @@ class ImplementationSettings
 
         return $value ?? '';
     }
+
+    /**
+     * Retorna la cuota de Google por defecto que se asigna al usuario real creado
+     * por UserSetupHelper (empresa-api) cuando no se configuró nada.
+     *
+     * El valor se lee desde admin_settings con key 'implementation_google_cuota_default'.
+     * Si no existe el registro, devuelve 100 como valor por defecto.
+     *
+     * @return int Cuota por defecto (mínimo 0).
+     */
+    public static function get_google_cuota_default(): int
+    {
+        // Leer el valor guardado; fallback a 100 si no existe o es 0.
+        $value = (int) AdminSetting::where('key', 'implementation_google_cuota_default')->value('value');
+
+        return $value > 0 ? $value : 100;
+    }
 }

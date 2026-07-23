@@ -202,4 +202,36 @@ class ImplementationSettingsController extends Controller
 
         return response()->json(['url' => $url], 200);
     }
+
+    /**
+     * Retorna la cuota de Google configurada por defecto para nuevos usuarios reales.
+     *
+     * @return JsonResponse
+     */
+    public function get_google_cuota_default(): JsonResponse
+    {
+        // ImplementationSettings aplica el fallback a 100.
+        $cuota = ImplementationSettings::get_google_cuota_default();
+
+        return response()->json(['cuota' => $cuota], 200);
+    }
+
+    /**
+     * Actualiza la cuota de Google por defecto para nuevos usuarios reales.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse
+     */
+    public function update_google_cuota_default(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // Sin límite superior estricto: es un contador de uso, no un booleano ni un rango acotado.
+            'cuota' => 'required|integer|min:0',
+        ]);
+
+        AdminSetting::set('implementation_google_cuota_default', (string) $validated['cuota']);
+
+        return response()->json(['cuota' => (int) $validated['cuota']], 200);
+    }
 }

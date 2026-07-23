@@ -300,6 +300,7 @@ class RunUserSetupService
             'consultora_de_precios'        => (bool) $lead->consultora_de_precios,
             'imagenes'                     => (bool) $lead->imagenes,
             'produccion'                   => (bool) $lead->produccion,
+            'google_cuota'                 => ImplementationSettings::get_google_cuota_default(),
         ];
     }
 
