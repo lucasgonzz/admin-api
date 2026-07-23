@@ -1521,6 +1521,28 @@ class EcommerceInstallationService
     }
 
     /**
+     * Contenido canónico del .htaccess que necesita el docroot de la tienda para que Vue Router
+     * en history mode funcione bajo Apache: reescribe a index.html cualquier request que no
+     * corresponda a un archivo o directorio real, para que el SPA pueda tomar la ruta interna en
+     * vez de que Apache devuelva 404 antes de que el JS llegue a cargar (deep-links y refresh
+     * sobre rutas internas). El build de tienda-spa no emite este archivo, por eso lo escribe el
+     * pipeline de deploy (ver build_spa_atomic_deploy_shell(), prompt 193/01).
+     *
+     * @return string
+     */
+    protected function spa_htaccess_content(): string
+    {
+        return "<IfModule mod_rewrite.c>\n"
+            . "  RewriteEngine On\n"
+            . "  RewriteBase /\n"
+            . "  RewriteRule ^index\\.html$ - [L]\n"
+            . "  RewriteCond %{REQUEST_FILENAME} !-f\n"
+            . "  RewriteCond %{REQUEST_FILENAME} !-d\n"
+            . "  RewriteRule . /index.html [L]\n"
+            . "</IfModule>\n";
+    }
+
+    /**
      * Script bash para el despliegue atómico del SPA en la raíz del dominio: descomprime en una
      * carpeta hermana temporal y recién al final hace el mv sobre el docroot, minimizando la
      * ventana de downtime a un par de operaciones mv (en vez de descomprimir en vivo sobre el
@@ -1532,6 +1554,12 @@ class EcommerceInstallationService
      */
     protected function build_spa_atomic_deploy_shell(string $spa_docroot, string $temp_zip_path): string
     {
+        // Contenido del .htaccess de history mode, codificado en base64 para poder inyectarlo en
+        // el shell (armado con escapeshellarg más abajo) sin pelear con comillas, saltos de línea
+        // ni el `<IfModule>` dentro del string ya escapado que arma este método. El alfabeto
+        // base64 (A-Za-z0-9+/=) es seguro dentro de escapeshellarg (prompt 193/01).
+        $htaccess_b64 = base64_encode($this->spa_htaccess_content());
+
         $staging_dir = $spa_docroot . '__new_' . $this->installation->uuid;
         $old_dir     = $spa_docroot . '__old_' . $this->installation->uuid;
 
@@ -1584,6 +1612,21 @@ class EcommerceInstallationService
             . 'rm -rf "$STAGING"; mkdir -p "$STAGING"; '
             . 'unzip -o "$ZIP" -d "$STAGING"; '
             . 'test -f "$STAGING/index.html" || (echo SPA_STAGING_MISSING_INDEX; exit 1); '
+            // Escribe el .htaccess de history mode dentro del staging, ANTES del swap, para que
+            // llegue atómicamente como parte del docroot nuevo (prompt 193/01). Vue Router en
+            // history mode necesita que Apache reescriba a index.html cualquier request que no
+            // sea un archivo/directorio real; sin este archivo, cualquier deep-link o refresh
+            // sobre una ruta interna de la tienda devuelve 404 aunque el resto del deploy haya
+            // salido bien. El build de tienda-spa no emite .htaccess, así que se lo agrega el
+            // pipeline acá. Se regenera a propósito en CADA corrida (instalación y actualización):
+            // es idempotente y auto-repara cualquier tienda vieja cuyo .htaccess se hubiera
+            // perdido en un swap anterior (hoy no hay .htaccess custom por cliente; si alguna vez
+            // hiciera falta uno distinto por tienda, es otra feature aparte, no tocar esto para eso).
+            . 'printf %s ' . escapeshellarg($htaccess_b64) . ' | base64 -d > "$STAGING/.htaccess"; '
+            // Guard: con set -e activo, si por lo que sea el archivo no quedó escrito, cortar la
+            // corrida acá en vez de desplegar una tienda que va a dar 404 en cualquier deep-link.
+            . 'test -s "$STAGING/.htaccess" || (echo SPA_HTACCESS_MISSING; exit 1); '
+            . 'echo SPA_HTACCESS_OK; '
             // Swap atómico: mueve el docroot actual a "old" y el staging a docroot.
             . 'mkdir -p "$(dirname "$DOCROOT")"; '
             . 'if [ -d "$DOCROOT" ]; then mv "$DOCROOT" "$OLD"; fi; '
