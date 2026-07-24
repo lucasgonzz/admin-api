@@ -366,8 +366,10 @@ class EcommerceInstallationService
     {
         $this->connect_build_vps();
 
-        // a) Branding en vivo: color primario y logo del online_configuration de la tienda.
-        [$primary_color, $logo_url] = $this->fetch_online_configuration_branding();
+        // a) Branding en vivo: color primario y logo, resueltos contra empresa-api (fuente primaria)
+        // con fallback a la tienda-api propia del cliente. $logo_source indica de qué campo salió
+        // el logo ('tienda' u 'empresa') solo para trazabilidad en logs.
+        [$primary_color, $logo_url, $logo_source] = $this->fetch_online_configuration_branding();
 
         $spa_build_path = $this->builds_spa_path();
 
@@ -863,29 +865,150 @@ class EcommerceInstallationService
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Consulta GET {api_url}/api/commerce/{commerce_id} para obtener el branding en vivo de la
-     * tienda (mismo endpoint que usa tienda-spa al bootear, ver tienda-spa/src/store/commerce.js).
+     * Resuelve el branding en vivo (color primario + logo) del cliente, con cadena de fuentes:
      *
-     * Diseñado para degradar con gracia: en una instalación desde cero tienda-api todavía no está
-     * desplegada, así que esta llamada típicamente FALLA (se usa el color por defecto). En una
-     * futura re-ejecución (update, prompt 585) con tienda-api ya viva, sí trae el color/logo reales.
+     *   1. empresa-api del cliente (fuente PRIMARIA) — vía admin-sync/branding. Está viva desde
+     *      antes de instalar la tienda, porque empresa se instala primero.
+     *   2. tienda-api del propio cliente (fuente SECUNDARIA / fallback) — GET /api/commerce/{id},
+     *      típicamente solo disponible en una re-ejecución (update) con tienda-api ya desplegada.
+     *   3. Si ninguna responde: color por defecto, sin logo.
      *
-     * @return array{0: string, 1: string|null}  [primary_color, logo_url|null]
+     * Dentro de la respuesta que gane, se aplica la cadena logo_url -> image_url -> null (el mismo
+     * fallback que ya hace tienda-spa/src/components/nav/BrandBtn.vue), registrando en
+     * $logo_source de qué campo salió ('tienda' o 'empresa') solo para trazabilidad en logs.
+     *
+     * Cada intento fallido se loguea en 'warning' explicitando la fuente y el motivo, para que un
+     * cliente sin ningún logo quede visible en el log en vez de pasar desapercibido.
+     *
+     * @return array{0: string, 1: string|null, 2: string|null}  [primary_color, logo_url|null, logo_source|null]
      */
     protected function fetch_online_configuration_branding(): array
     {
+        /** Color de respaldo cuando ninguna fuente trae uno propio. */
         $default_color = trim((string) config('services.deploy_tienda.default_theme_color', '#c5111d'));
-        $commerce_id   = $this->client->user_id;
-        $api_url       = trim((string) $this->ecommerce->api_url);
+
+        // 1) Fuente primaria: empresa-api del cliente.
+        $empresa_branding = $this->fetch_branding_from_empresa_api();
+        if ($empresa_branding !== null) {
+            return $this->resolve_branding_from_source($empresa_branding, $default_color, 'empresa-api');
+        }
+
+        // 2) Fuente secundaria (fallback): tienda-api del propio cliente.
+        $tienda_branding = $this->fetch_branding_from_tienda_api();
+        if ($tienda_branding !== null) {
+            return $this->resolve_branding_from_source($tienda_branding, $default_color, 'tienda-api');
+        }
+
+        // 3) Ninguna de las dos fuentes respondió: color por defecto, sin logo.
+        $this->log(
+            'compile_spa',
+            'Sin logo disponible: ni empresa-api ni tienda-api devolvieron branding utilizable; '
+            . 'se usa el color por defecto ' . $default_color,
+            'warning'
+        );
+
+        return [$default_color, null, null];
+    }
+
+    /**
+     * Consulta GET {empresa-api}/api/admin-sync/branding del cliente (fuente primaria de branding).
+     * Reusa el mismo patrón de autenticación server-to-server que SyncClientEmployeesFromEmpresaService
+     * (header X-Admin-Api-Key + ClientEmpresaApiUrlResolver).
+     *
+     * @return array{logo_url: string, image_url: string, primary_color: string}|null  Null si no
+     *         se pudo resolver la URL, falta api_key, o la llamada HTTP falló/no fue exitosa.
+     */
+    protected function fetch_branding_from_empresa_api(): ?array
+    {
+        /** Resolver de URL de empresa-api del cliente (mismo mecanismo que admin-sync/employees). */
+        $api_url_resolver = new ClientEmpresaApiUrlResolver();
+        $branding_url = $api_url_resolver->admin_sync_url($this->client, ClientEmpresaApiUrlResolver::BRANDING_PATH);
+
+        if ($branding_url === '') {
+            $this->log(
+                'compile_spa',
+                'empresa-api no respondió el branding (sin URL de empresa-api configurada para el cliente); '
+                . 'se prueba con la tienda-api',
+                'warning'
+            );
+
+            return null;
+        }
+
+        if (empty($this->client->api_key)) {
+            $this->log(
+                'compile_spa',
+                'empresa-api no respondió el branding (cliente sin api_key configurada); se prueba con la tienda-api',
+                'warning'
+            );
+
+            return null;
+        }
+
+        try {
+            $response = Http::withHeaders([
+                    'X-Admin-Api-Key' => $this->client->api_key,
+                    'Accept'          => 'application/json',
+                ])
+                ->timeout((int) config('services.client_api.timeout', 15))
+                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->get($branding_url);
+        } catch (\Throwable $e) {
+            $this->log(
+                'compile_spa',
+                "empresa-api no respondió el branding ({$e->getMessage()}); se prueba con la tienda-api",
+                'warning'
+            );
+
+            return null;
+        }
+
+        if (! $response->successful()) {
+            $this->log(
+                'compile_spa',
+                "empresa-api no respondió el branding (HTTP {$response->status()}); se prueba con la tienda-api",
+                'warning'
+            );
+
+            return null;
+        }
+
+        /** Bloque branding de la respuesta: {logo_url, image_url, primary_color, company_name}. */
+        $branding = $response->json('branding', []);
+        if (! is_array($branding)) {
+            $branding = [];
+        }
+
+        return [
+            'logo_url'      => isset($branding['logo_url']) ? trim((string) $branding['logo_url']) : '',
+            'image_url'     => isset($branding['image_url']) ? trim((string) $branding['image_url']) : '',
+            'primary_color' => isset($branding['primary_color']) ? trim((string) $branding['primary_color']) : '',
+        ];
+    }
+
+    /**
+     * Consulta GET {api_url}/api/commerce/{commerce_id} para obtener el branding en vivo de la
+     * tienda (mismo endpoint que usa tienda-spa al bootear, ver tienda-spa/src/store/commerce.js).
+     * Fuente SECUNDARIA (fallback): en una instalación desde cero tienda-api todavía no está
+     * desplegada, así que esta llamada típicamente falla; en una re-ejecución (update) con
+     * tienda-api ya viva, sí trae el color/logo reales.
+     *
+     * @return array{logo_url: string, image_url: string, primary_color: string}|null  Null si falta
+     *         api_url/user_id o la llamada HTTP falló/no fue exitosa.
+     */
+    protected function fetch_branding_from_tienda_api(): ?array
+    {
+        $commerce_id = $this->client->user_id;
+        $api_url     = trim((string) $this->ecommerce->api_url);
 
         if ($api_url === '' || $commerce_id === null) {
             $this->log(
                 'compile_spa',
-                'Sin api_url o user_id todavía: se usa el color por defecto ' . $default_color,
+                'tienda-api no respondió el branding (sin api_url o user_id todavía)',
                 'warning'
             );
 
-            return [$default_color, null];
+            return null;
         }
 
         $endpoint = rtrim($this->get_ecommerce_api_url_for_env(), '/') . "/api/commerce/{$commerce_id}";
@@ -896,21 +1019,21 @@ class EcommerceInstallationService
         } catch (\Throwable $e) {
             $this->log(
                 'compile_spa',
-                "No se pudo consultar {$endpoint} ({$e->getMessage()}); se usa el color por defecto",
+                "tienda-api no respondió el branding ({$e->getMessage()})",
                 'warning'
             );
 
-            return [$default_color, null];
+            return null;
         }
 
         if (! $response->successful()) {
             $this->log(
                 'compile_spa',
-                "GET {$endpoint} respondió {$response->status()}; se usa el color por defecto",
+                "tienda-api no respondió el branding (HTTP {$response->status()})",
                 'warning'
             );
 
-            return [$default_color, null];
+            return null;
         }
 
         $online_configuration = $response->json('commerce.online_configuration', []);
@@ -918,20 +1041,62 @@ class EcommerceInstallationService
             $online_configuration = [];
         }
 
-        $primary_color = trim((string) ($online_configuration['primary_color'] ?? ''));
+        /** Logo genérico del comercio (fallback cuando online_configuration no tiene logo propio). */
+        $image_url = trim((string) $response->json('commerce.image_url', ''));
+
+        return [
+            'logo_url'      => isset($online_configuration['logo_url']) ? trim((string) $online_configuration['logo_url']) : '',
+            'image_url'     => $image_url,
+            'primary_color' => isset($online_configuration['primary_color']) ? trim((string) $online_configuration['primary_color']) : '',
+        ];
+    }
+
+    /**
+     * Aplica, sobre el branding crudo ya obtenido de UNA fuente (empresa-api o tienda-api), la
+     * cadena logo_url -> image_url -> null y color -> default, y deja el log de éxito/aviso.
+     * El color y el logo siempre salen de la misma fuente que respondió (nunca se mezclan).
+     *
+     * @param  array{logo_url: string, image_url: string, primary_color: string}  $branding
+     * @param  string  $default_color
+     * @param  string  $source_label  'empresa-api' o 'tienda-api', solo para el mensaje de log.
+     * @return array{0: string, 1: string|null, 2: string|null}  [primary_color, logo_url|null, logo_source|null]
+     */
+    protected function resolve_branding_from_source(array $branding, string $default_color, string $source_label): array
+    {
+        /** Color: el de la fuente si vino, si no el color por defecto (con warning). */
+        $primary_color = $branding['primary_color'];
         if ($primary_color === '') {
-            $this->log('compile_spa', 'Falta primary_color en online_configuration; se usa el color por defecto', 'warning');
+            $this->log(
+                'compile_spa',
+                "Falta primary_color en el branding de {$source_label}; se usa el color por defecto",
+                'warning'
+            );
             $primary_color = $default_color;
         }
 
-        $logo_url = isset($online_configuration['logo_url']) ? trim((string) $online_configuration['logo_url']) : '';
-        if ($logo_url === '') {
-            $logo_url = null;
+        // Cadena de logo: primero el logo propio de la tienda, si no el logo/imagen general de la
+        // empresa, si no queda sin logo.
+        $logo_url    = null;
+        $logo_source = null;
+        if ($branding['logo_url'] !== '') {
+            $logo_url    = $branding['logo_url'];
+            $logo_source = 'tienda';
+        } elseif ($branding['image_url'] !== '') {
+            $logo_url    = $branding['image_url'];
+            $logo_source = 'empresa';
         }
 
-        $this->log('compile_spa', "Branding leído del online_configuration — color: {$primary_color}");
+        if ($logo_source !== null) {
+            $this->log('compile_spa', "Branding resuelto desde {$source_label} — color: {$primary_color} | logo: {$logo_source}");
+        } else {
+            $this->log(
+                'compile_spa',
+                "Branding resuelto desde {$source_label} — color: {$primary_color} | sin logo disponible",
+                'warning'
+            );
+        }
 
-        return [$primary_color, $logo_url];
+        return [$primary_color, $logo_url, $logo_source];
     }
 
     /**

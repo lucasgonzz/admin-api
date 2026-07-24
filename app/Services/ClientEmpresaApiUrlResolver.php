@@ -24,6 +24,11 @@ class ClientEmpresaApiUrlResolver
     const UPDATE_DEFAULT_VERSION_PATH = 'api/admin-sync/update-default-version';
 
     /**
+     * Ruta relativa del endpoint de branding (logo/color/nombre) en empresa-api.
+     */
+    const BRANDING_PATH = 'api/admin-sync/branding';
+
+    /**
      * Devuelve la URL base del empresa-api (sin slash final) o cadena vacía si no hay URL válida.
      * Cada candidato se normaliza con su hosting_type asociado, agregando /public en shared_hosting si corresponde.
      *
