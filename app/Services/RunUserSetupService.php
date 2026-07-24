@@ -267,7 +267,7 @@ class RunUserSetupService
             $user_id_for_erp = (int) $lead->user_id;
         }
 
-        return [
+        $payload = [
             'user_id'       => $user_id_for_erp,
             'user_name'     => $this->resolve_user_name_for_erp($lead),
             'company_name'  => $lead->company_name,
@@ -302,6 +302,15 @@ class RunUserSetupService
             'produccion'                   => (bool) $lead->produccion,
             'google_cuota'                 => ImplementationSettings::get_google_cuota_default(),
         ];
+
+        // La API key de Google solo viaja si está cargada en admin. Si está vacía no se manda
+        // el campo, y empresa-api usa la constante de fallback que tiene en UserSetupHelper.
+        $google_api_key = ImplementationSettings::get_google_api_key_default();
+        if ($google_api_key !== '') {
+            $payload['google_custom_search_api_key'] = $google_api_key;
+        }
+
+        return $payload;
     }
 
     /**

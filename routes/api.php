@@ -465,6 +465,18 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/implementation-google-cuota-default', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_google_cuota_default']);
         Route::put('settings/implementation-google-cuota-default', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_google_cuota_default']);
 
+        // Configuración de implementaciones: API key de Google Custom Search para clientes reales.
+        Route::get('settings/implementation-google-api-key-default', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_google_api_key_default']);
+        Route::put('settings/implementation-google-api-key-default', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_google_api_key_default']);
+
+        // Configuración de implementaciones: API key de Google Custom Search para demos.
+        Route::get('settings/implementation-google-api-key-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_google_api_key_demo']);
+        Route::put('settings/implementation-google-api-key-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_google_api_key_demo']);
+
+        // Configuración de implementaciones: cuota de Google Custom Search por defecto para demos.
+        Route::get('settings/implementation-google-cuota-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_google_cuota_demo']);
+        Route::put('settings/implementation-google-cuota-demo', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_google_cuota_demo']);
+
         // Configuración de implementaciones: URL base del formulario público de configuración.
         Route::get('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'get_form_url']);
         Route::put('settings/implementation-form-url', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update_form_url']);

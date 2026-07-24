@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Lead;
+use App\Services\ImplementationSettings;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -95,7 +96,7 @@ class RunDemoSetupService
      */
     protected function build_payload(Lead $lead)
     {
-        return [
+        $payload = [
             // Datos visibles del User
             'name'          => $lead->contact_name,
             'company_name'  => $lead->company_name,
@@ -133,7 +134,22 @@ class RunDemoSetupService
             'consultora_de_precios'        => (bool) $lead->consultora_de_precios,
             'imagenes'                     => (bool) $lead->imagenes,
             'produccion'                   => (bool) $lead->produccion,
+
+            // Cuota diaria de Google Custom Search para el User de la demo. A diferencia de la
+            // API key, esto no es un secreto y tiene un default sano (100), así que se manda
+            // siempre (sin condición), a diferencia de google_custom_search_api_key más abajo.
+            'google_cuota'                 => ImplementationSettings::get_google_cuota_demo(),
         ];
+
+        // La API key de Google solo viaja si está cargada en admin. Si está vacía no se manda
+        // el campo, y empresa-api usa la constante de fallback que tiene en DemoSetupHelper.
+        // Se lee la key de DEMO (distinta de la de clientes reales) para no compartir cuota.
+        $google_api_key = ImplementationSettings::get_google_api_key_demo();
+        if ($google_api_key !== '') {
+            $payload['google_custom_search_api_key'] = $google_api_key;
+        }
+
+        return $payload;
     }
 
     /**

@@ -234,4 +234,120 @@ class ImplementationSettingsController extends Controller
 
         return response()->json(['cuota' => (int) $validated['cuota']], 200);
     }
+
+    /**
+     * Retorna la API key de Google Custom Search configurada para clientes reales.
+     *
+     * No se enmascara el valor: el panel de admin es interno y hace falta poder ver
+     * qué key está cargada.
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function get_google_api_key_default(): JsonResponse
+    {
+        // ImplementationSettings aplica el fallback a cadena vacía.
+        $api_key = ImplementationSettings::get_google_api_key_default();
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Actualiza la API key de Google Custom Search para clientes reales.
+     *
+     * Las API keys de Google Custom Search tienen forma "AIza" + 35 caracteres alfanuméricos
+     * (incluyendo "-" y "_"). La regex está para evitar el error más caro posible: guardar
+     * una key mal copiada (cortada, con un espacio pegado, o la key de otro servicio de
+     * Google) y enterarse recién cuando un cliente nuevo no puede buscar imágenes.
+     *
+     * Se acepta null / cadena vacía como forma explícita de borrar la setting y volver
+     * al fallback hardcodeado en empresa-api (en ese caso se guarda '').
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function update_google_api_key_default(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // "present" permite null/'' explícito para borrar; si viene con contenido, debe matchear el formato de Google.
+            'api_key' => ['present', 'nullable', 'string', 'max:100', 'regex:/^AIza[0-9A-Za-z\-_]{35}$/'],
+        ]);
+
+        // Cadena vacía si vino null (borra la setting y vuelve al fallback de empresa-api).
+        $api_key = (string) ($validated['api_key'] ?? '');
+        AdminSetting::set('implementation_google_api_key_default', $api_key);
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Retorna la API key de Google Custom Search configurada para demos.
+     *
+     * Separada de la de clientes reales a propósito: la cuota diaria de Custom Search
+     * es por key, y mezclarlas haría que las demos consuman la cuota de los clientes que pagan.
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function get_google_api_key_demo(): JsonResponse
+    {
+        // ImplementationSettings aplica el fallback a cadena vacía.
+        $api_key = ImplementationSettings::get_google_api_key_demo();
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Actualiza la API key de Google Custom Search para demos.
+     *
+     * Misma validación y semántica de borrado que update_google_api_key_default().
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function update_google_api_key_demo(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // "present" permite null/'' explícito para borrar; si viene con contenido, debe matchear el formato de Google.
+            'api_key' => ['present', 'nullable', 'string', 'max:100', 'regex:/^AIza[0-9A-Za-z\-_]{35}$/'],
+        ]);
+
+        // Cadena vacía si vino null (borra la setting y vuelve al fallback de empresa-api).
+        $api_key = (string) ($validated['api_key'] ?? '');
+        AdminSetting::set('implementation_google_api_key_demo', $api_key);
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Retorna la cuota de Google configurada por defecto para nuevos usuarios de demo.
+     *
+     * @return JsonResponse
+     */
+    public function get_google_cuota_demo(): JsonResponse
+    {
+        // ImplementationSettings aplica el fallback a 100.
+        $cuota = ImplementationSettings::get_google_cuota_demo();
+
+        return response()->json(['cuota' => $cuota], 200);
+    }
+
+    /**
+     * Actualiza la cuota de Google por defecto para nuevos usuarios de demo.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse
+     */
+    public function update_google_cuota_demo(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // Sin límite superior estricto: es un contador de uso, no un booleano ni un rango acotado.
+            'cuota' => 'required|integer|min:0',
+        ]);
+
+        AdminSetting::set('implementation_google_cuota_demo', (string) $validated['cuota']);
+
+        return response()->json(['cuota' => (int) $validated['cuota']], 200);
+    }
 }

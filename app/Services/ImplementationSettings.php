@@ -97,4 +97,64 @@ class ImplementationSettings
 
         return $value > 0 ? $value : 100;
     }
+
+    /**
+     * Retorna la API key de Google Custom Search que se le asigna al User de un
+     * cliente real (no demo) al correr el user-setup (UserSetupHelper en empresa-api).
+     *
+     * El valor se lee desde admin_settings con key 'implementation_google_api_key_default'.
+     *
+     * Fallback intencional: cadena vacía ''. Si en admin todavía no se cargó ninguna key,
+     * admin-api no manda el campo 'google_custom_search_api_key' en el payload y
+     * empresa-api usa la constante que ya tiene hardcodeada en su propio código. Así el
+     * día que se despliega esto no cambia nada de comportamiento hasta que se cargue el valor.
+     *
+     * @return string API key (o cadena vacía si no está configurada).
+     */
+    public static function get_google_api_key_default(): string
+    {
+        // Leer el valor guardado; trim para que un valor con espacios al final no rompa la llamada a Google.
+        $value = trim((string) AdminSetting::where('key', 'implementation_google_api_key_default')->value('value'));
+
+        return $value;
+    }
+
+    /**
+     * Retorna la API key de Google Custom Search que se le asigna al User de una
+     * demo al correr el demo-setup (DemoSetupHelper en empresa-api).
+     *
+     * El valor se lee desde admin_settings con key 'implementation_google_api_key_demo'.
+     * Se mantiene separada de get_google_api_key_default() a propósito: la cuota diaria de
+     * Custom Search es por key, y mezclar demo con clientes reales haría que las demos
+     * consuman la cuota de los clientes que pagan.
+     *
+     * Fallback intencional: cadena vacía '' (mismo motivo que get_google_api_key_default()).
+     *
+     * @return string API key (o cadena vacía si no está configurada).
+     */
+    public static function get_google_api_key_demo(): string
+    {
+        // Leer el valor guardado; trim para que un valor con espacios al final no rompa la llamada a Google.
+        $value = trim((string) AdminSetting::where('key', 'implementation_google_api_key_demo')->value('value'));
+
+        return $value;
+    }
+
+    /**
+     * Retorna la cuota de Google por defecto que se asigna al usuario creado por
+     * DemoSetupHelper (empresa-api) para las demos, cuando no se configuró nada.
+     *
+     * El valor se lee desde admin_settings con key 'implementation_google_cuota_demo'.
+     * Si no existe el registro, devuelve 100 como valor por defecto (mismo fallback
+     * que get_google_cuota_default(), ya que hoy DemoSetupHelper tiene ese valor hardcodeado).
+     *
+     * @return int Cuota por defecto (mínimo 0).
+     */
+    public static function get_google_cuota_demo(): int
+    {
+        // Leer el valor guardado; fallback a 100 si no existe o es 0.
+        $value = (int) AdminSetting::where('key', 'implementation_google_cuota_demo')->value('value');
+
+        return $value > 0 ? $value : 100;
+    }
 }
