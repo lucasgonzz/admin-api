@@ -2641,6 +2641,15 @@ TXT;
                 ? (bool) $final_actions['enviar_mail_demo']
                 : true;
 
+            /* reenviar_mail_demo (grupo 212, prompt 01): a diferencia de forzar_slot/enviar_mail_demo,
+             * esta flag SÍ puede venir sugerida por Claude directamente (ver
+             * build_demo_access_context() en build_user_content()). Por eso, si el admin no la tocó
+             * en el panel (no vino en final_actions), se respeta el valor sugerido por Claude en vez
+             * de forzar un default fijo; si el admin la tocó, manda su valor. */
+            $parsed_efectivo['reenviar_mail_demo'] = array_key_exists('reenviar_mail_demo', $final_actions)
+                ? (bool) $final_actions['reenviar_mail_demo']
+                : ! empty($parsed['reenviar_mail_demo']);
+
             /* --- Diff campo por campo (base de Claude vs efectivo del admin), para auditoría --- */
             $diff              = [];
             $campos_a_comparar = [
@@ -2651,6 +2660,7 @@ TXT;
                 'cancelar_demo',
                 'requiere_intervencion_humana',
                 'motivo_intervencion',
+                'reenviar_mail_demo',
             ];
             foreach ($campos_a_comparar as $campo) {
                 $valor_claude = $parsed[$campo] ?? null;
@@ -3669,6 +3679,93 @@ TXT;
         }
 
         /*
+         * FIX (grupo 212, prompt 01, 24/7/2026 — bug real, lead #451): reenvío explícito del
+         * Mail 1 a pedido del lead (ver build_demo_access_context() en build_user_content()). Es
+         * un camino independiente del envío automático de arriba: ahí solo se manda en
+         * agendamiento/reagendado, y una vez que demo_mail_sent_at ya está cargado no había forma
+         * de reenviarlo desde la conversación. Acá SÍ se reenvía aunque demo_mail_sent_at ya esté
+         * seteado, con una guardia anti-ráfaga de 5 minutos.
+         */
+        // Flag sugerida por Claude (o forzada por el admin vía final_actions/apply_pending_actions).
+        $reenviar_mail_flag = ! empty($parsed['reenviar_mail_demo']);
+
+        // Evitar el doble envío: si ya se mandó el Mail 1 en este mismo paquete (arriba), no reenviar de nuevo.
+        if ($reenviar_mail_flag && ! $debe_enviar_mail_demo) {
+            // Datos mínimos indispensables para poder armar y mandar el mail sin romper el helper/blade.
+            $tiene_datos_para_reenviar = ! empty($lead->email)
+                && ! empty($lead->demo_id)
+                && ! empty($lead->doc_number)
+                && ! empty($lead->demo_date);
+
+            if ($tiene_datos_para_reenviar) {
+                // Guardia anti-ráfaga: si el Mail 1 se mandó hace menos de 5 minutos, no reenviar
+                // (evita que dos mensajes seguidos del lead disparen dos mails idénticos).
+                $reenviado_recientemente = $lead->demo_mail_sent_at
+                    && $lead->demo_mail_sent_at->diffInMinutes(AppTime::now()) < 5;
+
+                if ($reenviado_recientemente) {
+                    Log::warning('LeadAiService: se pidió reenviar el Mail 1 pero se envió hace menos de 5 minutos, se omite.', [
+                        'lead_id'           => $lead->id,
+                        'demo_mail_sent_at' => optional($lead->demo_mail_sent_at)->toIso8601String(),
+                    ]);
+                } else {
+                    try {
+                        $lead->loadMissing('demo');
+                        $mailable = \App\Mail\Helpers\LeadDemoMailHelper::build($lead);
+                        \Illuminate\Support\Facades\Mail::to($lead->email)->send($mailable);
+                        $lead->update(['demo_mail_sent_at' => AppTime::now()]);
+                        Log::info('LeadAiService: Mail 1 reenviado a pedido del lead.', [
+                            'lead_id' => $lead->id,
+                            'email'   => $lead->email,
+                        ]);
+                        $admin_notifications_log[] = [
+                            'evento' => 'Mail de demo reenviado (pedido del lead)',
+                            'admins' => [],
+                        ];
+                    } catch (\Throwable $e) {
+                        Log::error('LeadAiService: error al reenviar el Mail 1 a pedido del lead.', [
+                            'lead_id' => $lead->id,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
+                }
+            } else {
+                // Faltan datos indispensables: no reenviar y derivar a intervención humana enumerando qué falta.
+                $faltantes_reenvio = [];
+                if (empty($lead->email)) {
+                    $faltantes_reenvio[] = 'email';
+                }
+                if (empty($lead->demo_id)) {
+                    $faltantes_reenvio[] = 'demo asignada';
+                }
+                if (empty($lead->doc_number)) {
+                    $faltantes_reenvio[] = 'documento de prueba';
+                }
+                if (empty($lead->demo_date)) {
+                    $faltantes_reenvio[] = 'fecha de demo';
+                }
+
+                Log::warning('LeadAiService: se pidió reenviar el Mail 1 pero faltan datos, se deriva a intervención humana.', [
+                    'lead_id'   => $lead->id,
+                    'faltantes' => $faltantes_reenvio,
+                ]);
+
+                /* Mismo mecanismo que ya usa el archivo para setear esta flag desde $parsed (ver
+                 * guardar_email sin agendar_demo, más arriba en este método). El bloque que crea
+                 * la AdminTask de intervención humana ya corrió para este paquete antes de llegar
+                 * acá, así que además de dejar la marca en $parsed (por consistencia/auditoría) se
+                 * persiste directo sobre el lead para que quede efectivamente marcado. */
+                $parsed['requiere_intervencion_humana'] = true;
+                $parsed['motivo_intervencion'] = 'Se pidió reenviar el Mail 1 de demo pero faltan datos: '
+                    . implode(', ', $faltantes_reenvio) . '.';
+                $lead->update([
+                    'requiere_intervencion_humana' => true,
+                    'claude_auto_reply'            => false,
+                ]);
+            }
+        }
+
+        /*
          * Notificar cuando la sugerencia requiere verificación manual. Dos motivos posibles,
          * dos servicios distintos (ver prompt 230):
          *   - Agendamiento: el lead está en el tramo solicita_disponibilidad..demo_pendiente_de_terminar
@@ -4057,6 +4154,105 @@ TXT;
     }
 
     /**
+     * Normaliza la URL de la demo del lead para asegurar protocolo absoluto (http/https), igual
+     * que hace el mail de demo.
+     *
+     * FIX (grupo 212, prompt 01, 24/7/2026): misma lógica que
+     * `LeadDemoMailHelper::normalize_mail_url()`, que es privado en esa clase y no se puede
+     * reutilizar directo desde acá. Se reimplementa localmente en vez de acoplar ambas clases;
+     * si el criterio de normalización cambia, hay que actualizar los dos lugares.
+     *
+     * @param string $raw_url URL cruda tal como está guardada en `demos.erp_spa_url`.
+     *
+     * @return string URL normalizada con protocolo absoluto, o cadena vacía si $raw_url es vacía.
+     */
+    private function normalize_demo_url(string $raw_url): string
+    {
+        // Normalizar espacios para evitar armar un link inválido.
+        $normalized_url = trim($raw_url);
+        if ($normalized_url === '') {
+            return '';
+        }
+
+        // Si ya es absoluta (http/https), devolverla tal cual.
+        if (preg_match('/^https?:\/\//i', $normalized_url)) {
+            return $normalized_url;
+        }
+
+        // Fallback seguro para links sin protocolo.
+        return 'https://' . ltrim($normalized_url, '/');
+    }
+
+    /**
+     * Arma el bloque "DATOS DE ACCESO DEL LEAD" que se inyecta en el contexto de Claude durante
+     * todo el tramo de demo (ver `ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO`), no solo en
+     * `ingresando_demo`.
+     *
+     * FIX (grupo 212, prompt 01, 24/7/2026 — bug real, lead #451): antes este bloque solo se
+     * armaba dentro del `if` de `ingresando_demo`, así que un lead que pedía los datos de acceso
+     * estando en cualquier otro estado del tramo (ej. `demo_agendada`) se quedaba sin esa
+     * información en el contexto. Además, el link salía de `config('services.demo_url')` (clave
+     * inexistente, siempre caía al default hardcodeado) en vez del link real de la demo asignada
+     * al lead (`$lead->demo->erp_spa_url`, la misma que usa el Mail 1).
+     *
+     * @param Lead $lead Lead para el que se arma el bloque (puede no tener demo/doc_number aún).
+     *
+     * @return string Bloque de texto listo para concatenar al prompt, o cadena vacía si no aplica.
+     */
+    private function build_demo_access_context(Lead $lead): string
+    {
+        // Asegurar que la relación demo esté cargada antes de leerla.
+        $lead->loadMissing('demo');
+
+        // Link real de la demo asignada al lead (no un config genérico).
+        $demo_url_raw = $lead->demo ? trim((string) $lead->demo->erp_spa_url) : '';
+        $demo_url     = $demo_url_raw !== '' ? $this->normalize_demo_url($demo_url_raw) : '';
+
+        // Documento de prueba del lead: es a la vez usuario y contraseña de acceso a la demo.
+        $doc_number = trim((string) ($lead->doc_number ?? ''));
+
+        // Caso incompleto: falta el link, el documento, o los dos. Nunca inventar ni aproximar.
+        if ($demo_url === '' || $doc_number === '') {
+            // Enumerar explícitamente qué dato falta, para que el motivo de intervención sea claro.
+            $faltantes = [];
+            if ($demo_url === '') {
+                $faltantes[] = 'link de la demo';
+            }
+            if ($doc_number === '') {
+                $faltantes[] = 'documento de prueba';
+            }
+            $faltantes_txt = implode(' y ', $faltantes);
+
+            return "\n\nDATOS DE ACCESO DEL LEAD: NO DISPONIBLES (falta: {$faltantes_txt}).\n"
+                . "PROHIBIDO inventar un link o un documento de prueba, y PROHIBIDO prometer pasarlos\n"
+                . "\"en un momento\" como si los tuvieras: no los tenés.\n"
+                . "Si el lead pide los datos de acceso, respondele solo que en un momento le confirman el\n"
+                . "acceso, y devolvé requiere_intervencion_humana: true con motivo_intervencion indicando\n"
+                . "exactamente qué falta ({$faltantes_txt}).";
+        }
+
+        // Fecha de envío del Mail 1 (si ya se mandó), para que el agente sepa si insistir con reenviarlo.
+        $mail_enviado_texto = $lead->demo_mail_sent_at
+            ? 'si (' . $lead->demo_mail_sent_at->format('d/m/Y H:i') . ')'
+            : 'no';
+
+        // Caso completo: link y documento presentes, se arma el bloque completo para el agente.
+        return "\n\nDATOS DE ACCESO DEL LEAD (USAR SIEMPRE ESTOS, TEXTUALES — NUNCA INVENTAR NI APROXIMAR):\n"
+            . "  Link de la demo: {$demo_url}\n"
+            . "  Usuario: {$doc_number}\n"
+            . "  Contraseña: {$doc_number}\n"
+            . "  Mail 1 enviado: {$mail_enviado_texto}\n"
+            . "Estos datos SOLO se le pasan al lead si el lead reporta que no le llegó el mail, que no lo\n"
+            . "encuentra o que no puede entrar. No los ofrezcas por iniciativa propia: el canal normal es\n"
+            . "el Mail 1.\n"
+            . "Cuando los pases, en el MISMO mensaje pedile que igual busque el mail (revisando spam y\n"
+            . "\"No deseados\") porque los videos tutoriales están solo ahí, y ofrecele reenviárselo.\n"
+            . "Si el lead dice que no le llegó, que no lo encuentra o pide que se lo manden de nuevo,\n"
+            . "devolvé reenviar_mail_demo: true en el JSON.\n"
+            . "PROHIBIDO escribir un placeholder entre corchetes o prometer pasar estos datos más tarde.";
+    }
+
+    /**
      * Construye el contenido user con historial y datos del lead.
      *
      * Si se proporciona $availability_context, se agrega al final del contenido
@@ -4174,22 +4370,27 @@ TXT;
          * El detalle fino de comportamiento está en el protocolo (sección CICLO DE LA DEMO). */
         $lead_status_for_context = (string) $lead->status;
 
-        if ($lead_status_for_context === 'ingresando_demo') {
-            /* Datos de acceso del lead: doc_number es usuario y contraseña. URL desde config. */
-            $doc_number_ingreso = (string) ($lead->doc_number ?? '');
-            $demo_url_ingreso   = rtrim((string) config('services.demo_url', 'https://demo.comerciocity.com'), '/');
+        /*
+         * FIX (grupo 212, prompt 01, 24/7/2026 — bug real, lead #451): los datos de acceso a la
+         * demo (link + documento) se inyectan ahora en TODO el tramo de demo
+         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), no solo en ingresando_demo, para que el
+         * agente los tenga disponibles apenas el lead los pida, en cualquier estado del ciclo.
+         * Se agrega antes de resolver el objetivo puntual de cada estado (el if de abajo).
+         */
+        if (in_array($lead_status_for_context, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+            $demo_access_context = $this->build_demo_access_context($lead);
+            if ($demo_access_context !== '') {
+                $txt .= $demo_access_context;
+            }
+        }
 
+        if ($lead_status_for_context === 'ingresando_demo') {
             /* El lead está en el momento de intentar entrar al sistema demo. */
             $txt .= "\n\nCONTEXTO DE DEMO - INGRESO:\n"
                 . "El lead tiene la demo en curso de inicio y se le preguntó si pudo ingresar al sistema.\n"
                 . "\n"
-                . "DATOS DE ACCESO DEL LEAD (USAR SIEMPRE ESTOS — NUNCA INVENTAR):\n"
-                . "  Link de la demo: {$demo_url_ingreso}\n"
-                . "  Usuario: {$doc_number_ingreso}\n"
-                . "  Contraseña: {$doc_number_ingreso}\n"
-                . "\n"
                 . "Tu objetivo es asegurarte de que entre. Si dice que tuvo un problema para entrar,\n"
-                . "pasale estos datos exactos (link, usuario y contraseña).\n"
+                . "pasale los datos exactos que figuran en DATOS DE ACCESO DEL LEAD (link, usuario y contraseña).\n"
                 . "NUNCA uses un número de documento diferente al que figura arriba.\n"
                 . "Cuando el lead confirme que ya entró (infieras de su mensaje, no por una palabra exacta),\n"
                 . "devolvé la acción confirmar_ingreso: true en el JSON.\n"
