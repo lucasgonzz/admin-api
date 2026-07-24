@@ -56,7 +56,8 @@ class LeadDemoMailHelper
             $data['logo_url'],
             $data['presenter_name'],
             $data['presenter_role'],
-            $data['personalized_demo_videos']
+            $data['personalized_demo_videos'],
+            $data['url_landing']
         );
     }
 
@@ -97,6 +98,11 @@ class LeadDemoMailHelper
         // Número de documento del lead: se usa como credencial de ingreso y como contraseña.
         $doc_number = (string) ($lead->doc_number ?? '');
         $password   = $doc_number;
+        // URL de la landing pública de la demo (prompt 213/02): link de respaldo dentro del
+        // Mail 1 y dato mas del bloque de acceso para el agente de WhatsApp. Si el lead no
+        // tiene `uuid` cargado (registros viejos, previos a la migración), queda vacía y no
+        // rompe: tanto el blade como el contexto del agente la ocultan con un chequeo simple.
+        $url_landing = !empty($lead->uuid) ? route('demo.landing', ['uuid' => $lead->uuid]) : '';
         $url_whatsapp   = (string) config('commerciocity.demo_mail.whatsapp_url', '');
         $presenter_name = (string) config('commerciocity.demo_mail.presenter_name', 'Equipo ComercioCity');
         $presenter_role = (string) config('commerciocity.demo_mail.presenter_role', 'Fundador');
@@ -148,6 +154,7 @@ class LeadDemoMailHelper
             'presenter_name'           => $presenter_name,
             'presenter_role'           => $presenter_role,
             'personalized_demo_videos' => $personalized_demo_videos,
+            'url_landing'              => $url_landing,
         ];
     }
 

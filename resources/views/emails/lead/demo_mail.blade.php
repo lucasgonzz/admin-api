@@ -17,6 +17,23 @@
       <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
 
         {{-- ================================================================
+             0. LINK "VER EN EL NAVEGADOR" (prompt 213/02): respaldo de la
+             landing pública, arriba de todo y en letra chica/tenue, siguiendo
+             la convención habitual de cualquier newsletter. Solo se muestra si
+             el lead tiene `uuid` cargado (registros viejos no tienen landing).
+             ================================================================ --}}
+        @if($url_landing)
+        <tr>
+          <td style="padding:10px 32px 0 32px;text-align:center;">
+            <a href="{{ $url_landing }}" target="_blank" rel="noopener noreferrer"
+               style="font-size:11px;color:#9AA5B1;text-decoration:underline;">
+              ¿No se ve bien este mail? Abrí todo desde acá
+            </a>
+          </td>
+        </tr>
+        @endif
+
+        {{-- ================================================================
              1. HEADER: logo + fondo azul oscuro
              ================================================================ --}}
         <tr>

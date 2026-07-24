@@ -4204,6 +4204,11 @@ TXT;
         // Asegurar que la relación demo esté cargada antes de leerla.
         $lead->loadMissing('demo');
 
+        // URL de la landing pública de la demo (prompt 213/02): mismo dato que ve el Mail 1
+        // como link de respaldo. Solo se calcula acá (no en el caso incompleto de más abajo):
+        // si todavía no hay acceso armado, mandar la landing solo confunde al lead.
+        $url_landing = !empty($lead->uuid) ? route('demo.landing', ['uuid' => $lead->uuid]) : '';
+
         // Link real de la demo asignada al lead (no un config genérico).
         $demo_url_raw = $lead->demo ? trim((string) $lead->demo->erp_spa_url) : '';
         $demo_url     = $demo_url_raw !== '' ? $this->normalize_demo_url($demo_url_raw) : '';
@@ -4237,8 +4242,23 @@ TXT;
             : 'no';
 
         // Caso completo: link y documento presentes, se arma el bloque completo para el agente.
+        // Línea de la landing (prompt 213/02): solo si hay uuid; se agrega debajo del link de
+        // la demo, dentro del mismo bloque de datos de acceso.
+        $landing_linea = $url_landing !== ''
+            ? "  Pagina con todo (videos + acceso): {$url_landing}\n"
+            : '';
+
+        // Instrucción adicional (prompt 213/02): cuándo y por qué ofrecer la landing como
+        // alternativa al mail. Solo tiene sentido si hay landing para ofrecer.
+        $landing_instruccion = $url_landing !== ''
+            ? "Si el lead dice que no le llega el mail o que no lo encuentra, ademas de reenviarlo podes pasarle\n"
+                . "esta pagina: tiene los mismos videos tutoriales y los mismos datos de acceso que el mail, y se abre\n"
+                . "desde el celular sin instalar nada. Es la forma mas rapida de destrabarlo.\n"
+            : '';
+
         return "\n\nDATOS DE ACCESO DEL LEAD (USAR SIEMPRE ESTOS, TEXTUALES — NUNCA INVENTAR NI APROXIMAR):\n"
             . "  Link de la demo: {$demo_url}\n"
+            . $landing_linea
             . "  Usuario: {$doc_number}\n"
             . "  Contraseña: {$doc_number}\n"
             . "  Mail 1 enviado: {$mail_enviado_texto}\n"
@@ -4249,6 +4269,7 @@ TXT;
             . "\"No deseados\") porque los videos tutoriales están solo ahí, y ofrecele reenviárselo.\n"
             . "Si el lead dice que no le llegó, que no lo encuentra o pide que se lo manden de nuevo,\n"
             . "devolvé reenviar_mail_demo: true en el JSON.\n"
+            . $landing_instruccion
             . "PROHIBIDO escribir un placeholder entre corchetes o prometer pasar estos datos más tarde.";
     }
 

@@ -83,6 +83,15 @@ class LeadDemoMail extends Mailable
     public $personalized_demo_videos;
 
     /**
+     * URL de la landing pública de la demo del lead (prompt 213/02). Se muestra como link de
+     * respaldo "abrir en el navegador" arriba de todo del mail. Vacía si el lead no tiene
+     * `uuid` cargado (registros viejos).
+     *
+     * @var string
+     */
+    public $url_landing;
+
+    /**
      * @param string $nombre         Nombre del prospecto.
      * @param string $dia            Día formateado de la demo.
      * @param string $hora_inicio    Hora de inicio.
@@ -102,6 +111,7 @@ class LeadDemoMail extends Mailable
      * @param string $presenter_name Nombre del firmante.
      * @param string $presenter_role Cargo del firmante.
      * @param array<int, array{title: string, description: string, video_url: string}> $personalized_demo_videos Filas para la sección de tutoriales a medida.
+     * @param string $url_landing    URL de la landing pública de la demo (link de respaldo del mail).
      */
     public function __construct(
         string $nombre,
@@ -122,7 +132,8 @@ class LeadDemoMail extends Mailable
         string $logo_url,
         string $presenter_name,
         string $presenter_role,
-        array $personalized_demo_videos = []
+        array $personalized_demo_videos = [],
+        string $url_landing = ''
     ) {
         $this->nombre          = $nombre;
         $this->dia             = $dia;
@@ -143,6 +154,7 @@ class LeadDemoMail extends Mailable
         $this->presenter_name  = $presenter_name;
         $this->presenter_role  = $presenter_role;
         $this->personalized_demo_videos = $personalized_demo_videos;
+        $this->url_landing     = $url_landing;
     }
 
     /**
