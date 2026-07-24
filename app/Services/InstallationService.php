@@ -640,7 +640,115 @@ class InstallationService
                 false
             );
         }
+
+        // Última comprobación antes de dar la etapa (y la instalación) por completada: si algo
+        // quedó incompleto en el hosting, verify_api_installation() lanza y la instalación se
+        // marca como fallida en vez de exitosa.
+        $this->verify_api_installation();
+
         $this->log('finalize_api', 'API finalizada y lista para bootear', 'success');
+    }
+
+    /**
+     * Verifica que la instalación quedó completa en el hosting antes de darla por exitosa.
+     *
+     * Corre un único comando SSH que chequea, con `[ -e ... ]`, la existencia de cada ruta de
+     * $required_paths relativa a api_path. Es la única oportunidad real de detectar una
+     * instalación incompleta: los ZIPs de upgrade (DeploymentService::step_upload_api(), a
+     * diferencia del ZIP de instalación) excluyen a propósito `public/*` y `storage/*` —
+     * `public/afip/` guarda certificados del cliente y `storage/` sus archivos, no se pueden
+     * pisar en cada actualización — así que lo que falte después de esta etapa no se repone
+     * solo en ningún upgrade futuro.
+     *
+     * El comando remoto termina siempre con "echo VERIFY_DONE" para poder distinguir una salida
+     * vacía por sesión SSH caída (verificación que no llegó a correr) de una verificación real
+     * que no encontró faltantes.
+     *
+     * @return void
+     * @throws \RuntimeException Si la verificación no llegó a completarse o falta alguna ruta requerida.
+     */
+    private function verify_api_installation(): void
+    {
+        $api_path = $this->get_api_path();
+
+        // Rutas relativas a api_path imprescindibles para que la API bootee y para que los
+        // upgrades (que excluyen public/ y storage/ de sus ZIPs) tengan algo sobre lo que pisar.
+        // Agregar una ruta a chequear es agregar un elemento acá.
+        $required_paths = [
+            'public/index.php',
+            'public/.htaccess',
+            '.env',
+            'vendor/autoload.php',
+            'bootstrap/cache',
+            'storage/framework/views',
+            'storage/framework/cache/data',
+            'storage/framework/sessions',
+            'storage/logs',
+            'storage/app/public',
+        ];
+
+        // Arma la lista del `for` a partir del array de arriba, escapando cada ruta.
+        $escaped_paths = [];
+        foreach ($required_paths as $required_path) {
+            $escaped_paths[] = escapeshellarg($required_path);
+        }
+
+        // `for ... in ... ; do ... done` y `[ -e ... ]` son POSIX puro: sin brace expansion ni
+        // nada específico de bash, para no depender del shell que tenga el hosting.
+        $command = 'cd ' . escapeshellarg($api_path)
+            . ' && for P in ' . implode(' ', $escaped_paths) . '; do [ -e "$P" ] || echo "FALTA $P"; done'
+            . ' && echo VERIFY_DONE';
+
+        $this->log('finalize_api', 'Verificando integridad de la instalación...');
+
+        // must_succeed = false: acá lo que decide si la verificación falló es la salida
+        // (líneas "FALTA ..." o ausencia de VERIFY_DONE), no el exit code del comando remoto.
+        $output = $this->exec_hosting_ssh('finalize_api', $command, false);
+
+        if (strpos($output, 'VERIFY_DONE') === false) {
+            // Salida vacía o cortada antes de tiempo: la sesión SSH se interrumpió y no llegó a
+            // terminar la verificación. Sin VERIFY_DONE no hay forma de confirmar que la
+            // instalación está completa, así que se trata como fallo.
+            $this->log(
+                'finalize_api',
+                'No se pudo completar la verificación de integridad (sesión SSH interrumpida).',
+                'error'
+            );
+
+            throw new \RuntimeException(
+                'La instalación no pudo verificarse: la sesión SSH se interrumpió antes de terminar '
+                . 'la comprobación. Revisar manualmente antes de entregarla al cliente.'
+            );
+        }
+
+        // Junta cada línea "FALTA <ruta>" que haya devuelto el comando remoto.
+        $missing_paths = [];
+        foreach (preg_split('/\r\n|\r|\n/', $output) as $output_line) {
+            if (strpos($output_line, 'FALTA ') === 0) {
+                $missing_paths[] = trim(substr($output_line, strlen('FALTA ')));
+            }
+        }
+
+        if (!empty($missing_paths)) {
+            $missing_list = implode(', ', $missing_paths);
+            $this->log(
+                'finalize_api',
+                'La instalación quedó incompleta. Faltan: ' . $missing_list,
+                'error'
+            );
+
+            throw new \RuntimeException(
+                'La instalación quedó incompleta: faltan ' . $missing_list . '. Hay que revisarla '
+                . 'antes de entregarla al cliente: los upgrades excluyen public/ y storage/ de sus '
+                . 'ZIPs, así que estas rutas no se van a reponer solas en ninguna actualización futura.'
+            );
+        }
+
+        $this->log(
+            'finalize_api',
+            'Instalación verificada: todos los archivos y directorios requeridos están presentes',
+            'success'
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
