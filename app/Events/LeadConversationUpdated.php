@@ -38,15 +38,25 @@ class LeadConversationUpdated implements ShouldBroadcastNow
     public $is_status_update;
 
     /**
+     * Estado de entrega de WhatsApp que originó el broadcast ('entregado', 'leido' o 'fallido').
+     * `null` cuando el evento no es una actualización de estado (mensaje nuevo, etc.).
+     *
+     * @var string|null
+     */
+    public $delivery_status;
+
+    /**
      * @param int      $lead_id
      * @param int|null $lead_message_id
      * @param bool     $is_status_update True solo para broadcasts de cambio de estado de entrega WhatsApp.
+     * @param string|null $delivery_status Estado de entrega WhatsApp puntual ('entregado'/'leido'/'fallido').
      */
-    public function __construct(int $lead_id, ?int $lead_message_id = null, bool $is_status_update = false)
+    public function __construct(int $lead_id, ?int $lead_message_id = null, bool $is_status_update = false, ?string $delivery_status = null)
     {
         $this->lead_id          = $lead_id;
         $this->lead_message_id  = $lead_message_id;
         $this->is_status_update = $is_status_update;
+        $this->delivery_status  = $delivery_status;
     }
 
     /**
@@ -91,6 +101,8 @@ class LeadConversationUpdated implements ShouldBroadcastNow
             'lead_message_id'  => $this->lead_message_id,
             // El frontend omite refresco de badges/grilla cuando este flag es true.
             'is_status_update' => $this->is_status_update,
+            // Estado de entrega puntual (string corto, no compromete el límite de 10KB).
+            'delivery_status'  => $this->delivery_status,
         ];
     }
 }

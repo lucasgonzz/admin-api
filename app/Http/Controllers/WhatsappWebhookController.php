@@ -284,8 +284,10 @@ class WhatsappWebhookController extends Controller
             }
 
             // Notificar al frontend del cambio de estado (is_status_update = true para evitar
-            // refresco de badges y fila de grilla — solo actualizar el bubble del mensaje).
-            event(new \App\Events\LeadConversationUpdated((int) $message->lead_id, (int) $message->id, true));
+            // refresco de badges y fila de grilla en general — solo actualizar el bubble del mensaje).
+            // Se pasa además $status como delivery_status: el frontend hace una excepción cuando
+            // vale 'fallido' y también refresca la fila del lead en la grilla de leads.
+            event(new \App\Events\LeadConversationUpdated((int) $message->lead_id, (int) $message->id, true, $status));
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsApp webhook: error al procesar evento de estado de entrega.', [
                 'event_type' => $event_type,
