@@ -199,8 +199,12 @@ class DeploymentService
                     return;
                 case 'update_default_version':
                     $this->step_update_default_version();
-                    // Marca el paso "Sistema configurado" automáticamente.
-                    $this->mark_upgrade_step_timestamp('sistema_configurado_at');
+                    // Solo marca "Sistema configurado" si el paso terminó en éxito real. Si degradó a
+                    // manual_required, el timestamp queda sin marcar para que se vea pendiente en el
+                    // panel hasta que el operador resuelva el cambio a mano en el servidor del cliente.
+                    if ($this->upgrade->fresh()->default_version_sync_status === 'success') {
+                        $this->mark_upgrade_step_timestamp('sistema_configurado_at');
+                    }
                     break;
                 case 'complete':
                     $this->step_complete();
@@ -785,44 +789,74 @@ class DeploymentService
             $this->upgrade
         );
 
-        if ($url === '') {
-            throw new \RuntimeException(
-                'No hay URL válida del empresa-api para update-default-version. '
-                . 'Configure la ClientApi destino del upgrade con URL https://...'
-            );
-        }
-
-        if (empty($client->api_key)) {
-            throw new \RuntimeException(
-                'El cliente no tiene api_key (debe coincidir con ADMIN_API_INBOUND_KEY en empresa-api).'
-            );
-        }
-
         $spa_url = trim((string) $this->target_api->spa_url);
         $api_url = $this->get_api_url_for_env();
+        // Cola común que se agrega al final de cualquier mensaje de "acción manual", con los valores
+        // concretos que el operador tiene que dejar cargados a mano en el servidor del cliente.
+        $manual_action_suffix = " Hay que cambiar a mano la version estable en el servidor del cliente: "
+            . "SPA {$spa_url} | API {$api_url}.";
+
+        // Sin URL válida de destino: no es un fallo del deployment (que ya subió SPA, API, migraciones,
+        // seeders y comandos), es un problema de configuración de la ClientApi. Se degrada a manual.
+        if ($url === '') {
+            $manual_message = 'No hay URL válida del empresa-api para update-default-version '
+                . '(configure la ClientApi destino del upgrade con URL https://...).' . $manual_action_suffix;
+            $this->log('update_default_version', $manual_message, 'warning');
+            $this->upgrade->update([
+                'default_version_sync_status'  => 'manual_required',
+                'default_version_sync_message' => $manual_message,
+            ]);
+            return;
+        }
+
+        // Sin api_key del cliente: mismo motivo, problema de configuración del admin, no del deployment.
+        if (empty($client->api_key)) {
+            $manual_message = 'El cliente no tiene api_key (debe coincidir con ADMIN_API_INBOUND_KEY '
+                . 'en empresa-api).' . $manual_action_suffix;
+            $this->log('update_default_version', $manual_message, 'warning');
+            $this->upgrade->update([
+                'default_version_sync_status'  => 'manual_required',
+                'default_version_sync_message' => $manual_message,
+            ]);
+            return;
+        }
 
         $this->log(
             'update_default_version',
             "PUT {$url} — SPA: {$spa_url} | API: {$api_url}"
         );
 
-        $response = Http::withHeaders([
-            'X-Admin-Api-Key' => $client->api_key,
-            'Accept'          => 'application/json',
-        ])
-            ->timeout((int) config('services.client_api.timeout', 15))
-            ->retry((int) config('services.client_api.retries', 2), 500)
-            ->put($url, [
-                'spa_url'         => $spa_url,
-                'default_version' => $spa_url,
-                'api_url'         => $api_url,
-            ]);
+        // Respuesta HTTP real (si se pudo obtener) y mensaje de error de transporte (si no hubo respuesta).
+        $response = null;
+        $transport_error = '';
 
-        $body = $response->body();
-        $this->log('update_default_version', 'HTTP ' . $response->status() . ': ' . substr($body, 0, 2000));
+        try {
+            $response = Http::withHeaders([
+                'X-Admin-Api-Key' => $client->api_key,
+                'Accept'          => 'application/json',
+            ])
+                ->timeout((int) config('services.client_api.timeout', 15))
+                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->put($url, [
+                    'spa_url'         => $spa_url,
+                    'default_version' => $spa_url,
+                    'api_url'         => $api_url,
+                ]);
+        } catch (\Illuminate\Http\Client\RequestException $e) {
+            // En Laravel 8, ->retry() convierte cualquier respuesta no-2xx en excepción antes de que
+            // put() devuelva algo (PendingRequest::send() llama $response->throw() dentro del retry()
+            // cuando $tries > 1). Por eso la rama del 404 de más abajo quedaba como código muerto:
+            // recuperamos acá la respuesta real desde la excepción para poder seguir evaluándola.
+            $response = $e->response;
+        } catch (\Throwable $e) {
+            // ConnectionException, timeout, DNS, etc.: no hay respuesta HTTP asociada.
+            $transport_error = $e->getMessage();
+        }
 
         // Caso exitoso: empresa-api confirmó el cambio de versión/URL por defecto.
-        if ($response->successful()) {
+        if ($response !== null && $response->successful()) {
+            $body = $response->body();
+            $this->log('update_default_version', 'HTTP ' . $response->status() . ': ' . substr($body, 0, 2000));
             $this->upgrade->update([
                 'default_version_sync_status'  => 'success',
                 'default_version_sync_message' => null,
@@ -831,34 +865,40 @@ class DeploymentService
         }
 
         /*
-         * 404 = la ruta admin-sync/update-default-version no existe en esta instancia de empresa-api
-         * (cliente con una versión vieja que todavía no tiene el endpoint). No se trata como error del
-         * deployment: se deja seguir el pipeline (incluido step_complete(), que igual activa la
-         * ClientApi destino en el admin) y se registra como pendiente de acción manual.
+         * Cualquier otro desenlace (404, otro código HTTP, o sin respuesta por error de transporte) no
+         * tumba el deployment: se deja seguir el pipeline (incluido step_complete(), que igual activa
+         * la ClientApi destino en el admin) y se registra como pendiente de acción manual, con el
+         * motivo real para que el operador sepa qué pasó.
          */
-        if ($response->status() === 404) {
-            // Mensaje para el operador: qué pasó y qué falta hacer manualmente en el cliente.
-            $manual_message = 'empresa-api de este cliente no tiene el endpoint update-default-version '
-                . '(versión desactualizada). La versión activa ya se actualizó en el admin, pero hace '
-                . 'falta cambiar manualmente el link de la versión estable en el servidor del cliente: '
-                . "SPA {$spa_url} | API {$api_url}.";
-
-            // Nivel 'error' a propósito para que la línea se vea en rojo en el panel (no hay nivel
-            // 'warning' intermedio hoy en el helper de colores del frontend); no es un error real
-            // del deployment, el detalle correcto para el usuario vive en default_version_sync_message.
-            $this->log('update_default_version', $manual_message, 'error');
-
-            $this->upgrade->update([
-                'default_version_sync_status'  => 'manual_required',
-                'default_version_sync_message' => $manual_message,
-            ]);
-            return;
+        if ($response !== null && $response->status() === 404) {
+            // 404 = la ruta admin-sync/update-default-version no existe en esta instancia de empresa-api,
+            // o la URL de la ClientApi está mal cargada (típico: falta el /public de hosting compartido).
+            $manual_message = "empresa-api de este cliente respondió 404 en {$url}. Puede ser que la "
+                . 'versión instalada todavía no tenga el endpoint admin-sync/update-default-version '
+                . '(versión desactualizada), o que la URL de la ClientApi esté mal cargada (revisar si '
+                . 'falta el /public de hosting compartido).' . $manual_action_suffix;
+        } elseif ($response !== null) {
+            $body = substr((string) $response->body(), 0, 300);
+            $manual_message = 'El empresa-api del cliente respondió HTTP ' . $response->status() . ': '
+                . $body;
+            if ($response->status() === 401 || $response->status() === 403) {
+                $manual_message .= ' Probablemente la api_key del cliente no coincide con '
+                    . 'ADMIN_API_INBOUND_KEY del empresa-api.';
+            }
+            $manual_message .= $manual_action_suffix;
+        } else {
+            $manual_message = "No se pudo contactar al empresa-api del cliente en {$url}: "
+                . $transport_error . $manual_action_suffix;
         }
 
-        // Cualquier otro código (401 api_key inválida, 500 real, etc.): error genuino del deployment.
-        throw new \RuntimeException(
-            'Error al actualizar versión por defecto en empresa-api: HTTP ' . $response->status()
-        );
+        // Nivel 'warning' (no 'error'): no es un fallo del deployment, el detalle vive en
+        // default_version_sync_message y el operador lo resuelve a mano desde el panel.
+        $this->log('update_default_version', $manual_message, 'warning');
+
+        $this->upgrade->update([
+            'default_version_sync_status'  => 'manual_required',
+            'default_version_sync_message' => $manual_message,
+        ]);
     }
 
     /**

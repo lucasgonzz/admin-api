@@ -96,6 +96,11 @@ class DeploymentController extends BaseController
     /**
      * Ejecuta cambio de URL / versión por defecto (última etapa post-cierre).
      *
+     * Acepta el estado 'paused_post_tasks' (flujo normal, recién terminados los comandos post-cierre)
+     * y también 'failed' (reintento manual desde el panel): si este mismo paso falló antes por un
+     * problema de red o de configuración que ya se resolvió, el operador puede reintentarlo apretando
+     * el botón de nuevo, sin necesidad de tocar la base de datos a mano.
+     *
      * @param  string  $id  UUID del ClientVersionUpgrade
      * @return \Illuminate\Http\JsonResponse
      */
@@ -103,7 +108,7 @@ class DeploymentController extends BaseController
     {
         $upgrade = $this->find_upgrade_by_route_id($id);
 
-        if ($upgrade->deployment_status !== 'paused_post_tasks') {
+        if ($upgrade->deployment_status !== 'paused_post_tasks' && $upgrade->deployment_status !== 'failed') {
             return response()->json([
                 'message' => 'El deployment no está listo para configurar el sistema (URL/versión por defecto).',
             ], 422);
