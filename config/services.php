@@ -164,6 +164,11 @@ return [
         // el php_bin correcto en lugar de depender del wrapper 'composer' bare de PATH.
         // Criterio estándar en hosting que requiere una versión específica de PHP (confirmado con Lucas, 22/7/2026).
         'composer_script' => env('DEPLOY_TIENDA_COMPOSER_SCRIPT', '/usr/local/bin/composer'),
+        // Timeout (segundos) del lock exclusivo sobre el directorio de build compartido entre
+        // todos los clientes: cuánto espera una corrida a que se libere el lock de otra antes de
+        // abortar, y a partir de qué antigüedad se considera huérfano un lock de una corrida
+        // muerta (grupo 208 — EcommerceInstallationService::acquire_build_lock()).
+        'build_lock_timeout' => env('DEPLOY_TIENDA_BUILD_LOCK_TIMEOUT', 1800),
     ],
 
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).

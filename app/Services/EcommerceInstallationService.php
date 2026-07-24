@@ -186,7 +186,16 @@ class EcommerceInstallationService
             ]);
             $this->ecommerce->update(['status' => 'installing']);
 
-            $this->execute_steps();
+            // Lock exclusivo sobre el directorio de build compartido (grupo 208): cubre desde
+            // ensure_spa_cloned hasta el final de upload_spa (las dos etapas que tocan el clone
+            // compartido de tienda-spa), así que alcanza con tomarlo acá y soltarlo en el finally
+            // de abajo, que corre tanto si execute_steps() termina bien como si explota.
+            $this->acquire_build_lock();
+            try {
+                $this->execute_steps();
+            } finally {
+                $this->release_build_lock();
+            }
 
             $this->installation->update([
                 'status'      => 'completada',
@@ -357,6 +366,119 @@ class EcommerceInstallationService
     }
 
     /**
+     * Toma el lock exclusivo sobre el directorio de build compartido (`builds_spa_path()`), antes
+     * de clonar/tocar nada ahí. Ese directorio es una única ruta para TODOS los clientes: sin este
+     * lock, dos corridas en paralelo (dos instalaciones/actualizaciones disparadas casi al mismo
+     * tiempo) pueden pisarse los íconos/assets entre sí si el worker de cola llega a procesarlas
+     * de forma concurrente (grupo 208).
+     *
+     * Implementación: como `exec_build_ssh()` corre cada comando en su propia sesión SSH, no sirve
+     * mantener abierto un `flock` entre llamadas. En cambio, cada intento manda UN solo comando
+     * remoto que usa `flock` sobre un archivo `<builds_spa_path>.lock` (al lado del directorio, no
+     * adentro, para que `git clean` no lo toque) para hacer atómica la lectura-escritura de un
+     * archivo `<builds_spa_path>.owner` con el `uuid` de la corrida dueña y su timestamp:
+     *   - si el `.owner` no existe, o su timestamp es más viejo que el timeout configurado (lock
+     *     huérfano de una corrida que murió sin liberar), lo pisa con el `uuid` propio y el
+     *     comando remoto imprime `BUILD_LOCK_ACQUIRED`;
+     *   - si está tomado por otra corrida viva, imprime `BUILD_LOCK_BUSY <uuid>` y no toca nada.
+     * Si sale `BUILD_LOCK_BUSY`, se reintenta cada 15 segundos (con `sleep` del lado PHP, no del
+     * remoto) hasta agotar `services.deploy_tienda.build_lock_timeout` (default 1800s), logueando
+     * una línea `info` por cada reintento con el `uuid` que tiene el lock tomado.
+     *
+     * @return void
+     * @throws \RuntimeException  Si se agota el timeout sin poder tomar el lock.
+     */
+    protected function acquire_build_lock(): void
+    {
+        $spa_build_path = $this->builds_spa_path();
+        $lock_file       = $spa_build_path . '.lock';
+        $owner_file      = $spa_build_path . '.owner';
+        $timeout_seconds = (int) config('services.deploy_tienda.build_lock_timeout', 1800);
+        $own_uuid        = (string) $this->installation->uuid;
+
+        $this->connect_build_vps();
+
+        $deadline = time() + $timeout_seconds;
+
+        while (true) {
+            $now = time();
+
+            // Comando atómico (bajo flock): lee el .owner actual; si no existe o está vencido según
+            // el timeout, lo pisa con el uuid propio e imprime BUILD_LOCK_ACQUIRED; si está tomado
+            // por otra corrida viva, imprime BUILD_LOCK_BUSY <uuid_del_dueño> sin tocar nada.
+            $inner_script = 'OWNER_LINE=$(cat ' . escapeshellarg($owner_file) . ' 2>/dev/null || true); '
+                . 'OWNER_UUID=$(printf "%s" "$OWNER_LINE" | cut -d" " -f1); '
+                . 'OWNER_TS=$(printf "%s" "$OWNER_LINE" | cut -d" " -f2); '
+                . 'NOW=' . $now . '; '
+                . 'TIMEOUT=' . $timeout_seconds . '; '
+                . 'if [ -z "$OWNER_TS" ] || [ $((NOW - OWNER_TS)) -gt "$TIMEOUT" ]; then '
+                . 'printf "%s %s" ' . escapeshellarg($own_uuid) . ' "$NOW" > ' . escapeshellarg($owner_file) . '; '
+                . 'echo BUILD_LOCK_ACQUIRED; '
+                . 'else echo "BUILD_LOCK_BUSY $OWNER_UUID"; fi';
+            $command = 'flock ' . escapeshellarg($lock_file) . ' -c ' . escapeshellarg($inner_script);
+
+            $output = $this->exec_build_ssh('ensure_spa_cloned', $command, false);
+
+            if (stripos($output, 'BUILD_LOCK_ACQUIRED') !== false) {
+                $this->log('ensure_spa_cloned', "Lock del directorio de build adquirido (corrida {$own_uuid})", 'success');
+
+                return;
+            }
+
+            if (time() >= $deadline) {
+                throw new \RuntimeException(
+                    'No se pudo tomar el lock del directorio de build compartido en '
+                    . "{$timeout_seconds}s: " . $this->truncate_for_log($output, 200)
+                );
+            }
+
+            $this->log(
+                'ensure_spa_cloned',
+                'Directorio de build compartido ocupado por otra corrida ('
+                . $this->truncate_for_log($output, 200) . '); reintentando en 15s...'
+            );
+            sleep(15);
+        }
+    }
+
+    /**
+     * Libera el lock del directorio de build compartido tomado por `acquire_build_lock()`, SOLO si
+     * el `.owner` remoto todavía tiene el `uuid` de esta misma corrida (evita que una corrida A,
+     * liberando tarde por algún error, borre el lock que ya tomó legítimamente una corrida B
+     * posterior). Se llama siempre en el `finally` de `run()`, tanto si la corrida termina bien
+     * como si explota, para que el lock nunca quede tomado más de lo necesario.
+     *
+     * No usa `must_succeed`: si esto falla (p. ej. la sesión SSH ya se cayó por el mismo error que
+     * hizo explotar la corrida) no tiene sentido tirar una segunda excepción — el lock igual se
+     * autolibera por antigüedad la próxima vez que otra corrida lo necesite (ver acquire arriba).
+     *
+     * @return void
+     */
+    protected function release_build_lock(): void
+    {
+        $spa_build_path = $this->builds_spa_path();
+        $lock_file       = $spa_build_path . '.lock';
+        $owner_file      = $spa_build_path . '.owner';
+        $own_uuid        = (string) $this->installation->uuid;
+
+        try {
+            $inner_script = 'OWNER_LINE=$(cat ' . escapeshellarg($owner_file) . ' 2>/dev/null || true); '
+                . 'OWNER_UUID=$(printf "%s" "$OWNER_LINE" | cut -d" " -f1); '
+                . 'if [ "$OWNER_UUID" = ' . escapeshellarg($own_uuid) . ' ]; then rm -f '
+                . escapeshellarg($owner_file) . '; fi';
+            $command = 'flock ' . escapeshellarg($lock_file) . ' -c ' . escapeshellarg($inner_script);
+
+            $this->connect_build_vps();
+            $this->exec_build_ssh('finalize', $command, false);
+            $this->log('finalize', "Lock del directorio de build liberado (corrida {$own_uuid})");
+        } catch (\Throwable $e) {
+            // No se re-lanza: liberar el lock es best-effort, y no debe tapar la excepción real de
+            // la corrida (si la hubo) ni explotar por su cuenta dentro de un finally.
+            $this->log('finalize', "No se pudo liberar el lock del directorio de build: {$e->getMessage()}", 'warning');
+        }
+    }
+
+    /**
      * Etapa 2: branding en vivo + .env del SPA + patch de vue.config.js + íconos PWA + build.
      *
      * @return void
@@ -366,12 +488,17 @@ class EcommerceInstallationService
     {
         $this->connect_build_vps();
 
+        $spa_build_path = $this->builds_spa_path();
+
+        // Antes de tocar cualquier otra cosa: resetea los assets de íconos que hubiera dejado una
+        // corrida anterior en este mismo directorio de build (compartido entre TODOS los clientes),
+        // para que nunca se herede el favicon/set PWA de otro cliente (grupo 208).
+        $this->reset_versioned_icon_assets($spa_build_path);
+
         // a) Branding en vivo: color primario y logo, resueltos contra empresa-api (fuente primaria)
         // con fallback a la tienda-api propia del cliente. $logo_source indica de qué campo salió
         // el logo ('tienda' u 'empresa') solo para trazabilidad en logs.
         [$primary_color, $logo_url, $logo_source] = $this->fetch_online_configuration_branding();
-
-        $spa_build_path = $this->builds_spa_path();
 
         // b) .env del SPA: SOLO las 3 variables que necesita tienda-spa para bootear (sin Google,
         // sin VARIANT_COLOR y sin NO_PAUSAR — a diferencia de empresa, ver contexto del prompt 584).
@@ -397,16 +524,11 @@ class EcommerceInstallationService
         // reemplaza el valor de las líneas ya existentes (no agrega ni duplica líneas).
         $this->patch_spa_vue_config($spa_build_path, $primary_color, $this->pwa_display_name());
 
-        // d) Íconos PWA a partir del logo (si hay logo_url; si no, se deja el set genérico versionado).
-        if ($logo_url !== null) {
-            $this->step_generate_pwa_icons($spa_build_path, $logo_url);
-        } else {
-            $this->log(
-                'compile_spa',
-                'Sin logo_url en online_configuration: se deja el set de íconos genérico versionado',
-                'warning'
-            );
-        }
+        // d) Íconos PWA: se regeneran SIEMPRE (con logo si hay, o con un ícono placeholder —
+        // inicial del comercio sobre el color primario— si no hay), para que ningún cliente
+        // publique jamás el set de íconos que hubiera quedado de otro cliente o de una corrida
+        // anterior (grupo 208; antes esto se dejaba intacto cuando no había logo_url).
+        $this->step_generate_pwa_icons($spa_build_path, $logo_url, $primary_color, $this->pwa_display_name());
 
         // e) npm ci + npm run build (mismo mecanismo que empresa).
         $npm_bin = trim((string) config('services.deploy.npm_bin', 'npm'));
@@ -448,39 +570,104 @@ class EcommerceInstallationService
     }
 
     /**
-     * Sub-etapa de compile_spa: descarga el logo y genera el set de íconos PWA con el script node
-     * `deploy/tienda/generate_pwa_icons.js` (ver ese archivo para el detalle de cada tamaño).
+     * Restaura a lo versionado (y limpia lo no versionado) los assets de íconos PWA en el
+     * directorio de build del SPA, ANTES de tocar nada más en `step_compile_spa()`.
      *
-     * @param  string  $spa_build_path
-     * @param  string  $logo_url
+     * El directorio de build (`builds_spa_path()`) es una única ruta compartida por TODOS los
+     * clientes: sin este reset, una corrida puede heredar en disco el favicon/set de íconos que
+     * dejó la corrida anterior (de otro cliente) o los temporales de una corrida muerta a mitad
+     * de camino (grupo 208). `git checkout` restaura lo trackeado (`public/img/icons`,
+     * `public/favicon.ico`) a la versión de master; `git clean -fd` borra archivos no trackeados
+     * que hayan quedado dentro de `public/img/icons` (p.ej. un `safari-pinned-tab.svg` generado
+     * por una corrida anterior si en algún momento se agrega ahí); y el `rm -f` final limpia los
+     * temporales de descarga/script que puede haber dejado una corrida que murió antes de su
+     * propia limpieza (`step_generate_pwa_icons()` ya limpia los suyos al final, pero eso no pasa
+     * si la corrida se cae antes de llegar ahí).
+     *
+     * `must_succeed = false`: si el `git checkout` no tiene nada que restaurar (o el repo recién
+     * se clonó y ya está limpio) no es motivo para abortar la instalación.
+     *
+     * @param  string  $spa_build_path  Ruta absoluta del clone de tienda-spa en el VPS de builds.
      * @return void
      */
-    protected function step_generate_pwa_icons(string $spa_build_path, string $logo_url)
+    protected function reset_versioned_icon_assets(string $spa_build_path): void
     {
-        $this->log('compile_spa', 'Generando íconos PWA desde el logo del cliente...');
+        $command = 'cd ' . escapeshellarg($spa_build_path)
+            . ' && git checkout -- ' . escapeshellarg('public/img/icons') . ' ' . escapeshellarg('public/favicon.ico') . ' 2>&1'
+            . '; git clean -fd ' . escapeshellarg('public/img/icons') . ' 2>&1'
+            . '; rm -f ' . escapeshellarg($spa_build_path . '/.deploy_logo_tmp')
+            . ' ' . escapeshellarg($spa_build_path . '/.deploy_generate_pwa_icons.js') . ' 2>&1';
 
-        // Descarga el logo a un archivo temporal en el VPS (curl, ya disponible junto con node/npm).
-        $remote_logo_path = $spa_build_path . '/.deploy_logo_tmp';
-        $download_output  = $this->exec_build_ssh(
+        $reset_output = $this->exec_build_ssh('compile_spa', $command, false);
+        $this->log(
             'compile_spa',
-            'curl -sL -o ' . escapeshellarg($remote_logo_path) . ' ' . escapeshellarg($logo_url)
-            . ' && test -s ' . escapeshellarg($remote_logo_path) . ' && echo LOGO_DOWNLOAD_OK || echo LOGO_DOWNLOAD_FAILED',
-            false
+            'Assets de íconos versionados reseteados antes de generar el set nuevo '
+            . '(directorio de build compartido entre todos los clientes). '
+            . $this->truncate_for_log($reset_output, 400)
         );
-        if (stripos($download_output, 'LOGO_DOWNLOAD_OK') === false) {
-            // No corta la instalación: se loguea warning y se deja el set genérico versionado.
+    }
+
+    /**
+     * Sub-etapa de compile_spa: genera el set de íconos PWA con el script node
+     * `deploy/tienda/generate_pwa_icons.js` (ver ese archivo para el detalle de cada tamaño), SIEMPRE:
+     * a partir del logo del cliente si hay uno y se pudo descargar, o con un ícono placeholder
+     * (inicial del comercio sobre su color primario) en cualquier otro caso — nunca se sale de este
+     * método dejando en disco el set de íconos que hubiera de una corrida/cliente anterior
+     * (grupo 208; `reset_versioned_icon_assets()` ya se encargó de dejar el punto de partida limpio).
+     *
+     * @param  string       $spa_build_path
+     * @param  string|null  $logo_url        Null si el comercio no tiene logo cargado en ningún lado.
+     * @param  string       $primary_color   Color primario del comercio, usado como fondo del placeholder.
+     * @param  string       $display_name    Nombre del comercio, usado para la inicial del placeholder
+     *                                        y de safari-pinned-tab.svg (en los dos modos).
+     * @return void
+     */
+    protected function step_generate_pwa_icons(
+        string $spa_build_path,
+        ?string $logo_url,
+        string $primary_color,
+        string $display_name
+    ) {
+        // Ruta remota donde quedaría el logo descargado (solo se usa/llena en el modo con logo).
+        $remote_logo_path = $spa_build_path . '/.deploy_logo_tmp';
+        // Bandera que decide, más abajo, qué invocación del script node corresponde.
+        $use_placeholder = false;
+
+        if ($logo_url === null) {
+            // Caso más simple: el comercio no tiene ningún logo cargado (ni en tienda-api ni en
+            // empresa-api). Se va derecho al modo placeholder, sin intentar descargar nada.
             $this->log(
                 'compile_spa',
-                'No se pudo descargar el logo (' . $this->truncate_for_log($download_output, 300)
-                . '); se deja el set de íconos genérico',
+                'El comercio no tiene ningún logo cargado: se genera un ícono con la inicial sobre el color primario',
                 'warning'
             );
+            $use_placeholder = true;
+        } else {
+            $this->log('compile_spa', 'Generando íconos PWA desde el logo del cliente...');
 
-            return;
+            // Descarga el logo a un archivo temporal en el VPS (curl, ya disponible junto con node/npm).
+            $download_output = $this->exec_build_ssh(
+                'compile_spa',
+                'curl -sL -o ' . escapeshellarg($remote_logo_path) . ' ' . escapeshellarg($logo_url)
+                . ' && test -s ' . escapeshellarg($remote_logo_path) . ' && echo LOGO_DOWNLOAD_OK || echo LOGO_DOWNLOAD_FAILED',
+                false
+            );
+            if (stripos($download_output, 'LOGO_DOWNLOAD_OK') === false) {
+                // A diferencia de antes: ya NO se hace return acá. Cae al modo placeholder para no
+                // dejar en disco el set de íconos que hubiera de una corrida/cliente anterior.
+                $this->log(
+                    'compile_spa',
+                    'No se pudo descargar el logo (' . $this->truncate_for_log($download_output, 300)
+                    . '); se genera un ícono con la inicial sobre el color primario',
+                    'warning'
+                );
+                $use_placeholder = true;
+            }
         }
 
         // Instala "sharp" en el clone del VPS sin persistirlo en package.json (--no-save): es una
-        // dependencia solo de generación de íconos, no del bundle final de la SPA.
+        // dependencia solo de generación de íconos, no del bundle final de la SPA. Necesaria en los
+        // dos modos (el placeholder también se compone/rasteriza con sharp).
         $this->log('compile_spa', 'Instalando sharp para generar íconos...');
         $this->exec_build_ssh(
             'compile_spa',
@@ -505,29 +692,44 @@ class EcommerceInstallationService
             "printf '%s' '{$script_escaped}' > " . escapeshellarg($remote_script)
         );
 
-        // Corre el script: logo descargado -> public/img/icons del repo.
+        // Arma la invocación del script según el modo resuelto arriba.
         $icons_output_dir = $spa_build_path . '/public/img/icons';
+        if ($use_placeholder) {
+            $node_command = 'node ' . escapeshellarg($remote_script) . ' --placeholder '
+                . escapeshellarg($primary_color) . ' '
+                . escapeshellarg($display_name) . ' '
+                . escapeshellarg($icons_output_dir) . ' 2>&1';
+        } else {
+            $node_command = 'node ' . escapeshellarg($remote_script) . ' '
+                . escapeshellarg($remote_logo_path) . ' '
+                . escapeshellarg($icons_output_dir) . ' '
+                . escapeshellarg($display_name) . ' 2>&1';
+        }
+
         $run_output = $this->exec_build_ssh(
             'compile_spa',
-            $this->build_vps_command(
-                $spa_build_path,
-                'node ' . escapeshellarg($remote_script) . ' '
-                . escapeshellarg($remote_logo_path) . ' '
-                . escapeshellarg($icons_output_dir) . ' 2>&1'
-            ),
+            $this->build_vps_command($spa_build_path, $node_command),
             true,
             true
         );
         $this->log('compile_spa', $this->truncate_for_log($run_output, 1200));
 
         if (stripos($run_output, 'GENERATE_ICONS_DONE') === false) {
+            // Preferible una corrida fallida y visible a una tienda publicada con el set de íconos
+            // de otro cliente: nunca se atrapa este error para "seguir igual".
             throw new \RuntimeException(
                 'La generación de íconos PWA no terminó OK. ' . $this->truncate_for_log($run_output, 600)
             );
         }
-        $this->log('compile_spa', 'Íconos PWA generados desde el logo del cliente', 'success');
+        $this->log(
+            'compile_spa',
+            $use_placeholder
+                ? 'Íconos PWA generados con ícono placeholder (inicial del comercio sobre el color primario)'
+                : 'Íconos PWA generados desde el logo del cliente',
+            'success'
+        );
 
-        // Limpia el logo y el script temporales del VPS.
+        // Limpia el logo (si se llegó a descargar) y el script temporales del VPS.
         $this->exec_build_ssh(
             'compile_spa',
             'rm -f ' . escapeshellarg($remote_logo_path) . ' ' . escapeshellarg($remote_script),
