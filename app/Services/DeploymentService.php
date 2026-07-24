@@ -464,23 +464,79 @@ class DeploymentService
     /**
      * Etapa: limpiar caché y migraciones en el servidor remoto.
      *
+     * Comienza asegurando que el esqueleto de storage/ existe (el ZIP del upgrade
+     * lo excluye, así que puede estar incompleto). Luego limpia caches de artisan
+     * de forma defensiva (si fallan, la etapa sigue igual), y finalmente corre
+     * las migraciones (bloqueante).
+     *
      * @return void
      */
     private function step_run_migrations()
     {
         $api_path = $this->get_api_path();
 
+        // Asegurar que el árbol de storage/ existe antes de correr clears.
+        $this->ensure_storage_skeleton('run_migrations');
+
         $this->log('run_migrations', 'Limpiando caché de Laravel...');
+
+        // Borrar caches de bootstrap por shell antes de los artisan clears.
+        // Un config.php cacheado inválido podría romper artisan, así que lo sacamos
+        // de circulación sin depender de que artisan bootee.
+        $this->run_command(
+            'run_migrations',
+            'cd ' . escapeshellarg($api_path)
+            . ' && rm -f bootstrap/cache/config.php bootstrap/cache/routes-*.php 2>&1',
+            false
+        );
+
+        // Los cuatro artisan clears: si fallan (permisos, directorios que no existen aún,
+        // ownership raro) no es motivo para abortar el deploy. Se loguean como warnings.
         $clear_commands = [
-            "cd {$api_path} && php artisan config:clear",
-            "cd {$api_path} && php artisan cache:clear",
-            "cd {$api_path} && php artisan view:clear",
-            "cd {$api_path} && php artisan route:clear",
+            'config:clear',
+            'cache:clear',
+            'view:clear',
+            'route:clear',
         ];
-        foreach ($clear_commands as $cmd) {
-            $this->run_command('run_migrations', $cmd);
+
+        $had_clear_errors = false;
+        foreach ($clear_commands as $clear_command) {
+            try {
+                $clear_output = $this->run_command(
+                    'run_migrations',
+                    "cd {$api_path} && php artisan {$clear_command} --no-ansi 2>&1",
+                    false
+                );
+
+                // Revisar si la salida contiene señales de error de artisan
+                // (aunque el exit status sea 0 en algunos casos raros).
+                if ($this->remote_output_indicates_failure($clear_output)) {
+                    $this->log(
+                        'run_migrations',
+                        "Advertencia: {$clear_command} no se pudo completar. El deploy sigue igual.",
+                        'warning'
+                    );
+                    $had_clear_errors = true;
+                }
+            } catch (\Throwable $e) {
+                // El comando falló bloqueantemente (exit != 0 con must_succeed=true original,
+                // pero acá es false así que la excepción viene de verificación extra).
+                // Loguear como warning y continuar.
+                $this->log(
+                    'run_migrations',
+                    "Advertencia: {$clear_command} falló. El deploy sigue igual. Detalle: "
+                    . $this->truncate_for_log($e->getMessage(), 300),
+                    'warning'
+                );
+                $had_clear_errors = true;
+            }
         }
-        $this->log('run_migrations', 'Caché limpiado', 'success');
+
+        if ($had_clear_errors) {
+            $this->log('run_migrations', 'Caché limpiado (con advertencias)', 'warning');
+        } else {
+            $this->log('run_migrations', 'Caché limpiado', 'success');
+        }
 
         $this->log('run_migrations', 'Corriendo migraciones...');
         $this->run_command(
@@ -1124,6 +1180,46 @@ class DeploymentService
             . 'find . -mindepth 1 -delete 2>/dev/null || true; '
             . 'if [ -f "$TEMP_ZIP" ]; then unzip -o "$TEMP_ZIP" -d .; rm -f "$TEMP_ZIP"; fi; '
             . 'echo SPA_DEPLOY_OK 2>&1';
+    }
+
+    /**
+     * Asegura que el esqueleto de directorios de storage/ existe en el servidor remoto.
+     *
+     * Contexto: el ZIP del upgrade excluye storage/* (regla defensiva para no pisar
+     * archivos del cliente), así que el árbol de storage/ solo viene de la instalación
+     * inicial y puede estar incompleto si el cliente lo limpió, migró de hosting, o
+     * quedó corrupto por algún motivo. Sin estos directorios, realpath() en
+     * config/view.php devuelve false, ViewClearCommand falla con "View path not found",
+     * y el deploy se aborta. Este método crea preventivamente el árbol completo.
+     *
+     * El comando enumera rutas una por una (prohibida brace expansion, que no está
+     * garantizada en sh del hosting compartido), hace chmod -R solo sobre los árboles
+     * chicos (storage/framework y bootstrap/cache; ver nota sobre rendimiento),
+     * y no falla si los directorios ya existen (mkdir -p es no-op).
+     *
+     * @param  string  $step  Identificador de etapa para logs
+     * @return void
+     */
+    private function ensure_storage_skeleton(string $step): void
+    {
+        $api_path = $this->get_api_path();
+
+        $this->log($step, 'Asegurando directorios de storage...');
+
+        // Comando: mkdir -p enumerando rutas una por una, chmod -R limitado a
+        // storage/framework y bootstrap/cache (en un cliente con años de adjuntos,
+        // chmod -R sobre storage/ entero puede tardar muchísimo y timeoutear SSH).
+        $this->run_command(
+            $step,
+            'cd ' . escapeshellarg($api_path)
+            . ' && mkdir -p storage/app/public storage/framework/cache/data storage/framework/sessions'
+            . ' storage/framework/testing storage/framework/views storage/logs bootstrap/cache'
+            . ' && chmod -R 775 storage/framework bootstrap/cache'
+            . ' && chmod 775 storage storage/app storage/app/public storage/logs 2>&1',
+            false
+        );
+
+        $this->log($step, 'Directorios de storage asegurados', 'success');
     }
 
     /**
