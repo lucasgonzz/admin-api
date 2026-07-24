@@ -954,21 +954,17 @@ class DeploymentService
 
     /**
      * URL de API para VUE_APP_API_URL (.env del SPA), con /public en shared_hosting si aplica.
+     * Delega en ClientEmpresaApiUrlResolver para mantener la regla de normalización centralizada.
      *
      * @return string
      */
     private function get_api_url_for_env()
     {
-        $api_url = rtrim((string) $this->target_api->url, '/');
-        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
-
-        if ($hosting_type === 'shared_hosting') {
-            if (substr($api_url, -7) !== '/public') {
-                $api_url .= '/public';
-            }
-        }
-
-        return $api_url;
+        $resolver = new ClientEmpresaApiUrlResolver();
+        return $resolver->normalize_api_base_url(
+            $this->target_api->url,
+            $this->target_api->hosting_type
+        );
     }
 
     /**
