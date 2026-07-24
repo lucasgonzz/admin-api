@@ -16,6 +16,10 @@ Route::get('/', function () {
     return redirect()->route('versions.index');
 });
 
+// Landing pública de la demo por lead (prompt 213): sin login, token = uuid del lead.
+// Fuera de los grupos guest/auth a propósito: es pública por diseño.
+Route::get('/demo/{uuid}', 'DemoLandingController@show')->name('demo.landing');
+
 Route::get('/recall', function () {
     $lead = \App\Models\Lead::find(254);
     $recall = app(\App\Services\RecallService::class);

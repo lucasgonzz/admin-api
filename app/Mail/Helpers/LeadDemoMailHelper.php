@@ -24,11 +24,55 @@ class LeadDemoMailHelper
     /**
      * Construye el LeadDemoMail listo para pasar a Mail::to()->send().
      *
+     * Delega todo el mapeo Lead -> variables en build_view_data() para que el mail y la
+     * landing pública (prompt 213) compartan una única fuente de datos y no se puedan
+     * desincronizar entre sí.
+     *
      * @param Lead $lead Prospecto al que se envía el correo de demo.
      *
      * @return LeadDemoMail Mailable listo para enviar.
      */
     public static function build(Lead $lead): LeadDemoMail
+    {
+        // Mapeo Lead -> array asociativo, reusado también por la landing pública.
+        $data = self::build_view_data($lead);
+
+        return new LeadDemoMail(
+            $data['nombre'],
+            $data['dia'],
+            $data['hora_inicio'],
+            $data['hora_fin'],
+            $data['url_demo'],
+            $data['usuario'],
+            $data['password'],
+            $data['doc_number'],
+            $data['url_tienda'],
+            $data['url_whatsapp'],
+            $data['video_intro'],
+            $data['video_stock'],
+            $data['video_ventas'],
+            $data['video_ecommerce'],
+            $data['video_cierre'],
+            $data['logo_url'],
+            $data['presenter_name'],
+            $data['presenter_role'],
+            $data['personalized_demo_videos']
+        );
+    }
+
+    /**
+     * Mapea el Lead a un array asociativo con exactamente las mismas claves que hoy
+     * expone `LeadDemoMail` como propiedades públicas.
+     *
+     * Fuente única de datos: la usan tanto `build()` (Mail 1) como
+     * `DemoLandingController` (landing pública del prompt 213), para que ambos canales
+     * muestren siempre la misma información.
+     *
+     * @param Lead $lead Prospecto del que se arma la data.
+     *
+     * @return array<string, mixed> Datos listos para el blade del mail o de la landing.
+     */
+    public static function build_view_data(Lead $lead): array
     {
         // Nombre preferido para personalizar el saludo.
         $nombre = self::pick_display_name($lead);
@@ -84,27 +128,27 @@ class LeadDemoMailHelper
             ];
         }
 
-        return new LeadDemoMail(
-            $nombre,
-            $dia,
-            $hora_inicio,
-            $hora_fin,
-            $url_demo,
-            $usuario,
-            $password,
-            $doc_number,
-            $url_tienda,
-            $url_whatsapp,
-            $video_intro,
-            $video_stock,
-            $video_ventas,
-            $video_ecommerce,
-            $video_cierre,
-            $logo_url,
-            $presenter_name,
-            $presenter_role,
-            $personalized_demo_videos
-        );
+        return [
+            'nombre'                   => $nombre,
+            'dia'                      => $dia,
+            'hora_inicio'              => $hora_inicio,
+            'hora_fin'                 => $hora_fin,
+            'url_demo'                 => $url_demo,
+            'usuario'                  => $usuario,
+            'password'                 => $password,
+            'doc_number'               => $doc_number,
+            'url_tienda'               => $url_tienda,
+            'url_whatsapp'             => $url_whatsapp,
+            'video_intro'              => $video_intro,
+            'video_stock'              => $video_stock,
+            'video_ventas'             => $video_ventas,
+            'video_ecommerce'          => $video_ecommerce,
+            'video_cierre'             => $video_cierre,
+            'logo_url'                 => $logo_url,
+            'presenter_name'           => $presenter_name,
+            'presenter_role'           => $presenter_role,
+            'personalized_demo_videos' => $personalized_demo_videos,
+        ];
     }
 
     /**
