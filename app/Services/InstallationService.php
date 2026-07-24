@@ -573,17 +573,26 @@ class InstallationService
     {
         $api_path = $this->get_api_path();
 
-        $this->log('finalize_api', 'Limpiando cache de bootstrap...');
+        $this->log('finalize_api', 'Asegurando directorios de storage...');
         $this->reconnect_hosting_ssh();
 
-        // bootstrap/cache/ se excluye del ZIP de instalación (step_upload_api) para no
-        // arrastrar caches del VPS de builds. En una instalación desde cero el directorio
-        // no existe todavía en el hosting, y tanto package:discover (acá) como el boot de
-        // Laravel en runtime exigen que esté presente y con permiso de escritura.
+        // Asegurar que el árbol de storage/ existe antes de correr clears.
+        // El ZIP de instalación (step_upload_api) NO excluye storage/ (a diferencia de upgrades),
+        // pero si por algún motivo el árbol llega incompleto (transferencia manual previa,
+        // limpieza a mano en el hosting), view:clear y cache:clear fallan con "path not found",
+        // y realpath() en config/view.php devuelve false.
+        //
+        // bootstrap/cache/ también se excluye del ZIP para no arrastrar caches del VPS de builds.
+        // En una instalación desde cero ninguno de los directorios existe todavía en el hosting,
+        // y tanto package:discover como el boot de Laravel en runtime exigen que ambos estén
+        // presentes y con permiso de escritura.
         $this->exec_hosting_ssh(
             'finalize_api',
             'cd ' . escapeshellarg($api_path)
-            . ' && mkdir -p bootstrap/cache && chmod 775 bootstrap/cache 2>&1',
+            . ' && mkdir -p storage/app/public storage/framework/cache/data storage/framework/sessions'
+            . ' storage/framework/testing storage/framework/views storage/logs bootstrap/cache'
+            . ' && chmod -R 775 storage/framework bootstrap/cache'
+            . ' && chmod 775 storage storage/app storage/app/public storage/logs 2>&1',
             false
         );
 
