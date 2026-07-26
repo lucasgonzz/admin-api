@@ -130,6 +130,8 @@ return [
     ],
 
     // Kapso (WhatsApp Cloud API): TLS saliente desde WhatsappSendService.
+    // Repositorio público: prohibido volver a escribir el valor real de api_key/webhook_secret
+    // en el código. Ambos se cargan únicamente desde el .env (WhatsappConfigSeeder los lee de acá).
     'kapso' => [
         // Si no se define KAPSO_CAINFO, reutiliza ANTHROPIC_CAINFO (mismo cacert.pem en WAMP).
         'ca_bundle' => env('KAPSO_CAINFO', env('ANTHROPIC_CAINFO')),
@@ -137,6 +139,11 @@ return [
             env('KAPSO_VERIFY_SSL', env('ANTHROPIC_VERIFY_SSL', true)),
             FILTER_VALIDATE_BOOLEAN
         ),
+        // API key de Kapso para mandar WhatsApp desde el número de ComercioCity. Sensible: con este
+        // valor un tercero puede enviar mensajes desde el canal por donde entran todos los leads.
+        'api_key' => env('KAPSO_API_KEY', ''),
+        // Secret para validar la firma del webhook entrante de Kapso.
+        'webhook_secret' => env('KAPSO_WEBHOOK_SECRET', ''),
     ],
 
     // Pipeline de instalación/actualización del ecommerce (tienda-spa + tienda-api), prompt 584.

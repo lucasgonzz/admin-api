@@ -22,10 +22,25 @@ class WhatsappConfigSeeder extends Seeder
             return;
         }
 
+        // Repositorio público: la api_key y el webhook_secret de Kapso NUNCA se hardcodean acá.
+        // Se leen del .env (config/services.php → 'kapso'); si no están cargados, quedan en null
+        // y se avisa por consola sin frenar el resto de los seeders.
+        $kapso_api_key = config('services.kapso.api_key');
+        $kapso_webhook_secret = config('services.kapso.webhook_secret');
+
+        if (empty($kapso_api_key) || empty($kapso_webhook_secret)) {
+            if ($this->command) {
+                $this->command->warn(
+                    'WhatsappConfigSeeder: KAPSO_API_KEY y/o KAPSO_WEBHOOK_SECRET no están definidos en el .env. '
+                    . 'Se siembra el registro con valores null (WhatsApp saliente no va a funcionar hasta cargarlos).'
+                );
+            }
+        }
+
         WhatsappConfig::create([
-            'kapso_api_key'   => 'cebf2e65f32f92f8437cce4e5582ba9a21ed4cc318d8fbef548c2e8d35271357',
+            'kapso_api_key'   => $kapso_api_key ?: null,
             'phone_number_id' => '1135644799636575',
-            'webhook_secret'  => 'ffb6e70a95b832e0dddfb84adfb4c20e22d74dac1cf02c0c438d7d9bc04bb20b',
+            'webhook_secret'  => $kapso_webhook_secret ?: null,
             'is_active'       => true,
             'test_mode'       => true,
         ]);
