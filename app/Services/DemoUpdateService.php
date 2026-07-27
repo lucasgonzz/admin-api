@@ -9,6 +9,7 @@ use App\Models\Version;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
 use App\Services\ClientEmpresaApiUrlResolver;
+use Illuminate\Support\Facades\Http;
 
 /**
  * Ejecuta el pipeline completo de actualización de una demo en hosting compartido.
@@ -18,6 +19,7 @@ use App\Services\ClientEmpresaApiUrlResolver;
  *   2. step_upload_spa()      — zip dist/ → sftp download → sftp upload al hosting
  *   3. step_upload_api()      — checkout en VPS + composer install + zip → sftp → hosting
  *   4. step_run_migrations()  — limpia caché de Laravel + `php artisan migrate --force` en el hosting
+ *   5. step_verify_demo()     — verifica que la API y el SPA respondan con la URL realmente compilada
  *
  * El demo-setup NO forma parte de este pipeline (decisión del 14/7/2026): corre `migrate:fresh`
  * y vaciaría la base de la demo. Se dispara solo desde el módulo de Leads.
@@ -79,6 +81,19 @@ class DemoUpdateService
     private $build_ssh;
 
     /**
+     * URL de API que quedó efectivamente escrita en el .env del SPA compilado
+     * (el mismo valor que se asignó a VUE_APP_API_URL en build_demo_spa_env_content()).
+     *
+     * CRÍTICO (24/7/2026): step_verify_demo() tiene que verificar contra ESTA cadena, no
+     * contra una URL re-resuelta desde $this->demo->erp_api_url en el momento de verificar.
+     * Si se re-arma la URL en vez de reusar la que se compiló, un bug de normalización daría
+     * verde con la demo rota — que es justamente el incidente que motivó esta etapa.
+     *
+     * @var string
+     */
+    private $compiled_api_url = '';
+
+    /**
      * Carga el DemoUpdate con sus relaciones y la credencial shared_hosting.
      *
      * @param  DemoUpdate  $demo_update
@@ -116,6 +131,7 @@ class DemoUpdateService
             $this->step_upload_spa();
             $this->step_upload_api();
             $this->step_run_migrations();
+            $this->step_verify_demo();
 
             // Pipeline exitoso: actualizar timestamps y estado.
             $this->demo_update->status      = 'completado';
@@ -470,6 +486,121 @@ class DemoUpdateService
             true
         );
         $this->append_log('[run_migrations] Migraciones completadas');
+    }
+
+    /**
+     * Etapa 5: verifica que la demo realmente responda tras la actualización.
+     *
+     * INCIDENTE (24/7/2026): el pipeline compiló, subió, migró y quedó en `completado` con la
+     * demo devolviendo 404 en cada request porque el .env compilado tenía `/public/public`
+     * (bug corregido por el prompt 01 de este grupo, en ClientEmpresaApiUrlResolver). Ninguna
+     * de las cuatro etapas anteriores prueba el resultado: son todas validaciones de proceso
+     * (build sin errores, ZIP válido, migrate con exit 0), no de que el SPA compilado pueda
+     * efectivamente hablarle a la API. La URL queda compilada DENTRO del bundle, así que un
+     * valor equivocado es invisible para esas validaciones.
+     *
+     * Por eso esta etapa pega HTTP directo:
+     *   - a `{compiled_api_url}/sanctum/csrf-cookie`, con la cadena EXACTA que se escribió en
+     *     el .env (no una URL re-resuelta desde erp_api_url — ver doc de $compiled_api_url);
+     *   - al SPA (`erp_spa_url`), para detectar el caso de que el deploy haya vaciado el
+     *     directorio sin reponer nada (find -delete de build_spa_hosting_deploy_shell()).
+     *
+     * Ambos chequeos reintentan hasta 3 veces con 5s de espera, para no marcar `fallido` por
+     * un hipo de red transitorio o por el hosting todavía recalentando el opcache tras el
+     * deploy. Si tras los 3 intentos no hay 2xx, lanza RuntimeException — run() lo captura y
+     * marca el DemoUpdate como `fallido`.
+     *
+     * Demos con URL local (ej. empresa.local:8000, las que arma el seeder) no son hosting
+     * real: se saltea la verificación y se deja constancia en el log, sin fallar.
+     *
+     * @return void
+     */
+    private function step_verify_demo(): void
+    {
+        // No debería pasar nunca: build_demo_spa_env_content() siempre lo setea antes de esta
+        // etapa. Si llegara vacío, algo del pipeline cambió de orden — mejor fallar explícito
+        // que verificar contra una URL vacía o adivinada.
+        if ($this->compiled_api_url === '') {
+            throw new \RuntimeException(
+                '[verify_demo] No se pudo determinar la URL con la que se compiló el SPA '
+                . '(compiled_api_url vacía).'
+            );
+        }
+
+        // Demos locales (seeder) no son hosting real: no tiene sentido pegarles por HTTP.
+        if (! preg_match('/^https?:\/\//i', $this->compiled_api_url)) {
+            $this->append_log(
+                '[verify_demo] Se saltea la verificación: "' . $this->compiled_api_url . '" '
+                . 'no es una URL absoluta (demo local).'
+            );
+
+            return;
+        }
+
+        // Verifica la API con la cadena exacta compilada en el .env.
+        $api_check_url = rtrim($this->compiled_api_url, '/') . '/sanctum/csrf-cookie';
+        $this->verify_demo_url_responds('verify_demo', $api_check_url, 'API');
+
+        // Verifica el SPA: detecta el caso de deploy que vació el directorio sin reponer nada.
+        $spa_check_url = rtrim((string) $this->demo->erp_spa_url, '/');
+        $this->verify_demo_url_responds('verify_demo', $spa_check_url, 'SPA');
+    }
+
+    /**
+     * Pega un GET a la URL indicada con reintentos, para uso de step_verify_demo().
+     * Considera exitoso cualquier status 2xx. Loguea el resultado en ambos casos (OK y error).
+     *
+     * @param  string  $step        Prefijo de log
+     * @param  string  $url         URL completa a verificar
+     * @param  string  $label       Etiqueta legible ("API" | "SPA") para distinguir en el log
+     * @return void
+     * @throws \RuntimeException  Si ningún intento devuelve 2xx
+     */
+    private function verify_demo_url_responds(string $step, string $url, string $label): void
+    {
+        // Tope de intentos y espera entre ellos: un 404/timeout transitorio en el primer
+        // intento no debe tirar abajo una actualización que por lo demás salió bien.
+        $max_attempts = 3;
+        $wait_seconds = 5;
+
+        $last_status = null;
+        for ($attempt = 1; $attempt <= $max_attempts; $attempt++) {
+            try {
+                $response    = Http::timeout(20)->get($url);
+                $last_status = $response->status();
+
+                if ($response->successful()) {
+                    $this->append_log(
+                        "[{$step}] {$label} OK (intento {$attempt}/{$max_attempts}, status {$last_status}) — {$url}"
+                    );
+
+                    return;
+                }
+            } catch (\Throwable $e) {
+                // Timeout, DNS, conexión rechazada, etc.: se trata igual que un status no-2xx
+                // y se reintenta.
+                $last_status = null;
+                $this->append_log(
+                    "[{$step}] {$label} sin respuesta (intento {$attempt}/{$max_attempts}) — {$url} — "
+                    . $e->getMessage()
+                );
+            }
+
+            if ($attempt < $max_attempts) {
+                sleep($wait_seconds);
+            }
+        }
+
+        $status_text = $last_status === null ? 'sin respuesta' : (string) $last_status;
+        $this->append_log(
+            "[{$step}] {$label} FALLÓ tras {$max_attempts} intentos (status {$status_text}) — {$url}"
+        );
+
+        throw new \RuntimeException(
+            "La demo no responde en {$label} ({$url}): status {$status_text} tras {$max_attempts} intentos. "
+            . 'El código se subió bien, pero la demo no responde en esa URL — revisá el campo '
+            . 'erp_api_url de la demo.'
+        );
     }
 
     // =========================================================================
@@ -1174,6 +1305,11 @@ class DemoUpdateService
         // API URL ya normalizada (con /public agregado si corresponde, idempotente).
         $api_url = $this->demo_api_base_url();
         $spa_url = rtrim((string) $this->demo->erp_spa_url, '/');
+
+        // Guarda la URL exacta que se va a escribir como VUE_APP_API_URL: es el único lugar
+        // donde se asigna, y es la cadena que step_verify_demo() debe usar para verificar
+        // (no una URL re-resuelta desde $this->demo->erp_api_url).
+        $this->compiled_api_url = $api_url;
 
         $env_vars = [
             'VUE_APP_API_URL'        => $api_url,
