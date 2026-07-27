@@ -135,6 +135,35 @@ class ClientEmpresaApiUrlResolver
     }
 
     /**
+     * Normaliza la URL de API de una demo aplicando la regla de /public para shared_hosting.
+     *
+     * Todas las demos viven en hosting compartido bajo domains/comerciocity.com/public_html/{slug}/api.
+     * Si la URL es absoluta (http/https), delega en normalize_api_base_url() con hosting_type=shared_hosting.
+     * Si no es absoluta (ej: empresa.local:8000 del seeder local), devuelve el valor crudo con trim/rtrim
+     * pero SIN agregar /public, porque agregarle /public a una URL local rompería artisan serve.
+     *
+     * @param  string|null  $url  URL de API de la demo (puede incluir o no /public)
+     * @return string  URL normalizada, o cadena vacía si está vacía
+     */
+    public function normalize_demo_api_base_url(?string $url): string
+    {
+        $url_trimmed = rtrim(trim((string) $url), '/');
+        if ($url_trimmed === '') {
+            return '';
+        }
+
+        // Intentar normalizar como URL absoluta con hosting compartido
+        $normalized = $this->normalize_api_base_url($url_trimmed, 'shared_hosting');
+        if ($normalized !== '') {
+            return $normalized;
+        }
+
+        // Si normalize_api_base_url() devolvió vacío (URL no es http/https),
+        // es una URL local (ej: empresa.local:8000). Devolverla cruda sin /public.
+        return $url_trimmed;
+    }
+
+    /**
      * Normaliza y valida que la URL sea absoluta (http/https) con host resoluble.
      *
      * @param  string|null  $url

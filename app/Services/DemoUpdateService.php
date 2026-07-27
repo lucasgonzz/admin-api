@@ -8,6 +8,7 @@ use App\Models\DemoUpdate;
 use App\Models\Version;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
+use App\Services\ClientEmpresaApiUrlResolver;
 
 /**
  * Ejecuta el pipeline completo de actualización de una demo en hosting compartido.
@@ -186,6 +187,7 @@ class DemoUpdateService
         $this->append_log('[compile_spa] Checkout ' . $tag . ': ' . $this->truncate_for_log($checkout_output));
 
         // Genera el .env para que el SPA apunte a esta demo específica.
+        $api_url_para_log = $this->demo_api_base_url();
         $env_content  = $this->build_demo_spa_env_content();
         $env_escaped  = str_replace("'", "'\\''", $env_content);
         $env_file     = $spa_build_path . '/.env';
@@ -194,7 +196,7 @@ class DemoUpdateService
             "printf '%s' '{$env_escaped}' > " . escapeshellarg($env_file)
         );
         $this->append_log(
-            '[compile_spa] .env configurado — API: ' . rtrim((string) $this->demo->erp_api_url, '/') . '/public'
+            '[compile_spa] .env configurado — API: ' . $api_url_para_log
             . ' | SPA: ' . $this->demo->erp_spa_url
         );
 
@@ -1139,14 +1141,38 @@ class DemoUpdateService
     }
 
     /**
+     * Devuelve la URL de API de la demo ya normalizada para uso en el SPA y el log.
+     *
+     * Valida que la URL no esté vacía (falla temprano si no está cargada).
+     * Delega en ClientEmpresaApiUrlResolver::normalize_demo_api_base_url() para aplicar
+     * la regla idempotente de /public en shared_hosting.
+     *
+     * @return string  URL de API normalizada
+     * @throws \RuntimeException Si erp_api_url está vacía
+     */
+    private function demo_api_base_url(): string
+    {
+        $url = rtrim(trim((string) $this->demo->erp_api_url), '/');
+        if ($url === '') {
+            throw new \RuntimeException(
+                'La demo "' . $this->demo->slug . '" no tiene configurado el campo erp_api_url. '
+                . 'Cargalo desde el módulo de Demos antes de actualizar.'
+            );
+        }
+
+        $resolver = new ClientEmpresaApiUrlResolver();
+        return $resolver->normalize_demo_api_base_url($url);
+    }
+
+    /**
      * Genera el contenido del .env para el SPA apuntando a la demo.
      *
      * @return string
      */
     private function build_demo_spa_env_content(): string
     {
-        // API URL con /public al final (shared_hosting siempre requiere el subfolder public).
-        $api_url = rtrim((string) $this->demo->erp_api_url, '/') . '/public';
+        // API URL ya normalizada (con /public agregado si corresponde, idempotente).
+        $api_url = $this->demo_api_base_url();
         $spa_url = rtrim((string) $this->demo->erp_spa_url, '/');
 
         $env_vars = [

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Lead;
 use App\Services\ImplementationSettings;
+use App\Services\ClientEmpresaApiUrlResolver;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -37,9 +38,10 @@ class RunDemoSetupService
 
         /**
          * URL de ERP API de la demo asignada al lead.
-         * Se normaliza para evitar doble slash al concatenar path.
+         * Se normaliza con la regla idempotente de /public en shared_hosting.
          */
-        $erp_api_url = rtrim((string) $demo->erp_api_url, '/');
+        $resolver = new ClientEmpresaApiUrlResolver();
+        $erp_api_url = $resolver->normalize_demo_api_base_url($demo->erp_api_url);
         if ($erp_api_url === '') {
             return $this->mark_failed($lead, 'La demo asignada no tiene ERP API URL configurada.');
         }
