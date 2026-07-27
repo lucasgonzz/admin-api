@@ -151,6 +151,10 @@ class Lead extends Model
         'presentation_mail_sent_at'    => 'datetime',
         'demo_setup_last_run_at'       => 'datetime',
         'user_setup_last_run_at'       => 'datetime',
+
+        // Token de ingreso directo a la demo: vencimiento y revocación (grupo 233, prompt 01).
+        'demo_ingreso_token_expira_at'   => 'datetime',
+        'demo_ingreso_token_revocado_at' => 'datetime',
         'followup_mail_sent_at'        => 'datetime',
         'demo_mail_sent_at'            => 'datetime',
 
@@ -657,6 +661,28 @@ class Lead extends Model
     public function setDemoEndTimeAttribute($value)
     {
         $this->attributes['demo_end_time'] = self::nullable_trimmed_string($value);
+    }
+
+    /**
+     * Arma el link completo de ingreso directo a la demo (grupo 233, prompt 01).
+     *
+     * Sale del `erp_spa_url` de la demo asignada al lead, no de ninguna constante:
+     * cada instancia demo tiene su propio subdominio. Devuelve null si todavía no
+     * se emitió token o si el lead no tiene demo asignada.
+     *
+     * @return string|null
+     */
+    public function getDemoIngresoUrlAttribute()
+    {
+        if (empty($this->demo_ingreso_token) || is_null($this->demo)) {
+            return null;
+        }
+        $base = rtrim((string) $this->demo->erp_spa_url, '/');
+        if ($base === '') {
+            return null;
+        }
+
+        return $base . '/demo/ingreso?t=' . $this->demo_ingreso_token;
     }
 
     /**

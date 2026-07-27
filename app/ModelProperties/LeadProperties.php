@@ -256,6 +256,39 @@ class LeadProperties
                 'readonly' => true,
             ],
             [
+                /*
+                 * Token de ingreso directo a la demo (grupo 233, prompt 01). Solo lectura:
+                 * se emite por código en RunDemoSetupService, nunca editable a mano.
+                 */
+                'key' => 'demo_ingreso_token',
+                'text' => 'Token de ingreso',
+                'type' => 'text',
+                'value' => '',
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'not_show_on_table' => true,
+            ],
+            [
+                'key' => 'demo_ingreso_token_expira_at',
+                'text' => 'Vencimiento token de ingreso',
+                'type' => 'date',
+                'value' => null,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'not_show_on_table' => true,
+                'width' => 170,
+            ],
+            [
+                'key' => 'demo_ingreso_token_revocado_at',
+                'text' => 'Token revocado',
+                'type' => 'date',
+                'value' => null,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'not_show_on_table' => true,
+                'width' => 170,
+            ],
+            [
                 'key' => 'personalized_demo_videos',
                 'text' => 'Videos tutoriales personalizados (mail demo)',
                 'type' => 'custom',

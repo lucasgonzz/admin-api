@@ -7,6 +7,8 @@ use App\Services\ImplementationSettings;
 use App\Services\ClientEmpresaApiUrlResolver;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Carbon\Carbon;
 
 /**
  * Service responsable de disparar DemoSetupHelper::run en la ERP API
@@ -52,6 +54,10 @@ class RunDemoSetupService
             'demo_setup_last_run_at' => now(),
             'demo_setup_last_error' => null,
         ]);
+
+        // Emitimos el token de ingreso ANTES de armar el payload: viaja dentro de él y así
+        // el retry de la llamada HTTP de más abajo manda siempre el mismo valor (idempotente).
+        $this->emitir_token_de_ingreso($lead);
 
         $payload = $this->build_payload($lead);
 
@@ -141,6 +147,13 @@ class RunDemoSetupService
             // API key, esto no es un secreto y tiene un default sano (100), así que se manda
             // siempre (sin condición), a diferencia de google_custom_search_api_key más abajo.
             'google_cuota'                 => ImplementationSettings::get_google_cuota_demo(),
+
+            // Token de ingreso directo a la demo (sesión ya iniciada) y su vencimiento.
+            // Se emite una única vez en emitir_token_de_ingreso(), antes de armar este payload.
+            'demo_ingreso_token'            => $lead->demo_ingreso_token,
+            'demo_ingreso_token_expira_at'  => $lead->demo_ingreso_token_expira_at
+                ? $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s')
+                : null,
         ];
 
         // La API key de Google solo viaja si está cargada en admin. Si está vacía no se manda
@@ -152,6 +165,59 @@ class RunDemoSetupService
         }
 
         return $payload;
+    }
+
+    /**
+     * Genera y persiste el token de ingreso directo a la demo para el Lead dado.
+     *
+     * Se llama una sola vez por corrida de run(), antes de armar el payload: como la llamada
+     * HTTP tiene retry automático, generar el token en la respuesta de empresa-api produciría
+     * un valor distinto en cada reintento. Generándolo acá, en admin-api, y mandándolo dentro
+     * del payload, el reintento manda siempre el mismo valor (operación idempotente).
+     *
+     * Asimetría intencional de almacenamiento: acá en admin-api se guarda el token EN CLARO
+     * (demo_ingreso_token), porque el admin necesita poder reconstruir el link para reenviarlo
+     * por WhatsApp. Del lado de empresa-api (prompt 02 de este grupo) solo se guarda el hash.
+     *
+     * El vencimiento sale de demo_date + demo_end_time + gracia_minutos_post. Como
+     * demo_end_time es un string libre de 32 caracteres (puede venir vacío o con formato raro),
+     * el cálculo va envuelto en try/catch con un fallback fijo de 4 horas: la expiración nunca
+     * puede quedar en null, porque es el único control de seguridad real de este link (viaja
+     * por WhatsApp y es inherentemente compartible).
+     *
+     * @param Lead $lead Lead al que se le emite el token
+     *
+     * @return string El token en claro recién generado
+     */
+    protected function emitir_token_de_ingreso(Lead $lead)
+    {
+        // Token de 64 caracteres, no es de un solo uso: vale durante toda la ventana de vigencia.
+        $token = Str::random(64);
+
+        // Intentamos calcular el vencimiento real a partir de la fecha/hora de fin de la demo.
+        $expira_at = null;
+        try {
+            if (!is_null($lead->demo_date) && !empty($lead->demo_end_time)) {
+                $expira_at = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_end_time)
+                    ->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+            }
+        } catch (\Throwable $e) {
+            // demo_end_time vino con formato inválido: seguimos al fallback de abajo, sin excepción visible.
+            $expira_at = null;
+        }
+
+        // Fallback obligatorio: nunca dejar el token sin vencimiento.
+        if (is_null($expira_at)) {
+            $expira_at = Carbon::now()->addHours(4);
+        }
+
+        $lead->update([
+            'demo_ingreso_token' => $token,
+            'demo_ingreso_token_expira_at' => $expira_at,
+            'demo_ingreso_token_revocado_at' => null,
+        ]);
+
+        return $token;
     }
 
     /**
