@@ -102,8 +102,11 @@ class ClientEmpresaApiUrlResolver
      * Normaliza y valida la URL, agregando /public en hosting compartido si corresponde.
      *
      * Realiza trim, rtrim de slash, validación de esquema http/https y host.
-     * En shared_hosting o null: agrega /public si la URL no termina ya en /public.
-     * En vps: devuelve sin modificar (no agrega /public a valores legacy).
+     * Antes de decidir si agrega /public, saca TODAS las repeticiones finales que ya
+     * tuviera (con strip_public_suffix()), para que el resultado sea idempotente aunque
+     * la URL de origen venga sucia de una carga vieja (ej. "/public/public"). Grupo 237.
+     * En shared_hosting o null: agrega un único /public.
+     * En vps: devuelve sin agregarlo (no se asume /public sobre valores legacy).
      *
      * @param  string|null  $url
      * @param  string|null  $hosting_type  'shared_hosting', 'vps' o null (default shared_hosting)
@@ -111,27 +114,71 @@ class ClientEmpresaApiUrlResolver
      */
     public function normalize_api_base_url(?string $url, ?string $hosting_type = null): string
     {
-        // Normalizar y validar usando la lógica base
+        // Normalizar y validar usando la lógica base (trim, rtrim, esquema http/https, host)
         $url = $this->normalize_base_url($url);
         if ($url === '') {
             return '';
         }
+
+        // Sacar todas las repeticiones finales de "/public" antes de decidir si agregar una,
+        // para que sea idempotente sin importar cuántas veces venga repetido el sufijo.
+        $url = self::strip_public_suffix($url);
 
         // Default a shared_hosting si no se especifica
         if ($hosting_type === null) {
             $hosting_type = 'shared_hosting';
         }
 
-        // En shared_hosting: agregar /public si no termina ya en él
+        // En shared_hosting: agregar un único /public
         if ($hosting_type === 'shared_hosting') {
             if (substr($url, -7) !== '/public') {
                 $url .= '/public';
             }
         }
 
-        // En vps: devolver sin modificar
+        // En vps: devolver sin agregarlo
 
         return $url;
+    }
+
+    /**
+     * Saca todas las repeticiones finales de "/public" de una URL (no solo una).
+     *
+     * Mismo criterio que ClientApiController::normalize_api_url(): usa "while" en vez de "if"
+     * porque columnas cargadas a mano en el pasado pueden tener "/public/public" o más.
+     * Método estático para poder reutilizarlo tanto acá (normalize_api_base_url) como desde
+     * comandos artisan de barrido de datos existentes.
+     *
+     * @param  string  $url  URL ya recortada de barra final.
+     * @return string  URL sin sufijos "/public" finales ni barra final.
+     */
+    public static function strip_public_suffix(string $url): string
+    {
+        // Asegurar que no quede barra final antes de comparar el sufijo.
+        $url = rtrim($url, '/');
+
+        // Sacar repeticiones de "/public" mientras el final de la URL matchee.
+        while (substr($url, -7) === '/public') {
+            $url = rtrim(substr($url, 0, -7), '/');
+        }
+
+        return $url;
+    }
+
+    /**
+     * Calcula la URL de API a usar en VUE_APP_API_URL / APP_URL del .env de una instancia,
+     * según el hosting_type del ClientApi destino.
+     *
+     * Unifica la lógica que antes estaba duplicada como método privado "get_api_url_for_env()"
+     * en DeploymentService e InstallationService (grupo 237): ambos llaman a este método para
+     * quedar sincronizados y aprovechar la limpieza idempotente de "/public" repetidos.
+     *
+     * @param  ClientApi  $target_api  ClientApi destino del deploy/instalación.
+     * @return string  URL normalizada, con /public en shared_hosting o sin él en vps.
+     */
+    public function build_api_url_for_env(ClientApi $target_api): string
+    {
+        return $this->normalize_api_base_url($target_api->url, $target_api->hosting_type);
     }
 
     /**

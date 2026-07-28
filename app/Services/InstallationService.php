@@ -1106,22 +1106,16 @@ class InstallationService
 
     /**
      * URL de la API para VUE_APP_API_URL y APP_URL, con /public en shared_hosting.
-     * Misma lógica que DeploymentService::get_api_url_for_env().
+     * Delegado a ClientEmpresaApiUrlResolver::build_api_url_for_env(), único punto que
+     * decide el sufijo "/public" según hosting_type (unificado con DeploymentService,
+     * grupo 237: antes este método estaba duplicado igual en las dos clases).
      *
      * @return string
      */
     private function get_api_url_for_env(): string
     {
-        $api_url      = rtrim((string) $this->target_api->url, '/');
-        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
-
-        if ($hosting_type === 'shared_hosting') {
-            if (substr($api_url, -7) !== '/public') {
-                $api_url .= '/public';
-            }
-        }
-
-        return $api_url;
+        $resolver = new ClientEmpresaApiUrlResolver();
+        return $resolver->build_api_url_for_env($this->target_api);
     }
 
     /**

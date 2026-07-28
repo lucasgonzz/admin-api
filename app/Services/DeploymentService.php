@@ -1056,11 +1056,11 @@ class DeploymentService
      */
     private function get_api_url_for_env()
     {
+        // Delegado a ClientEmpresaApiUrlResolver::build_api_url_for_env(), único punto que
+        // decide el sufijo "/public" según hosting_type (unificado con InstallationService,
+        // grupo 237).
         $resolver = new ClientEmpresaApiUrlResolver();
-        return $resolver->normalize_api_base_url(
-            $this->target_api->url,
-            $this->target_api->hosting_type
-        );
+        return $resolver->build_api_url_for_env($this->target_api);
     }
 
     /**
