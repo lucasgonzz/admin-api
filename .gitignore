@@ -21,3 +21,14 @@ yarn-error.log
 # Carpeta local del loop de Claude Code (hooks compartidos + scratch de prompts en curso).
 # No se versiona: current-prompt.md cambia en cada corrida y no aporta nada al historico del repo.
 .claude/
+
+# Material criptografico de AFIP: NUNCA se versiona (incidente 28/7/2026).
+# La rama vieja `develop` de este repo se llevo, en un `git add -A`, las claves
+# privadas de produccion y testing de public/afip/ a un repositorio publico.
+# `public/afip/logo.jpg` es lo unico de esa carpeta que si esta versionado.
+/public/afip/**/*.key
+/public/afip/**/*.pem
+/public/afip/**/*.crt
+/public/afip/**/*.csr
+/public/afip/wsaa/
+/public/afip/ws/
