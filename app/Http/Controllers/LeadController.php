@@ -33,6 +33,7 @@ use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
 use App\Services\BatchLeadAiRecoveryService;
 use App\Services\LeadPendingReviewService;
+use App\Services\DemoIngresoTokenService;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
 use App\Services\CloserGoogleCalendarEventService;
@@ -823,6 +824,117 @@ class LeadController extends Controller
             'message' => 'No se pudo crear la demo: ' . $lead->demo_setup_last_error,
             'model' => $this->fullModel('lead', $lead->id),
         ], 422);
+    }
+
+    /**
+     * Reemite el token de ingreso directo a la demo del lead (grupo 233, prompt 05): genera un
+     * link nuevo (por ejemplo si se reagendó el turno o el lead lo perdió) sin volver a correr
+     * el setup completo, que tarda y vacía la base. El token anterior queda invalidado
+     * automáticamente (DemoIngresoTokenService::reemitir ya lo resuelve).
+     *
+     * Si el aviso a la instancia falla (por ejemplo, instancia apagada), el servicio revierte el
+     * Lead al token anterior y lanza una excepción: acá se responde 422 sin haber dejado un
+     * token huérfano que la instancia no conoce.
+     *
+     * @param int|string              $id      Identificador del lead.
+     * @param DemoIngresoTokenService $service Servicio inyectado con la lógica de reemisión.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function reemitir_demo_token_json($id, DemoIngresoTokenService $service)
+    {
+        /* Lead objetivo al que se le reemite el token de ingreso. */
+        $lead = Lead::findOrFail($id);
+
+        try {
+            $lead = $service->reemitir($lead);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'No se pudo reemitir el token: ' . $e->getMessage(),
+                'model' => $this->fullModel('lead', $lead->id),
+            ], 422);
+        }
+
+        /* Deja constancia en admin_notifications de quién reemitió el token y cuándo. */
+        $this->registrar_evento_token_demo($lead, 'Token de ingreso a la demo reemitido');
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Revoca el token de ingreso directo a la demo del lead (grupo 233, prompt 05): por ejemplo
+     * si el link se compartió donde no debía. La sesión que ya estaba abierta con ese token se
+     * cae en el siguiente request (middleware de vigencia, prompt 03 de este grupo).
+     *
+     * @param int|string              $id      Identificador del lead.
+     * @param DemoIngresoTokenService $service Servicio inyectado con la lógica de revocación.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function revocar_demo_token_json($id, DemoIngresoTokenService $service)
+    {
+        /* Lead objetivo al que se le revoca el token de ingreso. */
+        $lead = Lead::findOrFail($id);
+
+        try {
+            $lead = $service->revocar($lead);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'No se pudo revocar el token: ' . $e->getMessage(),
+                'model' => $this->fullModel('lead', $lead->id),
+            ], 422);
+        }
+
+        /* Deja constancia en admin_notifications de quién revocó el token y cuándo. */
+        $this->registrar_evento_token_demo($lead, 'Token de ingreso a la demo revocado');
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Registra en `admin_notifications` (columna JSON de un LeadMessage) el evento de
+     * reemisión/revocación manual del token de ingreso a la demo, siguiendo el mismo patrón que
+     * ya usa LeadAiService para "Demo agendada" y "Mail de demo enviado": un elemento
+     * ['evento' => ..., 'admins' => [...]] dentro del array admin_notifications.
+     *
+     * A diferencia de LeadAiService (que acumula el evento sobre el LeadMessage que ya está
+     * procesando en ese flujo y lo flushea al final), acá se crea un LeadMessage dedicado con
+     * is_status_event=true (mismo recurso que usa LeadFollowupService para el pase automático a
+     * "En Pausa"): esta es una acción administrativa manual desde el panel sin un mensaje "en
+     * curso" al que atarla, y reusar el último LeadMessage del hilo podría pisar contenido de
+     * otro flujo (una sugerencia pendiente de Claude, por ejemplo). Con is_status_event=true no
+     * cuenta como actividad real del hilo (no actualiza last_message_at, no genera badge de "sin
+     * leer": scopeForListNotifications lo excluye explícitamente).
+     *
+     * 'admins' => [] porque este evento no dispara ninguna notificación por WhatsApp a otros
+     * admins (a diferencia de "Demo agendada", que sí pagea a los admins suscriptos vía
+     * DemoScheduledWhatsappService); igual que "Mail de demo enviado", que también deja
+     * 'admins' => [] cuando no hay a quién avisar por ese canal.
+     *
+     * @param Lead   $lead   Lead sobre el que se registra el evento.
+     * @param string $evento Etiqueta legible del evento (reemitido/revocado).
+     *
+     * @return void
+     */
+    protected function registrar_evento_token_demo(Lead $lead, string $evento)
+    {
+        /* Admin autenticado que ejecutó la acción manual desde el panel. La ruta exige
+           auth:sanctum, pero se resuelve con guarda por si se llamara fuera de ese contexto. */
+        $admin = Auth::user();
+
+        LeadMessage::create([
+            'lead_id'             => $lead->id,
+            'sender'              => 'sistema',
+            'content'             => $evento . ($admin ? ' por ' . $admin->name . '.' : '.'),
+            'status'              => 'enviado',
+            'is_followup'         => false,
+            /* Evento administrativo, no actividad real del hilo de WhatsApp. */
+            'is_status_event'     => true,
+            'sent_by_admin_id'    => $admin ? $admin->id : null,
+            'admin_notifications' => [
+                ['evento' => $evento, 'admins' => []],
+            ],
+        ]);
     }
 
     /**

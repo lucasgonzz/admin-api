@@ -21,6 +21,23 @@ use Carbon\Carbon;
 class RunDemoSetupService
 {
     /**
+     * Servicio que centraliza el cálculo de vencimiento del token de ingreso a la demo
+     * (extraído de acá a DemoIngresoTokenService en el grupo 233, prompt 05, para que el
+     * setup inicial y la reemisión manual desde el panel usen la misma lógica sin duplicarla).
+     *
+     * @var DemoIngresoTokenService
+     */
+    protected $demo_ingreso_token_service;
+
+    /**
+     * @param DemoIngresoTokenService|null $demo_ingreso_token_service Inyectable para tests.
+     */
+    public function __construct(?DemoIngresoTokenService $demo_ingreso_token_service = null)
+    {
+        $this->demo_ingreso_token_service = $demo_ingreso_token_service ?? new DemoIngresoTokenService();
+    }
+
+    /**
      * Ejecuta la demo remotamente y actualiza los campos de trazabilidad
      * del Lead (demo_setup_status / demo_setup_last_error / demo_setup_last_run_at).
      *
@@ -194,22 +211,10 @@ class RunDemoSetupService
         // Token de 64 caracteres, no es de un solo uso: vale durante toda la ventana de vigencia.
         $token = Str::random(64);
 
-        // Intentamos calcular el vencimiento real a partir de la fecha/hora de fin de la demo.
-        $expira_at = null;
-        try {
-            if (!is_null($lead->demo_date) && !empty($lead->demo_end_time)) {
-                $expira_at = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_end_time)
-                    ->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
-            }
-        } catch (\Throwable $e) {
-            // demo_end_time vino con formato inválido: seguimos al fallback de abajo, sin excepción visible.
-            $expira_at = null;
-        }
-
-        // Fallback obligatorio: nunca dejar el token sin vencimiento.
-        if (is_null($expira_at)) {
-            $expira_at = Carbon::now()->addHours(4);
-        }
+        // Cálculo de vencimiento delegado a DemoIngresoTokenService::calcular_expiracion()
+        // (extraído de acá, grupo 233 prompt 05) para que el setup inicial y la reemisión
+        // manual desde el panel usen exactamente la misma lógica y no se desincronicen.
+        $expira_at = $this->demo_ingreso_token_service->calcular_expiracion($lead);
 
         $lead->update([
             'demo_ingreso_token' => $token,

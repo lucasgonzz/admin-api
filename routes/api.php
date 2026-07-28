@@ -225,6 +225,10 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/toggle-notify-messages', [LeadController::class, 'toggle_notify_messages_json']);
         Route::post('lead/{id}/toggle-pinned', [LeadController::class, 'toggle_pinned_json']);
         Route::post('lead/{id}/toggle-manual-unread', [LeadController::class, 'toggle_manual_unread_json']);
+        // Reemisión/revocación del token de ingreso a la demo (grupo 233, prompt 05): misma
+        // autenticación/permisos que el resto de las acciones del panel del lead (auth:sanctum).
+        Route::post('lead/{id}/demo-token/reemitir', [LeadController::class, 'reemitir_demo_token_json']);
+        Route::post('lead/{id}/demo-token/revocar', [LeadController::class, 'revocar_demo_token_json']);
 
         // Panel del closer: leads filtrados por rol y sección operativa.
         Route::get('closer/panel', [LeadController::class, 'closer_panel_json']);
