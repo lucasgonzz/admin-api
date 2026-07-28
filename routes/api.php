@@ -93,6 +93,8 @@ Route::middleware('claude.task.key')
     ->group(function () {
         Route::get('admins', 'Api\ClaudeTaskIngestController@admins_json');
         Route::post('task', 'Api\ClaudeTaskIngestController@store_json');
+        Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');
+        Route::post('version-items', 'Api\ClaudeVersionItemsIngestController@store_json');
     });
 
 /*
