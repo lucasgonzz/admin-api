@@ -22,8 +22,8 @@ class ClientApiController extends BaseController
         /** ID del Client padre; null si el padre aún no fue persistido. */
         $client_id = $request->input('model_id');
 
-        /** URL base sin barra final. */
-        $url = rtrim((string) $request->input('url', ''), '/');
+        /** URL base normalizada (sin barra final ni sufijos "/public" repetidos). */
+        $url = $this->normalize_api_url($request->input('url', ''));
         /** Path relativo de la API. */
         $path = (string) $request->input('path', '');
 
@@ -51,7 +51,7 @@ class ClientApiController extends BaseController
         $client_api = ClientApi::findOrFail($id);
 
         if ($request->has('url')) {
-            $client_api->url = rtrim((string) $request->input('url'), '/');
+            $client_api->url = $this->normalize_api_url($request->input('url'));
         }
         if ($request->has('path')) {
             $client_api->path = (string) $request->input('path');
@@ -81,5 +81,36 @@ class ClientApiController extends BaseController
         $client_api->delete();
 
         return response()->json(null, 204);
+    }
+
+    /**
+     * Normaliza la URL base de un ClientApi antes de guardarla.
+     *
+     * La columna "client_apis.url" debe quedar SIEMPRE sin el sufijo "/public": ese sufijo es
+     * responsabilidad exclusiva de get_api_url_for_env() (hoy unificado en
+     * ClientEmpresaApiUrlResolver::build_api_url_for_env()), que decide agregarlo o no según el
+     * hosting_type de cada ClientApi. Guardar el sufijo también acá duplicaría esa decisión en dos
+     * capas (grupo 237, mismo problema ya resuelto del lado de empresa-api en el grupo 230).
+     *
+     * Usa un "while" (no un "if") para sacar TODAS las repeticiones finales de "/public", porque
+     * columnas cargadas a mano en el pasado pueden tener "/public/public" o más.
+     *
+     * No aplicar a "spa_url": esa URL nunca lleva "/public" y no hay que asumir nada sobre ella.
+     *
+     * @param  mixed  $url  Valor crudo recibido del request.
+     * @return string  URL normalizada, sin barra final ni sufijos "/public" repetidos.
+     */
+    protected function normalize_api_url($url)
+    {
+        // Cast a string y limpieza de espacios y barra final.
+        $url = trim((string) $url);
+        $url = rtrim($url, '/');
+
+        // Saca todas las repeticiones finales de "/public" (no solo una).
+        while (substr($url, -7) === '/public') {
+            $url = rtrim(substr($url, 0, -7), '/');
+        }
+
+        return $url;
     }
 }
