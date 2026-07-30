@@ -83,8 +83,20 @@ return [
             'VUE_APP_HAS_EXTRA_CONFIG' => env('DEPLOY_SPA_HAS_EXTRA_CONFIG', 'true'),
             'VUE_APP_ATTEMPT_PROP' => env('DEPLOY_SPA_ATTEMPT_PROP', 'doc_number'),
             'VUE_APP_ATTEMPT_TEXT' => env('DEPLOY_SPA_ATTEMPT_TEXT', 'numero de documento'),
+            // Buscador de imágenes de artículos (SearchImage.vue). Sin esta key el buscador queda
+            // muerto en silencio (grupo 267/02 — la key salió del código fuente en el grupo 220).
+            'VUE_APP_GOOGLE_SEARCH_API_KEY' => env('DEPLOY_SPA_GOOGLE_SEARCH_API_KEY', ''),
         ],
         'composer_bin' => env('DEPLOY_COMPOSER_BIN', 'composer'),
+        // Variables fijas del .env de tienda-spa en el VPS (VUE_APP_API_URL / VUE_APP_APP_URL /
+        // VUE_APP_COMMERCE_ID se arman en runtime en EcommerceInstallationService). Ambas keys
+        // salieron del código fuente en el grupo 220 y sin ellas el build de tienda-spa se rompe
+        // o queda con push notifications silenciosamente caído (grupo 267/02). Default '' siempre:
+        // el valor real solo vive en el .env del admin, nunca en el repo.
+        'tienda_build_env' => [
+            'VUE_APP_GOOGLE_MAPS_API_KEY' => env('DEPLOY_TIENDA_GOOGLE_MAPS_API_KEY', ''),
+            'VUE_APP_FIREBASE_API_KEY' => env('DEPLOY_TIENDA_FIREBASE_API_KEY', ''),
+        ],
     ],
 
     // GitHub API: token para acceder al repositorio de documentación de ComercioCity.

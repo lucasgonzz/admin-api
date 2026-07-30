@@ -500,8 +500,10 @@ class EcommerceInstallationService
         // el logo ('tienda' u 'empresa') solo para trazabilidad en logs.
         [$primary_color, $logo_url, $logo_source] = $this->fetch_online_configuration_branding();
 
-        // b) .env del SPA: SOLO las 3 variables que necesita tienda-spa para bootear (sin Google,
-        // sin VARIANT_COLOR y sin NO_PAUSAR — a diferencia de empresa, ver contexto del prompt 584).
+        // b) .env del SPA: las 3 variables base que necesita tienda-spa para bootear más las dos
+        // keys de Google Maps / Firebase que mergea build_spa_env_file_content() desde config
+        // (sin VARIANT_COLOR ni NO_PAUSAR — a diferencia de empresa, ver contexto del prompt 584 y
+        // la actualización del grupo 267/02).
         $api_url_for_env = $this->get_ecommerce_api_url_for_env();
         $spa_url         = trim((string) $this->ecommerce->spa_url);
         if ($spa_url === '') {
@@ -519,6 +521,25 @@ class EcommerceInstallationService
             "printf '%s' '{$env_escaped}' > " . escapeshellarg($env_file)
         );
         $this->log('compile_spa', "Archivo .env del SPA configurado — API: {$api_url_for_env} | SPA: {$spa_url}");
+
+        // Aviso (no bloqueante): si Google Maps y/o Firebase quedaron sin key configurada en el
+        // admin, el build igual sigue (una tienda sin mapa o sin push se despliega igual y frenar
+        // el deploy por esto sería peor que el síntoma), pero queda logueado para que no se pierda
+        // en silencio como pasó el 26/7/2026 (grupo 267/02).
+        $missing_tienda_env_keys = [];
+        if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_GOOGLE_MAPS_API_KEY', '')) === '') {
+            $missing_tienda_env_keys[] = 'VUE_APP_GOOGLE_MAPS_API_KEY (admin .env: DEPLOY_TIENDA_GOOGLE_MAPS_API_KEY)';
+        }
+        if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_FIREBASE_API_KEY', '')) === '') {
+            $missing_tienda_env_keys[] = 'VUE_APP_FIREBASE_API_KEY (admin .env: DEPLOY_TIENDA_FIREBASE_API_KEY)';
+        }
+        if (count($missing_tienda_env_keys) > 0) {
+            $this->log(
+                'compile_spa',
+                'El .env del SPA quedó con estas variables vacías: ' . implode(', ', $missing_tienda_env_keys),
+                'warning'
+            );
+        }
 
         // c) Patchea vue.config.js: themeColor + name dentro del bloque pwa. Idempotente: solo
         // reemplaza el valor de las líneas ya existentes (no agrega ni duplica líneas).
@@ -1858,9 +1879,15 @@ class EcommerceInstallationService
     /**
      * Contenido del .env de tienda-spa en el VPS antes de npm run build.
      *
-     * SOLO estas 3 variables (a diferencia de empresa-spa): VUE_APP_API_URL, VUE_APP_COMMERCE_ID
-     * y VUE_APP_APP_URL. Explícitamente SIN VUE_APP_VARIANT_COLOR, VUE_APP_GOOGLE_* ni
-     * VUE_APP_NO_PAUSAR_TIENDA_ONLINE (ver contexto del prompt 584 y limpiezas del grupo 161).
+     * Base fija de 3 variables (a diferencia de empresa-spa): VUE_APP_API_URL, VUE_APP_COMMERCE_ID
+     * y VUE_APP_APP_URL. Explícitamente SIN VUE_APP_VARIANT_COLOR ni VUE_APP_NO_PAUSAR_TIENDA_ONLINE
+     * (ver contexto del prompt 584 y limpiezas del grupo 161) — esas no las necesita el build.
+     *
+     * SÍ se mergea `services.deploy.tienda_build_env` (VUE_APP_GOOGLE_MAPS_API_KEY y
+     * VUE_APP_FIREBASE_API_KEY): el grupo 220 (26/7/2026) sacó estas dos keys del código fuente y
+     * las pasó a variables de build; desde entonces el build de tienda-spa las necesita para no
+     * romperse (Google Maps, usada en public/index.html) o para no dejar el push muerto en
+     * silencio (Firebase, usada en firebase-messaging-sw.js). Ver grupo 267/02.
      *
      * @param  string  $api_url
      * @param  string  $spa_url
@@ -1873,6 +1900,16 @@ class EcommerceInstallationService
             'VUE_APP_COMMERCE_ID'  => (string) $this->client->user_id,
             'VUE_APP_APP_URL'      => $spa_url,
         ];
+
+        // Mergea las variables fijas de tienda-spa (Google Maps / Firebase) definidas en config,
+        // con el mismo patrón que usa DeploymentService::build_spa_env_file_content() para
+        // empresa-spa: valida que sea array y castea/trimea cada valor antes de asignarlo.
+        $tienda_build_env = config('services.deploy.tienda_build_env', []);
+        if (is_array($tienda_build_env)) {
+            foreach ($tienda_build_env as $env_key => $env_value) {
+                $env_vars[(string) $env_key] = trim((string) $env_value);
+            }
+        }
 
         $lines = [];
         foreach ($env_vars as $env_key => $env_value) {

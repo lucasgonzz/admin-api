@@ -1316,6 +1316,14 @@ class DemoUpdateService
             'VUE_APP_APP_URL'        => $spa_url,
             'VUE_APP_PUSHER_KEY'     => trim((string) config('services.deploy.spa_pusher_key', '')),
             'VUE_APP_PUSHER_CLUSTER' => trim((string) config('services.deploy.spa_pusher_cluster', 'sa1')),
+            // Buscador de imágenes de artículos (SearchImage.vue) necesita esta key desde el grupo
+            // 220 (26/7/2026) o queda muerto en silencio. Solo esta variable puntual — NO se
+            // mergea todo `spa_build_env` acá: la demo hoy compila sin VUE_APP_IDIOM,
+            // VUE_APP_ROUTE_INDEX, etc., y agregárselas de golpe le cambiaría el comportamiento a
+            // la demo, que no es el alcance de este cambio (grupo 267/02).
+            'VUE_APP_GOOGLE_SEARCH_API_KEY' => trim(
+                (string) config('services.deploy.spa_build_env.VUE_APP_GOOGLE_SEARCH_API_KEY', '')
+            ),
         ];
 
         $lines = [];
