@@ -75,6 +75,15 @@ class LeadDemoSettings
     /** Clave: minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai. */
     public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
 
+    /**
+     * Clave: dinámica de demo con la que nacen los leads nuevos (grupo 293, prompt 01).
+     *
+     * Es la setting de "con qué dinámica se estampan los leads nuevos al crearse" — no la lee el
+     * runtime en cada mensaje, solo el hook `creating` del modelo Lead. Ver comentario de la
+     * migración `2026_07_31_140000_add_demo_experiencia_to_leads_table` para el porqué.
+     */
+    public const KEY_EXPERIENCIA_DEFAULT = 'demo_experiencia_default';
+
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
 
@@ -132,8 +141,14 @@ class LeadDemoSettings
     /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
     private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
+    /** Valor por defecto: dinámica de demo para leads nuevos (la que hoy funciona en producción). */
+    private const DEFAULT_EXPERIENCIA = 'actual';
+
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
+
+    /** Valores válidos para la dinámica de demo (`demo_experiencia` / `demo_experiencia_default`). */
+    public const VALID_EXPERIENCIAS = ['actual', 'nueva'];
 
     /** Mínimo permitido para todos los parámetros (minutos). */
     public const MIN_MINUTOS = 0;
@@ -167,6 +182,7 @@ class LeadDemoSettings
             'fin_timeout_minutos'                 => self::get_fin_timeout_minutos(),
             'pendiente_ingreso_horas_timeout'     => self::get_pendiente_ingreso_horas_timeout(),
             'pendiente_terminar_timeout_minutos'  => self::get_pendiente_terminar_timeout_minutos(),
+            'experiencia_default'                 => self::get_experiencia_default(),
         ];
     }
 
@@ -252,6 +268,16 @@ class LeadDemoSettings
         );
 
         AdminSetting::set(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::clamp((int) ($data['pendiente_terminar_timeout_minutos'] ?? self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS)));
+
+        // Dinámica de demo default para leads nuevos: guarda isset obligatoria, el SPA todavía no
+        // manda este campo (lo agrega el prompt 04) y el update() de settings tiene que seguir
+        // funcionando igual en el intervalo entre el deploy del backend y el del front.
+        if (isset($data['experiencia_default'])) {
+            $experiencia = (string) $data['experiencia_default'];
+            if (in_array($experiencia, self::VALID_EXPERIENCIAS, true)) {
+                AdminSetting::set(self::KEY_EXPERIENCIA_DEFAULT, $experiencia);
+            }
+        }
     }
 
     /**
@@ -565,6 +591,26 @@ class LeadDemoSettings
     public static function get_recall_bot_minutos_antes(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_RECALL_BOT_MINUTOS_ANTES, (string) self::DEFAULT_RECALL_BOT_MINUTOS_ANTES));
+    }
+
+    /**
+     * Dinámica de demo con la que se estampan los leads nuevos al crearse.
+     *
+     * Si el valor guardado en `admin_settings` no está en VALID_EXPERIENCIAS (setting corrupta o
+     * nunca configurada), devuelve 'actual': un valor basura acá nunca puede terminar sirviéndole
+     * al agente una variante que no existe.
+     *
+     * @return string
+     */
+    public static function get_experiencia_default(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_EXPERIENCIA_DEFAULT, self::DEFAULT_EXPERIENCIA);
+
+        if (in_array($stored, self::VALID_EXPERIENCIAS, true)) {
+            return $stored;
+        }
+
+        return self::DEFAULT_EXPERIENCIA;
     }
 
     /**

@@ -7,6 +7,7 @@ use App\Models\Concerns\HasUuid;
 use App\Models\Concerns\UsesVirtualTime;
 use App\Models\LeadAdminNotification;
 use App\Models\LeadPipelineStatus;
+use App\Services\LeadDemoSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
 
@@ -61,6 +62,15 @@ class Lead extends Model
         'closer_activo',
     ];
 
+    /** Dinámica de demo vigente en producción: Mail 1 con credenciales y videos por link. */
+    public const EXPERIENCIA_ACTUAL = 'actual';
+
+    /** Dinámica nueva en construcción: página inmersiva, formulario, panel lateral y tour. */
+    public const EXPERIENCIA_NUEVA = 'nueva';
+
+    /** Valores válidos de la columna `demo_experiencia`. */
+    public const EXPERIENCIAS = [self::EXPERIENCIA_ACTUAL, self::EXPERIENCIA_NUEVA];
+
     /**
      * Slugs válidos del pipeline (catálogo en BD o defaults).
      *
@@ -91,6 +101,14 @@ class Lead extends Model
             }
             if (empty($lead->address_3)) {
                 $lead->address_3 = 'Sucursal 3';
+            }
+
+            // Dinámica de demo que le toca a este lead: se estampa al nacer, con el valor que
+            // tenga la setting global en ese momento, y no vuelve a cambiar solo. Ver el
+            // comentario de la migración: leer la setting en runtime le cambiaría el guion a
+            // leads que ya tienen demo agendada con la dinámica anterior.
+            if (empty($lead->demo_experiencia)) {
+                $lead->demo_experiencia = LeadDemoSettings::get_experiencia_default();
             }
         });
 
@@ -771,5 +789,35 @@ class Lead extends Model
         $trimmed = trim((string) $raw);
 
         return $trimmed === '' ? null : $trimmed;
+    }
+
+    /**
+     * Dinámica de demo efectiva de este lead (grupo 293, prompt 01).
+     *
+     * Devuelve el valor de la columna `demo_experiencia` si es uno de los válidos
+     * (self::EXPERIENCIAS); en cualquier otro caso (null, string vacío, valor desconocido)
+     * devuelve self::EXPERIENCIA_ACTUAL. Este fallback es la regla de seguridad del interruptor:
+     * ante cualquier duda, el lead recibe la dinámica que hoy funciona en producción, nunca una
+     * a medio construir.
+     *
+     * @return string
+     */
+    public function demo_experiencia_efectiva(): string
+    {
+        if (in_array($this->demo_experiencia, self::EXPERIENCIAS, true)) {
+            return $this->demo_experiencia;
+        }
+
+        return self::EXPERIENCIA_ACTUAL;
+    }
+
+    /**
+     * Azúcar sobre demo_experiencia_efectiva(): true si a este lead le toca la dinámica nueva.
+     *
+     * @return bool
+     */
+    public function usa_experiencia_demo_nueva(): bool
+    {
+        return $this->demo_experiencia_efectiva() === self::EXPERIENCIA_NUEVA;
     }
 }
