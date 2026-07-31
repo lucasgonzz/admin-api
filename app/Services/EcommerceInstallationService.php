@@ -2365,6 +2365,7 @@ class EcommerceInstallationService
             'VUE_APP_API_URL'      => $api_url,
             'VUE_APP_COMMERCE_ID'  => (string) $this->client->user_id,
             'VUE_APP_APP_URL'      => $spa_url,
+            'VUE_APP_ICONS_VERSION' => date('YmdHis'),
         ];
 
         // Mergea las variables fijas de tienda-spa (Google Maps / Firebase) definidas en config,
