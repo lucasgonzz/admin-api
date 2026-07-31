@@ -71,6 +71,15 @@ class Lead extends Model
     /** Valores válidos de la columna `demo_experiencia`. */
     public const EXPERIENCIAS = [self::EXPERIENCIA_ACTUAL, self::EXPERIENCIA_NUEVA];
 
+    /** Perfil "dueño" del lead (§3.17): versión por defecto de la página inmersiva. */
+    public const PERFIL_DUENO = 'dueno';
+
+    /** Perfil "campeón" del lead (§3.17): versión alternativa de la página inmersiva. */
+    public const PERFIL_CAMPEON = 'campeon';
+
+    /** Valores válidos de la columna `perfil_lead` (grupo 300, prompt 01). */
+    public const PERFILES = [self::PERFIL_DUENO, self::PERFIL_CAMPEON];
+
     /**
      * Slugs válidos del pipeline (catálogo en BD o defaults).
      *
@@ -301,6 +310,20 @@ class Lead extends Model
         'closer_alert_accepted_at'      => 'datetime',
         'closer_delay_message_sent_at'  => 'datetime',
         'closer_no_show_rescheduled_at' => 'datetime',
+
+        // Seis respuestas del formulario de demo (grupo 300, prompt 01) que no tenían columna
+        // previa. Las otras tres respuestas del mismo formulario reusan columnas ya casteadas
+        // arriba (use_price_lists, use_deposits, omitir_cuentas_corrientes) — ver
+        // App\Services\LeadDemoFormMapper para la traducción completa.
+        'costos_en_dolares'                  => 'boolean',
+        'descuentos_por_metodo_pago'         => 'boolean',
+        'usa_cuentas_corrientes_proveedores' => 'boolean',
+        'usa_presupuestos'                   => 'boolean',
+        'registra_compras'                   => 'boolean',
+        'usa_ecommerce'                      => 'boolean',
+
+        // Timestamp de envío del formulario de demo: null = todavía no lo completó (grupo 300, prompt 01).
+        'demo_form_completado_at'            => 'datetime',
     ];
 
     /**
@@ -819,5 +842,25 @@ class Lead extends Model
     public function usa_experiencia_demo_nueva(): bool
     {
         return $this->demo_experiencia_efectiva() === self::EXPERIENCIA_NUEVA;
+    }
+
+    /**
+     * Perfil efectivo de este lead para decidir qué versión del scroll de la página inmersiva ve
+     * (grupo 300, prompt 01 — `contexto/demo_experiencia.md` §3.17).
+     *
+     * Devuelve el valor de la columna `perfil_lead` si es uno de los válidos (self::PERFILES); en
+     * cualquier otro caso (null, string vacío, valor desconocido) devuelve self::PERFIL_DUENO.
+     * Mismo criterio de fallback que `demo_experiencia_efectiva()`: ante la duda, la versión
+     * dueño, porque el costo de errarle es asimétrico (§3.17).
+     *
+     * @return string
+     */
+    public function perfil_lead_efectivo(): string
+    {
+        if (in_array($this->perfil_lead, self::PERFILES, true)) {
+            return $this->perfil_lead;
+        }
+
+        return self::PERFIL_DUENO;
     }
 }
