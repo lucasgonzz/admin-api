@@ -187,7 +187,7 @@ TXT;
             ],
         ];
 
-        $text = $this->run_with_tools($system_payload, $user_content, 1000, $http, $model);
+        $text = $this->run_with_tools($system_payload, $user_content, 1000, $http, $model, $lead);
 
         /* Log de diagnóstico: respuesta cruda de Claude en la primera llamada. */
         Log::debug('LeadAiService [PRIMERA LLAMADA] - respuesta Claude', [
@@ -503,7 +503,7 @@ TXT;
             ],
         ];
 
-        $text = $this->run_with_tools($system_payload, $user_content, 3000, $http, $model);
+        $text = $this->run_with_tools($system_payload, $user_content, 3000, $http, $model, $lead);
 
         /* Log de diagnóstico: respuesta cruda de Claude en la segunda llamada. */
         Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - respuesta Claude', [
@@ -3951,9 +3951,15 @@ TXT;
      *
      * @param string               $tool_name  Nombre de la tool invocada por Claude.
      * @param array<string, mixed> $tool_input Parámetros de entrada de la tool.
+     * @param Lead|null            $lead       Lead en curso, para resolver la variante de la
+     *                                         dinámica de demo (grupo 293). Se pasa explícito
+     *                                         por parámetro (NO como propiedad de instancia):
+     *                                         el servicio se resuelve del contenedor y una
+     *                                         propiedad podría sobrevivir entre leads distintos
+     *                                         dentro de un mismo worker de cola.
      * @return string Contenido del recurso, o mensaje de error si el recurso es desconocido.
      */
-    private function execute_tool(string $tool_name, array $tool_input): string
+    private function execute_tool(string $tool_name, array $tool_input, ?Lead $lead = null): string
     {
         if ($tool_name !== 'get_protocolo_recurso') {
             return 'Error: tool desconocida.';
@@ -3966,7 +3972,9 @@ TXT;
             return 'Error: recurso desconocido. Recursos válidos: ' . implode(', ', self::PROTOCOLO_RECURSOS);
         }
 
-        $contenido = app(WhatsappProtocolService::class)->getRecurso($nombre);
+        /* Dinámica de demo estampada en el lead (grupo 293). Sin lead en alcance, la vigente. */
+        $variante  = $lead ? $lead->demo_experiencia_efectiva() : Lead::EXPERIENCIA_ACTUAL;
+        $contenido = app(WhatsappProtocolService::class)->getRecurso($nombre, $variante);
 
         if ($contenido === '') {
             return "El recurso '{$nombre}' no está disponible todavía. Intentá responder con la información que tenés o marcá requiere_verificacion: true.";
@@ -3987,6 +3995,12 @@ TXT;
      * @param int                              $max_tokens     Límite de tokens de la respuesta.
      * @param PendingRequest                   $http           Cliente HTTP configurado.
      * @param string                           $model          Modelo de Claude a usar.
+     * @param Lead|null                        $lead           Lead en curso (grupo 293), threading
+     *                                                          explícito hasta execute_tool() para
+     *                                                          resolver la variante de protocolo
+     *                                                          que le corresponde. Ver docblock de
+     *                                                          execute_tool() sobre por qué NO se
+     *                                                          guarda como propiedad de instancia.
      *
      * @throws \RuntimeException Si falla HTTP o se superan las iteraciones sin respuesta final.
      *
@@ -3997,7 +4011,8 @@ TXT;
         string $user_content,
         int $max_tokens,
         PendingRequest $http,
-        string $model
+        string $model,
+        ?Lead $lead = null
     ): string {
         /* Historial de mensajes del loop: arranca con el mensaje inicial del usuario. */
         $messages   = [['role' => 'user', 'content' => $user_content]];
@@ -4057,13 +4072,18 @@ TXT;
                     $tool_input = isset($block['input']) && is_array($block['input']) ? $block['input'] : [];
 
                     $recurso_nombre = isset($tool_input['nombre']) ? $tool_input['nombre'] : '?';
+
+                    /* Variante servida (grupo 293): se loguea para poder verificar desde
+                     * producción qué variante recibió cada lead, sin tocar la base. */
+                    $variante_log = $lead ? $lead->demo_experiencia_efectiva() : Lead::EXPERIENCIA_ACTUAL;
                     Log::debug('LeadAiService: tool_use', [
-                        'tool'    => $tool_name,
-                        'recurso' => $recurso_nombre,
-                        'iter'    => $iterations,
+                        'tool'     => $tool_name,
+                        'recurso'  => $recurso_nombre,
+                        'iter'     => $iterations,
+                        'variante' => $variante_log,
                     ]);
 
-                    $tool_result  = $this->execute_tool($tool_name, $tool_input);
+                    $tool_result  = $this->execute_tool($tool_name, $tool_input, $lead);
                     $tool_results[] = [
                         'type'        => 'tool_result',
                         'tool_use_id' => $tool_id,

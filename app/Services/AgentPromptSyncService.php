@@ -115,6 +115,34 @@ class AgentPromptSyncService
             'target'    => self::TARGET_SYNCED_FILE,
             'label'     => 'Recurso: referidos',
         ],
+        // Variantes v2 (dinámica de demo nueva, grupo 293): copias de los recursos de arriba
+        // que se editan sin miedo porque solo las recibe un lead con demo_experiencia = 'nueva'.
+        // Hoy son copias exactas de las vigentes; divergen recién cuando se escriba el contenido
+        // nuevo. Ver WhatsappProtocolService::getRecurso() para la lógica de resolución/fallback.
+        [
+            'key'       => 'whatsapp_recurso_v2_calificacion',
+            'repo_path' => 'agentes/lead/recursos/v2/calificacion.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso (dinámica nueva): calificación de leads',
+        ],
+        [
+            'key'       => 'whatsapp_recurso_v2_demo_agenda',
+            'repo_path' => 'agentes/lead/recursos/v2/demo_agenda.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso (dinámica nueva): agenda de demo',
+        ],
+        [
+            'key'       => 'whatsapp_recurso_v2_demo_ciclo',
+            'repo_path' => 'agentes/lead/recursos/v2/demo_ciclo.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso (dinámica nueva): ciclo de demo',
+        ],
+        [
+            'key'       => 'whatsapp_recurso_v2_post_demo',
+            'repo_path' => 'agentes/lead/recursos/v2/post_demo.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso (dinámica nueva): post demo',
+        ],
         [
             'key'       => 'implementacion_protocolo',
             'repo_path' => 'prompts_agentes/implementacion_protocolo.md',
