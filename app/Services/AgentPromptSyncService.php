@@ -149,6 +149,15 @@ class AgentPromptSyncService
             'target'    => self::TARGET_SYNCED_FILE,
             'label'     => 'Protocolo de implementación',
         ],
+        // Catálogo de estructura de la demo (grupo 300, prompt 02): qué clips/videos/piezas de
+        // scroll existen, su orden y tipo. Las URLs de cada slot NO viven acá — viven en la tabla
+        // demo_media, editables desde el admin. Ver App\Services\DemoCatalogoService.
+        [
+            'key'       => 'demo_catalogo_json',
+            'repo_path' => 'contexto/demo_catalogo.json',
+            'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Catálogo de la demo (estructura)',
+        ],
     ];
 
     /**

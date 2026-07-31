@@ -412,6 +412,11 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'show']);
         Route::put('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'update']);
 
+        // Multimedia editable de la demo (grupo 300, prompt 02): un GET pinta toda la pantalla
+        // (slots del catálogo sincronizado + URLs cargadas) y un PUT guarda/borra la URL de un slot.
+        Route::get('demo-media', [\App\Http\Controllers\Api\DemoMediaController::class, 'index_json']);
+        Route::put('demo-media', [\App\Http\Controllers\Api\DemoMediaController::class, 'update_json']);
+
         // Implementaciones: listado, detalle y avance manual de etapa.
         Route::get('implementation', [\App\Http\Controllers\Api\ImplementationController::class, 'index']);
         // Conteo de implementaciones listas para avanzar (badge del Nav); debe ir antes del wildcard {implementation}.
