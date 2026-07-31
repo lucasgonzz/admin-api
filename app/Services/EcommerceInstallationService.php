@@ -1259,6 +1259,242 @@ class EcommerceInstallationService
             );
         }
         $this->log('finalize', 'tienda-api finalizada y lista para bootear', 'success');
+
+        // Ultimo paso del deploy, a proposito: invalidar el cache de vista previa de Meta solo
+        // tiene sentido cuando la tienda ya quedo publicada y respondiendo con el HTML nuevo.
+        $this->invalidate_meta_preview_cache();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // META PREVIEW CACHE (invalidación de vista previa de Open Graph, grupo 292)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Invalida el cache de vista previa (Open Graph) de Meta para la URL publica de la tienda.
+     *
+     * POR QUE EXISTE ESTE PASO (no borrar pensando que es ruido): el crawler de Meta -- el mismo
+     * que usan WhatsApp e Instagram -- guarda lo que scrapeo de cada URL y no vuelve a pedirla
+     * durante ~30 dias. Sin este paso, despues de recompilar el ecommerce el cliente sigue viendo
+     * la vista previa vieja al compartir su link, porque WhatsApp ni siquiera pide el HTML nuevo:
+     * el arreglo de titulo/imagen/descripcion parece no haber funcionado. La alternativa manual es
+     * pasar cada dominio por el Sharing Debugger de Facebook y apretar "Scrape Again", que con 40
+     * clientes y cada actualizacion no escala.
+     *
+     * FAIL-SOFT ABSOLUTO: este metodo no puede hacer fallar un deploy bajo ninguna circunstancia.
+     * Una tienda desplegada bien con el cache de Meta sin invalidar es un problema menor; un deploy
+     * abortado por un servicio externo caido es un problema grave.
+     *
+     * @return void
+     */
+    protected function invalidate_meta_preview_cache(): void
+    {
+        try {
+            /** Interruptor general: sin esto no se hace ninguna llamada externa. */
+            $enabled = (bool) config('services.deploy_tienda.meta_scrape_enabled', false);
+            /** App Access Token de Meta. Nunca se loguea ni se pone en una URL. */
+            $token = trim((string) config('services.deploy_tienda.meta_scrape_token', ''));
+
+            if (! $enabled || $token === '') {
+                $this->log(
+                    'finalize',
+                    'Invalidacion del cache de vista previa de Meta desactivada '
+                    . '(meta_scrape_enabled apagado o sin token configurado); se omite.'
+                );
+
+                return;
+            }
+
+            /** URL publica de la tienda, normalizada (con esquema y sin barra final). */
+            $spa_url = $this->normalize_url_for_meta_scrape((string) $this->ecommerce->spa_url);
+
+            if ($spa_url === '') {
+                $this->log(
+                    'finalize',
+                    'No se invalida el cache de Meta: la tienda no tiene spa_url configurada.',
+                    'warning'
+                );
+
+                return;
+            }
+
+            // Meta trata https://ejemplo.com y https://www.ejemplo.com como URLs DISTINTAS, con
+            // caches separados. Si el cliente comparte el link con www y nosotros invalidamos sin
+            // www, no sirvio de nada. Se invalidan las dos variantes: una llamada cada una, cada
+            // una con su propio try/catch y su propio log.
+            $variants = $this->meta_scrape_url_variants($spa_url);
+            foreach ($variants as $variant) {
+                $this->scrape_meta_url($variant, $token);
+            }
+        } catch (\Throwable $e) {
+            // Red de seguridad final: ni un error de configuracion puede tumbar el deploy.
+            $this->log(
+                'finalize',
+                'No se pudo invalidar el cache de vista previa de Meta ('
+                . $this->sanitize_secrets_for_log($e->getMessage()) . ')',
+                'warning'
+            );
+        }
+    }
+
+    /**
+     * Pide a la Graph API de Meta que vuelva a scrapear una URL concreta, invalidando su cache de
+     * vista previa. Una llamada por URL; nunca lanza.
+     *
+     * @param  string  $url    URL publica ya normalizada a invalidar.
+     * @param  string  $token  App Access Token de Meta. NO se loguea nunca.
+     * @return void
+     */
+    protected function scrape_meta_url(string $url, string $token): void
+    {
+        /** Endpoint fijo de la Graph API. Sin query string: los parametros van en el cuerpo. */
+        $endpoint = 'https://graph.facebook.com/v19.0/';
+
+        try {
+            // 🔴 El access_token va SIEMPRE en el cuerpo del POST (asForm), NUNCA en el query
+            // string del endpoint. Motivo (bug real del grupo 270/06, corregido por el 292): ante
+            // una excepcion de transporte -- DNS caido, red bloqueada, timeout -- Guzzle copia la
+            // URI COMPLETA dentro de $e->getMessage(), asi que un token en la URL termina en claro
+            // en el log de la instalacion, persistido en ecommerce_deployment_logs. Que la Graph
+            // API tambien acepte el token por query string no lo hace aceptable aca.
+            // Timeout corto y SIN reintentos: si Meta no contesta rapido, no vale la pena hacer
+            // esperar al deploy por un paso opcional.
+            $response = Http::asForm()
+                ->timeout(5)
+                ->post($endpoint, [
+                    'id'           => $url,
+                    'scrape'       => 'true',
+                    'access_token' => $token,
+                ]);
+        } catch (\Throwable $e) {
+            $this->log(
+                'finalize',
+                'No se pudo invalidar el cache de Meta para ' . $url . ' ('
+                . $this->sanitize_secrets_for_log($this->truncate_for_log($e->getMessage())) . ')',
+                'warning'
+            );
+
+            return;
+        }
+
+        if (! $response->successful()) {
+            $this->log(
+                'finalize',
+                'Meta rechazo la invalidacion de ' . $url . ' (HTTP ' . $response->status() . '): '
+                . $this->sanitize_secrets_for_log($this->truncate_for_log($response->body())),
+                'warning'
+            );
+
+            return;
+        }
+
+        $this->log('finalize', 'Cache de vista previa de Meta invalidado para ' . $url, 'success');
+    }
+
+    /**
+     * Quita de un texto cualquier aparicion de un secreto en formato query string antes de
+     * loguearlo. Segunda barrera: la primera es no poner nunca el token en una URL.
+     *
+     * Se aplica a todo texto de origen externo que se loguee en el flujo de invalidacion de Meta
+     * (mensajes de excepcion de transporte y cuerpos de respuesta de la Graph API).
+     *
+     * @param  string  $text
+     * @return string  El mismo texto con los valores de access_token enmascarados.
+     */
+    protected function sanitize_secrets_for_log(string $text): string
+    {
+        /** Enmascara access_token=<lo que sea> hasta el proximo separador de query o espacio. */
+        $sanitized = preg_replace('/access_token=[^&\s"\'\\\\]*/i', 'access_token=***', $text);
+
+        // preg_replace devuelve null si el patron falla; en ese caso se prefiere no loguear el
+        // texto original antes que arriesgarse a filtrar algo.
+        if (! is_string($sanitized)) {
+            return '[texto omitido: no se pudo sanear]';
+        }
+
+        return $sanitized;
+    }
+
+    /**
+     * Normaliza la spa_url del ecommerce para usarla como identificador de URL ante Meta.
+     *
+     * - Recorta espacios y la barra final (Meta cachea por URL exacta).
+     * - Si no trae esquema, le antepone https:// (con strpos, NO con str_starts_with: PHP 7.4).
+     * - Devuelve cadena vacia si no queda nada utilizable.
+     *
+     * @param  string  $spa_url
+     * @return string
+     */
+    protected function normalize_url_for_meta_scrape(string $spa_url): string
+    {
+        $url = trim($spa_url);
+        if ($url === '') {
+            return '';
+        }
+
+        $url = rtrim($url, '/');
+        if ($url === '') {
+            return '';
+        }
+
+        // strpos(...) === 0 en lugar de str_starts_with(): esa funcion es de PHP 8.
+        if (strpos($url, 'http://') !== 0 && strpos($url, 'https://') !== 0) {
+            $url = 'https://' . $url;
+        }
+
+        return $url;
+    }
+
+    /**
+     * Devuelve las variantes de una URL que hay que invalidar: la propia, y su par con o sin www.
+     *
+     * Meta cachea https://ejemplo.com y https://www.ejemplo.com por separado, asi que invalidar
+     * una sola deja al cliente viendo la vista previa vieja si comparte la otra.
+     *
+     * @param  string  $url  URL ya normalizada (con esquema, sin barra final).
+     * @return array<int, string>  Una o dos URLs, sin repetidos.
+     */
+    protected function meta_scrape_url_variants(string $url): array
+    {
+        /** Siempre se invalida al menos la URL tal como quedo configurada. */
+        $variants = [$url];
+
+        /** Posicion del separador de esquema, para partir esquema / autoridad / resto. */
+        $scheme_end = strpos($url, '://');
+        if ($scheme_end === false) {
+            return $variants;
+        }
+
+        $scheme = substr($url, 0, $scheme_end + 3);
+        $rest   = substr($url, $scheme_end + 3);
+
+        /** Primer / despues del host: separa la autoridad del path. */
+        $slash_position = strpos($rest, '/');
+        if ($slash_position === false) {
+            $authority = $rest;
+            $path      = '';
+        } else {
+            $authority = substr($rest, 0, $slash_position);
+            $path      = substr($rest, $slash_position);
+        }
+
+        if ($authority === '') {
+            return $variants;
+        }
+
+        // Si ya tiene www, la variante es sin www; si no, la variante es con www.
+        if (strpos($authority, 'www.') === 0) {
+            $other_authority = substr($authority, 4);
+        } else {
+            $other_authority = 'www.' . $authority;
+        }
+
+        if ($other_authority === '' || $other_authority === $authority) {
+            return $variants;
+        }
+
+        $variants[] = $scheme . $other_authority . $path;
+
+        return $variants;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

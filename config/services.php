@@ -188,6 +188,16 @@ return [
         // abortar, y a partir de qué antigüedad se considera huérfano un lock de una corrida
         // muerta (grupo 208 — EcommerceInstallationService::acquire_build_lock()).
         'build_lock_timeout' => env('DEPLOY_TIENDA_BUILD_LOCK_TIMEOUT', 1800),
+        // Invalidacion del cache de vista previa (Open Graph) de Meta al terminar el deploy
+        // (grupo 292, correctivo del 270/06). Apagado por defecto: si esta en false, o si el
+        // token viene vacio, no se hace ninguna llamada externa y el deploy sigue igual.
+        'meta_scrape_enabled' => (bool) env('META_SCRAPE_ENABLED', false),
+        // App Access Token de una app de Meta, con el formato {app_id} + barra vertical + {app_secret}.
+        // Se obtiene en developers.facebook.com > la app > Herramientas > Explorador de tokens de acceso.
+        // Sin este valor la invalidacion NO se hace: se loguea que esta desactivada y se sigue.
+        // 🔴 Este token no se loguea nunca, ni entero ni parcial, y no viaja jamas por query string:
+        // Guzzle copia la URI completa dentro del mensaje de sus excepciones de transporte.
+        'meta_scrape_token' => env('META_SCRAPE_TOKEN', ''),
     ],
 
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).
