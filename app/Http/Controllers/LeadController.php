@@ -403,19 +403,11 @@ class LeadController extends Controller
         // Query base liviana: relaciones del lead + solo mensajes de notificación.
         $query = Lead::query()->withAllForList();
 
-        // Orden: fijados primero (pinned_at DESC NULLS LAST), luego el criterio activo.
-        // CASE WHEN garantiza compatibilidad con MySQL (no soporta NULLS LAST directamente).
-        $query->orderByRaw('CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
-        $query->orderByRaw('pinned_at DESC');
-
-        // Orden secundario configurable desde admin-spa: último mensaje (default UI) o creación del lead.
+        // Orden de la bandeja (atención, fijados, desempate): delegado a Lead::scopeApplyBandejaOrder()
+        // (prompt 286/02) para compartir el mismo criterio con SearchController — antes estaba
+        // duplicado en los dos y ya había divergido. Default sigue siendo 'last_message'.
         $sort_by = (string) $request->input('sort_by', 'last_message');
-        if ($sort_by === 'last_message') {
-            // COALESCE evita que leads sin mensajes queden al final del listado.
-            $query->orderByRaw('COALESCE(last_message_at, created_at) DESC');
-        } else {
-            $query->orderByDesc('created_at');
-        }
+        $query->applyBandejaOrder($sort_by);
 
         // Filtro por estado comercial. Acepta un status único o una lista separada por comas
         // (ej. "demo_agendada,demo_en_curso") para traer leads en varios estados del pipeline a la vez.

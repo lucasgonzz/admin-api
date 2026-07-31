@@ -260,16 +260,14 @@ class SearchController
         if ($model_name === Lead::class) {
             $models = $models->withAllForList();
 
-            /** Mismo orden que index_json de leads: fijados primero y criterio activo del SPA. */
-            $models->orderByRaw('CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
-            $models->orderByRaw('pinned_at DESC');
-
+            /**
+             * Orden de la bandeja delegado a Lead::scopeApplyBandejaOrder() (prompt 286/02): mismo
+             * criterio que LeadController::index_json(), evita que los dos listados diverjan. Tiene
+             * que ir DESPUÉS de withAllForList() (línea de arriba) — el modo 'atencion' depende de
+             * los alias row_warning/failed_send_count que agrega ese scope.
+             */
             $sort_by = (string) $request->input('sort_by', 'last_message');
-            if ($sort_by === 'last_message') {
-                $models->orderByRaw('COALESCE(last_message_at, created_at) DESC');
-            } else {
-                $models->orderByDesc('created_at');
-            }
+            $models->applyBandejaOrder($sort_by);
         } elseif (method_exists($model_name, 'scopeWithAll')) {
             $models = $models->withAll()
                 ->orderBy('created_at', 'DESC');

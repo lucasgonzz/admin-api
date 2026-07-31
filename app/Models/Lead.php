@@ -468,6 +468,76 @@ class Lead extends Model
     }
 
     /**
+     * Aplica el orden de la bandeja de leads (selector del header en admin-spa: `last_message`,
+     * `created_at`, `atencion` — prompt 286/02). Extraído a un scope único porque el criterio de
+     * orden estaba **duplicado** en `LeadController::index_json()` y en `SearchController` (el
+     * listado con filtros de columna), y ya había divergido por accidente al tocar uno solo.
+     *
+     * ⚠️ DEPENDENCIA OBLIGATORIA: en modo `atencion` este scope referencia dentro de un `CASE` del
+     * `ORDER BY` los alias `row_warning` y `failed_send_count`, que NO son columnas reales de
+     * `leads` sino que los agrega el `SELECT` de `scopeWithUnreadLeadMessagesCount()` (MySQL permite
+     * referenciar alias del select list en el ORDER BY). Por eso este scope solo funciona sobre un
+     * query que YA pasó por `withAllForList()` o `withUnreadLeadMessagesCount()` antes de llamarlo.
+     * Aplicado sobre un `Lead::query()` pelado, en modo `atencion` MySQL tira "Unknown column".
+     * No reordenar estas líneas asumiendo que son columnas normales.
+     *
+     * Prioridad del orden, de mayor a menor:
+     * 1. Solo en modo `atencion`: primero los leads que necesitan atención humana, en el MISMO
+     *    criterio que pinta de color la grilla (`Leads.vue` / `table/body/Index.vue`) — rojo
+     *    (`pendiente_revision_at` no nulo o `failed_send_count > 0`) antes que amarillo
+     *    (`row_warning`), y recién después el resto. Rojo va primero porque el amarillo tiene
+     *    respaldo automático (`AutoSendLeadAiSuggestionJob` termina enviando la sugerencia si nadie
+     *    la confirma) y el rojo no: un envío fallido se queda ahí hasta que un humano lo vea.
+     * 2. Siempre (en los tres modos): fijados primero. Dentro de cada bloque de atención (rojo,
+     *    amarillo, resto) se sigue respetando "fijados primero" — el pin ya no le gana a la
+     *    atención, pero sigue existiendo un escalón más abajo.
+     * 3. Desempate final: `created_at DESC` en modo `created_at`; `COALESCE(last_message_at,
+     *    created_at) DESC` en los otros dos modos (incluido `atencion`, que no es un criterio
+     *    completo de orden sino un prefijo que necesita el desempate de siempre).
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     * @param string $sort_by Modo pedido por el header del SPA: 'last_message' | 'created_at' | 'atencion'.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeApplyBandejaOrder($query, $sort_by)
+    {
+        // Normalización: cualquier valor fuera de la lista blanca (incluido vacío/null) cae al
+        // default histórico de la bandeja, 'last_message'.
+        $valid_sort_modes = ['last_message', 'created_at', 'atencion'];
+        if (!in_array($sort_by, $valid_sort_modes, true)) {
+            $sort_by = 'last_message';
+        }
+
+        // Prefijo de atención: solo en modo 'atencion', y va ANTES que el criterio de fijados
+        // (por eso un lead con atención pendiente sube incluso por encima de los pineados).
+        if ($sort_by === 'atencion') {
+            $query->orderByRaw('
+                CASE
+                    WHEN pendiente_revision_at IS NOT NULL OR failed_send_count > 0 THEN 0
+                    WHEN row_warning = 1 THEN 1
+                    ELSE 2
+                END ASC
+            ');
+        }
+
+        // Fijados primero (pinned_at DESC NULLS LAST). CASE WHEN por compatibilidad con MySQL,
+        // que no soporta NULLS LAST directamente. Se mantiene igual en los tres modos.
+        $query->orderByRaw('CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END ASC');
+        $query->orderByRaw('pinned_at DESC');
+
+        // Desempate final: creación del lead en modo 'created_at'; último mensaje (con COALESCE
+        // para no dejar al final a los leads sin mensajes) en 'last_message' y en 'atencion'.
+        if ($sort_by === 'created_at') {
+            $query->orderByDesc('created_at');
+        } else {
+            $query->orderByRaw('COALESCE(last_message_at, created_at) DESC');
+        }
+
+        return $query;
+    }
+
+    /**
      * Empresa-api (Client registrado en admin-api) donde se corre la demo.
      */
     public function target_client()
