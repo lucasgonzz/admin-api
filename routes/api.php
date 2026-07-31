@@ -230,6 +230,10 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/demo-token/reemitir', [LeadController::class, 'reemitir_demo_token_json']);
         Route::post('lead/{id}/demo-token/revocar', [LeadController::class, 'revocar_demo_token_json']);
 
+        // Override manual por lead de la dinámica de demo (grupo 293, prompt 03): permite pilotear
+        // la experiencia nueva con leads elegidos a mano antes de abrirla a todos vía la setting global.
+        Route::post('lead/{id}/demo-experiencia', [LeadController::class, 'set_demo_experiencia_json']);
+
         // Panel del closer: leads filtrados por rol y sección operativa.
         Route::get('closer/panel', [LeadController::class, 'closer_panel_json']);
         Route::post('lead-partner/{id}/confirm', [LeadController::class, 'confirm_partner_json']);

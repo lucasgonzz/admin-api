@@ -57,6 +57,11 @@ class LeadDemoSettingsController extends Controller
             'fin_timeout_minutos'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'pendiente_ingreso_horas_timeout' => 'required|integer|min:1|max:720',
             'pendiente_terminar_timeout_minutos' => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            /* Dinámica de demo default para leads nuevos (grupo 293, prompt 03). "sometimes" y NO
+               "required": el SPA todavía no manda esta clave (la agrega el prompt 04), y con
+               "required" el formulario de configuración de demos actual tiraría 422 al guardar en
+               el intervalo entre el deploy de este backend y el del front. */
+            'experiencia_default'             => 'sometimes|nullable|string|in:actual,nueva',
         ]);
 
         /* Persistir todos los valores validados. */

@@ -884,6 +884,53 @@ class LeadController extends Controller
     }
 
     /**
+     * Override manual por lead de la dinámica de demo (grupo 293, prompt 03): permite cambiarle a
+     * un lead puntual la experiencia con la que va a ver la demo, sin depender de la setting global
+     * (`LeadDemoSettings::get_experiencia_default()`), que solo aplica al crear leads nuevos. Es lo
+     * que habilita pilotear la experiencia nueva con dos o tres leads elegidos a mano antes de
+     * abrirla a todos.
+     *
+     * @param int|string $id      Identificador del lead a modificar.
+     * @param Request    $request Debe traer `demo_experiencia` (uno de {@see Lead::EXPERIENCIAS}).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function set_demo_experiencia_json($id, Request $request)
+    {
+        /* Validación acotada: solo se acepta uno de los dos valores conocidos. La fuente de verdad
+           de los valores válidos es Lead::EXPERIENCIAS; se arma el "in:" a partir de esa constante
+           para no duplicar el literal. */
+        $request->validate([
+            'demo_experiencia' => 'required|string|in:' . implode(',', Lead::EXPERIENCIAS),
+        ]);
+
+        /* Lead objetivo al que se le cambia la dinámica de demo. */
+        $lead = Lead::findOrFail($id);
+
+        /* Valor nuevo pedido por el admin. */
+        $demo_experiencia_nueva = (string) $request->input('demo_experiencia');
+
+        /* Si el valor no cambia (doble click, o el admin reenvía el mismo valor), no se escribe ni
+           se registra evento: evita llenar el hilo de eventos vacíos. */
+        if ($lead->demo_experiencia === $demo_experiencia_nueva) {
+            return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+        }
+
+        $lead->demo_experiencia = $demo_experiencia_nueva;
+        $lead->save();
+
+        /* Deja constancia en el hilo del lead de quién cambió la dinámica y a qué valor, reusando
+           el mismo helper que ya usan reemitir/revocar de token (no se renombra: tiene call sites
+           de producción existentes y es genérico en lo que hace). */
+        $texto_evento = $demo_experiencia_nueva === Lead::EXPERIENCIA_NUEVA
+            ? 'Dinámica de demo cambiada a experiencia nueva'
+            : 'Dinámica de demo cambiada a experiencia actual';
+        $this->registrar_evento_token_demo($lead, $texto_evento);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Registra en `admin_notifications` (columna JSON de un LeadMessage) el evento de
      * reemisión/revocación manual del token de ingreso a la demo, siguiendo el mismo patrón que
      * ya usa LeadAiService para "Demo agendada" y "Mail de demo enviado": un elemento
