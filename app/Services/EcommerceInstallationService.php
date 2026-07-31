@@ -495,15 +495,17 @@ class EcommerceInstallationService
         // para que nunca se herede el favicon/set PWA de otro cliente (grupo 208).
         $this->reset_versioned_icon_assets($spa_build_path);
 
-        // a) Branding en vivo: color primario y logo, resueltos contra empresa-api (fuente primaria)
-        // con fallback a la tienda-api propia del cliente. $logo_source indica de qué campo salió
-        // el logo ('tienda' u 'empresa') solo para trazabilidad en logs.
-        [$primary_color, $logo_url, $logo_source] = $this->fetch_online_configuration_branding();
+        // a) Branding en vivo: color primario, logo y descripción, resueltos contra empresa-api
+        // (fuente primaria) con fallback a la tienda-api propia del cliente. $logo_source indica
+        // de qué campo salió el logo ('tienda' u 'empresa') solo para trazabilidad en logs.
+        // $meta_description alimenta VUE_APP_SITE_DESCRIPTION (grupo 270/04).
+        [$primary_color, $logo_url, $logo_source, $meta_description] = $this->fetch_online_configuration_branding();
 
         // b) .env del SPA: las 3 variables base que necesita tienda-spa para bootear más las dos
         // keys de Google Maps / Firebase que mergea build_spa_env_file_content() desde config
         // (sin VARIANT_COLOR ni NO_PAUSAR — a diferencia de empresa, ver contexto del prompt 584 y
-        // la actualización del grupo 267/02).
+        // la actualización del grupo 267/02), más las cuatro VUE_APP_SITE_* que arman el título y
+        // las etiquetas Open Graph del build de tienda-spa (grupo 270/04).
         $api_url_for_env = $this->get_ecommerce_api_url_for_env();
         $spa_url         = trim((string) $this->ecommerce->spa_url);
         if ($spa_url === '') {
@@ -513,14 +515,24 @@ class EcommerceInstallationService
             throw new \RuntimeException('El cliente no tiene user_id (bloque ComercioCity) configurado.');
         }
 
-        $env_content = $this->build_spa_env_file_content($api_url_for_env, $spa_url);
+        /** Nombre a mostrar del comercio: mismo valor que ya usan la PWA y los íconos (pwa_display_name()). */
+        $site_name = $this->pwa_display_name();
+
+        $env_content = $this->build_spa_env_file_content($api_url_for_env, $spa_url, $site_name, $meta_description);
         $env_escaped = str_replace("'", "'\\''", $env_content);
         $env_file    = $spa_build_path . '/.env';
         $this->exec_build_ssh(
             'compile_spa',
             "printf '%s' '{$env_escaped}' > " . escapeshellarg($env_file)
         );
-        $this->log('compile_spa', "Archivo .env del SPA configurado — API: {$api_url_for_env} | SPA: {$spa_url}");
+        // No se loguea la descripción entera (puede ser larga y el log se lee en la UI del admin):
+        // alcanza con indicar si vino vacía o no.
+        $description_log_label = trim($meta_description) !== '' ? 'con descripcion' : 'sin descripcion';
+        $this->log(
+            'compile_spa',
+            "Archivo .env del SPA configurado — API: {$api_url_for_env} | SPA: {$spa_url} | "
+            . "Nombre: {$site_name} | Descripcion: {$description_log_label}"
+        );
 
         // Aviso (no bloqueante): si Google Maps y/o Firebase quedaron sin key configurada en el
         // admin, el build igual sigue (una tienda sin mapa o sin push se despliega igual y frenar
@@ -1103,7 +1115,8 @@ class EcommerceInstallationService
      * Cada intento fallido se loguea en 'warning' explicitando la fuente y el motivo, para que un
      * cliente sin ningún logo quede visible en el log en vez de pasar desapercibido.
      *
-     * @return array{0: string, 1: string|null, 2: string|null}  [primary_color, logo_url|null, logo_source|null]
+     * @return array{0: string, 1: string|null, 2: string|null, 3: string}
+     *         [primary_color, logo_url|null, logo_source|null, meta_description]
      */
     protected function fetch_online_configuration_branding(): array
     {
@@ -1130,7 +1143,7 @@ class EcommerceInstallationService
             'warning'
         );
 
-        return [$default_color, null, null];
+        return [$default_color, null, null, ''];
     }
 
     /**
@@ -1138,8 +1151,8 @@ class EcommerceInstallationService
      * Reusa el mismo patrón de autenticación server-to-server que SyncClientEmployeesFromEmpresaService
      * (header X-Admin-Api-Key + ClientEmpresaApiUrlResolver).
      *
-     * @return array{logo_url: string, image_url: string, primary_color: string}|null  Null si no
-     *         se pudo resolver la URL, falta api_key, o la llamada HTTP falló/no fue exitosa.
+     * @return array{logo_url: string, image_url: string, primary_color: string, meta_description: string}|null
+     *         Null si no se pudo resolver la URL, falta api_key, o la llamada HTTP falló/no fue exitosa.
      */
     protected function fetch_branding_from_empresa_api(): ?array
     {
@@ -1196,16 +1209,19 @@ class EcommerceInstallationService
             return null;
         }
 
-        /** Bloque branding de la respuesta: {logo_url, image_url, primary_color, company_name}. */
+        /** Bloque branding de la respuesta: {logo_url, image_url, primary_color, company_name, meta_description}. */
         $branding = $response->json('branding', []);
         if (! is_array($branding)) {
             $branding = [];
         }
 
         return [
-            'logo_url'      => isset($branding['logo_url']) ? trim((string) $branding['logo_url']) : '',
-            'image_url'     => isset($branding['image_url']) ? trim((string) $branding['image_url']) : '',
-            'primary_color' => isset($branding['primary_color']) ? trim((string) $branding['primary_color']) : '',
+            'logo_url'         => isset($branding['logo_url']) ? trim((string) $branding['logo_url']) : '',
+            'image_url'        => isset($branding['image_url']) ? trim((string) $branding['image_url']) : '',
+            'primary_color'    => isset($branding['primary_color']) ? trim((string) $branding['primary_color']) : '',
+            // Descripción para las etiquetas Open Graph del ecommerce (grupo 270/01). Si no vino
+            // en el payload de empresa-api, se propaga vacía (el prompt 03 ya la trata como opcional).
+            'meta_description' => isset($branding['meta_description']) ? trim((string) $branding['meta_description']) : '',
         ];
     }
 
@@ -1216,8 +1232,8 @@ class EcommerceInstallationService
      * desplegada, así que esta llamada típicamente falla; en una re-ejecución (update) con
      * tienda-api ya viva, sí trae el color/logo reales.
      *
-     * @return array{logo_url: string, image_url: string, primary_color: string}|null  Null si falta
-     *         api_url/user_id o la llamada HTTP falló/no fue exitosa.
+     * @return array{logo_url: string, image_url: string, primary_color: string, meta_description: string}|null
+     *         Null si falta api_url/user_id o la llamada HTTP falló/no fue exitosa.
      */
     protected function fetch_branding_from_tienda_api(): ?array
     {
@@ -1268,9 +1284,13 @@ class EcommerceInstallationService
         $image_url = trim((string) $response->json('commerce.image_url', ''));
 
         return [
-            'logo_url'      => isset($online_configuration['logo_url']) ? trim((string) $online_configuration['logo_url']) : '',
-            'image_url'     => $image_url,
-            'primary_color' => isset($online_configuration['primary_color']) ? trim((string) $online_configuration['primary_color']) : '',
+            'logo_url'         => isset($online_configuration['logo_url']) ? trim((string) $online_configuration['logo_url']) : '',
+            'image_url'        => $image_url,
+            'primary_color'    => isset($online_configuration['primary_color']) ? trim((string) $online_configuration['primary_color']) : '',
+            // Descripción del branding (fallback cuando empresa-api no respondió). El endpoint
+            // GET /api/commerce/{id} de tienda-api carga la relación online_configuration completa
+            // (sin lista de columnas), así que la columna meta_description viaja sola (grupo 270/04).
+            'meta_description' => isset($online_configuration['meta_description']) ? trim((string) $online_configuration['meta_description']) : '',
         ];
     }
 
@@ -1279,10 +1299,11 @@ class EcommerceInstallationService
      * cadena logo_url -> image_url -> null y color -> default, y deja el log de éxito/aviso.
      * El color y el logo siempre salen de la misma fuente que respondió (nunca se mezclan).
      *
-     * @param  array{logo_url: string, image_url: string, primary_color: string}  $branding
+     * @param  array{logo_url: string, image_url: string, primary_color: string, meta_description: string}  $branding
      * @param  string  $default_color
      * @param  string  $source_label  'empresa-api' o 'tienda-api', solo para el mensaje de log.
-     * @return array{0: string, 1: string|null, 2: string|null}  [primary_color, logo_url|null, logo_source|null]
+     * @return array{0: string, 1: string|null, 2: string|null, 3: string}
+     *         [primary_color, logo_url|null, logo_source|null, meta_description]
      */
     protected function resolve_branding_from_source(array $branding, string $default_color, string $source_label): array
     {
@@ -1319,7 +1340,12 @@ class EcommerceInstallationService
             );
         }
 
-        return [$primary_color, $logo_url, $logo_source];
+        // Descripción del branding tal cual vino de la fuente (empresa-api o tienda-api), sin
+        // transformar acá: el recorte/colapso de espacios se hace en build_spa_env_file_content()
+        // al momento de escribirla al .env (grupo 270/04).
+        $meta_description = isset($branding['meta_description']) ? $branding['meta_description'] : '';
+
+        return [$primary_color, $logo_url, $logo_source, $meta_description];
     }
 
     /**
@@ -1345,14 +1371,34 @@ class EcommerceInstallationService
      * `^\s*themeColor:`. Es idempotente: siempre reemplaza el valor completo de la línea existente,
      * nunca agrega una línea nueva, así que correrlo de nuevo no acumula cambios.
      *
+     * Antes de correr los dos `sed`, verifica que exista EXACTAMENTE una línea "name:" en el
+     * archivo: si hubiera 0 o más de 1, el sed anclado a `^\s*name:` reemplazaría una línea
+     * equivocada (o ninguna) en silencio, dejando el `vue.config.js` corrupto o con el nombre de
+     * la PWA sin patchear. Preferible fallar ruidoso acá que publicar un build corrupto
+     * (grupo 270/04).
+     *
      * @param  string  $spa_build_path
      * @param  string  $theme_color
      * @param  string  $display_name
      * @return void
+     * @throws \RuntimeException  Si el archivo no tiene exactamente una línea "name:".
      */
     protected function patch_spa_vue_config(string $spa_build_path, string $theme_color, string $display_name)
     {
         $vue_config_file = $spa_build_path . '/vue.config.js';
+
+        /** Cantidad de líneas "name:" (sin contar comentadas) en vue.config.js del clone en el VPS. */
+        $name_line_count = (int) trim($this->exec_build_ssh(
+            'compile_spa',
+            'grep -c ' . escapeshellarg('^[[:space:]]*name:') . ' ' . escapeshellarg($vue_config_file) . ' || true',
+            false
+        ));
+        if ($name_line_count !== 1) {
+            throw new \RuntimeException(
+                'vue.config.js tiene ' . $name_line_count . ' lineas "name:" (se esperaba exactamente 1). '
+                . 'El patch del nombre de la PWA reemplazaria mas de una linea. Revisar tienda-spa/vue.config.js.'
+            );
+        }
 
         $theme_color_escaped = $this->escape_sed_replacement($theme_color);
         $display_name_escaped = $this->escape_sed_replacement($display_name);
@@ -1889,12 +1935,30 @@ class EcommerceInstallationService
      * romperse (Google Maps, usada en public/index.html) o para no dejar el push muerto en
      * silencio (Firebase, usada en firebase-messaging-sw.js). Ver grupo 267/02.
      *
+     * Además escribe las cuatro variables `VUE_APP_SITE_*` que tienda-spa usa en build-time
+     * (vue.config.js + public/index.html, grupo 270/03) para armar el `<title>` y las etiquetas
+     * Open Graph que leen los crawlers de WhatsApp/Instagram/Facebook al compartir el link
+     * (grupo 270/04): VUE_APP_SITE_NAME, VUE_APP_SITE_DESCRIPTION, VUE_APP_SITE_IMAGE y
+     * VUE_APP_SITE_URL.
+     *
      * @param  string  $api_url
      * @param  string  $spa_url
+     * @param  string  $site_name          Nombre del comercio (mismo valor que pwa_display_name()).
+     * @param  string  $meta_description   Descripción del branding, resuelta por
+     *                                     fetch_online_configuration_branding(); puede venir vacía.
      * @return string
      */
-    protected function build_spa_env_file_content(string $api_url, string $spa_url): string
-    {
+    protected function build_spa_env_file_content(
+        string $api_url,
+        string $spa_url,
+        string $site_name,
+        string $meta_description
+    ): string {
+        // URL de la tienda sin barra final, reusada tanto para VUE_APP_SITE_URL como para armar
+        // la URL absoluta de VUE_APP_SITE_IMAGE (og:image necesita ser absoluta: los crawlers de
+        // WhatsApp/Facebook no resuelven rutas relativas).
+        $spa_url_without_trailing_slash = rtrim($spa_url, '/');
+
         $env_vars = [
             'VUE_APP_API_URL'      => $api_url,
             'VUE_APP_COMMERCE_ID'  => (string) $this->client->user_id,
@@ -1911,10 +1975,24 @@ class EcommerceInstallationService
             }
         }
 
+        // Las cuatro variables del sitio (grupo 270/04). VUE_APP_SITE_DESCRIPTION se normaliza
+        // (colapsa saltos de línea/tabs, trim y recorte a 300 caracteres) porque puede venir con
+        // texto libre cargado por el cliente; si queda vacía se escribe vacía a propósito (mejor
+        // sin descripción que con una inventada).
+        $env_vars['VUE_APP_SITE_NAME']        = $site_name;
+        $env_vars['VUE_APP_SITE_DESCRIPTION'] = $this->normalize_site_description_for_env($meta_description);
+        $env_vars['VUE_APP_SITE_IMAGE']       = $spa_url_without_trailing_slash . '/img/og-image.png';
+        $env_vars['VUE_APP_SITE_URL']         = $spa_url_without_trailing_slash;
+
         $lines = [];
         foreach ($env_vars as $env_key => $env_value) {
             if (preg_match('/\s/', $env_value) !== 0) {
-                $escaped_value = str_replace('"', '\\"', $env_value);
+                // Escapa primero la barra invertida y recién después las comillas dobles (en ese
+                // orden): si se escapara "\"" primero, el "\" que agrega ese escape se duplicaría
+                // al pasar por el escape de "\\" (grupo 270/04 — la descripción puede traer ambos
+                // caracteres, a diferencia de las variables que ya existían).
+                $escaped_value = str_replace('\\', '\\\\', $env_value);
+                $escaped_value = str_replace('"', '\\"', $escaped_value);
                 $lines[] = $env_key . '="' . $escaped_value . '"';
             } else {
                 $lines[] = $env_key . '=' . $env_value;
@@ -1922,6 +2000,25 @@ class EcommerceInstallationService
         }
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * Normaliza una descripción de branding antes de escribirla como VUE_APP_SITE_DESCRIPTION en
+     * el `.env` del SPA: colapsa cualquier salto de línea/tab a un espacio simple (un `\n` crudo
+     * dentro del `.env` parte la línea y corrompe todas las variables siguientes), la recorta y
+     * la trimea, y la trunca a 300 caracteres por las dudas (empresa-api ya recorta del lado del
+     * grupo 270/01, pero acá también puede entrar por el fallback a tienda-api).
+     *
+     * @param  string  $description
+     * @return string
+     */
+    protected function normalize_site_description_for_env(string $description): string
+    {
+        // Colapsa cualquier secuencia de espacios/tabs/saltos de línea a un único espacio.
+        $normalized = preg_replace('/\s+/u', ' ', $description);
+        $normalized = trim((string) $normalized);
+
+        return mb_substr($normalized, 0, 300);
     }
 
     /**
