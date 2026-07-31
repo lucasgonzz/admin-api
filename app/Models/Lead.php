@@ -261,6 +261,9 @@ class Lead extends Model
         // Cuotas del contrato PDF: [{monto, fecha}]
         'contract_financiacion'              => 'array',
 
+        // Cláusulas particulares del contrato: [{titulo, texto}]
+        'contract_clausulas_particulares'    => 'array',
+
         // Fechas del contrato ComercioCity (inputs type="date" en admin-spa).
         'contract_fecha_emision'             => 'date',
         'contract_fecha_primer_pago_unico'   => 'date',

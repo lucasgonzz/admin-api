@@ -670,6 +670,13 @@ class LeadProperties
                 'value' => null,
                 'show' => false,
             ],
+            [
+                'key' => 'contract_clausulas_particulares',
+                'text' => 'Contrato — clausulas particulares',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
         ];
     }
 }
