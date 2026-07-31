@@ -16,6 +16,7 @@ use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
 use App\Http\Controllers\DemoController;
+use App\Http\Controllers\DemoExperienciaController;
 use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\AiSystemPromptController;
@@ -70,6 +71,16 @@ Route::prefix('form')->group(function () {
 | `client/{clientId}/factura/{invoiceId}/pdf-access-token` (ver grupo admin).
 */
 Route::get('client/{clientId}/factura/{invoiceId}/pdf-view/{token}', [ClientMensualidadController::class, 'factura_pdf_view']);
+
+/*
+| Página inmersiva de demo (grupo 300, prompt 03): pública, sin auth:sanctum, identificada por
+| el uuid del lead (no enumerable). GET arma el payload completo de la página; POST recibe las
+| nueve respuestas del formulario de configuración. Ver App\Http\Controllers\DemoExperienciaController.
+*/
+Route::prefix('demo-experiencia')->group(function () {
+    Route::get('{uuid}', [DemoExperienciaController::class, 'show_json']);
+    Route::post('{uuid}/formulario', [DemoExperienciaController::class, 'store_formulario_json']);
+});
 
 /*
 | Callback desde empresa-api cliente (inbound)
