@@ -87,7 +87,12 @@
         }
         .firmas-table {
             width: 100%;
+            /* fixed obliga a dompdf a respetar el 50% de cada celda. Sin esto reparte las columnas
+               segun el contenido y, con una razon social larga del cliente, las dos lineas de firma
+               quedan de distinto largo y descentradas una respecto de la otra. */
+            table-layout: fixed;
             margin-top: 36px;
+            page-break-inside: avoid;
         }
         .firma-col {
             width: 50%;
@@ -96,9 +101,11 @@
             padding: 0 16px;
         }
         .firma-linea {
-            border-top: 1px solid #333333;
+            /* 1pt y no 1px: un trazo de 0.75pt es el mas fino que dibuja un visor de PDF y a zooms
+               no enteros el antialiasing lo parte en tramos, y se lee como una linea torcida. */
+            border-top: 1pt solid #333333;
             width: 80%;
-            margin: 48px auto 8px auto;
+            margin: 64px auto 8px auto;
         }
         .firma-rol {
             font-weight: bold;
@@ -116,6 +123,19 @@
         .total-row td {
             font-weight: bold;
             background-color: #d0e0ef !important;
+        }
+        .clausula-particular {
+            page-break-inside: avoid;
+            margin-bottom: 12px;
+        }
+        .clausula-titulo {
+            font-weight: bold;
+            color: #1a3a5c;
+            margin: 14px 0 4px 0;
+        }
+        .clausula-prelacion {
+            font-style: italic;
+            color: #444444;
         }
     </style>
 </head>
@@ -312,6 +332,23 @@
         <strong>Jurisdicción:</strong> Para cualquier controversia derivada del presente contrato, las partes se someten a los tribunales ordinarios de la
         Ciudad Autónoma de Buenos Aires.
     </p>
+
+    {{-- Seccion 8 — Clausulas particulares (solo si hay alguna cargada) --}}
+    @if(count($clausulas) > 0)
+        <h2 class="section-title">8. Cláusulas particulares</h2>
+        <p class="clausula-prelacion">
+            Las cláusulas particulares que se detallan a continuación forman parte integrante del presente contrato
+            y prevalecen sobre las condiciones generales en caso de discrepancia entre unas y otras.
+        </p>
+        @foreach($clausulas as $clausula)
+            <div class="clausula-particular">
+                @if($clausula['titulo'] !== '')
+                    <p class="clausula-titulo">8.{{ $loop->iteration }} — {{ $clausula['titulo'] }}</p>
+                @endif
+                <p>{!! nl2br(e($clausula['texto'])) !!}</p>
+            </div>
+        @endforeach
+    @endif
 
     {{-- Firmas --}}
     <table class="firmas-table">

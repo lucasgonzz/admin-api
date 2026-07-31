@@ -53,6 +53,10 @@ class LeadContractPdfService
         $financiacion_raw = $lead->contract_financiacion ?? [];
         $financiacion_filas = self::normalize_financiacion_rows($financiacion_raw);
 
+        // Cláusulas particulares del contrato (sección 8), normalizadas para la vista.
+        $clausulas_raw = $lead->contract_clausulas_particulares ?? [];
+        $clausulas_filas = self::normalize_clausulas_rows($clausulas_raw);
+
         // Total mensual: base + extras de usuarios + perfiles ecommerce.
         $total_mensual = self::calculate_monthly_total(
             $lead->contract_mensualidad_base,
@@ -77,6 +81,8 @@ class LeadContractPdfService
             'fecha_primer_pago_unico' => self::format_contract_date($lead->contract_fecha_primer_pago_unico),
 
             'financiacion'         => $financiacion_filas,
+
+            'clausulas'            => $clausulas_filas,
 
             'mensualidad_moneda'          => $mensualidad_moneda,
             'mensualidad_base'            => $lead->contract_mensualidad_base,
@@ -116,6 +122,46 @@ class LeadContractPdfService
             $filas[] = [
                 'monto' => $monto,
                 'fecha' => $fecha,
+            ];
+        }
+
+        return $filas;
+    }
+
+    /**
+     * Normaliza filas de cláusulas particulares para la sección 8 del PDF.
+     *
+     * Tolera datos sucios: descarta filas que no sean array y descarta también las filas
+     * cuyo texto quede vacío después del trim (una cláusula sin cuerpo no tiene sentido en
+     * el contrato y dejaría un número de sección huérfano). El título es opcional: una fila
+     * con texto y sin título se conserva igual.
+     *
+     * @param mixed $clausulas_raw JSON decodificado o array.
+     *
+     * @return array<int, array{titulo: string, texto: string}>
+     */
+    protected static function normalize_clausulas_rows($clausulas_raw): array
+    {
+        if (!is_array($clausulas_raw)) {
+            return [];
+        }
+
+        $filas = [];
+        foreach ($clausulas_raw as $clausula) {
+            if (!is_array($clausula)) {
+                continue;
+            }
+            $titulo = isset($clausula['titulo']) ? trim((string) $clausula['titulo']) : '';
+            $texto = isset($clausula['texto']) ? trim((string) $clausula['texto']) : '';
+
+            // Descarta la fila si el texto quedó vacío: sin cuerpo, la cláusula no aporta nada.
+            if ($texto === '') {
+                continue;
+            }
+
+            $filas[] = [
+                'titulo' => $titulo,
+                'texto'  => $texto,
             ];
         }
 
