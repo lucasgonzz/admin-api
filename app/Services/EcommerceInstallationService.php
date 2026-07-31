@@ -563,7 +563,13 @@ class EcommerceInstallationService
         // anterior (grupo 208; antes esto se dejaba intacto cuando no había logo_url).
         $this->step_generate_pwa_icons($spa_build_path, $logo_url, $primary_color, $this->pwa_display_name());
 
-        // e) npm ci + npm run build (mismo mecanismo que empresa).
+        // e) Imagen de vista previa (og:image, 1200x630): mismo criterio de logo que los íconos
+        // PWA de arriba (logo_url ya resuelto en el mismo branding), compuesta sobre el color
+        // primario. Tiene que generarse ANTES de "npm ci"/"npm run build" para que Vue CLI copie
+        // public/img/og-image.png a dist/ durante el build (grupo 270/05).
+        $this->step_generate_og_image($spa_build_path, $logo_url, $primary_color, $this->pwa_display_name());
+
+        // f) npm ci + npm run build (mismo mecanismo que empresa).
         $npm_bin = trim((string) config('services.deploy.npm_bin', 'npm'));
         $this->assert_vps_npm_available($spa_build_path, $npm_bin);
 
@@ -620,6 +626,14 @@ class EcommerceInstallationService
      * `must_succeed = false`: si el `git checkout` no tiene nada que restaurar (o el repo recién
      * se clonó y ya está limpio) no es motivo para abortar la instalación.
      *
+     * `og-image.png` (grupo 270/05) tiene el mismo problema que los íconos y es peor: es la imagen
+     * que se ve al compartir el link, así que si quedara la de un cliente anterior, un comercio
+     * publicaría el logo de otro en cada link que comparte por WhatsApp. A diferencia de los
+     * íconos, `og-image.png` NO está versionado en git (se genera siempre, nunca viene en el
+     * repo), así que acá no corresponde un `git checkout` sino un `rm -f` directo: que el archivo
+     * se genere después no alcanza — si la generación fallara y el flujo siguiera, el archivo
+     * viejo seguiría ahí. Se borra primero, se genera después (en `step_generate_og_image()`).
+     *
      * @param  string  $spa_build_path  Ruta absoluta del clone de tienda-spa en el VPS de builds.
      * @return void
      */
@@ -629,12 +643,15 @@ class EcommerceInstallationService
             . ' && git checkout -- ' . escapeshellarg('public/img/icons') . ' ' . escapeshellarg('public/favicon.ico') . ' 2>&1'
             . '; git clean -fd ' . escapeshellarg('public/img/icons') . ' 2>&1'
             . '; rm -f ' . escapeshellarg($spa_build_path . '/.deploy_logo_tmp')
-            . ' ' . escapeshellarg($spa_build_path . '/.deploy_generate_pwa_icons.js') . ' 2>&1';
+            . ' ' . escapeshellarg($spa_build_path . '/.deploy_generate_pwa_icons.js')
+            . ' ' . escapeshellarg($spa_build_path . '/public/img/og-image.png')
+            . ' ' . escapeshellarg($spa_build_path . '/.deploy_logo_og_tmp')
+            . ' ' . escapeshellarg($spa_build_path . '/.deploy_generate_og_image.js') . ' 2>&1';
 
         $reset_output = $this->exec_build_ssh('compile_spa', $command, false);
         $this->log(
             'compile_spa',
-            'Assets de íconos versionados reseteados antes de generar el set nuevo '
+            'Assets de íconos versionados y og-image.png reseteados antes de generar el set nuevo '
             . '(directorio de build compartido entre todos los clientes). '
             . $this->truncate_for_log($reset_output, 400)
         );
@@ -759,6 +776,155 @@ class EcommerceInstallationService
             $use_placeholder
                 ? 'Íconos PWA generados con ícono placeholder (inicial del comercio sobre el color primario)'
                 : 'Íconos PWA generados desde el logo del cliente',
+            'success'
+        );
+
+        // Limpia el logo (si se llegó a descargar) y el script temporales del VPS.
+        $this->exec_build_ssh(
+            'compile_spa',
+            'rm -f ' . escapeshellarg($remote_logo_path) . ' ' . escapeshellarg($remote_script),
+            false
+        );
+    }
+
+    /**
+     * Sub-etapa de compile_spa: genera la imagen de vista previa (og:image, 1200x630) con el
+     * script node `deploy/tienda/generate_og_image.js`, SIEMPRE: a partir del logo del cliente si
+     * hay uno y se pudo descargar, o con un placeholder (inicial del comercio sobre su color
+     * primario) en cualquier otro caso — mismo criterio y mismo motivo que
+     * `step_generate_pwa_icons()` (grupo 270/05): nunca se sale de este método dejando en disco la
+     * og:image que hubiera de una corrida/cliente anterior (`reset_versioned_icon_assets()` ya
+     * borró la imagen vieja antes de llegar acá).
+     *
+     * Se llama desde `step_compile_spa()` inmediatamente después de `step_generate_pwa_icons()` y
+     * ANTES de "npm ci"/"npm run build", para que Vue CLI copie `public/img/og-image.png` a
+     * `dist/` durante el build.
+     *
+     * La salida va a `public/img/og-image.png` (NO a `public/img/icons`: esa carpeta la limpia
+     * `reset_versioned_icon_assets()`/el generador de íconos y no queremos que se pisen entre sí).
+     *
+     * `sharp` ya quedó instalado en el clone por `step_generate_pwa_icons()`, que corre justo
+     * antes en `step_compile_spa()`. Igual se instala de nuevo acá (`npm install sharp --no-save`):
+     * es idempotente y barato, y evita que este método quede dependiendo del orden de ejecución de
+     * otro paso.
+     *
+     * @param  string       $spa_build_path
+     * @param  string|null  $logo_url        Null si el comercio no tiene logo cargado en ningún lado.
+     * @param  string       $primary_color   Color primario del comercio, usado como fondo de la imagen.
+     * @param  string       $display_name    Nombre del comercio, usado para la inicial del placeholder.
+     * @return void
+     * @throws \RuntimeException  Si el script node no termina OK. Preferible una corrida fallida y
+     *                             visible a una tienda publicada con la og:image de otro cliente.
+     */
+    protected function step_generate_og_image(
+        string $spa_build_path,
+        ?string $logo_url,
+        string $primary_color,
+        string $display_name
+    ) {
+        // Ruta remota donde quedaría el logo descargado (solo se usa/llena en el modo con logo).
+        // Nombre de temporal DISTINTO al de step_generate_pwa_icons() (".deploy_logo_tmp"): ese
+        // método ya lo borró al terminar (corre justo antes en el pipeline), así que acá no hay
+        // nada que reusar y hace falta descargar el logo de nuevo.
+        $remote_logo_path = $spa_build_path . '/.deploy_logo_og_tmp';
+        // Bandera que decide, más abajo, qué invocación del script node corresponde.
+        $use_placeholder = false;
+
+        if ($logo_url === null) {
+            // El comercio no tiene ningún logo cargado (ni en tienda-api ni en empresa-api): se va
+            // derecho al modo placeholder, sin intentar descargar nada.
+            $this->log(
+                'compile_spa',
+                'El comercio no tiene ningún logo cargado: la og:image se genera con la inicial del comercio sobre el color primario',
+                'warning'
+            );
+            $use_placeholder = true;
+        } else {
+            $this->log('compile_spa', 'Generando og:image desde el logo del cliente...');
+
+            // Descarga el logo a un archivo temporal en el VPS (curl, ya disponible junto con node/npm).
+            $download_output = $this->exec_build_ssh(
+                'compile_spa',
+                'curl -sL -o ' . escapeshellarg($remote_logo_path) . ' ' . escapeshellarg($logo_url)
+                . ' && test -s ' . escapeshellarg($remote_logo_path) . ' && echo LOGO_DOWNLOAD_OK || echo LOGO_DOWNLOAD_FAILED',
+                false
+            );
+            if (stripos($download_output, 'LOGO_DOWNLOAD_OK') === false) {
+                // No se hace return acá: cae al modo placeholder para no dejar en disco la
+                // og:image que hubiera de una corrida/cliente anterior.
+                $this->log(
+                    'compile_spa',
+                    'No se pudo descargar el logo para la og:image (' . $this->truncate_for_log($download_output, 300)
+                    . '); se genera con la inicial del comercio sobre el color primario',
+                    'warning'
+                );
+                $use_placeholder = true;
+            }
+        }
+
+        // Instala "sharp" en el clone del VPS sin persistirlo en package.json (--no-save): ya
+        // quedó instalado por step_generate_pwa_icons(), pero reinstalarlo acá es idempotente y
+        // barato (ver nota de la clase arriba).
+        $this->log('compile_spa', 'Instalando sharp para generar la og:image...');
+        $this->exec_build_ssh(
+            'compile_spa',
+            $this->build_vps_command(
+                $spa_build_path,
+                'npm install sharp --no-save --no-audit --no-fund 2>&1'
+            ),
+            true,
+            true
+        );
+
+        // Copia el script generador al VPS (contenido versionado en admin-api/deploy/tienda/).
+        $script_local_path = base_path('deploy/tienda/generate_og_image.js');
+        if (! is_file($script_local_path)) {
+            throw new \RuntimeException("No se encontró el script local: {$script_local_path}");
+        }
+        $script_content = file_get_contents($script_local_path);
+        $script_escaped = str_replace("'", "'\\''", $script_content);
+        $remote_script  = $spa_build_path . '/.deploy_generate_og_image.js';
+        $this->exec_build_ssh(
+            'compile_spa',
+            "printf '%s' '{$script_escaped}' > " . escapeshellarg($remote_script)
+        );
+
+        // Ruta de salida final: public/img/og-image.png (Vue CLI la copia a dist/ durante el build).
+        $output_path = $spa_build_path . '/public/img/og-image.png';
+
+        // Arma la invocación del script según el modo resuelto arriba.
+        if ($use_placeholder) {
+            $node_command = 'node ' . escapeshellarg($remote_script) . ' --placeholder '
+                . escapeshellarg($primary_color) . ' '
+                . escapeshellarg($display_name) . ' '
+                . escapeshellarg($output_path) . ' 2>&1';
+        } else {
+            $node_command = 'node ' . escapeshellarg($remote_script) . ' '
+                . escapeshellarg($remote_logo_path) . ' '
+                . escapeshellarg($primary_color) . ' '
+                . escapeshellarg($output_path) . ' 2>&1';
+        }
+
+        $run_output = $this->exec_build_ssh(
+            'compile_spa',
+            $this->build_vps_command($spa_build_path, $node_command),
+            true,
+            true
+        );
+        $this->log('compile_spa', $this->truncate_for_log($run_output, 800));
+
+        if (stripos($run_output, 'GENERATE_OG_IMAGE_DONE') === false) {
+            // Preferible una corrida fallida y visible a una tienda publicada con la og:image de
+            // otro cliente: nunca se atrapa este error para "seguir igual".
+            throw new \RuntimeException(
+                'La generación de la og:image no terminó OK. ' . $this->truncate_for_log($run_output, 600)
+            );
+        }
+        $this->log(
+            'compile_spa',
+            $use_placeholder
+                ? 'og:image generada con la inicial del comercio sobre el color primario'
+                : 'og:image generada desde el logo del cliente',
             'success'
         );
 
@@ -2141,7 +2307,10 @@ class EcommerceInstallationService
     }
 
     /**
-     * Verifica que el directorio dist/ exista en el VPS tras el build.
+     * Verifica que el directorio dist/ exista en el VPS tras el build, y que Vue CLI haya copiado
+     * tanto `index.html` como `img/og-image.png` (grupo 270/05: si Vue CLI dejara de copiar
+     * `public/img` a `dist/`, sin este check no nos enteraríamos hasta que un cliente compartiera
+     * un link y viera la vista previa rota).
      *
      * @param  string  $spa_build_path
      * @param  string  $spa_output_dir
@@ -2164,6 +2333,26 @@ class EcommerceInstallationService
             );
         }
         $this->log('upload_spa', "Verificado {$spa_output_dir}/index.html en el VPS", 'success');
+
+        // Verificación aparte de la og:image (grupo 270/05), con su propio mensaje de error: si
+        // faltara, el resto del deploy igual salió bien (el SPA funciona), pero la vista previa al
+        // compartir el link quedaría rota — un fallo silencioso que conviene que corte acá.
+        $og_image_relative_path = $spa_output_dir . '/img/og-image.png';
+        $og_image_check_cmd = $this->build_vps_command(
+            $spa_build_path,
+            'test -f ' . escapeshellarg($og_image_relative_path)
+            . ' && echo SPA_OG_IMAGE_OK || (echo SPA_OG_IMAGE_MISSING; ls -la '
+            . escapeshellarg($spa_output_dir . '/img') . ' 2>/dev/null; exit 1)'
+        );
+        $og_image_output = $this->exec_build_ssh('upload_spa', $og_image_check_cmd);
+        if (stripos($og_image_output, 'SPA_OG_IMAGE_OK') === false) {
+            throw new \RuntimeException(
+                'El build no generó ' . $og_image_relative_path . ' en el VPS '
+                . '(Vue CLI no copió public/img/og-image.png a dist/). '
+                . $this->truncate_for_log($og_image_output, 600)
+            );
+        }
+        $this->log('upload_spa', "Verificado {$og_image_relative_path} en el VPS", 'success');
     }
 
     /**
