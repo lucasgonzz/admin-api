@@ -2236,9 +2236,15 @@ TXT;
         $slots = [];
         for ($slot_min = 0; $slot_min < 1440; $slot_min += $frecuencia) {
             if ($usa_experiencia_nueva) {
-                /* El closer no participa de esta decisión: el slot vale si el INICIO DE LA DEMO
-                 * cae dentro de la franja propia de la demo, sin proyectar ninguna llamada. */
-                if ($slot_min < $horario_inicio || $slot_min > $horario_fin) {
+                /* El closer no participa de esta decisión: el slot vale si ENTRA COMPLETO en la
+                 * franja propia de la demo (inicio Y fin), sin proyectar ninguna llamada.
+                 *
+                 * Correctivo grupo 310 (checker del grupo 306): validar solo el inicio dejaba
+                 * ofrecer un slot que cruza medianoche (ej. 23:30 con duración 60), y ese slot
+                 * no aparece en los rangos bloqueados de MAÑANA porque load_blocked_ranges_by_demo()
+                 * los guarda por date_key en minutos del día — debilitaba la capa 1 de bloqueo por
+                 * demo_id, permitiendo doble reserva de la misma instancia técnica. */
+                if ($slot_min < $horario_inicio || $slot_min + $duracion > $horario_fin) {
                     continue;
                 }
             } else {
