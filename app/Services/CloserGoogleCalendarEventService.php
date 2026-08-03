@@ -116,6 +116,247 @@ class CloserGoogleCalendarEventService
     }
 
     /**
+     * Reserva el hueco del closer como POSIBLE llamada (grupo 306, prompt 05) — sin invitar al
+     * lead ni generar Meet. La llamada recién se coordina con el lead cuando termina la demo y
+     * dice que quiere avanzar (grupo 307); esto solo evita que otro lead se lleve el mismo hueco
+     * mientras tanto.
+     *
+     * Se reserva SOLO si se cumplen las dos condiciones sobre el momento en que la demo
+     * terminaría: (1) cae dentro del horario laboral del closer, y (2) el closer no tiene ningún
+     * evento en el calendario en ese momento. Si falla cualquiera, no se reserva nada — la
+     * coordinación queda para el final (grupo 307).
+     *
+     * Persiste el id en `closer_hold_event_id` (columna separada de `google_event_id`: esa es la
+     * llamada CONFIRMADA que consumen LeadCallService, delete_event_for_lead() y Recall.ai —
+     * mezclarlas engancharía el bot de transcripción a una reserva vacía).
+     *
+     * @param Lead $lead Lead con demo ya guardada (demo_date, demo_start_time asignados).
+     *
+     * @return bool true si se creó la reserva; false si no se cumplieron las condiciones, no hay
+     *              conexión del closer, o falló la llamada a Google.
+     */
+    public function create_hold_for_lead(Lead $lead): bool
+    {
+        if (! $lead->demo_date || ! $lead->demo_start_time) {
+            Log::channel('disponibilidad')->warning(
+                '[CALENDAR_EVENT] No se puede reservar hueco: lead #' . $lead->id
+                . ' no tiene demo_date o demo_start_time asignados.'
+            );
+            return false;
+        }
+
+        $connection = $this->get_closer_connection();
+        if (! $connection) {
+            return false;
+        }
+
+        // Mismo cálculo que la llamada confirmada: inicio = fin de la demo, fin = gracia + llamada.
+        [$event_start, $event_end] = $this->calculate_event_times($lead);
+
+        // Condición 1: el rango entra en el horario laboral del closer ese día de semana.
+        if (! $this->rango_dentro_de_horario_closer($event_start, $event_end)) {
+            Log::channel('disponibilidad')->info(
+                '[CALENDAR_EVENT] No se reserva hueco: falló la condición de horario del closer.'
+                . ' lead_id=' . $lead->id
+                . ' event_start=' . $event_start->toDateTimeString()
+                . ' event_end=' . $event_end->toDateTimeString()
+            );
+            return false;
+        }
+
+        /* Condición 2: el calendario del closer está libre en ese rango. Invalidar la caché de
+         * esta fecha ANTES de consultar — un dato de hace 5 minutos alcanza para OFRECER
+         * horarios, pero no para decidir si se pisa el calendario de una persona. */
+        $fecha_str = $event_start->format('Y-m-d');
+        $this->busy_service->flush_cache_for_date($fecha_str);
+
+        $busy_result = $this->busy_service->get_busy_ranges_for_dates([$fecha_str]);
+        $busy_ranges = $busy_result['ranges'][$fecha_str] ?? [];
+
+        $inicio_minutos = $event_start->hour * 60 + $event_start->minute;
+        $fin_minutos    = $event_end->hour * 60 + $event_end->minute;
+
+        foreach ($busy_ranges as $rango_ocupado) {
+            [$bstart, $bend] = $rango_ocupado;
+            if ($inicio_minutos < $bend && $fin_minutos > $bstart) {
+                Log::channel('disponibilidad')->info(
+                    '[CALENDAR_EVENT] No se reserva hueco: falló la condición de calendario libre.'
+                    . ' lead_id=' . $lead->id
+                    . ' event_start=' . $event_start->toDateTimeString()
+                    . ' event_end=' . $event_end->toDateTimeString()
+                );
+                return false;
+            }
+        }
+
+        // Las dos condiciones se cumplen: reservar. sendUpdates queda en false a propósito: es lo
+        // que evita mandarle a un desconocido una invitación a una reunión que no pidió.
+        $event_body = $this->build_hold_event_body($lead, $event_start, $event_end);
+        $result     = $this->execute_calendar_event_creation($connection, $event_body, false);
+
+        if ($result === null) {
+            return false;
+        }
+
+        $lead->update(['closer_hold_event_id' => $result['google_event_id']]);
+
+        Log::channel('disponibilidad')->info(
+            '[CALENDAR_EVENT] Reserva preventiva creada en el calendario del closer.'
+            . ' lead_id=' . $lead->id
+            . ' closer_hold_event_id=' . $result['google_event_id']
+            . ' event_start=' . $event_start->toDateTimeString()
+            . ' event_end=' . $event_end->toDateTimeString()
+        );
+
+        // La reserva recién creada también cambia la disponibilidad: invalidar de nuevo.
+        $this->busy_service->flush_cache_for_date($fecha_str);
+
+        return true;
+    }
+
+    /**
+     * Libera la reserva preventiva del closer (grupo 306, prompt 05). Idempotente: sin
+     * `closer_hold_event_id` cargado, no hace nada y no tira error.
+     *
+     * Una reserva que queda colgada le come al closer un hueco real que el grupo 307 va a
+     * necesitar para el próximo lead — por eso esto se engancha en cada punto donde la demo se
+     * cancela, se reagenda, o el lead no llega a entrar.
+     *
+     * @param Lead        $lead
+     * @param string|null $demo_date_cache Fecha Y-m-d a invalidar en caché. Mismo motivo que en
+     *                                     delete_event_for_lead(): si el llamador ya limpió
+     *                                     demo_date en memoria/BD antes de llamar acá (caso
+     *                                     cancelación/reagendado), pasarla explícita — si no, se
+     *                                     usa $lead->demo_date.
+     *
+     * @return void
+     */
+    public function release_hold_for_lead(Lead $lead, ?string $demo_date_cache = null): void
+    {
+        if (empty($lead->closer_hold_event_id)) {
+            return;
+        }
+
+        $fecha_str = $demo_date_cache
+            ?? ($lead->demo_date ? $lead->demo_date->format('Y-m-d') : null);
+
+        // delete_event_by_id() ya invalida la caché de esta fecha si se le pasa (mismo mecanismo
+        // que usa la llamada confirmada al cancelar).
+        $this->delete_event_by_id($lead->closer_hold_event_id, $fecha_str);
+
+        $lead->closer_hold_event_id = null;
+        $lead->save();
+
+        Log::channel('disponibilidad')->info(
+            '[CALENDAR_EVENT] Reserva preventiva del closer liberada.'
+            . ' lead_id=' . $lead->id
+        );
+    }
+
+    /**
+     * Verifica que el rango [$event_start, $event_end] entre en el horario laboral del closer
+     * para el día de semana de $event_start. Respeta el checkbox
+     * `llamada_debe_terminar_en_horario`: si está activo, el fin también tiene que entrar.
+     *
+     * Un rango que cruza medianoche (fin en un día de calendario distinto al de inicio) se
+     * considera fuera de horario: el horario configurado es por-día y no tiene sentido partirlo.
+     *
+     * @param Carbon $event_start
+     * @param Carbon $event_end
+     *
+     * @return bool
+     */
+    private function rango_dentro_de_horario_closer(Carbon $event_start, Carbon $event_end): bool
+    {
+        if (! $event_start->isSameDay($event_end)) {
+            return false;
+        }
+
+        $dow = $event_start->dayOfWeek;
+        if ($dow === 0) {
+            $horario_raw = LeadDemoSettings::get_closer_horario_domingo();
+        } elseif ($dow === 6) {
+            $horario_raw = LeadDemoSettings::get_closer_horario_sabado();
+        } else {
+            $horario_raw = LeadDemoSettings::get_closer_horario_lunes_viernes();
+        }
+
+        // Horario vacío significa que el closer no trabaja ese día.
+        if ($horario_raw === '') {
+            return false;
+        }
+
+        $partes = explode('-', $horario_raw);
+        if (count($partes) !== 2) {
+            return false;
+        }
+
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $partes[0], $mi) || ! preg_match('/(\d{1,2}):(\d{2})/', $partes[1], $mf)) {
+            return false;
+        }
+
+        $horario_inicio = (int) $mi[1] * 60 + (int) $mi[2];
+        $horario_fin    = (int) $mf[1] * 60 + (int) $mf[2];
+
+        $inicio_minutos = $event_start->hour * 60 + $event_start->minute;
+        $fin_minutos    = $event_end->hour * 60 + $event_end->minute;
+
+        if ($inicio_minutos < $horario_inicio || $inicio_minutos > $horario_fin) {
+            return false;
+        }
+
+        if (LeadDemoSettings::get_llamada_debe_terminar_en_horario() && $fin_minutos > $horario_fin) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Cuerpo del evento de RESERVA PREVENTIVA: sin attendees, sin conferenceData, con un
+     * `colorId` distinto del `'2'` de las llamadas confirmadas para que el closer distinga de un
+     * vistazo una reserva de una reunión real.
+     *
+     * @param Lead   $lead
+     * @param Carbon $event_start
+     * @param Carbon $event_end
+     *
+     * @return array
+     */
+    private function build_hold_event_body(Lead $lead, Carbon $event_start, Carbon $event_end): array
+    {
+        $tz = 'America/Argentina/Buenos_Aires';
+
+        $lead_nombre = trim(($lead->name ?? '') . ' ' . ($lead->last_name ?? ''));
+        if ($lead_nombre === '') {
+            $lead_nombre = 'Lead #' . $lead->id;
+        }
+
+        $start_iso = $event_start->copy()->setTimezone($tz)->toIso8601String();
+        $end_iso   = $event_end->copy()->setTimezone($tz)->toIso8601String();
+
+        return [
+            // Prefijo [CC] igual que el resto de los eventos generados por ComercioCity.
+            'summary'     => '[CC] Posible llamada — ' . $lead_nombre,
+            'description' => 'RESERVA PREVENTIVA: el lead todavía no confirmó esta llamada. '
+                . 'Se libera sola si la demo no ocurre o si el lead no avanza.' . "\n"
+                . 'Lead: ' . $lead_nombre . "\n"
+                . 'Demo: ' . $lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_start_time,
+            'start'   => [
+                'dateTime' => $start_iso,
+                'timeZone' => $tz,
+            ],
+            'end'     => [
+                'dateTime' => $end_iso,
+                'timeZone' => $tz,
+            ],
+            // colorId "8" = grafito/gris: distinto del "2" (sage) que usan las llamadas confirmadas.
+            'colorId' => '8',
+            // Sin attendees ni conferenceData a propósito: es un bloqueo interno, no una invitación.
+        ];
+    }
+
+    /**
      * Crea un evento en el Google Calendar de una conexión dada y devuelve el id del evento
      * y el link de Meet extraídos de la respuesta de Google. No persiste nada — el llamador
      * decide dónde guardar el resultado (Lead o LeadCall según el caso).

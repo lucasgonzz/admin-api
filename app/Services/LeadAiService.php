@@ -3269,6 +3269,11 @@ TXT;
         $google_event_delete_needed = false;
         // Flag: se debe crear un nuevo evento en Google Calendar del closer.
         $google_event_create_needed = false;
+        // Flag: se debe liberar la reserva preventiva del closer (grupo 306, prompt 05).
+        $closer_hold_release_needed = false;
+        // Fecha Y-m-d a invalidar en caché al liberar la reserva (null = usar demo_date del lead
+        // fresco; se completa solo cuando el bloque de cancelar_demo limpia demo_date antes).
+        $closer_hold_demo_date_anterior = null;
 
         /* Acción: cancelar demo agendada cuando el lead pide reagendar.
          * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
@@ -3290,6 +3295,21 @@ TXT;
                 // Limpiar google_event_id y meet_url en memoria para que el save() principal los persista como null.
                 $lead->google_event_id = null;
                 $lead->meet_url        = null;
+            }
+
+            /* Reserva preventiva del closer (grupo 306, prompt 05, dinámica nueva): marcar para
+             * liberar en el bloque POST-save de más abajo, junto con las demás operaciones de
+             * Google Calendar — no acá, porque release_hold_for_lead() guarda el lead por su
+             * cuenta y en este punto de la función $lead puede tener mutaciones en memoria
+             * (contact_name, email) que todavía no deben persistirse (ver "Único save del lead"
+             * más abajo). No hace falta guardar el id ni limpiarlo en memoria: el bloque post-save
+             * relee el lead fresco de la base, que todavía tiene closer_hold_event_id cargado.
+             * La fecha SÍ hay que guardarla acá: unas líneas más abajo se limpia demo_date, así
+             * que el lead fresco del post-save ya no la va a tener (mismo motivo que
+             * $google_event_demo_date_anterior arriba). */
+            if (! empty($lead->closer_hold_event_id)) {
+                $closer_hold_release_needed      = true;
+                $closer_hold_demo_date_anterior  = $demo_date_anterior;
             }
 
             /* Limpiar los campos de demo: libera el slot y deja al lead listo para reagendar. */
@@ -3636,6 +3656,15 @@ TXT;
             Log::info('LeadAiService: no ingreso a demo marcado por inferencia.', [
                 'lead_id' => $lead->id,
             ]);
+
+            /* Liberar la reserva preventiva del closer (grupo 306, prompt 05): el lead nunca
+             * entró, así que ese hueco no le sirve a nadie colgado — es justo el que el grupo 307
+             * va a necesitar para el próximo lead. Se marca acá y se ejecuta en el bloque
+             * POST-save de más abajo, mismo motivo que en el bloque de cancelar_demo: no persistir
+             * nada a mitad de función. */
+            if (! empty($lead->closer_hold_event_id)) {
+                $closer_hold_release_needed = true;
+            }
         }
 
         /*
@@ -3914,12 +3943,14 @@ TXT;
          * los campos de demo (demo_date, demo_start_time, etc.) estén ya persistidos en BD.
          * Son best-effort: si fallan, no rompen el flujo de agendamiento.
          *
-         * Tres escenarios posibles:
+         * Cuatro escenarios posibles:
          *   1. Solo cancelar_demo sin agendar_demo: eliminar el evento existente.
          *   2. cancelar_demo + agendar_demo (reagendado): eliminar el viejo y crear el nuevo.
          *   3. Solo agendar_demo (primer agendado): crear el evento nuevo.
+         *   4. Reserva preventiva del closer (grupo 306, prompt 05, dinámica nueva) a liberar por
+         *      cancelación/reagendado o por no-ingreso — independiente de los tres de arriba.
          */
-        if ($google_event_delete_needed || $google_event_create_needed) {
+        if ($google_event_delete_needed || $google_event_create_needed || $closer_hold_release_needed) {
             try {
                 $google_oauth_service = app(GoogleCalendarOAuthService::class);
                 $google_event_service = new CloserGoogleCalendarEventService(
@@ -3936,9 +3967,27 @@ TXT;
                     );
                 }
 
+                if ($closer_hold_release_needed) {
+                    // Lead fresco: closer_hold_event_id todavía está cargado en la base (no se
+                    // limpió en memoria arriba), release_hold_for_lead() lo borra y persiste.
+                    // $closer_hold_demo_date_anterior cubre el caso cancelación/reagendado, donde
+                    // demo_date ya está en null en ese lead fresco.
+                    $google_event_service->release_hold_for_lead($lead->fresh(), $closer_hold_demo_date_anterior);
+                }
+
                 if ($google_event_create_needed) {
-                    // Crear el nuevo evento usando el lead fresco con los datos de demo persistidos.
-                    $google_event_service->create_event_for_lead($lead->fresh());
+                    /* Gate por dinámica (grupo 306, prompt 05): en la dinámica nueva el closer no
+                     * participa de la decisión de cuándo se hace la demo, así que no se le crea
+                     * una llamada confirmada con invitación — solo una reserva preventiva
+                     * condicional (create_hold_for_lead()). La dinámica actual sigue exactamente
+                     * igual que siempre. */
+                    $lead_fresco = $lead->fresh();
+                    if ($lead_fresco->usa_experiencia_demo_nueva()) {
+                        $google_event_service->create_hold_for_lead($lead_fresco);
+                    } else {
+                        // Crear el nuevo evento usando el lead fresco con los datos de demo persistidos.
+                        $google_event_service->create_event_for_lead($lead_fresco);
+                    }
                 }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error en operaciones de Google Calendar del closer.', [
