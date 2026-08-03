@@ -3115,7 +3115,7 @@ TXT;
     /**
      * Aplica de una todas las acciones estructuradas del JSON de Claude (guardar_nombre,
      * guardar_email, cancelar_demo, agendar_demo, confirmar_ingreso, confirmar_fin_demo,
-     * marcar_no_ingreso, sugerir_socio, requiere_intervencion_humana) y crea (o actualiza,
+     * posponer_check_fin_demo, marcar_no_ingreso, sugerir_socio, requiere_intervencion_humana) y crea (o actualiza,
      * cuando viene de una aprobación diferida) el LeadMessage con el resultado.
      *
      * Cuando $for_approval es true (llamado desde apply_pending_actions()), NO se vuelve a forzar
@@ -3654,6 +3654,37 @@ TXT;
                 $estado          = $pipeline_status->slug;
                 /* Recalcular el diff de estado para que el badge del mensaje sea correcto. */
                 $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+            }
+        }
+
+        /* Acción: posponer el check automático de fin de demo (grupo 307, prompt 01). Claude la
+         * devuelve cuando el lead avisa explícitamente que le falta un rato ("estoy viendo lo de
+         * compras", "dame 20 minutos"). Válida en los mismos estados que confirmar_fin_demo. No
+         * cambia el estado del lead: solo reprograma CheckDemoFin::handle(). */
+        $posponer_check_fin_demo_minutos = isset($parsed['posponer_check_fin_demo']) ? (int) $parsed['posponer_check_fin_demo'] : null;
+        // Un modelo que devuelve todas las claves de acción puede mandar `false`/`0` cuando NO
+        // corresponde posponer -- eso no es "posponer 0 minutos", es "no pedido". Igual que el resto
+        // de las acciones booleanas de este método (que usan !empty en vez de isset).
+        if ($posponer_check_fin_demo_minutos !== null && $posponer_check_fin_demo_minutos > 0) {
+            $estados_validos_posponer = ['demo_en_curso', 'demo_pendiente_de_terminar'];
+            if (in_array((string) $lead->status, $estados_validos_posponer, true)) {
+                /* Acotar a un rango sano: viene de un modelo interpretando lenguaje natural, y
+                 * "dame un rato" no puede convertirse en 8 horas. */
+                $minutos = $posponer_check_fin_demo_minutos;
+                if ($minutos < 5 || $minutos > 120) {
+                    Log::warning('LeadAiService: posponer_check_fin_demo fuera de rango, se acota.', [
+                        'lead_id'           => $lead->id,
+                        'minutos_recibidos' => $posponer_check_fin_demo_minutos,
+                    ]);
+                    $minutos = max(5, min(120, $minutos));
+                }
+
+                $lead->demo_fin_check_reprogramado_para = AppTime::now()->addMinutes($minutos);
+
+                Log::info('LeadAiService: check de fin de demo pospuesto a pedido del lead.', [
+                    'lead_id' => $lead->id,
+                    'minutos' => $minutos,
+                ]);
             }
         }
 
@@ -5001,13 +5032,19 @@ TXT;
                 . "final si ya terminó. No te quedes esperando pasivamente.\n"
                 . "Cuando infieras que el lead terminó la demo (aunque te lo diga indirectamente, o te diga que sí\n"
                 . "y encima te haga una pregunta), devolvé confirmar_fin_demo: true, respondé lo que haya que\n"
-                . "responder, y dejá que el sistema lo avance.";
+                . "responder, y dejá que el sistema lo avance.\n"
+                . "Si en cambio te dice explícitamente que le falta un rato (\"estoy viendo lo de compras\",\n"
+                . "\"dame 20 minutos\"), devolvé posponer_check_fin_demo con los minutos que pidió (entre 5 y 120;\n"
+                . "si no dio un número, usá tu criterio dentro de ese rango) para que el sistema no lo interrumpa\n"
+                . "antes de esa demora.";
         } elseif ($lead_status_for_context === 'demo_pendiente_de_terminar') {
             /* El lead volvió a escribir después de que el sistema no pudo confirmar el fin de la demo. */
             $txt .= "\n\nCONTEXTO DE DEMO - PENDIENTE DE TERMINAR:\n"
                 . "Se había dado por no confirmada la finalización de la demo de este lead, pero volvió a escribir.\n"
                 . "Si de su mensaje se infiere que efectivamente terminó la demo, devolvé confirmar_fin_demo: true.\n"
-                . "Si todavía está en la demo, seguí ayudándolo y volvé a perseguir saber cuándo termina.";
+                . "Si todavía está en la demo, seguí ayudándolo y volvé a perseguir saber cuándo termina.\n"
+                . "Si te dice explícitamente que le falta un rato, devolvé posponer_check_fin_demo con los minutos\n"
+                . "que pidió (entre 5 y 120).";
         } elseif ($lead_status_for_context === 'closer_activo') {
             /* Post-llamada: el lead ya tuvo la demo con el closer y puede mencionar socios u otros contactos. */
             $txt .= "\n\nCONTEXTO POST-LLAMADA - CLOSER ACTIVO:\n"

@@ -239,6 +239,11 @@ class Lead extends Model
         // Flag: ya se envió el mensaje preguntando si terminó la demo.
         'demo_fin_check_enviado'       => 'boolean',
 
+        // Reprogramación del check de fin (grupo 307, prompt 01): null = sin reprogramación
+        // vigente (usar demo_datetime + duración); con fecha, ese es el nuevo objetivo temporal
+        // porque hubo conversación viva o el agente pospuso a pedido del lead.
+        'demo_fin_check_reprogramado_para' => 'datetime',
+
         // Flag: la demo se dejó abierta en un rango amplio (sin horario puntual); no reservar
         // automáticamente ventana de llamada para el closer (se coordina aparte, manualmente).
         'demo_flexible'                => 'boolean',

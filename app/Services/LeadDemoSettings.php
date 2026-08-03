@@ -91,6 +91,18 @@ class LeadDemoSettings
     /** Clave: minutos desde el fin de la demo antes de pasar demo_pendiente_de_terminar → closer_activo. */
     public const KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS = 'demo_pendiente_terminar_timeout_minutos';
 
+    /**
+     * Clave: ventana de "conversación viva" para el check de fin de demo (grupo 307, prompt 01).
+     * Minutos: si hubo un mensaje entrante o saliente dentro de esta ventana, el check se pospone.
+     */
+    public const KEY_FIN_CHECK_SILENCIO_MINUTOS = 'fin_check_silencio_minutos';
+
+    /**
+     * Clave: cuánto se pospone el check de fin de demo cuando hay conversación viva y nadie (ni el
+     * agente, a pedido del lead) indicó una demora puntual (grupo 307, prompt 01).
+     */
+    public const KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS = 'fin_check_demora_default_minutos';
+
     /** Clave: minutos antes del inicio de la llamada del closer para enviar el bot de Recall.ai. */
     public const KEY_RECALL_BOT_MINUTOS_ANTES = 'recall_bot_minutos_antes';
 
@@ -175,6 +187,12 @@ class LeadDemoSettings
     /** Valor por defecto: 120 minutos (2 horas). */
     private const DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS = 120;
 
+    /** Valor por defecto: ventana de "conversación viva" para el check de fin (minutos). */
+    private const DEFAULT_FIN_CHECK_SILENCIO_MINUTOS = 10;
+
+    /** Valor por defecto: demora al posponer el check de fin cuando nadie indicó cuánto (minutos). */
+    private const DEFAULT_FIN_CHECK_DEMORA_DEFAULT_MINUTOS = 15;
+
     /** Valor por defecto: minutos antes de la llamada del closer para enviar el bot de Recall.ai. */
     private const DEFAULT_RECALL_BOT_MINUTOS_ANTES = 5;
 
@@ -223,6 +241,8 @@ class LeadDemoSettings
             'fin_timeout_minutos'                 => self::get_fin_timeout_minutos(),
             'pendiente_ingreso_horas_timeout'     => self::get_pendiente_ingreso_horas_timeout(),
             'pendiente_terminar_timeout_minutos'  => self::get_pendiente_terminar_timeout_minutos(),
+            'fin_check_silencio_minutos'          => self::get_fin_check_silencio_minutos(),
+            'fin_check_demora_default_minutos'    => self::get_fin_check_demora_default_minutos(),
             'experiencia_default'                 => self::get_experiencia_default(),
         ];
     }
@@ -340,6 +360,15 @@ class LeadDemoSettings
 
         AdminSetting::set(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::clamp((int) ($data['pendiente_terminar_timeout_minutos'] ?? self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS)));
 
+        // Ventana de "conversación viva" y demora por defecto al posponer el check de fin (grupo
+        // 307, prompt 01). "isset" y NO obligatorias: el SPA todavía no manda estas claves.
+        if (isset($data['fin_check_silencio_minutos'])) {
+            AdminSetting::set(self::KEY_FIN_CHECK_SILENCIO_MINUTOS, (string) self::clamp((int) $data['fin_check_silencio_minutos']));
+        }
+        if (isset($data['fin_check_demora_default_minutos'])) {
+            AdminSetting::set(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS, (string) self::clamp((int) $data['fin_check_demora_default_minutos']));
+        }
+
         // Dinámica de demo default para leads nuevos: guarda isset obligatoria, el SPA todavía no
         // manda este campo (lo agrega el prompt 04) y el update() de settings tiene que seguir
         // funcionando igual en el intervalo entre el deploy del backend y el del front.
@@ -423,6 +452,12 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS) === null) {
             AdminSetting::set(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_FIN_CHECK_SILENCIO_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_FIN_CHECK_SILENCIO_MINUTOS, (string) self::DEFAULT_FIN_CHECK_SILENCIO_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS, (string) self::DEFAULT_FIN_CHECK_DEMORA_DEFAULT_MINUTOS);
         }
     }
 
@@ -730,6 +765,29 @@ class LeadDemoSettings
     public static function get_pendiente_terminar_timeout_minutos(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS, (string) self::DEFAULT_PENDIENTE_TERMINAR_TIMEOUT_MINUTOS));
+    }
+
+    /**
+     * Ventana de "conversación viva" para el check de fin de demo, en minutos.
+     *
+     * Si hubo un mensaje entrante o saliente dentro de esta ventana (o hay una sugerencia
+     * pendiente), `CheckDemoFin` pospone en vez de enviar.
+     *
+     * @return int
+     */
+    public static function get_fin_check_silencio_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_FIN_CHECK_SILENCIO_MINUTOS, (string) self::DEFAULT_FIN_CHECK_SILENCIO_MINUTOS));
+    }
+
+    /**
+     * Demora, en minutos, al posponer el check de fin de demo cuando nadie indicó cuánto.
+     *
+     * @return int
+     */
+    public static function get_fin_check_demora_default_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS, (string) self::DEFAULT_FIN_CHECK_DEMORA_DEFAULT_MINUTOS));
     }
 
     /**

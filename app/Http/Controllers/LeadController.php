@@ -172,6 +172,12 @@ class LeadController extends Controller
             $lead->update([
                 'recordatorio_demo_enviado'   => false,
                 'recordatorio_manana_enviado' => false,
+                // Reprogramación del check de fin (grupo 307, prompt 01): si quedó seteada de una
+                // conversación viva en el horario viejo, es un timestamp del pasado que nunca más
+                // cae dentro de la ventana de ±2 minutos -- el check de fin quedaría trabado para
+                // siempre. Al reagendar, vuelve a null para que el nuevo horario calcule su propio
+                // objetivo (demo_datetime + duración) como cualquier demo sin reprogramar.
+                'demo_fin_check_reprogramado_para' => null,
             ]);
         }
 
@@ -581,6 +587,12 @@ class LeadController extends Controller
             $lead->update([
                 'recordatorio_demo_enviado'   => false,
                 'recordatorio_manana_enviado' => false,
+                // Reprogramación del check de fin (grupo 307, prompt 01): si quedó seteada de una
+                // conversación viva en el horario viejo, es un timestamp del pasado que nunca más
+                // cae dentro de la ventana de ±2 minutos -- el check de fin quedaría trabado para
+                // siempre. Al reagendar, vuelve a null para que el nuevo horario calcule su propio
+                // objetivo (demo_datetime + duración) como cualquier demo sin reprogramar.
+                'demo_fin_check_reprogramado_para' => null,
             ]);
         }
 

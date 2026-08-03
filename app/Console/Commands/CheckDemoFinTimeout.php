@@ -21,9 +21,12 @@ use Illuminate\Support\Facades\Log;
  * (`demo_terminada_confirmada = false`) y aún no fueron marcados con timeout
  * (`demo_pendiente_terminar_notificado = false`).
  *
- * La referencia temporal es `demo_datetime + duración` (momento del check de fin).
- * Si desde ese punto pasaron más de `fin_timeout_minutos`, el lead pasa al estado
- * `demo_pendiente_de_terminar` para visibilidad del equipo.
+ * La referencia temporal es `demo_datetime + duración` (momento del check de fin) --
+ * salvo que el check haya sido reprogramado por conversación viva (grupo 307, prompt
+ * 01): en ese caso la referencia es `demo_fin_check_reprogramado_para`, el momento real
+ * en que el check de fin se manda (o se mandó). Si desde ese punto pasaron más de
+ * `fin_timeout_minutos`, el lead pasa al estado `demo_pendiente_de_terminar` para
+ * visibilidad del equipo.
  *
  * El lead queda reactivable: si más adelante confirma que terminó, la acción
  * `confirmar_fin_demo` de Claude (prompt 095) lo mueve a `demo_realizada`.
@@ -79,22 +82,28 @@ class CheckDemoFinTimeout extends Command
         $processed = 0;
 
         foreach ($candidates as $lead) {
-            /* Construir datetime de inicio de demo en timezone Argentina. */
-            $demo_datetime = $this->parse_demo_datetime(
-                $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
-                (string) $lead->demo_start_time
-            );
+            /*
+             * Referencia: el check de fin se manda (o se mandó) en demo_datetime + duracion, salvo
+             * reprogramación (prompt 307-01), que la reemplaza como objetivo temporal.
+             */
+            if ($lead->demo_fin_check_reprogramado_para !== null) {
+                $check_fin_datetime = $lead->demo_fin_check_reprogramado_para->copy();
+            } else {
+                /* Construir datetime de inicio de demo en timezone Argentina. */
+                $demo_datetime = $this->parse_demo_datetime(
+                    $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
+                    (string) $lead->demo_start_time
+                );
 
-            if ($demo_datetime === null) {
-                continue;
+                if ($demo_datetime === null) {
+                    continue;
+                }
+
+                $check_fin_datetime = $demo_datetime->copy()->addMinutes($duracion_minutos);
             }
 
-            /*
-             * Referencia: check de fin se mandó en demo_datetime + duracion.
-             * El timeout se dispara cuando ese punto + timeout_minutos <= now.
-             */
-            $check_fin_datetime = $demo_datetime->copy()->addMinutes($duracion_minutos);
-            $trigger_timeout    = $check_fin_datetime->copy()->addMinutes($timeout_minutos);
+            /* El timeout se dispara cuando ese punto + timeout_minutos <= now. */
+            $trigger_timeout = $check_fin_datetime->copy()->addMinutes($timeout_minutos);
 
             if ($trigger_timeout->gt($now)) {
                 continue;

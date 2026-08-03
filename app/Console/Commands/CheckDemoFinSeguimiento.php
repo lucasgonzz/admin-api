@@ -22,8 +22,11 @@ use Illuminate\Support\Facades\Log;
  * (`demo_fin_seguimiento_enviado = false`).
  *
  * La referencia temporal es `demo_datetime + duración` (momento en que se envió el
- * check de fin). Si desde ese momento pasaron más de `fin_seguimiento_minutos`,
- * se envía 1 seguimiento. El flag anti-duplicado garantiza que no se repita.
+ * check de fin) -- salvo que el check haya sido reprogramado por conversación viva
+ * (grupo 307, prompt 01): en ese caso la referencia es `demo_fin_check_reprogramado_para`,
+ * porque ese es el momento real en que el check de fin se manda (o se mandó). Si desde
+ * ese punto pasaron más de `fin_seguimiento_minutos`, se envía 1 seguimiento. El flag
+ * anti-duplicado garantiza que no se repita.
  */
 class CheckDemoFinSeguimiento extends Command
 {
@@ -102,22 +105,29 @@ class CheckDemoFinSeguimiento extends Command
         $sent = 0;
 
         foreach ($candidates as $lead) {
-            /* Construir datetime de inicio de demo en timezone Argentina. */
-            $demo_datetime = $this->parse_demo_datetime(
-                $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
-                (string) $lead->demo_start_time
-            );
+            /*
+             * Momento en que se envía (o se envió) el check de fin: la reprogramación, si existe,
+             * reemplaza a demo_datetime + duración -- si no, el seguimiento saldría antes que el
+             * check que todavía está esperando una conversación viva (prompt 307-01).
+             */
+            if ($lead->demo_fin_check_reprogramado_para !== null) {
+                $check_fin_datetime = $lead->demo_fin_check_reprogramado_para->copy();
+            } else {
+                /* Construir datetime de inicio de demo en timezone Argentina. */
+                $demo_datetime = $this->parse_demo_datetime(
+                    $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
+                    (string) $lead->demo_start_time
+                );
 
-            if ($demo_datetime === null) {
-                continue;
+                if ($demo_datetime === null) {
+                    continue;
+                }
+
+                $check_fin_datetime = $demo_datetime->copy()->addMinutes($duracion_minutos);
             }
 
-            /*
-             * Momento en que se envió el check de fin = inicio + duración.
-             * El seguimiento se dispara cuando ese momento + seguimiento_minutos <= now.
-             */
-            $check_fin_datetime    = $demo_datetime->copy()->addMinutes($duracion_minutos);
-            $trigger_seguimiento   = $check_fin_datetime->copy()->addMinutes($seguimiento_minutos);
+            /* El seguimiento se dispara cuando ese momento + seguimiento_minutos <= now. */
+            $trigger_seguimiento = $check_fin_datetime->copy()->addMinutes($seguimiento_minutos);
 
             if ($trigger_seguimiento->gt($now)) {
                 continue;
