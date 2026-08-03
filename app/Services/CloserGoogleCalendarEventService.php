@@ -254,6 +254,107 @@ class CloserGoogleCalendarEventService
     }
 
     /**
+     * Actualiza la reserva preventiva del closer para reflejar que el lead ya está haciendo la
+     * demo (grupo 306, prompt 07): pasa de "posible llamada" a "demo en curso" sin tocar el
+     * horario ni el id del evento.
+     *
+     * Un PATCH, no un DELETE + POST: recrear el evento le cambiaría el id (closer_hold_event_id
+     * es lo que después usa release_hold_for_lead() para liberarlo) y le volvería a sonar la
+     * notificación al closer sin motivo. Sin closer_hold_event_id, no hace nada y no loguea
+     * error: es el caso normal de una demo que no cumplía las dos condiciones del prompt 05 y por
+     * lo tanto no reservó nada.
+     *
+     * @param Lead $lead Lead con demo_ingreso_confirmado recién marcado.
+     * @return void
+     */
+    public function mark_hold_as_demo_en_curso(Lead $lead): void
+    {
+        if (empty($lead->closer_hold_event_id)) {
+            return;
+        }
+
+        $connection = $this->get_closer_connection();
+        if (! $connection) {
+            return;
+        }
+
+        $tz = 'America/Argentina/Buenos_Aires';
+
+        // Mismo cálculo que create_hold_for_lead(): el evento del closer arranca cuando termina
+        // la demo. Ese horario no cambia acá -- sin tocar start/end del evento existente.
+        $event_times      = $this->calculate_event_times($lead);
+        $event_start      = $event_times[0];
+        $fin_estimado_str = $event_start->copy()->setTimezone($tz)->format('H:i');
+
+        $lead_nombre = trim(($lead->name ?? '') . ' ' . ($lead->last_name ?? ''));
+        if ($lead_nombre === '') {
+            $lead_nombre = 'Lead #' . $lead->id;
+        }
+
+        $ingreso_confirmado_str = $lead->demo_ingreso_confirmado_at
+            ? $lead->demo_ingreso_confirmado_at->copy()->setTimezone($tz)->format('H:i')
+            : Carbon::now($tz)->format('H:i');
+
+        $patch_body = [
+            'summary'     => '[CC] Demo en curso — ' . $lead_nombre,
+            'description' => 'El lead está haciendo la demo ahora mismo. '
+                . 'Ingreso confirmado a las ' . $ingreso_confirmado_str . '. '
+                . 'Estimado que termina a las ' . $fin_estimado_str . '.' . "\n"
+                . 'Lead: ' . $lead_nombre,
+            // colorId "5" = banana/amarillo: distinto del "8" (reserva preventiva) y del "2"
+            // (llamada confirmada), para que el closer note el cambio sin abrir el evento.
+            'colorId' => '5',
+        ];
+
+        try {
+            $access_token = $this->oauth_service->get_fresh_access_token($connection);
+
+            $response = Http::withToken($access_token)
+                ->patch(
+                    'https://www.googleapis.com/calendar/v3/calendars/'
+                        . urlencode($connection->google_calendar_id)
+                        . '/events/' . urlencode($lead->closer_hold_event_id),
+                    $patch_body
+                );
+
+            if ($response->status() === 404) {
+                // El closer borró el evento a mano: no es un error del sistema. Se limpia la
+                // columna para que release_hold_for_lead() no intente liberar algo que no existe.
+                Log::channel('disponibilidad')->info(
+                    '[CALENDAR_EVENT] La reserva preventiva ya no existe en Google (404) al marcar demo en curso.'
+                    . ' lead_id=' . $lead->id
+                    . ' closer_hold_event_id=' . $lead->closer_hold_event_id
+                );
+                $lead->closer_hold_event_id = null;
+                $lead->save();
+                return;
+            }
+
+            if ($response->failed()) {
+                Log::channel('disponibilidad')->warning(
+                    '[CALENDAR_EVENT] Error al marcar la reserva del closer como demo en curso.'
+                    . ' lead_id=' . $lead->id
+                    . ' HTTP=' . $response->status()
+                    . ' body=' . substr($response->body(), 0, 500)
+                );
+                return;
+            }
+
+            Log::channel('disponibilidad')->info(
+                '[CALENDAR_EVENT] Reserva del closer actualizada a demo en curso.'
+                . ' lead_id=' . $lead->id
+                . ' closer_hold_event_id=' . $lead->closer_hold_event_id
+            );
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->error(
+                '[CALENDAR_EVENT] Excepción al marcar la reserva del closer como demo en curso.'
+                . ' lead_id=' . $lead->id
+                . ' error=' . $e->getMessage()
+            );
+        }
+    }
+
+    /**
      * Verifica que el rango [$event_start, $event_end] entre en el horario laboral del closer
      * para el día de semana de $event_start. Respeta el checkbox
      * `llamada_debe_terminar_en_horario`: si está activo, el fin también tiene que entrar.

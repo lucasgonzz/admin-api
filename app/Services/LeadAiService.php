@@ -3271,6 +3271,8 @@ TXT;
         $google_event_create_needed = false;
         // Flag: se debe liberar la reserva preventiva del closer (grupo 306, prompt 05).
         $closer_hold_release_needed = false;
+        // Flag: se debe actualizar la reserva preventiva del closer a "demo en curso" (grupo 306, prompt 07).
+        $closer_hold_mark_demo_en_curso_needed = false;
         // Fecha Y-m-d a invalidar en caché al liberar la reserva (null = usar demo_date del lead
         // fresco; se completa solo cuando el bloque de cancelar_demo limpia demo_date antes).
         $closer_hold_demo_date_anterior = null;
@@ -3593,6 +3595,12 @@ TXT;
                     $lead->demo_ingreso_confirmado_at = AppTime::now();
                     /* Habilitar la notificación a admins (se dispara después del save). */
                     $notificar_ingreso_confirmado = true;
+                    /* Actualizar la reserva preventiva del closer a "demo en curso" (grupo 306,
+                     * prompt 07), junto con las demás operaciones de Google Calendar del
+                     * post-save. Adentro del anti-duplicado: si el agente vuelve a inferir un
+                     * ingreso ya confirmado -y lo hace, porque la inferencia conversacional se
+                     * evalúa en cada mensaje- no tiene que pegarle a Google una vez por mensaje. */
+                    $closer_hold_mark_demo_en_curso_needed = true;
                     Log::info('LeadAiService: ingreso a demo confirmado por inferencia.', [
                         'lead_id' => $lead->id,
                     ]);
@@ -3950,7 +3958,7 @@ TXT;
          *   4. Reserva preventiva del closer (grupo 306, prompt 05, dinámica nueva) a liberar por
          *      cancelación/reagendado o por no-ingreso — independiente de los tres de arriba.
          */
-        if ($google_event_delete_needed || $google_event_create_needed || $closer_hold_release_needed) {
+        if ($google_event_delete_needed || $google_event_create_needed || $closer_hold_release_needed || $closer_hold_mark_demo_en_curso_needed) {
             try {
                 $google_oauth_service = app(GoogleCalendarOAuthService::class);
                 $google_event_service = new CloserGoogleCalendarEventService(
@@ -3973,6 +3981,18 @@ TXT;
                     // $closer_hold_demo_date_anterior cubre el caso cancelación/reagendado, donde
                     // demo_date ya está en null en ese lead fresco.
                     $google_event_service->release_hold_for_lead($lead->fresh(), $closer_hold_demo_date_anterior);
+                }
+
+                if ($closer_hold_mark_demo_en_curso_needed) {
+                    /* Gate por dinámica (grupo 306, prompt 07): los leads de la dinámica actual
+                     * nunca tienen reserva preventiva (create_hold_for_lead() solo corre para
+                     * demo_experiencia = nueva) -- mark_hold_as_demo_en_curso() ya es un no-op sin
+                     * closer_hold_event_id, pero el gate explícito documenta la intención y evita
+                     * un fresh() + llamada de más para el caso más común (dinámica actual). */
+                    $lead_fresco_ingreso = $lead->fresh();
+                    if ($lead_fresco_ingreso->usa_experiencia_demo_nueva()) {
+                        $google_event_service->mark_hold_as_demo_en_curso($lead_fresco_ingreso);
+                    }
                 }
 
                 if ($google_event_create_needed) {
