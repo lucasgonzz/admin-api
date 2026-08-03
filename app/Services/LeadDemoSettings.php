@@ -51,6 +51,18 @@ class LeadDemoSettings
     /** Clave: horario laboral del closer los domingos (formato H:i-H:i; vacío = no trabaja). */
     public const KEY_CLOSER_HORARIO_DOMINGO = 'demo_closer_horario_domingo';
 
+    /**
+     * Clave: franja horaria propia de la demo de lunes a viernes (formato H:i-H:i), independiente
+     * del horario del closer (grupo 306, prompt 01 — ver `@contexto/demo_experiencia.md` §3.19).
+     */
+    public const KEY_DEMO_HORARIO_LUNES_VIERNES = 'demo_horario_lunes_viernes';
+
+    /** Clave: franja horaria propia de la demo los sábados (formato H:i-H:i). */
+    public const KEY_DEMO_HORARIO_SABADO = 'demo_horario_sabado';
+
+    /** Clave: franja horaria propia de la demo los domingos (formato H:i-H:i). */
+    public const KEY_DEMO_HORARIO_DOMINGO = 'demo_horario_domingo';
+
     /** Clave: indica si la llamada del closer debe terminar dentro del horario laboral (string "1"/"0"). */
     public const KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO = 'demo_llamada_debe_terminar_en_horario';
 
@@ -117,6 +129,18 @@ class LeadDemoSettings
     /** Valor por defecto: horario laboral del closer los domingos (vacío = no trabaja). */
     private const DEFAULT_CLOSER_HORARIO_DOMINGO = '';
 
+    /**
+     * Valor por defecto: franja completa (00:00-23:59). La demo se ofrece "lo antes posible,
+     * siempre" — un default acotado escondería el caso que este grupo viene a habilitar.
+     */
+    private const DEFAULT_DEMO_HORARIO_LUNES_VIERNES = '00:00-23:59';
+
+    /** Valor por defecto: franja completa de la demo los sábados. */
+    private const DEFAULT_DEMO_HORARIO_SABADO = '00:00-23:59';
+
+    /** Valor por defecto: franja completa de la demo los domingos. */
+    private const DEFAULT_DEMO_HORARIO_DOMINGO = '00:00-23:59';
+
     /** Valor por defecto: la llamada del closer NO debe terminar dentro del horario (desactivado). */
     private const DEFAULT_LLAMADA_DEBE_TERMINAR_EN_HORARIO = '0';
 
@@ -175,6 +199,9 @@ class LeadDemoSettings
             'closer_horario_lunes_viernes'        => self::get_closer_horario_lunes_viernes(),
             'closer_horario_sabado'               => self::get_closer_horario_sabado(),
             'closer_horario_domingo'              => self::get_closer_horario_domingo(),
+            'demo_horario_lunes_viernes'          => self::get_demo_horario_lunes_viernes(),
+            'demo_horario_sabado'                 => self::get_demo_horario_sabado(),
+            'demo_horario_domingo'                => self::get_demo_horario_domingo(),
             'llamada_debe_terminar_en_horario'    => self::get_llamada_debe_terminar_en_horario(),
             'frecuencia_slots_minutos'            => self::get_frecuencia_slots_minutos(),
             'ingreso_timeout_minutos'             => self::get_ingreso_timeout_minutos(),
@@ -240,6 +267,30 @@ class LeadDemoSettings
                 if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
                     AdminSetting::set(self::KEY_CLOSER_HORARIO_DOMINGO, $val);
                 }
+            }
+        }
+
+        // Franja de la demo lunes a viernes: validar ambos extremos del rango H:i-H:i; ignorar si alguno es inválido.
+        if (isset($data['demo_horario_lunes_viernes'])) {
+            $parts = explode('-', (string) $data['demo_horario_lunes_viernes']);
+            if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+                AdminSetting::set(self::KEY_DEMO_HORARIO_LUNES_VIERNES, (string) $data['demo_horario_lunes_viernes']);
+            }
+        }
+
+        // Franja de la demo los sábados: validar ambos extremos del rango H:i-H:i; ignorar si alguno es inválido.
+        if (isset($data['demo_horario_sabado'])) {
+            $parts = explode('-', (string) $data['demo_horario_sabado']);
+            if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+                AdminSetting::set(self::KEY_DEMO_HORARIO_SABADO, (string) $data['demo_horario_sabado']);
+            }
+        }
+
+        // Franja de la demo los domingos: validar ambos extremos del rango H:i-H:i; ignorar si alguno es inválido.
+        if (isset($data['demo_horario_domingo'])) {
+            $parts = explode('-', (string) $data['demo_horario_domingo']);
+            if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+                AdminSetting::set(self::KEY_DEMO_HORARIO_DOMINGO, (string) $data['demo_horario_domingo']);
             }
         }
 
@@ -319,6 +370,15 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_CLOSER_HORARIO_DOMINGO) === null) {
             AdminSetting::set(self::KEY_CLOSER_HORARIO_DOMINGO, self::DEFAULT_CLOSER_HORARIO_DOMINGO);
+        }
+        if (AdminSetting::get(self::KEY_DEMO_HORARIO_LUNES_VIERNES) === null) {
+            AdminSetting::set(self::KEY_DEMO_HORARIO_LUNES_VIERNES, self::DEFAULT_DEMO_HORARIO_LUNES_VIERNES);
+        }
+        if (AdminSetting::get(self::KEY_DEMO_HORARIO_SABADO) === null) {
+            AdminSetting::set(self::KEY_DEMO_HORARIO_SABADO, self::DEFAULT_DEMO_HORARIO_SABADO);
+        }
+        if (AdminSetting::get(self::KEY_DEMO_HORARIO_DOMINGO) === null) {
+            AdminSetting::set(self::KEY_DEMO_HORARIO_DOMINGO, self::DEFAULT_DEMO_HORARIO_DOMINGO);
         }
         if (AdminSetting::get(self::KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO) === null) {
             AdminSetting::set(self::KEY_LLAMADA_DEBE_TERMINAR_EN_HORARIO, self::DEFAULT_LLAMADA_DEBE_TERMINAR_EN_HORARIO);
@@ -493,6 +553,60 @@ class LeadDemoSettings
         }
 
         return self::DEFAULT_CLOSER_HORARIO_DOMINGO;
+    }
+
+    /**
+     * Franja horaria propia de la demo de lunes a viernes (formato H:i-H:i), independiente del
+     * horario del closer.
+     *
+     * @return string
+     */
+    public static function get_demo_horario_lunes_viernes(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_DEMO_HORARIO_LUNES_VIERNES, self::DEFAULT_DEMO_HORARIO_LUNES_VIERNES);
+        $parts  = explode('-', $stored);
+
+        if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+            return $stored;
+        }
+
+        return self::DEFAULT_DEMO_HORARIO_LUNES_VIERNES;
+    }
+
+    /**
+     * Franja horaria propia de la demo los sábados (formato H:i-H:i), independiente del horario
+     * del closer.
+     *
+     * @return string
+     */
+    public static function get_demo_horario_sabado(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_DEMO_HORARIO_SABADO, self::DEFAULT_DEMO_HORARIO_SABADO);
+        $parts  = explode('-', $stored);
+
+        if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+            return $stored;
+        }
+
+        return self::DEFAULT_DEMO_HORARIO_SABADO;
+    }
+
+    /**
+     * Franja horaria propia de la demo los domingos (formato H:i-H:i), independiente del horario
+     * del closer.
+     *
+     * @return string
+     */
+    public static function get_demo_horario_domingo(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_DEMO_HORARIO_DOMINGO, self::DEFAULT_DEMO_HORARIO_DOMINGO);
+        $parts  = explode('-', $stored);
+
+        if (count($parts) === 2 && self::is_valid_hora_format($parts[0]) && self::is_valid_hora_format($parts[1])) {
+            return $stored;
+        }
+
+        return self::DEFAULT_DEMO_HORARIO_DOMINGO;
     }
 
     /**

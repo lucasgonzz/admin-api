@@ -999,7 +999,7 @@ class LeadController extends Controller
         $calendar_snapshot = null;
         // Disponibilidad de la ventana fija de días corridos (self::DIAS_DISPONIBILIDAD),
         // sin fecha específica solicitada por el lead.
-        $availability = $ai_service->build_availability_json(LeadAiService::DIAS_DISPONIBILIDAD, $calendar_snapshot, null, (int) $lead->id);
+        $availability = $ai_service->build_availability_json(LeadAiService::DIAS_DISPONIBILIDAD, $calendar_snapshot, null, (int) $lead->id, $lead->usa_experiencia_demo_nueva());
 
         // Catálogo de demos del pool con label legible: se usa erp_spa_url, misma convención
         // que ya usa admin-spa para mostrar una demo (ver Leads.vue::demo_client_label).

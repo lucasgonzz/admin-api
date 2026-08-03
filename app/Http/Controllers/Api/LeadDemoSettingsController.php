@@ -49,6 +49,13 @@ class LeadDemoSettingsController extends Controller
             'closer_horario_lunes_viernes'    => 'nullable|string|max:20',
             'closer_horario_sabado'           => 'nullable|string|max:20',
             'closer_horario_domingo'          => 'nullable|string|max:20',
+            /* Franja propia de la demo (grupo 306, prompt 01). "sometimes" y NO "required": el SPA
+               todavía no manda estas claves (las agrega el prompt 06), y con "required" el
+               formulario de configuración de demos actual tiraría 422 al guardar en el intervalo
+               entre el deploy de este backend y el del front. */
+            'demo_horario_lunes_viernes'      => 'sometimes|nullable|string|max:20',
+            'demo_horario_sabado'             => 'sometimes|nullable|string|max:20',
+            'demo_horario_domingo'            => 'sometimes|nullable|string|max:20',
             'frecuencia_slots_minutos'        => 'required|integer|in:'.implode(',', LeadDemoSettings::VALID_FRECUENCIA_SLOTS),
             'llamada_debe_terminar_en_horario' => 'required|boolean',
             // Settings del ciclo de vida automatizado de la demo.

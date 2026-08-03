@@ -342,11 +342,16 @@ TXT;
      */
     protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null, bool $came_from_availability_request = false): LeadMessage
     {
+        /* Dinámica de este lead (grupo 306): decide, y SOLO acá, si la demo usa su franja propia
+         * o sigue gobernada por el closer. No leer la setting global en ningún punto de este flujo —
+         * la dinámica se resuelve por la columna del lead, igual que en el grupo 293. */
+        $usa_experiencia_nueva = $lead->usa_experiencia_demo_nueva();
+
         /* JSON estructurado por demo para que Claude interprete disponibilidad sin regex.
          * Se pasa $specific_date para ampliar el rango cuando el lead pidió una fecha lejana.
          * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
         $calendar_snapshot    = null;
-        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id);
+        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id, $usa_experiencia_nueva);
 
         /*
          * Ampliar snapshot con demos agendadas, slots enviados a Claude y config del closer
@@ -923,14 +928,17 @@ TXT;
      *                                       ampliar este rango, nunca recortarlo.
      * @param array|null  $calendar_snapshot Referencia opcional para recibir el snapshot de Google Calendar.
      * @param string|null $specific_date     Fecha objetivo en formato Y-m-d, o null para comportamiento por defecto.
+     * @param bool        $usa_experiencia_nueva Si true, la demo usa su franja propia y el closer no
+     *                                       la gobierna (grupo 306). Default false para no romper
+     *                                       ningún caller existente.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null): array
+    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
          * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango. */
-        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date, $exclude_lead_id);
+        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date, $exclude_lead_id, $usa_experiencia_nueva);
 
         /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
         $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
@@ -980,7 +988,8 @@ TXT;
                     $context['duracion'],
                     $closer_busy_for_date,
                     $context['gracia_post'],
-                    $context['slot_config'] ?? []
+                    $context['slot_config'] ?? [],
+                    $usa_experiencia_nueva
                 );
             }
         }
@@ -1130,6 +1139,34 @@ TXT;
     }
 
     /**
+     * Resuelve el horario configurado (H:i-H:i) para un día de semana dado, según la dinámica.
+     *
+     * En la dinámica nueva la franja es la propia de la demo (grupo 306) — no tiene días sin
+     * trabajo, porque la demo se ofrece siempre. En la dinámica actual sigue siendo el horario
+     * laboral del closer (vacío = no trabaja ese día).
+     *
+     * @param int                   $dow                   Día de semana Carbon (0=domingo … 6=sábado).
+     * @param bool                  $usa_experiencia_nueva
+     * @param array<string, string> $horario_closer_por_dia Claves 'lv' | 'sab' | 'dom'.
+     * @param array<string, string> $horario_demo_por_dia   Mismas claves, franja propia de la demo.
+     *
+     * @return string
+     */
+    private function horario_por_dia_semana(int $dow, bool $usa_experiencia_nueva, array $horario_closer_por_dia, array $horario_demo_por_dia): string
+    {
+        $tabla = $usa_experiencia_nueva ? $horario_demo_por_dia : $horario_closer_por_dia;
+
+        if ($dow === 0) {
+            return $tabla['dom'];
+        }
+        if ($dow === 6) {
+            return $tabla['sab'];
+        }
+
+        return $tabla['lv'];
+    }
+
+    /**
      * Prepara días hábiles, consulta de bloqueos y mapa de fechas para disponibilidad.
      *
      * Centraliza la lógica compartida entre get_available_slots() y build_availability_json().
@@ -1151,7 +1188,7 @@ TXT;
      *
      * @return array<string, mixed>
      */
-    protected function prepare_slot_availability_context(int $days_ahead = self::DIAS_DISPONIBILIDAD, ?string $specific_date = null, ?int $exclude_lead_id = null): array
+    protected function prepare_slot_availability_context(int $days_ahead = self::DIAS_DISPONIBILIDAD, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false): array
     {
         /* Parámetros de configuración de demos. */
         $duracion    = LeadDemoSettings::get_duracion_minutos();
@@ -1163,6 +1200,10 @@ TXT;
         $horario_lv        = LeadDemoSettings::get_closer_horario_lunes_viernes();
         $horario_sab       = LeadDemoSettings::get_closer_horario_sabado();
         $horario_dom       = LeadDemoSettings::get_closer_horario_domingo();
+        /* Franja propia de la demo por día de semana (grupo 306): independiente del closer. */
+        $demo_horario_lv   = LeadDemoSettings::get_demo_horario_lunes_viernes();
+        $demo_horario_sab  = LeadDemoSettings::get_demo_horario_sabado();
+        $demo_horario_dom  = LeadDemoSettings::get_demo_horario_domingo();
         /* Frecuencia en minutos entre slots candidatos (ej. 30 = :00 y :30). */
         $frecuencia_slots  = LeadDemoSettings::get_frecuencia_slots_minutos();
         /* Checkbox: si true la llamada del closer también debe terminar dentro del horario. */
@@ -1178,12 +1219,22 @@ TXT;
             'horario_lv'                       => $horario_lv,
             'horario_sab'                      => $horario_sab,
             'horario_dom'                      => $horario_dom,
+            'demo_horario_lv'                  => $demo_horario_lv,
+            'demo_horario_sab'                 => $demo_horario_sab,
+            'demo_horario_dom'                 => $demo_horario_dom,
+            'usa_experiencia_nueva'            => $usa_experiencia_nueva,
             'frecuencia_slots'                 => $frecuencia_slots,
             'duracion'                         => $duracion,
             'gracia_post'                      => $gracia_post,
             'duracion_llamada_closer'          => $duracion_closer,
             'llamada_debe_terminar_en_horario' => $llamada_termina,
         ];
+
+        /* Tabla horario por día de semana, una para el closer y otra para la demo (grupo 306):
+         * la dinámica nueva resuelve el día contra la franja propia de la demo, que no tiene
+         * días sin trabajo — el closer no gobierna cuándo se ofrece la demo. */
+        $horario_closer_por_dia = ['lv' => $horario_lv, 'sab' => $horario_sab, 'dom' => $horario_dom];
+        $horario_demo_por_dia   = ['lv' => $demo_horario_lv, 'sab' => $demo_horario_sab, 'dom' => $demo_horario_dom];
 
         /* Log de diagnóstico: config activa para esta ejecución, facilita comparar con slots resultantes. */
         Log::channel('disponibilidad')->info(
@@ -1242,8 +1293,7 @@ TXT;
                  * días con horario configurado. */
                 $cursor_specific = $tomorrow->copy();
                 while ($cursor_specific->lte($end_date)) {
-                    $dow_s       = $cursor_specific->dayOfWeek;
-                    $horario_dia = ($dow_s === 0) ? $horario_dom : (($dow_s === 6) ? $horario_sab : $horario_lv);
+                    $horario_dia = $this->horario_por_dia_semana($cursor_specific->dayOfWeek, $usa_experiencia_nueva, $horario_closer_por_dia, $horario_demo_por_dia);
                     if ($horario_dia !== '') {
                         $working_days[] = $cursor_specific->copy();
                     }
@@ -1266,17 +1316,9 @@ TXT;
          * se descarta, en vez de forzar al cursor a seguir avanzando más allá de los N días. */
         if (! $use_specific_date) {
             for ($i = 0; $i < $days_ahead; $i++) {
-                /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). */
-                $dow = $cursor->dayOfWeek;
-                /* Horario laboral del closer según el día de la semana evaluado. */
-                $horario_dia = '';
-                if ($dow === 0) {
-                    $horario_dia = $horario_dom;
-                } elseif ($dow === 6) {
-                    $horario_dia = $horario_sab;
-                } else {
-                    $horario_dia = $horario_lv;
-                }
+                /* 0=domingo, 6=sábado, 1-5=lunes a viernes (convención Carbon). Horario según la
+                 * franja propia de la demo o la del closer, según la dinámica del lead. */
+                $horario_dia = $this->horario_por_dia_semana($cursor->dayOfWeek, $usa_experiencia_nueva, $horario_closer_por_dia, $horario_demo_por_dia);
 
                 /* Incluir el día solo si tiene rango horario configurado (no vacío).
                  * A diferencia del comportamiento anterior, un día sin horario NO extiende la
@@ -1316,34 +1358,50 @@ TXT;
         /* Snapshot legible de eventos Google del closer (solo para debug en admin-spa). */
         $google_calendar_snapshot = null;
 
-        /* Tercera capa de bloqueo: eventos del calendario Google del closer.
+        /*
+         * Tercera capa de bloqueo: eventos del calendario Google del closer.
          * Si la API de Google falla, se degrada de forma segura (continúa sin esta capa)
-         * para no romper el flujo de WhatsApp por un error externo. */
-        try {
-            $google_busy_service = new CloserGoogleCalendarBusyService(
-                app(\App\Services\GoogleCalendarOAuthService::class)
+         * para no romper el flujo de WhatsApp por un error externo.
+         *
+         * En la dinámica nueva esta capa no aplica (grupo 306): el closer no participa de la
+         * decisión de cuándo se hace la demo, así que su calendario no puede descartar un slot.
+         * Se salta la consulta (ahorra una llamada a la API de Google por mensaje) y se deja un
+         * snapshot mínimo con nota explícita, porque el panel de debug de admin-spa lo consume y
+         * un null suelto ahí se ve como error.
+         */
+        if ($usa_experiencia_nueva) {
+            $google_calendar_snapshot = ['nota' => 'no_aplica_experiencia_nueva'];
+            Log::channel('disponibilidad')->info(
+                '[DISPONIBILIDAD] Dinámica nueva: NO se consultó Google Calendar del closer '
+                . '(el closer no gobierna la franja de la demo, ver contexto/demo_experiencia.md §3.19).'
             );
-            $google_busy_result = $google_busy_service->get_busy_ranges_for_dates($date_strings);
-            $google_busy        = $google_busy_result['ranges'] ?? [];
-            $google_calendar_snapshot = $google_busy_result['snapshot'] ?? null;
+        } else {
+            try {
+                $google_busy_service = new CloserGoogleCalendarBusyService(
+                    app(\App\Services\GoogleCalendarOAuthService::class)
+                );
+                $google_busy_result = $google_busy_service->get_busy_ranges_for_dates($date_strings);
+                $google_busy        = $google_busy_result['ranges'] ?? [];
+                $google_calendar_snapshot = $google_busy_result['snapshot'] ?? null;
 
-            /* Log explícito cuando ningún closer tiene calendario conectado o aplicable. */
-            $this->log_google_calendar_connection_diagnosis($google_calendar_snapshot);
+                /* Log explícito cuando ningún closer tiene calendario conectado o aplicable. */
+                $this->log_google_calendar_connection_diagnosis($google_calendar_snapshot);
 
-            // Fusionar rangos de Google Calendar con los rangos de agenda interna.
-            foreach ($date_strings as $date) {
-                if (! empty($google_busy[$date])) {
-                    $closer_busy[$date] = array_merge(
-                        $closer_busy[$date] ?? [],
-                        $google_busy[$date]
-                    );
+                // Fusionar rangos de Google Calendar con los rangos de agenda interna.
+                foreach ($date_strings as $date) {
+                    if (! empty($google_busy[$date])) {
+                        $closer_busy[$date] = array_merge(
+                            $closer_busy[$date] ?? [],
+                            $google_busy[$date]
+                        );
+                    }
                 }
+            } catch (\Exception $e) {
+                // Degradación segura: loguear y continuar sin la capa de Google Calendar.
+                Log::warning('LeadAiService: fallo en CloserGoogleCalendarBusyService, se continúa sin la tercera capa', [
+                    'error' => $e->getMessage(),
+                ]);
             }
-        } catch (\Exception $e) {
-            // Degradación segura: loguear y continuar sin la capa de Google Calendar.
-            Log::warning('LeadAiService: fallo en CloserGoogleCalendarBusyService, se continúa sin la tercera capa', [
-                'error' => $e->getMessage(),
-            ]);
         }
 
         /* Diagnóstico: rangos de closer ocupado ya combinados (capa 2 interna + capa 3 Google),
@@ -1378,7 +1436,8 @@ TXT;
                     $duracion,
                     $closer_busy[$date_key] ?? [],
                     $gracia_post,
-                    $slot_config
+                    $slot_config,
+                    $usa_experiencia_nueva
                 );
                 foreach ($demo_slots as $slot) {
                     if (! in_array($slot, $union_available, true)) {
@@ -1400,14 +1459,7 @@ TXT;
             /* Avanzar el cursor hasta el próximo día con horario configurado (p. ej. domingo si aplica). */
             $horario_extra = '';
             while ($horario_extra === '') {
-                $dow_extra = $cursor->dayOfWeek;
-                if ($dow_extra === 0) {
-                    $horario_extra = $horario_dom;
-                } elseif ($dow_extra === 6) {
-                    $horario_extra = $horario_sab;
-                } else {
-                    $horario_extra = $horario_lv;
-                }
+                $horario_extra = $this->horario_por_dia_semana($cursor->dayOfWeek, $usa_experiencia_nueva, $horario_closer_por_dia, $horario_demo_por_dia);
                 if ($horario_extra === '') {
                     $cursor->addDay();
                 }
@@ -1423,33 +1475,36 @@ TXT;
             /* Fusionar rangos de closer del día extra (agenda interna). */
             $closer_busy[$extra_key] = $extra_result['closer_busy'][$extra_key] ?? [];
 
-            /* Agregar también la tercera capa (Google Calendar) para el día extra. */
-            try {
-                $google_busy_service_extra = new CloserGoogleCalendarBusyService(
-                    app(\App\Services\GoogleCalendarOAuthService::class)
-                );
-                $google_busy_extra_result = $google_busy_service_extra->get_busy_ranges_for_dates([$extra_key]);
-                $google_busy_extra        = $google_busy_extra_result['ranges'] ?? [];
-
-                if (! empty($google_busy_extra[$extra_key])) {
-                    $closer_busy[$extra_key] = array_merge(
-                        $closer_busy[$extra_key],
-                        $google_busy_extra[$extra_key]
+            /* Agregar también la tercera capa (Google Calendar) para el día extra — salvo en la
+             * dinámica nueva, donde esta capa no aplica (ver el bloque de arriba). */
+            if (! $usa_experiencia_nueva) {
+                try {
+                    $google_busy_service_extra = new CloserGoogleCalendarBusyService(
+                        app(\App\Services\GoogleCalendarOAuthService::class)
                     );
-                }
+                    $google_busy_extra_result = $google_busy_service_extra->get_busy_ranges_for_dates([$extra_key]);
+                    $google_busy_extra        = $google_busy_extra_result['ranges'] ?? [];
 
-                /* Acumular eventos del día extra en el snapshot principal. */
-                if (! empty($google_busy_extra_result['snapshot'])) {
-                    $google_calendar_snapshot = $this->merge_google_calendar_snapshots(
-                        $google_calendar_snapshot,
-                        $google_busy_extra_result['snapshot']
-                    );
+                    if (! empty($google_busy_extra[$extra_key])) {
+                        $closer_busy[$extra_key] = array_merge(
+                            $closer_busy[$extra_key],
+                            $google_busy_extra[$extra_key]
+                        );
+                    }
+
+                    /* Acumular eventos del día extra en el snapshot principal. */
+                    if (! empty($google_busy_extra_result['snapshot'])) {
+                        $google_calendar_snapshot = $this->merge_google_calendar_snapshots(
+                            $google_calendar_snapshot,
+                            $google_busy_extra_result['snapshot']
+                        );
+                    }
+                } catch (\Exception $e) {
+                    Log::warning('LeadAiService: fallo en CloserGoogleCalendarBusyService para día extra', [
+                        'extra_key' => $extra_key,
+                        'error'     => $e->getMessage(),
+                    ]);
                 }
-            } catch (\Exception $e) {
-                Log::warning('LeadAiService: fallo en CloserGoogleCalendarBusyService para día extra', [
-                    'extra_key' => $extra_key,
-                    'error'     => $e->getMessage(),
-                ]);
             }
 
             /* Diagnóstico: closer_busy combinado para el día extra agregado.
@@ -1771,7 +1826,7 @@ TXT;
      *
      * @return string[] Horarios disponibles en formato HH:MM.
      */
-    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0, array $slot_config = []): array
+    protected function compute_day_slots_for_demo(Carbon $day, array $blocked_ranges, Carbon $now, string $today_key, int $now_minutes, int $duracion, array $closer_busy_ranges_for_date = [], int $gracia_post = 0, array $slot_config = [], bool $usa_experiencia_nueva = false): array
     {
         $date_key  = $day->format('Y-m-d');
         $is_today  = $date_key === $today_key;
@@ -1811,8 +1866,12 @@ TXT;
              * Bug fix (prompt 076): comparación cambiada de estricta (>) a >= para el linde exacto.
              * Si closer_release == cstart, el closer arrancaría justo al liberar la demo anterior,
              * lo que hace imposible intercalar la llamada. Se bloquea correctamente con >=.
+             *
+             * En la dinámica nueva esta capa no aplica (grupo 306): el closer no participa de la
+             * decisión de cuándo se hace la demo, así que su agenda proyectada no puede descartar
+             * un slot de demo. La capa 1 (bloqueo por demo_id) sigue intacta arriba.
              */
-            if ($slot_free && ! empty($closer_busy_ranges_for_date)) {
+            if (! $usa_experiencia_nueva && $slot_free && ! empty($closer_busy_ranges_for_date)) {
                 /* Instante en que este lead candidato quedaría listo para el closer. */
                 $closer_release = $slot_end + $gracia_post;
                 foreach ($closer_busy_ranges_for_date as [$cstart, $cend]) {
@@ -1849,24 +1908,28 @@ TXT;
      *                        (default: self::DIAS_DISPONIBILIDAD). Antes representaba días hábiles
      *                        a juntar; desde el 13/7/2026 es el largo fijo de la ventana en días
      *                        corridos (ver prepare_slot_availability_context()).
+     * @param bool $usa_experiencia_nueva Si true, la demo usa su franja propia y el closer no la
+     *                        gobierna (grupo 306). Default false para no romper ningún caller.
      *
      * @return array<string, string[]> Mapa fecha (Y-m-d) → array de slots disponibles ('HH:MM').
      */
-    public function get_available_slots(int $days_ahead = self::DIAS_DISPONIBILIDAD): array
+    public function get_available_slots(int $days_ahead = self::DIAS_DISPONIBILIDAD, bool $usa_experiencia_nueva = false): array
     {
         /* Obtener todas las demos registradas para el cálculo multi-demo. */
         $demos = \App\Models\Demo::orderBy('id')->get();
 
         /*
          * Fallback: si no hay demos registradas, usar el algoritmo legacy
-         * (bloquea exactamente el slot de inicio sin márgenes).
+         * (bloquea exactamente el slot de inicio sin márgenes). El algoritmo legacy no conoce la
+         * franja propia de la demo: es un camino de respaldo para cuando no hay ninguna demo
+         * registrada, escenario que no aplica a la dinámica nueva.
          */
         if ($demos->isEmpty()) {
             return $this->get_available_slots_legacy($days_ahead);
         }
 
         /* Contexto compartido con build_availability_json(). */
-        $context = $this->prepare_slot_availability_context($days_ahead);
+        $context = $this->prepare_slot_availability_context($days_ahead, null, null, $usa_experiencia_nueva);
         $result  = [];
 
         foreach ($context['dates_map'] as $date_key => $day) {
@@ -1885,7 +1948,8 @@ TXT;
                     $context['duracion'],
                     $closer_busy_for_date,
                     $context['gracia_post'],
-                    $context['slot_config'] ?? []
+                    $context['slot_config'] ?? [],
+                    $usa_experiencia_nueva
                 );
 
                 foreach ($demo_slots as $slot) {
@@ -2068,9 +2132,14 @@ TXT;
      *
      * @param Carbon               $day         Día a evaluar.
      * @param array<string, mixed> $slot_config Config de generación (horario_lv, horario_sab,
-     *                                          horario_dom, frecuencia_slots, duracion,
-     *                                          gracia_post, duracion_llamada_closer,
-     *                                          llamada_debe_terminar_en_horario).
+     *                                          horario_dom, demo_horario_lv, demo_horario_sab,
+     *                                          demo_horario_dom, usa_experiencia_nueva,
+     *                                          frecuencia_slots, duracion, gracia_post,
+     *                                          duracion_llamada_closer,
+     *                                          llamada_debe_terminar_en_horario). Con
+     *                                          usa_experiencia_nueva=true (grupo 306) el día se
+     *                                          resuelve contra la franja propia de la demo
+     *                                          (demo_horario_*), no contra el horario del closer.
      *
      * @return string[] Horarios en formato HH:MM, ordenados de menor a mayor.
      */
@@ -2093,6 +2162,11 @@ TXT;
         $dur_closer  = isset($slot_config['duracion_llamada_closer'])          ? (int)  $slot_config['duracion_llamada_closer']          : 30;
         /* Checkbox: true = la llamada también debe terminar dentro del horario. */
         $llamada_termina = isset($slot_config['llamada_debe_terminar_en_horario']) ? (bool) $slot_config['llamada_debe_terminar_en_horario'] : false;
+        /* Dinámica nueva (grupo 306): la demo tiene franja propia, el closer no la gobierna. */
+        $usa_experiencia_nueva = isset($slot_config['usa_experiencia_nueva']) ? (bool) $slot_config['usa_experiencia_nueva'] : false;
+        $demo_horario_lv  = isset($slot_config['demo_horario_lv'])  ? (string) $slot_config['demo_horario_lv']  : '00:00-23:59';
+        $demo_horario_sab = isset($slot_config['demo_horario_sab']) ? (string) $slot_config['demo_horario_sab'] : '00:00-23:59';
+        $demo_horario_dom = isset($slot_config['demo_horario_dom']) ? (string) $slot_config['demo_horario_dom'] : '00:00-23:59';
 
         /*
          * Frecuencia mínima de 5 minutos para evitar loops infinitos o listas exageradamente largas.
@@ -2104,15 +2178,30 @@ TXT;
 
         /* Seleccionar el horario según día de semana (0=domingo, 6=sábado). */
         $dow = $day->dayOfWeek;
-        if ($dow === 0) {
-            /* Domingo */
-            $horario_raw = $horario_dom;
-        } elseif ($dow === 6) {
-            /* Sábado */
-            $horario_raw = $horario_sab;
+
+        /* La grilla de demos se genera desde la franja de la DEMO, no desde el horario del closer.
+         * La demo es autogestionada: el closer no participa. Atarla a su horario dejaba sin ningún
+         * slot al lead que escribe a las 20:00, que es justo el lead caliente que hay que atender.
+         * Ver contexto/demo_experiencia.md §3.19. */
+        if ($usa_experiencia_nueva) {
+            if ($dow === 0) {
+                $horario_raw = $demo_horario_dom;
+            } elseif ($dow === 6) {
+                $horario_raw = $demo_horario_sab;
+            } else {
+                $horario_raw = $demo_horario_lv;
+            }
         } else {
-            /* Lunes a viernes */
-            $horario_raw = $horario_lv;
+            if ($dow === 0) {
+                /* Domingo */
+                $horario_raw = $horario_dom;
+            } elseif ($dow === 6) {
+                /* Sábado */
+                $horario_raw = $horario_sab;
+            } else {
+                /* Lunes a viernes */
+                $horario_raw = $horario_lv;
+            }
         }
 
         /* Horario vacío significa que el closer no trabaja ese día: sin slots. */
@@ -2146,22 +2235,30 @@ TXT;
          */
         $slots = [];
         for ($slot_min = 0; $slot_min < 1440; $slot_min += $frecuencia) {
-            /*
-             * Proyectar el instante en que el closer tomaría la llamada para este slot:
-             *   inicio_llamada = inicio_demo + duracion_demo + gracia_post
-             */
-            $inicio_llamada = $slot_min + $duracion + $gracia;
-            /* Fin de la llamada del closer (relevante solo si el checkbox está activo). */
-            $fin_llamada    = $inicio_llamada + $dur_closer;
+            if ($usa_experiencia_nueva) {
+                /* El closer no participa de esta decisión: el slot vale si el INICIO DE LA DEMO
+                 * cae dentro de la franja propia de la demo, sin proyectar ninguna llamada. */
+                if ($slot_min < $horario_inicio || $slot_min > $horario_fin) {
+                    continue;
+                }
+            } else {
+                /*
+                 * Proyectar el instante en que el closer tomaría la llamada para este slot:
+                 *   inicio_llamada = inicio_demo + duracion_demo + gracia_post
+                 */
+                $inicio_llamada = $slot_min + $duracion + $gracia;
+                /* Fin de la llamada del closer (relevante solo si el checkbox está activo). */
+                $fin_llamada    = $inicio_llamada + $dur_closer;
 
-            /* La llamada debe COMENZAR dentro del horario laboral del closer. */
-            if ($inicio_llamada < $horario_inicio || $inicio_llamada > $horario_fin) {
-                continue;
-            }
+                /* La llamada debe COMENZAR dentro del horario laboral del closer. */
+                if ($inicio_llamada < $horario_inicio || $inicio_llamada > $horario_fin) {
+                    continue;
+                }
 
-            /* Si el checkbox está activado: la llamada también debe TERMINAR dentro del horario. */
-            if ($llamada_termina && $fin_llamada > $horario_fin) {
-                continue;
+                /* Si el checkbox está activado: la llamada también debe TERMINAR dentro del horario. */
+                if ($llamada_termina && $fin_llamada > $horario_fin) {
+                    continue;
+                }
             }
 
             $slots[] = self::format_minutes_to_hhmm($slot_min);
@@ -2980,7 +3077,7 @@ TXT;
                  * confirmando (prepare_slot_availability_context ya sabe ampliar el rango
                  * hasta esa fecha cuando se le pasa). */
                 $availability_snapshot_unused = null;
-                $availability = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $availability_snapshot_unused, $demo_date, $lead->id);
+                $availability = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $availability_snapshot_unused, $demo_date, $lead->id, $lead->usa_experiencia_demo_nueva());
                 $slots_demo   = [];
                 $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
                 foreach ($demo_slots_by_date as $date_label => $slots) {
