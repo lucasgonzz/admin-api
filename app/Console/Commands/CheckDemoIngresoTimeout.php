@@ -3,7 +3,10 @@
 namespace App\Console\Commands;
 
 use App\Models\Lead;
+use App\Services\CloserGoogleCalendarBusyService;
+use App\Services\CloserGoogleCalendarEventService;
 use App\Services\DemoCicloAdminNotificationService;
+use App\Services\GoogleCalendarOAuthService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Helpers\AppTime;
@@ -109,6 +112,28 @@ class CheckDemoIngresoTimeout extends Command
                 'status'                     => 'demo_pendiente_de_ingreso',
                 'demo_no_ingreso_notificado' => true,
             ]);
+
+            /*
+             * Liberar la reserva preventiva del closer (grupo 306, prompt 05, correctivo del
+             * 3/8/2026): este es el timeout de ingreso REAL — el lead se hizo fantasma y nadie lo
+             * marcó a mano. demo_date no se toca en este comando (el lead vuelve a
+             * demo_pendiente_de_ingreso con la misma demo cargada), así que $lead->fresh() todavía
+             * tiene la fecha para invalidar la caché correcta; no hace falta pasarla explícita.
+             * Best-effort: una falla de Google no puede frenar el procesamiento del resto de la
+             * cola de timeouts.
+             */
+            try {
+                $oauth_service_hold = app(GoogleCalendarOAuthService::class);
+                (new CloserGoogleCalendarEventService(
+                    $oauth_service_hold,
+                    new CloserGoogleCalendarBusyService($oauth_service_hold)
+                ))->release_hold_for_lead($lead->fresh());
+            } catch (\Throwable $e) {
+                Log::error('CheckDemoIngresoTimeout: error al liberar la reserva preventiva del closer.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
 
             /* Notificar a admins suscritos vía WhatsApp que el lead no ingresó por timeout. */
             try {
