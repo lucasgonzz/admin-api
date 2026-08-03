@@ -117,6 +117,10 @@ const MASKABLE_SIZES = [
 /* Proporción del lienzo que ocupa el logo en los íconos maskable (resto = padding blanco). */
 const MASKABLE_LOGO_RATIO = 0.8
 
+/* Tamaños a embeber dentro de favicon.ico: los que usan navegadores y accesos directos de Windows.
+ * Más grande solo infla el archivo sin que nadie lo mire. */
+const FAVICON_ICO_SIZES = [16, 32, 48]
+
 /**
  * Devuelve la inicial a usar en el ícono placeholder y en safari-pinned-tab.svg: el primer
  * carácter alfanumérico del nombre del comercio, en mayúscula. Si el nombre viene vacío o no
@@ -167,16 +171,17 @@ async function buildPlaceholderImageBuffer() {
 
 /**
  * Compone la imagen base (logo del cliente o placeholder en memoria) sobre un lienzo cuadrado con
- * fondo blanco y lo guarda como PNG.
+ * fondo blanco y devuelve el PNG resultante en memoria, sin escribirlo a disco. Extraída de
+ * composeIcon() para que favicon.ico pueda reusar exactamente el mismo pipeline de composición
+ * (mismo encuadre y fondo que el resto del set) sin pasar por el filesystem.
  *
  * @param  string|Buffer  source      Fuente de la imagen: path local del logo, o buffer PNG del
  *                                    placeholder ya compuesto (sharp() acepta ambos por igual).
  * @param  number          targetSize  Lado del lienzo final en píxeles.
  * @param  number          logoSize    Lado al que se redimensiona la imagen dentro del lienzo (<= targetSize).
- * @param  string          outputPath  Ruta absoluta del PNG de salida.
- * @return Promise<void>
+ * @return Promise<Buffer>  PNG compuesto, en memoria.
  */
-async function composeIcon(source, targetSize, logoSize, outputPath) {
+async function composeIconBuffer(source, targetSize, logoSize) {
 	/* Redimensiona la imagen fuente al tamaño interno (sin recortar, "contain" preserva el cuadrado). */
 	const resizedLogo = await sharp(source)
 		.resize(logoSize, logoSize, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
@@ -185,7 +190,7 @@ async function composeIcon(source, targetSize, logoSize, outputPath) {
 	/* Offset para centrar la imagen dentro del lienzo final. */
 	const offset = Math.round((targetSize - logoSize) / 2)
 
-	await sharp({
+	return sharp({
 		create: {
 			width: targetSize,
 			height: targetSize,
@@ -196,7 +201,74 @@ async function composeIcon(source, targetSize, logoSize, outputPath) {
 	})
 		.composite([{ input: resizedLogo, left: offset, top: offset }])
 		.png()
-		.toFile(outputPath)
+		.toBuffer()
+}
+
+/**
+ * Compone la imagen base sobre un lienzo cuadrado con fondo blanco y la guarda como PNG en disco.
+ *
+ * @param  string|Buffer  source      Fuente de la imagen: path local del logo, o buffer PNG del
+ *                                    placeholder ya compuesto (sharp() acepta ambos por igual).
+ * @param  number          targetSize  Lado del lienzo final en píxeles.
+ * @param  number          logoSize    Lado al que se redimensiona la imagen dentro del lienzo (<= targetSize).
+ * @param  string          outputPath  Ruta absoluta del PNG de salida.
+ * @return Promise<void>
+ */
+async function composeIcon(source, targetSize, logoSize, outputPath) {
+	const png = await composeIconBuffer(source, targetSize, logoSize)
+	fs.writeFileSync(outputPath, png)
+}
+
+/**
+ * Arma un archivo .ico real (contenedor ICO con PNG adentro) a partir de PNGs ya codificados.
+ * sharp no exporta .ico nativamente, pero el formato ICO admite PNG como imagen embebida — soportado
+ * por todos los navegadores actuales, incluido Safari — así que alcanza con armar el contenedor de
+ * bytes a mano; no hace falta convertir a BMP ni agregar ninguna librería. NO reemplazar esto por
+ * sharp(source).resize(...).png().toFile('favicon.ico'): eso es un PNG con la extensión cambiada a
+ * .ico, que Chrome y Firefox toleran pero Safari no — es justo el bug que este prompt arregla.
+ *
+ * Estructura (todos los enteros little-endian):
+ * - ICONDIR (6 bytes): reserved=0, type=1 (icono), count=cantidad de imágenes.
+ * - ICONDIRENTRY (16 bytes) por imagen: ancho, alto (1 byte c/u — un lado de 256px se escribe como
+ *   0 porque el campo es de un solo byte; con 16/32/48 no aplica, pero queda contemplado), colores
+ *   de paleta, reservado, planos, bits por pixel, tamaño del PNG, offset del PNG en el archivo.
+ * - Los PNG, concatenados uno atrás del otro, en el mismo orden que las entradas.
+ *
+ * @param  Array<Buffer>  pngBuffers  PNGs ya codificados, uno por tamaño, mismo orden que sizes.
+ * @param  Array<number>  sizes       Lado de cada PNG en pngBuffers, mismo orden que pngBuffers.
+ * @return Buffer  Archivo .ico completo, listo para escribir a disco.
+ */
+function buildIcoBuffer(pngBuffers, sizes) {
+	const count = pngBuffers.length
+	const dirEntrySize = 16
+	let offset = 6 + count * dirEntrySize
+
+	const header = Buffer.alloc(6)
+	header.writeUInt16LE(0, 0)
+	header.writeUInt16LE(1, 2)
+	header.writeUInt16LE(count, 4)
+
+	const entries = []
+	for (let i = 0; i < count; i++) {
+		const size = sizes[i]
+		const png = pngBuffers[i]
+		const sideByte = size === 256 ? 0 : size
+
+		const entry = Buffer.alloc(dirEntrySize)
+		entry.writeUInt8(sideByte, 0)
+		entry.writeUInt8(sideByte, 1)
+		entry.writeUInt8(0, 2)
+		entry.writeUInt8(0, 3)
+		entry.writeUInt16LE(1, 4)
+		entry.writeUInt16LE(32, 6)
+		entry.writeUInt32LE(png.length, 8)
+		entry.writeUInt32LE(offset, 12)
+
+		entries.push(entry)
+		offset += png.length
+	}
+
+	return Buffer.concat([header].concat(entries).concat(pngBuffers))
 }
 
 /**
@@ -245,14 +317,17 @@ async function run() {
 		console.log('ICON_OK ' + icon.name)
 	}
 
-	/* favicon.ico: sharp no exporta ICO nativamente; se guarda como PNG de 32x32 con extensión .ico,
-	 * que la mayoría de navegadores igual acepta cuando se sirve con el content-type correcto. Esta
-	 * línea siempre sobreescribe el favicon.ico que hubiera versionado (ver reset_versioned_icon_assets()
-	 * del lado PHP, que además lo restaura a lo versionado antes de correr este script). */
-	await sharp(iconSource)
-		.resize(32, 32, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
-		.png()
-		.toFile(path.join(outputDir, '..', '..', 'favicon.ico'))
+	/* favicon.ico: contenedor ICO real con los PNG de 16/32/48px adentro (ver buildIcoBuffer() más
+	 * arriba para el porqué y el formato). Compuesto con el mismo composeIconBuffer() que el resto
+	 * del set, para que salga idéntico en encuadre y fondo. Esta línea siempre sobreescribe el
+	 * favicon.ico que hubiera versionado (ver reset_versioned_icon_assets() del lado PHP, que además
+	 * lo restaura a lo versionado antes de correr este script). */
+	const faviconPngBuffers = []
+	for (const size of FAVICON_ICO_SIZES) {
+		faviconPngBuffers.push(await composeIconBuffer(iconSource, size, size))
+	}
+	const icoBuffer = buildIcoBuffer(faviconPngBuffers, FAVICON_ICO_SIZES)
+	fs.writeFileSync(path.join(outputDir, '..', '..', 'favicon.ico'), icoBuffer)
 	console.log('ICON_OK favicon.ico')
 
 	/* safari-pinned-tab.svg: ver writeSafariPinnedTab() — se genera siempre, en los dos modos. */
