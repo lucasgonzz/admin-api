@@ -90,6 +90,12 @@ class LeadMessage extends Model
         /* $parsed crudo de Claude sin aplicar, cuando el mensaje quedó pendiente por el motivo
            "agendamiento" (ver LeadAiService::requires_agendamiento_verification_gate). Null en el resto de los casos. */
         'pending_actions'         => 'array',
+        /* Horarios que el TEXTO del mensaje declara haber ofrecido (grupo 306, prompt 04):
+           [{fecha, desde, hasta}, ...]. Null = no se declaró nada (dinámica actual, o mensaje que no
+           ofrece horarios); [] = se declaró explícitamente que no ofrece ninguno. Solo aplica a
+           demo_experiencia='nueva'. LeadSuggestionSendService::send_suggestion() lo revalida contra
+           un cálculo fresco de disponibilidad justo antes de enviar. */
+        'horarios_ofrecidos'      => 'array',
         /* Lista legible (en español) de las acciones que efectivamente se aplicaron al enviar/aprobar
            este mensaje (agendar demo, guardar email, guardar nombre, cambio de estado, etc.). Se setea
            en LeadAiService::apply_parsed_response() a partir de LeadMessage::build_actions_summary().

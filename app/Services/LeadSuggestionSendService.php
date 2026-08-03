@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Helpers\AppTime;
 use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -81,6 +82,77 @@ class LeadSuggestionSendService
 
         if ($lead === null) {
             throw new \RuntimeException('Lead no encontrado para el mensaje.');
+        }
+
+        /*
+         * Revalidación de horarios ofrecidos (grupo 306, prompt 04). La disponibilidad se calculó
+         * al GENERAR la sugerencia, pero el mensaje se envía recién después de la aprobación humana
+         * — minutos u horas más tarde. Antes de este control, solo se revalidaba el horario que el
+         * lead ELIGIÓ (agendar_demo, más abajo en este mismo método); los horarios que el MENSAJE
+         * ofrece nunca se revalidaban, así que una sugerencia aprobada tarde podía ofrecer horarios
+         * ya tomados o ya pasados — exactamente lo que un humano revisando cada mensaje corrige a
+         * mano hoy. Va ANTES de aplicar pending_actions y de mandar por WhatsApp. Solo aplica a la
+         * dinámica nueva y solo si el mensaje declaró horarios (array no vacío).
+         *
+         * No reemplaza la revalidación de agendar_demo (apply_pending_actions(), más abajo): una
+         * protege el horario que el lead eligió contra colisión con otro lead; esta protege los
+         * horarios que el mensaje ofrece contra el paso del tiempo. Son controles de cosas distintas.
+         */
+        if ($lead->usa_experiencia_demo_nueva() && ! empty($message->horarios_ofrecidos)) {
+            $minutos_transcurridos = $message->created_at !== null
+                ? $message->created_at->diffInMinutes(AppTime::now())
+                : null;
+
+            try {
+                $caducados = app(\App\Services\LeadAiService::class)->revalidar_horarios_ofrecidos($lead, $message->horarios_ofrecidos);
+            } catch (\Throwable $e) {
+                /* Fail-safe OBLIGATORIO: este control existe para atrapar horarios vencidos, no para
+                 * dejar a un lead sin respuesta por un error de infraestructura ajeno (Google caído,
+                 * base lenta). Misma degradación segura que ya usa el resto del flujo de
+                 * disponibilidad: se envía igual y se deja constancia en el log. */
+                Log::channel('disponibilidad')->warning('[DISPONIBILIDAD] Fallo al revalidar horarios_ofrecidos antes de enviar; se envía igual.', [
+                    'lead_id'    => $lead->id,
+                    'message_id' => $message->id,
+                    'error'      => $e->getMessage(),
+                ]);
+                $caducados = [];
+            }
+
+            if (! empty($caducados)) {
+                Log::channel('disponibilidad')->warning('[DISPONIBILIDAD] Horario ofrecido caducó antes del envío.', [
+                    'lead_id'               => $lead->id,
+                    'message_id'            => $message->id,
+                    'horarios_declarados'   => $message->horarios_ofrecidos,
+                    'horarios_caducados'    => $caducados,
+                    'minutos_transcurridos' => $minutos_transcurridos,
+                ]);
+
+                /* No se inventa un estado nuevo: se reutiliza 'rechazado' (ya significa "esto no
+                 * salió") + requiere_verificacion, igual que el resto del flujo. El registro queda
+                 * en el hilo (no se borra) para que se pueda auditar qué se ofreció y por qué caducó. */
+                $message->status                = 'rechazado';
+                $message->requiere_verificacion = true;
+                $message->save();
+
+                $lead->requiere_intervencion_humana = true;
+                $lead->save();
+
+                (new LeadConversationErrorLogger())->log(
+                    (int) $lead->id,
+                    'Horario ofrecido dejó de estar disponible',
+                    'El horario que este mensaje ofrecía ya no está disponible (se ocupó o pasó mientras esperaba aprobación). Se regeneró la sugerencia con disponibilidad fresca.'
+                );
+
+                $lead->sync_suggestion_flags();
+                LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+
+                Log::channel('daily')->info('LeadSuggestionSendService: sugerencia regenerada por horario ofrecido caducado (grupo 306, prompt 04).', [
+                    'lead_id'    => $lead->id,
+                    'message_id' => $message->id,
+                ]);
+
+                return app(\App\Services\LeadAiService::class)->generate_suggestion($lead->fresh(), (bool) $message->is_followup);
+            }
         }
 
         /*

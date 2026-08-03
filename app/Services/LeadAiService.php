@@ -490,6 +490,7 @@ TXT;
             $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
             $availability_context .= "\n- Si la fecha o el horario que querés confirmar no están en el JSON, NO confirmes nada: informale al lead con naturalidad y ofrecé el más cercano que sí figure — uno solo, no una lista.";
             $availability_context .= "\n- El servidor verifica cada agendar_demo contra los slots que te mandó. Un horario que no salga exactamente de esa lista se descarta y el mensaje no sale — no hay forma de forzarlo.";
+            $availability_context .= "\n- DECLARÁ en el campo \"horarios_ofrecidos\" del JSON cada horario o rango que tu mensaje MENCIONA (no lo que está disponible en general, solo lo que el texto ofrece). Un ítem por horario: {\"fecha\": \"Y-m-d\", \"desde\": \"HH:MM\", \"hasta\": \"HH:MM\"} (la oferta primaria es un solo ítem con desde igual a hasta). Si tu mensaje no ofrece ningún horario, mandá un array vacío []. Esta declaración NO es opcional cuando el mensaje ofrece horarios: es la única forma que tiene el sistema de saber qué prometiste sin leer prosa, y lo revalida justo antes de enviar.";
         } else {
             $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
             $availability_context .= "\n- Analizá el historial de la conversación para determinar qué fecha y hora quiere el lead (puede decir \"hoy\", \"mañana\", \"el jueves\", \"a las 16\", etc.).";
@@ -1177,6 +1178,79 @@ TXT;
         }
 
         return "{$dia_texto} a las {$hora}";
+    }
+
+    /**
+     * Revalida los horarios que el TEXTO del mensaje declaró haber ofrecido (grupo 306, prompt 04)
+     * contra un cálculo FRESCO de disponibilidad, justo antes de enviar.
+     *
+     * La disponibilidad se calcula al GENERAR la sugerencia, pero el mensaje se envía recién
+     * después de la aprobación humana — minutos u horas más tarde. Hasta este prompt, la única
+     * revalidación era la del horario que el lead ELIGIÓ (agendar_demo, con lock por demo_id); los
+     * horarios que el MENSAJE ofrece nunca se revalidaban, así que una sugerencia aprobada tarde
+     * podía ofrecer horarios ya tomados o ya pasados.
+     *
+     * @param Lead                              $lead
+     * @param array<int, array<string, string>> $horarios_ofrecidos Declarados por el modelo:
+     *                                           [{fecha: Y-m-d, desde: HH:MM, hasta: HH:MM}, ...].
+     *
+     * @return array<int, mixed> Los ítems de $horarios_ofrecidos que YA NO están disponibles en
+     *                           ninguna demo. Vacío = todos siguen en pie.
+     */
+    public function revalidar_horarios_ofrecidos(Lead $lead, array $horarios_ofrecidos): array
+    {
+        $usa_experiencia_nueva    = $lead->usa_experiencia_demo_nueva();
+        $calendar_snapshot_unused = null;
+        $availability_fresca      = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot_unused, null, (int) $lead->id, $usa_experiencia_nueva);
+        $demos_json = isset($availability_fresca['demos']) && is_array($availability_fresca['demos'])
+            ? $availability_fresca['demos']
+            : [];
+
+        $caducados = [];
+        foreach ($horarios_ofrecidos as $item) {
+            if (! is_array($item)) {
+                $caducados[] = $item;
+                continue;
+            }
+
+            $fecha     = isset($item['fecha']) ? trim((string) $item['fecha']) : '';
+            $desde_raw = isset($item['desde']) ? trim((string) $item['desde']) : '';
+            /* Normalizar a HH:MM (mismo criterio que descartar_agendamiento_fuera_de_slots()). */
+            $desde = '';
+            if (preg_match('/(\d{1,2}):(\d{2})/', $desde_raw, $m)) {
+                $desde = str_pad($m[1], 2, '0', STR_PAD_LEFT) . ':' . $m[2];
+            }
+
+            if ($fecha === '' || $desde === '') {
+                $caducados[] = $item;
+                continue;
+            }
+
+            $sigue_disponible = false;
+            foreach ($demos_json as $slots_por_fecha) {
+                if (! is_array($slots_por_fecha)) {
+                    continue;
+                }
+                foreach ($slots_por_fecha as $date_label => $slots) {
+                    if (! is_array($slots)) {
+                        continue;
+                    }
+                    if (! preg_match('/(\d{4}-\d{2}-\d{2})$/', (string) $date_label, $m_fecha) || $m_fecha[1] !== $fecha) {
+                        continue;
+                    }
+                    if (in_array($desde, array_map('strval', $slots), true)) {
+                        $sigue_disponible = true;
+                        break 2;
+                    }
+                }
+            }
+
+            if (! $sigue_disponible) {
+                $caducados[] = $item;
+            }
+        }
+
+        return $caducados;
     }
 
     /**
@@ -2740,6 +2814,11 @@ TXT;
             'suggested_lead_status' => $suggested_lead_status,
             /* $parsed crudo de Claude, sin aplicar; apply_pending_actions() lo consume al aprobar. */
             'pending_actions'       => $parsed,
+            /* Horarios que el TEXTO de este mensaje declara ofrecer (grupo 306, prompt 04). Null si
+             * el modelo no declaró el campo (dinámica actual); array (posiblemente vacío []) si lo
+             * declaró. Se revalida en LeadSuggestionSendService::send_suggestion() justo antes de
+             * enviar, contra un cálculo fresco de disponibilidad. */
+            'horarios_ofrecidos'    => array_key_exists('horarios_ofrecidos', $parsed) ? $parsed['horarios_ofrecidos'] : null,
             'status'                => 'sugerido',
             'is_followup'           => $is_followup,
             'requiere_verificacion' => true,
@@ -3786,6 +3865,11 @@ TXT;
             /* Acciones efectivamente aplicadas por este mensaje (prompt 277), persistidas para
              * seguir mostrándose en la burbuja aunque pending_actions ya se haya limpiado a null. */
             'applied_actions_summary' => ! empty($applied_actions_summary) ? $applied_actions_summary : null,
+            /* Horarios que el TEXTO de este mensaje declara ofrecer (grupo 306, prompt 04). A
+             * diferencia de pending_actions, esto NO se limpia cuando el mensaje ya aplicó sus
+             * acciones: el envío real sigue pasando por LeadSuggestionSendService::send_suggestion(),
+             * que revalida este campo justo antes de mandar por WhatsApp. */
+            'horarios_ofrecidos'      => array_key_exists('horarios_ofrecidos', $parsed) ? $parsed['horarios_ofrecidos'] : null,
         ];
 
         if ($existing_message !== null) {
