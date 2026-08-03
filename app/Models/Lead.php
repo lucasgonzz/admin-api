@@ -800,6 +800,31 @@ class Lead extends Model
     }
 
     /**
+     * Arma el link público de la página inmersiva de demo de este lead (grupo 300, ruta
+     * `/experiencia/{uuid}` de `admin-spa`; correctivo del grupo 308, prompt 03).
+     *
+     * La base sale de `config('services.admin_spa.url')` -- la misma fuente que ya usan
+     * DemoScheduledWhatsappService, LeadEscalationWhatsappService y el resto de los links
+     * a admin-spa que arma este archivo. No confundir con `route('demo.landing', ...)`
+     * (grupo 213): esa landing la sirve admin-api en su propio dominio; la página
+     * inmersiva es una ruta de admin-spa, un dominio distinto.
+     *
+     * @return string|null Null si el lead no tiene uuid.
+     */
+    public function getDemoExperienciaUrlAttribute()
+    {
+        if (empty($this->uuid)) {
+            return null;
+        }
+        $base = rtrim((string) config('services.admin_spa.url'), '/');
+        if ($base === '') {
+            return null;
+        }
+
+        return $base . '/experiencia/' . $this->uuid;
+    }
+
+    /**
      * @param mixed $raw
      *
      * @return string|null

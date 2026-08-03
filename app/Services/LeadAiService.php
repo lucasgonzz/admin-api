@@ -524,7 +524,16 @@ TXT;
         $availability_context .= "\n- Si la fecha que pidió el lead SÍ aparece en el JSON (con o sin slots): usá esa info. Si tiene slots, ofrecelos. Si aparece SIN slots, significa que no hay disponibilidad ese día: informá al lead y ofrecé alternativas cercanas del JSON. NO vuelvas a pedir disponibilidad para una fecha que ya está en el JSON.";
         $availability_context .= "\n- Si el lead pidió un día que NO aparece en el JSON (más lejano que la ventana que te mandamos): devolvé solicita_disponibilidad: true junto con dia_solicitado. NUNCA una fecha: dia_solicitado acepta solo estos valores — 'manana', 'pasado_manana', un día de semana ('lunes'..'domingo', que el sistema resuelve como la próxima ocurrencia a partir de mañana), un día de semana con sufijo _proximo ('jueves_proximo' = el jueves de la semana siguiente), o '+N' (N días desde hoy, ej. '+10'). El sistema calcula la fecha; vos no.";
         $availability_context .= "\n- Si el lead pidió un día sin especificar hora (ej: 'el sábado') y ese día está en el JSON con slots: ofrecele directamente los horarios disponibles de ese día.";
-        $availability_context .= "\n- Si el lead pidió un horario concreto disponible: confirmalo aclarando si es mañana o tarde, y pedile el email (Paso 3 del protocolo).";
+        /* FIX (correctivo grupo 308/prompt 03, fix A): en la dinámica nueva el email no se pide
+         * para hacer la demo -- el acceso es el link de la página inmersiva (ver el bloque que
+         * arma build_demo_experiencia_context() en build_user_content()). Pedirlo acá, sin
+         * condicionar por dinámica, contradecía de frente a ese bloque. La rama $usa_experiencia_nueva
+         * ya existe en este mismo método (línea ~348, grupo 306) y gobierna el resto del bloque
+         * INSTRUCCIONES PARA AGENDAR de acá abajo: se reutiliza la misma variable, no se introduce
+         * una segunda forma de decidir la dinámica. */
+        $availability_context .= $usa_experiencia_nueva
+            ? "\n- Si el lead pidió un horario concreto disponible: confirmalo aclarando si es mañana o tarde."
+            : "\n- Si el lead pidió un horario concreto disponible: confirmalo aclarando si es mañana o tarde, y pedile el email (Paso 3 del protocolo).";
 
         /*
          * Regla de inferencia AM/PM: las demos son en horario diurno/laboral. Claude debe
@@ -4131,11 +4140,22 @@ TXT;
             && $demo_lista_para_mail
             && ! empty($lead->email)
             && empty($lead->demo_mail_sent_at);
-        $debe_enviar_mail_demo = (
-            $demo_lista_para_mail
-            && ($email_nuevo || ($es_reagendado && ! empty($lead->email)))
-            && $enviar_mail_demo_flag
-        ) || $mail_forzado_por_admin;
+        /*
+         * FIX (correctivo grupo 308/prompt 03): en la dinámica nueva el Mail 1 nunca sale -- manda
+         * credenciales (usuario/contraseña de acceso) que en esta dinámica no existen, el acceso
+         * es el link de la página inmersiva. Es una decisión del SERVIDOR, no del modelo: se
+         * gatea la expresión entera (incluido $mail_forzado_por_admin) para que ni siquiera el
+         * agente devolviendo enviar_mail_demo: true lo dispare. El reenvío manual explícito
+         * (reenviar_mail_demo, grupo 212) queda AFUERA de este gate a propósito -- es la salida
+         * de emergencia de Lucas, se resuelve más abajo, en su propio bloque.
+         */
+        $debe_enviar_mail_demo = ! $lead->usa_experiencia_demo_nueva() && (
+            (
+                $demo_lista_para_mail
+                && ($email_nuevo || ($es_reagendado && ! empty($lead->email)))
+                && $enviar_mail_demo_flag
+            ) || $mail_forzado_por_admin
+        );
         if ($debe_enviar_mail_demo) {
             try {
                 $lead->loadMissing('demo');
@@ -4776,6 +4796,41 @@ TXT;
     }
 
     /**
+     * Arma el bloque de acceso a la demo para leads en la dinámica NUEVA (correctivo del grupo
+     * 308, prompt 03): REEMPLAZA a `build_demo_access_context()` (nunca conviven -- el agente no
+     * puede ofrecer las dos cosas en el mismo mensaje). Sin credenciales ni mail: el acceso es el
+     * link de la página inmersiva (`/experiencia/{uuid}`, grupo 300), que se manda apenas se
+     * confirma el horario.
+     *
+     * A diferencia de `build_demo_access_context()`, el llamador de este método NO lo gatea por
+     * `ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO` (fix B del correctivo): el único dato que
+     * necesita es el `uuid` del lead, que existe desde que el lead se crea.
+     *
+     * @param Lead $lead Lead para el que se arma el bloque.
+     *
+     * @return string Bloque de texto listo para concatenar al prompt, o cadena vacía si no aplica.
+     */
+    private function build_demo_experiencia_context(Lead $lead): string
+    {
+        // El uuid existe desde que se crea el lead, así que esto solo da vacío en un caso
+        // anómalo (columna sin backfillear). Sin link, no hay nada que pasarle al agente.
+        $url = $lead->demo_experiencia_url;
+        if (empty($url)) {
+            return '';
+        }
+
+        return "\n\nPAGINA DE ACCESO A LA DEMO (dinamica nueva -- NO se pide email para esto):\n"
+            . "  Pagina: {$url}\n"
+            . "Apenas confirmes un horario con el lead (agendar_demo), pasale esta pagina en el MISMO\n"
+            . "mensaje: ahi ve el scroll de la demo, completa un formulario corto de configuracion, mira\n"
+            . "el video de introduccion y entra con un boton propio cuando llegue su turno.\n"
+            . "NUNCA pidas el email para poder hacer la demo: en esta dinamica no hace falta (el email\n"
+            . "se pide mas adelante, para el contrato y la facturacion, y no lo maneja este flujo).\n"
+            . "No existen usuario ni contraseña para ofrecer: todo el acceso pasa por el boton de la\n"
+            . "pagina, nunca por credenciales sueltas.";
+    }
+
+    /**
      * Construye el contenido user con historial y datos del lead.
      *
      * Si se proporciona $availability_context, se agrega al final del contenido
@@ -4900,7 +4955,24 @@ TXT;
          * agente los tenga disponibles apenas el lead los pida, en cualquier estado del ciclo.
          * Se agrega antes de resolver el objetivo puntual de cada estado (el if de abajo).
          */
-        if (in_array($lead_status_for_context, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+        /*
+         * FIX (correctivo grupo 308/prompt 03, fix B): para la dinámica NUEVA el link de la
+         * página inmersiva no depende de ningún dato que se genere recién con la demo agendada
+         * -- es solo el `uuid` del lead, que existe desde que el lead se crea. Por eso este bloque
+         * NO se gatea por ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO (ese gate usa el status YA
+         * PERSISTIDO, y hay un turno real donde el status persistido todavía no refleja que Claude
+         * está por confirmar demo_agendada en la respuesta que se está armando ahora mismo). Se
+         * inyecta siempre que el lead use la dinámica nueva, sin importar su status.
+         */
+        if ($lead->usa_experiencia_demo_nueva()) {
+            $demo_experiencia_context = $this->build_demo_experiencia_context($lead);
+            if ($demo_experiencia_context !== '') {
+                $txt .= $demo_experiencia_context;
+            }
+        } elseif (in_array($lead_status_for_context, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+            // Dinámica actual: el bloque viejo sigue gateado por el tramo de agendamiento, porque
+            // depende del link real de la demo y del doc_number -- datos que solo existen una vez
+            // que hay demo asignada. Los dos bloques son excluyentes (nunca los dos a la vez).
             $demo_access_context = $this->build_demo_access_context($lead);
             if ($demo_access_context !== '') {
                 $txt .= $demo_access_context;
