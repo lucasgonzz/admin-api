@@ -1210,6 +1210,9 @@ TXT;
         $llamada_termina   = LeadDemoSettings::get_llamada_debe_terminar_en_horario();
         /* Duración de la llamada del closer post-demo en minutos. */
         $duracion_closer   = LeadDemoSettings::get_duracion_llamada_closer_minutos();
+        /* Margen mínimo para ofrecer un horario de HOY (grupo 306, prompt 02). Solo aplica en la
+         * dinámica nueva; la actual sigue sin ofrecer horarios de hoy. */
+        $demo_minimo_minutos_desde_ahora = LeadDemoSettings::get_demo_minimo_minutos_desde_ahora();
 
         /*
          * Config agrupada para pasarla a compute_day_slots_for_demo() y get_all_slots_for_day()
@@ -1228,6 +1231,7 @@ TXT;
             'gracia_post'                      => $gracia_post,
             'duracion_llamada_closer'          => $duracion_closer,
             'llamada_debe_terminar_en_horario' => $llamada_termina,
+            'demo_minimo_minutos_desde_ahora'  => $demo_minimo_minutos_desde_ahora,
         ];
 
         /* Tabla horario por día de semana, una para el closer y otra para la demo (grupo 306):
@@ -1253,9 +1257,13 @@ TXT;
         $now         = AppTime::now();
         $now_minutes = $now->hour * 60 + $now->minute;
         $today_key   = $now->copy()->startOfDay()->format('Y-m-d');
-        /* El cursor arranca en mañana: nunca se ofrece el día actual como opción de demo.
-         * El closer necesita al menos un día de anticipación para prepararse. */
-        $cursor      = $now->copy()->startOfDay()->addDay();
+        /* El cursor arranca HOY en la dinámica nueva (grupo 306, prompt 02): el closer ya no
+         * participa de la decisión de cuándo se hace la demo, así que no hace falta un día de
+         * anticipación — la demo se ofrece lo antes posible, incluso ahora mismo. En la dinámica
+         * actual el cursor sigue arrancando en mañana, sin cambios. */
+        $cursor      = $usa_experiencia_nueva
+            ? $now->copy()->startOfDay()
+            : $now->copy()->startOfDay()->addDay();
 
         /* Lista inicial de días hábiles: solo fechas con horario configurado para ese día de semana. */
         $working_days = [];
@@ -1278,20 +1286,24 @@ TXT;
                 $target_date = null;
             }
 
-            /* Fecha mínima aceptable: mañana. */
-            $tomorrow = $now->copy()->startOfDay()->addDay();
+            /* Fecha mínima aceptable: HOY en la dinámica nueva (un lead puede pedir "hoy a las
+             * 20" y eso ahora es válido), mañana en la dinámica actual — grupo 306, prompt 02. */
+            $fecha_minima_aceptable = $usa_experiencia_nueva
+                ? $now->copy()->startOfDay()
+                : $now->copy()->startOfDay()->addDay();
 
-            if ($target_date !== null && $target_date->gte($tomorrow)) {
-                /* La ventana por defecto (N días corridos desde mañana) es el PISO: una fecha
-                 * pedida dentro de ese rango no la achica. Solo una fecha posterior la extiende.
-                 * Antes, una fecha_solicitada cercana recortaba la ventana y dejaba afuera días
-                 * que el lead sí podía llegar a pedir — causa raíz del bug del lead #12 (13/7/2026). */
-                $ventana_default_fin = $tomorrow->copy()->addDays($days_ahead - 1);
+            if ($target_date !== null && $target_date->gte($fecha_minima_aceptable)) {
+                /* La ventana por defecto (N días corridos desde la fecha mínima aceptable) es el
+                 * PISO: una fecha pedida dentro de ese rango no la achica. Solo una fecha
+                 * posterior la extiende. Antes, una fecha_solicitada cercana recortaba la ventana
+                 * y dejaba afuera días que el lead sí podía llegar a pedir — causa raíz del bug
+                 * del lead #12 (13/7/2026). */
+                $ventana_default_fin = $fecha_minima_aceptable->copy()->addDays($days_ahead - 1);
                 $end_date            = $target_date->gt($ventana_default_fin) ? $target_date->copy() : $ventana_default_fin;
 
-                /* Recorrer desde mañana hasta $end_date inclusive, incluyendo solo
-                 * días con horario configurado. */
-                $cursor_specific = $tomorrow->copy();
+                /* Recorrer desde la fecha mínima aceptable hasta $end_date inclusive, incluyendo
+                 * solo días con horario configurado. */
+                $cursor_specific = $fecha_minima_aceptable->copy();
                 while ($cursor_specific->lte($end_date)) {
                     $horario_dia = $this->horario_por_dia_semana($cursor_specific->dayOfWeek, $usa_experiencia_nueva, $horario_closer_por_dia, $horario_demo_por_dia);
                     if ($horario_dia !== '') {
@@ -1344,7 +1356,7 @@ TXT;
             '[DISPONIBILIDAD] Ventana consultada: '
             . (empty($date_strings) ? '(vacía)' : reset($date_strings) . ' a ' . end($date_strings))
             . ' — ' . count($date_strings) . ' día(s) con horario configurado'
-            . ' (ventana pedida: ' . $days_ahead . ' días corridos desde mañana'
+            . ' (ventana pedida: ' . $days_ahead . ' días corridos desde ' . ($usa_experiencia_nueva ? 'hoy' : 'mañana')
             . ($specific_date !== null ? ', fecha_resuelta: ' . $specific_date : '')
             . ')'
         );
@@ -1840,8 +1852,14 @@ TXT;
             $slot_start = (int) $sh * 60 + (int) $sm;
             $slot_end   = $slot_start + $duracion;
 
-            /* Hoy: descartar slots pasados o con menos de 30 min de margen. */
-            if ($is_today && $slot_start < $now_minutes + 30) {
+            /* Hoy: descartar slots pasados o con menos del margen configurado.
+             * Dinámica nueva (grupo 306, prompt 02): el margen es la setting configurable
+             * (default 15 min, tiempo en que el lead entra a la página y completa el formulario).
+             * Dinámica actual: se mantiene el margen fijo de 30 min, sin cambios. */
+            $margen_hoy_minutos = ($usa_experiencia_nueva && isset($slot_config['demo_minimo_minutos_desde_ahora']))
+                ? (int) $slot_config['demo_minimo_minutos_desde_ahora']
+                : 30;
+            if ($is_today && $slot_start < $now_minutes + $margen_hoy_minutos) {
                 continue;
             }
 
@@ -2167,6 +2185,16 @@ TXT;
         $demo_horario_lv  = isset($slot_config['demo_horario_lv'])  ? (string) $slot_config['demo_horario_lv']  : '00:00-23:59';
         $demo_horario_sab = isset($slot_config['demo_horario_sab']) ? (string) $slot_config['demo_horario_sab'] : '00:00-23:59';
         $demo_horario_dom = isset($slot_config['demo_horario_dom']) ? (string) $slot_config['demo_horario_dom'] : '00:00-23:59';
+
+        /*
+         * Grilla fina para HOY en la dinámica nueva (grupo 306, prompt 02): con la frecuencia
+         * configurada (30 min por defecto) un lead que escribe a las 17:47 recibe como "lo antes
+         * posible" las 18:30 — 43 minutos de espera para una demo que podría empezar a las 18:05.
+         * Los días futuros siguen con la frecuencia configurada, sin cambios.
+         */
+        if ($usa_experiencia_nueva && $day->format('Y-m-d') === AppTime::now()->format('Y-m-d')) {
+            $frecuencia = 5;
+        }
 
         /*
          * Frecuencia mínima de 5 minutos para evitar loops infinitos o listas exageradamente largas.
@@ -3082,6 +3110,10 @@ TXT;
                  * $specific_date para que la consulta cubra el día real que se está
                  * confirmando (prepare_slot_availability_context ya sabe ampliar el rango
                  * hasta esa fecha cuando se le pasa). */
+                /* Se recalcula con la MISMA bandera de experiencia del lead. Si esta validación usara
+                 * la grilla por defecto, un horario legítimo de hoy (18:05, grilla de 5 min) no
+                 * figuraría en la lista y se descartaría como alucinación del modelo. Ver grupo 306
+                 * prompt 02. */
                 $availability_snapshot_unused = null;
                 $availability = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $availability_snapshot_unused, $demo_date, $lead->id, $lead->usa_experiencia_demo_nueva());
                 $slots_demo   = [];

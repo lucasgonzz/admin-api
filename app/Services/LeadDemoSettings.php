@@ -18,6 +18,13 @@ class LeadDemoSettings
     /** Clave: minutos antes del inicio para correr demo setup automático. */
     public const KEY_SETUP_MINUTOS_ANTES = 'demo_setup_minutos_antes';
 
+    /**
+     * Clave: margen mínimo, en minutos desde ahora, para ofrecer un horario de demo HOY (grupo
+     * 306, prompt 02). Solo aplica a leads en la dinámica nueva — la actual sigue sin ofrecer
+     * horarios de hoy.
+     */
+    public const KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA = 'demo_minimo_minutos_desde_ahora';
+
     /** Clave: minutos de gracia post-demo para liberar el slot de disponibilidad. */
     public const KEY_GRACIA_MINUTOS_POST = 'demo_gracia_minutos_post';
 
@@ -101,6 +108,12 @@ class LeadDemoSettings
 
     /** Valor por defecto: setup antes del inicio (minutos). */
     private const DEFAULT_SETUP_MINUTOS_ANTES = 15;
+
+    /**
+     * Valor por defecto: margen mínimo para ofrecer un horario de HOY (minutos). Es el tiempo en
+     * que el lead entra a la página inmersiva, completa el formulario y mira el video de intro.
+     */
+    private const DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA = 15;
 
     /** Valor por defecto: gracia post-demo (minutos). */
     private const DEFAULT_GRACIA_MINUTOS_POST = 10;
@@ -190,6 +203,7 @@ class LeadDemoSettings
         return [
             'duracion_minutos'                    => self::get_duracion_minutos(),
             'setup_minutos_antes'                 => self::get_setup_minutos_antes(),
+            'demo_minimo_minutos_desde_ahora'     => self::get_demo_minimo_minutos_desde_ahora(),
             'gracia_minutos_post'                 => self::get_gracia_minutos_post(),
             'recordatorio_minutos_antes'          => self::get_recordatorio_minutos_antes(),
             'recordatorio_manana_hora'            => self::get_recordatorio_manana_hora(),
@@ -224,6 +238,12 @@ class LeadDemoSettings
     {
         AdminSetting::set(self::KEY_DURACION_MINUTOS,                (string) self::clamp((int) $data['duracion_minutos']));
         AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES,             (string) self::clamp((int) $data['setup_minutos_antes']));
+
+        // Margen minimo para ofrecer horarios de HOY (grupo 306, prompt 02): opcional a proposito,
+        // igual que las franjas de demo del prompt 01 -- el SPA todavia no manda este campo.
+        if (isset($data['demo_minimo_minutos_desde_ahora'])) {
+            AdminSetting::set(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::clamp((int) $data['demo_minimo_minutos_desde_ahora']));
+        }
         AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST,             (string) self::clamp((int) $data['gracia_minutos_post']));
         AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES,      (string) self::clamp((int) $data['recordatorio_minutos_antes']));
 
@@ -344,6 +364,9 @@ class LeadDemoSettings
         if (AdminSetting::get(self::KEY_SETUP_MINUTOS_ANTES) === null) {
             AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES, (string) self::DEFAULT_SETUP_MINUTOS_ANTES);
         }
+        if (AdminSetting::get(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA) === null) {
+            AdminSetting::set(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA);
+        }
         if (AdminSetting::get(self::KEY_GRACIA_MINUTOS_POST) === null) {
             AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST, (string) self::DEFAULT_GRACIA_MINUTOS_POST);
         }
@@ -421,6 +444,18 @@ class LeadDemoSettings
     public static function get_setup_minutos_antes(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_SETUP_MINUTOS_ANTES, (string) self::DEFAULT_SETUP_MINUTOS_ANTES));
+    }
+
+    /**
+     * Margen mínimo, en minutos desde ahora, para ofrecer un horario de demo HOY.
+     *
+     * Solo se consulta para leads en la dinámica nueva (grupo 306, prompt 02).
+     *
+     * @return int
+     */
+    public static function get_demo_minimo_minutos_desde_ahora(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA));
     }
 
     /**
