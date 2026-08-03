@@ -80,6 +80,7 @@ Route::get('client/{clientId}/factura/{invoiceId}/pdf-view/{token}', [ClientMens
 Route::prefix('demo-experiencia')->group(function () {
     Route::get('{uuid}', [DemoExperienciaController::class, 'show_json']);
     Route::post('{uuid}/formulario', [DemoExperienciaController::class, 'store_formulario_json']);
+    Route::post('{uuid}/ingresar', [DemoExperienciaController::class, 'ingresar_json']);
 });
 
 /*

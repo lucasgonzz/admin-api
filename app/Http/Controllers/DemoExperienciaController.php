@@ -11,6 +11,7 @@ use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Backend de la página inmersiva de demo (grupo 300, prompt 03 —
@@ -122,6 +123,84 @@ class DemoExperienciaController extends Controller
         ]);
 
         return response()->json($this->build_payload($lead), 200);
+    }
+
+    /**
+     * POST /api/demo-experiencia/{uuid}/ingresar
+     *
+     * Devuelve la URL de ingreso directo a la demo (grupo 233: `empresa-api` valida el token y
+     * abre la sesión del guard `web`) solo si el turno está activo y el token de ingreso vigente.
+     * Es POST y no forma parte del payload del GET: el GET se cachea y queda en logs de
+     * intermediarios; el POST se dispara con el clic y valida la ventana temporal contra el reloj
+     * del servidor en ese instante.
+     *
+     * Idempotente a propósito: el token no es de un solo uso (grupo 233), así que puede llamarse
+     * muchas veces durante el turno sin invalidar nada.
+     *
+     * @param string $uuid Token público del lead (columna `uuid`, no enumerable).
+     *
+     * @return JsonResponse `{ "url": ... }` en éxito (200), `{ "motivo": ... }` en 409, 404 si no
+     *                       existe el lead.
+     */
+    public function ingresar_json(string $uuid): JsonResponse
+    {
+        // Búsqueda manual por uuid, igual que en show_json() y store_formulario_json().
+        $lead = Lead::where('uuid', $uuid)->first();
+        if (! $lead) {
+            return response()->json(['message' => 'No encontrado.'], 404);
+        }
+
+        // Misma fuente de verdad que la página: build_turno() ya existe en este controller. No se
+        // recalcula la ventana acá con otra lógica, o aparecería el caso de un botón habilitado
+        // que rebota.
+        $turno = $this->build_turno($lead);
+        if ($turno['estado'] !== 'activo') {
+            // Los tres estados no-activos (sin_turno | antes | vencido) son motivos legibles
+            // válidos tal cual, sin traducción.
+            return response()->json(['motivo' => $turno['estado']], 409);
+        }
+
+        // El token lo emite el demo setup, que corre a T-15 (RunDemoSetupService). Un lead que
+        // llega justo antes puede encontrarse con esto: es un caso normal, no un error.
+        if (empty($lead->demo_ingreso_token)) {
+            return response()->json(['motivo' => 'preparando'], 409);
+        }
+
+        $token_revocado = $lead->demo_ingreso_token_revocado_at !== null;
+        $token_vencido  = $lead->demo_ingreso_token_expira_at !== null
+            && $lead->demo_ingreso_token_expira_at->isPast();
+        if ($token_revocado || $token_vencido) {
+            return response()->json(['motivo' => 'token_invalido'], 409);
+        }
+
+        // Accessor ya existente (grupo 233): null si no hay demo asignada o la demo no tiene
+        // erp_spa_url cargada.
+        $url = $lead->demo_ingreso_url;
+        if (empty($url)) {
+            return response()->json(['motivo' => 'sin_instancia'], 409);
+        }
+
+        Log::info('DemoExperienciaController: ingreso a la demo desde la página inmersiva', [
+            'lead_id' => $lead->id,
+            'uuid'    => $uuid,
+            'ip'      => request()->ip(),
+        ]);
+
+        // Registro informativo en el hilo del lead. No se reusa registrar_evento_token_demo() de
+        // LeadController porque asume un admin autenticado vía Auth::user() y acá no lo hay (ruta
+        // pública, sin admin) — mismo criterio que store_formulario_json() más abajo. No confundir
+        // con demo_ingreso_confirmado, que es la confirmación conversacional que dispara el
+        // cambio de estado del pipeline; este registro es solo informativo.
+        LeadMessage::create([
+            'lead_id'         => $lead->id,
+            'sender'          => 'sistema',
+            'content'         => 'El lead entró a la demo desde la página',
+            'status'          => 'enviado',
+            'is_followup'     => false,
+            'is_status_event' => true,
+        ]);
+
+        return response()->json(['url' => $url], 200);
     }
 
     /**
