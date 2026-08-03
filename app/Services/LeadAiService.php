@@ -395,11 +395,35 @@ TXT;
         $calendar_snapshot['slots_disponibles'] = $availability_data['demos'] ?? [];
         $calendar_snapshot['closer_config']    = $closer_config;
 
+        /* Bloque OFERTA PRIMARIA (grupo 306, prompt 03): el sistema ya resolvió el primer momento
+         * disponible real — el agente solo lo redacta, no elige entre una lista. Va PRIMERO de todo
+         * (antes que CALENDARIO y el JSON): lo primero que lee el modelo pesa más que lo último.
+         * Nunca se deja vacío si no hay disponibilidad — un bloque vacío es exactamente el escenario
+         * donde el modelo se pone a inventar (§3.22). Solo aplica a la dinámica nueva. */
+        $availability_context = '';
+        if ($usa_experiencia_nueva) {
+            $oferta_primaria = $this->resolve_oferta_primaria($availability_data, $usa_experiencia_nueva);
+
+            if ($oferta_primaria['hay_disponibilidad']) {
+                $availability_context .= "OFERTA PRIMARIA (resuelta por el sistema — es LA que tenés que ofrecer):"
+                    . "\n- Primer momento disponible: {$oferta_primaria['texto_referencia']} (demo_id {$oferta_primaria['demo_id']})";
+
+                if (! empty($oferta_primaria['oferta_manana']['hay_disponibilidad'])) {
+                    $availability_context .= "\n- Si el lead dice que hoy no puede: {$oferta_primaria['oferta_manana']['texto_referencia']} (demo_id {$oferta_primaria['oferta_manana']['demo_id']})";
+                }
+            } else {
+                $availability_context .= 'OFERTA PRIMARIA: no hay disponibilidad en la ventana consultada. '
+                    . 'Pedile al lead qué día le queda cómodo y usá esa fecha para volver a consultar — nunca inventes un horario.';
+            }
+
+            $availability_context .= "\n\n";
+        }
+
         /* Bloque CALENDARIO (prompt 350, lead #12, 13/7/2026): tabla de fechas resuelta por PHP,
          * antes del JSON. Es barato de generar y le saca a Claude toda excusa para calcular una
          * fecha por su cuenta — el bug de origen fue Claude razonando "hoy es lunes 13/07/2026,
          * jueves es 15/07/2026" (mal) y después "17/07/2026" (mal otra vez, en el mismo turno). */
-        $availability_context = "CALENDARIO (resuelto por el sistema — NO calcular fechas, leer de acá):\n";
+        $availability_context .= "CALENDARIO (resuelto por el sistema — NO calcular fechas, leer de acá):\n";
         $availability_context .= $this->build_tabla_fechas();
 
         $availability_context .= "\n\nDISPONIBILIDAD DE DEMOS (JSON):\n"
@@ -447,20 +471,40 @@ TXT;
             }
         }
 
-        /* Instrucciones para agendar demo usando el JSON de disponibilidad. */
-        $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
-        $availability_context .= "\n- Analizá el historial de la conversación para determinar qué fecha y hora quiere el lead (puede decir \"hoy\", \"mañana\", \"el jueves\", \"a las 16\", etc.).";
-        $availability_context .= "\n- Verificá que ese slot esté disponible en el JSON de arriba para la demo correspondiente.";
-        $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
-        $availability_context .= "\n- Si el slot NO está disponible: informale al lead con naturalidad y ofrecé las alternativas más cercanas disponibles.";
-        $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
-        $availability_context .= "\n- Nunca confirmes un horario que no aparezca en el JSON de disponibilidad.";
-        $availability_context .= "\n- Para OFRECER horarios al lead, usá SIEMPRE el texto de 'DISPONIBILIDAD EN RANGOS LEGIBLES' (bloques por turno) — nunca enumeres todos los slots del JSON uno por uno, queda un mensaje larguísimo y robótico. El JSON granular es solo para validar el horario que el lead elige y para el demo_id.";
-        $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
-        $availability_context .= "\n- demo_date se COPIA LITERALMENTE de la parte Y-m-d de una clave del JSON de disponibilidad. No se escribe de memoria, no se deduce, no se calcula.";
-        $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
-        $availability_context .= "\n- Si la fecha o el horario que querés confirmar no están en el JSON, NO confirmes nada: informale al lead con naturalidad y ofrecé las alternativas reales más cercanas que sí figuren.";
-        $availability_context .= "\n- El servidor verifica cada agendar_demo contra los slots que te mandó. Un horario que no salga exactamente de esta lista se descarta y el mensaje no sale — no hay forma de forzarlo.";
+        /* Instrucciones para agendar demo usando el JSON de disponibilidad.
+         * Dinámica nueva (grupo 306, prompt 03): el agente ya no elige entre una lista, solo
+         * redacta la oferta primaria que ya resolvió el sistema — bloque PROPIO, sin tocar el de
+         * abajo (los leads de la dinámica actual lo siguen usando tal cual, byte a byte). */
+        if ($usa_experiencia_nueva) {
+            $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
+            $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA de arriba, no una lista de horarios. El mensaje tiene que sonar a \"si querés, hoy mismo te la preparo para que la pruebes — ¿en qué horario te queda cómodo?\".";
+            $availability_context .= "\n- PROHIBIDO enumerar rangos de horarios, salvo que el lead pida explícitamente qué opciones hay.";
+            $availability_context .= "\n- Si el lead propone un horario concreto, verificalo en el JSON granular de disponibilidad de abajo.";
+            $availability_context .= "\n- Si el horario que pidió no está disponible, ofrecé el horario más cercano que sí lo esté — de nuevo, uno solo, no una lista.";
+            $availability_context .= "\n- La demo se hace desde una COMPUTADORA. Si el lead está en el teléfono, puede ver la página y el video ahí, pero tiene que avisar a qué hora va a poder sentarse frente a la compu — esa es la hora que se agenda.";
+            $availability_context .= "\n- Mínimo 15 minutos desde ahora: en esos minutos se prepara la instancia mientras el lead mira el video de introducción. Nunca prometas que la demo arranca \"ya mismo, ahora\".";
+            $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
+            $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
+            $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
+            $availability_context .= "\n- demo_date se COPIA LITERALMENTE de la parte Y-m-d de una clave del JSON de disponibilidad. No se escribe de memoria, no se deduce, no se calcula.";
+            $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
+            $availability_context .= "\n- Si la fecha o el horario que querés confirmar no están en el JSON, NO confirmes nada: informale al lead con naturalidad y ofrecé el más cercano que sí figure — uno solo, no una lista.";
+            $availability_context .= "\n- El servidor verifica cada agendar_demo contra los slots que te mandó. Un horario que no salga exactamente de esa lista se descarta y el mensaje no sale — no hay forma de forzarlo.";
+        } else {
+            $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
+            $availability_context .= "\n- Analizá el historial de la conversación para determinar qué fecha y hora quiere el lead (puede decir \"hoy\", \"mañana\", \"el jueves\", \"a las 16\", etc.).";
+            $availability_context .= "\n- Verificá que ese slot esté disponible en el JSON de arriba para la demo correspondiente.";
+            $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
+            $availability_context .= "\n- Si el slot NO está disponible: informale al lead con naturalidad y ofrecé las alternativas más cercanas disponibles.";
+            $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
+            $availability_context .= "\n- Nunca confirmes un horario que no aparezca en el JSON de disponibilidad.";
+            $availability_context .= "\n- Para OFRECER horarios al lead, usá SIEMPRE el texto de 'DISPONIBILIDAD EN RANGOS LEGIBLES' (bloques por turno) — nunca enumeres todos los slots del JSON uno por uno, queda un mensaje larguísimo y robótico. El JSON granular es solo para validar el horario que el lead elige y para el demo_id.";
+            $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
+            $availability_context .= "\n- demo_date se COPIA LITERALMENTE de la parte Y-m-d de una clave del JSON de disponibilidad. No se escribe de memoria, no se deduce, no se calcula.";
+            $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
+            $availability_context .= "\n- Si la fecha o el horario que querés confirmar no están en el JSON, NO confirmes nada: informale al lead con naturalidad y ofrecé las alternativas reales más cercanas que sí figuren.";
+            $availability_context .= "\n- El servidor verifica cada agendar_demo contra los slots que te mandó. Un horario que no salga exactamente de esta lista se descarta y el mensaje no sale — no hay forma de forzarlo.";
+        }
 
         if ($lead_proposed_time !== '') {
             $availability_context .= "\n- El lead propuso el horario: \"{$lead_proposed_time}\". Verificá si ese horario aparece en el JSON de disponibilidad.";
@@ -999,6 +1043,140 @@ TXT;
             'duration_demo_minutos' => $context['duracion'],
             'demos'                 => $demos_json,
         ];
+    }
+
+    /**
+     * Resuelve la OFERTA PRIMARIA (grupo 306, prompt 03): el primer momento disponible real, para
+     * que el agente solo lo redacte en vez de elegir entre una lista. Solo tiene sentido para leads
+     * en la dinámica nueva — se devuelve `hay_disponibilidad: false` si no lo es, como resguardo si
+     * algún llamador se equivoca de bandera.
+     *
+     * @param array<string, mixed> $availability_data     Estructura devuelta por build_availability_json().
+     * @param bool                 $usa_experiencia_nueva
+     *
+     * @return array<string, mixed> Ver ejemplo en el prompt: hay_disponibilidad, es_hoy, fecha,
+     *                              dia_label, hora, demo_id, texto_referencia, y oferta_manana
+     *                              (misma forma, primer slot en una fecha posterior a hoy).
+     */
+    protected function resolve_oferta_primaria(array $availability_data, bool $usa_experiencia_nueva): array
+    {
+        if (! $usa_experiencia_nueva) {
+            return ['hay_disponibilidad' => false];
+        }
+
+        $demos_json = isset($availability_data['demos']) && is_array($availability_data['demos'])
+            ? $availability_data['demos']
+            : [];
+
+        $hoy_key    = AppTime::now()->format('Y-m-d');
+        $manana_key = AppTime::now()->copy()->addDay()->format('Y-m-d');
+
+        $primaria = $this->primer_slot_disponible($demos_json, null);
+        if ($primaria === null) {
+            return ['hay_disponibilidad' => false];
+        }
+
+        $result = [
+            'hay_disponibilidad' => true,
+            'es_hoy'             => $primaria['fecha'] === $hoy_key,
+            'fecha'              => $primaria['fecha'],
+            'dia_label'          => $primaria['dia_label'],
+            'hora'               => $primaria['hora'],
+            'demo_id'            => $primaria['demo_id'],
+            'texto_referencia'   => $this->texto_referencia_oferta($primaria['fecha'], $primaria['hora'], $hoy_key, $manana_key),
+        ];
+
+        /* Primer slot en una fecha POSTERIOR a hoy (no necesariamente mañana: si mañana está lleno,
+         * es el próximo día con lugar). Es lo que el agente necesita para "si hoy no podés...". */
+        $manana = $this->primer_slot_disponible($demos_json, $hoy_key);
+        $result['oferta_manana'] = $manana === null
+            ? ['hay_disponibilidad' => false]
+            : [
+                'hay_disponibilidad' => true,
+                'es_hoy'             => false,
+                'fecha'              => $manana['fecha'],
+                'dia_label'          => $manana['dia_label'],
+                'hora'               => $manana['hora'],
+                'demo_id'            => $manana['demo_id'],
+                'texto_referencia'   => $this->texto_referencia_oferta($manana['fecha'], $manana['hora'], $hoy_key, $manana_key),
+            ];
+
+        return $result;
+    }
+
+    /**
+     * Encuentra, entre todas las demos, el slot más temprano (fecha y hora) — opcionalmente
+     * excluyendo una fecha puntual (para buscar "el primero después de hoy").
+     *
+     * Las fechas de las claves de $demos_json[demo_id] vienen como "día Y-m-d" (ej.
+     * "lunes 2026-08-03"); se comparan por el sufijo Y-m-d, que ordena cronológicamente como
+     * string. Los horarios "HH:MM" también ordenan cronológicamente como string.
+     *
+     * @param array<int, array<string, array<int, string>>> $demos_json
+     * @param string|null                                    $fecha_excluida Y-m-d a saltear, o null.
+     *
+     * @return array{fecha: string, dia_label: string, hora: string, demo_id: int}|null
+     */
+    private function primer_slot_disponible(array $demos_json, ?string $fecha_excluida): ?array
+    {
+        $mejor = null;
+
+        foreach ($demos_json as $demo_id => $slots_por_fecha) {
+            if (! is_array($slots_por_fecha)) {
+                continue;
+            }
+            foreach ($slots_por_fecha as $date_label => $slots) {
+                if (! is_array($slots) || empty($slots)) {
+                    continue;
+                }
+                if (! preg_match('/(\d{4}-\d{2}-\d{2})$/', (string) $date_label, $m)) {
+                    continue;
+                }
+                $fecha = $m[1];
+                if ($fecha_excluida !== null && $fecha === $fecha_excluida) {
+                    continue;
+                }
+
+                $slots_ordenados = array_map('strval', $slots);
+                sort($slots_ordenados);
+                $primer_hora = $slots_ordenados[0];
+
+                if ($mejor === null || $fecha < $mejor['fecha'] || ($fecha === $mejor['fecha'] && $primer_hora < $mejor['hora'])) {
+                    $mejor = [
+                        'fecha'     => $fecha,
+                        'dia_label' => (string) $date_label,
+                        'hora'      => $primer_hora,
+                        'demo_id'   => (int) $demo_id,
+                    ];
+                }
+            }
+        }
+
+        return $mejor;
+    }
+
+    /**
+     * Texto de referencia para el modelo ("hoy a las 18:05", "mañana a las 09:00", "el 2026-08-10 a
+     * las 10:00") — material para que el agente redacte, no un texto que se envía tal cual al lead.
+     *
+     * @param string $fecha      Y-m-d del slot.
+     * @param string $hora       HH:MM del slot.
+     * @param string $hoy_key    Y-m-d de hoy.
+     * @param string $manana_key Y-m-d de mañana.
+     *
+     * @return string
+     */
+    private function texto_referencia_oferta(string $fecha, string $hora, string $hoy_key, string $manana_key): string
+    {
+        if ($fecha === $hoy_key) {
+            $dia_texto = 'hoy';
+        } elseif ($fecha === $manana_key) {
+            $dia_texto = 'mañana';
+        } else {
+            $dia_texto = 'el ' . $fecha;
+        }
+
+        return "{$dia_texto} a las {$hora}";
     }
 
     /**
