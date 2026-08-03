@@ -1199,9 +1199,25 @@ TXT;
      */
     public function revalidar_horarios_ofrecidos(Lead $lead, array $horarios_ofrecidos): array
     {
+        /* Ampliar la ventana si algún horario declarado cae más allá de los 7 días default (mismo
+         * fix que el bug del lead #232, 2/7/2026): la oferta primaria puede reflejar una fecha
+         * lejana si el lead pidió explícitamente "en 10 días" y eso ensanchó la ventana al generar
+         * la sugerencia. Sin esto, esa fecha nunca aparecería en el recálculo por defecto y se
+         * marcaría como caducada aunque siga libre. */
+        $fecha_mas_lejana = null;
+        foreach ($horarios_ofrecidos as $item_fecha) {
+            if (! is_array($item_fecha) || ! isset($item_fecha['fecha'])) {
+                continue;
+            }
+            $fecha_item = trim((string) $item_fecha['fecha']);
+            if ($fecha_item !== '' && ($fecha_mas_lejana === null || $fecha_item > $fecha_mas_lejana)) {
+                $fecha_mas_lejana = $fecha_item;
+            }
+        }
+
         $usa_experiencia_nueva    = $lead->usa_experiencia_demo_nueva();
         $calendar_snapshot_unused = null;
-        $availability_fresca      = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot_unused, null, (int) $lead->id, $usa_experiencia_nueva);
+        $availability_fresca      = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot_unused, $fecha_mas_lejana, (int) $lead->id, $usa_experiencia_nueva);
         $demos_json = isset($availability_fresca['demos']) && is_array($availability_fresca['demos'])
             ? $availability_fresca['demos']
             : [];
