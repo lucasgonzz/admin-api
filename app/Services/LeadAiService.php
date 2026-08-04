@@ -625,6 +625,50 @@ TXT;
     }
 
     /**
+     * Regenera la sugerencia que reemplaza a un mensaje rechazado por horario ofrecido caducado
+     * (grupo 330, prompt 02, lead 30 el 4/8/2026). El mensaje que reemplaza a una oferta caducada
+     * es OTRO mensaje de oferta: si se regenera por la primera llamada (generate_suggestion(), sin
+     * JSON de disponibilidad ni oferta primaria), el modelo queda sin horario y contesta un ack sin
+     * agendar nada ni pasar el link ("Dale, Brisa... ahora mismo te lo preparo" -- frase que además
+     * el guion prohíbe explícitamente). La regeneración tiene que entrar por el mismo camino que
+     * produjo el mensaje original.
+     *
+     * Envuelve generate_suggestion_with_availability() (protected, no se le cambia la visibilidad
+     * ni se duplica su lógica) con came_from_availability_request = true, igual que si el modelo
+     * hubiera pedido disponibilidad. Sin fecha específica: la ventana por defecto ya incluye hoy.
+     *
+     * Fail-safe obligatorio: si la generación con disponibilidad tira excepción, cae a
+     * generate_suggestion() (el camino viejo) y lo deja logueado en el canal `disponibilidad` --
+     * misma degradación segura que ya usa el resto del flujo. Nunca deja al lead sin ninguna
+     * sugerencia.
+     *
+     * Se llama SOLO desde LeadSuggestionSendService::send_suggestion(), en el bloque de
+     * revalidación de horarios caducados (grupo 306, prompt 04) -- esta regeneración no dispara
+     * otra revalidación dentro del MISMO request: el bloque de caducidad corre en send_suggestion()
+     * (al aprobar/enviar un mensaje), no acá (al generarlo). La sugerencia nueva vuelve a declarar
+     * horarios_ofrecidos y va a pasar por SU PROPIA revalidación recién cuando alguien la apruebe a
+     * su vez -- son dos aprobaciones distintas, no una recursión.
+     *
+     * @param Lead $lead        Lead fresco (el llamador pasa $lead->fresh()).
+     * @param bool $is_followup true si el mensaje original que caducó era un seguimiento.
+     *
+     * @return LeadMessage
+     */
+    public function regenerar_sugerencia_por_horario_caducado(Lead $lead, bool $is_followup): LeadMessage
+    {
+        try {
+            return $this->generate_suggestion_with_availability($lead, $is_followup, null, true);
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->warning('[DISPONIBILIDAD] Fallo al regenerar sugerencia con disponibilidad fresca tras horario caducado; se genera por el camino viejo.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return $this->generate_suggestion($lead, $is_followup);
+        }
+    }
+
+    /**
      * Traduce el `dia_solicitado` que devuelve Claude (vocabulario cerrado, sin fechas) a una
      * fecha Y-m-d concreta, calculada por PHP con Carbon en timezone Argentina.
      *
