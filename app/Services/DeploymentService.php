@@ -93,7 +93,7 @@ class DeploymentService
     public function __construct(ClientVersionUpgrade $upgrade)
     {
         $this->upgrade = $upgrade;
-        $this->upgrade->loadMissing('client', 'target_client_api', 'from_version', 'to_version');
+        $this->upgrade->loadMissing('client', 'client.active_client_api', 'target_client_api', 'from_version', 'to_version');
         $this->run_command_resolver = new DeploymentRunCommandResolver();
 
         $this->target_api = $this->upgrade->target_client_api;
@@ -477,6 +477,7 @@ class DeploymentService
 
         // Asegurar que el árbol de storage/ existe antes de correr clears.
         $this->ensure_storage_skeleton('run_migrations');
+        $this->sync_afip_certificates('run_migrations');
 
         $this->log('run_migrations', 'Limpiando caché de Laravel...');
 
@@ -1223,23 +1224,24 @@ class DeploymentService
     }
 
     /**
-     * Ruta del API en el servidor destino según hosting_type.
+     * Ruta del API en el servidor según hosting_type, para cualquier ClientApi (no solo el destino).
      *
      * shared_hosting: prefijo Hostinger + path relativo de la API (ej: domains/comerciocity.com/public_html/colman/api).
      * vps: path absoluto construido como /home/api-{vps_path}/empresa-api.
      *
+     * @param  ClientApi  $client_api
      * @return string
      */
-    private function get_api_path(): string
+    private function resolve_client_api_path(ClientApi $client_api): string
     {
-        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+        $hosting_type = $client_api->hosting_type ?? 'shared_hosting';
 
         if ($hosting_type === 'vps') {
             /* Validar que vps_path esté configurado */
-            $vps_path = trim((string) ($this->target_api->vps_path ?? ''));
+            $vps_path = trim((string) ($client_api->vps_path ?? ''));
             if ($vps_path === '') {
                 throw new \RuntimeException(
-                    'La ClientApi destino tiene hosting_type=vps pero no tiene vps_path configurado. '
+                    'La ClientApi tiene hosting_type=vps pero no tiene vps_path configurado. '
                     . 'Completá el campo vps_path antes de deployar.'
                 );
             }
@@ -1248,7 +1250,113 @@ class DeploymentService
         }
 
         /* shared_hosting: prefijo Hostinger + path relativo */
-        return 'domains/comerciocity.com/public_html/' . $this->target_api->path;
+        return 'domains/comerciocity.com/public_html/' . $client_api->path;
+    }
+
+    /**
+     * Ruta del API en el servidor destino según hosting_type.
+     *
+     * @return string
+     */
+    private function get_api_path(): string
+    {
+        return $this->resolve_client_api_path($this->target_api);
+    }
+
+    /**
+     * Copia storage/app/afip/ desde la ClientApi hoy activa del cliente hacia la ClientApi destino
+     * de este deploy, ANTES de que se active el destino (step_update_default_version corre después,
+     * al final del pipeline, así que $client->active_client_api sigue siendo la vieja acá).
+     *
+     * Estrictamente no destructivo: solo copia archivos que no existen ya en destino, y solo dentro
+     * de storage/app/afip/ — nunca toca storage/app/public/ ni ningún otro subdirectorio, ahí viven
+     * los adjuntos e imágenes reales del cliente.
+     *
+     * Contexto: storage/* queda excluido del ZIP de cada deploy (ver step_upload_api) y cada
+     * actualización alterna de carpeta física (v1/v2, ver active_client_api_id) — storage/ no se
+     * comparte entre esas dos carpetas. Sin este paso, el certificado AFIP que ya está copiado a mano
+     * en la carpeta hoy activa desaparece en la próxima actualización del cliente.
+     *
+     * @param  string  $step
+     * @return void
+     */
+    private function sync_afip_certificates(string $step): void
+    {
+        $client = $this->upgrade->client;
+        $source_api = $client ? $client->active_client_api : null;
+
+        if ($source_api === null) {
+            $this->log($step, 'Sin ClientApi activa previa: nada de donde sincronizar certificados AFIP.', 'info');
+            return;
+        }
+
+        if ((int) $source_api->id === (int) $this->target_api->id) {
+            $this->log($step, 'La API activa ya es el destino de este deploy: nada que sincronizar.', 'info');
+            return;
+        }
+
+        $source_hosting_type = $source_api->hosting_type ?? 'shared_hosting';
+        $target_hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+
+        // Ambas tienen que ser shared_hosting en el MISMO servidor para poder resolverlo con un cp
+        // dentro de la sesión SSH ya abierta. Una migración shared_hosting -> vps (u origen/destino de
+        // tipos distintos) queda fuera de este sync automático: se avisa y sigue siendo manual.
+        if ($source_hosting_type !== 'shared_hosting' || $target_hosting_type !== 'shared_hosting') {
+            $this->log(
+                $step,
+                'Origen y/o destino no son shared_hosting: el sync automático de certificados AFIP '
+                . 'no aplica acá (por ejemplo, migración a VPS). Copiar el certificado a mano si corresponde.',
+                'warning'
+            );
+            return;
+        }
+
+        $source_path = $this->resolve_client_api_path($source_api);
+        $target_path = $this->get_api_path();
+
+        $this->log($step, 'Sincronizando storage/app/afip/ desde la versión activa (no destructivo)...');
+
+        $sync_command = $this->build_afip_sync_command($source_path, $target_path);
+        $output = $this->run_command($step, $sync_command, false);
+
+        if (strpos($output, 'AFIP_SYNC_OK') !== false) {
+            $this->log($step, 'Certificados AFIP sincronizados desde la versión activa.', 'success');
+        } elseif (strpos($output, 'AFIP_SYNC_SKIP_NO_SOURCE') !== false) {
+            $this->log($step, 'La versión activa no tiene storage/app/afip/ — nada para sincronizar.', 'info');
+        } else {
+            $this->log(
+                $step,
+                'No se pudo confirmar el sync de certificados AFIP. Si el cliente ya tenía certificado, '
+                . 'revisar a mano que siga facturando después de este deploy.',
+                'warning'
+            );
+        }
+    }
+
+    /**
+     * Arma el comando remoto que copia storage/app/afip/ de $source_path a $target_path SIN pisar
+     * ningún archivo que ya exista en destino, y sin depender de `cp --no-clobber` (no garantizado en
+     * todo hosting compartido): recorre archivo por archivo con find + cp condicional.
+     *
+     * @param  string  $source_path  Path (relativo, shared_hosting) de la carpeta hoy activa.
+     * @param  string  $target_path  Path (relativo, shared_hosting) de la carpeta destino del deploy.
+     * @return string
+     */
+    private function build_afip_sync_command(string $source_path, string $target_path): string
+    {
+        $source_afip = escapeshellarg($source_path . '/storage/app/afip');
+        $target_afip = escapeshellarg($target_path . '/storage/app/afip');
+
+        return 'SRC=' . $source_afip . '; DST=' . $target_afip . '; '
+            . 'if [ -d "$SRC" ]; then '
+            . 'mkdir -p "$DST" && '
+            . 'find "$SRC" -type f | while IFS= read -r f; do '
+            . 'rel="${f#$SRC/}"; '
+            . 'destfile="$DST/$rel"; '
+            . 'if [ ! -e "$destfile" ]; then mkdir -p "$(dirname "$destfile")" && cp "$f" "$destfile"; fi; '
+            . 'done; '
+            . 'echo AFIP_SYNC_OK; '
+            . 'else echo AFIP_SYNC_SKIP_NO_SOURCE; fi';
     }
 
     /**
