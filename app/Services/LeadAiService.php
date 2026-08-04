@@ -3115,7 +3115,8 @@ TXT;
     /**
      * Aplica de una todas las acciones estructuradas del JSON de Claude (guardar_nombre,
      * guardar_email, cancelar_demo, agendar_demo, confirmar_ingreso, confirmar_fin_demo,
-     * posponer_check_fin_demo, marcar_no_ingreso, sugerir_socio, requiere_intervencion_humana) y crea (o actualiza,
+     * posponer_check_fin_demo, marcar_no_ingreso, agendar_llamada_closer, descartar_llamada_closer,
+     * sugerir_socio, requiere_intervencion_humana) y crea (o actualiza,
      * cuando viene de una aprobación diferida) el LeadMessage con el resultado.
      *
      * Cuando $for_approval es true (llamado desde apply_pending_actions()), NO se vuelve a forzar
@@ -3285,6 +3286,13 @@ TXT;
         // Fecha Y-m-d a invalidar en caché al liberar la reserva (null = usar demo_date del lead
         // fresco; se completa solo cuando el bloque de cancelar_demo limpia demo_date antes).
         $closer_hold_demo_date_anterior = null;
+        // Flags de agendar_llamada_closer (grupo 307, prompt 03): se ejecuta en el bloque
+        // POST-save de mas abajo, igual que el resto de las operaciones de Google Calendar.
+        $closer_call_agendar_needed    = false;
+        // true = promover el hold vigente (mismo horario); false = crear un evento nuevo en el
+        // horario que el lead confirmo (y liberar el hold viejo, si habia uno, antes de crearlo).
+        $closer_call_promover_hold     = false;
+        $closer_call_inicio_confirmado = null;
 
         /* Acción: cancelar demo agendada cuando el lead pide reagendar.
          * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
@@ -3582,6 +3590,7 @@ TXT;
         $notificar_ingreso_confirmado = false;
         $notificar_fin_confirmado     = false;
         $notificar_no_ingreso         = false;
+        $notificar_llamada_agendada   = false;
 
         /* Acumula los eventos de notificación a admins disparados por este mensaje.
          * Cada elemento: ['evento' => string, 'admins' => string[]].
@@ -3639,8 +3648,15 @@ TXT;
                     /* Marcar el flag y registrar el momento exacto de confirmación de fin. */
                     $lead->demo_terminada_confirmada    = true;
                     $lead->demo_terminada_confirmada_at = AppTime::now();
-                    /* El closer toma el control tras la demo: Claude deja de responder automáticamente. */
-                    $lead->claude_auto_reply = false;
+                    /* En la dinamica nueva el agente NO se apaga al terminar la demo: le pregunta
+                     * al lead si le sirvio y le coordina la llamada con el closer. Se apaga recien
+                     * cuando la llamada queda agendada (agendar_llamada_closer) o cuando el lead
+                     * dice que no quiere avanzar (descartar_llamada_closer).
+                     * Ver contexto/demo_experiencia.md 3.19. */
+                    if (! $lead->usa_experiencia_demo_nueva()) {
+                        /* El closer toma el control tras la demo: Claude deja de responder automáticamente. */
+                        $lead->claude_auto_reply = false;
+                    }
                     /* Habilitar la notificación a admins (se dispara después del save). */
                     $notificar_fin_confirmado = true;
                     Log::info('LeadAiService: fin de demo confirmado por inferencia.', [
@@ -3743,6 +3759,136 @@ TXT;
                     'telefono'=> $telefono,
                 ]);
             }
+        }
+
+        /* Acción: el agente coordina la llamada del closer con el lead (grupo 307, prompt 03,
+         * dinámica nueva). Reemplaza al viejo "el closer toma el control" de confirmar_fin_demo:
+         * acá el agente sigue vivo y agenda él mismo, recién soltando el control cuando la
+         * LeadCall queda creada. Solo válida en demo_realizada -- el mismo estado al que
+         * confirmar_fin_demo ya fuerza al lead. */
+        $agendar_llamada = isset($parsed['agendar_llamada_closer']) && is_array($parsed['agendar_llamada_closer'])
+            ? $parsed['agendar_llamada_closer']
+            : null;
+
+        if ($agendar_llamada !== null && $lead->usa_experiencia_demo_nueva() && (string) $lead->status === 'demo_realizada') {
+            /* Idempotencia (criterio de éxito 9): un lead que confirma "dale" varias veces no
+             * puede terminar con varias LeadCall ni varios eventos en el calendario del closer. */
+            $ya_tiene_llamada_pendiente = $lead->calls()->where('estado', 'pendiente')->exists();
+
+            if ($ya_tiene_llamada_pendiente) {
+                Log::info('LeadAiService: agendar_llamada_closer ignorado, el lead ya tiene una llamada pendiente.', [
+                    'lead_id' => $lead->id,
+                ]);
+            } else {
+                $inicio_raw    = isset($agendar_llamada['inicio']) ? trim((string) $agendar_llamada['inicio']) : '';
+                $inicio_parsed = null;
+                if ($inicio_raw !== '') {
+                    try {
+                        $inicio_parsed = Carbon::parse($inicio_raw, 'America/Argentina/Buenos_Aires');
+                    } catch (\Exception $e) {
+                        $inicio_parsed = null;
+                    }
+                }
+
+                if ($inicio_parsed === null) {
+                    $parsed['requiere_intervencion_humana'] = true;
+                    $parsed['motivo_intervencion']           = 'El agente intentó agendar la llamada del closer con un horario ilegible.';
+                } else {
+                    /* Defensa (misma razón que ya protege agendar_demo en
+                     * descartar_agendamiento_fuera_de_slots()): el horario confirmado tiene que
+                     * salir de lo que el sistema ofreció de verdad, recalculado AHORA -- el
+                     * modelo no calcula horarios, los copia. Dos formas de ser válido: coincide
+                     * con la reserva preventiva vigente (grupo 306), o coincide con uno de los
+                     * próximos huecos reales recalculados con CloserAgendaService (grupo 307,
+                     * prompt 02). */
+                    $agenda_service = app(CloserAgendaService::class);
+
+                    $hold_start   = null;
+                    $hold_vigente = false;
+                    if (! empty($lead->closer_hold_event_id)) {
+                        $hold_vigente = $agenda_service->is_hold_still_valid($lead);
+                        if ($hold_vigente) {
+                            $google_oauth_service_hold = app(GoogleCalendarOAuthService::class);
+                            $calendar_service_hold     = new CloserGoogleCalendarEventService(
+                                $google_oauth_service_hold,
+                                new CloserGoogleCalendarBusyService($google_oauth_service_hold)
+                            );
+                            [$hold_start, ] = $calendar_service_hold->get_call_event_times($lead);
+                        }
+                    }
+
+                    $inicio_coincide_con_hold = $hold_vigente && $hold_start !== null
+                        && $hold_start->format('Y-m-d H:i') === $inicio_parsed->format('Y-m-d H:i');
+
+                    $slot_ofrecido_valido = false;
+                    if (! $inicio_coincide_con_hold) {
+                        foreach ($agenda_service->next_slots(8) as $slot_candidato) {
+                            if ($slot_candidato['inicio']->format('Y-m-d H:i') === $inicio_parsed->format('Y-m-d H:i')) {
+                                $slot_ofrecido_valido = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (! $inicio_coincide_con_hold && ! $slot_ofrecido_valido) {
+                        Log::channel('disponibilidad')->error(
+                            '[CLOSER_AGENDA] agendar_llamada_closer DESCARTADO: el horario confirmado no sale de los huecos reales.',
+                            [
+                                'lead_id'       => $lead->id,
+                                'inicio_pedido' => $inicio_raw,
+                            ]
+                        );
+                        $parsed['requiere_intervencion_humana'] = true;
+                        $parsed['motivo_intervencion']           = 'El agente confirmó un horario de llamada con el closer que el sistema nunca ofreció.';
+                    } else {
+                        /* Se ejecuta en el bloque POST-save de más abajo: crear/promover el
+                         * evento de Google requiere el lead ya persistido. */
+                        $closer_call_agendar_needed    = true;
+                        $closer_call_promover_hold     = $inicio_coincide_con_hold;
+                        $closer_call_inicio_confirmado = $inicio_parsed;
+
+                        /* Forzar el estado a closer_activo: es el punto de entrega al closer.
+                         * Recién ACÁ se apaga el agente -- a diferencia de confirmar_fin_demo en
+                         * la dinámica actual, que lo apaga al toque, acá el agente siguió vivo
+                         * hasta tener la llamada agendada de verdad (criterio de éxito 11). */
+                        $estado_raw      = 'closer_activo';
+                        $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
+                        $estado          = $pipeline_status->slug;
+                        $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+                        $lead->claude_auto_reply = false;
+
+                        Log::info('LeadAiService: llamada con el closer confirmada por el lead.', [
+                            'lead_id' => $lead->id,
+                            'inicio'  => $inicio_parsed->toDateTimeString(),
+                        ]);
+                    }
+                }
+            }
+        }
+
+        /* Acción: el lead dice que no quiere avanzar con la llamada del closer (grupo 307,
+         * prompt 03, dinámica nueva). Libera la reserva preventiva (si había) -- es el caso más
+         * frecuente de reserva colgada comiéndole un hueco a Tommy -- y deja el lead donde lo
+         * mire un humano, reusando el mecanismo ya existente de requiere_intervencion_humana. */
+        $descartar_llamada = ! empty($parsed['descartar_llamada_closer']);
+        if ($descartar_llamada && $lead->usa_experiencia_demo_nueva() && (string) $lead->status === 'demo_realizada') {
+            $motivo_descarte = isset($parsed['motivo_descarte_llamada']) && trim((string) $parsed['motivo_descarte_llamada']) !== ''
+                ? trim((string) $parsed['motivo_descarte_llamada'])
+                : 'El lead no quiere avanzar con la llamada del closer.';
+
+            if (! empty($lead->closer_hold_event_id)) {
+                $closer_hold_release_needed = true;
+            }
+
+            $lead->claude_auto_reply = false;
+
+            $parsed['requiere_intervencion_humana'] = true;
+            $parsed['motivo_intervencion']           = $motivo_descarte;
+
+            Log::info('LeadAiService: lead descartó la llamada con el closer.', [
+                'lead_id' => $lead->id,
+                'motivo'  => $motivo_descarte,
+            ]);
         }
 
         /* --- Fin de acciones estructuradas --- */
@@ -4058,6 +4204,73 @@ TXT;
         }
 
         /*
+         * Coordinación de la llamada del closer (grupo 307, prompt 03): promueve la reserva
+         * preventiva a llamada real, o crea un evento nuevo en el horario que el lead confirmó, y
+         * crea (o reutiliza, idempotencia) la LeadCall correspondiente. Después del save() del
+         * lead por el mismo motivo que el resto de las operaciones de Google Calendar de arriba:
+         * necesita demo_date/demo_start_time ya persistidos para calcular el rango del hold.
+         */
+        if ($closer_call_agendar_needed) {
+            try {
+                $lead_fresco_llamada = $lead->fresh();
+
+                $google_oauth_service_llamada = app(GoogleCalendarOAuthService::class);
+                $google_event_service_llamada = new CloserGoogleCalendarEventService(
+                    $google_oauth_service_llamada,
+                    new CloserGoogleCalendarBusyService($google_oauth_service_llamada)
+                );
+
+                if ($closer_call_promover_hold) {
+                    $resultado_evento_llamada = $google_event_service_llamada->promote_hold_to_call($lead_fresco_llamada);
+                } else {
+                    /* No hay reserva vigente para este horario: liberar la vieja si existía (si
+                     * no, le queda un bloqueo fantasma a Tommy comiéndole un hueco) y crear el
+                     * evento en el horario que el lead confirmó. */
+                    if (! empty($lead_fresco_llamada->closer_hold_event_id)) {
+                        $google_event_service_llamada->release_hold_for_lead($lead_fresco_llamada);
+                    }
+
+                    $duracion_llamada_closer = LeadDemoSettings::get_duracion_llamada_closer_minutos();
+                    $evento_fin_llamada      = $closer_call_inicio_confirmado->copy()->addMinutes($duracion_llamada_closer);
+
+                    $resultado_evento_llamada = $google_event_service_llamada->create_call_event_at(
+                        $lead_fresco_llamada->fresh(),
+                        $closer_call_inicio_confirmado,
+                        $evento_fin_llamada
+                    );
+                }
+
+                /* Best-effort, igual que LeadCallService::create_new_call_now(): si Google falló,
+                 * la LeadCall igual se crea (sin meet_url/google_event_id) para que quede
+                 * registrada la intención de llamada; no se pierde el agendamiento por un fallo
+                 * de la API externa. */
+                $call_service_llamada = app(\App\Services\LeadCallService::class);
+                $call_service_llamada->schedule_closer_call(
+                    $lead_fresco_llamada,
+                    $closer_call_inicio_confirmado,
+                    $resultado_evento_llamada['google_event_id'] ?? null,
+                    $resultado_evento_llamada['meet_url'] ?? null
+                );
+
+                $notificar_llamada_agendada = true;
+
+                Log::channel('disponibilidad')->info(
+                    '[CLOSER_AGENDA] Llamada del closer coordinada por el agente.',
+                    [
+                        'lead_id'   => $lead->id,
+                        'inicio'    => $closer_call_inicio_confirmado->toDateTimeString(),
+                        'promovido' => $closer_call_promover_hold,
+                    ]
+                );
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al coordinar la llamada del closer.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
+        /*
          * Notificaciones WhatsApp a admins del ciclo de demo.
          * Se disparan después del save() para que los timestamps (_at) ya estén persistidos.
          * Cada bloque es independiente: un fallo en uno no afecta a los demás.
@@ -4107,6 +4320,29 @@ TXT;
                 }
             } catch (\Throwable $e) {
                 Log::error('LeadAiService: error al notificar no_ingreso a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($notificar_llamada_agendada) {
+            /* Notificar a Tommy por los mismos canales que ya se usan para el escalado a
+             * humano (grupo 307, prompt 03) -- no hay un canal específico de "llamada agendada",
+             * y este es exactamente ese caso: el lead pasa a manos del closer. */
+            try {
+                $escalation_service_llamada = new \App\Services\LeadEscalationWhatsappService(
+                    new \App\Services\WhatsappSendService()
+                );
+                $llamada_notified = $escalation_service_llamada->notify(
+                    $lead->fresh(),
+                    'El lead confirmó la llamada post-demo. Revisá el calendario para coordinarla.'
+                );
+                if (! empty($llamada_notified)) {
+                    $admin_notifications_log[] = ['evento' => 'Llamada con el closer agendada', 'admins' => $llamada_notified];
+                }
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al notificar llamada agendada al closer.', [
                     'lead_id' => $lead->id,
                     'error'   => $e->getMessage(),
                 ]);

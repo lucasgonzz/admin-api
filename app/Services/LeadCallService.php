@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Lead;
 use App\Models\LeadCall;
+use Carbon\Carbon;
 
 /**
  * Gestiona la creación/reutilización de llamadas del closer con un lead (`LeadCall`), decidiendo
@@ -88,6 +89,48 @@ class LeadCallService
             'google_event_id' => $result['google_event_id'] ?? null,
             'estado'          => 'pendiente',
             'started_at'      => now(),
+        ]);
+    }
+
+    /**
+     * Crea (o reutiliza, si ya hay una pendiente) la LeadCall de la llamada agendada con el closer
+     * por el propio agente de IA (grupo 307, prompt 03) -- distinta del flujo de "Unirse a
+     * Meet"/"Nueva reunión" del panel, que arranca la llamada YA: acá se guarda `scheduled_at`
+     * porque la llamada todavía no arrancó, y deliberadamente NO se toca `started_at` (queda null
+     * hasta que la llamada efectivamente arranque, ver el resto del ciclo de vida de LeadCall).
+     *
+     * Idempotente: si el lead ya tiene una LeadCall pendiente, la actualiza en vez de crear una
+     * segunda -- un lead que confirma "dale" varias veces no puede terminar con varias reuniones
+     * en el calendario del closer (el llamador ya filtra este caso antes de invocar, pero el
+     * método queda seguro igual si se llama dos veces).
+     *
+     * @param Lead        $lead
+     * @param Carbon      $scheduled_at    Momento acordado con el lead.
+     * @param string|null $google_event_id Id del evento de Google (hold promovido o evento nuevo).
+     * @param string|null $meet_url        Link de Meet, si Google lo devolvió.
+     *
+     * @return LeadCall
+     */
+    public function schedule_closer_call(Lead $lead, Carbon $scheduled_at, ?string $google_event_id, ?string $meet_url): LeadCall
+    {
+        $pending = $lead->calls()->where('estado', 'pendiente')->orderByDesc('id')->first();
+
+        if ($pending) {
+            $pending->update([
+                'scheduled_at'    => $scheduled_at,
+                'google_event_id' => $google_event_id,
+                'meet_url'        => $meet_url,
+            ]);
+
+            return $pending->fresh();
+        }
+
+        return LeadCall::create([
+            'lead_id'         => $lead->id,
+            'scheduled_at'    => $scheduled_at,
+            'google_event_id' => $google_event_id,
+            'meet_url'        => $meet_url,
+            'estado'          => 'pendiente',
         ]);
     }
 }

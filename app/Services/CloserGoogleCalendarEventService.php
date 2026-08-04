@@ -355,6 +355,214 @@ class CloserGoogleCalendarEventService
     }
 
     /**
+     * Promueve la reserva preventiva del closer a llamada real (grupo 307, prompt 03): el lead ya
+     * confirmó que quiere la llamada, así que el mismo evento -- sin invitados ni Meet, creado por
+     * `create_hold_for_lead()` -- pasa a ser la reunión de verdad, por PATCH. No se toca el
+     * horario del evento (sigue siendo el que calculó `calculate_event_times()` al crear el hold);
+     * solo cambian título, color, invitado y Meet.
+     *
+     * Mueve el id de `closer_hold_event_id` a `google_event_id` y limpia la columna del hold: las
+     * dos NUNCA pueden quedar con el mismo valor -- `google_event_id` es la que consume el flujo
+     * de Recall.ai, y si el hold sigue apuntando ahí, cualquier liberación posterior de "el hold"
+     * borraría la llamada real.
+     *
+     * @param Lead $lead Lead con `closer_hold_event_id` cargado.
+     *
+     * @return array{google_event_id: ?string, meet_url: ?string, event_start: Carbon, event_end: Carbon}|null
+     *              null si no hay hold, no hay conexión del closer, o falló la llamada a Google.
+     */
+    public function promote_hold_to_call(Lead $lead): ?array
+    {
+        if (empty($lead->closer_hold_event_id)) {
+            return null;
+        }
+
+        $connection = $this->get_closer_connection();
+        if (! $connection) {
+            return null;
+        }
+
+        [$event_start, $event_end] = $this->calculate_event_times($lead);
+
+        $lead_nombre = trim(($lead->name ?? '') . ' ' . ($lead->last_name ?? ''));
+        if ($lead_nombre === '') {
+            $lead_nombre = 'Lead #' . $lead->id;
+        }
+
+        // Invitado condicional: en la dinámica nueva el lead puede no tener email todavía (grupo
+        // 308, prompt 03) -- sin email el evento queda sin invitado y el Meet se pasa por chat.
+        // Mismo patrón que build_event_body() y create_ad_hoc_meet_now().
+        $attendees = [];
+        if (! empty($lead->email)) {
+            $attendees[] = ['email' => $lead->email];
+        }
+
+        $patch_body = [
+            'summary'     => '[CC] Llamada — ' . $lead_nombre,
+            'description' => 'Lead: ' . $lead_nombre . "\n" . 'Llamada post-demo confirmada por el lead.',
+            // colorId "2" = sage/verde oscuro, el mismo que usan las llamadas confirmadas creadas
+            // desde cero (build_event_body()) -- distinto del "8" (reserva preventiva).
+            'colorId'        => '2',
+            'conferenceData' => [
+                'createRequest' => [
+                    'requestId'             => 'cc-lead-' . $lead->id . '-hold-promoted-' . time(),
+                    'conferenceSolutionKey' => ['type' => 'hangoutsMeet'],
+                ],
+            ],
+        ];
+        if (! empty($attendees)) {
+            // Recién acá tiene sentido invitar y pedir sendUpdates: es la primera vez que el lead
+            // efectivamente aceptó la reunión (el hold se creó sin su conocimiento).
+            $patch_body['attendees'] = $attendees;
+        }
+
+        $query_params = 'conferenceDataVersion=1';
+        if (! empty($attendees)) {
+            $query_params .= '&sendUpdates=all';
+        }
+
+        try {
+            $access_token = $this->oauth_service->get_fresh_access_token($connection);
+
+            $response = Http::withToken($access_token)
+                ->patch(
+                    'https://www.googleapis.com/calendar/v3/calendars/'
+                        . urlencode($connection->google_calendar_id)
+                        . '/events/' . urlencode($lead->closer_hold_event_id) . '?' . $query_params,
+                    $patch_body
+                );
+
+            if ($response->status() === 404) {
+                // El closer borró el evento a mano: no es un error del sistema (mismo criterio que
+                // mark_hold_as_demo_en_curso()).
+                Log::channel('disponibilidad')->info(
+                    '[CALENDAR_EVENT] No se pudo promover el hold a llamada real: ya no existe en Google (404).'
+                    . ' lead_id=' . $lead->id
+                    . ' closer_hold_event_id=' . $lead->closer_hold_event_id
+                );
+                $lead->closer_hold_event_id = null;
+                $lead->save();
+
+                return null;
+            }
+
+            if ($response->failed()) {
+                Log::channel('disponibilidad')->warning(
+                    '[CALENDAR_EVENT] Error al promover el hold a llamada real.'
+                    . ' lead_id=' . $lead->id
+                    . ' HTTP=' . $response->status()
+                    . ' body=' . substr($response->body(), 0, 500)
+                );
+
+                return null;
+            }
+
+            $meet_url     = null;
+            $entry_points = $response->json('conferenceData.entryPoints') ?? [];
+            foreach ($entry_points as $entry) {
+                if (($entry['entryPointType'] ?? '') === 'video') {
+                    $meet_url = $entry['uri'] ?? null;
+                    break;
+                }
+            }
+
+            $google_event_id = $lead->closer_hold_event_id;
+
+            $lead->google_event_id      = $google_event_id;
+            $lead->meet_url             = $meet_url;
+            $lead->closer_hold_event_id = null;
+            $lead->save();
+
+            Log::channel('disponibilidad')->info(
+                '[CALENDAR_EVENT] Reserva preventiva promovida a llamada real.'
+                . ' lead_id=' . $lead->id
+                . ' google_event_id=' . $google_event_id
+                . ' meet_url=' . ($meet_url ?? 'no generada')
+            );
+
+            return [
+                'google_event_id' => $google_event_id,
+                'meet_url'        => $meet_url,
+                'event_start'     => $event_start,
+                'event_end'       => $event_end,
+            ];
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->error(
+                '[CALENDAR_EVENT] Excepción al promover el hold a llamada real.'
+                . ' lead_id=' . $lead->id
+                . ' error=' . $e->getMessage()
+            );
+
+            return null;
+        }
+    }
+
+    /**
+     * Crea el evento de la llamada del closer en un horario EXPLÍCITO, no derivado de
+     * `demo_date` + duración (a diferencia de `create_event_for_lead()`). La usa
+     * `agendar_llamada_closer` (grupo 307, prompt 03) cuando no hay una reserva preventiva
+     * vigente para promover y el lead eligió otro hueco de `CloserAgendaService::next_slots()` --
+     * que puede caer en cualquier momento futuro, no necesariamente pegado al fin de SU demo (ej.
+     * la rama diferida: demo que termina a las 23:00 y el hueco real es a la mañana siguiente).
+     *
+     * Reusa el mismo armado de cuerpo de evento que `create_event_for_lead()`
+     * (`build_event_body()`: invitado condicional por email, Meet, `sendUpdates` si hay invitado),
+     * solo que con el rango que le pasa el llamador en vez de `calculate_event_times($lead)`.
+     *
+     * @param Lead   $lead        Lead para el cual se crea la llamada.
+     * @param Carbon $event_start Inicio del evento, ya validado contra los huecos ofrecidos.
+     * @param Carbon $event_end   Fin del evento (inicio + duración de la llamada del closer).
+     *
+     * @return array{google_event_id: ?string, meet_url: ?string}|null null si no hay conexión del
+     *              closer o falló la llamada a Google.
+     */
+    public function create_call_event_at(Lead $lead, Carbon $event_start, Carbon $event_end): ?array
+    {
+        $connection = $this->get_closer_connection();
+        if (! $connection) {
+            return null;
+        }
+
+        $event_body       = $this->build_event_body($lead, $event_start, $event_end);
+        $lead_tiene_email = ! empty($lead->email);
+
+        $result = $this->execute_calendar_event_creation($connection, $event_body, $lead_tiene_email);
+
+        if ($result === null) {
+            return null;
+        }
+
+        Log::channel('disponibilidad')->info(
+            '[CALENDAR_EVENT] Evento de llamada del closer creado en horario elegido por el lead (sin hold vigente).'
+            . ' lead_id=' . $lead->id
+            . ' google_event_id=' . $result['google_event_id']
+            . ' event_start=' . $event_start->toDateTimeString()
+            . ' event_end=' . $event_end->toDateTimeString()
+        );
+
+        // Invalidar la caché de disponibilidad: este evento nuevo cambia lo que el closer tiene
+        // ocupado ese día.
+        $this->busy_service->flush_cache_for_date($event_start->format('Y-m-d'));
+
+        return $result;
+    }
+
+    /**
+     * Expone `calculate_event_times()` (protected) para que otros servicios puedan conocer el
+     * rango [inicio, fin] de la reserva/llamada del closer de un lead sin duplicar la fórmula --
+     * la usa `LeadAiService::apply_parsed_response()` para comparar el horario que el lead
+     * confirmó contra el rango real del hold vigente.
+     *
+     * @param Lead $lead
+     *
+     * @return Carbon[] [event_start, event_end]
+     */
+    public function get_call_event_times(Lead $lead): array
+    {
+        return $this->calculate_event_times($lead);
+    }
+
+    /**
      * Verifica que el rango [$event_start, $event_end] entre en el horario laboral del closer
      * para el día de semana de $event_start. Respeta el checkbox
      * `llamada_debe_terminar_en_horario`: si está activo, el fin también tiene que entrar.
