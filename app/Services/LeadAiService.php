@@ -635,6 +635,34 @@ TXT;
             }
         }
 
+        /*
+         * GUARD (grupo 328, prompt 02): un mensaje que no declara horarios es invisible para la
+         * revalidación del grupo 306 (no hay nada que revalidar), así que es exactamente el
+         * mensaje mal formado que ningún control mira. Caso de origen: lead 30, 4/8/2026, "puede
+         * ser hoy a la tarde o mañana" -- horarios_ofrecidos quedó vacío y el mensaje salió solo.
+         * Sin la condición de hay_disponibilidad, esto marcaría también los mensajes legítimos
+         * que preguntan qué día le sirve al lead porque no hay slots.
+         */
+        if ($usa_experiencia_nueva
+            && ! empty($oferta_primaria['hay_disponibilidad'])
+            && empty($parsed['agendar_demo'])
+            && empty($parsed['horarios_ofrecidos'])
+        ) {
+            $parsed['requiere_verificacion'] = true;
+            $parsed['nota_para_setter']       = 'El mensaje no ofrece un horario concreto pese a que el sistema '
+                . 'resolvió una oferta primaria disponible (' . $oferta_primaria['texto_referencia'] . '). '
+                . 'Revisá antes de enviar.';
+
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Mensaje sin horarios_ofrecidos con oferta primaria disponible: marcado para revisión.',
+                [
+                    'lead_id'           => $lead->id,
+                    'texto_referencia'  => $oferta_primaria['texto_referencia'],
+                    'mensaje_sugerido'  => isset($parsed['mensaje_sugerido']) ? $parsed['mensaje_sugerido'] : '',
+                ]
+            );
+        }
+
         return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot);
     }
 
