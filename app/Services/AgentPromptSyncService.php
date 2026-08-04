@@ -144,6 +144,12 @@ class AgentPromptSyncService
             'label'     => 'Recurso (dinámica nueva): post demo',
         ],
         [
+            'key'       => 'whatsapp_recurso_v2_reglas',
+            'repo_path' => 'agentes/lead/recursos/v2/reglas.md',
+            'target'    => self::TARGET_SYNCED_FILE,
+            'label'     => 'Recurso (dinámica nueva): reglas del agente',
+        ],
+        [
             'key'       => 'implementacion_protocolo',
             'repo_path' => 'prompts_agentes/implementacion_protocolo.md',
             'target'    => self::TARGET_SYNCED_FILE,

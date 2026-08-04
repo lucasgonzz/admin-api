@@ -30,7 +30,7 @@ class WhatsappProtocolService
     const RECURSO_KEY_PREFIX_V2 = 'whatsapp_recurso_v2_';
 
     /** Recursos que tienen variante para la dinámica de demo nueva. */
-    const RECURSOS_CON_VARIANTE = ['calificacion', 'demo_agenda', 'demo_ciclo', 'post_demo'];
+    const RECURSOS_CON_VARIANTE = ['calificacion', 'demo_agenda', 'demo_ciclo', 'post_demo', 'reglas'];
 
     /**
      * Devuelve el texto del protocolo leído desde base de datos.
