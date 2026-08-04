@@ -405,11 +405,13 @@ TXT;
             $oferta_primaria = $this->resolve_oferta_primaria($availability_data, $usa_experiencia_nueva);
 
             if ($oferta_primaria['hay_disponibilidad']) {
-                $availability_context .= "OFERTA PRIMARIA (resuelta por el sistema — es LA que tenés que ofrecer):"
-                    . "\n- Primer momento disponible: {$oferta_primaria['texto_referencia']} (demo_id {$oferta_primaria['demo_id']})";
+                $availability_context .= "OFERTA PRIMARIA (resuelta por el sistema — es LA que tenés que ofrecer, con la hora exacta):"
+                    . "\n- Ofrecé ESTE momento: {$oferta_primaria['texto_referencia']} (demo_id {$oferta_primaria['demo_id']})"
+                    . "\n- El mensaje TIENE que decir esa hora. No la reemplaces por una franja (\"a la tarde\", \"más tarde\", \"mañana\") ni por una pregunta abierta (\"¿a qué hora te queda cómodo?\").";
 
                 if (! empty($oferta_primaria['oferta_manana']['hay_disponibilidad'])) {
-                    $availability_context .= "\n- Si el lead dice que hoy no puede: {$oferta_primaria['oferta_manana']['texto_referencia']} (demo_id {$oferta_primaria['oferta_manana']['demo_id']})";
+                    $availability_context .= "\n\nGUARDADO PARA EL TURNO SIGUIENTE (NO mencionar en este mensaje):"
+                        . "\n- Recién si el lead contesta que en ese horario no puede: {$oferta_primaria['oferta_manana']['texto_referencia']} (demo_id {$oferta_primaria['oferta_manana']['demo_id']})";
                 }
             } else {
                 $availability_context .= 'OFERTA PRIMARIA: no hay disponibilidad en la ventana consultada. '
@@ -437,7 +439,13 @@ TXT;
          * horario que elige el lead y para el demo_id. */
         $disponibilidad_legible = $this->format_availability_readable($availability_data);
         if (! empty($disponibilidad_legible)) {
-            $availability_context .= "\n\nDISPONIBILIDAD EN RANGOS LEGIBLES (usar ESTO para ofrecer horarios, NO enumerar los slots del JSON):";
+            /* El encabezado imperativo ("usar ESTO para ofrecer horarios") es correcto para la
+             * dinámica actual, que ofrece rangos por turno, y es la causa verificada del mensaje
+             * del lead 30 (4/8/2026) en la dinámica nueva, donde la oferta es un único horario.
+             * Unificar los dos textos vuelve a romper uno de los dos flujos. */
+            $availability_context .= $usa_experiencia_nueva
+                ? "\n\nRANGOS DEL DÍA (material de consulta — NO uses esto para la oferta inicial; solo si el lead pide expresamente ver qué opciones hay):"
+                : "\n\nDISPONIBILIDAD EN RANGOS LEGIBLES (usar ESTO para ofrecer horarios, NO enumerar los slots del JSON):";
             foreach ($disponibilidad_legible as $date_label => $texto) {
                 if ($texto !== '') {
                     $availability_context .= "\n- {$date_label}: {$texto}";
@@ -477,7 +485,13 @@ TXT;
          * abajo (los leads de la dinámica actual lo siguen usando tal cual, byte a byte). */
         if ($usa_experiencia_nueva) {
             $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
-            $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA de arriba, no una lista de horarios. El mensaje tiene que sonar a \"si querés, hoy mismo te la preparo para que la pruebes — ¿en qué horario te queda cómodo?\".";
+            if ($oferta_primaria['hay_disponibilidad']) {
+                $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA nombrando la hora: el mensaje tiene que sonar a \"si querés te la dejo lista para {$oferta_primaria['texto_referencia']} — ¿te sirve?\". Si el lead te dice que a esa hora no puede, recién ahí ofrecés el momento siguiente, otra vez uno solo y con hora.";
+                $availability_context .= "\n- PROHIBIDO ofrecer franjas del día. \"A la tarde\", \"a la mañana\", \"más tarde\", \"cuando quieras\" no son ofertas: son la forma vieja de agendar. Siempre una hora concreta copiada del JSON.";
+                $availability_context .= "\n- PROHIBIDO devolver la pregunta abierta sin haber ofrecido nada (\"¿a qué hora te queda cómodo?\", \"¿qué día te sirve?\") cuando el bloque OFERTA PRIMARIA trae un momento disponible. Esa pregunta solo vale si el bloque dice que NO hay disponibilidad.";
+            } else {
+                $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA de arriba, no una lista de horarios. El mensaje tiene que sonar a \"si querés, hoy mismo te la preparo para que la pruebes — ¿en qué horario te queda cómodo?\".";
+            }
             $availability_context .= "\n- PROHIBIDO enumerar rangos de horarios, salvo que el lead pida explícitamente qué opciones hay.";
             $availability_context .= "\n- Si el lead propone un horario concreto, verificalo en el JSON granular de disponibilidad de abajo.";
             $availability_context .= "\n- Si el horario que pidió no está disponible, ofrecé el horario más cercano que sí lo esté — de nuevo, uno solo, no una lista.";
