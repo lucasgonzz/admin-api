@@ -5098,6 +5098,86 @@ TXT;
     }
 
     /**
+     * Bloque "COORDINACIÓN DE LA LLAMADA CON EL CLOSER" (grupo 307, prompt 04): huecos reales del
+     * closer (armados con CloserAgendaService, grupo 307, prompt 02) y las instrucciones del tramo
+     * post-demo. Sin este bloque el agente tiene las acciones (agendar_llamada_closer,
+     * descartar_llamada_closer, posponer_check_fin_demo) pero no sabe qué horarios existen, y va a
+     * inventarlos (lead #232, @contexto/estado_y_decisiones.md §3.22) -- por eso el caso de agenda
+     * vacía se dice EXPLÍCITAMENTE en vez de omitirse.
+     *
+     * @param Lead $lead
+     *
+     * @return string
+     */
+    private function build_coordinacion_llamada_closer_context(Lead $lead): string
+    {
+        $agenda_service = app(CloserAgendaService::class);
+
+        $libre_ahora = false;
+        try {
+            $libre_ahora = $agenda_service->is_free_now($lead);
+        } catch (\Throwable $e) {
+            Log::error('LeadAiService: error al consultar is_free_now() para el contexto del closer.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
+        $slots = [];
+        try {
+            $slots = $agenda_service->next_slots(3);
+        } catch (\Throwable $e) {
+            Log::error('LeadAiService: error al consultar next_slots() para el contexto del closer.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
+        $txt = "\n\nCOORDINACIÓN DE LA LLAMADA CON EL CLOSER:\n"
+            . '- El closer puede tomar la llamada AHORA MISMO: ' . ($libre_ahora ? 'sí' : 'no') . "\n";
+
+        if (empty($slots)) {
+            /* Caso explícito a propósito (detalle 2 del prompt): un bloque vacío es el escenario
+             * donde el modelo improvisa horarios que no existen. */
+            $txt .= "- No hay próximos horarios disponibles del closer en este momento: NO inventes\n"
+                . "  ningún horario. Decile al lead que se le confirma el horario a la brevedad y\n"
+                . "  devolvé requiere_intervencion_humana: true.\n";
+        } else {
+            $txt .= "- Próximos horarios disponibles (copialos literalmente, no calcules ninguno):\n";
+            $n = 1;
+            foreach ($slots as $slot_disponible) {
+                $txt .= "  {$n}. {$slot_disponible['label']} -> inicio: "
+                    . $slot_disponible['inicio']->format('Y-m-d\TH:i:s') . "\n";
+                $n++;
+            }
+        }
+
+        $txt .= "\nInstrucciones de este tramo:\n"
+            . "- Cuando el lead confirme que terminó la demo, preguntale primero si le sirvió y qué le\n"
+            . "  pareció. No saltes directo a agendar: la llamada se ofrece sobre su respuesta, no\n"
+            . "  sobre el reloj.\n"
+            . "- Si le interesa y el closer está libre AHORA MISMO, ofrecele la llamada para ese\n"
+            . "  momento: es el caso de mayor valor, el lead recién vio el sistema y tiene las\n"
+            . "  preguntas frescas.\n"
+            . "- Si el closer no está libre, ofrecele el PRIMER horario de la lista, uno solo, igual\n"
+            . "  que en el agendamiento de la demo. Si no le sirve, ofrecele el siguiente.\n"
+            . "- Confirmado un horario, devolvé agendar_llamada_closer con el inicio copiado literal\n"
+            . "  de la lista de arriba.\n"
+            . "- Si el lead dice que no quiere avanzar, devolvé descartar_llamada_closer con el\n"
+            . "  motivo, sin insistir ni intentar rebatirlo: esa conversación es del closer, no tuya.\n"
+            . "- Si el lead dice que todavía no terminó la demo, devolvé posponer_check_fin_demo con\n"
+            . "  los minutos que él mismo dé a entender (\"dame 20 minutos\" -> 20; \"estoy viendo\n"
+            . "  compras\" -> estimá un valor razonable). No vuelvas a preguntarle en el mismo turno.\n"
+            . "- ⛔ Prohibido inventar horarios del closer. Si este bloque vino vacío arriba, no\n"
+            . "  prometas ninguno: decí que se lo confirmamos enseguida y devolvé\n"
+            . "  requiere_intervencion_humana: true.\n"
+            . '- La llamada dura entre 15 y 20 minutos y es por videollamada. No prometas nada sobre'
+            . " precios ni condiciones: eso es del closer.";
+
+        return $txt;
+    }
+
+    /**
      * Construye el contenido user con historial y datos del lead.
      *
      * Si se proporciona $availability_context, se agrega al final del contenido
@@ -5289,6 +5369,24 @@ TXT;
                 . "y/o número de teléfono, devolvé la acción sugerir_socio con los datos detectados.\n"
                 . "Solo usar cuando el lead lo mencione con datos de contacto concretos. Si no hay socio nuevo,\n"
                 . "omití sugerir_socio o ponelo en null.";
+        }
+
+        /*
+         * Coordinación de la llamada con el closer (grupo 307, prompt 04). Independiente del
+         * if/elseif de arriba a propósito: se inyecta ADEMÁS del bloque de cada estado (no lo
+         * reemplaza), en los TRES estados del tramo post-demo -- demo_en_curso,
+         * demo_pendiente_de_terminar y demo_realizada -- no solo el último. Mismo bug que hubo
+         * que corregir en el grupo 320: el turno en que el lead dice "sí, me sirvió" puede ser el
+         * MISMO en que se confirma el fin de la demo, y en ese momento el status persistido
+         * todavía puede ser demo_en_curso. Si el bloque solo se inyectara desde demo_realizada,
+         * faltaría justo en el turno que más importa. Solo dinámica nueva.
+         */
+        $estados_coordinacion_llamada = ['demo_en_curso', 'demo_pendiente_de_terminar', 'demo_realizada'];
+        if ($lead->usa_experiencia_demo_nueva() && in_array($lead_status_for_context, $estados_coordinacion_llamada, true)) {
+            $coordinacion_llamada_context = $this->build_coordinacion_llamada_closer_context($lead);
+            if ($coordinacion_llamada_context !== '') {
+                $txt .= $coordinacion_llamada_context;
+            }
         }
 
         $txt .= "\n¿Qué respuesta sugerís y en qué estado debería quedar el lead?";
