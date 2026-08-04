@@ -151,7 +151,14 @@ class LeadSuggestionSendService
                     'message_id' => $message->id,
                 ]);
 
-                return app(\App\Services\LeadAiService::class)->generate_suggestion($lead->fresh(), (bool) $message->is_followup);
+                /* El mensaje que reemplaza a una oferta caducada es otro mensaje de oferta: si se
+                 * regenera por la primera llamada, el modelo no tiene ni JSON ni oferta primaria y
+                 * contesta un ack sin horario ni link (lead 30, 4/8/2026: "Dale, Brisa... ahora
+                 * mismo te lo preparo", sin agendar nada). La regeneración entra por el mismo
+                 * camino que produjo el mensaje original (grupo 330, prompt 02) -- ver
+                 * LeadAiService::regenerar_sugerencia_por_horario_caducado(), que además trae su
+                 * propio fail-safe si la disponibilidad falla. */
+                return app(\App\Services\LeadAiService::class)->regenerar_sugerencia_por_horario_caducado($lead->fresh(), (bool) $message->is_followup);
             }
         }
 

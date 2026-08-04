@@ -667,6 +667,50 @@ TXT;
     }
 
     /**
+     * Regenera la sugerencia que reemplaza a un mensaje rechazado por horario ofrecido caducado
+     * (grupo 330, prompt 02, lead 30 el 4/8/2026). El mensaje que reemplaza a una oferta caducada
+     * es OTRO mensaje de oferta: si se regenera por la primera llamada (generate_suggestion(), sin
+     * JSON de disponibilidad ni oferta primaria), el modelo queda sin horario y contesta un ack sin
+     * agendar nada ni pasar el link ("Dale, Brisa... ahora mismo te lo preparo" -- frase que además
+     * el guion prohíbe explícitamente). La regeneración tiene que entrar por el mismo camino que
+     * produjo el mensaje original.
+     *
+     * Envuelve generate_suggestion_with_availability() (protected, no se le cambia la visibilidad
+     * ni se duplica su lógica) con came_from_availability_request = true, igual que si el modelo
+     * hubiera pedido disponibilidad. Sin fecha específica: la ventana por defecto ya incluye hoy.
+     *
+     * Fail-safe obligatorio: si la generación con disponibilidad tira excepción, cae a
+     * generate_suggestion() (el camino viejo) y lo deja logueado en el canal `disponibilidad` --
+     * misma degradación segura que ya usa el resto del flujo. Nunca deja al lead sin ninguna
+     * sugerencia.
+     *
+     * Se llama SOLO desde LeadSuggestionSendService::send_suggestion(), en el bloque de
+     * revalidación de horarios caducados (grupo 306, prompt 04) -- esta regeneración no dispara
+     * otra revalidación dentro del MISMO request: el bloque de caducidad corre en send_suggestion()
+     * (al aprobar/enviar un mensaje), no acá (al generarlo). La sugerencia nueva vuelve a declarar
+     * horarios_ofrecidos y va a pasar por SU PROPIA revalidación recién cuando alguien la apruebe a
+     * su vez -- son dos aprobaciones distintas, no una recursión.
+     *
+     * @param Lead $lead        Lead fresco (el llamador pasa $lead->fresh()).
+     * @param bool $is_followup true si el mensaje original que caducó era un seguimiento.
+     *
+     * @return LeadMessage
+     */
+    public function regenerar_sugerencia_por_horario_caducado(Lead $lead, bool $is_followup): LeadMessage
+    {
+        try {
+            return $this->generate_suggestion_with_availability($lead, $is_followup, null, true);
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->warning('[DISPONIBILIDAD] Fallo al regenerar sugerencia con disponibilidad fresca tras horario caducado; se genera por el camino viejo.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return $this->generate_suggestion($lead, $is_followup);
+        }
+    }
+
+    /**
      * Traduce el `dia_solicitado` que devuelve Claude (vocabulario cerrado, sin fechas) a una
      * fecha Y-m-d concreta, calculada por PHP con Carbon en timezone Argentina.
      *
@@ -1027,14 +1071,20 @@ TXT;
      * @param bool        $usa_experiencia_nueva Si true, la demo usa su franja propia y el closer no
      *                                       la gobierna (grupo 306). Default false para no romper
      *                                       ningún caller existente.
+     * @param int|null    $margen_hoy_override Reemplaza el margen mínimo de anticipación SOLO para
+     *                                       esta llamada (grupo 330, prompt 01). null = usa la
+     *                                       setting configurada, igual que siempre.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false): array
+    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false, ?int $margen_hoy_override = null): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
-         * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango. */
-        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date, $exclude_lead_id, $usa_experiencia_nueva);
+         * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango.
+         * $margen_hoy_override (grupo 330, prompt 01): null = comportamiento actual (usa la
+         * setting). Un valor explícito reemplaza el margen SOLO para esta llamada, sin tocar
+         * la setting ni ninguna otra llamada del mismo request -- ver revalidar_horarios_ofrecidos(). */
+        $context = $this->prepare_slot_availability_context($days_ahead, $specific_date, $exclude_lead_id, $usa_experiencia_nueva, $margen_hoy_override);
 
         /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
         $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
@@ -1268,7 +1318,21 @@ TXT;
 
         $usa_experiencia_nueva    = $lead->usa_experiencia_demo_nueva();
         $calendar_snapshot_unused = null;
-        $availability_fresca      = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot_unused, $fecha_mas_lejana, (int) $lead->id, $usa_experiencia_nueva);
+        /* El margen mínimo de anticipación decide qué se puede OFRECER, no si lo ya ofrecido sigue
+         * en pie. Como la oferta primaria es siempre el primer slot que sobrevive a ese margen,
+         * revalidar con el margen puesto cancela la oferta más cercana ante cualquier demora de
+         * aprobación mayor a un minuto -- pasó con el lead 30 el 4/8/2026: 11:30 ofrecido 11:14,
+         * cancelado al aprobar, con el slot todavía libre. Acá el margen va en 0 a propósito; lo
+         * que sigue vigente es "ya pasó" (filtro de slots pasados, sin tocar) y "se ocupó" (capa 1
+         * de bloqueo por demo_id, sin tocar).
+         *
+         * Caso borde DECIDIDO a propósito, no un olvido: si el horario ofrecido queda a menos del
+         * margen pero todavía no pasó (ej. 11:30 aprobado 11:29), el mensaje SALE igual. Es lo
+         * correcto -- el lead recibe un horario real y la instancia se prepara con lo que haya. El
+         * costo de mandarlo es que el setup arranque justo; el costo de cancelarlo es un lead
+         * caliente sin respuesta. No "arreglar" esto reintroduciendo el margen acá: es exactamente
+         * el bug que este comentario describe arriba. */
+        $availability_fresca      = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot_unused, $fecha_mas_lejana, (int) $lead->id, $usa_experiencia_nueva, 0);
         $demos_json = isset($availability_fresca['demos']) && is_array($availability_fresca['demos'])
             ? $availability_fresca['demos']
             : [];
@@ -1504,10 +1568,13 @@ TXT;
      *                                   (self::DIAS_DISPONIBILIDAD). Los días sin horario configurado
      *                                   se excluyen del resultado pero no extienden el recorrido.
      * @param string|null $specific_date Fecha objetivo en formato Y-m-d, o null para comportamiento por defecto.
+     * @param int|null    $margen_hoy_override Reemplaza el margen mínimo de anticipación SOLO para
+     *                                   esta llamada (grupo 330, prompt 01). null = usa la setting
+     *                                   configurada, igual que siempre.
      *
      * @return array<string, mixed>
      */
-    protected function prepare_slot_availability_context(int $days_ahead = self::DIAS_DISPONIBILIDAD, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false): array
+    protected function prepare_slot_availability_context(int $days_ahead = self::DIAS_DISPONIBILIDAD, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false, ?int $margen_hoy_override = null): array
     {
         /* Parámetros de configuración de demos. */
         $duracion    = LeadDemoSettings::get_duracion_minutos();
@@ -1530,8 +1597,14 @@ TXT;
         /* Duración de la llamada del closer post-demo en minutos. */
         $duracion_closer   = LeadDemoSettings::get_duracion_llamada_closer_minutos();
         /* Margen mínimo para ofrecer un horario de HOY (grupo 306, prompt 02). Solo aplica en la
-         * dinámica nueva; la actual sigue sin ofrecer horarios de hoy. */
-        $demo_minimo_minutos_desde_ahora = LeadDemoSettings::get_demo_minimo_minutos_desde_ahora();
+         * dinámica nueva; la actual sigue sin ofrecer horarios de hoy.
+         * $margen_hoy_override (grupo 330, prompt 01): distinto de null solo cuando el llamador
+         * pide explícitamente reemplazar la setting para ESTA llamada (revalidar_horarios_ofrecidos()
+         * pasa 0) -- el resto de los llamadores no lo pasan, así que siguen leyendo la setting igual
+         * que siempre. */
+        $demo_minimo_minutos_desde_ahora = $margen_hoy_override !== null
+            ? $margen_hoy_override
+            : LeadDemoSettings::get_demo_minimo_minutos_desde_ahora();
 
         /*
          * Config agrupada para pasarla a compute_day_slots_for_demo() y get_all_slots_for_day()
