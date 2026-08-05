@@ -23,6 +23,28 @@ use App\Models\Lead;
 class LeadDemoFormMapper
 {
     /**
+     * Las nueve respuestas en su valor por defecto, copiadas a mano de
+     * `contexto/demo_catalogo.md` §2 (tabla "FORMULARIO DE LA PÁGINA INMERSIVA", columna Default).
+     *
+     * Son los mismos valores que la página inmersiva muestra ya preseleccionados: el lead confirma,
+     * no completa. Si algún día se cambian en el catálogo, hay que cambiarlos también acá.
+     *
+     * A propósito NO se leen del catálogo sincronizado (`demo_catalogo.json`): ese JSON puede no
+     * estar sincronizado todavía y este valor tiene que existir siempre.
+     */
+    const RESPUESTAS_POR_DEFECTO = [
+        'tipo_precios'                       => 'unico',
+        'costos_en_dolares'                  => false,
+        'descuentos_por_metodo_pago'         => true,
+        'usa_cuentas_corrientes_clientes'    => true,
+        'usa_cuentas_corrientes_proveedores' => true,
+        'usa_presupuestos'                   => false,
+        'registra_compras'                   => true,
+        'usa_ecommerce'                      => true,
+        'usa_depositos'                      => false,
+    ];
+
+    /**
      * Aplica al lead las nueve respuestas del formulario, traduciéndolas a las columnas
      * correspondientes. NO persiste: deja el modelo modificado en memoria y es responsabilidad de
      * quien llama decidir cuándo hacer `$lead->save()` (por ejemplo, junto con
@@ -101,5 +123,34 @@ class LeadDemoFormMapper
             'registra_compras'                   => (bool) $lead->registra_compras,
             'usa_ecommerce'                      => (bool) $lead->usa_ecommerce,
         ];
+    }
+
+    /**
+     * Las nueve respuestas que hay que usar para configurar la instancia de demo de este lead.
+     *
+     * No es lo mismo que `from_lead()` y no se puede "simplificar" a `from_lead()`:
+     * `from_lead()` refleja el estado de las columnas, y las columnas apagadas de un lead que no
+     * contestó el formulario NO significan "contestó que no", significan "no contestó". Las seis
+     * columnas nuevas nacieron con `->default(false)` (migración
+     * `2026_07_31_160000_add_demo_form_fields_to_leads_table.php`), mientras que los defaults reales
+     * del catálogo están en su mayoría encendidos. Si se confundieran las dos cosas, a un lead que
+     * todavía no abrió la página se le armaría la instancia mutilada — caso alcanzable, porque el
+     * botón "Disparar setup demo" del panel de Operaciones se puede pulsar en cualquier momento.
+     *
+     * No escribe, no persiste, no toca el lead.
+     *
+     * @param Lead $lead
+     *
+     * @return array<string, mixed> Las nueve respuestas, en el mismo formato que devuelve
+     *                              `from_lead()`.
+     */
+    public static function respuestas_efectivas(Lead $lead): array
+    {
+        // Sin fecha de completado no hay respuestas del lead: valen los defaults del catálogo.
+        if ($lead->demo_form_completado_at === null) {
+            return self::RESPUESTAS_POR_DEFECTO;
+        }
+
+        return self::from_lead($lead);
     }
 }
