@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Lead;
 use App\Services\ImplementationSettings;
+use App\Services\LeadDemoFormMapper;
 use App\Services\ClientEmpresaApiUrlResolver;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -181,7 +182,68 @@ class RunDemoSetupService
             $payload['google_custom_search_api_key'] = $google_api_key;
         }
 
-        return $payload;
+        // El merge va AL FINAL, después de todas las claves de siempre, y no al principio: las
+        // claves recalculadas de la dinámica nueva (use_price_lists, use_deposits,
+        // usan_cuentas_corrientes) tienen que pisar a las viejas, no al revés. Para la dinámica
+        // actual respuestas_para_payload() devuelve [] y el payload queda idéntico al de siempre.
+        return array_merge($payload, $this->respuestas_para_payload($lead));
+    }
+
+    /**
+     * Las claves que hay que agregar o pisar en el payload según la dinámica de demo del lead.
+     *
+     * Para la dinámica ACTUAL devuelve un array vacío, sin excepciones: el payload de esos leads
+     * tiene que quedar idéntico byte por byte al de antes de este método. La ramificación usa
+     * `Lead::usa_experiencia_demo_nueva()` (grupo 293) y nunca la columna a mano, porque ese
+     * método ya cae a `Lead::EXPERIENCIA_ACTUAL` ante cualquier valor desconocido o nulo: mientras
+     * la dinámica nueva no esté activada, ningún lead de producción puede recibir el bloque nuevo
+     * por accidente.
+     *
+     * En la dinámica nueva los tres campos legados (`use_price_lists`, `use_deposits`,
+     * `usan_cuentas_corrientes`) se recalculan desde las MISMAS respuestas efectivas y no desde
+     * las columnas del lead, para que el payload tenga una sola fuente. Hoy coinciden porque el
+     * mapper escribe esas columnas al enviarse el formulario; pero si el formulario todavía no se
+     * completó, las respuestas efectivas salen de los defaults del catálogo mientras las columnas
+     * siguen en su valor de base. Dos fuentes que pueden discrepar es la clase de bug que no
+     * avisa: el bloque nuevo diría una cosa, el viejo otra, y `empresa-api` elegiría cualquiera.
+     *
+     * El método es puro a propósito: sólo el lead y `LeadDemoFormMapper`. Nada de settings, nada
+     * de base, nada de HTTP — así se puede probar sin base.
+     *
+     * @param Lead $lead
+     *
+     * @return array<string, mixed> Vacío para la dinámica actual.
+     */
+    protected function respuestas_para_payload(Lead $lead)
+    {
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return [];
+        }
+
+        $formulario_completado = $lead->demo_form_completado_at !== null;
+
+        if (! $formulario_completado) {
+            // No es un error: el botón "Disparar setup demo" del panel de Operaciones se puede
+            // pulsar antes de que el lead abra la página, a propósito. Queda registrado porque
+            // cuando después la demo aparezca sin ecommerce o sin compras, esta línea explica
+            // por qué se armó así.
+            Log::info('Demo setup con los defaults del catálogo: el lead todavía no completó el formulario de la página inmersiva.', [
+                'lead_id' => $lead->id,
+            ]);
+        }
+
+        $respuestas = LeadDemoFormMapper::respuestas_efectivas($lead);
+
+        return [
+            'demo_experiencia'      => Lead::EXPERIENCIA_NUEVA,
+            'demo_form_completado'  => $formulario_completado,
+            'respuestas_formulario' => $respuestas,
+
+            // Los tres legados, recalculados desde las respuestas de arriba (ver docblock).
+            'use_price_lists'         => ($respuestas['tipo_precios'] === 'listas'),
+            'use_deposits'            => (bool) $respuestas['usa_depositos'],
+            'usan_cuentas_corrientes' => (bool) $respuestas['usa_cuentas_corrientes_clientes'],
+        ];
     }
 
     /**
