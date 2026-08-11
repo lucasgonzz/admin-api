@@ -8,6 +8,12 @@
 /vendor
 .env
 .env.backup
+# Config de la base de testing del slot, propia de cada worktree del pool paralelo.
+# Va ignorada por dos motivos: trae credenciales, y sin ella la suite de este repo no
+# arranca (Laravel instancia Pusher con claves null y todo test que levante la app
+# muere con TypeError). El detalle esta en el repo de contexto claude-comerciocity,
+# en prompts/hallazgos/20260811-los-slots-de-admin-no-tienen-entorno-de-testing.json
+.env.testing
 .phpunit.result.cache
 docker-compose.override.yml
 Homestead.json
