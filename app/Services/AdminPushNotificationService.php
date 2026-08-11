@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AdminPushSubscription;
 use Illuminate\Support\Facades\Log;
+use Minishlink\WebPush\MessageSentReport;
 use Minishlink\WebPush\Subscription;
 use Minishlink\WebPush\WebPush;
 
@@ -57,20 +58,57 @@ class AdminPushNotificationService
         }
 
         // Enviar todo el lote; cada report corresponde a un device.
-        // En minishlink/web-push v7 el report expone getEndpoint() directamente.
         foreach ($web_push->flush() as $report) {
-            if (! $report->isSuccess()) {
-                $endpoint = $report->getEndpoint();
-
-                Log::channel('daily')->warning('Web Push: envío fallido, eliminando suscripción.', [
-                    'admin_id' => $admin_id,
-                    'endpoint' => $endpoint,
-                    'reason'   => $report->getReason(),
-                ]);
-
-                // Endpoint expirado o inválido: limpiar la suscripción muerta.
-                AdminPushSubscription::where('endpoint', $endpoint)->delete();
-            }
+            self::handle_send_report($admin_id, $report);
         }
+    }
+
+    /**
+     * Decide qué hacer con el resultado del envío a un device.
+     *
+     * Está separado del envío para poder probarlo: el criterio de "cuándo se borra una
+     * suscripción" es la parte con consecuencias (un borrado de más deja al admin sin
+     * notificaciones para siempre) y no se puede ejercitar sin salir a la red.
+     *
+     * @param int               $admin_id
+     * @param MessageSentReport $report Resultado del envío a un endpoint.
+     *
+     * @return void
+     */
+    public static function handle_send_report(int $admin_id, MessageSentReport $report): void
+    {
+        if ($report->isSuccess()) {
+            return;
+        }
+
+        // En minishlink/web-push v7 el report expone getEndpoint() directamente.
+        $endpoint = $report->getEndpoint();
+
+        /* Suscripción realmente muerta: el push service contestó 404 o 410, o sea que
+         * ese device ya no existe y no va a volver. isSubscriptionExpired() es de
+         * minishlink/web-push v7 (MessageSentReport::isSubscriptionExpired, que mira
+         * exactamente esos dos status codes). Solo en este caso se borra la fila. */
+        if ($report->isSubscriptionExpired()) {
+            Log::channel('daily')->warning('Web Push: suscripción expirada, se elimina el device.', [
+                'admin_id' => $admin_id,
+                'endpoint' => $endpoint,
+                'reason'   => $report->getReason(),
+            ]);
+
+            AdminPushSubscription::where('endpoint_hash', AdminPushSubscription::hash_endpoint($endpoint))
+                ->delete();
+
+            return;
+        }
+
+        /* Cualquier otro fallo (429 por rate limit, 500 del push service, timeout de red)
+         * es transitorio: la suscripción se conserva. Borrarla acá dejaba al admin sin
+         * notificaciones para siempre por una caída de cinco minutos de Apple, y sin
+         * ningún aviso — la pantalla de Cuenta le seguía mostrando el badge verde. */
+        Log::channel('daily')->warning('Web Push: envío fallido transitorio, se conserva la suscripción.', [
+            'admin_id' => $admin_id,
+            'endpoint' => $endpoint,
+            'reason'   => $report->getReason(),
+        ]);
     }
 }

@@ -1178,10 +1178,10 @@ class WhatsappWebhookController extends Controller
             }
         }
 
-        // Notificación WhatsApp a todos los admins suscritos a este lead.
-        (new \App\Services\LeadMessageNotificationWhatsappService(
-            new \App\Services\WhatsappSendService()
-        ))->notify($lead, $content);
+        /* Aviso a los admins suscritos a este lead (la campanita de la conversación).
+         * El canal es Web Push desde el 11/8/2026; el servicio manda WhatsApp solo a los
+         * admins que no tienen ningún device registrado. */
+        (new \App\Services\LeadMessagePushNotificationService())->notify($lead, $content);
 
         // 2) Bienvenida inmediata + job de presentación (segundo en el hilo; cada envío emite su propio broadcast).
         if ($run_onboarding) {

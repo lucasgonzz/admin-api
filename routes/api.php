@@ -298,10 +298,12 @@ Route::prefix('admin')->group(function () {
         Route::put('protocol-entry/{id}', [ProtocolEntryController::class, 'update_json']);
         Route::delete('protocol-entry/{id}', [ProtocolEntryController::class, 'destroy_json']);
 
-        // Web Push: clave pública VAPID + alta/baja de la suscripción del device actual.
+        // Web Push: clave pública VAPID + alta/baja/estado de la suscripción del device actual.
         Route::get('push/vapid-public-key', [\App\Http\Controllers\Api\AdminPushSubscriptionController::class, 'vapid_public_key_json']);
         Route::post('push/subscribe', [\App\Http\Controllers\Api\AdminPushSubscriptionController::class, 'store_json']);
         Route::post('push/unsubscribe', [\App\Http\Controllers\Api\AdminPushSubscriptionController::class, 'destroy_json']);
+        // POST y no GET a propósito: el endpoint es una URL larga y no tiene por qué viajar en la query string.
+        Route::post('push/subscription-status', [\App\Http\Controllers\Api\AdminPushSubscriptionController::class, 'subscription_status_json']);
 
         // CRUD de usuarios admin (equipo interno de ComercioCity).
         Route::get('admin-user', [AdminUserController::class, 'index_json']);
