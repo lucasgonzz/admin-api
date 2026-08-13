@@ -138,6 +138,75 @@ class DemoIngresoTokenService
     }
 
     /**
+     * Corre el vencimiento del token de ingreso SIN cambiarle el valor (misión 47).
+     *
+     * 🔴 Se extiende, NO se reemite, y la diferencia es todo el punto: la URL que el lead está a
+     * punto de abrir ya está construida con el token actual. Si se generara uno nuevo, esa URL
+     * quedaría inválida en el mismo request en que se la damos. El endpoint de la instancia
+     * (`admin-sync/demo-token`, acción `guardar`) borra los tokens previos del usuario antes de
+     * crear el que recibe, así que mandarle el MISMO valor con el `expira_at` nuevo deja un único
+     * token vigente, con el mismo hash y la fecha corrida.
+     *
+     * Para qué existe: con una ventana extendida hasta las 23:59, el vencimiento calculado
+     * (fin + gracia) cae 00:09 — un lead que entra 23:50 se quedaría sin sesión a los diecinueve
+     * minutos, habiéndole ofrecido nosotros seis horas de libertad. La ventana controla HASTA
+     * CUÁNDO PUEDE ENTRAR; una vez adentro, la sesión le dura una demo completa.
+     *
+     * No hace nada (y no falla) si el lead no tiene token o si el vencimiento actual ya cubre lo
+     * pedido: es seguro llamarlo en cada ingreso.
+     *
+     * @param Lead   $lead
+     * @param Carbon $nuevo_expira Vencimiento mínimo que tiene que quedar garantizado.
+     *
+     * @return bool true si el vencimiento se corrió de verdad.
+     *
+     * @throws \RuntimeException Si no se pudo avisar a la instancia (el Lead queda revertido).
+     */
+    public function extender_vencimiento(Lead $lead, Carbon $nuevo_expira)
+    {
+        if (empty($lead->demo_ingreso_token)) {
+            return false;
+        }
+
+        /* Ya alcanza: no se acorta nunca un vencimiento, ni se manda una llamada al pedo. */
+        if ($lead->demo_ingreso_token_expira_at !== null
+            && $lead->demo_ingreso_token_expira_at->gte($nuevo_expira)) {
+            return false;
+        }
+
+        $lead->loadMissing('demo');
+        $demo = $lead->demo;
+
+        if (is_null($demo)) {
+            throw new \RuntimeException('El lead no tiene demo asignada.');
+        }
+
+        $expira_anterior = $lead->demo_ingreso_token_expira_at;
+
+        $lead->update(['demo_ingreso_token_expira_at' => $nuevo_expira]);
+
+        try {
+            $this->avisar_instancia($demo, [
+                'accion'    => 'guardar',
+                /* El MISMO valor de token, a propósito. Ver el docblock. */
+                'token'     => $lead->demo_ingreso_token,
+                'expira_at' => $nuevo_expira->format('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable $e) {
+            $lead->update(['demo_ingreso_token_expira_at' => $expira_anterior]);
+
+            Log::error('DemoIngresoTokenService::extender_vencimiento error: ' . $e->getMessage(), [
+                'lead_id' => $lead->id,
+                'demo_id' => $demo->id,
+            ]);
+
+            throw new \RuntimeException('No se pudo avisar a la instancia: ' . $e->getMessage());
+        }
+
+        return true;
+    }
+
+    /**
      * Revoca el token de ingreso a la demo del lead (por ejemplo, si se compartió donde no
      * debia): marca `demo_ingreso_token_revocado_at` en el Lead y avisa a la instancia para que
      * revoque todos los tokens vigentes del usuario demo (hay uno solo por instancia).

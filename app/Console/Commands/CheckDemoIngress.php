@@ -89,6 +89,12 @@ class CheckDemoIngress extends Command
             ->where('auto_check_ingreso_demo', true)
             ->where('demo_check_ingreso_enviado', false)
             ->where('tiene_sugerencia_pendiente', false)
+            /* 🔴 Los leads con ventana extendida quedan afuera (misión 47). Este check cuelga de
+             * demo_start_time, así que a un lead al que le ofrecimos "de 20:00 a 23:59, entrá
+             * cuando puedas" le preguntaría a las 20:02 si pudo entrar — y de ahí sale una cadena
+             * de tres mensajes equivocados que además lo devuelve a `calificado` por timeout. La
+             * columna es boolean default false y no admite null, así que este where alcanza. */
+            ->where('demo_flexible', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->whereDate('demo_date', $now->format('Y-m-d'))

@@ -65,6 +65,9 @@ class LeadDemoSettingsController extends Controller
                no minutos. "sometimes" por el mismo motivo que los de arriba — una versión del SPA
                anterior a esta misión no manda la clave y no tiene que tirar 422. */
             'demo_intro_umbral_pct'           => 'sometimes|integer|min:'.LeadDemoSettings::MIN_PCT.'|max:'.LeadDemoSettings::MAX_PCT,
+            /* Tope de la ventana extendida (misión 47), en horas. Rango propio 1-12: es una guarda
+               contra que un solo lead bloquee la instancia el día entero. */
+            'demo_ventana_extendida_max_horas' => 'sometimes|integer|min:'.LeadDemoSettings::MIN_HORAS_VENTANA.'|max:'.LeadDemoSettings::MAX_HORAS_VENTANA,
             'frecuencia_slots_minutos'        => 'required|integer|in:'.implode(',', LeadDemoSettings::VALID_FRECUENCIA_SLOTS),
             'llamada_debe_terminar_en_horario' => 'required|boolean',
             // Settings del ciclo de vida automatizado de la demo.

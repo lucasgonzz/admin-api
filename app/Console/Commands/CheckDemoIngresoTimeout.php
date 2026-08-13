@@ -66,6 +66,12 @@ class CheckDemoIngresoTimeout extends Command
             ->where('demo_check_ingreso_enviado', true)
             ->where('demo_ingreso_confirmado', false)
             ->where('demo_no_ingreso_notificado', false)
+            /* Ventana extendida afuera (misión 47), y no alcanza con que CheckDemoIngress ya los
+             * excluya: a `ingresando_demo` también se llega por la vía conversacional
+             * (confirmar_ingreso), así que un flexible puede estar en ese estado sin que este
+             * comando lo haya puesto ahí. El timeout cuelga de demo_start_time y lo mandaría a
+             * demo_pendiente_de_ingreso mientras su ventana sigue abierta. */
+            ->where('demo_flexible', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->get();

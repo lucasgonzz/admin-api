@@ -35,6 +35,16 @@ class LeadDemoSettings
      */
     public const KEY_DEMO_INTRO_UMBRAL_PCT = 'demo_intro_umbral_pct';
 
+    /**
+     * Clave: tope de horas de la ventana extendida (misión 47).
+     *
+     * Es una GUARDA, no algo que el lead elija. Sin tope, "hasta el fin del día" significa que un
+     * lead que dice "a partir de las 10 de la mañana" bloquea esa instancia de 09:45 a 00:09 — el
+     * día entero, por uno solo que capaz no aparece. Con tres instancias, dos o tres leads así
+     * dejan el día sin disponibilidad para nadie.
+     */
+    public const KEY_VENTANA_EXTENDIDA_MAX_HORAS = 'demo_ventana_extendida_max_horas';
+
     /** Clave: minutos de gracia post-demo para liberar el slot de disponibilidad. */
     public const KEY_GRACIA_MINUTOS_POST = 'demo_gracia_minutos_post';
 
@@ -145,6 +155,9 @@ class LeadDemoSettings
     /** Valor por defecto: porcentaje del video de introducción exigido para entrar (misión 46). */
     private const DEFAULT_DEMO_INTRO_UMBRAL_PCT = 90;
 
+    /** Valor por defecto: tope de la ventana extendida, en horas (misión 47). */
+    private const DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS = 6;
+
     /** Valor por defecto: gracia post-demo (minutos). */
     private const DEFAULT_GRACIA_MINUTOS_POST = 10;
 
@@ -235,6 +248,12 @@ class LeadDemoSettings
     /** Máximo permitido para el umbral del video de introducción (porcentaje). */
     public const MAX_PCT = 100;
 
+    /** Mínimo permitido para el tope de la ventana extendida (horas). */
+    public const MIN_HORAS_VENTANA = 1;
+
+    /** Máximo permitido para el tope de la ventana extendida (horas). */
+    public const MAX_HORAS_VENTANA = 12;
+
     /**
      * Devuelve la configuración completa para el panel (GET settings).
      *
@@ -247,6 +266,7 @@ class LeadDemoSettings
             'setup_minutos_antes'                 => self::get_setup_minutos_antes(),
             'demo_minimo_minutos_desde_ahora'     => self::get_demo_minimo_minutos_desde_ahora(),
             'demo_intro_umbral_pct'               => self::get_demo_intro_umbral_pct(),
+            'demo_ventana_extendida_max_horas'    => self::get_ventana_extendida_max_horas(),
             'gracia_minutos_post'                 => self::get_gracia_minutos_post(),
             'recordatorio_minutos_antes'          => self::get_recordatorio_minutos_antes(),
             'recordatorio_manana_hora'            => self::get_recordatorio_manana_hora(),
@@ -294,6 +314,11 @@ class LeadDemoSettings
         // de arriba -- una version anterior del SPA que no lo mande no tiene que borrar el valor.
         if (isset($data['demo_intro_umbral_pct'])) {
             AdminSetting::set(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::clamp_pct((int) $data['demo_intro_umbral_pct']));
+        }
+
+        // Tope de la ventana extendida (mision 47), en horas. "sometimes" por el mismo motivo.
+        if (isset($data['demo_ventana_extendida_max_horas'])) {
+            AdminSetting::set(self::KEY_VENTANA_EXTENDIDA_MAX_HORAS, (string) self::clamp_horas_ventana((int) $data['demo_ventana_extendida_max_horas']));
         }
         AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST,             (string) self::clamp((int) $data['gracia_minutos_post']));
         AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES,      (string) self::clamp((int) $data['recordatorio_minutos_antes']));
@@ -430,6 +455,9 @@ class LeadDemoSettings
         if (AdminSetting::get(self::KEY_DEMO_INTRO_UMBRAL_PCT) === null) {
             AdminSetting::set(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::DEFAULT_DEMO_INTRO_UMBRAL_PCT);
         }
+        if (AdminSetting::get(self::KEY_VENTANA_EXTENDIDA_MAX_HORAS) === null) {
+            AdminSetting::set(self::KEY_VENTANA_EXTENDIDA_MAX_HORAS, (string) self::DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS);
+        }
         if (AdminSetting::get(self::KEY_GRACIA_MINUTOS_POST) === null) {
             AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST, (string) self::DEFAULT_GRACIA_MINUTOS_POST);
         }
@@ -536,6 +564,16 @@ class LeadDemoSettings
     public static function get_demo_intro_umbral_pct(): int
     {
         return self::clamp_pct((int) AdminSetting::get(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::DEFAULT_DEMO_INTRO_UMBRAL_PCT));
+    }
+
+    /**
+     * Tope de la ventana extendida, en horas (misión 47).
+     *
+     * @return int
+     */
+    public static function get_ventana_extendida_max_horas(): int
+    {
+        return self::clamp_horas_ventana((int) AdminSetting::get(self::KEY_VENTANA_EXTENDIDA_MAX_HORAS, (string) self::DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS));
     }
 
     /**
@@ -902,6 +940,28 @@ class LeadDemoSettings
         }
         if ($value > self::MAX_PCT) {
             return self::MAX_PCT;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Acota el tope de la ventana extendida al rango [MIN_HORAS_VENTANA, MAX_HORAS_VENTANA].
+     *
+     * Clamp propio: son horas, no minutos ni porcentaje, y el mínimo es 1 y no 0 — una ventana
+     * extendida de cero horas no es una ventana, es un turno normal mal escrito.
+     *
+     * @param int $value Valor en horas.
+     *
+     * @return int
+     */
+    private static function clamp_horas_ventana(int $value): int
+    {
+        if ($value < self::MIN_HORAS_VENTANA) {
+            return self::MIN_HORAS_VENTANA;
+        }
+        if ($value > self::MAX_HORAS_VENTANA) {
+            return self::MAX_HORAS_VENTANA;
         }
 
         return $value;

@@ -112,6 +112,10 @@ class CheckDemoFin extends Command
             ->where('automatizaciones_demo_activas', true)
             ->where('auto_check_fin_demo', true)
             ->where('demo_fin_check_enviado', false)
+            /* Ventana extendida afuera (misión 47): el check de fin se dispara al cumplirse la
+             * duración desde demo_start_time, así que a un flexible que entró a las 23:00 le
+             * preguntaría a las 21:00 si terminó — dos horas antes de que empezara. */
+            ->where('demo_flexible', false)
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->where(function ($query) use ($now) {
