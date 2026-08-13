@@ -66,6 +66,22 @@ class CheckDemoIngresoTimeout extends Command
             ->where('demo_check_ingreso_enviado', true)
             ->where('demo_ingreso_confirmado', false)
             ->where('demo_no_ingreso_notificado', false)
+            /* Ventana extendida afuera (misión 47), y no alcanza con que CheckDemoIngress ya los
+             * excluya: a `ingresando_demo` también se llega por la vía conversacional
+             * (confirmar_ingreso), así que un flexible puede estar en ese estado sin que este
+             * comando lo haya puesto ahí. El timeout cuelga de demo_start_time y lo mandaría a
+             * demo_pendiente_de_ingreso mientras su ventana sigue abierta.
+             *
+             * Las dos condiciones, por el mismo motivo que en CheckDemoIngress: `demo_flexible` es
+             * una columna preexistente que Lucas también marca a mano en leads de la dinámica
+             * actual, y esos tienen que seguir pasando por acá. */
+            ->where(function ($query) {
+                $query->where('demo_flexible', false)
+                    ->orWhere(function ($otra_dinamica) {
+                        $otra_dinamica->where('demo_experiencia', '!=', Lead::EXPERIENCIA_NUEVA)
+                            ->orWhereNull('demo_experiencia');
+                    });
+            })
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->get();

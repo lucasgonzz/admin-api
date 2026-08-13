@@ -89,6 +89,24 @@ class CheckDemoIngress extends Command
             ->where('auto_check_ingreso_demo', true)
             ->where('demo_check_ingreso_enviado', false)
             ->where('tiene_sugerencia_pendiente', false)
+            /* 🔴 Los leads con ventana extendida quedan afuera (misión 47). Este check cuelga de
+             * demo_start_time, así que a un lead al que le ofrecimos "de 20:00 a 23:59, entrá
+             * cuando puedas" le preguntaría a las 20:02 si pudo entrar — y de ahí sale una cadena
+             * de tres mensajes equivocados que además lo devuelve a `calificado` por timeout.
+             *
+             * 🔴 Y la exclusión pide LAS DOS condiciones, no solo `demo_flexible`: esa columna es
+             * PREEXISTENTE (2/7/2026) y significa otra cosa —"no reservar ventana de closer"—, es
+             * un checkbox que Lucas marca a mano, y hasta esta misión ese era su único uso. Un lead
+             * de la dinámica ACTUAL con el checkbox marcado recibe estos checks hoy y tiene que
+             * seguir recibiéndolos: filtrar solo por `demo_flexible` le cambiaría el comportamiento
+             * en producción sin que nadie lo pidiera. */
+            ->where(function ($query) {
+                $query->where('demo_flexible', false)
+                    ->orWhere(function ($otra_dinamica) {
+                        $otra_dinamica->where('demo_experiencia', '!=', Lead::EXPERIENCIA_NUEVA)
+                            ->orWhereNull('demo_experiencia');
+                    });
+            })
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->whereDate('demo_date', $now->format('Y-m-d'))

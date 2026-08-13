@@ -8,6 +8,7 @@ use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\DemoHitosService;
+use App\Services\DemoIngresoTokenService;
 use App\Services\DemoPlanResolver;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
@@ -264,6 +265,8 @@ class DemoExperienciaController extends Controller
             return response()->json(['motivo' => 'token_invalido'], 409);
         }
 
+        $this->extender_token_si_es_ventana_extendida($lead);
+
         // Accessor ya existente (grupo 233): null si no hay demo asignada o la demo no tiene
         // erp_spa_url cargada.
         $url = $lead->demo_ingreso_url;
@@ -299,6 +302,49 @@ class DemoExperienciaController extends Controller
         DemoHitosService::marcar_ingreso_pulsado($lead);
 
         return response()->json(['url' => $url], 200);
+    }
+
+    /**
+     * Le corre el vencimiento al token cuando el lead tiene ventana extendida, para que la sesión
+     * le dure una demo completa desde que entra (misión 47, pieza 4).
+     *
+     * El vencimiento normal sale de `demo_end_time + gracia`. Con una ventana hasta las 23:59 eso
+     * son las 00:09: un lead que entra 23:50 se quedaría sin sesión a los diecinueve minutos,
+     * habiéndole ofrecido nosotros seis horas para entrar cuando pudiera. La ventana dice HASTA
+     * CUÁNDO PUEDE ENTRAR; adentro, la demo dura lo que dura una demo.
+     *
+     * Best-effort a propósito: si el aviso a la instancia falla, se loguea y el ingreso sigue. El
+     * token actual todavía es válido —lo acabamos de verificar dos líneas más arriba— así que
+     * frenar acá le negaría la demo a un lead por un problema que, en el peor caso, le va a cortar
+     * la sesión más tarde.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    private function extender_token_si_es_ventana_extendida(Lead $lead): void
+    {
+        /* Las dos condiciones. `demo_flexible` sola no alcanza: es una columna preexistente que
+         * también se marca a mano en leads de la dinámica actual para no reservarles ventana de
+         * closer, y a esos no les corresponde ninguna extensión de token — de hecho dispararía una
+         * llamada saliente a la instancia que hoy no existe. */
+        if (! $lead->demo_flexible || ! $lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
+        $minimo = AppTime::now()
+            ->copy()
+            ->addMinutes(LeadDemoSettings::get_duracion_minutos() + LeadDemoSettings::get_gracia_minutos_post());
+
+        try {
+            $service = new DemoIngresoTokenService();
+            $service->extender_vencimiento($lead, $minimo);
+        } catch (\Throwable $e) {
+            Log::warning('DemoExperienciaController: no se pudo extender el token de una ventana extendida. El ingreso sigue.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

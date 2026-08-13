@@ -93,6 +93,12 @@ TXT;
     const DIAS_DISPONIBILIDAD = 7;
 
     /**
+     * Último minuto del día, en minutos desde medianoche (23:59). Es el techo duro de una ventana
+     * extendida: no existe fecha de fin, así que la ventana no puede cruzar la medianoche.
+     */
+    const FIN_DEL_DIA_MINUTOS = 1439;
+
+    /**
      * Convierte minutos del día (0-1439) al formato legible HH:MM.
      * Pensado para los logs de diagnóstico de disponibilidad, donde mostrar
      * minutos crudos (por ejemplo 720) es ilegible frente a "12:00".
@@ -354,7 +360,10 @@ TXT;
         /* Config con la que se calculó la grilla de ESTA request (misión 46): de acá sale el número
          * de minutos que el bloque de instrucciones le dice al agente, más abajo. */
         $slot_config          = null;
-        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id, $usa_experiencia_nueva, null, $slot_config);
+        /* Hasta dónde se puede extender cada slot (misión 47), calculado por el servidor sobre los
+         * mismos rangos bloqueados que la grilla. El agente lo COPIA, nunca lo calcula. */
+        $ventanas_extendidas  = null;
+        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id, $usa_experiencia_nueva, null, $slot_config, $ventanas_extendidas);
 
         /* Minutos que el lead tiene para completar el formulario y mirar el video de introducción.
          *
@@ -467,6 +476,27 @@ TXT;
             }
         }
 
+        /* Bloque VENTANA EXTENDIDA (misión 47). Mismo patrón que OFERTA PRIMARIA: el sistema
+         * resuelve y el agente redacta. Si el agente calculara el "hasta" y se equivocara, el
+         * mensaje ya salió — y encima le habríamos prometido al lead una instancia que no
+         * podemos reservar. Solo la dinámica nueva, y solo los slots que admiten ventana. */
+        if ($usa_experiencia_nueva && ! empty($ventanas_extendidas)) {
+            $lineas_ventana = [];
+            foreach ($ventanas_extendidas as $demo_id_ventana => $por_fecha) {
+                foreach ($por_fecha as $date_label => $por_slot) {
+                    foreach ($por_slot as $slot_inicio => $hasta) {
+                        $lineas_ventana[] = "\n- {$date_label}, empezando {$slot_inicio} (demo_id {$demo_id_ventana}): se puede extender hasta {$hasta}";
+                    }
+                }
+            }
+
+            if (! empty($lineas_ventana)) {
+                $availability_context .= "\n\nVENTANA EXTENDIDA (resuelta por el sistema — el \"hasta\" se COPIA de acá, nunca se calcula):";
+                $availability_context .= implode('', $lineas_ventana);
+                $availability_context .= "\n- Un horario de inicio que no figure en esta lista NO admite ventana extendida: para ese horario solo se puede agendar la demo normal.";
+            }
+        }
+
         /*
          * Detectar si el último mensaje del lead contiene un horario concreto propuesto.
          * Se usa solo como pista adicional; Claude debe cruzar con el JSON de arriba.
@@ -525,6 +555,13 @@ TXT;
             }
             $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
             $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
+            /* Ventana extendida (misión 47): NO es la oferta por defecto. Aparece solo cuando el
+             * lead dice que no se puede comprometer a un horario, y el "hasta" se copia del bloque
+             * VENTANA EXTENDIDA. */
+            $availability_context .= "\n- VENTANA EXTENDIDA: no la ofrezcas de entrada. El comportamiento normal sigue siendo un horario de inicio con una hora de duración.";
+            $availability_context .= "\n- Solo si el lead te dice que no puede comprometerse a un horario puntual: preguntale A PARTIR DE QUÉ HORA ya estaría disponible, y ofrecele la ventana desde esa hora hasta el \"hasta\" que figure para ese horario en el bloque VENTANA EXTENDIDA. Copiás ese valor; no lo calculás, no lo redondeás y no lo estirás.";
+            $availability_context .= "\n- Cuando ofrezcas la ventana extendida, dejá claro el compromiso sin sonar a reproche: le reservamos la instancia todo ese tiempo para él, y a cambio necesitamos que se tome alrededor de una hora de verdad para recorrerla. La ventana es HASTA CUÁNDO PUEDE ENTRAR, no cuánto dura la demo.";
+            $availability_context .= "\n- Para confirmar una ventana extendida devolvé agendar_demo con ventana_extendida: true, además de demo_id, demo_date y demo_start_time. El servidor calcula la hora de fin: vos NUNCA mandás demo_end_time, ni en la ventana extendida ni en una demo normal.";
             $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
             $availability_context .= "\n- demo_date se COPIA LITERALMENTE de la parte Y-m-d de una clave del JSON de disponibilidad. No se escribe de memoria, no se deduce, no se calcula.";
             $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
@@ -620,7 +657,7 @@ TXT;
          * en esta misma llamada. No se re-consulta el calendario: se compara contra $availability_data,
          * que es exactamente lo que el modelo tuvo delante. Cualquier otra cosa es una alucinación.
          */
-        $parsed = $this->descartar_agendamiento_fuera_de_slots($lead, $parsed, $availability_data);
+        $parsed = $this->descartar_agendamiento_fuera_de_slots($lead, $parsed, $availability_data, is_array($ventanas_extendidas) ? $ventanas_extendidas : []);
 
         /*
          * COHERENCIA DE FECHA BLOQUEANTE (hueco #4, 6/7/2026 — ahora bloqueante desde el prompt
@@ -860,7 +897,7 @@ TXT;
      *
      * @return array<string, mixed> Paquete corregido.
      */
-    protected function descartar_agendamiento_fuera_de_slots(Lead $lead, array $parsed, array $availability_data): array
+    protected function descartar_agendamiento_fuera_de_slots(Lead $lead, array $parsed, array $availability_data, array $ventanas_extendidas = []): array
     {
         if (empty($parsed['agendar_demo']) || ! is_array($parsed['agendar_demo'])) {
             return $parsed;
@@ -905,14 +942,30 @@ TXT;
         $fecha_en_ventana = ($demo_date !== '' && isset($fechas_enviadas[$demo_date]));
         $hora_disponible  = ($demo_start !== '' && in_array($demo_start, $slots_de_esa_demo_y_fecha, true));
 
-        if ($demo_id > 0 && $fecha_en_ventana && $hora_disponible) {
+        /* Ventana extendida (misión 47): el mismo criterio que para el horario. Si el agente la
+         * pidió sobre un inicio que el bloque VENTANA EXTENDIDA no ofrecía, es una ventana que el
+         * sistema nunca le mostró — y el mensaje que la acompaña ya le prometió al lead una hora
+         * de fin. Se descarta el paquete entero, igual que un horario inventado. */
+        /* El `usa_experiencia_demo_nueva()` va acá y no solo en el bloque que persiste, para que los
+         * DOS traten la misma entrada igual: sin él, un `ventana_extendida: true` alucinado en un
+         * lead de la dinámica actual hacía que este guard descartara el paquete entero mientras el
+         * otro bloque lo agendaba como demo normal. Uno rechazaba y el otro aceptaba lo mismo. */
+        $pidio_ventana     = ! empty($agendar['ventana_extendida']) && $lead->usa_experiencia_demo_nueva();
+        $ventana_ofrecida  = true;
+        if ($pidio_ventana) {
+            $ventana_ofrecida = $this->buscar_ventana_ofrecida($ventanas_extendidas, $demo_id, $demo_date, $demo_start) !== null;
+        }
+
+        if ($demo_id > 0 && $fecha_en_ventana && $hora_disponible && $ventana_ofrecida) {
             /* Todo en orden: la fecha y la hora salen de los slots que le mandamos nosotros. */
             return $parsed;
         }
 
         $motivo = ! $fecha_en_ventana
             ? 'fecha fuera de la ventana enviada a Claude'
-            : (! $hora_disponible ? 'horario no disponible en esa fecha' : 'demo_id inválido');
+            : (! $hora_disponible
+                ? 'horario no disponible en esa fecha'
+                : (! $ventana_ofrecida ? 'ventana extendida sobre un horario que no la admite' : 'demo_id inválido'));
 
         Log::channel('disponibilidad')->error(
             '[DISPONIBILIDAD] agendar_demo DESCARTADO: ' . $motivo . '. Claude confirmó un slot que el sistema nunca le ofreció.',
@@ -956,6 +1009,49 @@ TXT;
             . '). Revisá el horario con el lead antes de enviar.';
 
         return $parsed;
+    }
+
+    /**
+     * Busca el "hasta" que el sistema ofreció para un (demo, fecha, horario de inicio), o null si
+     * ese horario no admitía ventana extendida (misión 47).
+     *
+     * Las claves de fecha del mapa vienen con el nombre del día pegado adelante ("jueves
+     * 2026-08-20"), igual que en el JSON de disponibilidad, así que se compara por el sufijo Y-m-d
+     * — mismo criterio que ya usa el resto del archivo.
+     *
+     * @param array<int, array<string, array<string, string>>> $ventanas_extendidas
+     * @param int    $demo_id
+     * @param string $demo_date  Y-m-d.
+     * @param string $demo_start HH:MM.
+     *
+     * @return string|null
+     */
+    protected function buscar_ventana_ofrecida(array $ventanas_extendidas, int $demo_id, string $demo_date, string $demo_start)
+    {
+        if ($demo_id <= 0 || $demo_date === '' || $demo_start === '') {
+            return null;
+        }
+
+        $por_fecha = isset($ventanas_extendidas[$demo_id]) ? $ventanas_extendidas[$demo_id] : [];
+        if (! is_array($por_fecha)) {
+            return null;
+        }
+
+        foreach ($por_fecha as $date_label => $por_slot) {
+            $label = (string) $date_label;
+            $coincide = ($label === $demo_date)
+                || (strlen($demo_date) <= strlen($label) && substr($label, -strlen($demo_date)) === $demo_date);
+
+            if (! $coincide || ! is_array($por_slot)) {
+                continue;
+            }
+
+            if (isset($por_slot[$demo_start])) {
+                return (string) $por_slot[$demo_start];
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1106,10 +1202,17 @@ TXT;
      *                                       se serializa entero al prompt del agente, así que una
      *                                       clave nueva ahí le cambiaría el JSON que lee el modelo.
      *                                       Mismo patrón que $calendar_snapshot.
+     * @param array|null  $ventanas_extendidas Referencia opcional para recibir, por demo y por
+     *                                       fecha, hasta qué hora se puede extender cada slot de
+     *                                       inicio (misión 47). Estructura:
+     *                                       [demo_id][date_label][slot_inicio] => "HH:MM".
+     *                                       Solo se llena para la dinámica nueva. Fuera del array
+     *                                       de retorno por el mismo motivo que $slot_config: ese
+     *                                       array se serializa entero al prompt del agente.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false, ?int $margen_hoy_override = null, &$slot_config = null): array
+    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false, ?int $margen_hoy_override = null, &$slot_config = null, &$ventanas_extendidas = null): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
          * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango.
@@ -1173,14 +1276,100 @@ TXT;
                     $context['slot_config'] ?? [],
                     $usa_experiencia_nueva
                 );
+
+                /* Hasta dónde se puede extender cada uno de esos slots (misión 47). Se calcula acá
+                 * y no afuera porque los rangos bloqueados de esta instancia en esta fecha viven
+                 * en este scope; exponerlos enteros al llamador sería darle a otro la
+                 * responsabilidad de volver a interpretarlos. Solo la dinámica nueva. */
+                if ($usa_experiencia_nueva) {
+                    foreach ($demos_json[$demo_id][$date_label] as $slot) {
+                        $hasta = $this->calcular_fin_ventana_extendida(
+                            (string) $slot,
+                            $blocked_ranges,
+                            $context['duracion'],
+                            $context['gracia_post'],
+                            $context['setup_antes'],
+                            LeadDemoSettings::get_ventana_extendida_max_horas()
+                        );
+
+                        if ($hasta !== null) {
+                            $ventanas[$demo_id][$date_label][(string) $slot] = $hasta;
+                        }
+                    }
+                }
             }
         }
+
+        /* Se asigna al final y de una sola vez: si el llamador pasó una referencia, recibe el mapa
+         * completo o un array vacío, nunca uno a medio llenar. */
+        $ventanas_extendidas = isset($ventanas) ? $ventanas : [];
 
         return [
             'hoy'                   => $hoy_label,
             'duration_demo_minutos' => $context['duracion'],
             'demos'                 => $demos_json,
         ];
+    }
+
+    /**
+     * Hasta qué hora se puede extender la ventana de un slot de inicio, o null si ese slot no
+     * admite ventana extendida (misión 47).
+     *
+     * 🔴 ES LA ÚNICA FUENTE del "hasta". La usan los tres lugares que necesitan la respuesta: el
+     * bloque VENTANA EXTENDIDA que se le manda al agente, el guard que descarta un agendamiento
+     * que el sistema nunca ofreció, y la revalidación bajo lock antes de persistir. Si cada uno
+     * calculara lo suyo, el agente podría prometerle al lead una hora que la validación después
+     * rechaza — y el mensaje ya salió.
+     *
+     * Es todo o nada: si la ventana completa no entra, ese slot no admite extendida. NO se recorta
+     * en silencio para que entre, porque el lead ya recibió un mensaje que dice hasta qué hora la
+     * tiene, y darle menos sin decírselo es peor que reofrecer.
+     *
+     * @param string                 $slot_inicio    Slot de inicio en HH:MM.
+     * @param array<int, array{0:int,1:int}> $blocked_ranges Rangos ocupados de ESA instancia en ESA
+     *                                                fecha, en minutos desde medianoche.
+     * @param int                    $duracion       Duración de una demo completa, en minutos.
+     * @param int                    $gracia_post    Gracia posterior, en minutos.
+     * @param int                    $setup_antes    Minutos previos que la instancia queda tomada.
+     * @param int                    $max_horas      Tope de la ventana, en horas.
+     *
+     * @return string|null "HH:MM" hasta donde llega la ventana, o null si no admite.
+     */
+    protected function calcular_fin_ventana_extendida(string $slot_inicio, array $blocked_ranges, int $duracion, int $gracia_post, int $setup_antes, int $max_horas)
+    {
+        if (! preg_match('/^(\d{1,2}):(\d{2})$/', $slot_inicio, $m)) {
+            return null;
+        }
+
+        $inicio_min = (int) $m[1] * 60 + (int) $m[2];
+
+        /* El corte en 23:59 no es una decisión estética: la demo se ubica en el tiempo con
+         * demo_date (una fecha) + demo_start_time/demo_end_time (dos strings HH:MM). Una ventana
+         * que cruce la medianoche necesitaría una fecha de fin, y todo el cálculo de bloqueo, el
+         * vencimiento del token y los comandos del ciclo dan por sentado que empieza y termina el
+         * mismo día. Decisión de Lucas, 13/8/2026. Misión 47. */
+        $fin_min = min($inicio_min + $max_horas * 60, self::FIN_DEL_DIA_MINUTOS);
+
+        /* Si desde este inicio no entra ni una demo completa con su gracia, no hay ventana que
+         * ofrecer: sería reservarle la instancia para algo que no llega a pasar. */
+        if (($fin_min - $inicio_min) < ($duracion + $gracia_post)) {
+            return null;
+        }
+
+        /* La instancia queda tomada desde setup_antes previo al inicio y hasta la gracia posterior
+         * al fin. Si ese bloque pisa cualquier rango ya ocupado, este slot no admite extendida. */
+        $bloque_inicio = $inicio_min - $setup_antes;
+        $bloque_fin    = $fin_min + $gracia_post;
+
+        foreach ($blocked_ranges as $rango) {
+            $bstart = isset($rango[0]) ? (int) $rango[0] : 0;
+            $bend   = isset($rango[1]) ? (int) $rango[1] : 0;
+            if ($bloque_inicio < $bend && $bloque_fin > $bstart) {
+                return null;
+            }
+        }
+
+        return sprintf('%02d:%02d', intdiv($fin_min, 60), $fin_min % 60);
     }
 
     /**
@@ -1959,6 +2148,10 @@ TXT;
         return [
             'duracion'                 => $duracion,
             'gracia_post'              => $gracia_post,
+            /* Minutos que la instancia queda tomada ANTES del inicio. Ya se lee arriba para el
+             * bloqueo; se expone para que el cálculo de la ventana extendida (misión 47) use ese
+             * mismo valor en vez de releer la setting por su cuenta. */
+            'setup_antes'              => $setup_antes,
             'now'                      => $now,
             'now_minutes'              => $now_minutes,
             'today_key'                => $today_key,
@@ -3102,7 +3295,10 @@ TXT;
      * ```
      * final_actions: {
      *   estado_sugerido: string|null,               // null = no tocó el estado, se conserva el de Claude
-     *   agendar_demo: {demo_id, demo_date, demo_start_time} | null, // null = admin desactivó la demo
+     *   agendar_demo: {demo_id, demo_date, demo_start_time, ventana_extendida?} | null, // null = admin desactivó la demo
+     *                                                // ventana_extendida (bool, misión 47): el modelo
+     *                                                // pide la MODALIDAD; la hora de fin la calcula
+     *                                                // el servidor. demo_end_time nunca se lee de acá.
      *   forzar_slot: bool,                           // true = agendar aunque el slot figure ocupado
      *   enviar_mail_demo: bool,                       // Mail 1 on/off (solo aplica si hay demo)
      *   guardar_nombre: string|null,
@@ -3171,9 +3367,25 @@ TXT;
             }
 
             /* agendar_demo: el admin puede desactivarla (null) o dejar la que Claude propuso editada
-             * (array con demo_id/demo_date/demo_start_time). En ambos casos, manda directo. */
+             * (array con demo_id/demo_date/demo_start_time). En ambos casos, manda directo.
+             *
+             * 🔴 Con UNA excepción, y no es un detalle (misión 47): el panel RECONSTRUYE este objeto
+             * clave por clave en el front, así que cualquier clave que no esté en esa lista llega
+             * ausente y, pisando el objeto entero, se pierde para siempre. `ventana_extendida` no es
+             * un campo que el admin edite: es la MODALIDAD que pidió el agente, y perderla convierte
+             * una ventana de seis horas en una demo normal de una hora, con el mensaje que le
+             * prometía la ventana ya enviado al lead. Si el panel no la manda, se conserva la del
+             * paquete original. Si la manda, gana el panel — ahí sí es una decisión explícita. */
             if (array_key_exists('agendar_demo', $final_actions)) {
-                $parsed_efectivo['agendar_demo'] = $final_actions['agendar_demo'];
+                $agendar_admin = $final_actions['agendar_demo'];
+
+                if (is_array($agendar_admin)
+                    && ! array_key_exists('ventana_extendida', $agendar_admin)
+                    && isset($parsed['agendar_demo']['ventana_extendida'])) {
+                    $agendar_admin['ventana_extendida'] = $parsed['agendar_demo']['ventana_extendida'];
+                }
+
+                $parsed_efectivo['agendar_demo'] = $agendar_admin;
             }
 
             /* guardar_nombre / guardar_email: string editable o null para suprimir la acción.
@@ -3487,6 +3699,14 @@ TXT;
             $lead->demo_date       = null;
             $lead->demo_start_time = null;
             $lead->demo_end_time   = null;
+            /* La modalidad se apaga con el turno (misión 47). Si quedara prendida, el lead seguiría
+             * excluido de los relojes del ciclo después de reagendar una demo normal.
+             *
+             * Solo en la dinámica nueva: en la actual esta columna es el checkbox manual de "sin
+             * horario de closer" y no le corresponde a una cancelación de demo desactivarlo. */
+            if ($lead->usa_experiencia_demo_nueva()) {
+                $lead->demo_flexible = false;
+            }
 
             Log::info('LeadAiService: demo cancelada por solicitud de reagendado.', [
                 'lead_id'            => $lead->id,
@@ -3578,7 +3798,13 @@ TXT;
                  * figuraría en la lista y se descartaría como alucinación del modelo. Ver grupo 306
                  * prompt 02. */
                 $availability_snapshot_unused = null;
-                $availability = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $availability_snapshot_unused, $demo_date, $lead->id, $lead->usa_experiencia_demo_nueva());
+                /* Ventanas extendidas recalculadas en ESTE instante, bajo el lock (misión 47): es
+                 * lo que hace que la revalidación cubra la ventana COMPLETA y no solo el slot de
+                 * inicio. Entre la oferta y la confirmación otro lead pudo agarrar un horario de
+                 * adentro, y entonces la ventana que le prometimos ya no entra. */
+                $slot_config_unused    = null;
+                $ventanas_revalidadas  = null;
+                $availability = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $availability_snapshot_unused, $demo_date, $lead->id, $lead->usa_experiencia_demo_nueva(), null, $slot_config_unused, $ventanas_revalidadas);
                 $slots_demo   = [];
                 $demo_slots_by_date = $availability['demos'][$demo_id] ?? [];
                 foreach ($demo_slots_by_date as $date_label => $slots) {
@@ -3591,6 +3817,62 @@ TXT;
 
                 /* Slot presente en la disponibilidad real leída recién arriba. */
                 $slot_disponible = in_array($demo_start, $slots_demo, true);
+
+                /* Ventana extendida (misión 47). El "hasta" lo resuelve el servidor: el modelo solo
+                 * pide la modalidad con un booleano. Si pidió ventana y en este instante ya no
+                 * entra, el agendamiento cae por el MISMO camino de slot inválido que ya está
+                 * construido y probado — que reofrece. 🔴 Prohibido recortarla en silencio para que
+                 * entre: el lead ya recibió un mensaje que dice hasta qué hora la tiene. */
+                $quiere_ventana_extendida = ! empty($agendar_demo['ventana_extendida'])
+                    && $lead->usa_experiencia_demo_nueva();
+                $fin_ventana_extendida    = null;
+
+                if ($quiere_ventana_extendida) {
+                    $fin_ventana_extendida = $this->buscar_ventana_ofrecida(
+                        is_array($ventanas_revalidadas) ? $ventanas_revalidadas : [],
+                        $demo_id,
+                        $demo_date,
+                        $demo_start
+                    );
+
+                    if ($fin_ventana_extendida === null && ! $forzar_slot) {
+                        Log::error('LeadAiService: ventana extendida ya no disponible al confirmar. Se descarta el agendamiento.', [
+                            'lead_id'    => $lead->id,
+                            'demo_id'    => $demo_id,
+                            'demo_date'  => $demo_date,
+                            'demo_start' => $demo_start,
+                        ]);
+
+                        /* Cae por el camino de slot inválido: se marca como no disponible y el
+                         * bloque de abajo se encarga del mensaje correctivo y del estado. */
+                        $slot_disponible = false;
+                    } elseif ($fin_ventana_extendida === null && $forzar_slot) {
+                        /* El admin forzó el slot: la ventana se calcula igual, pero SIN validar
+                         * contra los rangos ocupados —esa validación es justo la que él decidió
+                         * saltear— conservando el tope de horas y el corte a las 23:59.
+                         *
+                         * La alternativa era degradar a demo normal, y es peor de la peor manera:
+                         * silenciosa. El mensaje aprobado ya le prometió la ventana al lead, así que
+                         * agendarle una hora sin decir nada deja al sistema afirmando una cosa y
+                         * haciendo otra. Queda el warning para que el forzado sea rastreable. */
+                        $fin_ventana_extendida = $this->calcular_fin_ventana_extendida(
+                            $demo_start,
+                            [],
+                            LeadDemoSettings::get_duracion_minutos(),
+                            LeadDemoSettings::get_gracia_minutos_post(),
+                            LeadDemoSettings::get_setup_minutos_antes(),
+                            LeadDemoSettings::get_ventana_extendida_max_horas()
+                        );
+
+                        Log::warning('LeadAiService: ventana extendida forzada por el admin sobre un horario que ya no la admitía.', [
+                            'lead_id'    => $lead->id,
+                            'demo_id'    => $demo_id,
+                            'demo_date'  => $demo_date,
+                            'demo_start' => $demo_start,
+                            'fin_forzado' => $fin_ventana_extendida,
+                        ]);
+                    }
+                }
 
                 if (! $slot_disponible && ! $forzar_slot) {
                     Log::error('LeadAiService: Claude devolvió un agendar_demo con slot no disponible. Se ignora.', [
@@ -3658,16 +3940,50 @@ TXT;
                      * persistirse — recién acá es cierto que hay una demo confirmada este turno. */
                     $demo_confirmada_este_turno = true;
 
-                    /* Fin de demo: inicio + duración configurada (Claude no debe enviar demo_end_time). */
+                    /* Fin de demo: inicio + duración configurada (Claude no debe enviar demo_end_time).
+                     *
+                     * Con ventana extendida (misión 47) el fin sale del valor que el servidor ya
+                     * había resuelto y revalidado bajo este mismo lock — nunca de algo que haya
+                     * mandado el modelo. Si el JSON parseado trae un demo_end_time, no se lee acá
+                     * ni en ningún lado: la regla dura existe porque el agente ya inventó horarios
+                     * frente a un lead real (lead #232, 2/7/2026), y darle una hora de fin para
+                     * escribir reabre exactamente esa puerta. */
                     $duracion  = LeadDemoSettings::get_duracion_minutos();
                     $demo_end  = Carbon::createFromFormat('H:i', $demo_start)
                         ->addMinutes($duracion)
                         ->format('H:i');
 
+                    $es_ventana_extendida = ($quiere_ventana_extendida && $fin_ventana_extendida !== null);
+                    if ($es_ventana_extendida) {
+                        $demo_end = $fin_ventana_extendida;
+                    }
+
+                    if (isset($agendar_demo['demo_end_time'])) {
+                        Log::warning('LeadAiService: el modelo mandó demo_end_time en agendar_demo. Se descarta: la hora de fin la calcula el servidor.', [
+                            'lead_id'                => $lead->id,
+                            'demo_end_time_modelo'   => (string) $agendar_demo['demo_end_time'],
+                            'demo_end_time_servidor' => $demo_end,
+                        ]);
+                    }
+
                     $lead->demo_id         = $demo_id;
                     $lead->demo_date       = $demo_date;
                     $lead->demo_start_time = $demo_start;
                     $lead->demo_end_time   = $demo_end;
+                    /* La modalidad se escribe siempre que el lead sea de la dinámica NUEVA, no solo
+                     * cuando es true: un reagendamiento de un lead que antes tenía ventana extendida
+                     * a un turno normal tiene que apagar la columna, o quedaría fuera de los relojes
+                     * del ciclo para siempre.
+                     *
+                     * 🔴 Y NO se toca en la dinámica actual, aunque ahí el valor calculado siempre
+                     * sea false. `demo_flexible` es una columna preexistente (2/7/2026) con otro
+                     * significado —"no reservar ventana de closer"— y es un checkbox que Lucas marca
+                     * a mano. Pisarla en cada agendamiento le apagaría esa decisión al reagendar por
+                     * WhatsApp, y el lead volvería a reservar ventana de closer automática: el
+                     * "bloqueo fantasma" que el fix del 2/7 vino a eliminar. */
+                    if ($lead->usa_experiencia_demo_nueva()) {
+                        $lead->demo_flexible = $es_ventana_extendida;
+                    }
 
                     /*
                      * FIX (prompt 118): actualizar el status junto con los campos de demo.

@@ -241,7 +241,12 @@ class LeadProperties
             ],
             [
                 'key' => 'demo_flexible',
-                'text' => 'Demo flexible (sin reservar horario de closer)',
+                /* El texto se amplió con la misión 47: desde entonces esta columna no solo exime de
+                 * reservar la ventana del closer — también saca al lead de los tres relojes del
+                 * ciclo de demo (check de ingreso, su timeout y el check de fin), porque con una
+                 * ventana de horas esos mensajes le llegarían todos a la hora equivocada. Prender
+                 * este checkbox a mano hace las dos cosas, y el label tiene que decirlo. */
+                'text' => 'Ventana extendida (entra cuando puede; sin horario de closer y sin checks automáticos)',
                 'type' => 'checkbox',
                 'value' => false,
             ],

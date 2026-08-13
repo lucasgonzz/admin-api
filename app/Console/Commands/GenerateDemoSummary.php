@@ -111,8 +111,22 @@ class GenerateDemoSummary extends Command
             /*
              * Momento objetivo para generar el resumen:
              * inicio de demo + duración - minutos antes del fin configurados.
+             *
+             * 🔴 Salvo con ventana extendida (misión 47), donde el fin real es `demo_end_time` y no
+             * `inicio + duración`. Y no es una mejora opcional: es corregir una regresión que
+             * introdujo esta misma misión. Antes, a la hora de este disparo el lead ya no estaba en
+             * `demo_agendada` —`CheckDemoIngress` lo había movido a `ingresando_demo`— así que este
+             * comando no lo agarraba. Al sacar a los flexibles de ese check, se quedan en
+             * `demo_agendada` y sí lo agarran: para una ventana de 20:00 a 23:59 el resumen del
+             * closer se generaría a las 20:50, con el lead probablemente todavía sin entrar. Y como
+             * el filtro exige `demo_summary` vacío, nunca se regeneraría.
              */
             $summary_target = $demo_datetime->copy()->addMinutes($duracion - $resumen_minutos);
+
+            $fin_ventana = $this->fin_de_ventana_extendida($lead);
+            if ($fin_ventana !== null) {
+                $summary_target = $fin_ventana->copy()->subMinutes($resumen_minutos);
+            }
 
             /*
              * Ventana de 4 minutos alrededor del momento objetivo para no perder
@@ -320,5 +334,31 @@ class GenerateDemoSummary extends Command
         } catch (\Exception $e) {
             return null;
         }
+    }
+
+    /**
+     * Fin real de la ventana extendida de un lead, o null si no tiene una (misión 47).
+     *
+     * Las dos condiciones —el flag y la dinámica nueva— porque `demo_flexible` es una columna
+     * preexistente que también se marca a mano en la dinámica actual con otro significado.
+     *
+     * @param Lead $lead
+     *
+     * @return Carbon|null
+     */
+    protected function fin_de_ventana_extendida(Lead $lead): ?Carbon
+    {
+        if (! $lead->demo_flexible || ! $lead->usa_experiencia_demo_nueva()) {
+            return null;
+        }
+
+        if ($lead->demo_date === null || trim((string) $lead->demo_end_time) === '') {
+            return null;
+        }
+
+        return $this->parse_demo_datetime(
+            $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
+            (string) $lead->demo_end_time
+        );
     }
 }
