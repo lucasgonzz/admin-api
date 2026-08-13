@@ -296,7 +296,11 @@ class DemoExperienciaController extends Controller
      */
     private function extender_token_si_es_ventana_extendida(Lead $lead): void
     {
-        if (! $lead->demo_flexible) {
+        /* Las dos condiciones. `demo_flexible` sola no alcanza: es una columna preexistente que
+         * también se marca a mano en leads de la dinámica actual para no reservarles ventana de
+         * closer, y a esos no les corresponde ninguna extensión de token — de hecho dispararía una
+         * llamada saliente a la instancia que hoy no existe. */
+        if (! $lead->demo_flexible || ! $lead->usa_experiencia_demo_nueva()) {
             return;
         }
 

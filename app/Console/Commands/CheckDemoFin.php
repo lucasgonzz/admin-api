@@ -114,8 +114,17 @@ class CheckDemoFin extends Command
             ->where('demo_fin_check_enviado', false)
             /* Ventana extendida afuera (misión 47): el check de fin se dispara al cumplirse la
              * duración desde demo_start_time, así que a un flexible que entró a las 23:00 le
-             * preguntaría a las 21:00 si terminó — dos horas antes de que empezara. */
-            ->where('demo_flexible', false)
+             * preguntaría a las 21:00 si terminó — dos horas antes de que empezara.
+             *
+             * Las dos condiciones, por el mismo motivo que en CheckDemoIngress: `demo_flexible` es
+             * una columna preexistente que también se marca a mano en la dinámica actual. */
+            ->where(function ($query) {
+                $query->where('demo_flexible', false)
+                    ->orWhere(function ($otra_dinamica) {
+                        $otra_dinamica->where('demo_experiencia', '!=', Lead::EXPERIENCIA_NUEVA)
+                            ->orWhereNull('demo_experiencia');
+                    });
+            })
             ->whereNotNull('demo_date')
             ->whereNotNull('demo_start_time')
             ->where(function ($query) use ($now) {

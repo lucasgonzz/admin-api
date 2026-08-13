@@ -299,6 +299,56 @@ class DemoExtendidaHastaElFinDelDiaTest extends TestCase
     }
 
     /**
+     * 5bis. 🔴 EL CAMINO REAL, y es el que estaba roto: todo `agendar_demo` pasa por el panel de
+     *       verificación antes de enviarse (el auto-send lo corta explícitamente cuando el paquete
+     *       trae un agendamiento). El panel reconstruye `agendar_demo` clave por clave, así que una
+     *       clave que no viaje se pierde — y el backend pisaba el objeto entero con lo que llegaba.
+     *       Resultado: el lead recibía el mensaje prometiéndole la ventana y la base le guardaba una
+     *       demo normal de una hora.
+     *
+     *       Este test simula exactamente eso: un panel de una versión del SPA que NO manda la clave.
+     *       La modalidad tiene que sobrevivir igual.
+     *
+     * @return void
+     */
+    public function test_la_ventana_sobrevive_al_panel_de_verificacion(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        $paquete = $this->paquete($demo, '2026-08-20', '20:00', true);
+
+        // El mensaje pendiente, como lo deja el flujo antes de la aprobación humana.
+        $mensaje = LeadMessage::create([
+            'lead_id'         => $lead->id,
+            'sender'          => 'agente',
+            'content'         => 'Te reservo la instancia hasta las 23:59, entrá cuando puedas.',
+            'status'          => 'sugerido',
+            'is_followup'     => false,
+            'pending_actions' => $paquete,
+        ]);
+
+        /* Lo que manda el panel: las tres claves de siempre, SIN ventana_extendida. */
+        $final_actions = [
+            'estado_sugerido' => 'demo_agendada',
+            'agendar_demo'    => [
+                'demo_id'         => $demo->id,
+                'demo_date'       => '2026-08-20',
+                'demo_start_time' => '20:00',
+            ],
+            'forzar_slot' => false,
+        ];
+
+        $this->service()->apply_pending_actions($mensaje, $final_actions);
+
+        $lead->refresh();
+        $this->assertSame('23:59', $lead->demo_end_time, 'La ventana se perdió al pasar por el panel: el lead quedó con una demo normal.');
+        $this->assertTrue((bool) $lead->demo_flexible);
+    }
+
+    /**
      * 6. El lead flexible que entra 23:50 no se queda sin sesión a los 19 minutos: al ingresar, el
      *    vencimiento se corre al menos una demo completa, con el MISMO valor de token.
      *
@@ -385,6 +435,58 @@ class DemoExtendidaHastaElFinDelDiaTest extends TestCase
         $this->artisan('leads:check-demo-ingress')->assertExitCode(0);
 
         $this->assertTrue((bool) $lead->refresh()->demo_check_ingreso_enviado);
+    }
+
+    /**
+     * 8bis. 🔴 El otro test que protege producción, y el que faltaba: `demo_flexible` es una columna
+     *       PREEXISTENTE (2/7/2026) que significa "no reservar ventana de closer" y que Lucas marca
+     *       a mano desde el panel — ese era su único uso hasta esta misión. Un lead de la dinámica
+     *       ACTUAL con ese checkbox marcado recibe los checks del ciclo hoy, y tiene que seguir
+     *       recibiéndolos: filtrar solo por `demo_flexible` le cambiaba el comportamiento sin que
+     *       nadie lo pidiera.
+     *
+     * @return void
+     */
+    public function test_el_flag_manual_de_un_lead_actual_no_lo_saca_del_ciclo(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-20 20:01:00', 'America/Argentina/Buenos_Aires'));
+
+        $lead = $this->crear_lead_para_check(true);
+        // Dinámica ACTUAL con el checkbox manual marcado: el caso documentado en la migración.
+        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
+        $lead->save();
+
+        $this->artisan('leads:check-demo-ingress')->assertExitCode(0);
+
+        $this->assertTrue(
+            (bool) $lead->refresh()->demo_check_ingreso_enviado,
+            'Un lead de la dinámica actual con demo_flexible manual dejó de recibir el check de ingreso.'
+        );
+    }
+
+    /**
+     * 8ter. Y por el mismo motivo, agendar por WhatsApp no le puede APAGAR ese checkbox a un lead de
+     *       la dinámica actual: si se lo apagara, volvería a reservar ventana de closer automática
+     *       — el "bloqueo fantasma" que el fix del 2/7/2026 eliminó.
+     *
+     * @return void
+     */
+    public function test_agendar_no_pisa_el_flag_manual_de_un_lead_actual(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
+        $lead->demo_flexible    = true;
+        $lead->save();
+
+        $this->service()->aplicar($lead, $this->paquete($demo, '2026-08-20', '10:00', false));
+
+        $this->assertTrue(
+            (bool) $lead->refresh()->demo_flexible,
+            'El agendamiento apagó el flag manual de un lead de la dinámica actual.'
+        );
     }
 
     /**

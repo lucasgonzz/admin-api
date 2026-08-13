@@ -946,7 +946,11 @@ TXT;
          * pidió sobre un inicio que el bloque VENTANA EXTENDIDA no ofrecía, es una ventana que el
          * sistema nunca le mostró — y el mensaje que la acompaña ya le prometió al lead una hora
          * de fin. Se descarta el paquete entero, igual que un horario inventado. */
-        $pidio_ventana     = ! empty($agendar['ventana_extendida']);
+        /* El `usa_experiencia_demo_nueva()` va acá y no solo en el bloque que persiste, para que los
+         * DOS traten la misma entrada igual: sin él, un `ventana_extendida: true` alucinado en un
+         * lead de la dinámica actual hacía que este guard descartara el paquete entero mientras el
+         * otro bloque lo agendaba como demo normal. Uno rechazaba y el otro aceptaba lo mismo. */
+        $pidio_ventana     = ! empty($agendar['ventana_extendida']) && $lead->usa_experiencia_demo_nueva();
         $ventana_ofrecida  = true;
         if ($pidio_ventana) {
             $ventana_ofrecida = $this->buscar_ventana_ofrecida($ventanas_extendidas, $demo_id, $demo_date, $demo_start) !== null;
@@ -3363,9 +3367,25 @@ TXT;
             }
 
             /* agendar_demo: el admin puede desactivarla (null) o dejar la que Claude propuso editada
-             * (array con demo_id/demo_date/demo_start_time). En ambos casos, manda directo. */
+             * (array con demo_id/demo_date/demo_start_time). En ambos casos, manda directo.
+             *
+             * 🔴 Con UNA excepción, y no es un detalle (misión 47): el panel RECONSTRUYE este objeto
+             * clave por clave en el front, así que cualquier clave que no esté en esa lista llega
+             * ausente y, pisando el objeto entero, se pierde para siempre. `ventana_extendida` no es
+             * un campo que el admin edite: es la MODALIDAD que pidió el agente, y perderla convierte
+             * una ventana de seis horas en una demo normal de una hora, con el mensaje que le
+             * prometía la ventana ya enviado al lead. Si el panel no la manda, se conserva la del
+             * paquete original. Si la manda, gana el panel — ahí sí es una decisión explícita. */
             if (array_key_exists('agendar_demo', $final_actions)) {
-                $parsed_efectivo['agendar_demo'] = $final_actions['agendar_demo'];
+                $agendar_admin = $final_actions['agendar_demo'];
+
+                if (is_array($agendar_admin)
+                    && ! array_key_exists('ventana_extendida', $agendar_admin)
+                    && isset($parsed['agendar_demo']['ventana_extendida'])) {
+                    $agendar_admin['ventana_extendida'] = $parsed['agendar_demo']['ventana_extendida'];
+                }
+
+                $parsed_efectivo['agendar_demo'] = $agendar_admin;
             }
 
             /* guardar_nombre / guardar_email: string editable o null para suprimir la acción.
@@ -3680,8 +3700,13 @@ TXT;
             $lead->demo_start_time = null;
             $lead->demo_end_time   = null;
             /* La modalidad se apaga con el turno (misión 47). Si quedara prendida, el lead seguiría
-             * excluido de los relojes del ciclo después de reagendar una demo normal. */
-            $lead->demo_flexible   = false;
+             * excluido de los relojes del ciclo después de reagendar una demo normal.
+             *
+             * Solo en la dinámica nueva: en la actual esta columna es el checkbox manual de "sin
+             * horario de closer" y no le corresponde a una cancelación de demo desactivarlo. */
+            if ($lead->usa_experiencia_demo_nueva()) {
+                $lead->demo_flexible = false;
+            }
 
             Log::info('LeadAiService: demo cancelada por solicitud de reagendado.', [
                 'lead_id'            => $lead->id,
@@ -3821,6 +3846,31 @@ TXT;
                         /* Cae por el camino de slot inválido: se marca como no disponible y el
                          * bloque de abajo se encarga del mensaje correctivo y del estado. */
                         $slot_disponible = false;
+                    } elseif ($fin_ventana_extendida === null && $forzar_slot) {
+                        /* El admin forzó el slot: la ventana se calcula igual, pero SIN validar
+                         * contra los rangos ocupados —esa validación es justo la que él decidió
+                         * saltear— conservando el tope de horas y el corte a las 23:59.
+                         *
+                         * La alternativa era degradar a demo normal, y es peor de la peor manera:
+                         * silenciosa. El mensaje aprobado ya le prometió la ventana al lead, así que
+                         * agendarle una hora sin decir nada deja al sistema afirmando una cosa y
+                         * haciendo otra. Queda el warning para que el forzado sea rastreable. */
+                        $fin_ventana_extendida = $this->calcular_fin_ventana_extendida(
+                            $demo_start,
+                            [],
+                            LeadDemoSettings::get_duracion_minutos(),
+                            LeadDemoSettings::get_gracia_minutos_post(),
+                            LeadDemoSettings::get_setup_minutos_antes(),
+                            LeadDemoSettings::get_ventana_extendida_max_horas()
+                        );
+
+                        Log::warning('LeadAiService: ventana extendida forzada por el admin sobre un horario que ya no la admitía.', [
+                            'lead_id'    => $lead->id,
+                            'demo_id'    => $demo_id,
+                            'demo_date'  => $demo_date,
+                            'demo_start' => $demo_start,
+                            'fin_forzado' => $fin_ventana_extendida,
+                        ]);
                     }
                 }
 
@@ -3920,10 +3970,20 @@ TXT;
                     $lead->demo_date       = $demo_date;
                     $lead->demo_start_time = $demo_start;
                     $lead->demo_end_time   = $demo_end;
-                    /* La modalidad se escribe SIEMPRE, no solo cuando es true: un reagendamiento de
-                     * un lead que antes tenía ventana extendida a un turno normal tiene que apagar
-                     * la columna, o quedaría fuera de los relojes del ciclo para siempre. */
-                    $lead->demo_flexible   = $es_ventana_extendida;
+                    /* La modalidad se escribe siempre que el lead sea de la dinámica NUEVA, no solo
+                     * cuando es true: un reagendamiento de un lead que antes tenía ventana extendida
+                     * a un turno normal tiene que apagar la columna, o quedaría fuera de los relojes
+                     * del ciclo para siempre.
+                     *
+                     * 🔴 Y NO se toca en la dinámica actual, aunque ahí el valor calculado siempre
+                     * sea false. `demo_flexible` es una columna preexistente (2/7/2026) con otro
+                     * significado —"no reservar ventana de closer"— y es un checkbox que Lucas marca
+                     * a mano. Pisarla en cada agendamiento le apagaría esa decisión al reagendar por
+                     * WhatsApp, y el lead volvería a reservar ventana de closer automática: el
+                     * "bloqueo fantasma" que el fix del 2/7 vino a eliminar. */
+                    if ($lead->usa_experiencia_demo_nueva()) {
+                        $lead->demo_flexible = $es_ventana_extendida;
+                    }
 
                     /*
                      * FIX (prompt 118): actualizar el status junto con los campos de demo.
