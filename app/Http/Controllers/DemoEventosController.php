@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Services\DemoHitosService;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -21,6 +22,9 @@ use Illuminate\Support\Facades\Log;
  */
 class DemoEventosController extends Controller
 {
+    /** Tamaño máximo del json de `datos` de un evento, en bytes del serializado. */
+    const MAX_BYTES_DATOS = 4096;
+
     /**
      * POST /api/demo-eventos
      *
@@ -50,8 +54,10 @@ class DemoEventosController extends Controller
          *    como el emisor reintenta ante cualquier respuesta no exitosa, UN evento mal formado
          *    dejaba el canal en loop infinito fallando siempre en el mismo lugar. Con `date` la
          *    respuesta es 422, que es definitiva y le dice al emisor qué arreglar.
-         *  - `max` en `datos`. Es un json libre que entra sin mirar: sin techo, un solo evento
-         *    puede traer megabytes.
+         *  - Techo en `datos`. Es un json libre que entra sin mirar: sin techo, un solo evento
+         *    puede traer megabytes. Ojo con esto: el `max:50` de la regla cuenta ELEMENTOS del
+         *    array, no bytes — con él solo, un `datos` de una clave y 2 MB de texto pasa igual
+         *    (medido). El límite de tamaño real se chequea abajo, sobre el json serializado.
          *
          * Misión 48. */
         $validated = $request->validate([
@@ -65,6 +71,22 @@ class DemoEventosController extends Controller
             'eventos.*.ocurrido_at' => 'nullable|date|after:2020-01-01|before:2038-01-01',
             'eventos.*.datos'       => 'nullable|array|max:50',
         ]);
+
+        // Techo de tamaño de `datos`, en bytes del json serializado — que es lo que termina en la
+        // columna. 4 KB es holgado para lo que un evento de demo necesita cargar y corta de raíz
+        // el evento de megabytes que la regla `max:50` deja pasar.
+        foreach ($validated['eventos'] as $indice => $evento) {
+            if (! isset($evento['datos'])) {
+                continue;
+            }
+
+            if (strlen((string) json_encode($evento['datos'])) > self::MAX_BYTES_DATOS) {
+                return response()->json([
+                    'message' => 'El campo datos supera el tamaño máximo permitido.',
+                    'errors'  => ['eventos.' . $indice . '.datos' => ['Máximo ' . self::MAX_BYTES_DATOS . ' bytes.']],
+                ], 422);
+            }
+        }
 
         $guardados  = 0;
         $duplicados = 0;
@@ -86,14 +108,33 @@ class DemoEventosController extends Controller
                 continue;
             }
 
-            DemoEventoRecibido::create([
-                'lead_id'     => $lead->id,
-                'uuid'        => $evento['uuid'],
-                'nombre'      => $evento['nombre'],
-                'clip_id'     => isset($evento['clip_id']) ? $evento['clip_id'] : null,
-                'ocurrido_at' => isset($evento['ocurrido_at']) ? $evento['ocurrido_at'] : null,
-                'datos'       => isset($evento['datos']) ? $evento['datos'] : null,
-            ]);
+            /* El `exists()` de arriba resuelve el caso normal, pero NO es atómico con el insert:
+             * dos requests del mismo emisor pueden leer las dos que el evento no existe y la
+             * segunda choca contra el unique (lead_id, uuid). Sin este catch eso sale como HTTP
+             * 500, y como el emisor reintenta ante cualquier respuesta no exitosa, el lote entra
+             * en loop. Un choque de unicidad significa exactamente lo mismo que el `exists()`:
+             * el evento ya está. Se cuenta como duplicado y se sigue. Misión 48. */
+            try {
+                DemoEventoRecibido::create([
+                    'lead_id'     => $lead->id,
+                    'uuid'        => $evento['uuid'],
+                    'nombre'      => $evento['nombre'],
+                    'clip_id'     => isset($evento['clip_id']) ? $evento['clip_id'] : null,
+                    'ocurrido_at' => isset($evento['ocurrido_at']) ? $evento['ocurrido_at'] : null,
+                    'datos'       => isset($evento['datos']) ? $evento['datos'] : null,
+                ]);
+            } catch (QueryException $e) {
+                // 23000 es la clase SQLSTATE de violación de integridad (incluye el 1062 de
+                // MySQL). Cualquier otro error de base sí tiene que subir.
+                if ((string) $e->getCode() !== '23000') {
+                    throw $e;
+                }
+
+                $duplicados++;
+
+                continue;
+            }
+
             $guardados++;
 
             // Un evento que no le corresponde a ningún hito del plan queda guardado igual y no

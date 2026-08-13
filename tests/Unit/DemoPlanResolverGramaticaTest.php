@@ -148,6 +148,25 @@ class DemoPlanResolverGramaticaTest extends TestCase
     }
 
     /**
+     * Fail-closed: un campo no booleano SIN dominio declarado en `VALORES_VALIDOS` también es
+     * inválido. Si no fuera así, el día que el formulario sume una décima respuesta no booleana
+     * se reabriría el mismo agujero para ese campo y nadie se enteraría.
+     *
+     * Hoy `tipo_precios` es la única respuesta no booleana, así que este caso no se puede
+     * construir con las nueve reales: se prueba con un set de respuestas que trae una de más.
+     */
+    public function test_un_campo_sin_dominio_declarado_es_invalido(): void
+    {
+        $metodo = new ReflectionMethod(DemoPlanResolver::class, 'evaluar');
+        $metodo->setAccessible(true);
+
+        $respuestas               = $this->respuestas();
+        $respuestas['rubro']      = 'ferreteria';
+
+        $this->assertNull($metodo->invoke(null, 'rubro=ferreteria', $respuestas));
+    }
+
+    /**
      * Una condición que no es un string ni null es un error de tipo del catálogo. Sin este
      * chequeo, `false` se casteaba a la cadena vacía y se leía como "sin condición".
      */

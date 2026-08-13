@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Lead;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -246,6 +247,21 @@ class DemoPlanResolver
             return false;
         }
 
+        /* Y el mismo chequeo otra vez, pero contra la fila bloqueada. El de arriba decide con la
+         * copia en memoria, que la trajo un `Lead::where('uuid', ...)->first()` sin lock desde un
+         * endpoint público: con dos envíos simultáneos —un doble clic en Guardar— las dos copias
+         * dicen `null` y las dos congelan. Tomar el lock acá serializa a la segunda, que al
+         * releer ya ve la fecha escrita y se va sin hacer nada. Se relee explícitamente en vez de
+         * confiar en el atributo porque el lock no refresca el modelo. Misión 48. */
+        $congelado_en_base = DB::table('leads')
+            ->where('id', $lead->id)
+            ->lockForUpdate()
+            ->value('demo_plan_congelado_at');
+
+        if ($congelado_en_base !== null) {
+            return false;
+        }
+
         $plan = self::resolver($lead);
 
         if ($plan === null) {
@@ -400,7 +416,13 @@ class DemoPlanResolver
                 return null;
             }
 
-            if (isset(self::VALORES_VALIDOS[$campo]) && ! in_array($valor, self::VALORES_VALIDOS[$campo], true)) {
+            /* Fail-closed: un campo no booleano SIN dominio declarado también es inválido. Si la
+             * condición fuera `isset(...) && !in_array(...)`, el día que el formulario sume una
+             * décima respuesta no booleana volvería a abrirse el mismo agujero —typo del valor
+             * resuelto a `false` en silencio— y nadie se enteraría hasta que un lead se quedara
+             * sin un módulo. Así, agregar un campo obliga a declarar su dominio acá; olvidarse
+             * hace ruido (la condición se declara inválida) en vez de fallar callado. */
+            if (! isset(self::VALORES_VALIDOS[$campo]) || ! in_array($valor, self::VALORES_VALIDOS[$campo], true)) {
                 return null;
             }
 

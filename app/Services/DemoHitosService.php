@@ -53,8 +53,13 @@ class DemoHitosService
             return 0;
         }
 
-        // Idempotencia: un lead que ya tiene hitos no se regenera.
-        $ya_tiene = LeadDemoHito::where('lead_id', $lead->id)->exists();
+        /* Idempotencia: un lead que ya tiene hitos no se regenera. El `lockForUpdate` NO es de
+         * adorno y esta lectura no es "sólo un exists": corre adentro de la transacción que
+         * congela el plan, y el endpoint que la dispara es público — un doble clic en Guardar
+         * alcanza para tener dos requests acá al mismo tiempo. Sin lock las dos leen que no hay
+         * hitos, las dos generan, y la segunda revienta contra el unique con un 1062 que sale
+         * como HTTP 500 en la cara del lead. Medido, no supuesto. Misión 48. */
+        $ya_tiene = LeadDemoHito::where('lead_id', $lead->id)->lockForUpdate()->exists();
         if ($ya_tiene) {
             return 0;
         }
@@ -117,6 +122,13 @@ class DemoHitosService
      */
     public static function aplicar(Lead $lead, array $evento): int
     {
+        // Cuarta puerta con la misma guardia. Hoy el middleware del canal ya rechaza a un lead
+        // 'actual' antes de llegar acá, pero ésta era la única entrada del servicio que dependía
+        // de que otra defensa no fallara — y ese es justo el criterio que no se sostiene solo.
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return 0;
+        }
+
         $nombre = isset($evento['nombre']) ? (string) $evento['nombre'] : '';
         if ($nombre === '') {
             return 0;

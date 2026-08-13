@@ -301,6 +301,27 @@ class DemoEventosIngestaTest extends TestCase
     }
 
     /**
+     * El techo de `datos` es de bytes y no de claves. La regla `max:50` de Laravel cuenta
+     * ELEMENTOS del array: sin este chequeo, un `datos` de una sola clave con megabytes adentro
+     * pasaba y se guardaba entero.
+     */
+    public function test_un_datos_gigante_se_rechaza_aunque_tenga_una_sola_clave(): void
+    {
+        $lead = $this->crear_lead_con_hitos();
+
+        $evento          = $this->evento('clip.terminado', '1.1');
+        $evento['datos'] = ['payload' => str_repeat('A', 20000)];
+
+        $this->postear($lead, [$evento])->assertStatus(422);
+        $this->assertSame(0, DemoEventoRecibido::where('lead_id', $lead->id)->count());
+
+        // Y un `datos` de tamaño razonable sigue entrando.
+        $chico          = $this->evento('clip.terminado', '1.1');
+        $chico['datos'] = ['articulo_id' => 7, 'nombre' => 'Tornillo'];
+        $this->postear($lead, [$chico])->assertStatus(200);
+    }
+
+    /**
      * Un lote con varios eventos se procesa entero en una sola llamada.
      */
     public function test_un_lote_con_varios_eventos_se_procesa_entero(): void
