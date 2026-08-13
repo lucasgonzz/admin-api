@@ -2,12 +2,14 @@
 
 namespace App\Services;
 
+use App\Helpers\AppTime;
 use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Services\DemoHitosService;
 use App\Services\DemoPlanResolver;
 use App\Services\ImplementationSettings;
 use App\Services\LeadDemoFormMapper;
+use App\Services\LeadDemoSettings;
 use App\Services\ClientEmpresaApiUrlResolver;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -25,6 +27,19 @@ use Carbon\Carbon;
  */
 class RunDemoSetupService
 {
+    /**
+     * Minutos después del inicio del turno a partir de los cuales se arma la instancia con los
+     * defaults del catálogo para un lead que nunca completó el formulario (misión 46, pieza 2).
+     *
+     * No es cero a propósito: el que está tipeando el formulario tiene que GANARLE al fallback.
+     * Con 0, dos minutos de demora bastarían para que le armen la demo con respuestas que no son
+     * las suyas. Es el borde de `contexto/demo_experiencia.md` §3.16 B.
+     */
+    const MARGEN_SIN_FORMULARIO_MINUTOS = 5;
+
+    /** Zona horaria de referencia de todo el ciclo de demo (misma que usan el resto de los comandos). */
+    const TZ = 'America/Argentina/Buenos_Aires';
+
     /**
      * Servicio que centraliza el cálculo de vencimiento del token de ingreso a la demo
      * (extraído de acá a DemoIngresoTokenService en el grupo 233, prompt 05, para que el
@@ -46,11 +61,17 @@ class RunDemoSetupService
      * Ejecuta la demo remotamente y actualiza los campos de trazabilidad
      * del Lead (demo_setup_status / demo_setup_last_error / demo_setup_last_run_at).
      *
-     * @param Lead $lead Prospecto con demo seteada
+     * @param Lead $lead              Prospecto con demo seteada
+     * @param bool $solo_si_pendiente true = claim atómico (misión 46): sólo corre si el lead
+     *                                todavía está en `pendiente`, y la transición a `ejecutandose`
+     *                                se hace condicional para que dos disparadores simultáneos no
+     *                                lo corran dos veces. false (default) = comportamiento de
+     *                                siempre, que es el del botón "Disparar setup demo" del panel:
+     *                                re-correr a propósito aunque el estado sea `exitoso`.
      *
      * @return Lead El mismo Lead refrescado
      */
-    public function run(Lead $lead)
+    public function run(Lead $lead, bool $solo_si_pendiente = false)
     {
         $lead->loadMissing('demo');
         $demo = $lead->demo;
@@ -70,12 +91,42 @@ class RunDemoSetupService
             return $this->mark_failed($lead, 'La demo asignada no tiene ERP API URL configurada.');
         }
 
-        // Marcamos el arranque para que el panel muestre el intento en curso
-        $lead->update([
-            'demo_setup_status' => 'ejecutandose',
-            'demo_setup_last_run_at' => now(),
-            'demo_setup_last_error' => null,
-        ]);
+        /* Marcamos el arranque para que el panel muestre el intento en curso.
+         *
+         * Con $solo_si_pendiente la transición es un CLAIM: un UPDATE condicionado a que el estado
+         * siga siendo `pendiente`, y se sigue de largo si no afectó ninguna fila. Desde la misión 46
+         * hay dos disparadores (el comando cada minuto y el POST del formulario), así que el update
+         * incondicional de antes permitía que los dos entraran a la vez y le hicieran DOS
+         * `migrate:fresh` a la misma instancia — con el lead adentro en el peor caso. La condición
+         * viaja adentro del propio UPDATE, no en un `if` previo: un chequeo y después un update es
+         * exactamente la ventana que hay que cerrar. */
+        if ($solo_si_pendiente) {
+            $claimed = Lead::where('id', $lead->id)
+                ->where('demo_setup_status', 'pendiente')
+                ->update([
+                    'demo_setup_status' => 'ejecutandose',
+                    'demo_setup_last_run_at' => now(),
+                    'demo_setup_last_error' => null,
+                ]);
+
+            if ($claimed !== 1) {
+                Log::info('RunDemoSetupService: el setup ya lo tomó otro disparador, no se corre de nuevo.', [
+                    'lead_id' => $lead->id,
+                ]);
+
+                return $lead->refresh();
+            }
+
+            /* El UPDATE de arriba fue por query builder: la instancia en memoria todavía tiene el
+             * estado viejo y el resto del método (y el llamador) lee de ella. */
+            $lead->refresh();
+        } else {
+            $lead->update([
+                'demo_setup_status' => 'ejecutandose',
+                'demo_setup_last_run_at' => now(),
+                'demo_setup_last_error' => null,
+            ]);
+        }
 
         // Emitimos el token de ingreso ANTES de armar el payload: viaja dentro de él y así
         // el retry de la llamada HTTP de más abajo manda siempre el mismo valor (idempotente).
@@ -118,6 +169,114 @@ class RunDemoSetupService
             ]);
 
             return $this->mark_failed($lead, 'Excepción: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * ¿Corresponde disparar el demo setup de este lead en este instante?
+     *
+     * 🔴 Regla "formulario + T-setup, lo que pase ULTIMO" (`contexto/demo_experiencia.md` §3.16 B).
+     * No es una optimización: sin la condición del formulario, un turno a ahora+5 cae dentro de la
+     * ventana de 15 minutos en el mismo instante en que se agenda y el setup corre ANTES de que el
+     * lead conteste nada, así que la instancia se arma con los defaults del catálogo y las nueve
+     * respuestas del formulario no cambian nada. Y sin sacar el tope superior, el lead que tarda en
+     * completarlo deja de ser candidato apenas pasa su hora y no entra nunca. Misión 46.
+     *
+     * 🔴 Y vive acá, en un solo lugar, porque la necesitan DOS llamadores por motivos distintos: el
+     * comando `leads:run-demo-setup` (cada minuto, red de seguridad y camino de los turnos agendados
+     * para más adelante) y el POST del formulario de la página inmersiva, que dispara en el acto
+     * para no perder hasta 60 segundos de los 5 minutos del lead. Dos copias de esta condición
+     * coincidirían por casualidad, no por construcción — mismo criterio que `estados-turno.js`.
+     *
+     * La dinámica ACTUAL conserva exactamente el comportamiento de antes de la misión 46 —ventana
+     * `[ahora, ahora + setup_minutos_antes]`, sin mirar el formulario— porque esos leads no tienen
+     * página inmersiva y nunca van a tener `demo_form_completado_at`: aplicarles la condición del
+     * formulario los dejaría sin setup para siempre.
+     *
+     * @param Lead        $lead Lead candidato, con demo_date y demo_start_time cargados.
+     * @param Carbon|null $now  Instante de referencia; null = AppTime::now() (respeta el reloj
+     *                          virtual de local).
+     *
+     * @return array{disparar: bool, motivo: string, inicio: Carbon|null}
+     */
+    public function evaluar_disparo(Lead $lead, ?Carbon $now = null): array
+    {
+        if ($now === null) {
+            $now = AppTime::now(self::TZ);
+        }
+
+        $inicio = $this->parse_turno_datetime($lead->demo_date, (string) $lead->demo_start_time);
+        if ($inicio === null) {
+            return ['disparar' => false, 'motivo' => 'sin_hora_de_inicio', 'inicio' => null];
+        }
+
+        $setup_minutos = LeadDemoSettings::get_setup_minutos_antes();
+
+        // Dinámica actual: idéntico a como estaba. Ninguna rama nueva la alcanza.
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            $window_end = $now->copy()->addMinutes($setup_minutos);
+            if ($inicio->lt($now) || $inicio->gt($window_end)) {
+                return ['disparar' => false, 'motivo' => 'fuera_de_ventana', 'inicio' => $inicio];
+            }
+
+            return ['disparar' => true, 'motivo' => 'ventana_dinamica_actual', 'inicio' => $inicio];
+        }
+
+        /* Corte superior de la dinámica nueva: el turno vencido, no la hora de inicio. El fin sale
+         * de demo_end_time y, si está vacío, de la duración configurada — mismo criterio que
+         * DemoExperienciaController::build_turno(). */
+        $fin = $this->parse_turno_datetime($lead->demo_date, (string) $lead->demo_end_time);
+        if ($fin === null) {
+            $fin = $inicio->copy()->addMinutes(LeadDemoSettings::get_duracion_minutos());
+        }
+        $fin_con_gracia = $fin->copy()->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+
+        if ($now->gt($fin_con_gracia)) {
+            return ['disparar' => false, 'motivo' => 'turno_vencido', 'inicio' => $inicio];
+        }
+
+        $formulario_completado = $lead->demo_form_completado_at !== null;
+
+        // (a) Formulario completo y ya abrió la ventana de preparación.
+        if ($formulario_completado) {
+            if ($now->gte($inicio->copy()->subMinutes($setup_minutos))) {
+                return ['disparar' => true, 'motivo' => 'formulario_y_ventana', 'inicio' => $inicio];
+            }
+
+            return ['disparar' => false, 'motivo' => 'formulario_pero_falta_para_la_ventana', 'inicio' => $inicio];
+        }
+
+        // (b) Sin formulario: el fallback con los defaults del catálogo, ya arrancado el turno.
+        if ($now->gte($inicio->copy()->addMinutes(self::MARGEN_SIN_FORMULARIO_MINUTOS))) {
+            return ['disparar' => true, 'motivo' => 'fallback_sin_formulario', 'inicio' => $inicio];
+        }
+
+        return ['disparar' => false, 'motivo' => 'sin_formulario_todavia', 'inicio' => $inicio];
+    }
+
+    /**
+     * Combina la fecha de la demo con una hora en texto libre (HH:MM) en la timezone de referencia.
+     *
+     * Devuelve null si la hora está vacía o no se puede parsear, para que un dato mal cargado
+     * saltee ese lead en vez de romper el batch entero.
+     *
+     * @param mixed  $demo_date Valor de `demo_date` del lead (Carbon por el cast, o null).
+     * @param string $hora_str  Hora en texto libre; vacía = sin dato.
+     *
+     * @return Carbon|null
+     */
+    protected function parse_turno_datetime($demo_date, string $hora_str)
+    {
+        if ($demo_date === null || trim($hora_str) === '') {
+            return null;
+        }
+
+        try {
+            $fecha_str = $demo_date->copy()->setTimezone(self::TZ)->format('Y-m-d');
+
+            return Carbon::parse("{$fecha_str} {$hora_str}", self::TZ);
+        } catch (\Exception $e) {
+            return null;
         }
     }
 

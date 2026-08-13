@@ -350,6 +350,12 @@ class Lead extends Model
         // Timestamp de envío del formulario de demo: null = todavía no lo completó (grupo 300, prompt 01).
         'demo_form_completado_at'            => 'datetime',
 
+        // Progreso del lead sobre el video de introducción (misión 46). El pct se castea a entero
+        // para que el payload público no lo devuelva como string y el front tenga que compararlo
+        // contra el umbral con conversión implícita.
+        'intro_visto_pct'                    => 'integer',
+        'intro_visto_at'                     => 'datetime',
+
         // Plan de demo congelado (misión 48): qué secciones y qué clips le tocan a este lead. Es
         // una foto, no una vista: se resuelve una sola vez con DemoPlanResolver y no se recalcula
         // al leer, porque el catálogo se sincroniza a producción sin deploy y le cambiaría el

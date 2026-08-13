@@ -351,7 +351,21 @@ TXT;
          * Se pasa $specific_date para ampliar el rango cuando el lead pidió una fecha lejana.
          * El snapshot de Google Calendar se captura en la misma consulta de disponibilidad. */
         $calendar_snapshot    = null;
-        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id, $usa_experiencia_nueva);
+        /* Config con la que se calculó la grilla de ESTA request (misión 46): de acá sale el número
+         * de minutos que el bloque de instrucciones le dice al agente, más abajo. */
+        $slot_config          = null;
+        $availability_data    = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $calendar_snapshot, $specific_date, $lead->id, $usa_experiencia_nueva, null, $slot_config);
+
+        /* Minutos que el lead tiene para completar el formulario y mirar el video de introducción.
+         *
+         * Sale del mismo valor con el que se calculó la grilla de esta request (incluido el
+         * override). Si acá se releyera la setting, la frase que el agente le dice al lead y los
+         * horarios que el sistema le ofrece podrían discrepar — y la regla dura 2 del protocolo
+         * obliga a que mande el JSON, así que el agente quedaría prometiendo una cosa y confirmando
+         * otra. Misión 46. */
+        $minimo_minutos_desde_ahora = isset($slot_config['demo_minimo_minutos_desde_ahora'])
+            ? (int) $slot_config['demo_minimo_minutos_desde_ahora']
+            : null;
 
         /*
          * Ampliar snapshot con demos agendadas, slots enviados a Claude y config del closer
@@ -496,7 +510,19 @@ TXT;
             $availability_context .= "\n- Si el lead propone un horario concreto, verificalo en el JSON granular de disponibilidad de abajo.";
             $availability_context .= "\n- Si el horario que pidió no está disponible, ofrecé el horario más cercano que sí lo esté — de nuevo, uno solo, no una lista.";
             $availability_context .= "\n- La demo se hace desde una COMPUTADORA. Si el lead está en el teléfono, puede ver la página y el video ahí, pero tiene que avisar a qué hora va a poder sentarse frente a la compu — esa es la hora que se agenda.";
-            $availability_context .= "\n- Mínimo 15 minutos desde ahora: en esos minutos se prepara la instancia mientras el lead mira el video de introducción. Nunca prometas que la demo arranca \"ya mismo, ahora\".";
+            /* El número NO se escribe a mano: viene del mismo valor que armó la grilla (ver el
+             * comentario largo de $minimo_minutos_desde_ahora, más arriba). Hasta la misión 46 acá
+             * decía "Mínimo 15 minutos" literal y encima le PROHIBÍA al agente decir "ahora mismo",
+             * contradiciendo a agentes/lead/recursos/v2/demo_agenda.md, que le manda decir
+             * exactamente eso. Dos fuentes para el mismo invariante, y ganaba la equivocada.
+             * Si el valor no llegó (sólo posible por un bug del armado), se omite la línea entera:
+             * mejor sin instrucción que con un número inventado. */
+            if ($minimo_minutos_desde_ahora !== null) {
+                $availability_context .= "\n- Mínimo {$minimo_minutos_desde_ahora} minutos desde ahora: son los que el lead tarda en completar el formulario y "
+                    . "mirar el video de introducción, mientras la demo se prepara sola por debajo. Eso NO es una espera "
+                    . "antes de entrar: el lead entra a la página en el momento en que le pasás el link. Podés decirle "
+                    . "que la puede hacer ahora mismo.";
+            }
             $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
             $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
             $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
@@ -1074,10 +1100,16 @@ TXT;
      * @param int|null    $margen_hoy_override Reemplaza el margen mínimo de anticipación SOLO para
      *                                       esta llamada (grupo 330, prompt 01). null = usa la
      *                                       setting configurada, igual que siempre.
+     * @param array|null  $slot_config       Referencia opcional para recibir la config con la que se
+     *                                       calculó ESTA grilla (misión 46). Se expone por referencia
+     *                                       y no dentro del array de retorno a propósito: ese array
+     *                                       se serializa entero al prompt del agente, así que una
+     *                                       clave nueva ahí le cambiaría el JSON que lee el modelo.
+     *                                       Mismo patrón que $calendar_snapshot.
      *
      * @return array<string, mixed> Estructura: hoy, duration_demo_minutos, demos.
      */
-    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false, ?int $margen_hoy_override = null): array
+    public function build_availability_json(int $days_ahead = self::DIAS_DISPONIBILIDAD, &$calendar_snapshot = null, ?string $specific_date = null, ?int $exclude_lead_id = null, bool $usa_experiencia_nueva = false, ?int $margen_hoy_override = null, &$slot_config = null): array
     {
         /* Contexto compartido: días hábiles, rangos bloqueados y parámetros de demo.
          * Se pasa $specific_date para que, si el lead pidió una fecha lejana, se amplíe el rango.
@@ -1088,6 +1120,10 @@ TXT;
 
         /* Exponer snapshot de calendario al llamador (segunda llamada con disponibilidad). */
         $calendar_snapshot = $context['google_calendar_snapshot'] ?? null;
+
+        /* Config efectiva de ESTA grilla (misión 46). Se expone acá arriba, apenas se resuelve el
+         * contexto, para que el llamador la tenga aunque más abajo cambie algo del armado. */
+        $slot_config = $context['slot_config'] ?? [];
 
         /*
          * Garantizar snapshot mínimo de diagnóstico cuando se consultó disponibilidad
