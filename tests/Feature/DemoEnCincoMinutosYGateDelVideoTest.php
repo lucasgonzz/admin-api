@@ -271,6 +271,10 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
         $this->artisan('leads:run-demo-setup')->assertExitCode(0);
 
         $this->assertSame('pendiente', $lead->refresh()->demo_setup_status);
+        // Y no disparó por el motivo correcto: si el lead hubiera dejado de ser candidato por
+        // cualquier otra razón, el estado también quedaría en `pendiente` y el test pasaría sin
+        // probar nada. Que no haya salido ninguna llamada al empresa-api lo cierra.
+        Http::assertNothingSent();
     }
 
     /**
