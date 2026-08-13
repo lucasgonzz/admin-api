@@ -61,6 +61,10 @@ class LeadDemoSettingsController extends Controller
                "required" el formulario de configuración de demos actual tiraría 422 al guardar en
                el intervalo entre el deploy de este backend y el del front. */
             'demo_minimo_minutos_desde_ahora' => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            /* Umbral del video de introducción (misión 46). Rango propio 0-100: es un porcentaje,
+               no minutos. "sometimes" por el mismo motivo que los de arriba — una versión del SPA
+               anterior a esta misión no manda la clave y no tiene que tirar 422. */
+            'demo_intro_umbral_pct'           => 'sometimes|integer|min:'.LeadDemoSettings::MIN_PCT.'|max:'.LeadDemoSettings::MAX_PCT,
             'frecuencia_slots_minutos'        => 'required|integer|in:'.implode(',', LeadDemoSettings::VALID_FRECUENCIA_SLOTS),
             'llamada_debe_terminar_en_horario' => 'required|boolean',
             // Settings del ciclo de vida automatizado de la demo.

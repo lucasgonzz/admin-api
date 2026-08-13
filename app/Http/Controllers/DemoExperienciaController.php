@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Helpers\AppTime;
+use App\Jobs\RunDemoSetupJob;
 use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
+use App\Services\RunDemoSetupService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -57,8 +59,11 @@ class DemoExperienciaController extends Controller
      * configuración, las aplica sobre el lead vía `LeadDemoFormMapper`, marca
      * `demo_form_completado_at` solo en el primer envío y deja constancia en el hilo del lead.
      *
-     * Este endpoint NO dispara el demo setup: solo deja la marca de tiempo que el scheduler
-     * existente evalúa junto con la ventana de los 15 minutos previos al turno (§3.16 B).
+     * Desde la misión 46 este endpoint SÍ dispara el demo setup, cuando ya se cumple la condición
+     * de `RunDemoSetupService::evaluar_disparo()` (formulario completo + ventana abierta). El
+     * comando `leads:run-demo-setup` sigue corriendo cada minuto como red de seguridad y como
+     * camino de los turnos agendados para más adelante; lo que se gana acá son los hasta 60
+     * segundos que el lead perdería esperando el próximo tick, sobre un margen total de 5 minutos.
      *
      * @param Request $request Body con las respuestas del formulario (claves opcionales).
      * @param string  $uuid    Token público del lead (columna `uuid`, no enumerable).
@@ -122,6 +127,67 @@ class DemoExperienciaController extends Controller
             // Sin sent_by_admin_id: esta acción no la hizo un admin.
         ]);
 
+        $this->disparar_setup_si_corresponde($lead);
+
+        return response()->json($this->build_payload($lead), 200);
+    }
+
+    /**
+     * POST /api/demo-experiencia/{uuid}/intro-progreso
+     *
+     * Recibe el avance del lead sobre el video de introducción (misión 46, pieza 4). Público como
+     * los otros tres, mismo criterio: identifica por el `uuid` del lead y no devuelve nada
+     * sensible.
+     *
+     * MONÓTONO: el valor guardado nunca baja. El reproductor reporta el mayor `currentTime`
+     * alcanzado, pero llegan varios reportes por minuto y pueden cruzarse en la red — un pct viejo
+     * que llegue tarde no puede borrar el progreso real. La primera vez que cruza el umbral sella
+     * `intro_visto_at` y deja constancia en el hilo del lead.
+     *
+     * @param Request $request Body: `{ "pct": 0..100 }`.
+     * @param string  $uuid    Token público del lead (columna `uuid`, no enumerable).
+     *
+     * @return JsonResponse Mismo payload que el GET, para que la página refresque con una sola
+     *                      llamada y el botón se prenda sin esperar al poleo.
+     */
+    public function store_intro_progreso_json(Request $request, string $uuid): JsonResponse
+    {
+        // Búsqueda manual por uuid, igual que en el resto de los endpoints de este controller.
+        $lead = Lead::where('uuid', $uuid)->first();
+        if (! $lead) {
+            return response()->json(['message' => 'No encontrado.'], 404);
+        }
+
+        $validated = $request->validate([
+            'pct' => 'required|integer|min:0|max:100',
+        ]);
+
+        $pct_recibido = (int) $validated['pct'];
+        $pct_guardado = (int) $lead->intro_visto_pct;
+
+        if ($pct_recibido > $pct_guardado) {
+            $lead->intro_visto_pct = $pct_recibido;
+
+            // El sello va una sola vez: interesa CUÁNDO terminó de mirarlo, no cuál fue el último
+            // reporte. La condición mira intro_visto_at y no el pct viejo porque el umbral se puede
+            // bajar desde el panel, y un lead que ya estaba por encima no tiene que volver a
+            // "cruzarlo" ni generar un segundo mensaje en el hilo.
+            if ($lead->intro_visto_at === null && $pct_recibido >= LeadDemoSettings::get_demo_intro_umbral_pct()) {
+                $lead->intro_visto_at = Carbon::now();
+
+                LeadMessage::create([
+                    'lead_id'         => $lead->id,
+                    'sender'          => 'sistema',
+                    'content'         => 'El lead terminó el video de introducción',
+                    'status'          => 'enviado',
+                    'is_followup'     => false,
+                    'is_status_event' => true,
+                ]);
+            }
+
+            $lead->save();
+        }
+
         return response()->json($this->build_payload($lead), 200);
     }
 
@@ -150,18 +216,22 @@ class DemoExperienciaController extends Controller
             return response()->json(['message' => 'No encontrado.'], 404);
         }
 
-        // Misma fuente de verdad que la página: build_turno() ya existe en este controller. No se
+        // Misma fuente de verdad que la página: evaluar_ingreso() es el ÚNICO lugar donde se decide
+        // si se puede entrar, y es el mismo que alimenta `puede_ingresar` del payload. No se
         // recalcula la ventana acá con otra lógica, o aparecería el caso de un botón habilitado
         // que rebota.
-        $turno = $this->build_turno($lead);
-        if ($turno['estado'] !== 'activo') {
-            // Los tres estados no-activos (sin_turno | antes | vencido) son motivos legibles
-            // válidos tal cual, sin traducción.
-            return response()->json(['motivo' => $turno['estado']], 409);
+        //
+        // 🔴 Desde la misión 46 esto ya NO exige `turno.estado === 'activo'`: el reloj del turno
+        // dejó de ser la puerta. La puerta es que la demo esté armada y el intro visto. Un turno de
+        // mañana no se abre igual, porque su setup todavía no corrió.
+        $evaluacion = $this->evaluar_ingreso($lead);
+        if (! $evaluacion['puede']) {
+            return response()->json(['motivo' => $evaluacion['motivo']], 409);
         }
 
-        // El token lo emite el demo setup, que corre a T-15 (RunDemoSetupService). Un lead que
-        // llega justo antes puede encontrarse con esto: es un caso normal, no un error.
+        // El token lo emite el demo setup (RunDemoSetupService). Con el setup en `exitoso` esto no
+        // debería pasar, pero si pasa el motivo correcto sigue siendo `preparando`: al lead le da
+        // la misma instrucción — esperá un momento y probá de nuevo.
         if (empty($lead->demo_ingreso_token)) {
             return response()->json(['motivo' => 'preparando'], 409);
         }
@@ -214,6 +284,11 @@ class DemoExperienciaController extends Controller
      */
     private function build_payload(Lead $lead): array
     {
+        // Una sola consulta de media por request: la usan el mapa `media` de la página y el cálculo
+        // de si el intro es obligatorio.
+        $media      = DemoMedia::url_por_slot();
+        $evaluacion = $this->evaluar_ingreso($lead, $media);
+
         return [
             'lead' => [
                 'contact_name' => (string) ($lead->contact_name ?? ''),
@@ -229,8 +304,151 @@ class DemoExperienciaController extends Controller
             ),
             // Solo los slots con URL cargada; los que faltan no aparecen y la página muestra su
             // placeholder (DemoMedia::url_por_slot() ya filtra por url no vacía).
-            'media' => DemoMedia::url_por_slot(),
+            'media' => $media,
+
+            // Estado del armado de la instancia. Hasta la misión 46 no viajaba, así que la página
+            // no tenía forma de saber que la demo estaba lista: se enteraba haciendo clic y
+            // comiéndose el 409 `preparando`.
+            'setup' => [
+                'estado' => (string) ($lead->demo_setup_status ?? 'pendiente'),
+            ],
+
+            // Progreso del lead sobre el video de introducción y umbral vigente.
+            'intro' => $this->build_intro($lead, $media),
+
+            // 🔴 Mismo interruptor que usa AppTime para el reloj virtual del admin, y por eso es el
+            // correcto: producción no corre en `local`, así que el bypass no se puede filtrar por
+            // accidente. No es un flag de build del front, ni una query string, ni una columna del
+            // lead — cualquiera de esas tres se puede activar desde afuera.
+            'modo_prueba' => $this->modo_prueba(),
+
+            // 🔴 Lo calcula SOLO el backend. El front no lo deriva ni lo recalcula en ningún
+            // componente: si lo hiciera, habría dos reglas para la misma puerta y la del navegador
+            // sería la fácil de saltear.
+            'puede_ingresar' => $evaluacion['puede'],
         ];
+    }
+
+    /**
+     * El bloque `intro` del payload: cuánto vio el lead, cuánto se le exige, y si el gate aplica.
+     *
+     * `obligatorio` es false cuando NO hay URL cargada para el slot `intro`. Sin esa salvaguarda,
+     * mientras el video no esté subido el gate dejaría a TODOS afuera para siempre y no habría
+     * forma de entrar a ninguna demo — el video se graba post-merge, así que ese es el estado real
+     * del sistema hoy. También es false en modo prueba, que es el camino con el que Lucas prueba.
+     *
+     * @param Lead                  $lead
+     * @param array<string, string> $media Mapa slot_id => url ya resuelto por el llamador.
+     *
+     * @return array<string, mixed>
+     */
+    private function build_intro(Lead $lead, array $media): array
+    {
+        $hay_video_cargado = isset($media['intro']) && trim((string) $media['intro']) !== '';
+
+        return [
+            'visto_pct'   => (int) $lead->intro_visto_pct,
+            'umbral_pct'  => LeadDemoSettings::get_demo_intro_umbral_pct(),
+            'obligatorio' => $hay_video_cargado && ! $this->modo_prueba(),
+        ];
+    }
+
+    /**
+     * 🔴 EL ÚNICO lugar donde se decide si un lead puede entrar a su demo (misión 46, pieza 3).
+     *
+     * Lo consumen `build_payload()` (para el flag `puede_ingresar` que gobierna el botón) e
+     * `ingresar_json()` (para autorizar el POST y devolver el motivo del 409). Que sean el mismo
+     * cálculo es lo que evita el peor síntoma posible acá: un botón habilitado que rebota.
+     *
+     * La regla, tal cual la fija la misión:
+     *
+     *     puede_ingresar = setup exitoso
+     *                  AND turno no vencido
+     *                  AND ( modo_prueba OR intro no obligatorio OR visto_pct >= umbral )
+     *
+     * El orden de los chequeos define el `motivo`, y está elegido para que el lead lea lo más
+     * accionable primero: un turno vencido no se arregla mirando el video.
+     *
+     * @param Lead                       $lead
+     * @param array<string, string>|null $media Mapa slot_id => url; null = se consulta acá.
+     *
+     * @return array{puede: bool, motivo: string}
+     */
+    private function evaluar_ingreso(Lead $lead, ?array $media = null): array
+    {
+        if ($media === null) {
+            $media = DemoMedia::url_por_slot();
+        }
+
+        $turno = $this->build_turno($lead);
+        if ($turno['estado'] === 'vencido') {
+            return ['puede' => false, 'motivo' => 'vencido'];
+        }
+
+        $setup = (string) ($lead->demo_setup_status ?? 'pendiente');
+        if ($setup === 'fallido') {
+            return ['puede' => false, 'motivo' => 'setup_fallido'];
+        }
+        if ($setup !== 'exitoso') {
+            // pendiente | ejecutandose: la instancia se está armando. Un solo motivo para los dos
+            // porque para el lead son lo mismo — esperar.
+            return ['puede' => false, 'motivo' => 'preparando'];
+        }
+
+        $intro = $this->build_intro($lead, $media);
+        if ($intro['obligatorio'] && $intro['visto_pct'] < $intro['umbral_pct']) {
+            return ['puede' => false, 'motivo' => 'intro_pendiente'];
+        }
+
+        return ['puede' => true, 'motivo' => 'ok'];
+    }
+
+    /**
+     * true en entorno de prueba, donde el gate del intro no aplica.
+     *
+     * @return bool
+     */
+    private function modo_prueba(): bool
+    {
+        return config('app.env') === 'local';
+    }
+
+    /**
+     * Dispara el demo setup en el acto si el lead ya cumple la condición (misión 46, pieza 2).
+     *
+     * Sólo para la dinámica nueva y sólo con el setup todavía en `pendiente`. Si el turno es para
+     * más adelante, no dispara nada: lo levanta el comando cuando abra la ventana.
+     *
+     * `afterResponse()` y no `dispatch()` a secas: con `QUEUE_CONNECTION=sync` un dispatch común
+     * correría inline y le bloquearía al lead la respuesta del formulario hasta 300 segundos.
+     *
+     * @param Lead $lead
+     *
+     * @return void
+     */
+    private function disparar_setup_si_corresponde(Lead $lead): void
+    {
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
+        if ((string) ($lead->demo_setup_status ?? 'pendiente') !== 'pendiente') {
+            return;
+        }
+
+        $service    = new RunDemoSetupService();
+        $evaluacion = $service->evaluar_disparo($lead);
+
+        if (! $evaluacion['disparar']) {
+            return;
+        }
+
+        Log::info('DemoExperienciaController: disparo inmediato del demo setup desde el formulario', [
+            'lead_id' => $lead->id,
+            'motivo'  => $evaluacion['motivo'],
+        ]);
+
+        RunDemoSetupJob::dispatch($lead->id)->afterResponse();
     }
 
     /**

@@ -3,19 +3,21 @@
 namespace App\Console\Commands;
 
 use App\Models\Lead;
-use App\Services\LeadDemoSettings;
 use App\Helpers\AppTime;
 use App\Services\RunDemoSetupService;
-use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Corre automáticamente el demo setup para leads cuya demo arranca pronto.
  *
- * Se ejecuta cada minuto. Busca leads en estado `demo_agendada` con
- * `demo_setup_status = pendiente` cuya demo comience dentro de los
- * próximos X minutos (configurado en LeadDemoSettings::get_setup_minutos_antes()).
+ * Se ejecuta cada minuto sobre los leads en `demo_agendada` con `demo_setup_status = pendiente` y
+ * demo agendada para hoy. Quién dispara y quién no lo decide
+ * {@see RunDemoSetupService::evaluar_disparo()}, que desde la misión 46 comparte esa regla con el
+ * POST del formulario de la página inmersiva.
+ *
+ * Para la dinámica ACTUAL el criterio sigue siendo el de siempre: la demo tiene que empezar dentro
+ * de los próximos `LeadDemoSettings::get_setup_minutos_antes()` minutos.
  */
 class RunDemoSetup extends Command
 {
@@ -42,16 +44,14 @@ class RunDemoSetup extends Command
      */
     public function handle(RunDemoSetupService $service): int
     {
-        /* Minutos antes del inicio para correr el setup según configuración. */
-        $setup_minutos = LeadDemoSettings::get_setup_minutos_antes();
-
         /* Momento actual en timezone Argentina. */
         $now = AppTime::now();
 
-        /* Límite superior de la ventana: inicio de demo debe estar dentro de los próximos X minutos. */
-        $window_end = $now->copy()->addMinutes($setup_minutos);
-
-        /* Buscar leads con demo agendada, setup pendiente y demo en la ventana de tiempo. */
+        /* Buscar leads con demo agendada, setup pendiente y demo del día de hoy. La decisión de
+         * disparar o no ya no se toma acá: vive en RunDemoSetupService::evaluar_disparo(), porque
+         * la comparte con el POST del formulario de la página inmersiva (misión 46, pieza 2). Ahí
+         * está el comentario completo de la regla y de por qué desapareció el corte por hora de
+         * inicio para la dinámica nueva. */
         $candidates = Lead::query()
             ->where('status', 'demo_agendada')
             ->where('demo_setup_status', 'pendiente')
@@ -64,14 +64,10 @@ class RunDemoSetup extends Command
         $executed = 0;
 
         foreach ($candidates as $lead) {
-            /* Construir el datetime completo de inicio de demo en timezone Argentina. */
-            $demo_datetime = $this->parse_demo_datetime(
-                $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
-                (string) $lead->demo_start_time
-            );
+            $evaluacion = $service->evaluar_disparo($lead, $now);
 
             /* Si el formato de hora es inválido, saltear sin romper el batch. */
-            if ($demo_datetime === null) {
+            if ($evaluacion['motivo'] === 'sin_hora_de_inicio') {
                 Log::warning('RunDemoSetup: no se pudo parsear demo_start_time', [
                     'lead_id'         => $lead->id,
                     'demo_start_time' => $lead->demo_start_time,
@@ -79,19 +75,22 @@ class RunDemoSetup extends Command
                 continue;
             }
 
-            /* Solo ejecutar si la demo está dentro de la ventana [ahora, ahora + setup_minutos]. */
-            if ($demo_datetime->lt($now) || $demo_datetime->gt($window_end)) {
+            if (! $evaluacion['disparar']) {
                 continue;
             }
 
             Log::info('RunDemoSetup: ejecutando setup automático', [
                 'lead_id'       => $lead->id,
                 'contact_name'  => $lead->contact_name,
-                'demo_datetime' => $demo_datetime->toDateTimeString(),
+                'demo_datetime' => $evaluacion['inicio']->toDateTimeString(),
+                'motivo'        => $evaluacion['motivo'],
             ]);
 
-            /* Delegar al servicio existente que ya maneja HTTP, retries y estados. */
-            $service->run($lead);
+            /* Delegar al servicio existente que ya maneja HTTP, retries y estados. El `true` es el
+             * claim atómico: desde la misión 46 el POST del formulario también dispara, así que el
+             * comando tiene que poder llegar tarde y no hacer nada en vez de correr el setup dos
+             * veces sobre la misma instancia. */
+            $service->run($lead, true);
 
             $executed++;
         }
@@ -99,24 +98,5 @@ class RunDemoSetup extends Command
         $this->info("Demo setups ejecutados: {$executed}");
 
         return 0;
-    }
-
-    /**
-     * Parsea el datetime de inicio de demo a partir de fecha (Y-m-d) y hora (H:i o similar).
-     *
-     * Devuelve null si el formato no es válido para evitar errores en el batch.
-     *
-     * @param string $date Fecha en formato Y-m-d.
-     * @param string $time Hora en texto libre (ej: "09:00" o "9:30").
-     *
-     * @return Carbon|null
-     */
-    protected function parse_demo_datetime(string $date, string $time): ?Carbon
-    {
-        try {
-            return Carbon::parse("{$date} {$time}");
-        } catch (\Exception $e) {
-            return null;
-        }
     }
 }

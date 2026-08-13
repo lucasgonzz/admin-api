@@ -81,6 +81,8 @@ Route::prefix('demo-experiencia')->group(function () {
     Route::get('{uuid}', [DemoExperienciaController::class, 'show_json']);
     Route::post('{uuid}/formulario', [DemoExperienciaController::class, 'store_formulario_json']);
     Route::post('{uuid}/ingresar', [DemoExperienciaController::class, 'ingresar_json']);
+    // Progreso del lead sobre el video de introducción (misión 46). Público como los otros tres.
+    Route::post('{uuid}/intro-progreso', [DemoExperienciaController::class, 'store_intro_progreso_json']);
 });
 
 /*

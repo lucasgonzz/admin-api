@@ -25,6 +25,16 @@ class LeadDemoSettings
      */
     public const KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA = 'demo_minimo_minutos_desde_ahora';
 
+    /**
+     * Clave: porcentaje del video de introducción que el lead tiene que haber visto para que se
+     * le habilite el ingreso a la demo (misión 46, pieza 3).
+     *
+     * No es un parámetro de minutos: tiene su propio rango 0–100 y su propio clamp. Meterlo en
+     * clamp() —que acota a MAX_MINUTOS = 240— parecería inofensivo y de hecho no truncaría nada
+     * hoy, pero deja escrito que 100 y 240 son la misma clase de número, y no lo son.
+     */
+    public const KEY_DEMO_INTRO_UMBRAL_PCT = 'demo_intro_umbral_pct';
+
     /** Clave: minutos de gracia post-demo para liberar el slot de disponibilidad. */
     public const KEY_GRACIA_MINUTOS_POST = 'demo_gracia_minutos_post';
 
@@ -124,8 +134,16 @@ class LeadDemoSettings
     /**
      * Valor por defecto: margen mínimo para ofrecer un horario de HOY (minutos). Es el tiempo en
      * que el lead entra a la página inmersiva, completa el formulario y mira el video de intro.
+     *
+     * Bajó de 15 a 5 en la misión 46: esos minutos no son una espera antes de entrar, son los que
+     * el lead pasa adentro de la página. No confundir con DEFAULT_SETUP_MINUTOS_ANTES, que sigue
+     * en 15 a propósito y mide otra cosa (cuánto antes se prepara la instancia de un turno
+     * agendado para más adelante).
      */
-    private const DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA = 15;
+    private const DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA = 5;
+
+    /** Valor por defecto: porcentaje del video de introducción exigido para entrar (misión 46). */
+    private const DEFAULT_DEMO_INTRO_UMBRAL_PCT = 90;
 
     /** Valor por defecto: gracia post-demo (minutos). */
     private const DEFAULT_GRACIA_MINUTOS_POST = 10;
@@ -211,6 +229,12 @@ class LeadDemoSettings
     /** Máximo permitido para todos los parámetros (minutos). */
     public const MAX_MINUTOS = 240;
 
+    /** Mínimo permitido para el umbral del video de introducción (porcentaje). */
+    public const MIN_PCT = 0;
+
+    /** Máximo permitido para el umbral del video de introducción (porcentaje). */
+    public const MAX_PCT = 100;
+
     /**
      * Devuelve la configuración completa para el panel (GET settings).
      *
@@ -222,6 +246,7 @@ class LeadDemoSettings
             'duracion_minutos'                    => self::get_duracion_minutos(),
             'setup_minutos_antes'                 => self::get_setup_minutos_antes(),
             'demo_minimo_minutos_desde_ahora'     => self::get_demo_minimo_minutos_desde_ahora(),
+            'demo_intro_umbral_pct'               => self::get_demo_intro_umbral_pct(),
             'gracia_minutos_post'                 => self::get_gracia_minutos_post(),
             'recordatorio_minutos_antes'          => self::get_recordatorio_minutos_antes(),
             'recordatorio_manana_hora'            => self::get_recordatorio_manana_hora(),
@@ -263,6 +288,12 @@ class LeadDemoSettings
         // igual que las franjas de demo del prompt 01 -- el SPA todavia no manda este campo.
         if (isset($data['demo_minimo_minutos_desde_ahora'])) {
             AdminSetting::set(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::clamp((int) $data['demo_minimo_minutos_desde_ahora']));
+        }
+
+        // Umbral del video de introduccion (mision 46): opcional por el mismo motivo que el campo
+        // de arriba -- una version anterior del SPA que no lo mande no tiene que borrar el valor.
+        if (isset($data['demo_intro_umbral_pct'])) {
+            AdminSetting::set(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::clamp_pct((int) $data['demo_intro_umbral_pct']));
         }
         AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST,             (string) self::clamp((int) $data['gracia_minutos_post']));
         AdminSetting::set(self::KEY_RECORDATORIO_MINUTOS_ANTES,      (string) self::clamp((int) $data['recordatorio_minutos_antes']));
@@ -396,6 +427,9 @@ class LeadDemoSettings
         if (AdminSetting::get(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA) === null) {
             AdminSetting::set(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA);
         }
+        if (AdminSetting::get(self::KEY_DEMO_INTRO_UMBRAL_PCT) === null) {
+            AdminSetting::set(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::DEFAULT_DEMO_INTRO_UMBRAL_PCT);
+        }
         if (AdminSetting::get(self::KEY_GRACIA_MINUTOS_POST) === null) {
             AdminSetting::set(self::KEY_GRACIA_MINUTOS_POST, (string) self::DEFAULT_GRACIA_MINUTOS_POST);
         }
@@ -491,6 +525,17 @@ class LeadDemoSettings
     public static function get_demo_minimo_minutos_desde_ahora(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA));
+    }
+
+    /**
+     * Porcentaje del video de introducción que el lead tiene que haber visto para que se le
+     * habilite el ingreso a la demo (misión 46, pieza 3).
+     *
+     * @return int
+     */
+    public static function get_demo_intro_umbral_pct(): int
+    {
+        return self::clamp_pct((int) AdminSetting::get(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::DEFAULT_DEMO_INTRO_UMBRAL_PCT));
     }
 
     /**
@@ -834,6 +879,29 @@ class LeadDemoSettings
         }
         if ($value > self::MAX_MINUTOS) {
             return self::MAX_MINUTOS;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Acota un porcentaje al rango permitido [MIN_PCT, MAX_PCT].
+     *
+     * Clamp propio y no clamp(): el de minutos acota a 240, así que un valor de 100 pasaría igual
+     * y el bug recién aparecería el día que alguien cambie MAX_MINUTOS. Ver el comentario de
+     * KEY_DEMO_INTRO_UMBRAL_PCT.
+     *
+     * @param int $value Valor en porcentaje.
+     *
+     * @return int
+     */
+    private static function clamp_pct(int $value): int
+    {
+        if ($value < self::MIN_PCT) {
+            return self::MIN_PCT;
+        }
+        if ($value > self::MAX_PCT) {
+            return self::MAX_PCT;
         }
 
         return $value;
