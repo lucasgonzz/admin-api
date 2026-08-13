@@ -329,6 +329,13 @@ class Lead extends Model
 
         // Timestamp de envío del formulario de demo: null = todavía no lo completó (grupo 300, prompt 01).
         'demo_form_completado_at'            => 'datetime',
+
+        // Plan de demo congelado (misión 48): qué secciones y qué clips le tocan a este lead. Es
+        // una foto, no una vista: se resuelve una sola vez con DemoPlanResolver y no se recalcula
+        // al leer, porque el catálogo se sincroniza a producción sin deploy y le cambiaría el
+        // roadmap a un lead que está en el medio de la demo.
+        'demo_plan'                          => 'array',
+        'demo_plan_congelado_at'             => 'datetime',
     ];
 
     /**
