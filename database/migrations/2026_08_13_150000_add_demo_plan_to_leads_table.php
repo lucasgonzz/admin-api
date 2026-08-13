@@ -36,10 +36,11 @@ class AddDemoPlanToLeadsTable extends Migration
             // Marca de congelamiento. Null = sin plan todavía.
             $table->timestamp('demo_plan_congelado_at')->nullable()->after('demo_plan');
 
-            // Secreto del canal de eventos. Longitud acotada a 64 (Str::random(64)), con índice
-            // simple porque es la clave de búsqueda del middleware DemoEventosKey.
-            $table->string('demo_eventos_token', 64)->nullable()->after('demo_plan_congelado_at');
-            $table->index('demo_eventos_token');
+            // Secreto del canal de eventos. Longitud acotada a 64 (Str::random(64)). Va `unique`
+            // y no un índice simple: es la credencial por la que el middleware resuelve el lead,
+            // así que dos leads con el mismo valor harían que `first()` eligiera uno arbitrario.
+            // En MySQL un unique admite varios NULL, que es el estado normal de la columna.
+            $table->string('demo_eventos_token', 64)->nullable()->unique()->after('demo_plan_congelado_at');
         });
     }
 
@@ -49,7 +50,7 @@ class AddDemoPlanToLeadsTable extends Migration
     public function down()
     {
         Schema::table('leads', function (Blueprint $table) {
-            $table->dropIndex(['demo_eventos_token']);
+            $table->dropUnique(['demo_eventos_token']);
             $table->dropColumn(['demo_plan', 'demo_plan_congelado_at', 'demo_eventos_token']);
         });
     }

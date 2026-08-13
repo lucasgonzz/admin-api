@@ -239,6 +239,68 @@ class DemoEventosIngestaTest extends TestCase
     }
 
     /**
+     * El lote tiene techo. Sin él, un solo POST podía disparar cientos de miles de queries
+     * contra la base que corre el panel comercial entero.
+     */
+    public function test_un_lote_demasiado_grande_se_rechaza(): void
+    {
+        $lead = $this->crear_lead_con_hitos();
+
+        $lote = [];
+        for ($i = 0; $i < 201; $i++) {
+            $lote[] = $this->evento('clip.terminado', '1.1');
+        }
+
+        $this->postear($lead, $lote)->assertStatus(422);
+        $this->assertSame(0, DemoEventoRecibido::where('lead_id', $lead->id)->count());
+    }
+
+    /**
+     * 🔴 Un `ocurrido_at` que no es una fecha se rechaza con 422 y no revienta el canal.
+     *
+     * Antes se validaba como string y se persistía en una columna `timestamp`: el `create()`
+     * tiraba un 500 no manejado. Como el emisor reintenta ante cualquier respuesta no exitosa,
+     * UN evento mal formado dejaba el canal en loop infinito, fallando siempre en el mismo lugar
+     * y sin nadie mirando. El 422 es definitivo y dice qué arreglar.
+     */
+    public function test_una_fecha_ilegible_o_fuera_de_rango_se_rechaza_con_422(): void
+    {
+        $lead = $this->crear_lead_con_hitos();
+
+        foreach (['asdf', '2999-12-31', '0000-00-00'] as $fecha) {
+            $evento                = $this->evento('clip.terminado', '1.1');
+            $evento['ocurrido_at'] = $fecha;
+
+            $this->postear($lead, [$evento])->assertStatus(422);
+        }
+
+        $this->assertSame(0, DemoEventoRecibido::where('lead_id', $lead->id)->count());
+        $this->assertSame(LeadDemoHito::ESTADO_PENDIENTE, $this->hito_de_clip($lead, '1.1')->estado);
+    }
+
+    /**
+     * La idempotencia es POR LEAD: el uuid de un lead no puede bloquear el evento de otro.
+     */
+    public function test_el_mismo_uuid_en_dos_leads_distintos_no_se_pisa(): void
+    {
+        $lead_a = $this->crear_lead_con_hitos();
+        $lead_b = $this->crear_lead_con_hitos();
+
+        $uuid   = (string) Str::uuid();
+        $evento = $this->evento('clip.terminado', '1.1', $uuid);
+
+        $this->postear($lead_a, [$evento])->assertStatus(200);
+
+        // El mismo uuid, otro lead: se guarda igual y le mueve SU hito.
+        $respuesta = $this->postear($lead_b, [$evento])->assertStatus(200);
+        $this->assertSame(1, $respuesta->json('guardados'));
+        $this->assertSame(0, $respuesta->json('duplicados'));
+
+        $this->assertSame(LeadDemoHito::ESTADO_PARCIAL, $this->hito_de_clip($lead_b, '1.1')->estado);
+        $this->assertSame(2, DemoEventoRecibido::where('uuid', $uuid)->count());
+    }
+
+    /**
      * Un lote con varios eventos se procesa entero en una sola llamada.
      */
     public function test_un_lote_con_varios_eventos_se_procesa_entero(): void

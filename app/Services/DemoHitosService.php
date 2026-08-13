@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Lead;
 use App\Models\LeadDemoHito;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Genera y mueve los hitos del roadmap de la demo de un lead (misión 48, pieza 3).
@@ -38,6 +39,13 @@ class DemoHitosService
      */
     public static function generar(Lead $lead): int
     {
+        // Segunda de las dos puertas de escritura de la misión 48, y se defiende sola por el
+        // mismo motivo que DemoPlanResolver::congelar_en_memoria(): el endpoint público del
+        // formulario no mira la dinámica. Un lead 'actual' no tiene roadmap ni nada que marcar.
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return 0;
+        }
+
         $plan = $lead->demo_plan;
 
         // Sin plan no hay roadmap. No es un error: el catálogo puede no estar sincronizado.
@@ -117,10 +125,43 @@ class DemoHitosService
         $clip_id  = isset($evento['clip_id']) && $evento['clip_id'] !== '' ? (string) $evento['clip_id'] : null;
         $ocurrido = self::resolver_momento($evento);
 
+        /* Todo el bloque va en una transacción con `lockForUpdate` sobre los hitos que va a tocar,
+         * y esto es lo que hace REAL la regla de que un estado no retrocede.
+         *
+         * Sin el lock, la comparación de pesos de marcar() se hace contra la copia en memoria que
+         * trajo el `first()`, mientras que el `save()` de Eloquent escribe la columna sin ningún
+         * WHERE sobre el estado anterior. Con dos POST solapados —que es el caso normal: el emisor
+         * reintenta y la red reordena— eso alcanza para volver un hito de `completo` a `parcial`:
+         *
+         *   R1 lee el hito en `pendiente` y se frena
+         *   R2 corre entero y lo deja en `completo`
+         *   R1 retoma con su copia vieja, calcula `parcial` sobre ella, ve 1 > 0 y guarda
+         *
+         * El chequeo de uuid del controlador no lo cubre: en el momento en que R2 miró, la fila de
+         * R1 todavía no existía. Misión 48. */
+        return DB::transaction(function () use ($lead, $nombre, $clip_id, $ocurrido) {
+            return self::aplicar_bajo_lock($lead, $nombre, $clip_id, $ocurrido);
+        });
+    }
+
+    /**
+     * Cuerpo de `aplicar()`, ya adentro de la transacción. Todas las lecturas de hitos toman
+     * `lockForUpdate` para que nadie más pueda leerlos hasta que este evento termine de aplicarse.
+     *
+     * @param Lead        $lead
+     * @param string      $nombre   Nombre del evento.
+     * @param string|null $clip_id  Clip al que refiere, si aplica.
+     * @param Carbon      $ocurrido Momento del evento.
+     *
+     * @return int Cantidad de hitos efectivamente modificados.
+     */
+    protected static function aplicar_bajo_lock(Lead $lead, string $nombre, $clip_id, Carbon $ocurrido): int
+    {
         // El lead entró de verdad a la demo: el hito de ingreso queda completo.
         if ($nombre === self::EVENTO_INGRESO) {
             $hito = LeadDemoHito::where('lead_id', $lead->id)
                 ->where('tipo', LeadDemoHito::TIPO_INGRESO)
+                ->lockForUpdate()
                 ->first();
 
             if ($hito === null) {
@@ -141,6 +182,7 @@ class DemoHitosService
             $hito = LeadDemoHito::where('lead_id', $lead->id)
                 ->where('tipo', LeadDemoHito::TIPO_TUTORIAL)
                 ->where('clip_id', $clip_id)
+                ->lockForUpdate()
                 ->first();
 
             if ($hito === null) {
@@ -154,6 +196,7 @@ class DemoHitosService
         // declaren como su `evento_esperado`. Puede ser ninguno, y no es un error.
         $hitos = LeadDemoHito::where('lead_id', $lead->id)
             ->where('evento_esperado', $nombre)
+            ->lockForUpdate()
             ->get();
 
         $modificados = 0;
@@ -290,14 +333,27 @@ class DemoHitosService
      */
     public static function marcar_ingreso_pulsado(Lead $lead): bool
     {
-        $hito = LeadDemoHito::where('lead_id', $lead->id)
-            ->where('tipo', LeadDemoHito::TIPO_INGRESO)
-            ->first();
-
-        if ($hito === null) {
+        // Misma guardia: lo llama ingresar_json(), que también es público y tampoco mira la
+        // dinámica. Hoy sería inocuo por sí solo (un lead 'actual' no tiene hitos), pero eso lo
+        // garantizarían las otras dos guardias y no ésta — y una defensa que depende de que otra
+        // no falle no es una defensa.
+        if (! $lead->usa_experiencia_demo_nueva()) {
             return false;
         }
 
-        return self::marcar($hito, null, Carbon::now(), true, false);
+        // Mismo lock que aplicar(): este método corre desde el endpoint del botón de ingreso, que
+        // puede solaparse con el evento `demo.ingreso` que manda la instancia en ese mismo momento.
+        return DB::transaction(function () use ($lead) {
+            $hito = LeadDemoHito::where('lead_id', $lead->id)
+                ->where('tipo', LeadDemoHito::TIPO_INGRESO)
+                ->lockForUpdate()
+                ->first();
+
+            if ($hito === null) {
+                return false;
+            }
+
+            return self::marcar($hito, null, Carbon::now(), true, false);
+        });
     }
 }

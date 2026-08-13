@@ -32,8 +32,8 @@ class CreateDemoEventosRecibidosTable extends Migration
             // Lead al que pertenece el evento. Sale del token del header, nunca del body.
             $table->unsignedBigInteger('lead_id')->index();
 
-            // Identificador del evento generado por el emisor. Unique: es la idempotencia.
-            $table->string('uuid', 64)->unique();
+            // Identificador del evento generado por el emisor.
+            $table->string('uuid', 64);
 
             // Nombre del evento (`demo.ingreso`, `clip.terminado`, `articulo.creado`, ...).
             $table->string('nombre', 60);
@@ -50,6 +50,14 @@ class CreateDemoEventosRecibidosTable extends Migration
 
             // Timestamps estándar de creación/actualización.
             $table->timestamps();
+
+            /* La idempotencia es POR LEAD y no global. Con un unique global sobre `uuid` solo,
+             * quien tenga un token válido puede pre-insertar bajo su propio lead el uuid de un
+             * evento que va a emitir OTRO lead: cuando llegara el real se contaría como duplicado
+             * y no se aplicaría a los hitos de ese otro. Que hoy haga falta adivinar el uuid no
+             * alcanza como defensa — el formato lo elige el emisor (misión 50) y todavía no está
+             * escrito. Misión 48. */
+            $table->unique(['lead_id', 'uuid'], 'demo_eventos_recibidos_lead_uuid_unique');
         });
     }
 

@@ -40,13 +40,30 @@ class DemoEventosController extends Controller
             return response()->json(['error' => 'no autorizado'], 401);
         }
 
+        /* Tres cosas que la validación tiene que cerrar, y las tres se pagan caro si faltan:
+         *
+         *  - `max` en el lote. Sin techo, un POST con 100.000 eventos son cientos de miles de
+         *    queries en una sola request contra la base que corre el panel comercial entero. 200
+         *    es holgado para el caso real (una demo dura una hora y emite decenas de eventos).
+         *  - `date` en `ocurrido_at`, y no `string`. La columna es un `timestamp` con cast
+         *    `datetime`: un valor ilegible reventaba en el `create()` con un 500 no manejado, y
+         *    como el emisor reintenta ante cualquier respuesta no exitosa, UN evento mal formado
+         *    dejaba el canal en loop infinito fallando siempre en el mismo lugar. Con `date` la
+         *    respuesta es 422, que es definitiva y le dice al emisor qué arreglar.
+         *  - `max` en `datos`. Es un json libre que entra sin mirar: sin techo, un solo evento
+         *    puede traer megabytes.
+         *
+         * Misión 48. */
         $validated = $request->validate([
-            'eventos'               => 'required|array|min:1',
+            'eventos'               => 'required|array|min:1|max:200',
             'eventos.*.uuid'        => 'required|string|max:64',
             'eventos.*.nombre'      => 'required|string|max:60',
             'eventos.*.clip_id'     => 'nullable|string|max:10',
-            'eventos.*.ocurrido_at' => 'nullable|string|max:40',
-            'eventos.*.datos'       => 'nullable|array',
+            // El rango va acotado además de validado: `date` acepta "2999-12-31", que parsea bien
+            // en Carbon y se sale del rango de un TIMESTAMP de MySQL (1970-2038) — o sea, otro
+            // 500 por el mismo camino que el valor ilegible.
+            'eventos.*.ocurrido_at' => 'nullable|date|after:2020-01-01|before:2038-01-01',
+            'eventos.*.datos'       => 'nullable|array|max:50',
         ]);
 
         $guardados  = 0;
@@ -60,7 +77,9 @@ class DemoEventosController extends Controller
              * chequeo va ANTES de aplicar los hitos, no sólo antes de insertar: aplicar dos veces
              * el mismo evento no rompe nada hoy (los estados no retroceden y las marcas se
              * escriben una sola vez), pero sí falsearía el conteo de hitos movidos. Misión 48. */
-            $ya_recibido = DemoEventoRecibido::where('uuid', $evento['uuid'])->exists();
+            $ya_recibido = DemoEventoRecibido::where('lead_id', $lead->id)
+                ->where('uuid', $evento['uuid'])
+                ->exists();
             if ($ya_recibido) {
                 $duplicados++;
 

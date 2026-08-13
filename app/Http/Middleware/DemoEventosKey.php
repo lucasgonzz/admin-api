@@ -42,6 +42,14 @@ class DemoEventosKey
             return response()->json(['error' => 'no autorizado'], 401);
         }
 
+        // El token no vence solo, así que un lead al que se le corrió el setup con la dinámica
+        // nueva y después se lo volvió a 'actual' —el rollback previsto de un piloto— seguiría
+        // teniendo un token válido en la mano de su instancia. Volver a 'actual' apaga el canal:
+        // es lo que se quiere de un rollback, y el 401 es definitivo, no un error transitorio.
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return response()->json(['error' => 'no autorizado'], 401);
+        }
+
         $request->attributes->set('demo_eventos_lead', $lead);
 
         return $next($request);

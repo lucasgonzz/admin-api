@@ -31,6 +31,19 @@ class DemoPlanResolver
     const VERSION_CATALOGO = 2;
 
     /**
+     * Dominio de los campos NO booleanos que la forma `campo=valor` puede comparar.
+     *
+     * De las nueve respuestas del formulario, `tipo_precios` es la única que no es un booleano
+     * (ver `LeadDemoFormMapper::RESPUESTAS_POR_DEFECTO`), y sus dos valores son los que el mapper
+     * escribe y lee. Está acá y no derivado del catálogo a propósito: es lo que permite distinguir
+     * "el lead contestó otra cosa" de "el catálogo tiene un typo", que sin esta lista son
+     * indistinguibles — las dos darían simplemente `false`.
+     */
+    const VALORES_VALIDOS = [
+        'tipo_precios' => ['unico', 'listas'],
+    ];
+
+    /**
      * Resuelve el plan de demo del lead.
      *
      * @param Lead $lead Lead del que se leen las respuestas efectivas del formulario.
@@ -209,6 +222,19 @@ class DemoPlanResolver
      */
     public static function congelar_en_memoria(Lead $lead): bool
     {
+        /* Guardia de dinámica, y va ACÁ y no en quien llama: éste es uno de los dos únicos lugares
+         * donde el trabajo de la misión 48 escribe algo sobre un lead (el otro es
+         * DemoHitosService::generar()). El endpoint del formulario es PÚBLICO y no mira la
+         * dinámica —resuelve el lead por uuid y nada más—, así que una guardia que viviera del
+         * lado del llamador dejaría entrar a un lead 'actual' por ese camino. Y es alcanzable de
+         * verdad: el interruptor por lead (LeadController::set_demo_experiencia_json) existe para
+         * pilotear la dinámica nueva con leads elegidos a mano, o sea que volver un lead de
+         * 'nueva' a 'actual' es el rollback previsto — y ese lead ya tiene su link de la página
+         * circulando. Misión 48. */
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return false;
+        }
+
         /* El plan se congela UNA sola vez y no se recalcula al leer. Si se resolviera en cada
          * lectura, editar `demo_catalogo.json` —que se sincroniza a producción sin deploy— le
          * cambiaría el roadmap a un lead que está en el medio de la demo, y los hitos ya marcados
@@ -297,9 +323,16 @@ class DemoPlanResolver
      */
     protected static function evaluar($condicion, array $respuestas)
     {
-        // Sin condición: siempre incluido.
-        if ($condicion === null || trim((string) $condicion) === '') {
+        // Sin condición: siempre incluido. Vale para null, cadena vacía y cadena de espacios.
+        if ($condicion === null || (is_string($condicion) && trim($condicion) === '')) {
             return true;
+        }
+
+        // Una condición que no es un string ni null (un booleano, un número, un array) es un
+        // error de tipo del catálogo, no una condición vacía. Sin este chequeo, `false` se
+        // castearía a la cadena vacía y se leería como "sin condición".
+        if (! is_string($condicion)) {
+            return null;
         }
 
         $condicion = trim((string) $condicion);
@@ -351,6 +384,23 @@ class DemoPlanResolver
             $valor = trim(substr($termino, $posicion_igual + 1));
 
             if ($campo === '' || $valor === '' || ! array_key_exists($campo, $respuestas)) {
+                return null;
+            }
+
+            /* El lado DERECHO se valida igual que el izquierdo, y esto no es celo: sin esto,
+             * cualquier typo del valor (`tipo_precios=lista`, `tipo_precios=Listas`, un `==` de
+             * más) se resuelve a `false` en silencio — el clip desaparece del plan sin entrar en
+             * `condiciones_invalidas` y sin una línea de log, que es exactamente el modo de falla
+             * invisible que esta clase existe para impedir. Y el peor caso es `campo=false`: la
+             * gramática no tiene `!`, así que negar un booleano por igualdad es lo primero que va
+             * a intentar quien edite el catálogo, y da `false` SIEMPRE, valga lo que valga el
+             * campo (`(string) false` es la cadena vacía, `(string) true` es "1"). Misión 48. */
+            if (is_bool($respuestas[$campo])) {
+                // Un booleano se pregunta con la forma `campo`, nunca con `campo=valor`.
+                return null;
+            }
+
+            if (isset(self::VALORES_VALIDOS[$campo]) && ! in_array($valor, self::VALORES_VALIDOS[$campo], true)) {
                 return null;
             }
 
