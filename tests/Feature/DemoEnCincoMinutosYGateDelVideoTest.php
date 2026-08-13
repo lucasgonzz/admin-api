@@ -345,6 +345,33 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
     }
 
     /**
+     * 8bis. El progreso del intro PERSISTE entre visitas. La misión pide verificarlo explícitamente
+     *       y no darlo por sentado: es lo que evita que el lead que miró el video hoy tenga que
+     *       volver a mirarlo cuando llegue su turno mañana. Sale de que el valor viva en la columna
+     *       y no en el navegador, así que se comprueba pidiendo el payload de nuevo, como haría una
+     *       visita posterior.
+     *
+     * @return void
+     */
+    public function test_el_progreso_del_intro_persiste_entre_visitas(): void
+    {
+        $ahora = $this->momento_base();
+        $this->fijar_reloj($ahora);
+
+        // Turno para mañana: la visita de hoy es anterior al turno, igual que el caso real.
+        $lead = $this->crear_lead(Lead::EXPERIENCIA_NUEVA, $ahora->copy()->addDay());
+
+        $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/intro-progreso', ['pct' => 100])
+            ->assertStatus(200);
+
+        // "Otra visita": un GET nuevo, sin nada del lado del cliente.
+        $payload = $this->getJson('/api/demo-experiencia/' . $lead->uuid)->json();
+
+        $this->assertSame(100, $payload['intro']['visto_pct']);
+        $this->assertNotNull($lead->refresh()->intro_visto_at);
+    }
+
+    /**
      * 9. Doble disparo: el job y el comando sobre el mismo lead. El setup corre UNA sola vez —
      *    el claim condicional devuelve 0 filas en el segundo.
      *
