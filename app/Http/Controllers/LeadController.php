@@ -10,6 +10,7 @@ use App\Models\Client;
 use App\Models\AdminSetting;
 use App\Models\Demo;
 use App\Models\Lead;
+use App\Models\LeadDemoHito;
 use App\Models\LeadMessage;
 use App\Models\LeadMessageAttachment;
 use App\Models\LeadPartner;
@@ -828,6 +829,91 @@ class LeadController extends Controller
             'message' => 'No se pudo crear la demo: ' . $lead->demo_setup_last_error,
             'model' => $this->fullModel('lead', $lead->id),
         ], 422);
+    }
+
+    /**
+     * GET /api/lead/{id}/demo-roadmap — el recorrido de la demo de este lead (misión 49).
+     *
+     * Devuelve el plan congelado, sus hitos y el progreso en UNA sola llamada. Es a propósito:
+     * el panel poléa este endpoint cada 10 segundos mientras el lead está adentro de la demo, y
+     * una respuesta por partes obligaría a una query por hito en cada tick.
+     *
+     * Sólo LEE. No hay forma de mover un hito desde el panel: el estado de un hito es el registro
+     * de lo que el lead efectivamente hizo, y si se pudiera editar a mano dejaría de serlo.
+     *
+     * `tiene_plan: false` NO es un error: es el estado normal de casi todos los leads, porque el
+     * plan recién se congela cuando completan el formulario de la página inmersiva.
+     *
+     * @param int|string $id Identificador del lead.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function demo_roadmap_json($id)
+    {
+        /* Lead del que se pide el recorrido. */
+        $lead = Lead::findOrFail($id);
+
+        $plan = $lead->demo_plan;
+        $tiene_plan = is_array($plan) && ! empty($plan);
+
+        $hitos = LeadDemoHito::where('lead_id', $lead->id)
+            ->orderBy('orden')
+            ->get();
+
+        $completos = 0;
+        $parciales = 0;
+        $lista     = [];
+
+        foreach ($hitos as $hito) {
+            if ($hito->estado === LeadDemoHito::ESTADO_COMPLETO) {
+                $completos++;
+            } elseif ($hito->estado === LeadDemoHito::ESTADO_PARCIAL) {
+                $parciales++;
+            }
+
+            /* Se arma la fila a mano en vez de devolver el modelo entero: así el payload es un
+             * contrato explícito y una columna nueva de `lead_demo_hitos` no se filtra sola. */
+            $lista[] = [
+                'orden'             => (int) $hito->orden,
+                'tipo'              => $hito->tipo,
+                'seccion'           => $hito->seccion,
+                'clip_id'           => $hito->clip_id,
+                'titulo'            => $hito->titulo,
+                'estado'            => $hito->estado,
+                'evento_esperado'   => $hito->evento_esperado,
+                'tutorial_visto_at' => $hito->tutorial_visto_at ? $hito->tutorial_visto_at->format('Y-m-d H:i:s') : null,
+                'accion_hecha_at'   => $hito->accion_hecha_at ? $hito->accion_hecha_at->format('Y-m-d H:i:s') : null,
+            ];
+        }
+
+        return response()->json([
+            'tiene_plan'   => $tiene_plan,
+            'congelado_at' => $lead->demo_plan_congelado_at
+                ? $lead->demo_plan_congelado_at->format('Y-m-d H:i:s')
+                : null,
+
+            // Las nueve respuestas con las que se resolvió el plan, tal como quedaron congeladas
+            // (no las columnas actuales del lead: si reenvió el formulario, pueden diferir).
+            'respuestas' => $tiene_plan && isset($plan['respuestas']) ? $plan['respuestas'] : [],
+
+            // Errores del catálogo que el resolver encontró al armar este plan. El panel los
+            // muestra: son un typo del repo que llegó a producción por el sync, y morir en un log
+            // es exactamente lo que no puede pasar.
+            'condiciones_invalidas' => $tiene_plan && isset($plan['condiciones_invalidas'])
+                ? $plan['condiciones_invalidas']
+                : [],
+
+            /* El denominador del progreso es el TOTAL de hitos de este lead, no una constante:
+             * cada lead tiene el recorrido que le tocó según sus respuestas, así que 3/12 y 3/20
+             * son progresos distintos y compararlos contra un total fijo no querría decir nada. */
+            'progreso' => [
+                'completos' => $completos,
+                'parciales' => $parciales,
+                'total'     => count($lista),
+            ],
+
+            'hitos' => $lista,
+        ], 200);
     }
 
     /**
