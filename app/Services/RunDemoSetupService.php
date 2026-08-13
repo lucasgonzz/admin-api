@@ -3,11 +3,15 @@
 namespace App\Services;
 
 use App\Helpers\AppTime;
+use App\Models\DemoMedia;
 use App\Models\Lead;
+use App\Services\DemoHitosService;
+use App\Services\DemoPlanResolver;
 use App\Services\ImplementationSettings;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
 use App\Services\ClientEmpresaApiUrlResolver;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -127,6 +131,12 @@ class RunDemoSetupService
         // Emitimos el token de ingreso ANTES de armar el payload: viaja dentro de él y así
         // el retry de la llamada HTTP de más abajo manda siempre el mismo valor (idempotente).
         $this->emitir_token_de_ingreso($lead);
+
+        // Último momento en que se puede congelar el plan: el lead que nunca completó el
+        // formulario lo congela acá, con los defaults del catálogo, para que ninguno entre a la
+        // demo sin roadmap. Si ya lo tenía congelado (caso normal, lo hizo el formulario) esto no
+        // hace nada. Misión 48.
+        $this->congelar_plan_si_falta($lead);
 
         $payload = $this->build_payload($lead);
 
@@ -344,8 +354,8 @@ class RunDemoSetupService
         // El merge va AL FINAL, después de todas las claves de siempre, y no al principio: las
         // claves recalculadas de la dinámica nueva (use_price_lists, use_deposits,
         // usan_cuentas_corrientes) tienen que pisar a las viejas, no al revés. Para la dinámica
-        // actual respuestas_para_payload() devuelve [] y el payload queda idéntico al de siempre.
-        return array_merge($payload, $this->respuestas_para_payload($lead));
+        // actual claves_de_la_dinamica_nueva() devuelve [] y el payload queda idéntico al de siempre.
+        return array_merge($payload, $this->claves_de_la_dinamica_nueva($lead));
     }
 
     /**
@@ -406,6 +416,93 @@ class RunDemoSetupService
     }
 
     /**
+     * Todo el bloque de claves que sólo recibe un lead de la dinámica nueva: las respuestas del
+     * formulario más el canal de eventos, el plan congelado y el mapa de multimedia (misión 48).
+     *
+     * La guardia de dinámica es UNA sola y vive en `respuestas_para_payload()`: si ese método
+     * devolvió vacío, el lead es de la dinámica actual y acá no se agrega absolutamente nada. Se
+     * hace así, y no repitiendo el `usa_experiencia_demo_nueva()`, porque dos condiciones que
+     * deciden lo mismo en dos lugares distintos son dos condiciones que pueden divergir — y la que
+     * quedara desactualizada le mandaría claves nuevas a un lead de producción.
+     *
+     * Este método SÍ toca la base (`demo_media`), a diferencia de `respuestas_para_payload()`, que
+     * se mantiene puro a propósito para poder probarse sin base.
+     *
+     * @param Lead $lead
+     *
+     * @return array<string, mixed> Vacío para la dinámica actual.
+     */
+    protected function claves_de_la_dinamica_nueva(Lead $lead)
+    {
+        $respuestas = $this->respuestas_para_payload($lead);
+
+        if (empty($respuestas)) {
+            return [];
+        }
+
+        return array_merge($respuestas, [
+            /* El canal de eventos se autoconfigura por el payload y NO por el `.env` de cada
+             * instancia (misión 48). `empresa-api` ya tiene un canal saliente hacia el admin
+             * (`services.admin_api`, usado por AdminReportHelper y SupportSyncHelper), pero exige
+             * ADMIN_API_URL y ADMIN_API_OUTBOUND_KEY cargadas a mano en las tres instancias demo —
+             * y ese es exactamente el modo de falla que ya se pagó con el panel, cuyas
+             * PANEL_ADMIN_API_URL / PANEL_ADMIN_INGEST_KEY quedaron vacías y el botón de novedades
+             * no publicó nunca sin que nadie se enterara. El payload ya transporta un secreto por
+             * precedente (google_custom_search_api_key) y se reescribe entero en cada
+             * migrate:fresh, así que no queda ningún paso manual por instancia que pueda faltar. */
+            'demo_eventos_token' => $lead->demo_eventos_token,
+            'demo_eventos_url'   => rtrim((string) config('app.url'), '/') . '/api/demo-eventos',
+
+            // El plan congelado, para el panel lateral y el roadmap de la instancia (misión 51).
+            'demo_plan' => $lead->demo_plan,
+
+            /* Las URLs van APARTE del plan y no adentro, a propósito: el plan es estructura y se
+             * congela; las URLs son contenido y se resuelven en cada setup. De los 43 slots
+             * multimedia hoy hay uno solo cargado, y se van subiendo desde /multimedia-demo sin
+             * deploy — si quedaran congeladas dentro del plan, un video subido después nunca
+             * llegaría a una demo ya armada. Es la misma separación que ya rige entre
+             * demo_catalogo.json (repo) y la tabla demo_media (base). */
+            'demo_media_urls' => DemoMedia::url_por_slot(),
+        ]);
+    }
+
+    /**
+     * Congela el plan de demo del lead si todavía no lo tiene, y le genera los hitos.
+     *
+     * Es la red de contención del lead que nunca abrió la página inmersiva: el formulario es el
+     * lugar natural del congelamiento, pero el botón "Disparar setup demo" del panel se puede
+     * pulsar antes. `respuestas_efectivas()` devuelve en ese caso los defaults del catálogo, así
+     * que el plan queda armado con lo que la página le habría mostrado preseleccionado.
+     *
+     * Sólo aplica a la dinámica nueva: un lead de la dinámica actual no tiene página inmersiva,
+     * ni roadmap, ni nada que congelar.
+     *
+     * Si el resolver devuelve null (catálogo sin sincronizar) no se congela nada y el setup sigue
+     * su curso: que no haya roadmap no puede impedir que la demo exista.
+     *
+     * @param Lead $lead
+     */
+    protected function congelar_plan_si_falta(Lead $lead)
+    {
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
+        if ($lead->demo_plan_congelado_at !== null) {
+            return;
+        }
+
+        DB::transaction(function () use ($lead) {
+            if (! DemoPlanResolver::congelar_en_memoria($lead)) {
+                return;
+            }
+
+            $lead->save();
+            DemoHitosService::generar($lead);
+        });
+    }
+
+    /**
      * Genera y persiste el token de ingreso directo a la demo para el Lead dado.
      *
      * Se llama una sola vez por corrida de run(), antes de armar el payload: como la llamada
@@ -437,11 +534,25 @@ class RunDemoSetupService
         // manual desde el panel usen exactamente la misma lógica y no se desincronicen.
         $expira_at = $this->demo_ingreso_token_service->calcular_expiracion($lead);
 
-        $lead->update([
+        $campos = [
             'demo_ingreso_token' => $token,
             'demo_ingreso_token_expira_at' => $expira_at,
             'demo_ingreso_token_revocado_at' => null,
-        ]);
+        ];
+
+        // Secreto del canal de eventos (misión 48). Se emite acá, en el mismo método y por el
+        // mismo motivo que el de ingreso: la llamada HTTP de run() tiene retry, y un token
+        // generado adentro del reintento daría un valor distinto por corrida. No tiene
+        // vencimiento propio: vive lo que viva la instancia, que se reescribe en cada setup.
+        //
+        // Sólo para la dinámica nueva. Un lead de la dinámica actual no emite nada por este canal
+        // —no tiene página inmersiva ni instancia que reporte—, así que ni siquiera se le escribe
+        // la columna: el alcance de la misión 48 termina en Lead::usa_experiencia_demo_nueva().
+        if ($lead->usa_experiencia_demo_nueva()) {
+            $campos['demo_eventos_token'] = Str::random(64);
+        }
+
+        $lead->update($campos);
 
         return $token;
     }

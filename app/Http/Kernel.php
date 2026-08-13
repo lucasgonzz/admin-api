@@ -66,5 +66,7 @@ class Kernel extends HttpKernel
         'admin.inbound.key' => \App\Http\Middleware\AdminInboundKey::class,
         // Endpoint de ingesta de tareas creadas por Claude desde la conversación (grupo 180).
         'claude.task.key' => \App\Http\Middleware\ClaudeTaskKey::class,
+        // Canal por el que una instancia de demo reporta lo que el lead hace adentro (misión 48).
+        'demo.eventos.key' => \App\Http\Middleware\DemoEventosKey::class,
     ];
 }

@@ -7,13 +7,16 @@ use App\Jobs\RunDemoSetupJob;
 use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use App\Services\DemoHitosService;
 use App\Services\DemoIngresoTokenService;
+use App\Services\DemoPlanResolver;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
 use App\Services\RunDemoSetupService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -110,7 +113,25 @@ class DemoExperienciaController extends Controller
             $lead->demo_form_completado_at = Carbon::now();
         }
 
-        $lead->save();
+        // El plan de demo se congela acá, en el primer envío, y en el MISMO save() que
+        // demo_form_completado_at (misión 48, pieza 2). El orden importa: congelar_en_memoria()
+        // lee las respuestas efectivas, que dependen de que demo_form_completado_at ya tenga
+        // valor — de lo contrario resolvería con los defaults del catálogo en vez de con lo que
+        // el lead acaba de contestar. En un reenvío no congela nada y sólo deja el log de la
+        // diferencia. Los hitos se generan en la misma transacción que el save.
+        DB::transaction(function () use ($lead) {
+            // Se llama en todos los envíos, no sólo en el primero: en el primero congela, y en un
+            // reenvío el método ve que el plan ya existe, NO lo re-resuelve y sólo deja constancia
+            // de qué respuestas cambiaron. Volver a resolverlo dejaría los hitos ya marcados
+            // apuntando a clips que pudieron salir del plan.
+            $congelo = DemoPlanResolver::congelar_en_memoria($lead);
+
+            $lead->save();
+
+            if ($congelo) {
+                DemoHitosService::generar($lead);
+            }
+        });
 
         // Trazabilidad en el hilo del lead: se escribe el LeadMessage directo acá (no se reusa
         // el helper administrativo del panel, que asume un admin autenticado vía Auth::user() —
@@ -272,6 +293,13 @@ class DemoExperienciaController extends Controller
             'is_followup'     => false,
             'is_status_event' => true,
         ]);
+
+        // El hito de ingreso queda en PARCIAL, no en completo: acá sólo consta que el lead pulsó
+        // el botón y que le dimos la URL. El `completo` lo pone el evento `demo.ingreso` que manda
+        // la instancia cuando valida el token (misión 50). Son dos señales distintas a propósito:
+        // la diferencia entre las dos es el caso "pulsó y no entró", que hoy no se ve desde ningún
+        // lado. Misión 48.
+        DemoHitosService::marcar_ingreso_pulsado($lead);
 
         return response()->json(['url' => $url], 200);
     }

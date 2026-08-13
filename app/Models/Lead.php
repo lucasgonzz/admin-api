@@ -169,6 +169,26 @@ class Lead extends Model
     protected $guarded = [];
 
     /**
+     * Atributos que nunca salen al serializar el modelo (misión 48).
+     *
+     * `demo_eventos_token` es el secreto con el que una instancia de demo se identifica ante
+     * `POST /api/demo-eventos`: no lo necesita ninguna vista ni ningún consumidor del panel, sale
+     * del admin una sola vez y por un camino explícito (el payload del setup, donde se pone a mano
+     * en `RunDemoSetupService`). Se oculta acá porque el modelo se serializa entero en varios
+     * lugares —`fullModel` de las rutas del panel, y el `broadcastWith()` de `LeadSuggestionCreated`,
+     * que emite sobre un `Channel` público— y `$guarded = []` sin `$hidden` significa que cualquier
+     * columna nueva viaja a todos ellos por default.
+     *
+     * A propósito NO se agrega `demo_ingreso_token` acá, aunque también sea un secreto: el admin
+     * lo necesita en claro para reconstruir el link que reenvía por WhatsApp (ver el docblock de
+     * `RunDemoSetupService::emitir_token_de_ingreso()`), así que ocultarlo puede romper el panel.
+     * Queda como hallazgo aparte, no como cambio al pasar de esta misión.
+     *
+     * @var array<int, string>
+     */
+    protected $hidden = ['demo_eventos_token'];
+
+    /**
      * Casts para mantener tipados los booleanos del formulario y las fechas
      * de agendamiento / trazabilidad (demo y producción).
      */
@@ -335,6 +355,13 @@ class Lead extends Model
         // contra el umbral con conversión implícita.
         'intro_visto_pct'                    => 'integer',
         'intro_visto_at'                     => 'datetime',
+
+        // Plan de demo congelado (misión 48): qué secciones y qué clips le tocan a este lead. Es
+        // una foto, no una vista: se resuelve una sola vez con DemoPlanResolver y no se recalcula
+        // al leer, porque el catálogo se sincroniza a producción sin deploy y le cambiaría el
+        // roadmap a un lead que está en el medio de la demo.
+        'demo_plan'                          => 'array',
+        'demo_plan_congelado_at'             => 'datetime',
     ];
 
     /**

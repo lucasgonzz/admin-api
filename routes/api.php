@@ -16,6 +16,7 @@ use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
 use App\Http\Controllers\DemoController;
+use App\Http\Controllers\DemoEventosController;
 use App\Http\Controllers\DemoExperienciaController;
 use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
@@ -84,6 +85,15 @@ Route::prefix('demo-experiencia')->group(function () {
     // Progreso del lead sobre el video de introducción (misión 46). Público como los otros tres.
     Route::post('{uuid}/intro-progreso', [DemoExperienciaController::class, 'store_intro_progreso_json']);
 });
+
+/*
+| Canal de ingesta de eventos de una instancia de demo (misión 48): fuera de auth:sanctum, con
+| middleware propio. El header X-Demo-Eventos-Key ES el identificador del lead (no se manda
+| lead_id en el body: dos fuentes para lo mismo pueden contradecirse). Ver
+| App\Http\Middleware\DemoEventosKey y App\Http\Controllers\DemoEventosController.
+*/
+Route::middleware('demo.eventos.key')
+    ->post('demo-eventos', [DemoEventosController::class, 'store_json']);
 
 /*
 | Callback desde empresa-api cliente (inbound)
