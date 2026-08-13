@@ -249,6 +249,31 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
     }
 
     /**
+     * 4bis. La otra mitad del test 4, y es la que fija la ASIMETRÍA: para un lead `actual` el turno
+     *       ya empezado **no** dispara, porque para esa dinámica el tope superior sigue existiendo.
+     *       Sin este test, el 4 solo prueba que la dinámica actual sigue disparando y no que sigue
+     *       disparando *igual*: alguien podría sacarle el tope a las dos y el verde no cambiaría.
+     *
+     * @return void
+     */
+    public function test_la_dinamica_actual_conserva_el_tope_superior(): void
+    {
+        $ahora = $this->momento_base();
+        $this->fijar_reloj($ahora);
+
+        // Exactamente el caso del test 3, que en la dinámica nueva SÍ dispara.
+        $lead = $this->crear_lead(
+            Lead::EXPERIENCIA_ACTUAL,
+            $ahora->copy()->subMinutes(20),
+            $ahora->copy()
+        );
+
+        $this->artisan('leads:run-demo-setup')->assertExitCode(0);
+
+        $this->assertSame('pendiente', $lead->refresh()->demo_setup_status);
+    }
+
+    /**
      * 5. Con el setup exitoso, el intro en 40% rebota con `intro_pendiente`; en 95% entra.
      *
      * @return void
