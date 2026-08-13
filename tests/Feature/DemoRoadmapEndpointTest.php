@@ -208,6 +208,45 @@ class DemoRoadmapEndpointTest extends TestCase
     }
 
     /**
+     * Un plan al que le falta alguna clave no puede tirar el endpoint: el panel lo poléa cada 10
+     * segundos y un 500 ahí se convierte en un error cada diez segundos.
+     */
+    public function test_un_plan_mutilado_no_rompe_el_endpoint(): void
+    {
+        $this->autenticar();
+        $lead = $this->crear_lead(true);
+
+        $mutilados = [
+            'sin respuestas'             => ['secciones' => [], 'condiciones_invalidas' => []],
+            'sin condiciones_invalidas'  => ['respuestas' => ['tipo_precios' => 'unico']],
+            'plan vacio'                 => [],
+            'claves en null'             => ['respuestas' => null, 'condiciones_invalidas' => null],
+        ];
+
+        foreach ($mutilados as $caso => $plan) {
+            $lead->demo_plan = $plan;
+            $lead->save();
+
+            $r = $this->getJson('/api/admin/lead/' . $lead->id . '/demo-roadmap');
+
+            $this->assertSame(200, $r->status(), 'caso: ' . $caso);
+            $this->assertIsArray($r->json('respuestas'), 'caso: ' . $caso);
+            $this->assertIsArray($r->json('condiciones_invalidas'), 'caso: ' . $caso);
+        }
+    }
+
+    /**
+     * Un id que no existe da 404, y uno no numérico tampoco puede dar 500.
+     */
+    public function test_un_lead_inexistente_da_404(): void
+    {
+        $this->autenticar();
+
+        $this->getJson('/api/admin/lead/99999999/demo-roadmap')->assertStatus(404);
+        $this->getJson('/api/admin/lead/pepe/demo-roadmap')->assertStatus(404);
+    }
+
+    /**
      * Las respuestas que viajan son las CONGELADAS dentro del plan, no las columnas actuales del
      * lead: si reenvió el formulario pueden diferir, y lo que explica el recorrido que se está
      * mostrando es con lo que se resolvió, no lo último que contestó.

@@ -832,7 +832,10 @@ class LeadController extends Controller
     }
 
     /**
-     * GET /api/lead/{id}/demo-roadmap — el recorrido de la demo de este lead (misión 49).
+     * GET /api/admin/lead/{id}/demo-roadmap — el recorrido de la demo de este lead (misión 49).
+     *
+     * (El prefijo `admin` lo pone el grupo de rutas del panel, donde viven también
+     * `run-demo-setup` y `demo-token/reemitir`. La spec de la misión escribía el path sin él.)
      *
      * Devuelve el plan congelado, sus hitos y el progreso en UNA sola llamada. Es a propósito:
      * el panel poléa este endpoint cada 10 segundos mientras el lead está adentro de la demo, y
@@ -850,8 +853,12 @@ class LeadController extends Controller
      */
     public function demo_roadmap_json($id)
     {
-        /* Lead del que se pide el recorrido. */
-        $lead = Lead::findOrFail($id);
+        /* Lead del que se pide el recorrido. Se piden SOLO las tres columnas que se usan, y no el
+         * `select *` de siempre: `leads` tiene ~140 columnas, doce de ellas TEXT/JSON (notas,
+         * resúmenes de llamada, errores de setup), y este endpoint se poléa cada diez segundos por
+         * cada lead abierto. En el resto del controller el `select *` no cuesta nada porque se
+         * llama una vez por acción; acá se llama 540 veces por lead y por sesión. */
+        $lead = Lead::select('id', 'demo_plan', 'demo_plan_congelado_at')->findOrFail($id);
 
         $plan = $lead->demo_plan;
         $tiene_plan = is_array($plan) && ! empty($plan);
