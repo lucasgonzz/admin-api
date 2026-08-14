@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Demo;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
+use App\Models\LeadDemoHito;
 use App\Jobs\RunDemoSetupJob;
 use App\Services\LeadDemoSettings;
 use App\Services\RunDemoSetupService;
@@ -294,6 +295,66 @@ class DemoSetupFueraDelRequestTest extends TestCase
 
         $this->assertSame('fallido', (string) $con_eventos->refresh()->demo_setup_status);
         $this->assertSame(0, (int) $con_eventos->demo_setup_intentos);
+    }
+
+    /**
+     * 5quater. La tercera señal: el lead que pulsó "Entrar a la demo" tampoco recibe un disparo
+     * automático, y esto vale también para un lead en `pendiente`, no sólo para el reintento.
+     *
+     * Lo agregó la verificación de la misión 60. Es la señal más importante de las tres porque es
+     * la única local de admin-api: las otras dos dependen de que conteste el lead o de que la
+     * instancia pueda alcanzar el canal de eventos.
+     */
+    public function test_no_se_dispara_el_setup_si_el_lead_ya_pulso_el_ingreso(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+        Http::fake(['*' => Http::response(['ok' => true], 200)]);
+
+        // En `pendiente`, no en `fallido`: el agujero que cerró la verificación era justamente que
+        // la guarda colgaba del reintento y este camino no la tocaba.
+        $lead = $this->crear_lead(
+            Lead::EXPERIENCIA_NUEVA,
+            $this->momento_base()->copy()->subMinutes(10),
+            'pendiente'
+        );
+
+        $hito                   = new LeadDemoHito();
+        $hito->lead_id          = $lead->id;
+        $hito->tipo             = LeadDemoHito::TIPO_INGRESO;
+        $hito->orden            = 0;
+        $hito->titulo           = 'Entrar a la demo';
+        $hito->tutorial_visto_at = $this->momento_base()->copy();
+        $hito->save();
+
+        $this->artisan('leads:run-demo-setup')->assertExitCode(0);
+
+        $this->assertSame('pendiente', (string) $lead->refresh()->demo_setup_status);
+    }
+
+    /**
+     * 6. El comando de vencimiento tampoco toca a la dinámica ACTUAL.
+     *
+     * También de la verificación: la primera versión no filtraba por dinámica, así que le pisaba el
+     * estado y el error a un lead 'actual' colgado. No destruía nada, pero el criterio de
+     * aceptación de la misión dice *ningún* camino.
+     */
+    public function test_el_vencimiento_no_toca_a_la_dinamica_actual(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $timeout = LeadDemoSettings::get_setup_timeout_minutos();
+
+        $lead = $this->crear_lead(
+            Lead::EXPERIENCIA_ACTUAL,
+            $this->momento_base()->copy()->addMinutes(5),
+            'ejecutandose',
+            $this->momento_base()->copy()->subMinutes($timeout + 5)
+        );
+
+        $this->artisan('leads:vencer-demo-setups-colgados')->assertExitCode(0);
+
+        $this->assertSame('ejecutandose', (string) $lead->refresh()->demo_setup_status);
+        $this->assertEmpty((string) $lead->demo_setup_last_error);
     }
 
     /**

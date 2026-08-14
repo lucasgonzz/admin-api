@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
+use App\Models\LeadDemoHito;
 use App\Helpers\AppTime;
 use App\Services\RunDemoSetupService;
 use Illuminate\Console\Command;
@@ -84,6 +85,24 @@ class RunDemoSetup extends Command
 
         foreach ($candidates as $lead) {
             $es_reintento = ((string) $lead->demo_setup_status === 'fallido');
+
+            /* 🔴 La guarda de "nadie adentro" se aplica a TODO disparo automático, no sólo al
+             * reintento, y esto lo corrigió la verificación de la misión 60. Colgada del reintento
+             * tenía un agujero: `reclamar_reintento()` deja al lead en `pendiente`, así que si el
+             * proceso muere entre ese UPDATE y el `run()` —un `QueryException`, un fatal de
+             * memoria, el cron cortado— el lead se queda en `pendiente` y en el tick siguiente el
+             * comando lo levanta como si fuera de primera vez, sin pasar por ninguna guarda. El
+             * contador aguantaba igual (no había un segundo reintento), pero el que corría lo hacía
+             * sin lo único que evita el daño irreversible.
+             *
+             * Y pensado de nuevo, colgarla del reintento nunca tuvo sentido: un lead en `pendiente`
+             * con alguien adentro tampoco tiene que recibir un `migrate:fresh` automático.
+             *
+             * El botón manual del panel NO pasa por acá (`run($lead, false)`), a propósito: Lucas
+             * tiene que poder forzar un armado sabiendo lo que hace. */
+            if ($lead->usa_experiencia_demo_nueva() && $this->hay_alguien_adentro($lead)) {
+                continue;
+            }
 
             /* Un `fallido` tiene que ganarse el turno antes de que se lo evalúe como candidato. Si
              * no puede reintentarse, se lo saltea sin ruido: no es un error, es el estado final. */
@@ -172,23 +191,68 @@ class RunDemoSetup extends Command
             return false;
         }
 
+        return true;
+    }
+
+    /**
+     * 🔴 ¿Hay alguien adentro de la demo de este lead?
+     *
+     * Es la guarda que evita el único daño irreversible de todo este camino: disparar el setup
+     * hace `migrate:fresh` sobre la instancia, y hacerlo con el lead adentro le vacía la base en
+     * vivo. Alcanza con que UNA de las tres señales diga que sí.
+     *
+     * Las tres, y por qué son tres y no dos:
+     *
+     *  1. `demo_ingreso_confirmado` — lo infiere el agente de una respuesta del lead por WhatsApp.
+     *     Depende de que el lead conteste.
+     *  2. Cualquier evento en `demo_eventos_recibidos` — depende de que la instancia pueda alcanzar
+     *     `/api/demo-eventos`. Se pregunta por cualquiera y no sólo por `demo.ingreso`: un clip
+     *     terminado prueba lo mismo, y filtrar por nombre ataría la guarda a un vocabulario que
+     *     todavía se está escribiendo (misión 50).
+     *  3. El hito de ingreso pulsado (`tutorial_visto_at` del hito `ingreso`) — lo escribe el
+     *     propio admin-api cuando el lead aprieta "Entrar a la demo" en la página inmersiva. La
+     *     agregó la verificación de la misión 60, y es la más importante de las tres porque es la
+     *     única **local**: las otras dos dependen de un tercero que puede no responder. El caso que
+     *     la hace falta es real — un intento manual desde el panel rota `demo_eventos_token` y, si
+     *     falla, deja a la instancia viva emitiendo con el token viejo, o sea 401 permanente: la
+     *     señal 2 se apaga justo cuando más falta hace.
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    private function hay_alguien_adentro(Lead $lead): bool
+    {
         if ((bool) $lead->demo_ingreso_confirmado) {
-            Log::info('RunDemoSetup: no se reintenta el setup, el lead ya confirmó el ingreso.', [
+            Log::info('RunDemoSetup: no se dispara el setup, el lead ya confirmó el ingreso.', [
                 'lead_id' => $lead->id,
             ]);
 
-            return false;
+            return true;
         }
 
         if (DemoEventoRecibido::where('lead_id', $lead->id)->exists()) {
-            Log::info('RunDemoSetup: no se reintenta el setup, la instancia ya reportó eventos del lead.', [
+            Log::info('RunDemoSetup: no se dispara el setup, la instancia ya reportó eventos del lead.', [
                 'lead_id' => $lead->id,
             ]);
 
-            return false;
+            return true;
         }
 
-        return true;
+        $ingreso_pulsado = LeadDemoHito::where('lead_id', $lead->id)
+            ->where('tipo', LeadDemoHito::TIPO_INGRESO)
+            ->whereNotNull('tutorial_visto_at')
+            ->exists();
+
+        if ($ingreso_pulsado) {
+            Log::info('RunDemoSetup: no se dispara el setup, el lead ya pulsó el ingreso a la demo.', [
+                'lead_id' => $lead->id,
+            ]);
+
+            return true;
+        }
+
+        return false;
     }
 
     /**

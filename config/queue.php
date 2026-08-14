@@ -38,7 +38,15 @@ return [
             'driver' => 'database',
             'table' => 'jobs',
             'queue' => 'default',
-            'retry_after' => 90,
+            /* 🔴 660 y no los 90 de siempre (misión 60). `retry_after` tiene que ser MAYOR que el
+             * timeout del job más largo de esta conexión, y desde esta misión el `RunDemoSetupJob`
+             * corre acá con `$timeout = 600`. Con 90, un setup real —que tarda hasta dos minutos—
+             * volvía a quedar disponible mientras el primer worker lo seguía corriendo bien: el
+             * worker del minuto siguiente lo reservaba, veía `attempts > tries` y lo mandaba a
+             * `failed_jobs` con MaxAttemptsExceededException. No habría doble `migrate:fresh` (el
+             * claim atómico lo tapa), pero `failed_jobs` se llenaría de fallos falsos, que es lo
+             * primero que va a mirar el próximo que venga a debuggear esto. */
+            'retry_after' => 660,
             'after_commit' => false,
         ],
 

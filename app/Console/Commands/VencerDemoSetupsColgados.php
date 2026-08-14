@@ -61,7 +61,19 @@ class VencerDemoSetupsColgados extends Command
             ->where('demo_setup_status', 'ejecutandose')
             ->whereNotNull('demo_setup_last_run_at')
             ->where('demo_setup_last_run_at', '<', $limite)
-            ->get();
+            ->get()
+            /* 🔴 Sólo la dinámica nueva. Lo corrigió la verificación de la misión 60: la primera
+             * versión no filtraba, así que a un lead 'actual' colgado también le pisaba el estado y
+             * el error. No destruía nada —el reintento sí tiene su guarda de dinámica— pero el
+             * criterio de aceptación de la misión es explícito: *ningún* lead con
+             * `demo_experiencia` distinto de 'nueva' cambia de comportamiento en ningún camino.
+             *
+             * El filtro va en PHP y no en el WHERE a propósito: `usa_experiencia_demo_nueva()` cae
+             * a la dinámica actual ante null, string vacío o cualquier valor desconocido, y esa
+             * lógica no se puede duplicar en SQL sin que las dos versiones diverjan algún día. */
+            ->filter(function (Lead $lead) {
+                return $lead->usa_experiencia_demo_nueva();
+            });
 
         /* Contador de leads vencidos para el log final. */
         $vencidos = 0;
