@@ -18,6 +18,22 @@
         </include>
     </coverage>
     <php>
+        <!--
+            🔴 512M y no el default del php.ini (128M): sin esto la suite MUERE a mitad y el gate
+            del carril de merge no puede medir nada (misión 60, 14/8/2026).
+
+            El corte es siempre en el mismo punto —63 de 117 tests, en
+            DemoExtendidaHastaElFinDelDiaTest— con "Allowed memory size of 134217728 bytes
+            exhausted" en LeadAiService.php:117. Un fatal por memoria mata el proceso de PHP entero,
+            así que phpunit no llega a escribir el XML de junit: el archivo queda en 0 bytes y el
+            carril aborta con "no se pudo medir", ni siquiera con rojos — sin poder medir. Medido en
+            la rama y en master: pasa igual en los dos, o sea que mientras el límite siga en 128M
+            NINGUNA misión de admin-api puede mergear.
+
+            Sube el techo de la corrida de tests y nada más: no toca el php.ini de Apache ni el
+            límite con el que corre la aplicación en producción.
+        -->
+        <ini name="memory_limit" value="512M"/>
         <server name="APP_ENV" value="testing"/>
         <server name="BCRYPT_ROUNDS" value="4"/>
         <server name="CACHE_DRIVER" value="array"/>
