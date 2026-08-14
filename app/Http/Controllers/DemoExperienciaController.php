@@ -493,8 +493,30 @@ class DemoExperienciaController extends Controller
      * Sólo para la dinámica nueva y sólo con el setup todavía en `pendiente`. Si el turno es para
      * más adelante, no dispara nada: lo levanta el comando cuando abra la ventana.
      *
-     * `afterResponse()` y no `dispatch()` a secas: con `QUEUE_CONNECTION=sync` un dispatch común
-     * correría inline y le bloquearía al lead la respuesta del formulario hasta 300 segundos.
+     * 🔴 `->onConnection('database')` explícito, y NO `afterResponse()` ni `dispatch()` pelado
+     * (misión 60):
+     *
+     *  - `afterResponse()` era lo que había, y su premisa era falsa. `dispatchAfterResponse()` de
+     *    Laravel 8 registra un `container->terminating()` que llama a `dispatchNow()`: el job corre
+     *    INLINE, en este mismo proceso, nunca en un worker. Y `Response::send()` sólo suelta la
+     *    conexión antes de los `terminating` si existe `fastcgi_finish_request()`, que bajo mod_php
+     *    no existe. Medido el 14/8/2026: el navegador del lead se comía 124 segundos con este POST
+     *    abierto, y a los 120 Apache mataba el proceso por `max_execution_time`. Un fatal por
+     *    tiempo no se puede capturar, así que el lead quedaba en `ejecutandose` para siempre.
+     *  - `dispatch()` a secas tampoco sirve: `config/queue.php` es
+     *    `env('QUEUE_CONNECTION', 'sync')`, y con `sync` volvería a correr inline. Esto no puede
+     *    depender de un `.env`. (Precedente al revés en este repo:
+     *    `LeadAiSuggestionAutoSendScheduler` pone `->onConnection('sync')` explícito cuando lo que
+     *    quiere es justamente correr inline.)
+     *
+     * Quién lo levanta: `Kernel.php` ya corre `queue:work --stop-when-empty` cada minuto. Ahí el
+     * job vive en un proceso de CLI, donde `max_execution_time` es 0 por el propio SAPI, y recién
+     * entonces el `$timeout` y el `$tries` declarados en el job significan algo.
+     *
+     * El costo asumido: hasta 60 segundos de latencia hasta el próximo tick. Entra con margen —el
+     * setup tarda hasta dos minutos y el lead está mirando un intro de ~6 (`demo_experiencia.md`
+     * §3.16 A)—, y se paga para no colgarle el navegador al lead los mismos 124 segundos y encima
+     * perder el resultado.
      *
      * @param Lead $lead
      *
@@ -522,7 +544,7 @@ class DemoExperienciaController extends Controller
             'motivo'  => $evaluacion['motivo'],
         ]);
 
-        RunDemoSetupJob::dispatch($lead->id)->afterResponse();
+        RunDemoSetupJob::dispatch($lead->id)->onConnection('database');
     }
 
     /**

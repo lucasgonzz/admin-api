@@ -146,7 +146,23 @@ class RunDemoSetupService
                 ])
                 // El timeout default es bajo; el setup puede tardar minutos entre migraciones y seeders
                 ->timeout((int) config('services.client_api.timeout', 15) * 20)
-                ->retry((int) config('services.client_api.retries', 2), 500)
+                /* 🔴 UN solo intento, a diferencia del resto de los llamadores de este cliente HTTP
+                 * (misión 60). No es preferencia de estilo:
+                 *
+                 *  - Reintentar un timeout del servidor da el mismo timeout. Duplica la espera con
+                 *    cero probabilidad de éxito, y era justamente lo que empujaba a admin-api más
+                 *    allá de su propio techo de ejecución.
+                 *  - Peor: el segundo intento le manda otro `migrate:fresh` a una instancia que
+                 *    puede estar todavía procesando el primero. Es la única llamada de este repo
+                 *    que dispara una operación destructiva y larga del otro lado; las demás
+                 *    (PublishVersionService y compañía) son idempotentes o baratas, y por eso
+                 *    `config('services.client_api.retries')` NO se toca: lo comparten.
+                 *  - Efecto lateral buscado: con `tries = 1` el cliente de Laravel deja de llamar
+                 *    solo a `$response->throw()`, así que una respuesta no exitosa vuelve por el
+                 *    camino normal y la maneja el `if ($response->successful())` de acá abajo, que
+                 *    guarda el cuerpo. Antes se convertía en excepción y el mensaje llegaba
+                 *    truncado por `RequestException`. */
+                ->retry(1, 500)
                 ->post($erp_api_url . '/api/admin-sync/demo-setup', $payload);
 
             if ($response->successful()) {
@@ -158,9 +174,13 @@ class RunDemoSetupService
                 return $lead->refresh();
             }
 
+            /* 2000 y no 500: la columna es TEXT y el cuerpo de un 500 de Laravel trae el mensaje
+             * de la excepción y el principio del stack, que es lo único que se tiene para saber
+             * por qué falló el armado. Con 500 caracteres el mensaje útil quedaba cortado justo
+             * cuando más falta hace. */
             return $this->mark_failed(
                 $lead,
-                'HTTP ' . $response->status() . ': ' . substr($response->body(), 0, 500)
+                'HTTP ' . $response->status() . ': ' . substr($response->body(), 0, 2000)
             );
         } catch (\Throwable $e) {
             Log::error('RunDemoSetupService@run error: ' . $e->getMessage(), [

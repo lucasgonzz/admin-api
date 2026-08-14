@@ -19,6 +19,18 @@ class LeadDemoSettings
     public const KEY_SETUP_MINUTOS_ANTES = 'demo_setup_minutos_antes';
 
     /**
+     * Clave: minutos que un setup puede pasar en `ejecutandose` antes de darse por colgado
+     * (misión 60).
+     *
+     * Existe porque `ejecutandose` era un estado terminal de hecho: el comando de cada minuto sólo
+     * mira `pendiente`, así que un setup cuyo proceso murió sin poder escribir el fallo se quedaba
+     * ahí para siempre. Medido el 14/8/2026 sobre la base real: tres leads colgados y **ninguno**
+     * que hubiera llegado nunca a `exitoso` en dos meses. La lección ya estaba escrita en este repo
+     * para `demo_updates` (`DemoUpdateService.php:145`, 13/7/2026) y no se había generalizado.
+     */
+    public const KEY_SETUP_TIMEOUT_MINUTOS = 'demo_setup_timeout_minutos';
+
+    /**
      * Clave: margen mínimo, en minutos desde ahora, para ofrecer un horario de demo HOY (grupo
      * 306, prompt 02). Solo aplica a leads en la dinámica nueva — la actual sigue sin ofrecer
      * horarios de hoy.
@@ -140,6 +152,16 @@ class LeadDemoSettings
 
     /** Valor por defecto: setup antes del inicio (minutos). */
     private const DEFAULT_SETUP_MINUTOS_ANTES = 15;
+
+    /**
+     * Valor por defecto: minutos en `ejecutandose` antes de darlo por colgado (misión 60).
+     *
+     * 10 y no 3: el setup real tarda hasta dos minutos en producción, y el precio de los dos
+     * errores no es el mismo. Pasarse de holgado sólo demora el aviso; quedarse corto marca como
+     * fallido un armado que estaba andando bien y habilita el reintento, que dispara otro
+     * `migrate:fresh` sobre una instancia ocupada.
+     */
+    private const DEFAULT_SETUP_TIMEOUT_MINUTOS = 10;
 
     /**
      * Valor por defecto: margen mínimo para ofrecer un horario de HOY (minutos). Es el tiempo en
@@ -264,6 +286,7 @@ class LeadDemoSettings
         return [
             'duracion_minutos'                    => self::get_duracion_minutos(),
             'setup_minutos_antes'                 => self::get_setup_minutos_antes(),
+            'setup_timeout_minutos'               => self::get_setup_timeout_minutos(),
             'demo_minimo_minutos_desde_ahora'     => self::get_demo_minimo_minutos_desde_ahora(),
             'demo_intro_umbral_pct'               => self::get_demo_intro_umbral_pct(),
             'demo_ventana_extendida_max_horas'    => self::get_ventana_extendida_max_horas(),
@@ -303,6 +326,12 @@ class LeadDemoSettings
     {
         AdminSetting::set(self::KEY_DURACION_MINUTOS,                (string) self::clamp((int) $data['duracion_minutos']));
         AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES,             (string) self::clamp((int) $data['setup_minutos_antes']));
+
+        // Timeout del setup colgado (mision 60): opcional, mismo criterio que los campos de abajo.
+        // El SPA todavia no lo manda y una version vieja del front no tiene que borrar el valor.
+        if (isset($data['setup_timeout_minutos'])) {
+            AdminSetting::set(self::KEY_SETUP_TIMEOUT_MINUTOS, (string) self::clamp_setup_timeout((int) $data['setup_timeout_minutos']));
+        }
 
         // Margen minimo para ofrecer horarios de HOY (grupo 306, prompt 02): opcional a proposito,
         // igual que las franjas de demo del prompt 01 -- el SPA todavia no manda este campo.
@@ -449,6 +478,9 @@ class LeadDemoSettings
         if (AdminSetting::get(self::KEY_SETUP_MINUTOS_ANTES) === null) {
             AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES, (string) self::DEFAULT_SETUP_MINUTOS_ANTES);
         }
+        if (AdminSetting::get(self::KEY_SETUP_TIMEOUT_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_SETUP_TIMEOUT_MINUTOS, (string) self::DEFAULT_SETUP_TIMEOUT_MINUTOS);
+        }
         if (AdminSetting::get(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA) === null) {
             AdminSetting::set(self::KEY_DEMO_MINIMO_MINUTOS_DESDE_AHORA, (string) self::DEFAULT_DEMO_MINIMO_MINUTOS_DESDE_AHORA);
         }
@@ -541,6 +573,20 @@ class LeadDemoSettings
     public static function get_setup_minutos_antes(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_SETUP_MINUTOS_ANTES, (string) self::DEFAULT_SETUP_MINUTOS_ANTES));
+    }
+
+    /**
+     * Minutos que un setup puede pasar en `ejecutandose` antes de darse por colgado (misión 60).
+     *
+     * Tiene clamp propio con mínimo 1 y no el de minutos, que arranca en 0: con 0 el comando de
+     * vencimiento le pisaría el estado a un setup que acaba de arrancar y todavía está corriendo
+     * bien, y ese es exactamente el caso en el que un reintento hace daño.
+     *
+     * @return int
+     */
+    public static function get_setup_timeout_minutos(): int
+    {
+        return self::clamp_setup_timeout((int) AdminSetting::get(self::KEY_SETUP_TIMEOUT_MINUTOS, (string) self::DEFAULT_SETUP_TIMEOUT_MINUTOS));
     }
 
     /**
@@ -962,6 +1008,27 @@ class LeadDemoSettings
         }
         if ($value > self::MAX_HORAS_VENTANA) {
             return self::MAX_HORAS_VENTANA;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Acota el timeout del setup colgado al rango [1, MAX_MINUTOS] (misión 60).
+     *
+     * El mínimo es 1 y no 0 a propósito: ver el docblock de `get_setup_timeout_minutos()`.
+     *
+     * @param int $value Valor en minutos.
+     *
+     * @return int
+     */
+    private static function clamp_setup_timeout(int $value): int
+    {
+        if ($value < 1) {
+            return 1;
+        }
+        if ($value > self::MAX_MINUTOS) {
+            return self::MAX_MINUTOS;
         }
 
         return $value;

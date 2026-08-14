@@ -15,16 +15,32 @@ use Illuminate\Support\Facades\Log;
  * Dispara el demo setup de un lead apenas completa el formulario de la página inmersiva
  * (misión 46, pieza 2).
  *
- * 🔴 Se despacha SIEMPRE con `->afterResponse()`, nunca a secas. `.env` declara
- * `QUEUE_CONNECTION=sync`, así que un `dispatch()` común correría INLINE y le bloquearía al lead la
- * respuesta del formulario hasta 300 segundos — el timeout de la llamada HTTP al empresa-api de la
- * demo. Con `afterResponse()` el trabajo corre después de mandada la respuesta y no depende del
- * driver de cola.
+ * 🔴 Se despacha SIEMPRE con `->onConnection('database')`, nunca a secas y nunca con
+ * `afterResponse()` (misión 60, 14/8/2026). Este docblock decía lo contrario y **las dos premisas
+ * que daba eran falsas**; quedan escritas acá para que nadie las vuelva a dar por buenas:
  *
- * Y no se encola como job normal por otro motivo: `queue:work --stop-when-empty` también corre
- * `everyMinute()`, así que un job en cola tendría exactamente la misma latencia que el comando
- * `leads:run-demo-setup` y no compraría nada. Lo que esta pieza viene a ganar son justamente esos
- * hasta 60 segundos, sobre un margen total de 5 minutos.
+ *  1. *"Con `afterResponse()` el trabajo corre después de mandada la respuesta"*. No.
+ *     `Dispatcher::dispatchAfterResponse()` de `laravel/framework` v8.83.29 registra un
+ *     `container->terminating(...)` que llama a **`dispatchNow()`**: el job corre inline, en este
+ *     mismo proceso, y nunca lo toma un worker. Corolario incómodo: el `$timeout` y el `$tries` de
+ *     acá abajo **no regían nada**, porque son ajustes de worker de cola.
+ *  2. *"...y no depende del driver de cola"*. Tampoco, pero peor: `Response::send()` de
+ *     `symfony/http-foundation` 5.4 sólo suelta la conexión antes de los `terminating` si existe
+ *     `fastcgi_finish_request()`. El entorno de Lucas corre `apache2handler` (mod_php), donde esa
+ *     función no existe — verificado sirviendo una sonda por HTTP, no leyendo el disco. Así que el
+ *     lead esperaba TODO el trabajo con el POST del formulario abierto: 124 segundos medidos, y
+ *     Apache matando el proceso a los 120 por `max_execution_time`. Un fatal por tiempo no es
+ *     capturable, así que el `catch (\Throwable)` del service nunca corría y el lead quedaba en
+ *     `demo_setup_status = 'ejecutandose'` con el error en NULL.
+ *
+ * A la cola de base de datos, entonces, y con la conexión explícita: `config/queue.php` es
+ * `env('QUEUE_CONNECTION', 'sync')` y con `sync` un `dispatch()` común volvería a correr inline.
+ * Lo levanta el `queue:work --stop-when-empty` que `Kernel.php` ya corre cada minuto, en un proceso
+ * de CLI donde `max_execution_time` vale 0 y estos `$timeout`/`$tries` sí se aplican.
+ *
+ * La latencia de hasta 60 segundos hasta el próximo tick es el costo asumido, y es el mismo que
+ * tiene `leads:run-demo-setup`. La versión anterior de este docblock decía que por eso encolar "no
+ * compraba nada": compra que el trabajo no muera a los 120 segundos y que el lead no espere.
  */
 class RunDemoSetupJob implements ShouldQueue
 {

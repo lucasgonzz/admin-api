@@ -34,6 +34,11 @@ class Kernel extends ConsoleKernel
         // Corre demo setup automático X minutos antes del inicio de cada demo.
         $schedule->command('leads:run-demo-setup')->everyMinute();
 
+        // Saca del limbo los setups que quedaron en `ejecutandose` y nunca reportaron (misión 60).
+        // Cada minuto y no cada cinco: el turno del lead dura una hora y el reintento único que
+        // habilita este vencimiento tiene que llegar a tiempo para servirle de algo.
+        $schedule->command('leads:vencer-demo-setups-colgados')->everyMinute();
+
         // Envía check de ingreso X minutos después del inicio de la demo.
         $schedule->command('leads:check-demo-ingress')->everyMinute();
 
@@ -65,7 +70,16 @@ class Kernel extends ConsoleKernel
             ->dailyAt("{$report_hour}:00")
             ->withoutOverlapping();
 
-        $schedule->command('queue:work --stop-when-empty')->everyMinute();
+        /* 🔴 `database` explícito, y no `queue:work` a secas (misión 60). Sin el nombre de la
+         * conexión, el worker toma la default, que es `env('QUEUE_CONNECTION', 'sync')` — o sea
+         * `sync`, que no tiene backend que consumir: el comando corría cada minuto y **no miraba la
+         * tabla `jobs`**. Medido el 14/8/2026: un job encolado en `database` sobrevive intacto a
+         * `queue:work --stop-when-empty` y lo procesa recién `queue:work database`.
+         *
+         * No es teórico ni nuevo: en la base de producción había tres `RunDemoSetupJob` encolados
+         * con `attempts = 0`, es decir jamás intentados. Alguien ya encolaba a `database` y nadie
+         * los consumía. */
+        $schedule->command('queue:work database --stop-when-empty')->everyMinute();
     }
 
     /**
