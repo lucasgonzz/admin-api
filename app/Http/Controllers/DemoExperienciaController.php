@@ -509,7 +509,7 @@ class DemoExperienciaController extends Controller
      *    `LeadAiSuggestionAutoSendScheduler` pone `->onConnection('sync')` explícito cuando lo que
      *    quiere es justamente correr inline.)
      *
-     * Quién lo levanta: `Kernel.php` ya corre `queue:work --stop-when-empty` cada minuto. Ahí el
+     * Quién lo levanta: `Kernel.php` corre `queue:work database --stop-when-empty` cada minuto. Ahí el
      * job vive en un proceso de CLI, donde `max_execution_time` es 0 por el propio SAPI, y recién
      * entonces el `$timeout` y el `$tries` declarados en el job significan algo.
      *

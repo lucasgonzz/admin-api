@@ -143,7 +143,13 @@ class DemoSetupFueraDelRequestTest extends TestCase
 
         $respuesta->assertStatus(200);
 
-        Queue::assertPushed(RunDemoSetupJob::class);
+        /* 🔴 Se afirma la CONEXIÓN, no sólo que se despachó, y lo corrigió la verificación de esta
+         * misión. `QueueFake::connection()` devuelve `$this` sin mirar el nombre, así que un
+         * `assertPushed` pelado pasa igual con un `dispatch()` sin `onConnection` — o sea que no
+         * protegía justamente el requisito de la pieza 1, que es la regresión más probable acá. */
+        Queue::assertPushed(RunDemoSetupJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
 
         // El estado NO se movió: el trabajo quedó encolado, no corrió. Si el job se hubiera
         // ejecutado inline, acá habría `ejecutandose`, `exitoso` o `fallido`.

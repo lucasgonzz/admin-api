@@ -35,7 +35,7 @@ use Illuminate\Support\Facades\Log;
  *
  * A la cola de base de datos, entonces, y con la conexión explícita: `config/queue.php` es
  * `env('QUEUE_CONNECTION', 'sync')` y con `sync` un `dispatch()` común volvería a correr inline.
- * Lo levanta el `queue:work --stop-when-empty` que `Kernel.php` ya corre cada minuto, en un proceso
+ * Lo levanta el `queue:work database --stop-when-empty` que `Kernel.php` corre cada minuto, en un proceso
  * de CLI donde `max_execution_time` vale 0 y estos `$timeout`/`$tries` sí se aplican.
  *
  * La latencia de hasta 60 segundos hasta el próximo tick es el costo asumido, y es el mismo que

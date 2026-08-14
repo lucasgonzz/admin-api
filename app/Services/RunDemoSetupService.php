@@ -146,8 +146,8 @@ class RunDemoSetupService
                 ])
                 // El timeout default es bajo; el setup puede tardar minutos entre migraciones y seeders
                 ->timeout((int) config('services.client_api.timeout', 15) * 20)
-                /* 🔴 UN solo intento, a diferencia del resto de los llamadores de este cliente HTTP
-                 * (misión 60). No es preferencia de estilo:
+                /* 🔴 UN solo intento para la dinámica nueva, a diferencia del resto de los
+                 * llamadores de este cliente HTTP (misión 60). No es preferencia de estilo:
                  *
                  *  - Reintentar un timeout del servidor da el mismo timeout. Duplica la espera con
                  *    cero probabilidad de éxito, y era justamente lo que empujaba a admin-api más
@@ -161,8 +161,21 @@ class RunDemoSetupService
                  *    solo a `$response->throw()`, así que una respuesta no exitosa vuelve por el
                  *    camino normal y la maneja el `if ($response->successful())` de acá abajo, que
                  *    guarda el cuerpo. Antes se convertía en excepción y el mensaje llegaba
-                 *    truncado por `RequestException`. */
-                ->retry(1, 500)
+                 *    truncado por `RequestException`.
+                 *
+                 * 🔴 Y por qué la dinámica ACTUAL conserva los reintentos de la config, aunque el
+                 * argumento de arriba también le aplicaría: lo corrigió la verificación de esta
+                 * misión. `run()` es compartido —lo llaman el comando, el job y el botón manual del
+                 * panel, ninguno mirando la dinámica—, así que bajarlo a 1 para todos le cambiaba
+                 * tres cosas a los leads de producción que hoy andan: perdían el reintento que
+                 * salva un 502 transitorio, les cambiaba el formato del error guardado, y dejaban
+                 * de generar el `Log::error` del catch (con `tries = 1` la respuesta no exitosa ya
+                 * no se convierte en excepción). El criterio de aceptación de la misión es
+                 * explícito y no admite lectura: *ningún* lead con `demo_experiencia` distinto de
+                 * 'nueva' cambia de comportamiento en *ningún* camino. La mejora entra por la
+                 * dinámica nueva, que es donde se midió el problema; llevarla a la actual es una
+                 * decisión de producto aparte y está escalada. */
+                ->retry($lead->usa_experiencia_demo_nueva() ? 1 : (int) config('services.client_api.retries', 2), 500)
                 ->post($erp_api_url . '/api/admin-sync/demo-setup', $payload);
 
             if ($response->successful()) {
@@ -177,7 +190,12 @@ class RunDemoSetupService
             /* 2000 y no 500: la columna es TEXT y el cuerpo de un 500 de Laravel trae el mensaje
              * de la excepción y el principio del stack, que es lo único que se tiene para saber
              * por qué falló el armado. Con 500 caracteres el mensaje útil quedaba cortado justo
-             * cuando más falta hace. */
+             * cuando más falta hace.
+             *
+             * Para la dinámica ACTUAL esta rama sigue siendo inalcanzable, igual que antes de la
+             * misión 60: con sus reintentos de config el cliente llama solo a `$response->throw()`
+             * y la respuesta no exitosa sale por el `catch`, con su `Log::error` y su formato de
+             * mensaje de siempre. */
             return $this->mark_failed(
                 $lead,
                 'HTTP ' . $response->status() . ': ' . substr($response->body(), 0, 2000)
