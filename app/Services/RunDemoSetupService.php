@@ -606,6 +606,51 @@ class RunDemoSetupService
      */
     protected function mark_failed(Lead $lead, string $reason)
     {
+        /* 🔴 Guarda de la dinámica NUEVA: un `exitoso` ya escrito no se pisa con un `fallido`.
+         *
+         * Es la mitad de admin del arreglo de la misión 61. Desde la misión 61 la instancia avisa
+         * por el canal de eventos (`demo.setup.completado`) que terminó de armarse, y ese aviso
+         * llega por su propia conexión, independiente del POST que estamos esperando acá. El orden
+         * "llega el evento → después vence/se corta el POST" es real y no una hipótesis: el POST
+         * espera hasta 300 segundos y el evento sale apenas el setup termina. Sin esta guarda, ese
+         * orden vuelve a dejar al lead en `fallido` con la demo perfectamente armada, y
+         * `evaluar_ingreso()` no le habilita nunca el botón — que es el caso exacto que la misión
+         * vino a arreglar.
+         *
+         * La condición viaja ADENTRO del propio UPDATE y no en un `if` sobre `$lead`, por dos
+         * motivos: la instancia en memoria trae el estado de hace hasta 300 segundos (es lo que
+         * puede haber durado el POST que estamos por dar por perdido), y un chequeo seguido de un
+         * update es exactamente la ventana de carrera que hay que cerrar. Mismo criterio que el
+         * claim atómico de `run()`.
+         *
+         * 🔴 Y por qué la dinámica ACTUAL queda AFUERA de la guarda, aunque el argumento parezca
+         * general: `run()` y este método son COMPARTIDOS —los llaman el comando
+         * `leads:run-demo-setup`, el `RunDemoSetupJob` y el botón "Correr demo setup ahora" del
+         * panel, ninguno mirando la dinámica del lead—. Un lead de la dinámica actual no tiene
+         * canal de eventos (`emitir_token_de_ingreso()` ni le escribe `demo_eventos_token`), así
+         * que nunca puede llegarle un `exitoso` desde afuera: el único `exitoso` que puede tener es
+         * el de un POST anterior, y ahí el botón del panel, que se pulsa para re-correr el setup a
+         * propósito, TIENE que poder dejarlo en `fallido` si esta vez falló de verdad. Extenderle
+         * la guarda le cambiaría el comportamiento a los leads de producción, que es justo lo que
+         * el criterio de aceptación de la misión 60 prohíbe. */
+        if ($lead->usa_experiencia_demo_nueva()) {
+            $marcados = Lead::where('id', $lead->id)
+                ->where('demo_setup_status', '!=', 'exitoso')
+                ->update([
+                    'demo_setup_status' => 'fallido',
+                    'demo_setup_last_error' => $reason,
+                ]);
+
+            if ($marcados !== 1) {
+                Log::info('RunDemoSetupService: el setup ya estaba en exitoso, no se lo marca fallido.', [
+                    'lead_id'           => $lead->id,
+                    'motivo_descartado' => $reason,
+                ]);
+            }
+
+            return $lead->refresh();
+        }
+
         $lead->update([
             'demo_setup_status' => 'fallido',
             'demo_setup_last_error' => $reason,
