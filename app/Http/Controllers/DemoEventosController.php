@@ -26,6 +26,14 @@ class DemoEventosController extends Controller
     const MAX_BYTES_DATOS = 4096;
 
     /**
+     * Evento con el que la instancia avisa que terminó de armarse el demo setup (misión 61).
+     *
+     * No es un hito del roadmap: es estado del ciclo de vida de la INSTANCIA. Ver
+     * {@see self::marcar_setup_exitoso()}.
+     */
+    const EVENTO_SETUP_COMPLETADO = 'demo.setup.completado';
+
+    /**
      * POST /api/demo-eventos
      *
      * Recibe un lote de eventos (siempre array, aunque venga uno solo), los persiste y los aplica
@@ -137,6 +145,18 @@ class DemoEventosController extends Controller
 
             $guardados++;
 
+            /* 🔴 `demo.setup.completado` se persiste como cualquier otro evento, pero NO pasa por
+             * DemoHitosService y no mueve ningún hito. No es un descuido ni una optimización: el
+             * roadmap es el recorrido del LEAD adentro de la demo (entró, vio el tutorial, creó el
+             * artículo), y que la instancia se haya terminado de armar no es algo que el lead
+             * hizo. Mezclarlos le mostraría al lead un logro que no es suyo, y encima descontaría
+             * el conteo de `hitos` del resumen del lote, que es lo que mira el emisor. Misión 61. */
+            if ($evento['nombre'] === self::EVENTO_SETUP_COMPLETADO) {
+                $this->marcar_setup_exitoso($lead);
+
+                continue;
+            }
+
             // Un evento que no le corresponde a ningún hito del plan queda guardado igual y no
             // rompe nada: el crudo alimenta el brief del closer aunque hoy no lo sepamos leer.
             $movidos += DemoHitosService::aplicar($lead, $evento);
@@ -156,5 +176,43 @@ class DemoEventosController extends Controller
             'duplicados' => $duplicados,
             'hitos'      => $movidos,
         ], 200);
+    }
+
+    /**
+     * Deja el demo setup del lead en `exitoso` porque la propia instancia avisó que terminó de
+     * armarse (misión 61).
+     *
+     * @param Lead $lead Lead dueño del canal, ya resuelto por el middleware.
+     */
+    protected function marcar_setup_exitoso(Lead $lead): void
+    {
+        /* Misma guardia que las cuatro de DemoHitosService, y por el mismo motivo: hoy el
+         * middleware del canal ya rechaza con 401 a un lead 'actual', pero una defensa que depende
+         * de que otra no falle no es una defensa. Un lead de la dinámica actual no tiene instancia
+         * que reporte nada. */
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
+        /* 🔴 Este evento mueve el estado a `exitoso` desde `pendiente`, desde `ejecutandose` y
+         * TAMBIÉN desde `fallido`. Lo último es deliberado y no viola la regla de que ningún
+         * estado retrocede: `exitoso` es el estado más alto de los cuatro, así que desde cualquiera
+         * de los otros tres esto siempre es avanzar.
+         *
+         * Y por qué desde `fallido` en particular, que es lo que alguien va a querer "corregir"
+         * acá con un `where('demo_setup_status', '!=', 'fallido')`: hasta la misión 61 el admin se
+         * enteraba del resultado del setup SOLO por la respuesta HTTP del POST a
+         * `/api/admin-sync/demo-setup`, que se espera hasta 300 segundos adentro del
+         * RunDemoSetupJob. Si esa conexión se corta con el setup terminando bien del otro lado,
+         * `RunDemoSetupService::mark_failed()` deja al lead en `fallido` con la instancia
+         * perfectamente armada, y `evaluar_ingreso()` no le habilita nunca el botón de comenzar la
+         * demo. Este evento lo emite la instancia recién DESPUÉS de terminar de armarse: es prueba
+         * directa de que la demo existe, y es información más nueva y más confiable que un POST que
+         * se cortó. Ponerle esa condición vuelve a romper exactamente el caso que esta misión vino
+         * a arreglar. */
+        $lead->update([
+            'demo_setup_status'     => 'exitoso',
+            'demo_setup_last_error' => null,
+        ]);
     }
 }
