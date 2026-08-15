@@ -6,6 +6,7 @@ use App\Models\Demo;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadDemoHito;
+use App\Http\Controllers\DemoEventosController;
 use App\Jobs\RunDemoSetupJob;
 use App\Services\LeadDemoSettings;
 use App\Services\RunDemoSetupService;
@@ -301,6 +302,73 @@ class DemoSetupFueraDelRequestTest extends TestCase
 
         $this->assertSame('fallido', (string) $con_eventos->refresh()->demo_setup_status);
         $this->assertSame(0, (int) $con_eventos->demo_setup_intentos);
+    }
+
+    /**
+     * 5ter. 🔴 Un evento que emite el SERVIDOR no prueba que haya alguien adentro, y por lo tanto
+     * no puede bloquear el reintento.
+     *
+     * La señal 2 de `hay_alguien_adentro()` se apoyaba en que todo evento del canal nace de una
+     * acción del lead. `demo.setup.completado` rompió esa premisa: lo emite el propio
+     * `DemoSetupHelper::run()` al terminar de armar la instancia, cuando por definición todavía no
+     * entró nadie. Sin la exclusión, la secuencia normal —termina un setup, llega el aviso, queda
+     * la fila— dejaba la señal prendida para siempre y el lead no volvía a recibir su reintento
+     * NUNCA, porque el `continue` corta antes de `puede_reintentarse()`. Falla del lado seguro, o
+     * sea que nadie se enteraría.
+     *
+     * Los dos casos valen lo mismo: el segundo es la no-regresión. Si alguien vacía la constante
+     * `EVENTOS_QUE_NO_PRUEBAN_PRESENCIA` o le saca el `whereNotIn`, se pone rojo el primero; si
+     * alguien "simplifica" el filtro hasta descartar cualquier evento, se pone rojo el segundo.
+     */
+    public function test_el_aviso_del_setup_no_bloquea_el_reintento_pero_un_evento_del_lead_si(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+        Http::fake(['*' => Http::response(['ok' => true], 200)]);
+
+        // (a) La única fila del canal es el aviso del propio setup: no hay nadie adentro.
+        $solo_aviso = $this->crear_lead(
+            Lead::EXPERIENCIA_NUEVA,
+            $this->momento_base()->copy()->subMinutes(10),
+            'fallido'
+        );
+        $this->registrar_evento($solo_aviso, DemoEventosController::EVENTO_SETUP_COMPLETADO);
+
+        // (b) La fila es de un evento que sólo puede haber producido el lead: sí hay alguien.
+        $con_evento_del_lead = $this->crear_lead(
+            Lead::EXPERIENCIA_NUEVA,
+            $this->momento_base()->copy()->subMinutes(10),
+            'fallido'
+        );
+        $this->registrar_evento($con_evento_del_lead, 'clip.terminado', '1.1');
+
+        $this->artisan('leads:run-demo-setup')->assertExitCode(0);
+
+        $solo_aviso->refresh();
+        $this->assertSame(1, (int) $solo_aviso->demo_setup_intentos, 'El aviso del setup no puede consumirle el reintento al lead.');
+        $this->assertSame('exitoso', (string) $solo_aviso->demo_setup_status);
+
+        $con_evento_del_lead->refresh();
+        $this->assertSame(0, (int) $con_evento_del_lead->demo_setup_intentos, 'Con el lead adentro no se reintenta: el reintento hace migrate:fresh.');
+        $this->assertSame('fallido', (string) $con_evento_del_lead->demo_setup_status);
+    }
+
+    /**
+     * Deja una fila en `demo_eventos_recibidos` sin pasar por el canal HTTP: acá se mide la guarda
+     * del comando, no la ingesta (esa tiene sus propias pruebas en DemoEventosIngestaTest).
+     *
+     * @param Lead        $lead
+     * @param string      $nombre
+     * @param string|null $clip_id
+     */
+    private function registrar_evento(Lead $lead, string $nombre, ?string $clip_id = null): void
+    {
+        $evento              = new DemoEventoRecibido();
+        $evento->lead_id     = $lead->id;
+        $evento->uuid        = (string) Str::uuid();
+        $evento->nombre      = $nombre;
+        $evento->clip_id     = $clip_id;
+        $evento->ocurrido_at = $this->momento_base()->copy();
+        $evento->save();
     }
 
     /**
