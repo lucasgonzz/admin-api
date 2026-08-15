@@ -639,6 +639,10 @@ class RunDemoSetupService
                 ->update([
                     'demo_setup_status' => 'fallido',
                     'demo_setup_last_error' => $reason,
+                    // A mano porque el query builder no estampa los timestamps: sin esto, el mismo
+                    // fallo movía `updated_at` por el camino de Eloquent y deja de moverlo por
+                    // éste, y el panel ordena por esa columna.
+                    'updated_at' => now(),
                 ]);
 
             if ($marcados !== 1) {
