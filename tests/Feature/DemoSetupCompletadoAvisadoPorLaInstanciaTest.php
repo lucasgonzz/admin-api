@@ -15,7 +15,7 @@ use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
- * El aviso de vuelta de la instancia: `demo.setup.completado` (misión 61).
+ * El aviso de vuelta de la instancia: `demo.setup.completado` (misión cruzada demo-v2-conexion-admin-empresa, 14/8/2026).
  *
  * Hasta ahora admin se enteraba del resultado del demo setup SOLO por la respuesta HTTP del POST a
  * `/api/admin-sync/demo-setup`, que se espera hasta 300 segundos adentro del RunDemoSetupJob. Si

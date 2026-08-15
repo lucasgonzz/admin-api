@@ -39,6 +39,18 @@ class RunDemoSetup extends Command
     protected $description = 'Corre automáticamente el demo setup para leads cuya demo arranca pronto';
 
     /**
+     * Eventos del canal que NO prueban que haya una persona adentro de la demo, porque los emite
+     * el servidor por su cuenta y no una acción del lead.
+     *
+     * Los usa la señal 2 de {@see self::hay_alguien_adentro()}, que es una guarda contra vaciarle
+     * la base a un lead que está usando la demo. Un evento que el lead no produjo no puede ser
+     * prueba de que el lead está ahí.
+     *
+     * @var array<int, string>
+     */
+    const EVENTOS_QUE_NO_PRUEBAN_PRESENCIA = ['demo.setup.completado'];
+
+    /**
      * Cuántas veces se reintenta un setup `fallido` de forma automática (misión 60, pieza 4).
      *
      * Uno. Agotado, el lead se queda en `fallido`: la página inmersiva ya tiene su bloque para ese
@@ -172,10 +184,15 @@ class RunDemoSetup extends Command
      *  4. **El turno tiene que seguir vigente**, que lo decide `evaluar_disparo()` en el llamador y
      *     no acá.
      *
-     * Sobre la señal de eventos: se pregunta por CUALQUIER evento de la instancia y no sólo por
+     * Sobre la señal de eventos: se pregunta por cualquier evento de la instancia y no sólo por
      * `demo.ingreso`. Un evento cualquiera —un clip terminado, un artículo creado— prueba que hubo
      * alguien del otro lado igual de bien, y filtrar por nombre haría que la guarda dependa de un
      * vocabulario que todavía se está escribiendo (misión 50). Ante la duda, no reintentar.
+     *
+     * Con una excepción, y sólo una: los eventos que emite el SERVIDOR y no el lead, listados en
+     * `EVENTOS_QUE_NO_PRUEBAN_PRESENCIA`. El detalle está en el docblock de `hay_alguien_adentro()`,
+     * que es donde vive la consulta — acá se nombra para que este párrafo no siga afirmando
+     * "cualquier evento" a secas, que dejó de ser cierto.
      *
      * @param Lead $lead Lead en `fallido`.
      *
@@ -205,10 +222,23 @@ class RunDemoSetup extends Command
      *
      *  1. `demo_ingreso_confirmado` — lo infiere el agente de una respuesta del lead por WhatsApp.
      *     Depende de que el lead conteste.
-     *  2. Cualquier evento en `demo_eventos_recibidos` — depende de que la instancia pueda alcanzar
-     *     `/api/demo-eventos`. Se pregunta por cualquiera y no sólo por `demo.ingreso`: un clip
-     *     terminado prueba lo mismo, y filtrar por nombre ataría la guarda a un vocabulario que
-     *     todavía se está escribiendo (misión 50).
+     *  2. Cualquier evento en `demo_eventos_recibidos` **salvo los que no los emite el lead** —
+     *     depende de que la instancia pueda alcanzar `/api/demo-eventos`. Se pregunta por cualquiera
+     *     y no sólo por `demo.ingreso`: un clip terminado prueba lo mismo, y filtrar por nombre
+     *     ataría la guarda a un vocabulario que todavía se está escribiendo (misión 50).
+     *
+     *     🔴 La excepción de `EVENTOS_QUE_NO_PRUEBAN_PRESENCIA` no es cosmética. La premisa de esta
+     *     señal es que **todo evento nace de una acción del lead**, y era cierta mientras el único
+     *     emisor server-side era `demo.ingreso`. `demo.setup.completado` la rompe: lo emite el
+     *     propio `DemoSetupHelper::run()` al terminar de armar la instancia, cuando por definición
+     *     todavía no entró nadie. Sin esta exclusión, la secuencia normal —termina un setup, llega
+     *     el aviso, queda la fila— deja la señal 2 prendida para siempre, y el reintento automático
+     *     de la misión 60 no vuelve a correr NUNCA para ese lead: el `continue` de más arriba corta
+     *     antes de `puede_reintentarse()`. Falla del lado seguro (nunca dispara un `migrate:fresh`
+     *     de más), que es justamente por lo que nadie se enteraría.
+     *
+     *     Regla para el que agregue el próximo evento server-side: si el evento **no** prueba que
+     *     hay una persona adentro de la demo, va en esa constante.
      *  3. El hito de ingreso pulsado (`tutorial_visto_at` del hito `ingreso`) — lo escribe el
      *     propio admin-api cuando el lead aprieta "Entrar a la demo" en la página inmersiva. La
      *     agregó la verificación de la misión 60, y es la más importante de las tres porque es la
@@ -231,7 +261,11 @@ class RunDemoSetup extends Command
             return true;
         }
 
-        if (DemoEventoRecibido::where('lead_id', $lead->id)->exists()) {
+        $hay_eventos_del_lead = DemoEventoRecibido::where('lead_id', $lead->id)
+            ->whereNotIn('nombre', self::EVENTOS_QUE_NO_PRUEBAN_PRESENCIA)
+            ->exists();
+
+        if ($hay_eventos_del_lead) {
             Log::info('RunDemoSetup: no se dispara el setup, la instancia ya reportó eventos del lead.', [
                 'lead_id' => $lead->id,
             ]);

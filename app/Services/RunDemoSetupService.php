@@ -608,7 +608,7 @@ class RunDemoSetupService
     {
         /* 🔴 Guarda de la dinámica NUEVA: un `exitoso` ya escrito no se pisa con un `fallido`.
          *
-         * Es la mitad de admin del arreglo de la misión 61. Desde la misión 61 la instancia avisa
+         * Es la mitad de admin del arreglo de la misión cruzada demo-v2. Desde la misión cruzada demo-v2 la instancia avisa
          * por el canal de eventos (`demo.setup.completado`) que terminó de armarse, y ese aviso
          * llega por su propia conexión, independiente del POST que estamos esperando acá. El orden
          * "llega el evento → después vence/se corta el POST" es real y no una hipótesis: el POST
@@ -645,8 +645,14 @@ class RunDemoSetupService
                     'updated_at' => now(),
                 ]);
 
+            /* El mensaje dice "no se escribió" y NO "ya estaba en exitoso", aunque ese sea el caso
+             * que importa. `config/database.php` no setea `PDO::MYSQL_ATTR_FOUND_ROWS`, así que
+             * `update()` devuelve las filas CAMBIADAS y no las matcheadas: dos `mark_failed`
+             * seguidos con el mismo motivo dentro del mismo segundo también dan 0, y ahí el estado
+             * era `fallido`, no `exitoso`. Un log que afirma de más es peor que uno que describe
+             * de menos — el que lo lea a las tres de la mañana le va a creer. */
             if ($marcados !== 1) {
-                Log::info('RunDemoSetupService: el setup ya estaba en exitoso, no se lo marca fallido.', [
+                Log::info('RunDemoSetupService: no se escribió el fallido (el setup ya estaba en exitoso, o el fallido ya estaba escrito igual).', [
                     'lead_id'           => $lead->id,
                     'motivo_descartado' => $reason,
                 ]);
