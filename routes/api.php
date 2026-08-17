@@ -18,6 +18,7 @@ use App\Http\Controllers\DeploymentController;
 use App\Http\Controllers\DemoController;
 use App\Http\Controllers\DemoEventosController;
 use App\Http\Controllers\DemoExperienciaController;
+use App\Http\Controllers\DemoMediaUrlsController;
 use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\AiSystemPromptController;
@@ -94,6 +95,15 @@ Route::prefix('demo-experiencia')->group(function () {
 */
 Route::middleware('demo.eventos.key')
     ->post('demo-eventos', [DemoEventosController::class, 'store_json']);
+
+/*
+| Hermano de LECTURA del canal de arriba (misión cruzada demo-panel-recorrido, 17/8/2026): la
+| instancia pregunta el mapa actual de URLs de multimedia en vez de quedarse con la foto que le llegó
+| en el payload del setup. Misma autenticación, mismo header, mismo 401. Ver
+| App\Http\Controllers\DemoMediaUrlsController para el caso concreto que lo hizo falta.
+*/
+Route::middleware('demo.eventos.key')
+    ->get('demo-media-urls', [DemoMediaUrlsController::class, 'index']);
 
 /*
 | Callback desde empresa-api cliente (inbound)
