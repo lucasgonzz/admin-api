@@ -5415,8 +5415,12 @@ TXT;
      *
      * FIX (grupo 212, prompt 01, 24/7/2026): misma lógica que
      * `LeadDemoMailHelper::normalize_mail_url()`, que es privado en esa clase y no se puede
-     * reutilizar directo desde acá. Se reimplementa localmente en vez de acoplar ambas clases;
+     * reutilizar directo desde acá. Se reimplementaba localmente en vez de acoplar ambas clases;
      * si el criterio de normalización cambia, hay que actualizar los dos lugares.
+     *
+     * ✅ 17/8/2026: el criterio cambió (los hosts locales van por HTTP) y esa deuda se pagó. Las
+     * dos copias delegan ahora en `DemoUrlNormalizer::absolute()`, que es el único lugar donde
+     * vive la regla. Este método queda como envoltorio para no tocar sus llamadores.
      *
      * @param string $raw_url URL cruda tal como está guardada en `demos.erp_spa_url`.
      *
@@ -5424,19 +5428,7 @@ TXT;
      */
     private function normalize_demo_url(string $raw_url): string
     {
-        // Normalizar espacios para evitar armar un link inválido.
-        $normalized_url = trim($raw_url);
-        if ($normalized_url === '') {
-            return '';
-        }
-
-        // Si ya es absoluta (http/https), devolverla tal cual.
-        if (preg_match('/^https?:\/\//i', $normalized_url)) {
-            return $normalized_url;
-        }
-
-        // Fallback seguro para links sin protocolo.
-        return 'https://' . ltrim($normalized_url, '/');
+        return DemoUrlNormalizer::absolute($raw_url);
     }
 
     /**

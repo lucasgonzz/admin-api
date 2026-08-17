@@ -4,6 +4,7 @@ namespace App\Mail\Helpers;
 
 use App\Mail\LeadDemoMail;
 use App\Models\Lead;
+use App\Services\DemoUrlNormalizer;
 use Carbon\Carbon;
 
 /**
@@ -222,18 +223,12 @@ class LeadDemoMailHelper
      */
     private static function normalize_mail_url(string $raw_url): string
     {
-        // Normalizar espacios para evitar href inválidos.
-        $normalized_url = trim($raw_url);
-        if ($normalized_url === '') {
-            return '';
-        }
-
-        // Si ya es absoluta (http/https), devolverla tal cual.
-        if (preg_match('/^https?:\/\//i', $normalized_url)) {
-            return $normalized_url;
-        }
-
-        // Fallback seguro para enlaces sin protocolo.
-        return 'https://' . ltrim($normalized_url, '/');
+        // 🔴 La regla vive en DemoUrlNormalizer y NO se reimplementa acá (17/8/2026). Este método
+        // tenía la copia original; LeadAiService::normalize_demo_url() tenía una segunda, con un
+        // comentario que ya declaraba la duplicación como deuda ("si el criterio cambia, hay que
+        // actualizar los dos lugares"). El criterio cambió —los hosts locales van por HTTP— y ese
+        // aviso fue exactamente lo que evitó dejar tres copias divergentes. Se mantiene el método
+        // como envoltorio para no tocar sus llamadores.
+        return DemoUrlNormalizer::absolute($raw_url);
     }
 }

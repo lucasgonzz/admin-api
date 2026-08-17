@@ -7,6 +7,7 @@ use App\Models\Concerns\HasUuid;
 use App\Models\Concerns\UsesVirtualTime;
 use App\Models\LeadAdminNotification;
 use App\Models\LeadPipelineStatus;
+use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
@@ -822,6 +823,14 @@ class Lead extends Model
      * cada instancia demo tiene su propio subdominio. Devuelve null si todavía no
      * se emitió token o si el lead no tiene demo asignada.
      *
+     * 🔴 La URL pasa por DemoUrlNormalizer y NO se concatena cruda (bug reportado por Lucas el
+     * 17/8/2026): `erp_spa_url` es texto libre y puede estar guardada sin esquema —el seeder local
+     * la guarda así, y el módulo de Demos lo permite—. Este link no se muestra: se navega, con
+     * `window.location.href` en BotonAcceso.vue. Sin esquema el navegador lee `empresa.local:`
+     * como protocolo, bloquea la navegación, y como eso no es un error de HTTP el `.catch` del SPA
+     * nunca corre: el botón se queda en "Entrando…" para siempre. El mail de demo y el contexto
+     * del agente de IA ya normalizaban este mismo valor; este camino era el único que no.
+     *
      * @return string|null
      */
     public function getDemoIngresoUrlAttribute()
@@ -829,7 +838,7 @@ class Lead extends Model
         if (empty($this->demo_ingreso_token) || is_null($this->demo)) {
             return null;
         }
-        $base = rtrim((string) $this->demo->erp_spa_url, '/');
+        $base = DemoUrlNormalizer::absolute($this->demo->erp_spa_url);
         if ($base === '') {
             return null;
         }
