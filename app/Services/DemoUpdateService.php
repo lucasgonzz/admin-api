@@ -542,7 +542,13 @@ class DemoUpdateService
         $this->verify_demo_url_responds('verify_demo', $api_check_url, 'API');
 
         // Verifica el SPA: detecta el caso de deploy que vació el directorio sin reponer nada.
-        $spa_check_url = rtrim((string) $this->demo->erp_spa_url, '/');
+        //
+        // 🔴 Normalizada, no cruda (17/8/2026): acá ya se sabe que la demo es de hosting real
+        // —lo decidió el guard de arriba mirando `compiled_api_url`—, pero eso no dice nada sobre
+        // `erp_spa_url`, que es otra columna de texto libre. Una demo con `erp_api_url` absoluta y
+        // `erp_spa_url` sin esquema hacía fallar este GET y marcaba fallida una actualización que
+        // había salido bien.
+        $spa_check_url = DemoUrlNormalizer::absolute($this->demo->erp_spa_url);
         $this->verify_demo_url_responds('verify_demo', $spa_check_url, 'SPA');
     }
 
@@ -1265,7 +1271,13 @@ class DemoUpdateService
      */
     private function slug_from_url(string $url): string
     {
-        $host = parse_url(rtrim($url, '/'), PHP_URL_HOST) ?? '';
+        // 🔴 Se normaliza ANTES de parsear (17/8/2026). `parse_url()` sobre una URL sin esquema
+        // interpreta `demo3.comerciocity.com:443` como esquema + path y devuelve null para
+        // PHP_URL_HOST: el slug quedaba vacío y las rutas del hosting se armaban como
+        // `public_html//spa`, o sea el ZIP subido a un directorio equivocado. `erp_spa_url` es
+        // texto libre y el módulo de Demos permite guardarla sin esquema, así que ese caso no es
+        // hipotético. Misma familia que el link de ingreso roto que originó DemoUrlNormalizer.
+        $host = parse_url(DemoUrlNormalizer::absolute($url), PHP_URL_HOST) ?? '';
 
         // El slug es el primer segmento del hostname (antes del primer punto).
         return explode('.', $host)[0];
@@ -1304,7 +1316,16 @@ class DemoUpdateService
     {
         // API URL ya normalizada (con /public agregado si corresponde, idempotente).
         $api_url = $this->demo_api_base_url();
-        $spa_url = rtrim((string) $this->demo->erp_spa_url, '/');
+
+        // 🔴 `VUE_APP_APP_URL` normalizada (17/8/2026): queda compilada DENTRO del bundle, así que
+        // una URL sin esquema no la corrige nadie después — hay que rehacer el build.
+        //
+        // Y ojo con la asimetría de dos líneas más arriba: `$api_url` NO pasa por acá a propósito.
+        // `demo_api_base_url()` deja crudo el valor no absoluto porque `step_verify_demo()` usa
+        // justamente "esta URL no es absoluta" para reconocer una demo local y saltearse los
+        // chequeos HTTP contra el hosting. Agregarle esquema a `erp_api_url` activaría tráfico de
+        // red real en el entorno de desarrollo.
+        $spa_url = DemoUrlNormalizer::absolute($this->demo->erp_spa_url);
 
         // Guarda la URL exacta que se va a escribir como VUE_APP_API_URL: es el único lugar
         // donde se asigna, y es la cadena que step_verify_demo() debe usar para verificar
