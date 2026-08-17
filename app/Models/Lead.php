@@ -838,7 +838,7 @@ class Lead extends Model
         if (empty($this->demo_ingreso_token) || is_null($this->demo)) {
             return null;
         }
-        $base = DemoUrlNormalizer::absolute($this->demo->erp_spa_url);
+        $base = DemoUrlNormalizer::base($this->demo->erp_spa_url);
         if ($base === '') {
             return null;
         }

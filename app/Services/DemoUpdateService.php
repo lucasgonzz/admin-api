@@ -548,7 +548,7 @@ class DemoUpdateService
         // `erp_spa_url`, que es otra columna de texto libre. Una demo con `erp_api_url` absoluta y
         // `erp_spa_url` sin esquema hacía fallar este GET y marcaba fallida una actualización que
         // había salido bien.
-        $spa_check_url = DemoUrlNormalizer::absolute($this->demo->erp_spa_url);
+        $spa_check_url = DemoUrlNormalizer::base($this->demo->erp_spa_url);
         $this->verify_demo_url_responds('verify_demo', $spa_check_url, 'SPA');
     }
 
@@ -1271,12 +1271,14 @@ class DemoUpdateService
      */
     private function slug_from_url(string $url): string
     {
-        // 🔴 Se normaliza ANTES de parsear (17/8/2026). `parse_url()` sobre una URL sin esquema
-        // interpreta `demo3.comerciocity.com:443` como esquema + path y devuelve null para
-        // PHP_URL_HOST: el slug quedaba vacío y las rutas del hosting se armaban como
-        // `public_html//spa`, o sea el ZIP subido a un directorio equivocado. `erp_spa_url` es
-        // texto libre y el módulo de Demos permite guardarla sin esquema, así que ese caso no es
-        // hipotético. Misma familia que el link de ingreso roto que originó DemoUrlNormalizer.
+        // 🔴 Se normaliza ANTES de parsear (17/8/2026), y el caso que lo justifica es angosto:
+        // medido con PHP 7.4.33, `parse_url('demo3.comerciocity.com', PHP_URL_HOST)` devuelve
+        // **null** —sin puerto no reconoce host—, mientras que con puerto
+        // (`empresa.local:8080`) sí lo reconoce. O sea que el slug quedaba vacío justo para una
+        // demo de producción cargada a mano sin esquema, que es la forma más común, y las rutas
+        // del hosting se armaban como `public_html//spa`: el ZIP subido a un directorio
+        // equivocado, sin ningún error. `erp_spa_url` es texto libre y el módulo de Demos permite
+        // guardarla así. Misma familia que el link de ingreso que originó DemoUrlNormalizer.
         $host = parse_url(DemoUrlNormalizer::absolute($url), PHP_URL_HOST) ?? '';
 
         // El slug es el primer segmento del hostname (antes del primer punto).
@@ -1325,7 +1327,7 @@ class DemoUpdateService
         // justamente "esta URL no es absoluta" para reconocer una demo local y saltearse los
         // chequeos HTTP contra el hosting. Agregarle esquema a `erp_api_url` activaría tráfico de
         // red real en el entorno de desarrollo.
-        $spa_url = DemoUrlNormalizer::absolute($this->demo->erp_spa_url);
+        $spa_url = DemoUrlNormalizer::base($this->demo->erp_spa_url);
 
         // Guarda la URL exacta que se va a escribir como VUE_APP_API_URL: es el único lugar
         // donde se asigna, y es la cadena que step_verify_demo() debe usar para verificar

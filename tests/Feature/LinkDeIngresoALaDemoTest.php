@@ -97,6 +97,14 @@ class LinkDeIngresoALaDemoTest extends TestCase
         $lead->demo_end_time     = $inicio->copy()->addMinutes(60)->format('H:i');
         $lead->demo_setup_status = 'exitoso';
         $lead->demo_ingreso_token = 'tok-' . Str::random(20);
+
+        // 🔴 El gate del video se satisface EXPLÍCITAMENTE y no por omisión. `evaluar_ingreso()`
+        // corta con `intro_pendiente` si hay un video de introducción cargado en `demo_media` y el
+        // lead no lo terminó. Hoy esa tabla está vacía en la base del slot, así que sin esta línea
+        // los tests pasan por un estado que no controlan: el día que alguien siembre un video
+        // —y las bases del pool se resiembran— darían rojo sin que el arreglo se haya roto.
+        $lead->intro_visto_pct = 100;
+
         $lead->save();
 
         return $lead->refresh();

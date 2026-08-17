@@ -40,10 +40,16 @@ class DemoUrlNormalizer
     const LOCAL_HOST_SUFFIXES = ['.local', '.test', '.localhost'];
 
     /**
-     * Devuelve la URL con esquema garantizado y sin barra final.
+     * Devuelve la URL con esquema garantizado.
      *
-     * Idempotente: una URL que ya viene absoluta vuelve igual (solo se le saca la barra final),
-     * así que se puede llamar sobre valores ya normalizados sin efecto.
+     * 🔴 **No toca nada más que el esquema.** En particular NO recorta la barra final: este mismo
+     * método normaliza también los `video_url` de los tutoriales personalizados
+     * (`LeadDemoMailHelper::build_view_data()`), que son URLs arbitrarias cargadas por un operador
+     * y pueden traer query string o path significativo. Recortarles el último carácter es una
+     * forma silenciosa de corromperlas. El que va a concatenarle una ruta usa `base()`.
+     *
+     * Idempotente: una URL que ya viene absoluta vuelve igual, así que se puede llamar sobre
+     * valores ya normalizados sin efecto.
      *
      * @param string|null $raw_url Valor crudo tal como está guardado en la columna.
      *
@@ -52,12 +58,12 @@ class DemoUrlNormalizer
     public static function absolute($raw_url)
     {
         // Los espacios de más son frecuentes al pegar la URL en el formulario de Demos.
-        $url = rtrim(trim((string) $raw_url), '/');
+        $url = trim((string) $raw_url);
         if ($url === '') {
             return '';
         }
 
-        // Ya es absoluta: no se toca nada más que la barra final.
+        // Ya es absoluta: se devuelve tal cual, sin tocarle nada.
         if (preg_match('/^https?:\/\//i', $url)) {
             return $url;
         }
@@ -70,27 +76,59 @@ class DemoUrlNormalizer
     }
 
     /**
+     * Devuelve la URL absoluta y sin barra final, lista para concatenarle una ruta.
+     *
+     * Existe aparte de `absolute()` porque recortar la barra final solo es seguro cuando quien
+     * llama va a pegarle un path a continuación. Ver el comentario de `absolute()`.
+     *
+     * @param string|null $raw_url Valor crudo tal como está guardado en la columna.
+     *
+     * @return string URL absoluta sin barra final, o cadena vacía si $raw_url viene vacía.
+     */
+    public static function base($raw_url)
+    {
+        return rtrim(self::absolute($raw_url), '/');
+    }
+
+    /**
      * Extrae el host de una URL SIN esquema (`empresa.local:8080/algo` → `empresa.local`).
      *
-     * No se usa `parse_url()` a propósito: sobre una cadena sin esquema, `parse_url()` interpreta
-     * `empresa.local:8080` como esquema `empresa.local` + path `8080`, devuelve `null` para
-     * PHP_URL_HOST y deja la decisión sin dato. Es el mismo motivo por el que
-     * `DemoUpdateService::slug_from_url()` devolvía slug vacío para estas URLs.
+     * 🔴 No se usa `parse_url()` acá, y el motivo es más angosto de lo que parece — medido con
+     * PHP 7.4.33, que es el de producción:
      *
-     * @param string $url URL sin esquema, ya recortada.
+     *     parse_url('empresa.local:8080',   PHP_URL_HOST) === 'empresa.local'
+     *     parse_url('demo3.comerciocity.com', PHP_URL_HOST) === NULL
+     *
+     * O sea que `parse_url()` acierta cuando hay puerto y **devuelve null cuando no lo hay**, que
+     * es justamente la forma en que se carga a mano una demo de producción. Una decisión de
+     * esquema que dependa de eso queda sin dato en el caso más común. Por eso el parseo de acá es
+     * propio y explícito.
+     *
+     * @param string $url URL sin esquema, ya recortada y sin barras iniciales.
      *
      * @return string Host en minúsculas, o cadena vacía si no se pudo aislar.
      */
     private static function host_of($url)
     {
-        // Hasta la primera barra queda la autoridad (host + puerto eventual).
-        $partes    = explode('/', $url);
-        $autoridad = $partes[0];
+        // La autoridad termina en el primer separador que aparezca: path, query o fragmento. Los
+        // tres se cortan, no solo la barra: `host?a=b@c.local` metía la query adentro del host y
+        // hacía que el `@` de más abajo se comiera el host real.
+        $corte = strcspn($url, '/?#');
+        $autoridad = substr($url, 0, $corte);
 
         // Credenciales embebidas (`user:pass@host`), por si alguien las pegó desde el navegador.
         $arroba = strrpos($autoridad, '@');
         if ($arroba !== false) {
             $autoridad = substr($autoridad, $arroba + 1);
+        }
+
+        // IPv6 va entre corchetes (`[::1]:8080`) y adentro tiene los mismos dos puntos que el
+        // separador de puerto, así que se resuelve antes y por separado.
+        if (isset($autoridad[0]) && $autoridad[0] === '[') {
+            $cierre = strpos($autoridad, ']');
+            if ($cierre !== false) {
+                return strtolower(substr($autoridad, 1, $cierre - 1));
+            }
         }
 
         // El puerto se descarta: la decisión de esquema es por host.
@@ -109,8 +147,9 @@ class DemoUrlNormalizer
      * la sirve `npm run serve` por HTTP plano. Sin esta rama, el arreglo del link de ingreso no
      * funcionaría justo en el entorno donde se prueba la demo antes de publicarla.
      *
-     * Los sufijos de abajo son de uso reservado para desarrollo (RFC 6762 para `.local`, RFC 6761
-     * para `.test`/`.localhost`): ningún host real de un cliente puede caer acá por accidente.
+     * Los sufijos son de uso reservado para desarrollo (RFC 6762 para `.local`, RFC 6761 para
+     * `.test` y `.localhost`) y los rangos de IP son los privados de la RFC 1918: ningún host real
+     * de un cliente puede caer acá por accidente.
      *
      * @param string $host Host ya normalizado a minúsculas.
      *
@@ -128,7 +167,33 @@ class DemoUrlNormalizer
             }
         }
 
+        // IP privada de LAN: es la forma en que se prueba la demo desde un teléfono contra la
+        // máquina de desarrollo, que es un requisito fijo del proyecto (verificación en tres
+        // anchos). Ahí tampoco hay TLS.
+        if (self::is_private_ipv4($host)) {
+            return 'http://';
+        }
+
         // Cualquier host real: HTTPS. Ante la duda, el esquema seguro.
         return 'https://';
+    }
+
+    /**
+     * ¿El host es una IP privada de LAN (RFC 1918)?
+     *
+     * @param string $host Host a evaluar.
+     *
+     * @return bool
+     */
+    private static function is_private_ipv4($host)
+    {
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            return false;
+        }
+
+        // FILTER_FLAG_NO_PRIV_RANGE devuelve false para las privadas: si la IP es válida pero no
+        // pasa este filtro, es de rango privado. Cubre 10/8, 172.16/12 y 192.168/16 sin escribir
+        // los rangos a mano.
+        return filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE) === false;
     }
 }
