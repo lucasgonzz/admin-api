@@ -72,6 +72,12 @@ class DemoUrlNormalizer
         // las barras iniciales se sacan para no terminar armando `https:///host`.
         $url = ltrim($url, '/');
 
+        // Un valor que era solo barras no es una URL: sin esto devolvía `https://` a secas, y
+        // `base()` lo dejaba en `https:`, que es peor que vacío porque parece una URL.
+        if ($url === '') {
+            return '';
+        }
+
         return self::scheme_for_host(self::host_of($url)) . $url;
     }
 
@@ -113,7 +119,13 @@ class DemoUrlNormalizer
         // La autoridad termina en el primer separador que aparezca: path, query o fragmento. Los
         // tres se cortan, no solo la barra: `host?a=b@c.local` metía la query adentro del host y
         // hacía que el `@` de más abajo se comiera el host real.
-        $corte = strcspn($url, '/?#');
+        //
+        // 🔴 La barra INVERTIDA también corta, y no es un detalle cosmético: el estándar de URL
+        // manda normalizar `\` a `/` en los esquemas especiales, así que el navegador lee
+        // `demo3.comerciocity.com\algo.local` como host `demo3.comerciocity.com` + path
+        // `/algo.local`. Sin ese carácter acá, este parseo veía un host terminado en `.local` y le
+        // daba HTTP plano a un dominio real de cliente.
+        $corte = strcspn($url, "/?#\\");
         $autoridad = substr($url, 0, $corte);
 
         // Credenciales embebidas (`user:pass@host`), por si alguien las pegó desde el navegador.

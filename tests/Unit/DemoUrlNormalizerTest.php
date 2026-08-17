@@ -166,6 +166,25 @@ class DemoUrlNormalizerTest extends TestCase
             'https://demo3.comerciocity.com#x.local',
             DemoUrlNormalizer::absolute('demo3.comerciocity.com#x.local')
         );
+
+        // Detrás de una barra invertida: el navegador la normaliza a `/`, así que eso es path y
+        // el host sigue siendo el real.
+        $this->assertSame(
+            'https://demo3.comerciocity.com\\evil.local',
+            DemoUrlNormalizer::absolute('demo3.comerciocity.com\\evil.local')
+        );
+    }
+
+    /**
+     * Un valor que es solo barras no es una URL: tiene que dar vacío, no `https://` ni `https:`.
+     *
+     * @return void
+     */
+    public function test_un_valor_de_solo_barras_no_es_una_url(): void
+    {
+        $this->assertSame('', DemoUrlNormalizer::absolute('/'));
+        $this->assertSame('', DemoUrlNormalizer::absolute('//'));
+        $this->assertSame('', DemoUrlNormalizer::base('/'));
     }
 
     /**

@@ -211,11 +211,11 @@ class LeadDemoMailHelper
     /**
      * Normaliza URLs para uso en HTML de email.
      *
-     * Reglas:
-     * - trim de espacios
-     * - si está vacía, devuelve cadena vacía
-     * - si ya tiene esquema absoluto (http/https), se respeta
-     * - si no tiene esquema, se antepone https://
+     * 🔴 Las reglas ya NO se enumeran acá: viven en `DemoUrlNormalizer::absolute()` y esta lista
+     * quedó desactualizada apenas cambió el criterio (decía "si no tiene esquema, se antepone
+     * https://", que dejó de ser cierto para los hosts locales el 17/8/2026). Duplicar una regla
+     * en un docblock tiene el mismo problema que duplicarla en código, con el agravante de que
+     * nada la ejecuta y por lo tanto nada la delata.
      *
      * @param string $raw_url URL cruda proveniente de DB o config.
      *
