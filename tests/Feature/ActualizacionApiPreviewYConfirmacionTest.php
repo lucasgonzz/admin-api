@@ -17,8 +17,8 @@ use Tests\TestCase;
  *
  * Es el mismo mecanismo que el flujo web (Bloque C), pero acá lo que importa es el
  * CONTRATO explícito que consume `UpdateVersionRangeModal.vue`: `is_hotfix`,
- * `default_checked` y `is_target` por candidata, y el fallback documentado cuando el
- * SPA no manda `confirmed_version_ids`.
+ * `default_checked` y `is_target` por candidata, y la obligatoriedad de
+ * `confirmed_version_ids` (sin fallback: no hay creación sin confirmación humana).
  */
 class ActualizacionApiPreviewYConfirmacionTest extends TestCase
 {
@@ -178,19 +178,69 @@ class ActualizacionApiPreviewYConfirmacionTest extends TestCase
     }
 
     /**
-     * Sin `confirmed_version_ids` (clave ausente o vacía) aplica el fallback documentado:
-     * todas las troncales (sin hotfix) más la destino, que es el mismo default que
-     * `default_checked` en el preview.
+     * 🔴 Sin `confirmed_version_ids` el endpoint devuelve 422. Antes había un fallback que
+     * armaba el conjunto solo (troncal + destino): era exactamente el cálculo automático
+     * sin confirmación humana que esta misión vino a eliminar. El único consumidor real
+     * (`Updates.vue`) siempre manda el campo desde el modal de confirmación.
      *
      * @return void
      */
-    public function test_store_sin_confirmed_version_ids_aplica_el_fallback_troncal_sin_hotfix(): void
+    public function test_store_sin_confirmed_version_ids_devuelve_422(): void
     {
         $e = $this->armar_escenario();
 
         $response = $this->postJson('/api/admin/update', [
             'client_id'     => $e['client']->id,
             'to_version_id' => $e['v_3_6_3']->id,
+        ]);
+
+        $response->assertStatus(422);
+        $response->assertJsonValidationErrors('confirmed_version_ids');
+
+        $this->assertSame(
+            0,
+            DB::table('client_version_upgrades')->where('client_id', $e['client']->id)->count(),
+            'No se debía crear ninguna actualización sin confirmación explícita.'
+        );
+    }
+
+    /**
+     * `confirmed_version_ids` vacío también es 422 (`min:1`).
+     *
+     * @return void
+     */
+    public function test_store_con_confirmed_version_ids_vacio_devuelve_422(): void
+    {
+        $e = $this->armar_escenario();
+
+        $response = $this->postJson('/api/admin/update', [
+            'client_id'             => $e['client']->id,
+            'to_version_id'         => $e['v_3_6_3']->id,
+            'confirmed_version_ids' => [],
+        ]);
+
+        $response->assertStatus(422);
+        $response->assertJsonValidationErrors('confirmed_version_ids');
+    }
+
+    /**
+     * Un mismo id repetido en `confirmed_version_ids` es un pedido válido (el conjunto
+     * pedido es el mismo): no puede dar 422, y la pivot tiene que quedar sin duplicados.
+     *
+     * @return void
+     */
+    public function test_store_con_ids_duplicados_no_rompe_y_la_pivot_queda_sin_duplicados(): void
+    {
+        $e = $this->armar_escenario();
+
+        $response = $this->postJson('/api/admin/update', [
+            'client_id'             => $e['client']->id,
+            'to_version_id'         => $e['v_3_6_3']->id,
+            'confirmed_version_ids' => [
+                $e['v_3_6_1']->id,
+                $e['v_3_6_1']->id,
+                $e['v_3_6_3']->id,
+            ],
         ]);
 
         $response->assertStatus(201);
@@ -204,8 +254,57 @@ class ActualizacionApiPreviewYConfirmacionTest extends TestCase
             ->values()
             ->all();
 
-        $esperados = collect([$e['v_3_6_1']->id, $e['v_3_6_2']->id, $e['v_3_6_3']->id])->sort()->values()->all();
-        $this->assertSame($esperados, $ids_en_pivot);
-        $this->assertNotContains((int) $e['v_3_6_1_1']->id, $ids_en_pivot, 'El fallback no debe incluir hotfixes.');
+        $esperados = collect([$e['v_3_6_1']->id, $e['v_3_6_3']->id])->sort()->values()->all();
+        $this->assertSame($esperados, $ids_en_pivot, 'La pivot no debe quedar con ids duplicados.');
+    }
+
+    /**
+     * Un id duplicado que además está fuera del rango sigue dando 422: la deduplicación no
+     * puede tapar la validación de pertenencia.
+     *
+     * @return void
+     */
+    public function test_store_con_id_duplicado_fuera_del_rango_sigue_devolviendo_422(): void
+    {
+        $e = $this->armar_escenario();
+
+        $fuera_de_rango = $this->crear_version('9.8.7');
+
+        $response = $this->postJson('/api/admin/update', [
+            'client_id'             => $e['client']->id,
+            'to_version_id'         => $e['v_3_6_3']->id,
+            'confirmed_version_ids' => [
+                $e['v_3_6_1']->id,
+                $e['v_3_6_1']->id,
+                $fuera_de_rango->id,
+            ],
+        ]);
+
+        $response->assertStatus(422);
+    }
+
+    /**
+     * `POST /api/admin/update` con destino en borrador devuelve 422, aunque el POST no
+     * haya pasado por el preview (que ya validaba lo mismo).
+     *
+     * @return void
+     */
+    public function test_store_json_con_destino_en_draft_devuelve_422(): void
+    {
+        $e = $this->armar_escenario();
+
+        $borrador = $this->crear_version('3.6.8', false, 'draft');
+
+        $response = $this->postJson('/api/admin/update', [
+            'client_id'             => $e['client']->id,
+            'to_version_id'         => $borrador->id,
+            'confirmed_version_ids' => [$borrador->id],
+        ]);
+
+        $response->assertStatus(422);
+        $this->assertSame(
+            0,
+            DB::table('client_version_upgrades')->where('client_id', $e['client']->id)->count()
+        );
     }
 }

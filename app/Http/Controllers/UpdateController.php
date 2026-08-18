@@ -122,6 +122,12 @@ class UpdateController extends BaseController
         $client = Client::findOrFail($request->input('client_id'));
         $to     = Version::findOrFail($request->input('to_version_id'));
 
+        // Mismo criterio que `preview()`: un POST directo que no pasó por el preview no
+        // puede crear una actualización hacia una versión todavía en borrador.
+        if ($to->status !== 'published') {
+            abort(422, 'La versión destino debe estar publicada.');
+        }
+
         $confirmed_ids = $this->resolve_confirmed_version_ids(
             $client,
             $to,
@@ -312,34 +318,32 @@ class UpdateController extends BaseController
 
     public function store_json(Request $request)
     {
+        // 🔴 `confirmed_version_ids` es obligatorio, igual que `version_ids` en el flujo web.
+        // Antes había un fallback que armaba el conjunto solo (troncal + destino) cuando la
+        // clave no venía: eso es exactamente el cálculo automático sin confirmación humana
+        // que esta misión vino a eliminar. El único consumidor real (`Updates.vue`) siempre
+        // manda el campo desde el modal de confirmación.
         $request->validate([
-            'client_id'     => 'required|exists:clients,id',
-            'to_version_id' => 'required|exists:versions,id',
+            'client_id'               => 'required|exists:clients,id',
+            'to_version_id'           => 'required|exists:versions,id',
+            'confirmed_version_ids'   => 'required|array|min:1',
+            'confirmed_version_ids.*' => 'integer',
         ]);
 
         $client = Client::findOrFail($request->input('client_id'));
         $to     = Version::findOrFail($request->input('to_version_id'));
 
-        $ids_enviados = $request->input('confirmed_version_ids');
-
-        if (empty($ids_enviados)) {
-            // Sin la clave (o vacía): fallback troncal (sin hotfixes) + destino. Coincide
-            // con los checkboxes tildados por defecto del modal, y mantiene el endpoint
-            // usable por cualquier consumidor que no mande confirmed_version_ids.
-            $candidates    = VersionPathService::candidatesBetween($client->current_version, $to);
-            $confirmed_ids = $candidates->reject(function (Version $v) {
-                return (bool) $v->is_hotfix;
-            })->pluck('id')->all();
-            if (! in_array((int) $to->id, $confirmed_ids, true)) {
-                $confirmed_ids[] = (int) $to->id;
-            }
-        } else {
-            $confirmed_ids = $this->resolve_confirmed_version_ids(
-                $client,
-                $to,
-                array_map('intval', $ids_enviados)
-            );
+        // Mismo criterio que `preview_json()`: no se arma una actualización hacia una
+        // versión en borrador, aunque el POST no haya pasado por el preview.
+        if ($to->status !== 'published') {
+            return response()->json(['message' => 'La versión destino debe estar publicada.'], 422);
         }
+
+        $confirmed_ids = $this->resolve_confirmed_version_ids(
+            $client,
+            $to,
+            array_map('intval', $request->input('confirmed_version_ids'))
+        );
 
         $upgrade = ClientVersionUpgrade::create(
             $this->build_upgrade_create_attributes($client, $client->current_version_id, $to->id, $request)
@@ -551,9 +555,17 @@ class UpdateController extends BaseController
         $candidates    = VersionPathService::candidatesBetween($client->current_version, $to);
         $candidate_ids = $candidates->pluck('id')->all();
 
+        // Se trabaja con conjuntos ya deduplicados de las dos puntas: un mismo id repetido
+        // en el request es un pedido válido (el conjunto pedido es el mismo), no un error.
+        // Comparar contra `array_intersect` sin deduplicar antes rechazaba esos casos con
+        // 422 y, mezclado con ids inválidos, podía compensar los conteos y dejar pasar algo
+        // que el propio mensaje de error dice que rechaza.
+        $requested_ids = array_values(array_unique(array_map('intval', $requested_ids)));
+        $candidate_ids = array_values(array_unique(array_map('intval', $candidate_ids)));
+
         $confirmed_ids = array_values(array_intersect($requested_ids, $candidate_ids));
 
-        if (count($confirmed_ids) !== count(array_unique($requested_ids))) {
+        if (count($confirmed_ids) !== count($requested_ids)) {
             abort(422, 'Se enviaron versiones que no pertenecen al rango calculado.');
         }
 

@@ -230,4 +230,68 @@ class CrearActualizacionEnDosPasosTest extends TestCase
 
         $response->assertStatus(422);
     }
+
+    /**
+     * `POST updates` con la versión destino en borrador devuelve 422. `preview()` ya lo
+     * validaba, pero un POST directo que no pasó por el preview podía crear una
+     * actualización hacia algo todavía sin publicar.
+     *
+     * @return void
+     */
+    public function test_store_con_destino_en_draft_devuelve_422(): void
+    {
+        $e = $this->armar_escenario();
+
+        $borrador          = new Version();
+        $borrador->uuid    = (string) Str::uuid();
+        $borrador->version = '3.3.9';
+        $borrador->title   = 'Versión 3.3.9';
+        $borrador->status  = 'draft';
+        $borrador->save();
+
+        $response = $this->actingAs($e['admin'])->post('updates', [
+            'client_id'     => $e['client']->id,
+            'to_version_id' => $borrador->id,
+            'version_ids'   => [$borrador->id],
+        ]);
+
+        $response->assertStatus(422);
+        $this->assertSame(
+            0,
+            DB::table('client_version_upgrades')->where('client_id', $e['client']->id)->count(),
+            'No se debía crear la actualización con destino en borrador.'
+        );
+    }
+
+    /**
+     * Un id repetido en `version_ids` es un pedido válido: no puede dar 422 y la pivot
+     * tiene que quedar sin duplicados.
+     *
+     * @return void
+     */
+    public function test_store_web_con_ids_duplicados_no_rompe(): void
+    {
+        $e = $this->armar_escenario();
+
+        $response = $this->actingAs($e['admin'])->post('updates', [
+            'client_id'     => $e['client']->id,
+            'to_version_id' => $e['v_3_3_3']->id,
+            'version_ids'   => [$e['v_3_3_1']->id, $e['v_3_3_1']->id, $e['v_3_3_3']->id],
+        ]);
+
+        $response->assertStatus(302);
+
+        $upgrade_id = (int) DB::table('client_version_upgrades')->latest('id')->value('id');
+
+        $ids_confirmados = DB::table('client_version_upgrade_versions')
+            ->where('client_version_upgrade_id', $upgrade_id)
+            ->pluck('version_id')
+            ->map('intval')
+            ->sort()
+            ->values()
+            ->all();
+
+        $esperados = collect([$e['v_3_3_1']->id, $e['v_3_3_3']->id])->sort()->values()->all();
+        $this->assertSame($esperados, $ids_confirmados, 'La pivot no debe quedar con ids duplicados.');
+    }
 }
