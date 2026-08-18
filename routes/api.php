@@ -363,6 +363,9 @@ Route::prefix('admin')->group(function () {
 
         Route::get('update', [UpdateController::class, 'index_json']);
         Route::post('update', [UpdateController::class, 'store_json']);
+        // Antes de update/{id}: sin segmento variable, no colisiona (los demás POST
+        // sobre update/{id} llevan un segmento fijo después del id).
+        Route::post('update/preview', [UpdateController::class, 'preview_json']);
         Route::get('update/{id}', [UpdateController::class, 'show_json']);
         Route::put('update/{id}', [UpdateController::class, 'update_json']);
         Route::delete('update/{id}', [UpdateController::class, 'destroy_json']);

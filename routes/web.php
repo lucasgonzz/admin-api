@@ -83,6 +83,7 @@ Route::middleware('auth')->group(function () {
     // Actualizaciones
     Route::get('updates', 'UpdateController@index')->name('updates.index');
     Route::get('updates/create', 'UpdateController@create')->name('updates.create');
+    Route::post('updates/preview', 'UpdateController@preview')->name('updates.preview');
     Route::post('updates', 'UpdateController@store')->name('updates.store');
     Route::get('updates/{update}', 'UpdateController@show')->name('updates.show');
     Route::post('updates/{update}/advance-status', 'UpdateController@advance_status')->name('updates.advance_status');

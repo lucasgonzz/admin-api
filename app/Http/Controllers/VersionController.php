@@ -7,6 +7,7 @@ use App\Http\Controllers\CommonLaravel\Helpers\ModelPropertiesHelper;
 use App\Models\Client;
 use App\Models\Version;
 use App\Services\VersionNestedJsonSync;
+use App\Services\VersionNumberComparator;
 use Illuminate\Http\Request;
 
 class VersionController extends BaseController
@@ -21,6 +22,7 @@ class VersionController extends BaseController
     }
 
     function store(Request $request) {
+        $this->validate_version_payload($request, true);
         $data = $this->extract_data($request);
         $version = Version::create($data);
         return redirect()->route('versions.show', $version->id)
@@ -40,6 +42,7 @@ class VersionController extends BaseController
     }
 
     function update(Request $request, $id) {
+        $this->validate_version_payload($request, true);
         $version = Version::findOrFail($id);
         $data = $this->extract_data($request);
         $version->update($data);
@@ -61,7 +64,41 @@ class VersionController extends BaseController
         } elseif ($request->filled('published_at')) {
             $data['published_at'] = $request->input('published_at');
         }
+        $data['is_hotfix'] = $this->resolve_is_hotfix($request, $data['version']);
         return $data;
+    }
+
+    /**
+     * Valida el código de versión en los cuatro caminos de entrada (Blade y JSON).
+     * `$required = false` para los caminos de actualización, donde el campo puede no venir.
+     *
+     * @param  Request  $request
+     * @param  bool  $required
+     * @return void
+     */
+    protected function validate_version_payload(Request $request, bool $required = true): void
+    {
+        $regla_base = ['string', 'max:30', 'regex:' . VersionNumberComparator::VALID_REGEX];
+        $request->validate(
+            ['version' => array_merge($required ? ['required'] : ['sometimes', 'required'], $regla_base)],
+            ['version.regex' => 'El código de versión debe tener al menos 3 componentes numéricos separados por puntos (ej. 3.3.1 o 3.3.1.2).']
+        );
+    }
+
+    /**
+     * Resuelve `is_hotfix`: si el request lo trae explícito, gana el criterio manual del admin;
+     * si no, se calcula del código de versión. Espeja el post-proceso ya existente de `published_at`.
+     *
+     * @param  Request  $request
+     * @param  string  $version_code
+     * @return bool
+     */
+    protected function resolve_is_hotfix(Request $request, string $version_code): bool
+    {
+        if ($request->has('is_hotfix')) {
+            return $request->boolean('is_hotfix');
+        }
+        return VersionNumberComparator::isHotfix($version_code);
     }
 
     // --- API JSON (admin-spa) ---
@@ -114,10 +151,12 @@ class VersionController extends BaseController
 
     public function store_json(Request $request)
     {
+        $this->validate_version_payload($request, true);
         $data = ModelPropertiesHelper::attributes_for_create($request, 'version');
         if (isset($data['status']) && $data['status'] === 'published' && empty($data['published_at'] ?? null)) {
             $data['published_at'] = now();
         }
+        $data['is_hotfix'] = $this->resolve_is_hotfix($request, $data['version']);
         $version = Version::create($data);
         (new VersionNestedJsonSync())->sync_from_request($version, $request);
 
@@ -126,11 +165,16 @@ class VersionController extends BaseController
 
     public function update_json(Request $request, $id)
     {
+        $this->validate_version_payload($request, false);
         $version = Version::findOrFail($id);
         ModelPropertiesHelper::set_from_request($version, $request, 'version');
         $version->refresh();
         if ($version->status === 'published' && ! $version->published_at) {
             $version->published_at = now();
+            $version->save();
+        }
+        if (! $request->has('is_hotfix')) {
+            $version->is_hotfix = VersionNumberComparator::isHotfix($version->version);
             $version->save();
         }
         (new VersionNestedJsonSync())->sync_from_request($version, $request);

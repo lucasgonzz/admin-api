@@ -120,34 +120,40 @@ class PublishVersionService
     }
 
     /**
-     * Arma el JSON hacia empresa-api: metadatos de la versión destino y notificaciones de todo el rango (from, to].
+     * Arma el JSON hacia empresa-api: metadatos de la versión destino y notificaciones del
+     * conjunto YA CONFIRMADO por el admin (pivot `client_version_upgrade_versions`), no de un
+     * recálculo del rango por `id`. La FORMA del payload no cambia, solo de dónde sale el dato.
      */
     protected function buildPayload(ClientVersionUpgrade $upgrade, Version $toVersion): array
     {
-        $notifications   = [];
-        $forClientId     = (int) $upgrade->client_id;
-        $withNotifications = [
-            'notifications' => function ($q) use ($forClientId) {
-                $q->forClientId($forClientId)->orderBy('sort_order');
-            },
-        ];
-        foreach (VersionPathService::versionsInRange(
-            $upgrade->from_version_id,
-            $toVersion->id,
-            $withNotifications
-        ) as $v) {
-            foreach ($v->notifications as $notification) {
-                $notifications[] = [
-                    'uuid'       => $notification->uuid,
-                    'title'      => $notification->title,
-                    'body'       => $notification->body,
-                    'sort_order' => VersionPathService::globalNotificationSortOrder(
-                        (int) $v->id,
-                        (int) $notification->sort_order
-                    ),
-                    'is_active'  => (bool) $notification->is_active,
-                ];
-            }
+        $notifications = [];
+        $forClientId   = (int) $upgrade->client_id;
+
+        $upgrade->loadMissing('confirmed_versions');
+        $confirmed = VersionPathService::sortSemantically($upgrade->confirmed_versions);
+
+        // Posición 1-based de cada versión dentro del conjunto confirmado, en orden semántico
+        // (no el `id` de tabla): así el sort_order que viaja al cliente respeta el orden real
+        // aunque haya hotfixes intercalados con `id` más alto que una minor posterior.
+        $position_by_version_id = [];
+        foreach ($confirmed as $index => $v) {
+            $position_by_version_id[(int) $v->id] = $index + 1;
+        }
+
+        foreach (VersionPathService::aggregatedNotifications($confirmed, $forClientId) as $notification) {
+            $version_id = (int) $notification->version->id;
+            $position   = $position_by_version_id[$version_id] ?? 1;
+
+            $notifications[] = [
+                'uuid'       => $notification->uuid,
+                'title'      => $notification->title,
+                'body'       => $notification->body,
+                'sort_order' => VersionPathService::positionalNotificationSortOrder(
+                    $position,
+                    (int) $notification->sort_order
+                ),
+                'is_active'  => (bool) $notification->is_active,
+            ];
         }
 
         return [

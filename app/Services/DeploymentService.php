@@ -975,15 +975,6 @@ class DeploymentService
         $this->log('complete', 'Deployment completado exitosamente', 'success');
     }
 
-    private function get_versions_in_range(): \Illuminate\Support\Collection
-    {
-        return \App\Models\Version::where('status', 'published')
-            ->where('id', '>', $this->upgrade->from_version->id)
-            ->where('id', '<=', $this->upgrade->to_version->id)
-            ->orderBy('id')
-            ->get();
-    }
-
     /**
      * Conecta por SSH al VPS de builds (empresa-spa).
      *

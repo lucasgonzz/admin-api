@@ -7,7 +7,7 @@
 
 <form method="POST" action="{{ route('versions.store') }}" class="card p-4">
     @csrf
-    @include('versions.partials.form', ['version' => null])
+    @include('versions.partials.form', ['version' => null, 'mostrar_is_hotfix' => false])
     <div class="mt-3">
         <button type="submit" class="btn btn-primary">Crear</button>
         <a href="{{ route('versions.index') }}" class="btn btn-link">Cancelar</a>

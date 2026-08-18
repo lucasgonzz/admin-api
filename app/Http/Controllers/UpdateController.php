@@ -81,17 +81,62 @@ class UpdateController extends BaseController
         return view('updates.create', compact('clients', 'versions', 'selected_client'));
     }
 
-    function store(Request $request) {
-        $client  = Client::findOrFail($request->input('client_id'));
-        $toId    = (int) $request->input('to_version_id');
-        $version = Version::findOrFail($toId);
+    /**
+     * Paso 1 → 2: arma las candidatas del rango (from, to] para que el admin confirme
+     * el subconjunto antes de crear el upgrade. No persiste nada.
+     */
+    function preview(Request $request) {
+        $request->validate([
+            'client_id'     => 'required|exists:clients,id',
+            'to_version_id' => 'required|exists:versions,id',
+        ]);
 
-        $fromId = $client->current_version_id;
-        // Incluye solo versiones estrictamente posteriores al estado actual del cliente, hasta el destino (id asc).
-        $path   = VersionPathService::versionsInRangeWithSeedersAndCommands($fromId, $version->id, (int) $client->id);
+        $client = Client::findOrFail($request->input('client_id'));
+        $to     = Version::findOrFail($request->input('to_version_id'));
+
+        if ($to->status !== 'published') {
+            return redirect()->back()->withInput()
+                             ->with('error', 'La versión destino debe estar publicada.');
+        }
+
+        $from       = $client->current_version;
+        $candidates = VersionPathService::candidatesBetween($from, $to);
+
+        $notes                = $request->input('notes');
+        $scheduled_date       = $request->input('scheduled_date');
+        $target_client_api_id = $request->input('target_client_api_id');
+
+        return view('updates.preview', compact(
+            'client', 'from', 'to', 'candidates', 'notes', 'scheduled_date', 'target_client_api_id'
+        ));
+    }
+
+    function store(Request $request) {
+        $request->validate([
+            'client_id'     => 'required|exists:clients,id',
+            'to_version_id' => 'required|exists:versions,id',
+            'version_ids'   => 'required|array|min:1',
+            'version_ids.*' => 'integer',
+        ]);
+
+        $client = Client::findOrFail($request->input('client_id'));
+        $to     = Version::findOrFail($request->input('to_version_id'));
+
+        $confirmed_ids = $this->resolve_confirmed_version_ids(
+            $client,
+            $to,
+            array_map('intval', $request->input('version_ids'))
+        );
 
         $upgrade = ClientVersionUpgrade::create(
-            $this->build_upgrade_create_attributes($client, $fromId, $version->id, $request)
+            $this->build_upgrade_create_attributes($client, $client->current_version_id, $to->id, $request)
+        );
+
+        $upgrade->confirmed_versions()->sync($confirmed_ids);
+
+        $path = VersionPathService::withSeedersAndCommands(
+            Version::whereIn('id', $confirmed_ids)->get(),
+            (int) $client->id
         );
 
         foreach ($path as $pathVersion) {
@@ -125,13 +170,14 @@ class UpdateController extends BaseController
 
         $to_version = $upgrade->to_version->load('manual_tasks', 'notifications');
 
-        $fromId = $upgrade->from_version_id;
-        $toId   = $upgrade->to_version_id;
-
         $clientId = (int) $upgrade->client_id;
-        // (from, to] y solo ítems que aplican a este cliente (restricción por cliente en la versión).
-        $aggregatedNotifications = VersionPathService::aggregatedNotifications($fromId, $toId, $clientId);
-        $aggregatedManualTasks   = VersionPathService::aggregatedManualTasks($fromId, $toId, $clientId);
+
+        // Conjunto ya confirmado por el admin (pivot), no un recálculo del rango por id.
+        $upgrade->loadMissing('confirmed_versions');
+        $confirmed = VersionPathService::sortSemantically($upgrade->confirmed_versions);
+
+        $aggregatedNotifications = VersionPathService::aggregatedNotifications($confirmed, $clientId);
+        $aggregatedManualTasks   = VersionPathService::aggregatedManualTasks($confirmed, $clientId);
 
         $notificationIds = $aggregatedNotifications->pluck('id')->all();
         $readsByNotificationId = collect();
@@ -266,14 +312,44 @@ class UpdateController extends BaseController
 
     public function store_json(Request $request)
     {
+        $request->validate([
+            'client_id'     => 'required|exists:clients,id',
+            'to_version_id' => 'required|exists:versions,id',
+        ]);
+
         $client = Client::findOrFail($request->input('client_id'));
-        $toId = (int) $request->input('to_version_id');
-        $version = Version::findOrFail($toId);
-        $fromId = $client->current_version_id;
-        $path = VersionPathService::versionsInRangeWithSeedersAndCommands($fromId, $version->id, (int) $client->id);
+        $to     = Version::findOrFail($request->input('to_version_id'));
+
+        $ids_enviados = $request->input('confirmed_version_ids');
+
+        if (empty($ids_enviados)) {
+            // Sin la clave (o vacía): fallback troncal (sin hotfixes) + destino. Coincide
+            // con los checkboxes tildados por defecto del modal, y mantiene el endpoint
+            // usable por cualquier consumidor que no mande confirmed_version_ids.
+            $candidates    = VersionPathService::candidatesBetween($client->current_version, $to);
+            $confirmed_ids = $candidates->reject(function (Version $v) {
+                return (bool) $v->is_hotfix;
+            })->pluck('id')->all();
+            if (! in_array((int) $to->id, $confirmed_ids, true)) {
+                $confirmed_ids[] = (int) $to->id;
+            }
+        } else {
+            $confirmed_ids = $this->resolve_confirmed_version_ids(
+                $client,
+                $to,
+                array_map('intval', $ids_enviados)
+            );
+        }
 
         $upgrade = ClientVersionUpgrade::create(
-            $this->build_upgrade_create_attributes($client, $fromId, $version->id, $request)
+            $this->build_upgrade_create_attributes($client, $client->current_version_id, $to->id, $request)
+        );
+
+        $upgrade->confirmed_versions()->sync($confirmed_ids);
+
+        $path = VersionPathService::withSeedersAndCommands(
+            Version::whereIn('id', $confirmed_ids)->get(),
+            (int) $client->id
         );
 
         foreach ($path as $pathVersion) {
@@ -298,6 +374,49 @@ class UpdateController extends BaseController
         $this->apply_shared_database_auto_skip($upgrade);
 
         return response()->json(['model' => $this->fullModel('update', $upgrade->id)], 201);
+    }
+
+    /**
+     * Contrato JSON del paso de confirmación para el SPA: candidatas del rango con
+     * `default_checked` (troncal sí, hotfix no, destino siempre) e `is_target`.
+     */
+    public function preview_json(Request $request)
+    {
+        $request->validate([
+            'client_id'     => 'required|exists:clients,id',
+            'to_version_id' => 'required|exists:versions,id',
+        ]);
+
+        $client = Client::findOrFail($request->input('client_id'));
+        $to     = Version::findOrFail($request->input('to_version_id'));
+
+        if ($to->status !== 'published') {
+            return response()->json(['message' => 'La versión destino debe estar publicada.'], 422);
+        }
+
+        $from       = $client->current_version;
+        $candidates = VersionPathService::candidatesBetween($from, $to);
+
+        $candidates_payload = $candidates->map(function (Version $v) use ($to) {
+            $is_target = ((int) $v->id === (int) $to->id);
+            $is_hotfix = (bool) $v->is_hotfix;
+
+            return [
+                'id'              => $v->id,
+                'version'         => $v->version,
+                'title'           => $v->title,
+                'description'     => $v->description,
+                'is_hotfix'       => $is_hotfix,
+                'default_checked' => (! $is_hotfix) || $is_target,
+                'is_target'       => $is_target,
+            ];
+        })->values();
+
+        return response()->json([
+            'from_version' => $from ? ['id' => $from->id, 'version' => $from->version] : null,
+            'to_version'   => ['id' => $to->id, 'version' => $to->version, 'title' => $to->title],
+            'candidates'   => $candidates_payload,
+        ], 200);
     }
 
     public function update_json(Request $request, $id)
@@ -376,12 +495,13 @@ class UpdateController extends BaseController
     public function extra_data_json($id)
     {
         $upgrade  = ClientVersionUpgrade::findOrFail($id);
-        $fromId   = $upgrade->from_version_id;
-        $toId     = $upgrade->to_version_id;
         $clientId = $upgrade->client_id ? (int) $upgrade->client_id : null;
 
-        $aggregated_notifications = VersionPathService::aggregatedNotifications($fromId, $toId, $clientId);
-        $aggregated_manual_tasks  = VersionPathService::aggregatedManualTasks($fromId, $toId, $clientId);
+        $upgrade->loadMissing('confirmed_versions');
+        $confirmed = VersionPathService::sortSemantically($upgrade->confirmed_versions);
+
+        $aggregated_notifications = VersionPathService::aggregatedNotifications($confirmed, $clientId);
+        $aggregated_manual_tasks  = VersionPathService::aggregatedManualTasks($confirmed, $clientId);
 
         $reads_by_id = [];
         if ($clientId && $aggregated_notifications->isNotEmpty()) {
@@ -408,6 +528,40 @@ class UpdateController extends BaseController
             'notifications' => $notifications->values(),
             'manual_tasks'  => $aggregated_manual_tasks->values(),
         ], 200);
+    }
+
+    /**
+     * Calcula el conjunto final de `version_id`s a confirmar para el upgrade.
+     *
+     * Valida pertenencia contra `candidatesBetween()` (el rango real entre la versión
+     * actual del cliente y el destino): filtra qué del conjunto pedido pertenece, nunca
+     * agrega versiones fuera de ese rango. Si algo pedido no pertenece, aborta con 422 —
+     * regla dura: acá NO se recalcula el rango para decidir qué guardar, solo para
+     * validar pertenencia. La versión destino siempre queda incluida, pertenezca o no
+     * al resultado de `candidatesBetween` (puede no pertenecer si, por ejemplo, no está
+     * publicada): define el upgrade y no puede quedar afuera.
+     *
+     * @param  Client  $client
+     * @param  Version  $to
+     * @param  array<int, int>  $requested_ids
+     * @return array<int, int>
+     */
+    protected function resolve_confirmed_version_ids(Client $client, Version $to, array $requested_ids): array
+    {
+        $candidates    = VersionPathService::candidatesBetween($client->current_version, $to);
+        $candidate_ids = $candidates->pluck('id')->all();
+
+        $confirmed_ids = array_values(array_intersect($requested_ids, $candidate_ids));
+
+        if (count($confirmed_ids) !== count(array_unique($requested_ids))) {
+            abort(422, 'Se enviaron versiones que no pertenecen al rango calculado.');
+        }
+
+        if (! in_array((int) $to->id, $confirmed_ids, true)) {
+            $confirmed_ids[] = (int) $to->id;
+        }
+
+        return $confirmed_ids;
     }
 
     /**

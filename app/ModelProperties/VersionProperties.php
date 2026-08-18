@@ -41,6 +41,14 @@ class VersionProperties
                 'width' => 120,
             ],
             [
+                'key' => 'is_hotfix',
+                'text' => 'Es hotfix',
+                'type' => 'checkbox',
+                'value' => false,
+                'show' => true,
+                'width' => 100,
+            ],
+            [
                 'key' => 'title',
                 'text' => 'Título',
                 'type' => 'text',

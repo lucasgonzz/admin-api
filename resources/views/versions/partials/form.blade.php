@@ -3,6 +3,15 @@
     <input type="text" name="version" class="form-control" required
            value="{{ old('version', $version->version ?? '') }}" maxlength="30" placeholder="2.5.0">
 </div>
+@if($mostrar_is_hotfix ?? false)
+<div class="form-group form-check">
+    <input type="hidden" name="is_hotfix" value="0">
+    <input type="checkbox" name="is_hotfix" value="1" class="form-check-input" id="is_hotfix"
+           @if(old('is_hotfix', $version->is_hotfix ?? null)) checked @endif>
+    <label class="form-check-label" for="is_hotfix">Es hotfix (parche lateral de un cliente puntual)</label>
+    <small class="d-block text-muted">Se precalcula por la cantidad de componentes del código (4 o más ⇒ hotfix). Podés corregirlo a mano.</small>
+</div>
+@endif
 <div class="form-group">
     <label class="form-label">Título</label>
     <input type="text" name="title" class="form-control" value="{{ old('title', $version->title ?? '') }}" maxlength="200">
