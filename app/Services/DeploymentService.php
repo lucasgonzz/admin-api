@@ -549,6 +549,43 @@ class DeploymentService
     }
 
     /**
+     * Compara dos ítems del upgrade (UpdateSeeder o UpdateCommand) para ordenarlos antes
+     * de ejecutarlos.
+     *
+     * Criterio: ORDEN SEMÁNTICO del código de versión (`VersionNumberComparator`), no el
+     * `id` de la fila en `versions` — un hotfix cargado después de una minor posterior
+     * tiene `id` más alto y por `id` correría último, que es justo el defecto que esta
+     * misión corrigió en el resto del sistema. Los desempates quedan como estaban:
+     * `execution_order` del VersionSeeder/VersionCommand y, último, el `id` del ítem.
+     *
+     * @param  \App\Models\UpdateSeeder|\App\Models\UpdateCommand  $a
+     * @param  \App\Models\UpdateSeeder|\App\Models\UpdateCommand  $b
+     * @param  string  $relacion_padre  'version_seeder' o 'version_command'
+     * @return int
+     */
+    private function compare_update_items($a, $b, $relacion_padre)
+    {
+        $padre_a = $a->{$relacion_padre};
+        $padre_b = $b->{$relacion_padre};
+
+        $codigo_a = ($padre_a && $padre_a->version) ? $padre_a->version->version : null;
+        $codigo_b = ($padre_b && $padre_b->version) ? $padre_b->version->version : null;
+
+        $por_version = VersionNumberComparator::compare($codigo_a, $codigo_b);
+        if ($por_version !== 0) {
+            return $por_version;
+        }
+
+        $orden_a = $padre_a ? (int) $padre_a->execution_order : 0;
+        $orden_b = $padre_b ? (int) $padre_b->execution_order : 0;
+        if ($orden_a !== $orden_b) {
+            return $orden_a <=> $orden_b;
+        }
+
+        return ((int) $a->id) <=> ((int) $b->id);
+    }
+
+    /**
      * Etapa: seeders del upgrade (mismos registros que muestra la interfaz).
      * Marca cada UpdateSeeder como exitoso o fallido al terminar.
      *
@@ -568,17 +605,14 @@ class DeploymentService
             'info'
         );
 
-        // Orden: versión ascendente y execution_order del VersionSeeder.
+        // Orden: versión ascendente por ORDEN SEMÁNTICO del código (no por `id` de tabla)
+        // y execution_order del VersionSeeder. Este es el único camino que ejecuta de
+        // verdad contra el servidor del cliente: si acá el orden sale por `id`, la
+        // actualización corre los seeders fuera de orden aunque el resto ya esté bien.
         $this->upgrade->loadMissing('update_seeders.version_seeder.version');
-        $update_seeders = $this->upgrade->update_seeders->sortBy(function ($update_seeder) {
-            $version_seeder = $update_seeder->version_seeder;
-            $version_id = $version_seeder && $version_seeder->version
-                ? (int) $version_seeder->version->id
-                : 0;
-            $execution_order = $version_seeder ? (int) $version_seeder->execution_order : 0;
-
-            return [$version_id, $execution_order, (int) $update_seeder->id];
-        });
+        $update_seeders = $this->upgrade->update_seeders->sort(function ($a, $b) {
+            return $this->compare_update_items($a, $b, 'version_seeder');
+        })->values();
 
         foreach ($update_seeders as $update_seeder) {
             $version_seeder = $update_seeder->version_seeder;
@@ -660,17 +694,12 @@ class DeploymentService
             'info'
         );
 
-        // Orden: versión ascendente y execution_order del VersionCommand.
+        // Orden: versión ascendente por ORDEN SEMÁNTICO del código (no por `id` de tabla)
+        // y execution_order del VersionCommand. Mismo motivo que en los seeders.
         $this->upgrade->loadMissing('update_commands.version_command.version');
-        $update_commands = $this->upgrade->update_commands->sortBy(function ($update_command) {
-            $version_command = $update_command->version_command;
-            $version_id = $version_command && $version_command->version
-                ? (int) $version_command->version->id
-                : 0;
-            $execution_order = $version_command ? (int) $version_command->execution_order : 0;
-
-            return [$version_id, $execution_order, (int) $update_command->id];
-        });
+        $update_commands = $this->upgrade->update_commands->sort(function ($a, $b) {
+            return $this->compare_update_items($a, $b, 'version_command');
+        })->values();
 
         $skipped_manual_count = 0;
         $skipped_done_count = 0;
