@@ -258,10 +258,17 @@ class DemoExperienciaController extends Controller
             return response()->json(['motivo' => 'preparando'], 409);
         }
 
+        // 🔴 `isPast()` compara contra Carbon::now() real, no contra AppTime::now(): a diferencia
+        // de build_turno() (arriba, vía evaluar_ingreso()), este chequeo no respetaba el reloj
+        // virtual de debug. Con el turno reabierto atrasando el reloj virtual hasta la hora del
+        // turno, el token —emitido en tiempo real y ya vencido en tiempo real— seguía cortando acá,
+        // contradiciendo al gate de arriba. Mismo criterio que empresa-api ya eligió para este
+        // mismo problema (informe 20260817-demo-vigencia-turno.md, hallazgo 2): en local, cero
+        // fricción — se ignora vencimiento y revocación, no se los hace virtual-time-aware.
         $token_revocado = $lead->demo_ingreso_token_revocado_at !== null;
         $token_vencido  = $lead->demo_ingreso_token_expira_at !== null
             && $lead->demo_ingreso_token_expira_at->isPast();
-        if ($token_revocado || $token_vencido) {
+        if (($token_revocado || $token_vencido) && ! $this->modo_prueba()) {
             return response()->json(['motivo' => 'token_invalido'], 409);
         }
 
@@ -478,7 +485,8 @@ class DemoExperienciaController extends Controller
     }
 
     /**
-     * true en entorno de prueba, donde el gate del intro no aplica.
+     * true en entorno de prueba, donde el gate del intro no aplica y el token de ingreso ignora
+     * vencimiento y revocación (ver ingresar_json()).
      *
      * @return bool
      */
