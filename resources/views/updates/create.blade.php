@@ -10,7 +10,8 @@
 <h3 class="mb-4">Nueva Actualización</h3>
 
 <div class="card p-4" style="max-width: 600px;">
-    <form method="POST" action="{{ route('updates.store') }}">
+    {{-- Paso 1 de 2: acá no se crea nada todavía, se arma el preview con el rango de versiones --}}
+    <form method="POST" action="{{ route('updates.preview') }}">
         @csrf
 
         <div class="form-group">
@@ -45,7 +46,7 @@
             <textarea name="notes" class="form-control" rows="2"></textarea>
         </div>
 
-        <button type="submit" class="btn btn-success">Crear actualización</button>
+        <button type="submit" class="btn btn-primary">Continuar &rarr;</button>
         <a href="{{ route('updates.index') }}" class="btn btn-link text-muted">Cancelar</a>
     </form>
 </div>
