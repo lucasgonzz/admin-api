@@ -23,7 +23,8 @@ class VersionController extends BaseController
 
     function store(Request $request) {
         $this->validate_version_payload($request, true);
-        $data = $this->extract_data($request);
+        // Alta: `is_hotfix` siempre se autocalcula, sin override posible.
+        $data = $this->extract_data($request, false);
         $version = Version::create($data);
         return redirect()->route('versions.show', $version->id)
                          ->with('success', 'Versión creada.');
@@ -42,9 +43,10 @@ class VersionController extends BaseController
     }
 
     function update(Request $request, $id) {
-        $this->validate_version_payload($request, true);
         $version = Version::findOrFail($id);
-        $data = $this->extract_data($request);
+        $this->validate_version_payload($request, true, $version);
+        // Edición: el admin puede forzar `is_hotfix` con el checkbox del form.
+        $data = $this->extract_data($request, true);
         $version->update($data);
         return redirect()->route('versions.show', $version->id)
                          ->with('success', 'Versión actualizada.');
@@ -57,14 +59,19 @@ class VersionController extends BaseController
                          ->with('success', 'Versión eliminada.');
     }
 
-    protected function extract_data(Request $request) {
+    /**
+     * @param  Request  $request
+     * @param  bool  $allow_override  `true` solo en los caminos de EDICIÓN (ver `resolve_is_hotfix`).
+     * @return array<string, mixed>
+     */
+    protected function extract_data(Request $request, bool $allow_override = false) {
         $data = $request->only('version', 'title', 'description', 'status');
         if ($data['status'] === 'published' && !$request->filled('published_at')) {
             $data['published_at'] = now();
         } elseif ($request->filled('published_at')) {
             $data['published_at'] = $request->input('published_at');
         }
-        $data['is_hotfix'] = $this->resolve_is_hotfix($request, $data['version']);
+        $data['is_hotfix'] = $this->resolve_is_hotfix($request, $data['version'], $allow_override);
         return $data;
     }
 
@@ -72,13 +79,30 @@ class VersionController extends BaseController
      * Valida el código de versión en los cuatro caminos de entrada (Blade y JSON).
      * `$required = false` para los caminos de actualización, donde el campo puede no venir.
      *
+     * 🔴 Excepción para versiones legacy: si `$version_actual` viene (caminos de EDICIÓN) y
+     * el código que llega es IDÉNTICO al ya persistido, no se exige el regex. Si no, un
+     * código viejo que no cumple el formato nuevo (por ejemplo "3.3", cargado antes de que
+     * existiera esta validación) bloquearía para siempre la edición del título, la
+     * descripción o el estado de esa versión, aunque nadie esté tocando el código. Si el
+     * admin SÍ cambia el código, el regex estricto se aplica igual que siempre.
+     *
      * @param  Request  $request
      * @param  bool  $required
+     * @param  Version|null  $version_actual  Fila ya persistida, solo en edición.
      * @return void
      */
-    protected function validate_version_payload(Request $request, bool $required = true): void
+    protected function validate_version_payload(Request $request, bool $required = true, ?Version $version_actual = null): void
     {
-        $regla_base = ['string', 'max:30', 'regex:' . VersionNumberComparator::VALID_REGEX];
+        $regla_base = ['string', 'max:30'];
+
+        $sin_cambios = $version_actual !== null
+            && $request->has('version')
+            && (string) $request->input('version') === (string) $version_actual->version;
+
+        if (! $sin_cambios) {
+            $regla_base[] = 'regex:' . VersionNumberComparator::VALID_REGEX;
+        }
+
         $request->validate(
             ['version' => array_merge($required ? ['required'] : ['sometimes', 'required'], $regla_base)],
             ['version.regex' => 'El código de versión debe tener al menos 3 componentes numéricos separados por puntos (ej. 3.3.1 o 3.3.1.2).']
@@ -86,16 +110,25 @@ class VersionController extends BaseController
     }
 
     /**
-     * Resuelve `is_hotfix`: si el request lo trae explícito, gana el criterio manual del admin;
-     * si no, se calcula del código de versión. Espeja el post-proceso ya existente de `published_at`.
+     * Resuelve `is_hotfix`.
+     *
+     * 🔴 El override manual SOLO existe en los caminos de EDICIÓN (`$allow_override = true`).
+     * En el ALTA se autocalcula siempre y se ignora cualquier `is_hotfix` que venga en el
+     * request: el modal genérico de creación del SPA (`common-vue`) inicializa el draft con
+     * TODAS las propiedades declaradas y su valor por defecto, así que el POST de alta
+     * siempre trae `is_hotfix` en `false`. Decidir por presencia de la clave hacía que toda
+     * versión creada desde el SPA quedara en `is_hotfix = false` sin importar el código.
+     * En el alta no hay checkbox en ninguna de las dos interfaces, así que no hay override
+     * que perder.
      *
      * @param  Request  $request
      * @param  string  $version_code
+     * @param  bool  $allow_override
      * @return bool
      */
-    protected function resolve_is_hotfix(Request $request, string $version_code): bool
+    protected function resolve_is_hotfix(Request $request, string $version_code, bool $allow_override = false): bool
     {
-        if ($request->has('is_hotfix')) {
+        if ($allow_override && $request->has('is_hotfix')) {
             return $request->boolean('is_hotfix');
         }
         return VersionNumberComparator::isHotfix($version_code);
@@ -156,7 +189,8 @@ class VersionController extends BaseController
         if (isset($data['status']) && $data['status'] === 'published' && empty($data['published_at'] ?? null)) {
             $data['published_at'] = now();
         }
-        $data['is_hotfix'] = $this->resolve_is_hotfix($request, $data['version']);
+        // Alta: `is_hotfix` siempre autocalculado, se ignora lo que mande el SPA.
+        $data['is_hotfix'] = $this->resolve_is_hotfix($request, $data['version'], false);
         $version = Version::create($data);
         (new VersionNestedJsonSync())->sync_from_request($version, $request);
 
@@ -165,8 +199,8 @@ class VersionController extends BaseController
 
     public function update_json(Request $request, $id)
     {
-        $this->validate_version_payload($request, false);
         $version = Version::findOrFail($id);
+        $this->validate_version_payload($request, false, $version);
         ModelPropertiesHelper::set_from_request($version, $request, 'version');
         $version->refresh();
         if ($version->status === 'published' && ! $version->published_at) {
