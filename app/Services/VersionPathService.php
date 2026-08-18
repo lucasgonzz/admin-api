@@ -188,13 +188,14 @@ class VersionPathService
     }
 
     /**
-     * sort_order global "histórico": multiplica por el `id` de la versión. Con orden
-     * semántico esto queda mal (un hotfix con `id` más alto que una minor posterior lo
-     * pisaría), por eso existe `positionalNotificationSortOrder()` para el camino nuevo.
+     * sort_order global "histórico": multiplica por el `id` de la versión. Es la fórmula
+     * EN USO (`PublishVersionService::buildPayload()`): como los `id` de versión nunca se
+     * repiten, el valor es monótono y único a lo largo del tiempo para un mismo cliente,
+     * así que dos actualizaciones sucesivas nunca emiten sort_order solapados.
      *
-     * Se conserva sin borrar y sin uso interno de este archivo: cambia valores de
-     * `sort_order` que ya viajaron a clientes, y puede haber código externo que
-     * todavía dependa de este cálculo puntual. No tocar.
+     * Dentro de un solo upgrade puede no coincidir exactamente con el orden semántico (un
+     * hotfix cargado después de una minor posterior tiene `id` más alto), pero eso es
+     * mucho más tolerable que romper el orden ENTRE actualizaciones ya entregadas.
      */
     public static function globalNotificationSortOrder(int $versionId, int $localSortOrder): int
     {
@@ -203,8 +204,15 @@ class VersionPathService
 
     /**
      * sort_order global basado en la POSICIÓN del ítem dentro del conjunto confirmado
-     * ya ordenado semánticamente (1-based), no en el `id` de tabla. Reemplaza a
-     * `globalNotificationSortOrder()` para el camino nuevo (ver `PublishVersionService`).
+     * ya ordenado semánticamente (1-based), no en el `id` de tabla.
+     *
+     * 🔴 NO SE ACTIVÓ, y queda acá definida sin uso a propósito. La posición se reinicia
+     * en 1 en cada `ClientVersionUpgrade`, así que actualizaciones sucesivas del mismo
+     * cliente emitirían sort_order solapados entre sí, pisando el orden de las
+     * notificaciones que ya viajaron a clientes en actualizaciones anteriores. Eso rompe
+     * el contrato hacia empresa-api de forma no compatible hacia atrás, y no se puede
+     * confirmar desde este repo. Pendiente de hablarlo con Lucas si algún día se quiere
+     * usar; hasta entonces la fórmula viva es `globalNotificationSortOrder()`.
      */
     public static function positionalNotificationSortOrder(int $position, int $localSortOrder): int
     {

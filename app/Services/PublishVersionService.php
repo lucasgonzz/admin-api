@@ -104,6 +104,13 @@ class PublishVersionService
     /**
      * Crea un nuevo upgrade y lo sincroniza al cliente.
      * Conservado para compatibilidad; el flujo principal pasa a usar syncExisting().
+     *
+     * 🔴 Este camino (publicación directa desde la vista de una versión) NO tiene paso de
+     * confirmación humana: nunca lo tuvo. Como `buildPayload()` ahora lee EXCLUSIVAMENTE
+     * de la pivot `client_version_upgrade_versions`, si no la llenamos acá el payload
+     * viajaría con `notifications: []` siempre. Se preserva el comportamiento histórico
+     * (todo el rango), ahora calculado en orden semántico y solo entre versiones
+     * publicadas, en vez de agregarle un paso de confirmación que nadie pidió.
      */
     public function publish(Client $client, Version $version, ?string $notes = null): ClientVersionUpgrade
     {
@@ -115,6 +122,12 @@ class PublishVersionService
             'notes'               => $notes,
             'created_by_admin_id' => Auth::id(),
         ]);
+
+        $fromVersion = $client->current_version;
+        $toVersion   = $version;
+
+        $candidates = VersionPathService::candidatesBetween($fromVersion, $toVersion);
+        $upgrade->confirmed_versions()->sync($candidates->pluck('id')->all());
 
         return $this->syncExisting($upgrade);
     }
@@ -132,24 +145,18 @@ class PublishVersionService
         $upgrade->loadMissing('confirmed_versions');
         $confirmed = VersionPathService::sortSemantically($upgrade->confirmed_versions);
 
-        // Posición 1-based de cada versión dentro del conjunto confirmado, en orden semántico
-        // (no el `id` de tabla): así el sort_order que viaja al cliente respeta el orden real
-        // aunque haya hotfixes intercalados con `id` más alto que una minor posterior.
-        $position_by_version_id = [];
-        foreach ($confirmed as $index => $v) {
-            $position_by_version_id[(int) $v->id] = $index + 1;
-        }
-
         foreach (VersionPathService::aggregatedNotifications($confirmed, $forClientId) as $notification) {
-            $version_id = (int) $notification->version->id;
-            $position   = $position_by_version_id[$version_id] ?? 1;
-
             $notifications[] = [
                 'uuid'       => $notification->uuid,
                 'title'      => $notification->title,
                 'body'       => $notification->body,
-                'sort_order' => VersionPathService::positionalNotificationSortOrder(
-                    $position,
+                // 🔴 Fórmula histórica (por `id` de versión), a propósito. La variante
+                // posicional (`positionalNotificationSortOrder`) reinicia la posición en 1
+                // en cada upgrade, así que dos actualizaciones sucesivas del mismo cliente
+                // emitirían sort_order solapados. Por `id` es monótono y único a lo largo
+                // del tiempo, y el contrato con empresa-api se mantiene compatible.
+                'sort_order' => VersionPathService::globalNotificationSortOrder(
+                    (int) $notification->version->id,
                     (int) $notification->sort_order
                 ),
                 'is_active'  => (bool) $notification->is_active,

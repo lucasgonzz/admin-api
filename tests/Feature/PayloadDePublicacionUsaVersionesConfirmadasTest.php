@@ -20,9 +20,11 @@ use Tests\TestCase;
  *
  *  - una notificación de una versión que NO está en la pivot (acá, un hotfix intermedio)
  *    nunca viaja en el payload, aunque exista y esté activa;
- *  - el `sort_order` que sí viaja respeta el orden SEMÁNTICO de las versiones
- *    confirmadas, no el orden de `id` — las versiones se cargan con `id` a propósito
- *    desordenado respecto al orden semántico para que un cálculo por `id` quede expuesto.
+ *  - el `sort_order` que sí viaja se calcula con la fórmula HISTÓRICA
+ *    (`globalNotificationSortOrder`: `version_id * 1000 + sort_order local`), porque el
+ *    valor de ese campo es contrato con empresa-api y tiene que seguir siendo monótono
+ *    ENTRE actualizaciones sucesivas del mismo cliente. La variante posicional quedó
+ *    definida pero sin uso (ver `VersionPathService::positionalNotificationSortOrder`).
  *
  * Se mockea la llamada HTTP saliente (`Http::fake`, mismo patrón que
  * `DemoSetupCompletadoAvisadoPorLaInstanciaTest`) y se inspecciona el payload real que
@@ -76,22 +78,16 @@ class PayloadDePublicacionUsaVersionesConfirmadasTest extends TestCase
 
     /**
      * El caso completo: pivot = {3.7.1, 3.7.3}, hotfix intermedio 3.7.1.1 con
-     * notificación activa que NO debe viajar, y `sort_order` que debe reflejar el orden
-     * semántico (3.7.1 antes que 3.7.3) aunque el `id` de tabla diga lo contrario.
+     * notificación activa que NO debe viajar, y `sort_order` calculado con la fórmula
+     * histórica (`version_id * 1000 + sort_order local`).
      *
      * @return void
      */
-    public function test_el_payload_usa_la_pivot_y_el_sort_order_respeta_el_orden_semantico(): void
+    public function test_el_payload_usa_la_pivot_y_el_sort_order_usa_la_formula_historica(): void
     {
-        // Orden de inserción (y por lo tanto de `id`) deliberadamente al revés del orden
-        // semántico del conjunto confirmado: la destino (3.7.3) se crea PRIMERO, y la
-        // troncal anterior (3.7.1) se crea DESPUÉS. Si el cálculo de posición usara el
-        // `id` en vez del orden semántico, los sort_order saldrían invertidos.
         $to               = $this->crear_version('3.7.3');
         $hotfix_intermedio = $this->crear_version('3.7.1.1', true);
         $from             = $this->crear_version('3.7.1');
-
-        $this->assertLessThan($from->id, $to->id, 'La base del test no quedó desordenada como se esperaba.');
 
         // Notificación en el hotfix NO confirmado: no debe viajar nunca.
         $this->crear_notificacion($hotfix_intermedio, 'Notificación del hotfix (no confirmado)', 5);
@@ -120,7 +116,13 @@ class PayloadDePublicacionUsaVersionesConfirmadasTest extends TestCase
 
         $this->assertSame('terminada', $resultado->status, 'La sincronización debía terminar en éxito con el fake de HTTP.');
 
-        Http::assertSent(function ($request) use ($notif_from, $notif_to) {
+        // Fórmula histórica: `version_id * 1000 + sort_order local`. Es única y monótona a
+        // lo largo del tiempo para un cliente (los `id` de versión no se repiten), que es
+        // lo que el contrato con empresa-api necesita entre actualizaciones sucesivas.
+        $sort_order_esperado_from = $from->id * 1000 + 10;
+        $sort_order_esperado_to   = $to->id * 1000 + 20;
+
+        Http::assertSent(function ($request) use ($sort_order_esperado_from, $sort_order_esperado_to) {
             $payload = $request->data();
 
             $notifications = collect($payload['notifications']);
@@ -136,13 +138,54 @@ class PayloadDePublicacionUsaVersionesConfirmadasTest extends TestCase
 
             $por_titulo = $notifications->keyBy('title');
 
-            // Posición 1-based en el orden SEMÁNTICO del conjunto confirmado: 3.7.1 es la
-            // posición 1 (multiplicador 1000 + sort_order local 10 = 1010) y 3.7.3 es la
-            // posición 2 (2000 + 20 = 2020) — pase lo que pase con el `id` de tabla.
             $sort_order_from = $por_titulo['Notificación de 3.7.1']['sort_order'] ?? null;
             $sort_order_to   = $por_titulo['Notificación de 3.7.3']['sort_order'] ?? null;
 
-            return $sort_order_from === 1010 && $sort_order_to === 2020;
+            return $sort_order_from === $sort_order_esperado_from
+                && $sort_order_to === $sort_order_esperado_to;
+        });
+    }
+
+    /**
+     * `publish()` (publicación directa desde la vista de una versión, sin paso de
+     * confirmación humana) tiene que llenar la pivot con TODO el rango calculado. Si no,
+     * `buildPayload()` —que lee exclusivamente de la pivot— manda `notifications: []`
+     * aunque haya notificaciones reales en el rango.
+     *
+     * @return void
+     */
+    public function test_publish_llena_la_pivot_con_todo_el_rango_y_las_notificaciones_viajan(): void
+    {
+        $from      = $this->crear_version('3.8.0');
+        $intermedia = $this->crear_version('3.8.1');
+        $hotfix    = $this->crear_version('3.8.1.1', true);
+        $to        = $this->crear_version('3.8.2');
+
+        $this->crear_notificacion($intermedia, 'Notificación de 3.8.1', 10);
+        $this->crear_notificacion($hotfix, 'Notificación de 3.8.1.1', 10);
+        $this->crear_notificacion($to, 'Notificación de 3.8.2', 10);
+
+        $client                     = $this->crear_cliente();
+        $client->current_version_id = $from->id;
+        $client->save();
+
+        Http::fake();
+
+        $upgrade = (new PublishVersionService())->publish($client->fresh(), $to);
+
+        $ids_en_pivot = $upgrade->confirmed_versions()->pluck('versions.id')->map('intval')->sort()->values()->all();
+        $esperados    = collect([$intermedia->id, $hotfix->id, $to->id])->sort()->values()->all();
+
+        $this->assertSame($esperados, $ids_en_pivot, 'publish() debía dejar todo el rango (from, to] en la pivot.');
+        $this->assertNotContains((int) $from->id, $ids_en_pivot, 'La versión de origen no forma parte del rango (from, to].');
+
+        Http::assertSent(function ($request) {
+            $titulos = collect($request->data()['notifications'])->pluck('title')->all();
+
+            return count($titulos) === 3
+                && in_array('Notificación de 3.8.1', $titulos, true)
+                && in_array('Notificación de 3.8.1.1', $titulos, true)
+                && in_array('Notificación de 3.8.2', $titulos, true);
         });
     }
 }
