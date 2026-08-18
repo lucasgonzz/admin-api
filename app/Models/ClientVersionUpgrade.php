@@ -72,6 +72,28 @@ class ClientVersionUpgrade extends Model
         return $this->hasMany(UpdateCommand::class)->orderBy('id');
     }
 
+    /**
+     * Versiones confirmadas por el admin al crear este upgrade (pivot
+     * `client_version_upgrade_versions`). Es la fuente de verdad del rango: reemplaza
+     * el cálculo por `id` de `VersionPathService::versionsInRange()` (borrado).
+     *
+     * 🔴 A propósito NO está en `scopeWithAll()`: `withAll()` la usan 10 call sites
+     * (`fullModel('update', $id)`, los *_json de UpdateController, UpdateSeederController,
+     * UpdateCommandController y el `show` Blade) y ninguno de ellos la necesita. Cargarla
+     * ahí engordaría los 10 payloads sin motivo. Se carga explícitamente con
+     * `loadMissing('confirmed_versions')` solo en los 3 lugares que sí la usan
+     * (`UpdateController::show`, `extra_data_json`, `PublishVersionService`). No la
+     * sumes a `withAll()` sin releer este comentario primero.
+     */
+    public function confirmed_versions() {
+        return $this->belongsToMany(
+            Version::class,
+            'client_version_upgrade_versions',
+            'client_version_upgrade_id',
+            'version_id'
+        );
+    }
+
     public function target_client_api() {
         return $this->belongsTo(ClientApi::class, 'target_client_api_id');
     }

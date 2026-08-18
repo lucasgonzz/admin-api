@@ -22,6 +22,7 @@ class Version extends Model
 
     protected $casts = [
         'published_at' => 'datetime',
+        'is_hotfix'    => 'boolean',
     ];
 
     function scopeWithAll($query) {

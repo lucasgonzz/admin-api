@@ -5,11 +5,20 @@ namespace App\Services;
 use App\Models\Version;
 use App\Models\VersionManualTask;
 use App\Models\VersionNotification;
+use App\Services\VersionNumberComparator;
 use Illuminate\Support\Collection;
 
 /**
- * Resuelve el conjunto de versiones entre el origen y el destino de un upgrade (excluye origen, incluye destino)
- * y expone agregados para listados y publicación, ordenando siempre por id de versión.
+ * Resuelve agregados (seeders, comandos, notificaciones, tareas manuales) sobre un
+ * conjunto de versiones YA CONFIRMADO por el admin, y ordena ese conjunto por orden
+ * semántico del código de versión (`VersionNumberComparator`), no por `id` de tabla.
+ *
+ * 🔴 Antes este service calculaba el rango él mismo (`versionsInRange()`, por `id`).
+ * Eso se borró: el rango se calcula una sola vez con `candidatesBetween()`, el admin
+ * confirma un subconjunto en el paso de preview, y de ahí en más todo el mundo (el
+ * detalle del upgrade, la publicación) lee ese subconjunto ya persistido en la pivot
+ * `client_version_upgrade_versions` — nunca se vuelve a recalcular el rango para decidir
+ * qué mostrar.
  */
 class VersionPathService
 {
@@ -35,38 +44,78 @@ class VersionPathService
     }
 
     /**
-     * Versiones del rango (from, to], con relaciones opcionales eager-loaded.
+     * Ordena una colección de Version por tupla semántica ascendente (no por `id`).
      *
+     * @param  Collection<int, Version>  $versions
      * @return Collection<int, Version>
      */
-    public static function versionsInRange(?int $fromVersionId, int $toVersionId, array $with = []): Collection
+    public static function sortSemantically(Collection $versions): Collection
     {
-        $q = Version::query()->orderBy('id');
-        if (!empty($with)) {
-            $q->with($with);
-        }
-        if ($fromVersionId === null) {
-            $q->whereKey($toVersionId);
-        } else {
-            $q->where('id', '>', $fromVersionId)
-                ->where('id', '<=', $toVersionId);
-        }
-
-        return $q->get();
+        return $versions->sort(function (Version $a, Version $b) {
+            return VersionNumberComparator::compare($a->version, $b->version);
+        })->values();
     }
 
     /**
-     * Rango con seeders y comandos (opcional: solo los que aplican al client_id, según restricción por cliente).
+     * Candidatas del rango (from, to] entre versiones PUBLICADAS, en orden semántico.
      *
+     * Si `$from` es `null`, el resultado es solo la versión destino — así se preserva
+     * la semántica actual de la vieja `versionsInRange()` para clientes sin
+     * `current_version_id` (no "todas las publicadas menores o iguales a destino").
+     *
+     * @param  Version|null  $from  Versión actual del cliente (puede no tener).
+     * @param  Version       $to    Versión destino del upgrade.
      * @return Collection<int, Version>
      */
-    public static function versionsInRangeWithSeedersAndCommands(?int $fromVersionId, int $toVersionId, ?int $forClientId = null): Collection
+    public static function candidatesBetween(?Version $from, Version $to): Collection
     {
-        if ($forClientId === null) {
-            return static::versionsInRange($fromVersionId, $toVersionId, ['seeders', 'commands']);
+        if ($from === null) {
+            return collect([$to]);
         }
 
-        return static::versionsInRange($fromVersionId, $toVersionId, [
+        $publicadas = Version::where('status', 'published')->get();
+
+        $candidatas = $publicadas->filter(function (Version $version) use ($from, $to) {
+            return VersionNumberComparator::compare($version->version, $from->version) > 0
+                && VersionNumberComparator::compare($version->version, $to->version) <= 0;
+        });
+
+        return static::sortSemantically($candidatas);
+    }
+
+    /**
+     * Recarga un conjunto de versiones (por `id`) con las relaciones indicadas, en
+     * orden semántico. Punto único de recarga: lo usan `withSeedersAndCommands()`,
+     * `aggregatedNotifications()` y `aggregatedManualTasks()`.
+     *
+     * @param  Collection<int, Version>  $versions  Conjunto ya confirmado (solo se usa su `id`).
+     * @param  array                     $with      Relaciones (o closures de relación) a eager-load.
+     * @return Collection<int, Version>
+     */
+    protected static function loadVersions(Collection $versions, array $with): Collection
+    {
+        $ids = $versions->pluck('id')->all();
+
+        $cargadas = Version::whereIn('id', $ids)->with($with)->get();
+
+        return static::sortSemantically($cargadas);
+    }
+
+    /**
+     * Recarga un conjunto YA CONFIRMADO de versiones con seeders y comandos (opcional:
+     * solo los que aplican al client_id, según restricción por cliente). Reemplaza a
+     * `versionsInRangeWithSeedersAndCommands()`.
+     *
+     * @param  Collection<int, Version>  $versions
+     * @return Collection<int, Version>
+     */
+    public static function withSeedersAndCommands(Collection $versions, ?int $forClientId = null): Collection
+    {
+        if ($forClientId === null) {
+            return static::loadVersions($versions, ['seeders', 'commands']);
+        }
+
+        return static::loadVersions($versions, [
             'seeders' => function ($q) use ($forClientId) {
                 $q->forClientId($forClientId)->orderBy('execution_order');
             },
@@ -77,11 +126,13 @@ class VersionPathService
     }
 
     /**
-     * Notificaciones del rango; si $forClientId, excluye ítems restringidos a otros clientes.
+     * Notificaciones de un conjunto YA CONFIRMADO de versiones, en orden semántico; si
+     * $forClientId, excluye ítems restringidos a otros clientes.
      *
+     * @param  Collection<int, Version>  $versions
      * @return Collection<int, VersionNotification>
      */
-    public static function aggregatedNotifications(?int $fromVersionId, int $toVersionId, ?int $forClientId = null): Collection
+    public static function aggregatedNotifications(Collection $versions, ?int $forClientId = null): Collection
     {
         if ($forClientId === null) {
             $with = ['notifications'];
@@ -92,8 +143,9 @@ class VersionPathService
                 },
             ];
         }
+
         $col = collect();
-        foreach (static::versionsInRange($fromVersionId, $toVersionId, $with) as $version) {
+        foreach (static::loadVersions($versions, $with) as $version) {
             $version_for_item = static::versionWithoutChildRelations($version);
             foreach ($version->notifications as $n) {
                 $n->setRelation('version', $version_for_item);
@@ -105,11 +157,13 @@ class VersionPathService
     }
 
     /**
-     * Tareas manuales agregadas en orden de versión; con $forClientId aplica el filtro de restricción.
+     * Tareas manuales de un conjunto YA CONFIRMADO de versiones, en orden semántico;
+     * con $forClientId aplica el filtro de restricción.
      *
+     * @param  Collection<int, Version>  $versions
      * @return Collection<int, VersionManualTask>
      */
-    public static function aggregatedManualTasks(?int $fromVersionId, int $toVersionId, ?int $forClientId = null): Collection
+    public static function aggregatedManualTasks(Collection $versions, ?int $forClientId = null): Collection
     {
         if ($forClientId === null) {
             $with = ['manual_tasks'];
@@ -120,8 +174,9 @@ class VersionPathService
                 },
             ];
         }
+
         $col = collect();
-        foreach (static::versionsInRange($fromVersionId, $toVersionId, $with) as $version) {
+        foreach (static::loadVersions($versions, $with) as $version) {
             $version_for_item = static::versionWithoutChildRelations($version);
             foreach ($version->manual_tasks as $task) {
                 $task->setRelation('version', $version_for_item);
@@ -132,8 +187,27 @@ class VersionPathService
         return $col;
     }
 
+    /**
+     * sort_order global "histórico": multiplica por el `id` de la versión. Con orden
+     * semántico esto queda mal (un hotfix con `id` más alto que una minor posterior lo
+     * pisaría), por eso existe `positionalNotificationSortOrder()` para el camino nuevo.
+     *
+     * Se conserva sin borrar y sin uso interno de este archivo: cambia valores de
+     * `sort_order` que ya viajaron a clientes, y puede haber código externo que
+     * todavía dependa de este cálculo puntual. No tocar.
+     */
     public static function globalNotificationSortOrder(int $versionId, int $localSortOrder): int
     {
         return (int) ($versionId * self::NOTIFICATION_SORT_ORDER_MULTIPLIER + $localSortOrder);
+    }
+
+    /**
+     * sort_order global basado en la POSICIÓN del ítem dentro del conjunto confirmado
+     * ya ordenado semánticamente (1-based), no en el `id` de tabla. Reemplaza a
+     * `globalNotificationSortOrder()` para el camino nuevo (ver `PublishVersionService`).
+     */
+    public static function positionalNotificationSortOrder(int $position, int $localSortOrder): int
+    {
+        return (int) ($position * self::NOTIFICATION_SORT_ORDER_MULTIPLIER + $localSortOrder);
     }
 }
