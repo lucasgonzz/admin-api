@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\ComerciocityAfipConfig;
+use App\Services\Afip\AfipCertificateProvisionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -112,5 +113,111 @@ class ComerciocityAfipConfigController extends Controller
         $config->save();
 
         return response()->json($config);
+    }
+
+    /**
+     * Estado de los cuatro certificados de AFIP guardados en el servidor del admin.
+     *
+     * Son los mismos archivos que el admin usa para facturar sus mensualidades y los que se
+     * instalan en cada cliente al instalar o actualizar su sistema
+     * (AfipCertificateProvisionService).
+     *
+     * @param AfipCertificateProvisionService $service
+     *
+     * @return JsonResponse
+     */
+    public function certificados_json(AfipCertificateProvisionService $service): JsonResponse
+    {
+        return response()->json(['archivos' => $service->estado_en_admin()]);
+    }
+
+    /**
+     * Sube (o reemplaza) uno o varios de los cuatro certificados de AFIP.
+     *
+     * Se guardan en `storage/app/afip/`, fuera del document root: son secretos. Una clave privada
+     * de AFIP descargable por HTTP es exactamente el agujero que se cerró en empresa-api sacándolos
+     * de `public/afip/`, así que acá no se repite (a diferencia del logo, que sí es público).
+     *
+     * Todos los campos son opcionales: el panel permite reemplazar de a uno sin volver a subir los
+     * otros tres.
+     *
+     * @param Request $request
+     * @param AfipCertificateProvisionService $service
+     *
+     * @return JsonResponse
+     */
+    public function upload_certificados_json(Request $request, AfipCertificateProvisionService $service): JsonResponse
+    {
+        $claves = array_keys(AfipCertificateProvisionService::ARCHIVOS);
+
+        // Validación por tamaño y nada más: un .crt o un .key no tiene mime type confiable, así que
+        // lo que decide si el archivo sirve es el chequeo de contenido PEM de más abajo.
+        $reglas = [];
+        foreach ($claves as $clave) {
+            $reglas[$clave] = 'nullable|file|max:512';
+        }
+        $request->validate($reglas);
+
+        $guardados = [];
+        $rechazados = [];
+
+        foreach ($claves as $clave) {
+            if (! $request->hasFile($clave)) {
+                continue;
+            }
+
+            $archivo = $request->file($clave);
+
+            if (! $this->parece_pem($archivo->getRealPath())) {
+                $rechazados[$clave] = 'No parece un certificado ni una clave en formato PEM: '
+                    . 'el archivo tiene que empezar con una línea "-----BEGIN ...-----".';
+                continue;
+            }
+
+            $service->guardar_origen($clave, $archivo);
+            $guardados[] = $clave;
+        }
+
+        if (empty($guardados) && empty($rechazados)) {
+            return response()->json(
+                ['message' => 'No se envió ningún archivo.'],
+                422
+            );
+        }
+
+        if (! empty($rechazados)) {
+            return response()->json([
+                'message'    => 'Algunos archivos no se guardaron.',
+                'guardados'  => $guardados,
+                'rechazados' => $rechazados,
+                'archivos'   => $service->estado_en_admin(),
+            ], 422);
+        }
+
+        return response()->json([
+            'guardados' => $guardados,
+            'archivos'  => $service->estado_en_admin(),
+        ]);
+    }
+
+    /**
+     * Chequea que un archivo tenga pinta de PEM (certificado o clave privada).
+     *
+     * No valida criptográficamente: solo evita el error humano de subir un PDF, un .p12 o el
+     * archivo equivocado, que si no se descubriría recién cuando un cliente no pueda facturar.
+     *
+     * @param string|false $ruta
+     *
+     * @return bool
+     */
+    private function parece_pem($ruta): bool
+    {
+        if (! is_string($ruta) || ! is_file($ruta)) {
+            return false;
+        }
+
+        $inicio = (string) file_get_contents($ruta, false, null, 0, 2048);
+
+        return strpos($inicio, '-----BEGIN') !== false;
     }
 }

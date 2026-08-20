@@ -8,6 +8,7 @@ use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
+use App\Services\Afip\AfipCertificateProvisionService;
 use Illuminate\Support\Collection;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
@@ -641,6 +642,11 @@ class InstallationService
             );
         }
 
+        // Certificados de AFIP: no vienen en el ZIP (están gitignoreados en empresa-api desde el
+        // commit ec6e164a del 26/7/2026), así que se copian desde el servidor del admin. Va antes
+        // de verify_api_installation() porque esa verificación ahora los exige.
+        $this->provision_afip_certificates();
+
         // Última comprobación antes de dar la etapa (y la instalación) por completada: si algo
         // quedó incompleto en el hosting, verify_api_installation() lanza y la instalación se
         // marca como fallida en vez de exitosa.
@@ -650,30 +656,61 @@ class InstallationService
     }
 
     /**
-     * Verifica que la instalación quedó completa en el hosting antes de darla por exitosa.
+     * Copia al servidor del cliente los certificados de AFIP que el ZIP no puede traer.
      *
-     * Corre un único comando SSH que chequea, con `[ -e ... ]`, la existencia de cada ruta de
-     * $required_paths relativa a api_path. Es la única oportunidad real de detectar una
-     * instalación incompleta: los ZIPs de upgrade (DeploymentService::step_upload_api(), a
-     * diferencia del ZIP de instalación) excluyen a propósito `public/*` y `storage/*` —
-     * `public/afip/` guarda certificados del cliente y `storage/` sus archivos, no se pueden
-     * pisar en cada actualización — así que lo que falte después de esta etapa no se repone
-     * solo en ningún upgrade futuro.
+     * El ZIP de instalación se arma del clon de git en el VPS de builds, y desde el commit
+     * `ec6e164a` de empresa-api (26/7/2026, "sacar certificados AFIP del repo publico y de
+     * public/") los certificados viven en `storage/app/afip/` y están gitignoreados. Sin este paso
+     * el cliente nace sin poder facturar, y como los ZIPs de upgrade excluyen `storage/*` tampoco
+     * se repondrían solos en ninguna actualización futura.
      *
-     * El comando remoto termina siempre con "echo VERIFY_DONE" para poder distinguir una salida
-     * vacía por sesión SSH caída (verificación que no llegó a correr) de una verificación real
-     * que no encontró faltantes.
+     * La fuente es el servidor del admin, que ya tiene el certificado de ComercioCity para facturar
+     * sus mensualidades (ver AfipWsaaService). Si ahí todavía no están cargados, esto no lanza:
+     * quien corta la instalación es verify_api_installation(), que corre inmediatamente después y
+     * exige las cuatro rutas.
      *
      * @return void
-     * @throws \RuntimeException Si la verificación no llegó a completarse o falta alguna ruta requerida.
      */
-    private function verify_api_installation(): void
+    private function provision_afip_certificates(): void
     {
+        $service  = new AfipCertificateProvisionService();
         $api_path = $this->get_api_path();
 
-        // Rutas relativas a api_path imprescindibles para que la API bootee y para que los
-        // upgrades (que excluyen public/ y storage/ de sus ZIPs) tengan algo sobre lo que pisar.
-        // Agregar una ruta a chequear es agregar un elemento acá.
+        $log = function (string $linea, string $nivel) {
+            $this->log('finalize_api', $linea, $nivel);
+        };
+
+        $this->log('finalize_api', 'Instalando certificados AFIP desde el servidor del admin...');
+
+        try {
+            $sftp = $this->open_sftp_session('shared_hosting');
+            $resultado = $service->provision($sftp, $api_path, $log);
+            $service->loguear_resultado($resultado, $log);
+        } catch (\Exception $e) {
+            $this->log(
+                'finalize_api',
+                'Falló la copia de los certificados AFIP: ' . $e->getMessage(),
+                'error'
+            );
+        }
+    }
+
+    /**
+     * Rutas, relativas a api_path, que tienen que existir para dar una instalación por completa.
+     *
+     * Son imprescindibles para que la API bootee y para que los upgrades (que excluyen public/ y
+     * storage/ de sus ZIPs) tengan algo sobre lo que pisar. Agregar una ruta a chequear es agregar
+     * un elemento acá.
+     *
+     * Los cuatro certificados de AFIP entran por AfipCertificateProvisionService::rutas_destino(),
+     * que es el único lugar donde vive ese contrato con empresa-api. Se exigen y no se dan por
+     * sentados: una instalación entregada sin ellos parece perfecta hasta que el cliente intenta
+     * emitir su primera factura, y ningún upgrade posterior los repone por sí solo.
+     *
+     * @return array<int, string>
+     */
+    private function required_installation_paths(): array
+    {
         $required_paths = [
             'public/index.php',
             'public/.htaccess',
@@ -686,6 +723,33 @@ class InstallationService
             'storage/logs',
             'storage/app/public',
         ];
+
+        return array_merge($required_paths, AfipCertificateProvisionService::rutas_destino());
+    }
+
+    /**
+     * Verifica que la instalación quedó completa en el hosting antes de darla por exitosa.
+     *
+     * Corre un único comando SSH que chequea, con `[ -e ... ]`, la existencia de cada ruta de
+     * $required_paths relativa a api_path. Es la única oportunidad real de detectar una
+     * instalación incompleta: los ZIPs de upgrade (DeploymentService::step_upload_api(), a
+     * diferencia del ZIP de instalación) excluyen a propósito `public/*` y `storage/*` —
+     * ahí viven los archivos del cliente y sus certificados de AFIP, no se pueden pisar en cada
+     * actualización — así que lo que falte después de esta etapa no se repone solo en ningún
+     * upgrade futuro.
+     *
+     * El comando remoto termina siempre con "echo VERIFY_DONE" para poder distinguir una salida
+     * vacía por sesión SSH caída (verificación que no llegó a correr) de una verificación real
+     * que no encontró faltantes.
+     *
+     * @return void
+     * @throws \RuntimeException Si la verificación no llegó a completarse o falta alguna ruta requerida.
+     */
+    private function verify_api_installation(): void
+    {
+        $api_path = $this->get_api_path();
+
+        $required_paths = $this->required_installation_paths();
 
         // Arma la lista del `for` a partir del array de arriba, escapando cada ruta.
         $escaped_paths = [];
@@ -737,10 +801,24 @@ class InstallationService
                 'error'
             );
 
+            // Pista concreta para el caso más probable: si lo que falta son los certificados de
+            // AFIP, no es un problema del hosting del cliente sino que no están cargados en el
+            // panel del admin, y el mensaje tiene que decir dónde se arregla.
+            $pista_afip = '';
+            foreach (AfipCertificateProvisionService::rutas_destino() as $ruta_afip) {
+                if (in_array($ruta_afip, $missing_paths, true)) {
+                    $pista_afip = ' Faltan certificados de AFIP: cargalos en el panel del admin '
+                        . '(Configuración AFIP → Certificados) y volvé a correr la instalación. '
+                        . 'Sin ellos el cliente no puede facturar.';
+                    break;
+                }
+            }
+
             throw new \RuntimeException(
                 'La instalación quedó incompleta: faltan ' . $missing_list . '. Hay que revisarla '
                 . 'antes de entregarla al cliente: los upgrades excluyen public/ y storage/ de sus '
                 . 'ZIPs, así que estas rutas no se van a reponer solas en ninguna actualización futura.'
+                . $pista_afip
             );
         }
 

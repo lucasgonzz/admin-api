@@ -176,6 +176,10 @@ Route::prefix('admin')->group(function () {
         Route::get('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'show_json']);
         Route::put('comerciocity-afip-config', [ComerciocityAfipConfigController::class, 'update_json']);
         Route::post('comerciocity-afip-config/logo', [ComerciocityAfipConfigController::class, 'upload_logo_json']);
+        // Certificados de AFIP: los mismos que el admin usa para facturar sus mensualidades y que
+        // se instalan en cada cliente al instalar o actualizar su sistema.
+        Route::get('comerciocity-afip-config/certificados', [ComerciocityAfipConfigController::class, 'certificados_json']);
+        Route::post('comerciocity-afip-config/certificados', [ComerciocityAfipConfigController::class, 'upload_certificados_json']);
 
         Route::get('shared-database-groups', [SharedDatabaseGroupController::class, 'index_json']);
         Route::post('shared-database-groups', [SharedDatabaseGroupController::class, 'store_json']);

@@ -10,6 +10,7 @@ use App\Models\DeploymentLog;
 use App\Models\Version;
 use App\Models\VersionCommand;
 use App\Models\VersionSeeder;
+use App\Services\Afip\AfipCertificateProvisionService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
 use phpseclib3\Net\SFTP;
@@ -478,6 +479,7 @@ class DeploymentService
         // Asegurar que el árbol de storage/ existe antes de correr clears.
         $this->ensure_storage_skeleton('run_migrations');
         $this->sync_afip_certificates('run_migrations');
+        $this->provision_afip_certificates('run_migrations');
 
         $this->log('run_migrations', 'Limpiando caché de Laravel...');
 
@@ -1254,23 +1256,9 @@ class DeploymentService
      */
     private function resolve_client_api_path(ClientApi $client_api): string
     {
-        $hosting_type = $client_api->hosting_type ?? 'shared_hosting';
+        $resolver = new ClientApiPathResolver();
 
-        if ($hosting_type === 'vps') {
-            /* Validar que vps_path esté configurado */
-            $vps_path = trim((string) ($client_api->vps_path ?? ''));
-            if ($vps_path === '') {
-                throw new \RuntimeException(
-                    'La ClientApi tiene hosting_type=vps pero no tiene vps_path configurado. '
-                    . 'Completá el campo vps_path antes de deployar.'
-                );
-            }
-
-            return '/home/api-' . $vps_path . '/empresa-api';
-        }
-
-        /* shared_hosting: prefijo Hostinger + path relativo */
-        return 'domains/comerciocity.com/public_html/' . $client_api->path;
+        return $resolver->resolve($client_api);
     }
 
     /**
@@ -1348,6 +1336,51 @@ class DeploymentService
                 $step,
                 'No se pudo confirmar el sync de certificados AFIP. Si el cliente ya tenía certificado, '
                 . 'revisar a mano que siga facturando después de este deploy.',
+                'warning'
+            );
+        }
+    }
+
+    /**
+     * Repone desde el servidor del admin los certificados de AFIP que el cliente siga sin tener,
+     * después de que sync_afip_certificates() ya arrastró lo que había en la carpeta de la versión
+     * anterior.
+     *
+     * Los dos pasos son complementarios y este orden importa: el sync respeta lo que el cliente ya
+     * tenía (incluido un certificado propio o rotado a mano) y esto solo completa los huecos. Un
+     * cliente instalado después del 26/7/2026 nunca tuvo los archivos —el ZIP de instalación sale
+     * del clon de git, donde están gitignoreados— y por eso el sync no encuentra nada que copiar:
+     * ese es justamente el caso que dejaba al cliente sin poder facturar.
+     *
+     * 🔴 Nunca aborta el deploy. Si el admin todavía no tiene los certificados cargados, o si el
+     * SFTP falla, se loguea y la actualización sigue: una actualización cortada a la mitad es peor
+     * que un certificado que ya venía faltando de antes. La instalación inicial sí es estricta
+     * (ver InstallationService::verify_api_installation()), porque ahí todavía no hay nada en
+     * producción que romper.
+     *
+     * @param  string  $step
+     * @return void
+     */
+    private function provision_afip_certificates(string $step): void
+    {
+        $service = new AfipCertificateProvisionService();
+        $api_path = $this->get_api_path();
+
+        $log = function (string $linea, string $nivel) use ($step) {
+            $this->log($step, $linea, $nivel);
+        };
+
+        $this->log($step, 'Verificando certificados AFIP contra el servidor del admin...');
+
+        try {
+            $sftp = $this->open_sftp_session($this->get_hosting_credential_type());
+            $resultado = $service->provision($sftp, $api_path, $log);
+            $service->loguear_resultado($resultado, $log);
+        } catch (\Exception $e) {
+            $this->log(
+                $step,
+                'No se pudieron verificar los certificados AFIP del cliente: ' . $e->getMessage()
+                . ' La actualización sigue igual; revisar a mano que el cliente pueda facturar.',
                 'warning'
             );
         }
