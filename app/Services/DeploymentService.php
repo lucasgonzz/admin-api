@@ -1372,6 +1372,8 @@ class DeploymentService
 
         $this->log($step, 'Verificando certificados AFIP contra el servidor del admin...');
 
+        $sftp = null;
+
         try {
             $sftp = $this->open_sftp_session($this->get_hosting_credential_type());
             $resultado = $service->provision($sftp, $api_path, $log);
@@ -1384,6 +1386,14 @@ class DeploymentService
                 'warning'
             );
         }
+
+        if ($sftp !== null) {
+            $sftp->disconnect();
+        }
+
+        // El resto de step_run_migrations sigue con run_command() sobre la sesión SSH: se reconecta
+        // por las dudas, igual que después de cada operación SFTP larga del resto del pipeline.
+        $this->reconnect_hosting_ssh();
     }
 
     /**

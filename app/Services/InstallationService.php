@@ -682,6 +682,8 @@ class InstallationService
 
         $this->log('finalize_api', 'Instalando certificados AFIP desde el servidor del admin...');
 
+        $sftp = null;
+
         try {
             $sftp = $this->open_sftp_session('shared_hosting');
             $resultado = $service->provision($sftp, $api_path, $log);
@@ -693,6 +695,16 @@ class InstallationService
                 'error'
             );
         }
+
+        if ($sftp !== null) {
+            $sftp->disconnect();
+        }
+
+        // 🔴 Imprescindible: verify_api_installation() corre inmediatamente después y usa la sesión
+        // SSH, no la SFTP. Sin reconectar, una sesión que quedó tocada por la transferencia devuelve
+        // salida vacía, la verificación no encuentra su VERIFY_DONE y marca fallida una instalación
+        // que en realidad quedó perfecta.
+        $this->reconnect_hosting_ssh();
     }
 
     /**
