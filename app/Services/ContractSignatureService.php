@@ -62,6 +62,30 @@ class ContractSignatureService
     ];
 
     /**
+     * Tope de píxeles totales (ancho × alto) que se acepta al subir una firma.
+     *
+     * 🔴 No duplica la regla `dimensions` del controlador: la acota por otro lado y por otro
+     * motivo. `imagecreatefromstring` descomprime la imagen a un bitmap de **4 bytes por
+     * píxel**, y ese bitmap no lo acota ni el peso del archivo ni `max:2048`: un PNG de firma
+     * es casi todo transparente y comprime a nada, así que uno de 4000×4000 pesa 83 KB, pasa
+     * la validación de peso, entra justo adentro de `max_width=4000,max_height=4000` y recién
+     * después revienta.
+     *
+     * La cuenta: 4000 × 4000 = 16.000.000 px × 4 bytes = **64 MB** de bitmap, contra un
+     * `memory_limit` de **128M** en el runtime real (`php.ini` de wamp; los 512M de
+     * `phpunit.xml` son solo de la suite). La request muere con un fatal de memoria, que ni
+     * el `@` suprime ni un `try/catch` de PHP 7.4 captura: 500 sin cuerpo JSON. El umbral
+     * medido está cerca de los 3.800 px de lado.
+     *
+     * 6.000.000 px = **24 MB** de bitmap, que entra holgado. Una firma escaneada de verdad no
+     * llega ni cerca: la de Lucas son 320 × 386 = 123.520 px, 48 veces menos.
+     *
+     * 🔴 Si alguien sube este número hay que rehacer la cuenta contra el `memory_limit` del
+     * servidor donde corre, no estimarla de memoria.
+     */
+    const PIXELES_MAX = 6000000;
+
+    /**
      * El hueco arriba de la línea. Son los 64px de `.firma-linea` traducidos a puntos.
      *
      * 🔴 Si se cambia acá hay que cambiarlo TAMBIÉN en la vista, y en las DOS columnas: las dos
@@ -157,7 +181,9 @@ class ContractSignatureService
      *
      * @param UploadedFile $archivo Archivo ya validado por el controlador.
      *
-     * @throws \RuntimeException Si el contenido no es un PNG ni un JPEG.
+     * @throws \RuntimeException Si el contenido no es un PNG ni un JPEG, o si el disco no
+     *                            acepta la escritura. Las dos las traduce a 422 el controlador:
+     *                            un 500 sin cuerpo no le dice nada a la SPA.
      *
      * @return void
      */
@@ -170,20 +196,53 @@ class ContractSignatureService
             throw new \RuntimeException('Tipo de imagen no soportado para la firma: ' . $mime_detectado);
         }
 
-        // Se borra el archivo anterior leyendo la ruta que está efectivamente persistida, no
-        // adivinando el nombre: si la firma anterior era .jpg y la nueva es .png, adivinando
-        // quedarían las dos en disco y una de ellas huérfana para siempre.
-        self::borrar_archivo();
+        $disco = Storage::disk(self::DISCO);
+        $ruta_anterior = self::ruta_relativa();
+        $ruta_nueva = self::CARPETA . '/' . self::NOMBRE_BASE . '.' . $extension;
 
-        $nombre = self::NOMBRE_BASE . '.' . $extension;
-        $ruta = Storage::disk(self::DISCO)->putFileAs(self::CARPETA, $archivo, $nombre);
+        // 🔴 Se escribe PRIMERO la firma nueva y se borra la vieja DESPUÉS. Al revés —borrar y
+        // después escribir— un `putFileAs` que falla deja a Lucas sin la firma anterior y sin
+        // ninguna nueva: `putFileAs` NO tira excepción, devuelve `false`, `AdminSetting::set`
+        // lo castea a cadena vacía y la API contesta 200 "listo" sobre un estado vacío.
+        //
+        // Y va a un nombre temporal en vez de directo al definitivo por el caso borde de
+        // reemplazar un .png por otro .png: ahí el destino ES el archivo viejo, así que
+        // escribir "primero" lo pisaría igual y no quedaría nada a lo que volver si la
+        // escritura sale a medias. Con el temporal, los bytes nuevos están confirmados en
+        // disco antes de que el nombre definitivo se toque.
+        $nombre_temporal = self::NOMBRE_BASE . '.subiendo-' . uniqid() . '.tmp';
+
+        if ($disco->putFileAs(self::CARPETA, $archivo, $nombre_temporal) === false) {
+            throw new \RuntimeException('No se pudo escribir el archivo de la firma en el disco.');
+        }
+
+        $ruta_temporal = self::CARPETA . '/' . $nombre_temporal;
+
+        // Recién ahora, con los bytes nuevos ya confirmados en disco, se libera el nombre
+        // definitivo. `move` de Flysystem falla si el destino existe, así que hay que borrarlo.
+        if ($disco->exists($ruta_nueva)) {
+            $disco->delete($ruta_nueva);
+        }
+
+        if ($disco->move($ruta_temporal, $ruta_nueva) === false) {
+            $disco->delete($ruta_temporal);
+
+            throw new \RuntimeException('No se pudo dejar el archivo de la firma en su lugar definitivo.');
+        }
 
         // 🔴 Se guarda la RUTA, no el base64 de la imagen. `admin_settings.value` es TEXT (64 KB)
         // y el base64 del PNG de una firma real mide ~70 KB: entraría truncado y sin avisar, el
         // data URI saldría cortado y dompdf dibujaría su "broken image" —una X gris— adentro del
         // contrato que firma el cliente. Los bytes viven en disco; acá va la ruta.
-        AdminSetting::set(self::CLAVE_RUTA, $ruta);
+        AdminSetting::set(self::CLAVE_RUTA, $ruta_nueva);
         AdminSetting::set(self::CLAVE_ACTUALIZADA_EN, now()->toIso8601String());
+
+        // La firma anterior con OTRA extensión (un .jpg reemplazado por un .png) se borra recién
+        // acá, leyendo la ruta que estaba efectivamente persistida y no adivinando el nombre: si
+        // se adivinara, quedarían las dos en disco y una de ellas huérfana para siempre.
+        if ($ruta_anterior !== null && $ruta_anterior !== $ruta_nueva && $disco->exists($ruta_anterior)) {
+            $disco->delete($ruta_anterior);
+        }
     }
 
     /**
@@ -220,20 +279,29 @@ class ContractSignatureService
             return $estado;
         }
 
-        $ruta = self::ruta_relativa();
+        $mime = self::mime();
+        $medidas_px = self::medidas_en_pixeles();
+
+        // 🔴 `cargada` dice si la firma se va a poder ESTAMPAR, no si hay un archivo en disco.
+        // No es lo mismo: un `.png` de bytes basura, o un `.gif` (extensión fuera del mapa de
+        // MIMEs), están en disco y pasan `existe()`, pero el contrato sale sin firma igual.
+        // Si acá dijéramos `true`, la SPA pintaría el badge verde "Cargada" y Lucas mandaría
+        // el contrato creyendo que va firmado. Los dos motivos de descarte son exactamente los
+        // mismos que usa LeadContractPdfService::build_signature_data para no estampar nada,
+        // así que la UI y el PDF no pueden discrepar.
+        if ($mime === null || $medidas_px === null) {
+            return $estado;
+        }
+
         $actualizada_en = AdminSetting::get(self::CLAVE_ACTUALIZADA_EN);
 
         $estado['cargada'] = true;
         $estado['actualizada_en'] = is_string($actualizada_en) && $actualizada_en !== ''
             ? $actualizada_en
             : null;
-        $estado['bytes'] = (int) Storage::disk(self::DISCO)->size($ruta);
-
-        $medidas_px = self::medidas_en_pixeles();
-        if ($medidas_px !== null) {
-            $estado['ancho'] = $medidas_px['ancho_px'];
-            $estado['alto'] = $medidas_px['alto_px'];
-        }
+        $estado['bytes'] = (int) Storage::disk(self::DISCO)->size(self::ruta_relativa());
+        $estado['ancho'] = $medidas_px['ancho_px'];
+        $estado['alto'] = $medidas_px['alto_px'];
 
         return $estado;
     }
