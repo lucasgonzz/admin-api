@@ -621,18 +621,28 @@ class LeadController extends Controller
      *
      * Lee los campos `contract_*` del lead y delega en {@see LeadContractPdfService}.
      *
-     * @param int|string $id Identificador del lead.
+     * El interruptor `incluir_firma` es una opción de ESTA generación, no un dato del contrato:
+     * por eso no entra en `build_contract_payload()` del PUT del lead ni se persiste en la tabla
+     * (guardarlo pediría una migración y no es lo que se pidió). El default `true` mantiene el
+     * contrato de API compatible hacia atrás: una SPA vieja que mande `{}` recibe el PDF con la
+     * firma, que es el comportamiento deseado.
+     *
+     * @param \Illuminate\Http\Request $request
+     * @param int|string               $id Identificador del lead.
      *
      * @return \Illuminate\Http\Response
      */
-    public function generate_contract_json($id)
+    public function generate_contract_json(Request $request, $id)
     {
         // Lead con datos de contrato persistidos en la tabla.
         $lead = Lead::findOrFail($id);
 
+        // Si estampa la firma del PRESTADOR en esta generación.
+        $incluir_firma = $request->boolean('incluir_firma', true);
+
         try {
             // Contenido binario del PDF generado con dompdf.
-            $pdf_content = LeadContractPdfService::generate($lead);
+            $pdf_content = LeadContractPdfService::generate($lead, $incluir_firma);
         } catch (\Throwable $error) {
             Log::error('LeadController@generate_contract_json error: ' . $error->getMessage(), [
                 'lead_id' => $lead->id,

@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Lead;
 use Barryvdh\DomPDF\Facade as Pdf;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Genera el PDF del contrato ComercioCity para un lead a partir de los campos `contract_*`.
@@ -16,14 +17,16 @@ class LeadContractPdfService
     /**
      * Construye datos del contrato, renderiza la vista y devuelve el PDF como string binario.
      *
-     * @param Lead $lead Lead con campos de contrato cargados.
+     * @param Lead $lead           Lead con campos de contrato cargados.
+     * @param bool $incluir_firma  Si estampa la firma del PRESTADOR. Default true para que
+     *                             cualquier llamador viejo siga andando igual.
      *
      * @return string Contenido binario del PDF.
      */
-    public static function generate(Lead $lead): string
+    public static function generate(Lead $lead, bool $incluir_firma = true): string
     {
         // Array de datos para la vista Blade del contrato.
-        $datos = self::build_contract_data($lead);
+        $datos = self::build_contract_data($lead, $incluir_firma);
 
         // Instancia PDF en A4 con márgenes definidos en la vista (@page).
         $pdf = Pdf::loadView('emails.lead.contract', $datos);
@@ -36,10 +39,11 @@ class LeadContractPdfService
      * Arma el array de variables del contrato a partir del modelo Lead.
      *
      * @param Lead $lead
+     * @param bool $incluir_firma Si estampa la firma del PRESTADOR en la celda de firmas.
      *
      * @return array<string, mixed>
      */
-    protected static function build_contract_data(Lead $lead): array
+    protected static function build_contract_data(Lead $lead, bool $incluir_firma = true): array
     {
         // Moneda y montos del pago único.
         $moneda = $lead->contract_currency ?? 'USD';
@@ -66,7 +70,7 @@ class LeadContractPdfService
             $lead->contract_precio_perfil_ecommerce
         );
 
-        return [
+        return array_merge(self::build_signature_data($incluir_firma), [
             'cc_nombre_fantasia'   => 'ComercioCity',
             'cc_razon_social'      => 'Lucas González',
             'cc_cuit'              => '20-42354898-4',
@@ -95,7 +99,63 @@ class LeadContractPdfService
 
             'total_mensual'               => $total_mensual,
             'total_mensual_formateado'    => self::format_amount_for_display($total_mensual),
+        ]);
+    }
+
+    /**
+     * Arma las cinco claves de la firma del PRESTADOR que consume la vista.
+     *
+     * Las cinco están SIEMPRE presentes, aunque valgan null. Nunca `@isset` en la vista: si un
+     * día faltara una clave, dompdf tira `Undefined variable` y el contrato entero deja de
+     * generarse. Una clave que siempre está y a veces vale null no puede producir eso.
+     *
+     * Y toda la lectura de la firma va envuelta en try/catch: si el archivo está corrupto, si
+     * `getimagesize` devuelve false o si el disco no responde, se loguea y el contrato sale
+     * SIN firma, no falla. Un contrato sin firma es un inconveniente; un contrato que no se
+     * puede generar frena una venta.
+     *
+     * @param bool $incluir_firma
+     *
+     * @return array<string, mixed>
+     */
+    protected static function build_signature_data(bool $incluir_firma): array
+    {
+        $sin_firma = [
+            'firma_prestador_src'                => null,
+            'firma_prestador_ancho_pt'           => null,
+            'firma_prestador_alto_pt'            => null,
+            'firma_prestador_margen_superior_pt' => null,
+            'firma_prestador_separacion_pt'      => ContractSignatureService::SEPARACION_PT,
         ];
+
+        if (!$incluir_firma) {
+            return $sin_firma;
+        }
+
+        try {
+            if (!ContractSignatureService::existe()) {
+                return $sin_firma;
+            }
+
+            $medidas = ContractSignatureService::medidas_en_puntos();
+            $src = ContractSignatureService::data_uri();
+
+            if ($medidas === null || $src === null) {
+                return $sin_firma;
+            }
+
+            return [
+                'firma_prestador_src'                => $src,
+                'firma_prestador_ancho_pt'           => $medidas['ancho_pt'],
+                'firma_prestador_alto_pt'            => $medidas['alto_pt'],
+                'firma_prestador_margen_superior_pt' => $medidas['margen_superior_pt'],
+                'firma_prestador_separacion_pt'      => ContractSignatureService::SEPARACION_PT,
+            ];
+        } catch (\Throwable $error) {
+            Log::warning('LeadContractPdfService: no se pudo leer la firma del PRESTADOR, el contrato sale sin firma. ' . $error->getMessage());
+
+            return $sin_firma;
+        }
     }
 
     /**
