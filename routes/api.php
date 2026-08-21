@@ -444,6 +444,14 @@ Route::prefix('admin')->group(function () {
         Route::get('settings/support-ai', [\App\Http\Controllers\Api\SupportAiSettingsController::class, 'show']);
         Route::put('settings/support-ai', [\App\Http\Controllers\Api\SupportAiSettingsController::class, 'update']);
 
+        // Firma del PRESTADOR que se estampa en el PDF del contrato de un lead. Las cuatro van
+        // dentro de auth:sanctum y no con URL firmada: la vista previa la pide la SPA con su
+        // token, y un link firmado sobreviviría fuera de la sesión.
+        Route::get('settings/contract-signature', [\App\Http\Controllers\Api\ContractSignatureController::class, 'show']);
+        Route::post('settings/contract-signature', [\App\Http\Controllers\Api\ContractSignatureController::class, 'store']);
+        Route::get('settings/contract-signature/file', [\App\Http\Controllers\Api\ContractSignatureController::class, 'file']);
+        Route::delete('settings/contract-signature', [\App\Http\Controllers\Api\ContractSignatureController::class, 'destroy']);
+
         Route::get('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'show']);
         Route::put('settings/lead-whatsapp-onboarding', [\App\Http\Controllers\Api\LeadWhatsappOnboardingSettingsController::class, 'update']);
 
