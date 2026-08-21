@@ -70,7 +70,7 @@ class LeadContractPdfService
             $lead->contract_precio_perfil_ecommerce
         );
 
-        return array_merge(self::build_signature_data($incluir_firma), [
+        return array_merge(self::build_signature_data($lead, $incluir_firma), [
             'cc_nombre_fantasia'   => 'ComercioCity',
             'cc_razon_social'      => 'Lucas González',
             'cc_cuit'              => '20-42354898-4',
@@ -114,11 +114,12 @@ class LeadContractPdfService
      * SIN firma, no falla. Un contrato sin firma es un inconveniente; un contrato que no se
      * puede generar frena una venta.
      *
+     * @param Lead $lead          Solo para poder identificar el contrato en el log.
      * @param bool $incluir_firma
      *
      * @return array<string, mixed>
      */
-    protected static function build_signature_data(bool $incluir_firma): array
+    protected static function build_signature_data(Lead $lead, bool $incluir_firma): array
     {
         $sin_firma = [
             'firma_prestador_src'                => null,
@@ -141,6 +142,17 @@ class LeadContractPdfService
             $src = ContractSignatureService::data_uri();
 
             if ($medidas === null || $src === null) {
+                // 🔴 Este return NO puede salir mudo. Los dos casos que el plan nombra —archivo
+                // corrupto y getimagesize devolviendo false— no lanzan excepción, así que no
+                // pasan por el catch de abajo: salen por acá. Sin este warning el contrato sale
+                // sin firma, la generación devuelve 200 y en los logs no queda una sola línea,
+                // que es exactamente la clase de error que APRENDER_NO_PARCHEAR.md ya tiene
+                // documentada en este proyecto: la condición de error que nunca llega a nadie.
+                Log::warning('LeadContractPdfService: la firma del PRESTADOR está cargada pero no se pudo leer (archivo corrupto, extensión no soportada o getimagesize sin datos). El contrato sale sin firma.', [
+                    'ruta'    => ContractSignatureService::ruta_relativa(),
+                    'lead_id' => $lead->id,
+                ]);
+
                 return $sin_firma;
             }
 
@@ -152,7 +164,9 @@ class LeadContractPdfService
                 'firma_prestador_separacion_pt'      => ContractSignatureService::SEPARACION_PT,
             ];
         } catch (\Throwable $error) {
-            Log::warning('LeadContractPdfService: no se pudo leer la firma del PRESTADOR, el contrato sale sin firma. ' . $error->getMessage());
+            Log::warning('LeadContractPdfService: no se pudo leer la firma del PRESTADOR, el contrato sale sin firma. ' . $error->getMessage(), [
+                'lead_id' => $lead->id,
+            ]);
 
             return $sin_firma;
         }

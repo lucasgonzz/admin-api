@@ -359,9 +359,9 @@
             <td class="firma-col">
                 @if($firma_prestador_src !== null)
                     {{-- Ancho, alto y margen vienen calculados en puntos desde ContractSignatureService,
-                         no de CSS: dompdf 1.2 no aplica max-width/max-height sobre <img>, asi que si la
-                         firma se dejara escalar sola, una imagen apaisada se comeria el ancho de la celda.
-                         El margen superior es el que mantiene el hueco total en HUECO_PT y las dos lineas
+                         no de CSS: dompdf 1.2 no aplica max-width/max-height sobre <img>, así que si la
+                         firma se dejara escalar sola, una imagen apaisada se comería el ancho de la celda.
+                         El margen superior es el que mantiene el hueco total en HUECO_PT y las dos líneas
                          de firma alineadas. --}}
                     <div class="firma-imagen-caja">
                         <img src="{{ $firma_prestador_src }}" alt=""
@@ -369,11 +369,11 @@
                                     height: {{ $firma_prestador_alto_pt }}pt;
                                     margin-top: {{ $firma_prestador_margen_superior_pt }}pt;" />
                     </div>
-                    {{-- margin-top inline y no una clase modificadora: el modificador tendria la misma
-                         especificidad que .firma-linea y solo ganaria por estar declarado despues en la
+                    {{-- margin-top inline y no una clase modificadora: el modificador tendría la misma
+                         especificidad que .firma-linea y solo ganaría por estar declarado después en la
                          hoja de estilos. Es una dependencia del orden del archivo, invisible, que se
-                         rompe sola la proxima vez que alguien ordene el CSS, y el sintoma serian las dos
-                         lineas de firma desalineadas en un contrato ya enviado. --}}
+                         rompe sola la próxima vez que alguien ordene el CSS, y el síntoma serían las dos
+                         líneas de firma desalineadas en un contrato ya enviado. --}}
                     <div class="firma-linea" style="margin-top: {{ $firma_prestador_separacion_pt }}pt;"></div>
                 @else
                     <div class="firma-linea"></div>
