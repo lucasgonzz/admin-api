@@ -23,6 +23,7 @@ use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\AiSystemPromptController;
 use App\Http\Controllers\Api\ClientInstallationController;
+use App\Http\Controllers\Api\EnvBulkChangeController;
 use App\Http\Controllers\Api\EnvTemplateController;
 use App\Http\Controllers\WhatsappConfigController;
 use App\Http\Controllers\WhatsappWebhookController;
@@ -573,6 +574,13 @@ Route::prefix('admin')->group(function () {
         Route::post('env-template/apply-diff/{client}', [EnvTemplateController::class, 'apply_diff']);
         Route::post('env-template/check-diff-all/{client}', [EnvTemplateController::class, 'check_diff_all']);
         Route::post('env-template/apply-diff-all/{client}', [EnvTemplateController::class, 'apply_diff_all']);
+
+        // Cambio masivo de variables .env sobre varios clientes, en dos tiempos: previsualizar
+        // (no escribe, devuelve el diff y un token) y aplicar (exige ese token). Es lo que consume
+        // el conector MCP para operar por voz.
+        Route::get('env-bulk/clients', [EnvBulkChangeController::class, 'clients']);
+        Route::post('env-bulk/preview', [EnvBulkChangeController::class, 'preview']);
+        Route::post('env-bulk/apply', [EnvBulkChangeController::class, 'apply']);
 
         // Reportes diarios del agente analizador: listado, descarga y generación manual.
         Route::get('agent-report', [\App\Http\Controllers\Api\AgentReportController::class, 'index_json']);
