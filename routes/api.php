@@ -579,6 +579,7 @@ Route::prefix('admin')->group(function () {
         // (no escribe, devuelve el diff y un token) y aplicar (exige ese token). Es lo que consume
         // el conector MCP para operar por voz.
         Route::get('env-bulk/clients', [EnvBulkChangeController::class, 'clients']);
+        Route::get('env-bulk/history', [EnvBulkChangeController::class, 'history']);
         Route::post('env-bulk/preview', [EnvBulkChangeController::class, 'preview']);
         Route::post('env-bulk/apply', [EnvBulkChangeController::class, 'apply']);
 

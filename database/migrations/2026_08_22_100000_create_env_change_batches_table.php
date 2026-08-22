@@ -27,7 +27,11 @@ class CreateEnvChangeBatchesTable extends Migration
             // Token que devuelve la previsualización y que la aplicación exige para escribir.
             $table->string('token', 64)->unique();
 
-            // Estado del lote: previewed | applied.
+            // Estado del lote: previewed | applying | applied.
+            // 'applying' existe para que un lote cortado a la mitad (timeout con muchos clientes,
+            // una sesión SSH colgada) se pueda reanudar: los renglones que quedaron sin escribir
+            // siguen en 'previewed' y se retoman. Sin ese estado intermedio, marcar 'applied' antes
+            // de escribir dejaba el token quemado y la mitad del lote sin forma de completarse.
             $table->string('status')->default('previewed');
 
             // Vencimiento de la previsualización. Pasado esto el lote ya no se puede aplicar.

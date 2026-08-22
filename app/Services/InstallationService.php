@@ -549,16 +549,16 @@ class InstallationService
         // una instalación en VPS escribía el .env en el servidor equivocado sin fallar.
         $env_ssh_service = new EnvSshService();
         $env_ssh_service->connect_for($this->target_api);
-        $api_path        = $env_ssh_service->get_api_path($this->target_api);
 
-        // Si el archivo .env no existe, lo crea vacío (touch) antes de llamar a write_env_vars.
-        $this->reconnect_hosting_ssh();
-        $env_file    = $api_path . '/.env';
-        $touch_cmd   = 'test -f ' . escapeshellarg($env_file) . ' || touch ' . escapeshellarg($env_file);
-        $this->exec_hosting_ssh('write_env', $touch_cmd, false);
+        // Si el .env todavía no existe, lo crea vacío. 🔴 El touch va POR LA SESIÓN DE
+        // EnvSshService, no por exec_hosting_ssh: esa otra sesión conecta fija al hosting
+        // compartido (connect(), línea ~119), así que con una API destino en VPS el touch caía en
+        // un servidor y la escritura en el otro — el archivo nunca aparecía donde se lo iba a
+        // buscar. Es el mismo par path/servidor para las dos operaciones o no sirve de nada.
+        $env_ssh_service->ensure_env_file_for($this->target_api);
 
-        // EnvSshService reutiliza la misma lógica de sed del sistema.
-        $env_ssh_service->write_env_vars($api_path, $vars_to_write);
+        // EnvSshService reutiliza la misma lógica de sed del sistema, y verifica la escritura.
+        $env_ssh_service->write_env_vars_for($this->target_api, $vars_to_write);
 
         $this->log('write_env', '.env generado y escrito en el hosting', 'success');
     }

@@ -39,8 +39,13 @@ class CreateEnvChangeItemsTable extends Migration
             $table->string('env_key');
 
             // Valor que tenía y que va a pasar a tener, enmascarados si la variable es sensible.
-            $table->string('old_value_masked')->nullable();
-            $table->string('new_value_masked')->nullable();
+            // 🔴 `text` y no `string`: cuando la variable NO es sensible se guarda el valor entero,
+            // y un .env real tiene valores largos (SANCTUM_STATEFUL_DOMAINS con varios dominios,
+            // una lista de orígenes CORS, un DATABASE_URL). Con varchar(255) y el modo estricto de
+            // MySQL que usa este proyecto, un valor largo tira "Data too long" en medio del
+            // recorrido y se lleva puesto el lote entero en vez de a ese solo cliente.
+            $table->text('old_value_masked')->nullable();
+            $table->text('new_value_masked')->nullable();
 
             // sha256 del valor nuevo completo: permite verificar sin exponer el secreto.
             $table->string('new_value_sha256', 64);
