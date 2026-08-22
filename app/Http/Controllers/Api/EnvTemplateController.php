@@ -231,13 +231,16 @@ class EnvTemplateController extends Controller
             ]);
         }
 
-        /* Obtiene el path del .env del cliente en el hosting. */
         $env_ssh_service = new EnvSshService();
-        $api_path        = $env_ssh_service->get_api_path($client_api);
 
-        /* Lee el .env del cliente vía SSH. En caso de error, devuelve warning no bloqueante. */
+        /*
+         * Lee el .env del cliente vía SSH. En caso de error, devuelve warning no bloqueante.
+         * read_env_for() resuelve servidor y path según el hosting_type de esta API: antes se
+         * armaba el path a mano con el prefijo de Hostinger y un cliente de VPS se leía del
+         * servidor equivocado.
+         */
         try {
-            $client_env = $env_ssh_service->read_env($api_path);
+            $client_env = $env_ssh_service->read_env_for($client_api);
         } catch (\Throwable $e) {
             return response()->json([
                 'diffs' => [],
@@ -309,12 +312,14 @@ class EnvTemplateController extends Controller
         $results = [];
 
         foreach ($client_apis as $client_api) {
-            /* Determina el path del .env del cliente en el hosting. */
-            $api_path = $env_ssh_service->get_api_path($client_api);
-
             try {
-                /* Lee el .env real del cliente vía SSH. */
-                $client_env = $env_ssh_service->read_env($api_path);
+                /*
+                 * Lee el .env real del cliente vía SSH, resolviendo servidor y path según el
+                 * hosting_type de esta API. La resolución va adentro del try a propósito: una API
+                 * con hosting_type=vps y sin vps_path cargado lanza excepción, y eso tiene que
+                 * fallar sólo para esa API, no cortar el recorrido de las demás.
+                 */
+                $client_env = $env_ssh_service->read_env_for($client_api);
 
                 /* Compara cada variable común contra el valor en el .env real. */
                 $diffs = [];
@@ -406,9 +411,9 @@ class EnvTemplateController extends Controller
         $failed_apis = [];
 
         foreach ($client_apis as $client_api) {
-            $api_path = $env_ssh_service->get_api_path($client_api);
             try {
-                $env_ssh_service->write_env_vars($api_path, $vars_to_write);
+                /* La resolución de path va adentro del try: un VPS sin vps_path falla solo para esa API. */
+                $env_ssh_service->write_env_vars_for($client_api, $vars_to_write);
                 $updated_apis++;
             } catch (\Throwable $e) {
                 $failed_apis[] = [
@@ -468,11 +473,10 @@ class EnvTemplateController extends Controller
             return response()->json(['updated' => []]);
         }
 
-        /* Escribe las variables en el .env del cliente vía SSH. */
+        /* Escribe las variables en el .env del cliente vía SSH, según el hosting_type de esta API. */
         $env_ssh_service = new EnvSshService();
-        $api_path        = $env_ssh_service->get_api_path($client_api);
 
-        $env_ssh_service->write_env_vars($api_path, $vars_to_write);
+        $env_ssh_service->write_env_vars_for($client_api, $vars_to_write);
         $env_ssh_service->disconnect();
 
         return response()->json(['updated' => array_keys($vars_to_write)]);

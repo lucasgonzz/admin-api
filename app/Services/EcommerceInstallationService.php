@@ -1164,9 +1164,11 @@ class EcommerceInstallationService
             );
         }
 
+        // Lee el .env de empresa del cliente conectando al servidor que corresponde a ESA API
+        // (shared_hosting o vps). Si el cliente de empresa vive en un VPS, su .env no está en el
+        // hosting compartido — antes se leía siempre de ahí y salía vacío o de otro sistema.
         $env_ssh_service  = new EnvSshService();
-        $empresa_api_path = $env_ssh_service->get_api_path($empresa_client_api);
-        $empresa_env_vars = $env_ssh_service->read_env($empresa_api_path);
+        $empresa_env_vars = $env_ssh_service->read_env_for($empresa_client_api);
 
         foreach (['DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'APP_KEY'] as $shared_key) {
             if (isset($empresa_env_vars[$shared_key])) {
@@ -1188,6 +1190,11 @@ class EcommerceInstallationService
         $touch_cmd = 'test -f ' . escapeshellarg($env_file) . ' || touch ' . escapeshellarg($env_file);
         $this->exec_hosting_ssh('write_env', $touch_cmd, false);
 
+        // tienda-api siempre vive en el hosting compartido (get_api_path() usa HOSTING_PREFIX y
+        // connect_hosting_ssh() de este servicio conecta fijo a shared_hosting). Se declara
+        // explícito porque la lectura de arriba pudo haber dejado la sesión abierta contra un VPS,
+        // si el cliente de empresa está ahí.
+        $env_ssh_service->connect_to('shared_hosting');
         $env_ssh_service->write_env_vars($api_path, $vars_to_write);
 
         $this->log('write_env', '.env de tienda-api generado y escrito en el hosting', 'success');

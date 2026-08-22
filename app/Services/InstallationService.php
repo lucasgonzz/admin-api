@@ -543,8 +543,12 @@ class InstallationService
             'Variables a escribir: ' . count($vars_to_write) . ' (' . implode(', ', array_keys($vars_to_write)) . ')'
         );
 
-        // Obtiene el path de la API en el hosting.
+        // Obtiene el path de la API en el hosting y abre SSH contra el servidor que corresponde
+        // al hosting_type de la API destino (shared_hosting o vps). Conectar es explícito desde el
+        // 22/8/2026: antes EnvSshService cargaba fija la credencial de hosting compartido, así que
+        // una instalación en VPS escribía el .env en el servidor equivocado sin fallar.
         $env_ssh_service = new EnvSshService();
+        $env_ssh_service->connect_for($this->target_api);
         $api_path        = $env_ssh_service->get_api_path($this->target_api);
 
         // Si el archivo .env no existe, lo crea vacío (touch) antes de llamar a write_env_vars.
