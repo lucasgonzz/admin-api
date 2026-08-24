@@ -90,6 +90,22 @@ class EnvSshServiceFake extends EnvSshService
     }
 
     /**
+     * ¿Hay .env cargado para esa API?
+     *
+     * Existir es tener una entrada en $envs, aunque el contenido sea vacío: es lo mismo que pasa en
+     * el servidor, donde un `.env` recién creado con touch existe y no tiene una sola línea. Un
+     * fake que devolviera siempre false haría que el esqueleto crea que todo destino está virgen y
+     * escriba todas las claves, que es justo lo que los tests tienen que poder detectar.
+     *
+     * @param  ClientApi  $client_api
+     * @return bool
+     */
+    public function env_exists_for(ClientApi $client_api): bool
+    {
+        return isset($this->envs[$client_api->id]);
+    }
+
+    /**
      * Crea el .env vacío en memoria si no existía.
      *
      * @param  ClientApi  $client_api
