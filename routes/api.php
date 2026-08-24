@@ -12,6 +12,7 @@ use App\Http\Controllers\ClientApiController;
 use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientMensualidadController;
+use App\Http\Controllers\ClientScheduleController;
 use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
@@ -225,6 +226,9 @@ Route::prefix('admin')->group(function () {
         // Mensualidad del cliente (inputs manuales + total calculado de forma autónoma, prompt 329).
         Route::get('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'show_json']);
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
+        // Horarios comerciales del cliente: el PUT reemplaza el conjunto entero de días y rangos.
+        Route::get('client/{clientId}/horarios', [ClientScheduleController::class, 'show_json']);
+        Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
