@@ -407,8 +407,11 @@ class SupportTicketController extends BaseController
 
         $ticket->save();
 
-        // Sincroniza cambios de ticket al empresa-api de ese cliente.
-        $sync_service->sync_ticket_to_client($ticket);
+        // Sincroniza cambios de ticket al empresa-api de ese cliente. Un ticket de WhatsApp
+        // no tiene contraparte allá: replicarlo es un POST que siempre falla.
+        if ($ticket->source !== 'whatsapp') {
+            $sync_service->sync_ticket_to_client($ticket);
+        }
 
         // Notifica a todos los operadores (support.admins) para alinear bandejas tras reasignación u otros cambios.
         event(new SupportTicketUpdated((int) $ticket->id));

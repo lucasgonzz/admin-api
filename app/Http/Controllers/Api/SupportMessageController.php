@@ -166,12 +166,32 @@ class SupportMessageController extends BaseController
      */
     public function mark_read($id, SupportClientSyncService $sync_service)
     {
-        $message = SupportMessage::findOrFail($id);
+        $message = SupportMessage::with('ticket')->findOrFail($id);
         $message->read_at = now();
         $message->save();
-        $sync_service->sync_read_to_client($message);
+
+        // En un ticket de WhatsApp el cliente no tiene chat del ERP donde ver la lectura:
+        // sincronizar sería un POST con dos reintentos y 15s de timeout contra una API que
+        // ni siquiera conoce este ticket, por cada mensaje que el operador abre.
+        if (! $this->ticket_is_whatsapp($message->ticket)) {
+            $sync_service->sync_read_to_client($message);
+        }
 
         return response()->json(['ok' => true], 200);
+    }
+
+    /**
+     * Indica si el ticket viaja por WhatsApp y por lo tanto no se sincroniza al ERP.
+     *
+     * Un ticket nulo se trata como ERP: es el comportamiento que había antes de esta guarda.
+     *
+     * @param SupportTicket|null $ticket Ticket del mensaje.
+     *
+     * @return bool
+     */
+    private function ticket_is_whatsapp($ticket): bool
+    {
+        return $ticket !== null && $ticket->source === 'whatsapp';
     }
 
     /**
@@ -227,7 +247,11 @@ class SupportMessageController extends BaseController
         ]);
         $typing_state->last_typing_at = now();
         $typing_state->save();
-        $sync_service->sync_typing_to_client($ticket);
+
+        // Mismo motivo que en mark_read(), pero peor: acá el POST salía por cada tecla.
+        if (! $this->ticket_is_whatsapp($ticket)) {
+            $sync_service->sync_typing_to_client($ticket);
+        }
 
         return response()->json(['ok' => true], 200);
     }
