@@ -18,6 +18,8 @@ class Kernel extends ConsoleKernel
         // Reintenta cada 5 minutos los mensajes de soporte no sincronizados a clientes.
         $schedule->command('support:retry-pending-syncs')->everyFiveMinutes();
         $schedule->command('support:check-response-alerts')->everyFiveMinutes();
+        // Una vez por día alcanza: un cliente se queda sin teléfono cargado una vez, no cada cinco minutos.
+        $schedule->command('support:check-clients-without-phone')->dailyAt('09:00');
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
