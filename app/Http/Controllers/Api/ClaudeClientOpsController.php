@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\UpdateController;
+use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
 use App\Models\ClientScheduleDay;
 use App\Services\ClientScheduleResolver;
@@ -625,6 +626,69 @@ class ClaudeClientOpsController extends Controller
             'proximo_cierre'        => $this->instante_iso($detalle['instante']),
             'proximo_cierre_motivo' => $detalle['motivo'],
         ], 200);
+    }
+
+    /**
+     * Encola el push de los horarios de un cliente a su empresa-api.
+     *
+     * Es el único endpoint de ESCRITURA de este controlador, y entra acá porque escribe sobre la
+     * misma entidad que el resto: es idempotente (reenvía el estado actual de los horarios, no
+     * acumula nada del lado del cliente) y por eso no lleva `confirm_client_name` ni `dry_run`. Lo
+     * único que hace es empujarle a la propia API del cliente un dato que el admin ya tiene: el
+     * daño posible es cero.
+     *
+     * 🔴 Encola con `->onConnection('database')` explícito y devuelve 202: nunca corre el HTTP
+     * adentro del request. Con QUEUE_CONNECTION=sync un dispatch pelado lo correría inline y le
+     * sumaría hasta ~45 segundos de espera a este endpoint (timeout 15 s por dos reintentos).
+     *
+     * El `sincronizacion` que viaja es el estado PERSISTIDO al momento de encolar, o sea el del
+     * intento anterior. El resultado de ESTE push se consulta después con
+     * `GET claude/clients/{id}/schedule`.
+     *
+     * @param int|string $id Id numérico o uuid del cliente.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function sync_schedule_json($id)
+    {
+        $client_id = $this->resolver_client_id($id);
+        if ($client_id === null) {
+            return $this->error_404('no existe el cliente ' . $id);
+        }
+
+        $cliente = Client::find($client_id);
+        if ($cliente === null) {
+            return $this->error_404('no existe el cliente ' . $id);
+        }
+
+        SyncClientScheduleJob::dispatch($client_id)->onConnection('database');
+
+        return response()->json([
+            'encolado' => true,
+            'conexion' => 'database',
+            'client'   => [
+                'id'   => (int) $cliente->id,
+                'uuid' => (string) $cliente->uuid,
+                'name' => (string) $cliente->name,
+            ],
+            'sincronizacion' => [
+                'estado'  => $cliente->schedule_sync_status === null
+                    ? null
+                    : (string) $cliente->schedule_sync_status,
+                'mensaje' => $cliente->schedule_sync_message === null
+                    ? null
+                    : (string) $cliente->schedule_sync_message,
+                'sincronizado_at' => $cliente->schedule_synced_at === null
+                    ? null
+                    : (string) $cliente->schedule_synced_at,
+            ],
+            'latencia_maxima_segundos' => 60,
+            'consultar_estado_en'      => 'GET claude/clients/' . $cliente->id . '/schedule',
+            'nota' => 'El push corre en el worker `queue:work database` que el scheduler dispara '
+                . 'cada minuto. El estado que viaja acá es el del intento ANTERIOR: este endpoint no '
+                . 'espera a que el push termine. Si el empresa-api del cliente todavía no tiene la '
+                . 'ruta admin-sync/business-hours, el resultado esperado es `manual_required`.',
+        ], 202);
     }
 
     /**

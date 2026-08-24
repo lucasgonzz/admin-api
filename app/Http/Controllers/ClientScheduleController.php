@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
 use App\Models\ClientScheduleDay;
 use App\Models\ClientScheduleRange;
@@ -96,7 +97,52 @@ class ClientScheduleController extends Controller
             }
         });
 
+        /* Los horarios ya quedaron guardados: recién ahora se avisa al empresa-api del cliente, y se
+         * hace ENCOLANDO.
+         *
+         * 🔴 `->onConnection('database')` explícito, no decorativo: con QUEUE_CONNECTION=sync un
+         * dispatch pelado correría el push HTTP adentro de este request, y con timeout 15 s y dos
+         * reintentos le sumaría hasta ~45 segundos de espera al modal del admin por un efecto
+         * secundario que a quien está guardando no le importa en este momento.
+         *
+         * Va DESPUÉS de la transacción a propósito: el job lee el cliente de la base cuando corre,
+         * así que despacharlo adentro sería empujar un estado que todavía puede hacer rollback. */
+        SyncClientScheduleJob::dispatch($client->id)->onConnection('database');
+
         return response()->json($this->armar_payload($client, $resolver));
+    }
+
+    /**
+     * Reintento a mano de la sincronización de horarios al empresa-api del cliente, para el botón
+     * "Reintentar sincronización" de la pestaña.
+     *
+     * Es idempotente: reenvía el estado actual de los horarios, no acumula nada del lado del
+     * cliente. Por eso no lleva ni `dry_run` ni `confirm_client_name`, a diferencia del resto de la
+     * escritura de los endpoints de operación: lo único que hace es empujarle a la propia API del
+     * cliente un dato que el admin ya tiene.
+     *
+     * Devuelve 202 y el estado PERSISTIDO al momento de encolar (que todavía es el del intento
+     * anterior): el push corre en el worker, así que el estado nuevo se ve consultando de nuevo.
+     *
+     * @param  int|string $clientId Id numérico o uuid del cliente.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function sync_json($clientId)
+    {
+        $client = $this->find_client_by_route_id($clientId);
+
+        // 🔴 Misma conexión explícita que en update_json(): nunca HTTP adentro del request.
+        SyncClientScheduleJob::dispatch($client->id)->onConnection('database');
+
+        return response()->json([
+            'encolado'       => true,
+            'conexion'       => 'database',
+            'client_id'      => (int) $client->id,
+            'sincronizacion' => $this->estado_de_sincronizacion($client),
+            'nota'           => 'El push corre en el worker `queue:work database` que el scheduler '
+                . 'dispara cada minuto. El estado que viaja acá todavía es el del intento anterior: '
+                . 'volvé a pedir GET admin/client/{clientId}/horarios para ver el resultado.',
+        ], 202);
     }
 
     /**
@@ -228,6 +274,27 @@ class ClientScheduleController extends Controller
             'day_keys'                  => ClientScheduleDay::day_keys_payload(),
             'dias'                      => $this->dias_cargados($client),
             'resueltos_proximos_7_dias' => $resolver->resolve_dias($client, Carbon::now($timezone), self::DIAS_RESUELTOS, $timezone),
+            'sincronizacion'            => $this->estado_de_sincronizacion($client),
+        ];
+    }
+
+    /**
+     * Estado del último push de los horarios al empresa-api del cliente, para que la pestaña pueda
+     * mostrar "Sincronizado el …" o el motivo del fallo sin volver a pegarle a la API del cliente.
+     *
+     * Las tres columnas en null significan "nunca se intentó", que NO es lo mismo que un fallo.
+     *
+     * @param  Client $client Cliente dueño de los horarios.
+     * @return array
+     */
+    private function estado_de_sincronizacion(Client $client)
+    {
+        return [
+            'estado'      => $client->schedule_sync_status === null ? null : (string) $client->schedule_sync_status,
+            'mensaje'     => $client->schedule_sync_message === null ? null : (string) $client->schedule_sync_message,
+            'sincronizado_at' => $client->schedule_synced_at === null
+                ? null
+                : (string) $client->schedule_synced_at,
         ];
     }
 

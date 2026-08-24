@@ -159,6 +159,9 @@ Route::middleware('claude.task.key')
         Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
         Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
         Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
+        /* Reintento del push de horarios al empresa-api del cliente. Idempotente y sin frenos:
+           reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
+        Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::get('upgrades', 'Api\ClaudeClientOpsController@upgrades_json');
         Route::get('upgrades/{id}', 'Api\ClaudeClientOpsController@upgrade_json');
@@ -241,6 +244,8 @@ Route::prefix('admin')->group(function () {
         // Horarios comerciales del cliente: el PUT reemplaza el conjunto entero de días y rangos.
         Route::get('client/{clientId}/horarios', [ClientScheduleController::class, 'show_json']);
         Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);
+        /* Botón "Reintentar sincronización" de la pestaña Horarios: encola el push al empresa-api. */
+        Route::post('client/{clientId}/horarios/sync', [ClientScheduleController::class, 'sync_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
