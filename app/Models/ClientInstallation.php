@@ -63,6 +63,20 @@ class ClientInstallation extends Model
     protected $guarded = [];
 
     /**
+     * Valor por defecto de kind en toda instancia nueva.
+     *
+     * 🔴 Repite el default de la migracion a proposito. Sin esto, ClientInstallation::create()
+     * devuelve un modelo SIN el atributo kind —Eloquent no relee lo que puso la base—, y la
+     * respuesta 201 de store() sale sin la clave: el SPA no tiene con que pintar el badge de la
+     * fila que acaba de crear, aunque al recargar el listado aparezca bien.
+     *
+     * @var array<string, mixed>
+     */
+    protected $attributes = [
+        'kind' => self::KIND_COMPLETA,
+    ];
+
+    /**
      * Conversiones de tipos para campos de fecha y JSON.
      *
      * @var array<string, string>
