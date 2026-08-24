@@ -11,11 +11,17 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Pasa a `closer_activo` los leads en `demo_pendiente_de_terminar` que superaron
+ * Pasa a `demo_realizada` los leads en `demo_pendiente_de_terminar` que superaron
  * el timeout configurado desde el final de la demo.
  *
  * Lógica: si el lead estuvo en demo_en_curso hasta el final pero nunca confirmó
  * que terminó, asumimos que hizo la demo y lo enviamos al closer.
+ *
+ * 🔴 Antes mandaba a `closer_activo`, y eso dejó de ser correcto con el panel del closer de
+ * tres columnas: ahí `closer_activo` significa "el lead confirmó que quiere la llamada" y este
+ * lead no confirmó nada -- ni siquiera que terminó la demo. Cae en `demo_realizada`, que es la
+ * misma columna "Listos para la llamada" pero con el badge "Sin confirmar", así que el closer lo
+ * sigue viendo y sabe que a ese todavía nadie le preguntó.
  *
  * Referencia temporal: demo_datetime + duración (momento en que terminó la demo).
  * Trigger: esa referencia + pendiente_terminar_timeout_minutos <= now.
@@ -34,10 +40,10 @@ class CheckDemoPendienteTerminarTimeout extends Command
      *
      * @var string
      */
-    protected $description = 'Pasa a closer_activo los leads en demo_pendiente_de_terminar que superaron el timeout desde el fin de la demo';
+    protected $description = 'Pasa a demo_realizada los leads en demo_pendiente_de_terminar que superaron el timeout desde el fin de la demo';
 
     /**
-     * Procesa leads varados en demo_pendiente_de_terminar y los envía a closer_activo.
+     * Procesa leads varados en demo_pendiente_de_terminar y los envía a demo_realizada.
      *
      * @return int Código de salida (0 = éxito).
      */
@@ -85,11 +91,11 @@ class CheckDemoPendienteTerminarTimeout extends Command
                 continue;
             }
 
-            $lead->update(['status' => 'closer_activo']);
+            $lead->update(['status' => 'demo_realizada']);
 
             LeadBroadcastService::emit_conversation_updated((int) $lead->id);
 
-            Log::info('CheckDemoPendienteTerminarTimeout: lead pasó a closer_activo automáticamente.', [
+            Log::info('CheckDemoPendienteTerminarTimeout: lead pasó a demo_realizada automáticamente.', [
                 'lead_id'         => $lead->id,
                 'contact_name'    => $lead->contact_name,
                 'fin_demo'        => $fin_demo->toDateTimeString(),
@@ -99,7 +105,7 @@ class CheckDemoPendienteTerminarTimeout extends Command
             $processed++;
         }
 
-        $this->info("Leads enviados a closer_activo: {$processed}");
+        $this->info("Leads enviados a demo_realizada: {$processed}");
 
         return 0;
     }

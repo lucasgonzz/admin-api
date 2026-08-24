@@ -7,6 +7,8 @@ use App\Mail\Helpers\LeadPresentationMailHelper;
 use App\Mail\Helpers\LeadFollowupMailHelper;
 use App\Mail\Helpers\LeadDemoMailHelper;
 use App\Models\Client;
+use App\Models\Admin;
+use App\Models\AdminCalendarConnection;
 use App\Models\AdminSetting;
 use App\Models\Demo;
 use App\Models\Lead;
@@ -3323,61 +3325,129 @@ class LeadController extends Controller
     }
 
     /**
-     * Panel del closer: leads agrupados por sección operativa (en curso, agendadas, seguimiento).
+     * Panel del closer: leads repartidos en las tres columnas operativas.
+     *
+     * 🔴 El divisor entre "Listos para la llamada" y "En seguimiento" es `lead_calls.started_at`,
+     * NO la existencia de una LeadCall. Desde el grupo 307 el propio agente agenda la llamada con
+     * el closer cuando el lead confirma que quiere avanzar: esa fila nace con `scheduled_at`
+     * cargado y `started_at` en null (ver `LeadCallService::schedule_closer_call()`). Dividir por
+     * "tiene llamada" mandaría a seguimiento a gente que todavía no habló con nadie.
+     *
+     * Las tres reglas son mutuamente excluyentes: las columnas 1 y 2 tienen conjuntos de estado
+     * disjuntos y las dos exigen que no haya ninguna llamada iniciada; la 3 exige lo contrario.
      *
      * @return \Illuminate\Http\JsonResponse
      */
     public function closer_panel_json()
     {
-        /* Fecha de hoy (zona horaria de la app), se mantiene para la columna "Demos agendadas". */
-        $today = now()->toDateString();
+        /* Cierres y pausa: salen del panel del closer, no hay nada que hacer con ellos. */
+        $estados_cerrados = ['cerrado_ganado', 'cerrado_perdido', 'en_pausa'];
+
+        /* Ciclo de demo sin terminar: agendó y todavía no confirmó que la recorrió. */
+        $estados_demo_sin_terminar = [
+            'demo_agendada',
+            'ingresando_demo',
+            'demo_en_curso',
+            'demo_pendiente_de_ingreso',
+            'demo_pendiente_de_terminar',
+        ];
 
         /*
-         * Columna 1 "Hoy": SOLO leads que ya hicieron la demo (demo_realizada) y todavía
-         * no tuvieron ninguna llamada del closer (lead_calls vacío). Decisión 17/7/2026:
-         * el closer ya no ve el ciclo de demo en curso -- eso lo maneja Martín manualmente
-         * desde el panel de leads. Apenas el lead tiene su primera LeadCall, sale de acá
-         * (la llamada queda en estado 'pendiente' hasta que llegue la transcripción, y
-         * mientras tanto el lead ya no aparece en ninguna columna del panel del closer --
-         * es un estado de transición corto, mientras dura la llamada).
+         * Columna 1 "Demos agendadas": el lead agendó la demo y todavía no la terminó. Incluye
+         * los subestados del ciclo (entrando, en curso, y las dos ramas de fallo) porque el closer
+         * pidió el panorama completo de lo que puede llegarle en los próximos días, no solo lo que
+         * tiene fecha futura.
          */
-        $en_curso = Lead::withAll()
-            ->where('status', 'demo_realizada')
-            ->whereDoesntHave('calls')
-            ->orderBy('demo_date')
-            ->orderBy('demo_start_time')
-            ->get();
-
-        /* Columna 2 "Demos agendadas": sin cambios -- demo_agendada de mañana en adelante. */
         $agendadas = Lead::withAll()
-            ->where('status', 'demo_agendada')
-            ->whereDate('demo_date', '>', $today)
+            ->whereIn('status', $estados_demo_sin_terminar)
+            ->whereDoesntHave('calls', function ($q) {
+                $q->whereNotNull('started_at');
+            })
             ->orderBy('demo_date')
             ->orderBy('demo_start_time')
             ->get();
 
         /*
-         * Columna 3 "En seguimiento": leads en closer_activo, con TODAS sus llamadas
-         * (resumen, transcripción y socios propios de cada una) para que el frontend
-         * pueda listarlas individualmente en vez de mostrar un solo resumen agregado.
+         * Columna 2 "Listos para la llamada": terminaron la demo y todavía no tuvieron la llamada
+         * con el closer. Dos poblaciones distintas, que el frontend separa por badge:
+         *   - `closer_activo`  → confirmaron que quieren avanzar (el agente ya se los preguntó).
+         *   - `demo_realizada` → terminaron la demo pero nadie les preguntó todavía, o no
+         *     contestaron. Es también donde cae el vencimiento de `demo_pendiente_de_terminar`.
+         * Se cargan las llamadas porque acá ya puede haber una AGENDADA por el agente (grupo 307)
+         * y el closer necesita ver el horario acordado y el link de Meet.
+         */
+        $para_llamar = Lead::withAll()
+            ->with(['calls' => function ($q) {
+                $q->with('partners')->orderBy('id');
+            }])
+            ->whereIn('status', ['demo_realizada', 'closer_activo'])
+            ->whereDoesntHave('calls', function ($q) {
+                $q->whereNotNull('started_at');
+            })
+            ->orderBy('demo_date', 'desc')
+            ->orderBy('demo_start_time', 'desc')
+            ->get();
+
+        /*
+         * Columna 3 "En seguimiento": ya tuvieron al menos una llamada de verdad con el closer y
+         * todavía no cerraron. Se filtra por estado cerrado en vez de exigir `closer_activo` para
+         * no perder un lead que quedó con un estado raro después de la llamada: el criterio del
+         * pedido es "tuvo la llamada y todavía no está cerrado ganado".
          */
         $seguimiento = Lead::withAll()
             ->with(['calls' => function ($q) {
                 $q->with('partners')->orderBy('id');
             }])
-            ->where('status', 'closer_activo')
+            ->whereHas('calls', function ($q) {
+                $q->whereNotNull('started_at');
+            })
+            ->whereNotIn('status', $estados_cerrados)
             ->orderBy('closer_called_at', 'desc')
             ->get();
 
         return response()->json([
-            'en_curso'    => $en_curso,
             'agendadas'   => $agendadas,
+            'para_llamar' => $para_llamar,
             'seguimiento' => $seguimiento,
             'settings'    => [
                 'alert_delay_minutes'   => (int) AdminSetting::get('closer_alert_delay_minutes', 5),
                 'alert_abandon_minutes' => (int) AdminSetting::get('closer_alert_abandon_minutes', 20),
+                /* Cuenta de Google con la que se crean los eventos: el panel abre todo link de
+                 * Meet con `authuser=` esta cuenta. Sin esto el closer entra con la sesión que
+                 * tenga abierta el navegador, que casi nunca es la del calendario conectado, y
+                 * Google Meet lo trata como invitado y le pide que el anfitrión lo admita. */
+                'closer_google_account' => $this->closer_google_account(),
             ],
         ], 200);
+    }
+
+    /**
+     * Mail de la cuenta de Google conectada del closer, o null si no hay ninguna conexión activa.
+     *
+     * Se resuelve con la misma regla que `CloserGoogleCalendarEventService::get_closer_connection()`
+     * (primer admin con `is_closer`, su conexión activa) para que el panel muestre exactamente la
+     * cuenta con la que se están creando los eventos y no otra.
+     *
+     * @return string|null
+     */
+    private function closer_google_account()
+    {
+        $closer = Admin::where('is_closer', true)->first();
+        if (! $closer) {
+            return null;
+        }
+
+        $connection = AdminCalendarConnection::where('admin_id', $closer->id)
+            ->where('is_active', true)
+            ->first();
+
+        if (! $connection) {
+            return null;
+        }
+
+        $email = trim((string) $connection->google_account_email);
+
+        return $email !== '' ? $email : null;
     }
 
     /**

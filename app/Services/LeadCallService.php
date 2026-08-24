@@ -40,6 +40,34 @@ class LeadCallService
         // fila para que el botón sea idempotente y no dispare llamadas duplicadas.
         $pending = $lead->calls()->where('estado', 'pendiente')->orderByDesc('id')->first();
         if ($pending) {
+            /* 🔴 Estampar `started_at` si la llamada venía sin arrancar. Es el caso de la llamada
+             * que el agente agendó solo (`schedule_closer_call()`, grupo 307): nace con
+             * `scheduled_at` cargado y `started_at` en null a propósito, porque en ese momento la
+             * llamada todavía no pasó. Este método corre cuando el closer aprieta "Unirse a Meet",
+             * o sea cuando la llamada arranca de verdad -- y ese timestamp es lo único que separa
+             * "Listos para la llamada" de "En seguimiento" en el panel del closer. Sin esto el
+             * lead se queda para siempre en la columna 2 aunque la llamada ya haya ocurrido. */
+            if ($pending->started_at === null) {
+                $pending->update(['started_at' => now()]);
+            }
+
+            /* Rescate del callejón sin salida: la llamada agendada se crea best-effort, así que
+             * si Google falló en ese momento quedó sin Meet. Para el closer eso es una llamada a
+             * la que no puede entrar y que además le tapa el botón "Nueva reunión" (ya hay una
+             * llamada pendiente). Se intenta generar el evento ahora; si Google vuelve a fallar,
+             * el método sigue siendo best-effort y devuelve la llamada como estaba. */
+            if (empty($pending->meet_url)) {
+                $rescate = $this->calendar_service->create_ad_hoc_meet_now($lead);
+                if (is_array($rescate) && ! empty($rescate['meet_url'])) {
+                    $pending->update([
+                        'meet_url'        => $rescate['meet_url'],
+                        'google_event_id' => $rescate['google_event_id'] ?? $pending->google_event_id,
+                    ]);
+                }
+            }
+
+            $pending->refresh();
+
             return $pending;
         }
 
