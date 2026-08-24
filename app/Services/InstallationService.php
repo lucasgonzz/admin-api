@@ -35,6 +35,10 @@ use phpseclib3\Net\SSH2;
  *   3. upload_api    — sin excluir public/ ni storage/ (instalación inicial)
  *   4. write_env     — genera el .env desde la plantilla base + valores manuales
  *   5. finalize_api  — corre los scripts de artisan que composer no ejecutó (ya con .env)
+ *
+ * Desde el 24/8/2026 esta misma clase corre un SEGUNDO pipeline, mucho más corto, para las filas
+ * con kind='esqueleto': el subdominio secundario del cliente (ver $skeleton_steps). Comparten todo
+ * —helpers SSH/SFTP, log, write_env— y se diferencian solo en la lista de etapas.
  */
 class InstallationService
 {
@@ -89,6 +93,26 @@ class InstallationService
     ];
 
     /**
+     * Orden de etapas del ESQUELETO del subdominio secundario (kind='esqueleto').
+     *
+     * Deja puesto lo mínimo que un upgrade posterior NO repone por su cuenta: los directorios, el
+     * contenido de public/, el symlink de storage y el .env. No compila el SPA ni sube el código de
+     * la API — eso lo trae el upgrade, que sí lo hace bien (DeploymentService::step_upload_api()).
+     *
+     * write_env es LA MISMA etapa de la instalación real, reutilizada tal cual: el .env que precisa
+     * el subdominio secundario es el mismo que el del principal salvo APP_URL y las SANCTUM_*, que
+     * ya salen de la ClientApi destino.
+     *
+     * @var array<int, string>
+     */
+    private $skeleton_steps = [
+        'prepare_dirs',
+        'upload_public',
+        'write_env',
+        'finalize_skeleton',
+    ];
+
+    /**
      * Carga la instalación, la API destino y las credenciales SSH.
      *
      * @param  ClientInstallation  $installation
@@ -104,6 +128,14 @@ class InstallationService
         $this->target_api = $this->installation->client_api;
         if ($this->target_api === null) {
             throw new \RuntimeException('La instalación no tiene API destino configurada.');
+        }
+
+        // El esqueleto y la instalación real comparten TODO menos la lista de etapas. Se elige acá
+        // y no en run() porque el pipeline es una propiedad de la fila, no de la corrida: la misma
+        // fila reintentada tiene que correr siempre lo mismo.
+        if ($this->installation->kind === ClientInstallation::KIND_ESQUELETO) {
+            $this->steps = $this->skeleton_steps;
+            $this->assert_skeleton_target_supported();
         }
 
         // Credenciales SSH de hosting compartido (una sola entrada en el sistema).
@@ -184,6 +216,15 @@ class InstallationService
                     break;
                 case 'finalize_api':
                     $this->step_finalize_api();
+                    break;
+                case 'prepare_dirs':
+                    $this->step_prepare_dirs();
+                    break;
+                case 'upload_public':
+                    $this->step_upload_public();
+                    break;
+                case 'finalize_skeleton':
+                    $this->step_finalize_skeleton();
                     break;
             }
         }
@@ -547,8 +588,17 @@ class InstallationService
         // al hosting_type de la API destino (shared_hosting o vps). Conectar es explícito desde el
         // 22/8/2026: antes EnvSshService cargaba fija la credencial de hosting compartido, así que
         // una instalación en VPS escribía el .env en el servidor equivocado sin fallar.
-        $env_ssh_service = new EnvSshService();
+        // app() y no `new`: sin binding registrado el resultado es idéntico (el container instancia
+        // la misma clase), pero habilita que un test reemplace el servicio con $this->app->instance()
+        // —como ya hace EnvMasivoDeClientesTest— y pruebe qué claves se escriben sin un servidor del
+        // otro lado. Sin esto, la regla de "el esqueleto no pisa el .env del cliente" es intesteable.
+        $env_ssh_service = app(EnvSshService::class);
         $env_ssh_service->connect_for($this->target_api);
+
+        // Recorta las claves que no hay que escribir. Va ANTES de ensure_env_file_for(): ese método
+        // crea el .env si falta, y si corriera primero el filtro vería un archivo vacío recién
+        // creado y no podría distinguirlo de un .env con el sistema del cliente adentro.
+        $vars_to_write = $this->filter_env_vars_to_write($env_ssh_service, $vars_to_write);
 
         // Si el .env todavía no existe, lo crea vacío. 🔴 El touch va POR LA SESIÓN DE
         // EnvSshService, no por exec_hosting_ssh: esa otra sesión conecta fija al hosting
@@ -843,6 +893,441 @@ class InstallationService
             'Instalación verificada: todos los archivos y directorios requeridos están presentes',
             'success'
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ETAPAS DEL ESQUELETO (kind = 'esqueleto')
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Corta antes de empezar si el esqueleto apuntaría a una API en VPS.
+     *
+     * 🔴 No es una limitación caprichosa: get_api_path() (más abajo en esta misma clase) hardcodea
+     * el prefijo del hosting compartido y connect() carga siempre la credencial 'shared_hosting',
+     * a diferencia de ClientApiPathResolver, que sí mira hosting_type. Un esqueleto sobre una API
+     * en VPS escribiría los directorios y el .env en el servidor equivocado y devolvería éxito —
+     * exactamente el bug documentado en la cabecera de EnvSshService. Arreglar esa deuda es una
+     * misión aparte, sobre el pipeline real que hoy anda en producción; acá se rechaza y listo.
+     *
+     * PromoteLeadToClientService crea las dos ClientApi del par siempre como 'shared_hosting', así
+     * que este caso no aparece en el uso normal.
+     *
+     * @return void
+     * @throws \RuntimeException Si la API destino está en VPS.
+     */
+    private function assert_skeleton_target_supported(): void
+    {
+        $hosting_type = trim((string) $this->target_api->hosting_type);
+        if ($hosting_type === '') {
+            $hosting_type = 'shared_hosting';
+        }
+
+        if ($hosting_type === 'vps') {
+            throw new \RuntimeException(
+                'El esqueleto todavía no soporta APIs en VPS: el pipeline de instalación resuelve '
+                . 'las rutas asumiendo hosting compartido y escribiría en el servidor equivocado. '
+                . 'Instalá esa API con el pipeline completo.'
+            );
+        }
+    }
+
+    /**
+     * Deja solo las claves que hay que escribir de verdad en el .env del destino.
+     *
+     * Instalación real (kind='completa'): devuelve todo tal cual. Es una instalación desde cero, el
+     * .env es de ella y no hay nada que respetar.
+     *
+     * Esqueleto: devuelve SOLO las claves que todavía NO están en el .env del destino. El subdominio
+     * secundario puede tener un sistema andando —el blue/green alterna cuál de los dos sirve
+     * producción, ver DeploymentService::step_complete()— y pisarle el .env con lo que el operador
+     * tipeó en el modal lo rompe. Las que ya están y difieren se loguean como warning para que el
+     * operador las vea en el log en vivo y decida, pero no se tocan.
+     *
+     * 🔴 Es público a propósito, y no un detalle privado de step_write_env(): es el ÚNICO punto de
+     * esta decisión que se puede probar sin un servidor del otro lado. Si se vuelve privado, el test
+     * que protege el .env del cliente desaparece con él.
+     *
+     * @param  EnvSshService  $env_ssh_service  Ya conectado al servidor de la API destino.
+     * @param  array<string, string>  $vars_to_write
+     * @return array<string, string>
+     */
+    public function filter_env_vars_to_write(EnvSshService $env_ssh_service, array $vars_to_write): array
+    {
+        if ($this->installation->kind !== ClientInstallation::KIND_ESQUELETO) {
+            return $vars_to_write;
+        }
+
+        // Sin .env en el destino no hay nada que respetar: se escribe completo, que es lo que
+        // necesita un subdominio virgen. ensure_env_file_for() lo crea inmediatamente después.
+        if (! $env_ssh_service->env_exists_for($this->target_api)) {
+            $this->log('write_env', 'El destino no tiene .env: se escribe completo.');
+
+            return $vars_to_write;
+        }
+
+        $env_actual = $env_ssh_service->read_env_for($this->target_api);
+
+        // Las tres claves que dependen del subdominio y no del cliente. Si ya están con OTRO valor,
+        // el subdominio está sirviendo algo distinto de lo que el operador cree: se avisa fuerte.
+        $claves_del_subdominio = ['APP_URL', 'SANCTUM_STATEFUL_DOMAINS', 'SANCTUM_STATEFUL_CORS'];
+
+        $vars_filtradas  = [];
+        $claves_intactas = [];
+        foreach ($vars_to_write as $key => $value) {
+            if (! array_key_exists($key, $env_actual)) {
+                $vars_filtradas[$key] = $value;
+                continue;
+            }
+
+            $claves_intactas[] = $key;
+
+            if (in_array($key, $claves_del_subdominio, true) && (string) $env_actual[$key] !== (string) $value) {
+                $this->log(
+                    'write_env',
+                    "El .env del destino ya tiene {$key}='{$env_actual[$key]}' y no se pisa "
+                    . "(le correspondería '{$value}'). Revisalo a mano si el subdominio no responde.",
+                    'warning'
+                );
+            }
+        }
+
+        $this->log(
+            'write_env',
+            'El destino ya tenía un .env: se escriben ' . count($vars_filtradas) . ' claves nuevas y '
+            . 'se dejan intactas ' . count($claves_intactas) . '.'
+        );
+
+        return $vars_filtradas;
+    }
+
+    /**
+     * Etapa 1 del esqueleto: crea los directorios que el upgrade da por existentes.
+     *
+     * @return void
+     */
+    private function step_prepare_dirs(): void
+    {
+        $api_path = $this->get_api_path();
+        $spa_dir  = 'domains/comerciocity.com/public_html/' . $this->get_spa_path();
+
+        $this->log('prepare_dirs', 'Preparando los directorios del subdominio...');
+        $this->reconnect_hosting_ssh();
+
+        // Directorio de la API, primero de todo: sin él no tienen dónde dejar el archivo ni el SFTP
+        // del ZIP de public/ de la etapa que sigue ni el del upgrade, porque $sftp->put() contra un
+        // directorio inexistente devuelve false y aborta con "SFTP put falló al subir".
+        $this->exec_hosting_ssh(
+            'prepare_dirs',
+            'mkdir -p ' . $this->escape_remote_arg($api_path) . ' 2>&1'
+        );
+
+        // Directorio del SPA. El esqueleto NO despliega el SPA (el subdominio queda sirviendo un
+        // directorio vacío hasta el primer upgrade), pero el upgrade hace `cd "$SPA_DIR" || exit 1`
+        // ANTES de vaciarlo (DeploymentService::build_spa_hosting_deploy_shell()): el directorio
+        // tiene que existir aunque esté vacío, o el deploy del SPA se corta ahí. mkdir -p no borra
+        // nada de lo que ya haya adentro.
+        $this->exec_hosting_ssh(
+            'prepare_dirs',
+            'mkdir -p ' . $this->escape_remote_arg($spa_dir) . ' 2>&1'
+        );
+
+        // Árbol de storage/ + bootstrap/cache, calcado de step_finalize_api() (que a su vez es el
+        // mismo de DeploymentService::ensure_storage_skeleton()).
+        //
+        // 🔴 Rutas enumeradas una por una y NO brace expansion: la expansión de llaves es de bash y
+        // no está garantizada en el sh del hosting compartido; ahí `mkdir -p storage/{logs,app}`
+        // crea un directorio llamado literalmente "{logs,app}".
+        //
+        // El chmod -R se limita a storage/framework y bootstrap/cache, que son árboles chicos: sobre
+        // un storage/ con años de adjuntos del cliente un chmod -R entero timeoutea la sesión SSH.
+        //
+        // must_succeed = false (igual que en step_finalize_api): el chmod puede fallar por ownership
+        // en el hosting compartido sin que eso invalide el esqueleto. Quien decide es
+        // verify_skeleton_installation().
+        $this->exec_hosting_ssh(
+            'prepare_dirs',
+            'cd ' . $this->escape_remote_arg($api_path)
+            . ' && mkdir -p storage/app/public storage/framework/cache/data storage/framework/sessions'
+            . ' storage/framework/testing storage/framework/views storage/logs bootstrap/cache'
+            . ' && chmod -R 775 storage/framework bootstrap/cache'
+            . ' && chmod 775 storage storage/app storage/app/public storage/logs 2>&1',
+            false
+        );
+
+        $this->log('prepare_dirs', 'Directorios del subdominio listos', 'success');
+    }
+
+    /**
+     * Etapa 2 del esqueleto: empaqueta public/ del tag en el VPS de builds y lo deja en el hosting.
+     *
+     * Los archivos de public/ salen del clone de git del VPS, del mismo tag que instalaría la
+     * versión elegida: son archivos versionados del repo y el tag es la única fuente de verdad.
+     * Copiarlos con `cp -r` desde la otra ClientApi del cliente no sirve: no funciona para un
+     * cliente nuevo cuyo primer subdominio todavía no está instalado, ni si los dos subdominios
+     * están en hostings distintos.
+     *
+     * @return void
+     */
+    private function step_upload_public(): void
+    {
+        $this->connect_build_vps();
+
+        $api_build_path = $this->builds_api_path();
+        $tag            = 'v' . $this->installation->version->version;
+        $this->log('upload_public', "Preparando public/ de la versión {$tag} en el VPS de builds");
+
+        $this->exec_build_ssh(
+            'upload_public',
+            'cd ' . $this->escape_remote_arg($api_build_path) . ' && git fetch --tags 2>&1'
+        );
+        $checkout_output = $this->exec_build_ssh(
+            'upload_public',
+            'cd ' . $this->escape_remote_arg($api_build_path)
+            . ' && git checkout ' . $this->escape_remote_arg($tag) . ' 2>&1'
+        );
+        $this->log('upload_public', $this->truncate_for_log($checkout_output));
+
+        $zip_name          = 'public_' . $this->installation->uuid . '.zip';
+        $public_zip_remote = $api_build_path . '/' . $zip_name;
+
+        // Housekeeping de ZIPs huérfanos, igual que en step_upload_api(): si un ZIP viejo quedó en
+        // el directorio de builds, `zip -r` lo mete adentro del nuevo y el tamaño crece en bola de
+        // nieve. El filtro por antigüedad evita pisar el paquete de una corrida en paralelo.
+        $this->exec_build_ssh(
+            'upload_public',
+            'cd ' . $this->escape_remote_arg($api_build_path)
+            . " && find . -maxdepth 1 -name 'public_*.zip' -mmin +120 -delete 2>&1"
+        );
+
+        // El ZIP lleva SOLO public/.
+        //
+        // --exclude='public/storage/*': si alguien alguna vez corrió storage:link en el clone de
+        // builds, ese symlink apunta a una ruta del VPS y empaquetarlo dejaría el link roto en el
+        // cliente. El symlink bueno lo crea step_finalize_skeleton().
+        //
+        // NO se excluye public/afip/: si el tag todavía lo trae, el cliente lo necesita — es lo
+        // mismo que hace la instalación real.
+        $zip_command = 'cd ' . $this->escape_remote_arg($api_build_path)
+            . ' && rm -f ' . $this->escape_remote_arg($zip_name)
+            . ' && zip -r ' . $this->escape_remote_arg($zip_name) . ' public'
+            . " --exclude='public/storage/*' 2>&1";
+        $this->exec_build_ssh('upload_public', $zip_command, true, true);
+
+        $public_zip_bytes = $this->verify_zip_on_vps($public_zip_remote, 'upload_public');
+        $this->log('upload_public', "public/ empaquetado ({$public_zip_bytes} bytes en VPS)");
+
+        // Descarga al servidor del admin.
+        $deployments_dir = storage_path('app/deployments');
+        if (! is_dir($deployments_dir)) {
+            mkdir($deployments_dir, 0755, true);
+        }
+        $local_zip  = storage_path('app/deployments/public_' . $this->installation->uuid . '.zip');
+        $sftp_build = $this->open_sftp_session('vps');
+        $this->sftp_download_file($sftp_build, $public_zip_remote, $local_zip, $public_zip_bytes, 'upload_public');
+        $this->log('upload_public', 'ZIP de public/ descargado al servidor de admin');
+
+        // Sube al hosting del cliente.
+        $api_path     = $this->get_api_path();
+        $remote_zip   = $api_path . '/' . $zip_name;
+        $sftp_hosting = $this->open_sftp_session('shared_hosting');
+        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_public');
+        $this->log('upload_public', 'ZIP de public/ subido al hosting');
+
+        $this->reconnect_hosting_ssh();
+
+        // 🔴 `unzip -n`, NO `-o`. El esqueleto rellena huecos y nunca pisa un archivo que el cliente
+        // ya tiene: el subdominio secundario puede estar sirviendo producción hoy mismo, porque el
+        // blue/green alterna cuál de los dos es la API activa. Con -o, un tag más viejo que el
+        // instalado le bajaría de versión el index.php a un sistema andando.
+        $this->exec_hosting_ssh(
+            'upload_public',
+            'cd ' . $this->escape_remote_arg($api_path)
+            . ' && unzip -n ' . $this->escape_remote_arg($zip_name)
+            . ' && rm -f ' . $this->escape_remote_arg($zip_name) . ' 2>&1',
+            true,
+            true
+        );
+        $this->log('upload_public', 'public/ descomprimido en el hosting (sin pisar lo que ya estaba)', 'success');
+
+        // Limpia temporales, igual que step_upload_api().
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
+        $this->reconnect_build_vps();
+        $this->exec_build_ssh(
+            'upload_public',
+            'rm -f ' . $this->escape_remote_arg($public_zip_remote)
+        );
+        $this->log('upload_public', 'Archivos temporales eliminados');
+    }
+
+    /**
+     * Etapa 4 del esqueleto: symlink de storage y verificación final.
+     *
+     * @return void
+     */
+    private function step_finalize_skeleton(): void
+    {
+        $api_path = $this->get_api_path();
+
+        $this->log('finalize_skeleton', 'Creando el symlink de storage...');
+        $this->reconnect_hosting_ssh();
+
+        // Symlink public/storage -> storage/app/public.
+        //
+        // 🔴 NO se usa `php artisan storage:link` (que es lo que sí hace la instalación real): en el
+        // esqueleto no hay vendor/ ni código de la API todavía, artisan directamente no existe. Y el
+        // upgrade tampoco lo crea nunca — no hay un solo storage:link en DeploymentService — así que
+        // si no lo pone el esqueleto, no lo pone nadie.
+        //
+        // Target RELATIVO y no absoluto (artisan lo hace absoluto): api_path es relativo al home del
+        // usuario SSH, así que desde acá no se puede construir la ruta absoluta sin un pwd extra.
+        //
+        // 🔴 Las DOS guardas, `[ ! -L ]` ADEMÁS de `[ ! -e ]`: sobre un symlink roto (uno cuyo target
+        // todavía no existe) `[ -e ]` devuelve falso, se intentaría el ln -s igual y fallaría con
+        // "File exists". Con -e solo, el caso más probable de reintento revienta.
+        //
+        // must_succeed = false, igual que el storage:link de la instalación real: quien decide es
+        // verify_skeleton_installation().
+        $link_output = $this->exec_hosting_ssh(
+            'finalize_skeleton',
+            'cd ' . $this->escape_remote_arg($api_path)
+            . ' && if [ ! -L public/storage ] && [ ! -e public/storage ]; then'
+            . ' ln -s ../storage/app/public public/storage; fi 2>&1',
+            false
+        );
+        $this->log('finalize_skeleton', $this->truncate_for_log($link_output));
+
+        $this->verify_skeleton_installation();
+
+        $this->log('finalize_skeleton', 'Esqueleto listo: el subdominio ya puede recibir un upgrade completo', 'success');
+    }
+
+    /**
+     * Lo que el esqueleto tiene que dejar puesto, ni más ni menos.
+     *
+     * 🔴 Esta lista parece que sobra, y no sobra: cada ruta de acá es algo que el ZIP del upgrade
+     * excluye (.env, vendor/*, storage/*, public/*) y que el upgrade NO repone por su cuenta. Antes
+     * de sacar una, buscá quién la crea en DeploymentService. Para public/index.php, public/.htaccess
+     * y public/storage la respuesta es NADIE: sin ellas el subdominio no bootea ni siquiera después
+     * de un upgrade exitoso.
+     *
+     * Lo que NO está acá, a propósito, porque el upgrade sí lo repone solo:
+     *   vendor/autoload.php     -> composer install en el hosting (DeploymentService::step_upload_api())
+     *   los 4 certificados AFIP -> sync_afip_certificates() + provision_afip_certificates()
+     *
+     * @return array<int, string>
+     */
+    private function required_skeleton_paths(): array
+    {
+        return [
+            'public/index.php',
+            'public/.htaccess',
+            'public/storage',
+            '.env',
+            'bootstrap/cache',
+            'storage/framework/views',
+            'storage/framework/cache/data',
+            'storage/framework/sessions',
+            'storage/logs',
+            'storage/app/public',
+        ];
+    }
+
+    /**
+     * Verifica que el esqueleto quedó completo en el hosting antes de darlo por exitoso.
+     *
+     * Mismo mecanismo que verify_api_installation(): un solo comando POSIX con un `for`, y un
+     * "echo VERIFY_DONE" al final para poder distinguir una salida vacía por sesión SSH caída
+     * (verificación que no llegó a correr) de una verificación real que no encontró faltantes.
+     *
+     * @return void
+     * @throws \RuntimeException Si la verificación no llegó a completarse o falta alguna ruta.
+     */
+    private function verify_skeleton_installation(): void
+    {
+        $api_path = $this->get_api_path();
+
+        $escaped_paths = [];
+        foreach ($this->required_skeleton_paths() as $required_path) {
+            $escaped_paths[] = $this->escape_remote_arg($required_path);
+        }
+
+        // 🔴 `[ -e "$P" ] || [ -L "$P" ]`, y no solo `[ -e ]` como en verify_api_installation():
+        // public/storage es un symlink, y `[ -e ]` sobre un symlink cuyo target todavía no existe
+        // devuelve falso. Sin el -L, la verificación reportaría FALTA sobre un symlink perfectamente
+        // creado y marcaría fallido un esqueleto que quedó bien.
+        $command = 'cd ' . $this->escape_remote_arg($api_path)
+            . ' && for P in ' . implode(' ', $escaped_paths) . '; do'
+            . ' [ -e "$P" ] || [ -L "$P" ] || echo "FALTA $P"; done'
+            . ' && echo VERIFY_DONE';
+
+        $this->log('finalize_skeleton', 'Verificando integridad del esqueleto...');
+
+        // must_succeed = false: lo que decide si la verificación falló es la salida, no el exit code.
+        $output = $this->exec_hosting_ssh('finalize_skeleton', $command, false);
+
+        if (strpos($output, 'VERIFY_DONE') === false) {
+            $this->log(
+                'finalize_skeleton',
+                'No se pudo completar la verificación del esqueleto (sesión SSH interrumpida).',
+                'error'
+            );
+
+            throw new \RuntimeException(
+                'El esqueleto no pudo verificarse: la sesión SSH se interrumpió antes de terminar la '
+                . 'comprobación. Revisalo a mano antes de lanzar un upgrade contra este subdominio.'
+            );
+        }
+
+        $missing_paths = [];
+        foreach (preg_split('/\r\n|\r|\n/', $output) as $output_line) {
+            if (strpos($output_line, 'FALTA ') === 0) {
+                $missing_paths[] = trim(substr($output_line, strlen('FALTA ')));
+            }
+        }
+
+        if (! empty($missing_paths)) {
+            $missing_list = implode(', ', $missing_paths);
+            $this->log(
+                'finalize_skeleton',
+                'El esqueleto quedó incompleto. Faltan: ' . $missing_list,
+                'error'
+            );
+
+            throw new \RuntimeException(
+                'El esqueleto quedó incompleto: faltan ' . $missing_list . '. No lances un upgrade '
+                . 'contra este subdominio hasta resolverlo: los ZIPs de actualización excluyen '
+                . 'public/, storage/ y el .env, así que estas rutas no se van a reponer solas en '
+                . 'ninguna actualización futura.'
+            );
+        }
+
+        $this->log(
+            'finalize_skeleton',
+            'Esqueleto verificado: están todas las rutas que el upgrade no repone por su cuenta',
+            'success'
+        );
+    }
+
+    /**
+     * Escapa un argumento para el shell del servidor REMOTO, que siempre es POSIX.
+     *
+     * 🔴 No se usa escapeshellarg(): esa función escapa según el sistema donde corre PHP, no según
+     * el del otro lado. En Windows emite comillas DOBLES, y el `sh` remoto expande `$`, backticks y
+     * barras adentro de comillas dobles. Como admin-api también corre local sobre WAMP, un
+     * client_apis.path con `$(...)` aplicado desde ahí se ejecutaría en el servidor del cliente.
+     * Copiado de EnvSshService::escape_remote_arg(), donde está la explicación larga.
+     *
+     * Los escapeshellarg() que ya están en las etapas de la instalación real son deuda previa: se
+     * dejan como están, se arreglan en una misión propia.
+     *
+     * @param  string  $value
+     * @return string
+     */
+    private function escape_remote_arg(string $value): string
+    {
+        return "'" . str_replace("'", "'\\''", $value) . "'";
     }
 
     // ─────────────────────────────────────────────────────────────────────────

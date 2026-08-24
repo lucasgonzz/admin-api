@@ -226,6 +226,31 @@ class EnvSshService
     }
 
     /**
+     * ¿Ya hay un .env en el servidor de esa ClientApi?
+     *
+     * Existe para el esqueleto del subdominio secundario, que necesita saberlo ANTES de escribir:
+     * sobre un subdominio que ya tiene un sistema andando no se pisa ni una clave, así que
+     * InstallationService::filter_env_vars_to_write() pregunta primero y recién después decide qué
+     * escribir.
+     *
+     * 🔴 No se averigua llamando a read_env_for() con un try/catch alrededor: preguntar por la
+     * existencia de un archivo no es un caso de excepción, y ese catch se tragaría también los
+     * fallos reales de lectura (sesión caída, permisos), haciendo pasar por "no hay .env" a un
+     * servidor que sí lo tiene — que es exactamente el escenario en el que el esqueleto pisaría el
+     * .env bueno del cliente.
+     *
+     * @param  ClientApi  $client_api
+     * @return bool
+     * @throws \RuntimeException Si no hay credencial para ese hosting o son rechazadas.
+     */
+    public function env_exists_for(ClientApi $client_api): bool
+    {
+        $this->connect_for($client_api);
+
+        return $this->file_exists($this->path_resolver->resolve($client_api) . '/.env');
+    }
+
+    /**
      * Crea el .env vacío si todavía no existe, para un sistema que se está instalando de cero.
      *
      * 🔴 Es la ÚNICA vía por la que este servicio crea un .env, y existe para el flujo de
