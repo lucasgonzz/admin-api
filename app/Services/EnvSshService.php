@@ -229,25 +229,71 @@ class EnvSshService
      * ¿Ya hay un .env en el servidor de esa ClientApi?
      *
      * Existe para el esqueleto del subdominio secundario, que necesita saberlo ANTES de escribir:
-     * sobre un subdominio que ya tiene un sistema andando no se pisa ni una clave, así que
-     * InstallationService::filter_env_vars_to_write() pregunta primero y recién después decide qué
-     * escribir.
+     * si el destino ya tiene .env el esqueleto no escribe ni una clave, así que
+     * InstallationService::filter_env_vars_to_write() pregunta acá y recién después decide.
      *
-     * 🔴 No se averigua llamando a read_env_for() con un try/catch alrededor: preguntar por la
-     * existencia de un archivo no es un caso de excepción, y ese catch se tragaría también los
-     * fallos reales de lectura (sesión caída, permisos), haciendo pasar por "no hay .env" a un
-     * servidor que sí lo tiene — que es exactamente el escenario en el que el esqueleto pisaría el
-     * .env bueno del cliente.
+     * Distingue TRES casos, no dos: existe (true), no existe (false) y NO SE PUDO DETERMINAR
+     * (excepción). El tercero es el que importa.
+     *
+     * 🔴 No delega en file_exists(), que es lo que hacía hasta el 24/8/2026, y no es una diferencia
+     * de estilo. Ese helper hace `trim((string) $this->ssh->exec($cmd)) === 'EXISTS'`: con la sesión
+     * rota, exec() devuelve false, (string) false es '', y '' !== 'EXISTS' da FALSE — o sea "no hay
+     * .env" — sin una sola excepción de por medio. Para el resto del servicio ese falso negativo es
+     * inofensivo (assert_env_file_exists() aborta igual). Acá significa lo contrario: el esqueleto
+     * creería que el subdominio está virgen y le escribiría el .env entero encima al servidor que sí
+     * lo tenía, que es exactamente el accidente que todo esto existe para evitar.
+     *
+     * 🔴 Tampoco se averigua con read_env_for() y un try/catch: preguntar por la existencia de un
+     * archivo no es un caso de excepción, y ese catch se tragaría los fallos reales de lectura de la
+     * misma forma.
+     *
+     * Se usa `[ -e ]` y no `[ -f ]`: para la decisión de "no le toques el .env a este servidor", que
+     * en esa ruta haya CUALQUIER cosa —un archivo, un symlink a un .env compartido— es motivo
+     * suficiente para no escribir.
      *
      * @param  ClientApi  $client_api
      * @return bool
-     * @throws \RuntimeException Si no hay credencial para ese hosting o son rechazadas.
+     * @throws \RuntimeException Si no hay credencial para ese hosting, si son rechazadas, o si el
+     *                           servidor no contesta lo que se le preguntó.
      */
     public function env_exists_for(ClientApi $client_api): bool
     {
         $this->connect_for($client_api);
+        $this->assert_connected();
 
-        return $this->file_exists($this->path_resolver->resolve($client_api) . '/.env');
+        $env_file = $this->path_resolver->resolve($client_api) . '/.env';
+
+        // Marcadores propios, no un `test -f && echo` cuya única señal de fallo es el string vacío.
+        $cmd = 'if [ -e ' . $this->escape_remote_arg($env_file) . ' ];'
+            . ' then echo ENV_SI; else echo ENV_NO; fi';
+
+        $raw = $this->ssh->exec($cmd);
+
+        if ($raw === false) {
+            throw new \RuntimeException(
+                "No se pudo determinar si existe el .env en: {$env_file}. La sesión SSH no devolvió "
+                . 'nada al preguntarlo. Se aborta sin escribir: dar esto por "no hay .env" es lo que '
+                . 'haría que se le escriba el .env entero encima a un servidor que sí lo tiene.'
+            );
+        }
+
+        $respuesta = trim((string) $raw);
+
+        if ($respuesta === 'ENV_SI') {
+            return true;
+        }
+
+        if ($respuesta === 'ENV_NO') {
+            return false;
+        }
+
+        // Cualquier otra cosa —vacío, un mensaje del shell, un banner de login— es "no sé". No es
+        // false.
+        throw new \RuntimeException(
+            "No se pudo determinar si existe el .env en: {$env_file}. El servidor respondió "
+            . "'{$respuesta}' en vez de ENV_SI o ENV_NO. Se aborta sin escribir: revisá la conexión "
+            . 'y el hosting_type, path y vps_path de esta API en el admin.'
+        );
     }
 
     /**

@@ -289,6 +289,47 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         $this->assertSame($antes, ClientInstallation::count());
     }
 
+    public function test_mas_de_dos_destinos_se_rechazan_en_castellano_y_diciendo_que_hacer(): void
+    {
+        $admin   = $this->crear_admin();
+        $datos   = $this->crear_cliente_con_dos_apis();
+        $version = $this->crear_version_publicada();
+
+        // Client::client_apis() es un hasMany sin límite y hay endpoints vivos para agregar una
+        // tercera API a un cliente, así que este payload sale del modal —que tilda todas por
+        // default— sin que el operador haya hecho nada raro.
+        $api3               = new ClientApi();
+        $api3->client_id    = $datos['client']->id;
+        $api3->url          = rtrim($datos['api1']->url, '/') . '3';
+        $api3->spa_url      = rtrim($datos['api1']->spa_url, '/') . '3';
+        $api3->path         = $datos['api1']->path . '3';
+        $api3->hosting_type = 'shared_hosting';
+        $api3->save();
+
+        $antes = ClientInstallation::count();
+
+        $response = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'  => $datos['client']->id,
+            'version_id' => $version->id,
+            'targets'    => [
+                ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+                ['client_api_id' => $datos['api2']->id, 'kind' => 'esqueleto'],
+                ['client_api_id' => $api3->id, 'kind' => 'esqueleto'],
+            ],
+        ]);
+
+        $response->assertStatus(422);
+
+        // 🔴 config/app.php tiene locale 'en': sin mensaje propio, acá salía el default de Laravel
+        // en inglés, en un endpoint donde todos los demás 422 están en castellano y explicados.
+        $mensaje = $response->json('errors.targets.0');
+        $this->assertStringContainsString('Solo se pueden instalar dos APIs', $mensaje);
+        $this->assertStringContainsString('Destildá', $mensaje);
+        $this->assertStringNotContainsString('may not have more than', $mensaje);
+
+        $this->assertSame($antes, ClientInstallation::count());
+    }
+
     public function test_un_esqueleto_sobre_una_api_en_vps_es_rechazado(): void
     {
         $admin   = $this->crear_admin();
@@ -434,6 +475,36 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         });
     }
 
+    public function test_el_segundo_start_sobre_el_par_no_encola_una_segunda_corrida(): void
+    {
+        Queue::fake();
+
+        $admin = $this->crear_admin();
+        $this->crear_templates_de_env();
+        $filas = $this->crear_grupo_pendiente($admin);
+
+        $this->cargar_valores_manuales($admin, $filas['real']);
+
+        // En la pestaña del cliente las dos filas del par están en pantalla, cada una con su botón
+        // "Iniciar" y su propio flag `starting`: deshabilitar uno no deshabilita el otro, así que
+        // dos clics seguidos son alcanzables con el mouse. Lo que no puede pasar es que salgan DOS
+        // pipelines sobre el mismo hosting —el `find . -mindepth 1 -delete` del public_html del SPA
+        // de uno contra el `unzip` del otro—, y menos todavía un 500.
+        $primero = $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/client-installations/' . $filas['real']->id . '/start');
+        $primero->assertStatus(200);
+
+        $segundo = $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/client-installations/' . $filas['esqueleto']->id . '/start');
+
+        $segundo->assertStatus(422);
+        // El estado que se le muestra es el de AHORA, no el que la fila tenía cuando se cargó.
+        $this->assertStringContainsString('instalando', $segundo->json('error'));
+
+        Queue::assertPushed(RunClientInstallationGroupJob::class, 1);
+        Queue::assertNotPushed(RunClientInstallationJob::class);
+    }
+
     public function test_iniciar_una_instalacion_suelta_sigue_encolando_el_job_de_siempre(): void
     {
         Queue::fake();
@@ -540,7 +611,7 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
     // EL .ENV DEL ESQUELETO (sin red: el servicio SSH está reemplazado por el fake)
     // ─────────────────────────────────────────────────────────────────────────
 
-    public function test_el_esqueleto_no_pisa_las_claves_que_el_env_del_destino_ya_tiene(): void
+    public function test_el_esqueleto_no_escribe_ninguna_clave_si_el_destino_ya_tiene_env(): void
     {
         $filas = $this->crear_grupo_para_el_servicio();
 
@@ -550,22 +621,25 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         $service = new InstallationService($filas['esqueleto']);
 
         $resultado = $service->filter_env_vars_to_write($this->ssh_fake, [
-            'DB_DATABASE' => 'lo_que_tipeo_el_operador',
-            'APP_URL'     => 'https://nueva.comerciocity.com',
-            'DB_USERNAME' => 'usuario_nuevo',
+            'DB_DATABASE'       => 'lo_que_tipeo_el_operador',
+            'APP_URL'           => 'https://nueva.comerciocity.com',
+            'DB_USERNAME'       => 'usuario_nuevo',
+            'SESSION_DOMAIN'    => '.comerciocity.com',
+            'QUEUE_CONNECTION'  => 'database',
         ]);
 
-        // 🔴 Las que ya están NO se escriben, ni siquiera con otro valor. Pisarle el .env a un
-        // subdominio que está sirviendo producción lo saca de servicio hasta que alguien lo note.
-        $this->assertArrayNotHasKey('DB_DATABASE', $resultado);
-        $this->assertArrayNotHasKey('APP_URL', $resultado);
-
-        // Y las ausentes sí: el esqueleto rellena huecos.
-        $this->assertArrayHasKey('DB_USERNAME', $resultado);
-        $this->assertSame('usuario_nuevo', $resultado['DB_USERNAME']);
+        // 🔴 NI UNA clave. Ni las que ya están ni las que faltan.
+        //
+        // Que las ausentes tampoco se escriban no es exceso de celo: el modal tilda las dos APIs por
+        // default, así que el destino más probable de un esqueleto sobre un cliente en producción es
+        // el subdominio que está sirviendo HOY. Ahí, SESSION_DOMAIN y QUEUE_CONNECTION —dos claves
+        // que la plantilla global sumó después de que ese cliente se instaló, y que por lo tanto le
+        // "faltan"— entran solas y lo rompen en silencio: la primera desloguea a todos los usuarios,
+        // la segunda manda los jobs a una cola que nadie consume.
+        $this->assertSame([], $resultado);
     }
 
-    public function test_el_esqueleto_avisa_en_el_log_cuando_una_clave_del_subdominio_ya_tiene_otro_valor(): void
+    public function test_el_esqueleto_avisa_en_el_log_que_no_toco_el_env_que_ya_estaba(): void
     {
         $filas = $this->crear_grupo_para_el_servicio();
 
@@ -576,15 +650,18 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
             'APP_URL' => 'https://nueva.comerciocity.com',
         ]);
 
-        // No se pisa, pero el operador lo tiene que ver en el log en vivo para decidir a mano.
+        // No escribir es la decisión correcta, pero tiene que ser VISIBLE: el operador está mirando
+        // el log en vivo y si no dice nada, va a creer que el .env quedó configurado.
         $warnings = $filas['esqueleto']->deployment_logs()
             ->where('level', 'warning')
             ->get()
             ->pluck('line')
             ->implode(' | ');
 
-        $this->assertStringContainsString('APP_URL', $warnings);
-        $this->assertStringContainsString('https://vieja.comerciocity.com', $warnings);
+        $this->assertStringContainsString('YA tenía un .env', $warnings);
+        $this->assertStringContainsString('no le escribió ninguna clave', $warnings);
+        // Y le dice qué hacer si de verdad falta algo, en vez de dejarlo adivinando.
+        $this->assertStringContainsString('a mano', $warnings);
     }
 
     public function test_el_esqueleto_escribe_el_env_completo_si_el_destino_no_tiene_ninguno(): void
@@ -673,7 +750,7 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         );
     }
 
-    public function test_write_env_del_esqueleto_solo_escribe_las_claves_ausentes_del_destino(): void
+    public function test_write_env_del_esqueleto_no_toca_un_env_que_ya_existe(): void
     {
         $this->crear_templates_de_env();
         $filas = $this->crear_grupo_para_el_servicio();
@@ -681,19 +758,18 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         $filas['esqueleto']->update(['env_manual_values' => $this->valores_manuales()]);
 
         // El subdominio secundario ya tiene sistema: su .env trae la base buena y su propia APP_URL.
-        $this->ssh_fake->envs[$filas['api2']->id] = "DB_DATABASE=la_base_de_produccion\nAPP_URL=" . rtrim($filas['api2']->url, '/') . "\n";
+        $env_original = "DB_DATABASE=la_base_de_produccion\nAPP_URL=" . rtrim($filas['api2']->url, '/') . "\n";
+
+        $this->ssh_fake->envs[$filas['api2']->id] = $env_original;
 
         $this->correr_write_env($filas['esqueleto']->fresh());
 
-        $escrito = $this->ssh_fake->escrituras[$filas['api2']->id];
-
-        // Es el caso borde que preocupaba a Lucas, probado de punta a punta y no solo en el filtro.
-        $this->assertArrayNotHasKey('DB_DATABASE', $escrito);
-        $this->assertArrayNotHasKey('APP_URL', $escrito);
-        $this->assertArrayHasKey('DB_USERNAME', $escrito);
-
-        // Y el .env del destino conserva el valor que ya tenía.
-        $this->assertStringContainsString('DB_DATABASE=la_base_de_produccion', $this->ssh_fake->envs[$filas['api2']->id]);
+        // Es el caso borde que preocupaba a Lucas, probado de punta a punta y no solo en el filtro:
+        // no hay NI UNA escritura contra ese subdominio, y el archivo queda byte por byte como
+        // estaba. Si algún día vuelve a aparecer una entrada acá, alguien repuso el filtro por clave
+        // y le está tocando el .env a un servidor que puede estar en producción.
+        $this->assertArrayNotHasKey($filas['api2']->id, $this->ssh_fake->escrituras);
+        $this->assertSame($env_original, $this->ssh_fake->envs[$filas['api2']->id]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -724,6 +800,70 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         // Lo que NO tiene que estar, porque el upgrade sí lo repone solo y pedirlo haría fallar
         // todo esqueleto contra un subdominio virgen.
         $this->assertNotContains('vendor/autoload.php', $paths);
+    }
+
+    public function test_la_verificacion_exige_que_public_storage_sea_un_symlink_y_no_un_directorio(): void
+    {
+        $filas = $this->crear_grupo_para_el_servicio();
+
+        $service = new InstallationService($filas['esqueleto']);
+
+        $metodo = new \ReflectionMethod($service, 'build_skeleton_verify_command');
+        $metodo->setAccessible(true);
+        $comando = $metodo->invoke($service);
+
+        // 🔴 public/storage se verifica con -L (SER un symlink), no con -e (existir). Si en esa ruta
+        // hay un directorio común, la guarda del ln -s no crea el enlace —bien, el esqueleto no
+        // borra nada— y con -e la verificación lo daba por bueno: /storage/... de ese cliente
+        // devuelve 404 para siempre y ningún upgrade lo arregla, porque no hay un solo storage:link
+        // en DeploymentService.
+        $this->assertStringContainsString("[ -L 'public/storage' ]", $comando);
+        $this->assertStringContainsString('NO_SYMLINK public/storage', $comando);
+
+        // Y no queda mezclado en el for de existencia, que es de donde salía el falso verde.
+        $this->assertStringNotContainsString("for P in 'public/storage'", $comando);
+        $this->assertStringNotContainsString("'public/storage' '.env'", $comando);
+
+        // Las demás rutas siguen verificándose por existencia: son archivos y directorios comunes.
+        $this->assertStringContainsString('[ -e "$P" ] || echo "FALTA $P"', $comando);
+        $this->assertStringContainsString("'public/index.php'", $comando);
+    }
+
+    public function test_un_directorio_comun_en_public_storage_hace_fallar_la_etapa_con_instrucciones(): void
+    {
+        $filas = $this->crear_grupo_para_el_servicio();
+
+        $service = new InstallationService($filas['esqueleto']);
+
+        $metodo = new \ReflectionMethod($service, 'interpret_skeleton_verify_output');
+        $metodo->setAccessible(true);
+
+        try {
+            $metodo->invoke($service, "NO_SYMLINK public/storage\nVERIFY_DONE\n");
+            $this->fail('Un directorio común en public/storage tiene que hacer fallar la etapa.');
+        } catch (\RuntimeException $e) {
+            $mensaje = $e->getMessage();
+        }
+
+        // El mensaje tiene que decir qué encontró y qué hacer: es un arreglo manual por SSH y el
+        // operador no tiene por qué saberlo de memoria.
+        $this->assertStringContainsString('public/storage', $mensaje);
+        $this->assertStringContainsString('NO es un symlink', $mensaje);
+        $this->assertStringContainsString('ln -s ../storage/app/public public/storage', $mensaje);
+
+        // Y una salida limpia sigue pasando, obvio.
+        $metodo->invoke($service, "VERIFY_DONE\n");
+    }
+
+    public function test_el_timeout_del_job_de_grupo_cubre_las_dos_corridas(): void
+    {
+        $del_grupo = new RunClientInstallationGroupJob(['uno', 'dos']);
+        $suelto    = new RunClientInstallationJob('uno');
+
+        // 🔴 El job de grupo corre DOS pipelines adentro del mismo handle(). Con el timeout de uno
+        // solo, una instalación real de 28 minutos deja al esqueleto arrancando en el 28 y el worker
+        // lo mata en el 30, con su fila clavada en 'instalando'.
+        $this->assertGreaterThanOrEqual($suelto->timeout * 2, $del_grupo->timeout);
     }
 
     public function test_el_pipeline_del_esqueleto_no_sube_la_api_ni_compila_el_spa(): void

@@ -43,6 +43,17 @@ use phpseclib3\Net\SSH2;
 class InstallationService
 {
     /**
+     * La única ruta del esqueleto que tiene que ser un SYMLINK y no un archivo o directorio común.
+     *
+     * Está como constante y no suelta en dos strings porque se usa en tres lugares que tienen que
+     * coincidir sí o sí: la lista de required_skeleton_paths(), la condición `[ -L ]` del comando de
+     * verificación y el mensaje de error que le dice al operador qué comando correr a mano.
+     *
+     * @var string
+     */
+    private const SKELETON_SYMLINK_PATH = 'public/storage';
+
+    /**
      * Instalación inicial en curso.
      *
      * @var ClientInstallation
@@ -527,6 +538,10 @@ class InstallationService
      *
      * Si el archivo .env no existe aún en el hosting, lo crea con touch antes de escribir.
      *
+     * 🔴 En un ESQUELETO esta etapa escribe SOLO si el destino no tiene .env todavía. Si ya lo tiene
+     * no escribe nada y termina bien — el porqué está en filter_env_vars_to_write(). La instalación
+     * real (kind='completa') escribe siempre todo, exista o no el archivo.
+     *
      * @return void
      */
     private function step_write_env()
@@ -599,6 +614,18 @@ class InstallationService
         // crea el .env si falta, y si corriera primero el filtro vería un archivo vacío recién
         // creado y no podría distinguirlo de un .env con el sistema del cliente adentro.
         $vars_to_write = $this->filter_env_vars_to_write($env_ssh_service, $vars_to_write);
+
+        // El filtro devuelve vacío en un solo caso: un ESQUELETO contra un destino que ya tiene
+        // .env. Ahí se corta acá y la etapa termina bien —no escribir es la decisión correcta, no
+        // un error— y ni siquiera se llama a ensure_env_file_for(): sobre un archivo que ya existe
+        // ese touch no hace nada, pero dejarlo sugiere que esta etapa todavía toca algo del destino,
+        // y no toca nada. En una instalación real este array nunca está vacío (APP_URL siempre se
+        // arma), así que este corte no cambia ese camino.
+        if (empty($vars_to_write)) {
+            $this->log('write_env', 'No hay nada que escribir en el .env del destino: se deja intacto.', 'success');
+
+            return;
+        }
 
         // Si el .env todavía no existe, lo crea vacío. 🔴 El touch va POR LA SESIÓN DE
         // EnvSshService, no por exec_hosting_ssh: esa otra sesión conecta fija al hosting
@@ -937,11 +964,12 @@ class InstallationService
      * Instalación real (kind='completa'): devuelve todo tal cual. Es una instalación desde cero, el
      * .env es de ella y no hay nada que respetar.
      *
-     * Esqueleto: devuelve SOLO las claves que todavía NO están en el .env del destino. El subdominio
-     * secundario puede tener un sistema andando —el blue/green alterna cuál de los dos sirve
-     * producción, ver DeploymentService::step_complete()— y pisarle el .env con lo que el operador
-     * tipeó en el modal lo rompe. Las que ya están y difieren se loguean como warning para que el
-     * operador las vea en el log en vivo y decida, pero no se tocan.
+     * Esqueleto: si el destino YA tiene un .env, devuelve un array VACÍO —no se escribe ni una
+     * clave, ni siquiera las que faltan— y loguea un warning. Si no lo tiene (subdominio virgen,
+     * que es el caso para el que existe el esqueleto), devuelve todo tal cual y el .env se escribe
+     * completo. El porqué del array vacío está adentro del método, sobre el log: en resumen, el
+     * modal tilda las dos APIs por default y el destino más probable es un subdominio que está
+     * sirviendo producción.
      *
      * 🔴 Es público a propósito, y no un detalle privado de step_write_env(): es el ÚNICO punto de
      * esta decisión que se puede probar sin un servidor del otro lado. Si se vuelve privado, el test
@@ -949,7 +977,7 @@ class InstallationService
      *
      * @param  EnvSshService  $env_ssh_service  Ya conectado al servidor de la API destino.
      * @param  array<string, string>  $vars_to_write
-     * @return array<string, string>
+     * @return array<string, string>  Vacío cuando es un esqueleto y el destino ya tiene .env.
      */
     public function filter_env_vars_to_write(EnvSshService $env_ssh_service, array $vars_to_write): array
     {
@@ -958,46 +986,46 @@ class InstallationService
         }
 
         // Sin .env en el destino no hay nada que respetar: se escribe completo, que es lo que
-        // necesita un subdominio virgen. ensure_env_file_for() lo crea inmediatamente después.
+        // necesita un subdominio virgen —que es exactamente para lo que existe el esqueleto— y es el
+        // ÚNICO camino por el que esta etapa escribe algo. ensure_env_file_for() crea el archivo
+        // inmediatamente después.
         if (! $env_ssh_service->env_exists_for($this->target_api)) {
             $this->log('write_env', 'El destino no tiene .env: se escribe completo.');
 
             return $vars_to_write;
         }
 
-        $env_actual = $env_ssh_service->read_env_for($this->target_api);
-
-        // Las tres claves que dependen del subdominio y no del cliente. Si ya están con OTRO valor,
-        // el subdominio está sirviendo algo distinto de lo que el operador cree: se avisa fuerte.
-        $claves_del_subdominio = ['APP_URL', 'SANCTUM_STATEFUL_DOMAINS', 'SANCTUM_STATEFUL_CORS'];
-
-        $vars_filtradas  = [];
-        $claves_intactas = [];
-        foreach ($vars_to_write as $key => $value) {
-            if (! array_key_exists($key, $env_actual)) {
-                $vars_filtradas[$key] = $value;
-                continue;
-            }
-
-            $claves_intactas[] = $key;
-
-            if (in_array($key, $claves_del_subdominio, true) && (string) $env_actual[$key] !== (string) $value) {
-                $this->log(
-                    'write_env',
-                    "El .env del destino ya tiene {$key}='{$env_actual[$key]}' y no se pisa "
-                    . "(le correspondería '{$value}'). Revisalo a mano si el subdominio no responde.",
-                    'warning'
-                );
-            }
-        }
-
+        // 🔴 El destino YA tiene .env: el esqueleto no escribe NI UNA clave. Ni siquiera las
+        // que faltan.
+        //
+        // Hasta el 24/8/2026 acá se escribían las claves ausentes y se respetaban las presentes, que
+        // suena inofensivo y no lo es. El modal tilda las DOS APIs por default, así que para un
+        // cliente que ya está en producción el camino más probable es que el operador no destilde el
+        // subdominio ACTIVO y corra el esqueleto contra el que está sirviendo hoy. Ahí, cualquier
+        // clave que la plantilla global sumó después de que ese cliente se instaló entra sola en su
+        // .env de producción:
+        //   • SESSION_DOMAIN=.comerciocity.com cambia el dominio de la cookie y DESLOGUEA a todos
+        //     los usuarios de ese cliente;
+        //   • QUEUE_CONNECTION=database, donde antes regía el default sync, manda los jobs a una
+        //     cola que en el hosting compartido no consume nadie.
+        // Ninguna de las dos falla ruidosamente: el sistema del cliente queda roto en silencio. Un
+        // .env al que le falta una clave, en cambio, no rompe nada por sí mismo y se corrige a mano
+        // en un minuto.
+        //
+        // Que un subdominio tenga .env significa que ya tuvo un sistema instalado, y ahí el
+        // esqueleto no tiene nada que hacer. No es un error: la etapa termina bien.
         $this->log(
             'write_env',
-            'El destino ya tenía un .env: se escriben ' . count($vars_filtradas) . ' claves nuevas y '
-            . 'se dejan intactas ' . count($claves_intactas) . '.'
+            'El destino YA tenía un .env, así que el esqueleto no le escribió ninguna clave y lo dejó '
+            . 'exactamente como estaba. Un subdominio con .env es un subdominio que ya tuvo un sistema '
+            . 'instalado y puede estar sirviendo producción ahora mismo (el blue/green alterna cuál de '
+            . 'los dos es la API activa), así que meterle claves de la plantilla global lo cambiaría en '
+            . 'caliente. Si a este .env de verdad le falta algo, corregilo a mano desde Variables de '
+            . 'entorno.',
+            'warning'
         );
 
-        return $vars_filtradas;
+        return [];
     }
 
     /**
@@ -1187,6 +1215,13 @@ class InstallationService
         // todavía no existe) `[ -e ]` devuelve falso, se intentaría el ln -s igual y fallaría con
         // "File exists". Con -e solo, el caso más probable de reintento revienta.
         //
+        // ⚠️ Y sí: si en public/storage hay un DIRECTORIO común en vez del symlink, esta guarda no
+        // crea nada y lo deja intacto. Es lo correcto —el esqueleto no borra— pero NO es un final
+        // feliz: con un directorio ahí, /storage/... del cliente devuelve 404 para siempre y ningún
+        // upgrade lo repone. Quien lo denuncia es build_skeleton_verify_command(), que exige `[ -L ]`
+        // sobre esta ruta y hace fallar la etapa con las instrucciones para arreglarlo a mano. No
+        // "simplifiques" esa verificación a `[ -e ]`: es la única red que hay para este caso.
+        //
         // must_succeed = false, igual que el storage:link de la instalación real: quien decide es
         // verify_skeleton_installation().
         $link_output = $this->exec_hosting_ssh(
@@ -1216,6 +1251,10 @@ class InstallationService
      *   vendor/autoload.php     -> composer install en el hosting (DeploymentService::step_upload_api())
      *   los 4 certificados AFIP -> sync_afip_certificates() + provision_afip_certificates()
      *
+     * ⚠️ public/storage se verifica DISTINTO del resto: no alcanza con que exista, tiene que ser un
+     * symlink. Ver build_skeleton_verify_command(), que lo saca de este for y le pone su propia
+     * condición. La ruta está igual en esta lista porque es una de las que el esqueleto deja puestas.
+     *
      * @return array<int, string>
      */
     private function required_skeleton_paths(): array
@@ -1223,7 +1262,7 @@ class InstallationService
         return [
             'public/index.php',
             'public/.htaccess',
-            'public/storage',
+            self::SKELETON_SYMLINK_PATH,
             '.env',
             'bootstrap/cache',
             'storage/framework/views',
@@ -1246,27 +1285,84 @@ class InstallationService
      */
     private function verify_skeleton_installation(): void
     {
-        $api_path = $this->get_api_path();
-
-        $escaped_paths = [];
-        foreach ($this->required_skeleton_paths() as $required_path) {
-            $escaped_paths[] = $this->escape_remote_arg($required_path);
-        }
-
-        // 🔴 `[ -e "$P" ] || [ -L "$P" ]`, y no solo `[ -e ]` como en verify_api_installation():
-        // public/storage es un symlink, y `[ -e ]` sobre un symlink cuyo target todavía no existe
-        // devuelve falso. Sin el -L, la verificación reportaría FALTA sobre un symlink perfectamente
-        // creado y marcaría fallido un esqueleto que quedó bien.
-        $command = 'cd ' . $this->escape_remote_arg($api_path)
-            . ' && for P in ' . implode(' ', $escaped_paths) . '; do'
-            . ' [ -e "$P" ] || [ -L "$P" ] || echo "FALTA $P"; done'
-            . ' && echo VERIFY_DONE';
-
         $this->log('finalize_skeleton', 'Verificando integridad del esqueleto...');
 
         // must_succeed = false: lo que decide si la verificación falló es la salida, no el exit code.
-        $output = $this->exec_hosting_ssh('finalize_skeleton', $command, false);
+        $output = $this->exec_hosting_ssh(
+            'finalize_skeleton',
+            $this->build_skeleton_verify_command(),
+            false
+        );
 
+        $this->interpret_skeleton_verify_output($output);
+
+        $this->log(
+            'finalize_skeleton',
+            'Esqueleto verificado: están todas las rutas que el upgrade no repone por su cuenta',
+            'success'
+        );
+    }
+
+    /**
+     * Arma el comando POSIX que verifica el esqueleto en el hosting.
+     *
+     * Está separado de verify_skeleton_installation() para poder probarlo sin un servidor del otro
+     * lado: es un string, y la diferencia entre `-e` y `-L` en la línea de public/storage es
+     * justamente lo que un test tiene que poder fijar.
+     *
+     * @return string
+     */
+    private function build_skeleton_verify_command(): string
+    {
+        $api_path = $this->get_api_path();
+
+        // El symlink se verifica aparte de todo lo demás, con su propia condición.
+        $escaped_paths = [];
+        foreach ($this->required_skeleton_paths() as $required_path) {
+            if ($required_path === self::SKELETON_SYMLINK_PATH) {
+                continue;
+            }
+
+            $escaped_paths[] = $this->escape_remote_arg($required_path);
+        }
+
+        $symlink = $this->escape_remote_arg(self::SKELETON_SYMLINK_PATH);
+
+        // 🔴 public/storage se verifica con `[ -L ]` —que SEA un symlink—, no con `[ -e ]` —que
+        // exista—. La diferencia no es cosmética: si en public/storage hay un DIRECTORIO común en
+        // vez del enlace, la guarda del ln -s de step_finalize_skeleton() no crea el symlink (bien:
+        // el esqueleto no borra nada) y con `[ -e ]` la verificación lo daba por bueno. Resultado:
+        // /storage/loquesea devuelve 404 para siempre en ese cliente, y ningún upgrade lo arregla
+        // —no hay un solo storage:link en DeploymentService—. Ese estado tiene que salir por la
+        // cara del operador, no quedar en verde.
+        //
+        // El `-L` además cubre el caso que motivaba al `-e`: un symlink cuyo target todavía no
+        // existe hace que `[ -e ]` devuelva falso aunque el enlace esté perfectamente creado.
+        //
+        // Las demás rutas siguen verificándose por existencia, que es lo que corresponde: son
+        // archivos y directorios comunes.
+        return 'cd ' . $this->escape_remote_arg($api_path)
+            . ' && for P in ' . implode(' ', $escaped_paths) . '; do'
+            . ' [ -e "$P" ] || echo "FALTA $P"; done'
+            . ' && if [ -L ' . $symlink . ' ]; then :;'
+            . ' elif [ -e ' . $symlink . ' ]; then echo "NO_SYMLINK ' . self::SKELETON_SYMLINK_PATH . '";'
+            . ' else echo "FALTA ' . self::SKELETON_SYMLINK_PATH . '"; fi'
+            . ' && echo VERIFY_DONE';
+    }
+
+    /**
+     * Traduce la salida del comando de verificación a un esqueleto bueno o a una excepción.
+     *
+     * Separado por lo mismo que build_skeleton_verify_command(): es lógica del admin, no del
+     * servidor, y se puede probar con un string.
+     *
+     * @param  string  $output
+     * @return void
+     * @throws \RuntimeException Si la verificación no llegó a completarse, falta alguna ruta o
+     *                           public/storage existe pero no es un symlink.
+     */
+    private function interpret_skeleton_verify_output(string $output): void
+    {
         if (strpos($output, 'VERIFY_DONE') === false) {
             $this->log(
                 'finalize_skeleton',
@@ -1281,10 +1377,41 @@ class InstallationService
         }
 
         $missing_paths = [];
+        $not_a_symlink = false;
         foreach (preg_split('/\r\n|\r|\n/', $output) as $output_line) {
             if (strpos($output_line, 'FALTA ') === 0) {
                 $missing_paths[] = trim(substr($output_line, strlen('FALTA ')));
+                continue;
             }
+
+            if (strpos($output_line, 'NO_SYMLINK ') === 0) {
+                $not_a_symlink = true;
+            }
+        }
+
+        // Se avisa ANTES que las faltantes: es el caso que más caro sale y el que menos se nota.
+        if ($not_a_symlink) {
+            $api_path = $this->get_api_path();
+
+            $this->log(
+                'finalize_skeleton',
+                'En ' . $api_path . '/' . self::SKELETON_SYMLINK_PATH . ' hay algo que no es el symlink '
+                . 'a storage/app/public (un directorio común, lo más probable).',
+                'error'
+            );
+
+            throw new \RuntimeException(
+                'El esqueleto no pudo terminar: en ' . $api_path . '/' . self::SKELETON_SYMLINK_PATH
+                . ' ya hay algo que NO es un symlink (un directorio común, lo más probable). El '
+                . 'esqueleto no lo borra —no borra nada— pero tampoco puede darlo por bueno: con un '
+                . 'directorio ahí, todo /storage/... de ese cliente devuelve 404 para siempre, y '
+                . 'ningún upgrade lo arregla, porque no hay un solo storage:link en el pipeline de '
+                . 'actualización. Resolvelo a mano por SSH: entrá a ' . $api_path . ', mové a '
+                . 'storage/app/public lo que haya adentro de ' . self::SKELETON_SYMLINK_PATH . ' si '
+                . 'importa, borrá el directorio y creá el enlace con '
+                . '`ln -s ../storage/app/public ' . self::SKELETON_SYMLINK_PATH . '`. Después volvé a '
+                . 'correr el esqueleto.'
+            );
         }
 
         if (! empty($missing_paths)) {
@@ -1302,12 +1429,6 @@ class InstallationService
                 . 'ninguna actualización futura.'
             );
         }
-
-        $this->log(
-            'finalize_skeleton',
-            'Esqueleto verificado: están todas las rutas que el upgrade no repone por su cuenta',
-            'success'
-        );
     }
 
     /**

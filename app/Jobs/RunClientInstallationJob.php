@@ -69,9 +69,14 @@ class RunClientInstallationJob implements ShouldQueue
             ->with(['client', 'client_api', 'version'])
             ->firstOrFail();
 
-        $service = new InstallationService($installation);
-
         try {
+            // 🔴 El `new InstallationService` va ADENTRO del try. El constructor puede tirar
+            // excepción —rechaza un esqueleto sobre una API en VPS, y falla si la fila no tiene
+            // API destino—, y desde afuera del try esa excepción se llevaba el job entero dejando
+            // la fila clavada en 'instalando': el listado la muestra corriendo, no corre nada, y
+            // start() no la reintenta porque ya no está en 'pendiente'.
+            $service = new InstallationService($installation);
+
             // connect() abre la sesión SSH al hosting; run() ejecuta el pipeline completo.
             $service->connect();
             $service->run();

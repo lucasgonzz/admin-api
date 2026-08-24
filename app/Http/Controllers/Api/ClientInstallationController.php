@@ -14,6 +14,7 @@ use App\Models\Version;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 /**
@@ -123,6 +124,18 @@ class ClientInstallationController extends Controller
             'targets'                 => 'nullable|array|max:2',
             'targets.*.client_api_id' => 'required_with:targets|integer',
             'targets.*.kind'          => 'required_with:targets|in:completa,esqueleto',
+        ], [
+            // 🔴 Mensaje propio y en castellano. config/app.php tiene locale 'en', así que el
+            // default de Laravel acá sale en inglés ("The targets may not have more than 2 items"),
+            // en un endpoint donde todos los demás 422 están en castellano y explicados. Y es
+            // alcanzable de verdad: Client::client_apis() es un hasMany sin límite y hay endpoints
+            // vivos para agregar una tercera API a un cliente (routes/api.php, el CRUD de
+            // client-apis), así que el modal —que tilda todas las APIs por default— le manda tres
+            // destinos al POST sin que el operador haya hecho nada raro. El mensaje tiene que
+            // decirle qué hacer, no informarle que hay una regla.
+            'targets.max' => 'Solo se pueden instalar dos APIs de una vez: una con la instalación '
+                . 'real y otra con el esqueleto. Destildá las que sobren y creá el resto en un '
+                . 'segundo pedido.',
         ]);
 
         // Cliente destino de la nueva instalación.
@@ -318,50 +331,83 @@ class ClientInstallationController extends Controller
      * Sobre una fila suelta arranca esa fila, igual que siempre. Sobre una fila de un grupo arranca
      * TODAS las filas del grupo que estén en 'pendiente', con la instalación real primero.
      *
+     * 🔴 La selección de las filas y el paso a 'instalando' van en UNA transacción con
+     * lockForUpdate(). No es prolijidad: en la pestaña del cliente las dos filas del par están en
+     * pantalla, cada una con su botón "Iniciar" y su propio flag `starting` —deshabilitar uno no
+     * deshabilita el otro—, así que dos clics casi simultáneos son alcanzables con el mouse. Sin el
+     * lock, los dos requests leían las mismas filas en 'pendiente' y despachaban DOS jobs sobre los
+     * mismos uuids: dos pipelines en paralelo contra el mismo hosting, con el
+     * `find . -mindepth 1 -delete` del public_html del SPA de uno corriendo contra el `unzip` del
+     * otro. Con el lock, el segundo request encuentra cero filas pendientes y se va con un 422.
+     *
+     * 🔴 El dispatch va DESPUÉS del commit, fuera del closure: un worker real puede levantar el job
+     * antes de que la transacción cierre y encontrarse las filas todavía en 'pendiente'.
+     *
      * @param  ClientInstallation  $installation  Instalación (o fila del grupo) a iniciar.
      * @return JsonResponse  { model, models? } o { error: string }
      */
     public function start(ClientInstallation $installation): JsonResponse
     {
-        $rows = $this->rows_to_start($installation);
-
-        if ($rows->isEmpty()) {
-            // Mismo mensaje exacto que antes del 24/8/2026: para una fila suelta esta respuesta
-            // tiene que ser indistinguible de la de siempre.
-            return response()->json([
-                'error' => "No se puede iniciar una instalación en estado '{$installation->status}'.",
-            ], 422);
-        }
-
-        // Obtiene todas las variables que requieren valor manual.
+        // Obtiene todas las variables que requieren valor manual. Va afuera de la transacción: es
+        // una lectura de configuración global, no compite con nadie y no tiene por qué alargar el
+        // tiempo con las filas lockeadas.
         $manual_templates = EnvTemplate::where('is_manual_on_create', true)->get();
 
-        // Valida que cada variable manual tenga un valor cargado (no vacío) en CADA fila que se va
-        // a iniciar: cada fila corre su propio step_write_env con sus propios valores.
-        $missing_keys = [];
-        foreach ($rows as $row) {
-            $env_manual_values = $row->env_manual_values ?? [];
-            foreach ($manual_templates as $template) {
-                $value = $env_manual_values[$template->key] ?? '';
-                if (trim((string) $value) === '' && ! in_array($template->key, $missing_keys, true)) {
-                    $missing_keys[] = $template->key;
+        $uuids_o_error = DB::transaction(function () use ($installation, $manual_templates) {
+            $rows = $this->rows_to_start($installation);
+
+            if ($rows->isEmpty()) {
+                // refresh() dentro del lock: para el segundo de dos clics simultáneos, el estado que
+                // el operador tiene que leer es 'instalando' (lo que la fila es AHORA), no
+                // 'pendiente' (lo que era cuando el route model binding la cargó).
+                $installation->refresh();
+
+                // Mismo mensaje exacto que antes del 24/8/2026: para una fila suelta esta respuesta
+                // tiene que ser indistinguible de la de siempre.
+                return response()->json([
+                    'error' => "No se puede iniciar una instalación en estado '{$installation->status}'.",
+                ], 422);
+            }
+
+            // Valida que cada variable manual tenga un valor cargado (no vacío) en CADA fila que se
+            // va a iniciar: cada fila corre su propio step_write_env con sus propios valores.
+            $missing_keys = [];
+            foreach ($rows as $row) {
+                $env_manual_values = $row->env_manual_values ?? [];
+                foreach ($manual_templates as $template) {
+                    $value = $env_manual_values[$template->key] ?? '';
+                    if (trim((string) $value) === '' && ! in_array($template->key, $missing_keys, true)) {
+                        $missing_keys[] = $template->key;
+                    }
                 }
             }
+
+            if (! empty($missing_keys)) {
+                return response()->json([
+                    'error'        => 'Faltan valores para variables requeridas antes de iniciar.',
+                    'missing_keys' => $missing_keys,
+                ], 422);
+            }
+
+            // Cambia el status a 'instalando' con las filas todavía lockeadas: recién cuando esto
+            // commitea, otro request las ve fuera de 'pendiente'.
+            $uuids = [];
+            foreach ($rows as $row) {
+                $row->update(['status' => 'instalando']);
+                $uuids[] = $row->uuid;
+            }
+
+            return $uuids;
+        });
+
+        // Los 422 salen tal cual del closure, con el mismo shape de siempre. Devolverlos desde
+        // adentro commitea una transacción que no escribió nada, que es exactamente lo que se
+        // quiere: no hay nada que revertir.
+        if ($uuids_o_error instanceof JsonResponse) {
+            return $uuids_o_error;
         }
 
-        if (! empty($missing_keys)) {
-            return response()->json([
-                'error'        => 'Faltan valores para variables requeridas antes de iniciar.',
-                'missing_keys' => $missing_keys,
-            ], 422);
-        }
-
-        // Cambia el status a 'instalando' antes de despachar el job.
-        $uuids = [];
-        foreach ($rows as $row) {
-            $row->update(['status' => 'instalando']);
-            $uuids[] = $row->uuid;
-        }
+        $uuids = $uuids_o_error;
 
         if (count($uuids) === 1) {
             // Camino de siempre para una instalación suelta: mismo job, mismo dispatch.
@@ -506,11 +552,21 @@ class ClientInstallationController extends Controller
     }
 
     /**
-     * Filas que hay que arrancar a partir de la que pidió el operador.
+     * Filas que hay que arrancar a partir de la que pidió el operador, YA LOCKEADAS.
      *
      * Sin grupo: la fila pedida, si está pendiente. Con grupo: todas las del grupo que estén
      * pendientes, con la real primero — así un start repetido sobre un grupo a medias corre solo lo
      * que falta, en vez de rechazar todo porque una de las dos ya está completada.
+     *
+     * 🔴 Las dos ramas releen de la base con lockForUpdate() y no reusan la instancia que trajo el
+     * route model binding, ni siquiera en el caso de una fila suelta. Ese `$installation->status`
+     * es una foto de antes del request: dos clics simultáneos veían los dos 'pendiente' y
+     * despachaban dos jobs sobre la misma instalación. Con el SELECT ... FOR UPDATE el segundo se
+     * queda esperando el commit del primero y después lee 'instalando', así que se va con las manos
+     * vacías.
+     *
+     * ⚠️ Sólo tiene sentido llamado adentro de una transacción: fuera de una, el lock se libera al
+     * terminar la consulta y no protege nada. El único llamador es start(), que abre la suya.
      *
      * @param  ClientInstallation  $installation
      * @return Collection
@@ -518,13 +574,15 @@ class ClientInstallationController extends Controller
     private function rows_to_start(ClientInstallation $installation): Collection
     {
         if ($installation->group_uuid === null) {
-            return $installation->status === 'pendiente'
-                ? new Collection([$installation])
-                : new Collection();
+            return ClientInstallation::where('id', $installation->id)
+                ->where('status', 'pendiente')
+                ->lockForUpdate()
+                ->get();
         }
 
         $rows = ClientInstallation::ofGroup($installation->group_uuid)
             ->where('status', 'pendiente')
+            ->lockForUpdate()
             ->get();
 
         return ClientInstallation::sort_real_first($rows);
