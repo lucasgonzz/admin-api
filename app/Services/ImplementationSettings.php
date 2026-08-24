@@ -86,16 +86,23 @@ class ImplementationSettings
      * por UserSetupHelper (empresa-api) cuando no se configuró nada.
      *
      * El valor se lee desde admin_settings con key 'implementation_google_cuota_default'.
-     * Si no existe el registro, devuelve 100 como valor por defecto.
+     * Si no existe el registro, devuelve 300 como valor por defecto.
+     *
+     * Por qué 300 y no 100: decisión de Lucas del 24/8/2026 — la cuota de imágenes de un
+     * cliente real creado por el user setup tiene que nacer en 300 (la demo nace en 100 y
+     * eso lo resuelve empresa-api). Este fallback es el camino principal en producción:
+     * RunUserSetupService manda SIEMPRE el campo google_cuota, así que el default de
+     * empresa-api casi nunca aplica. Si el AdminSetting está cargado, ese valor le gana
+     * al fallback, como corresponde.
      *
      * @return int Cuota por defecto (mínimo 0).
      */
     public static function get_google_cuota_default(): int
     {
-        // Leer el valor guardado; fallback a 100 si no existe o es 0.
+        // Leer el valor guardado; fallback a 300 si no existe o es 0.
         $value = (int) AdminSetting::where('key', 'implementation_google_cuota_default')->value('value');
 
-        return $value > 0 ? $value : 100;
+        return $value > 0 ? $value : 300;
     }
 
     /**
