@@ -387,6 +387,82 @@ class EndpointsDeAnalisisDeLeadsParaClaudeTest extends TestCase
     }
 
     /**
+     * 🔴 Un parámetro vacío devuelve 422, no 500.
+     *
+     * `ConvertEmptyStringsToNull` convierte `?order=` en null; como la clave EXISTE, `input()` no
+     * aplica el default y el null terminaba casteado a '' dentro de orderBy(), que tira
+     * InvalidArgumentException. Un `?order=` de más en la URL rompía el endpoint entero.
+     *
+     * @return void
+     */
+    public function test_un_parametro_vacio_no_revienta_el_endpoint()
+    {
+        $rutas = [
+            '/api/claude/leads?order=',
+            '/api/claude/leads?order_by=',
+            '/api/claude/messages?order=',
+        ];
+
+        foreach ($rutas as $ruta) {
+            $respuesta = $this->withHeaders($this->headers())->getJson($ruta);
+            $this->assertLessThan(
+                500,
+                $respuesta->status(),
+                'Un parámetro vacío en ' . $ruta . ' no puede devolver 500.'
+            );
+        }
+    }
+
+    /**
+     * 🔴 "Seguimiento" significa lo mismo en los conteos por lead que en las métricas.
+     *
+     * Hay tres filas de producción con is_followup=1 que NO son envíos por plantilla al lead:
+     * sugerencias sin aprobar, sugerencias rechazadas, y las notificaciones al closer. Si los dos
+     * caminos las tratan distinto, dan números distintos para el mismo lead — y es justo el número
+     * que hay que medir para dimensionar la caída de Meta.
+     *
+     * @return void
+     */
+    public function test_los_conteos_por_lead_no_cuentan_lo_que_no_es_un_seguimiento_real()
+    {
+        $lead = $this->crear_lead('Contaminado');
+
+        /* Un seguimiento real que no salió: este SÍ cuenta. */
+        $this->seguimiento_caido($lead, 'Meta rechazó: cuenta con pago pendiente');
+
+        /* Sugerencia sin aprobar: nunca se intentó enviar. */
+        LeadMessage::create([
+            'lead_id'              => $lead->id,
+            'sender'               => 'sistema',
+            'content'              => 'Seguimiento sugerido esperando aprobación',
+            'status'               => 'sugerido',
+            'is_followup'          => true,
+            'followup_template_id' => 7,
+        ]);
+
+        /* Notificación al closer: is_followup=1 pero el WhatsApp fue al closer, no al lead. */
+        LeadMessage::create([
+            'lead_id'     => $lead->id,
+            'sender'      => 'sistema',
+            'content'     => '[Notificación al closer — seguimiento en etapa avanzada]',
+            'status'      => 'enviado',
+            'is_followup' => true,
+        ]);
+
+        $respuesta = $this->withHeaders($this->headers())
+            ->getJson('/api/claude/leads?lead_ids[]=' . $lead->id . '&include=conteos');
+
+        $respuesta->assertStatus(200);
+        $conteos = $respuesta->json('data.0.conteos');
+
+        $this->assertSame(1, (int) $conteos['seguimientos'], 'Solo el seguimiento real por plantilla cuenta.');
+        $this->assertSame(1, (int) $conteos['seguimientos_no_confirmados']);
+
+        /* Y los salientes incluyen los de la IA, igual que el denominador de las tasas. */
+        $this->assertSame(3, (int) $conteos['salientes'], 'Saliente = setter O sistema, como en las métricas.');
+    }
+
+    /**
      * El schema se describe solo, para no tener que adivinar filtros del otro lado.
      *
      * @return void

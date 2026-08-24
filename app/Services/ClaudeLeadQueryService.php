@@ -32,8 +32,10 @@ class ClaudeLeadQueryService
     /** Tope duro de filas por página. Un `limit` mayor se recorta, no tira error. */
     const LIMIT_MAX = 500;
 
-    /** Tope de destinatarios por lote del lado de escritura (lo consume el otro controlador). */
-    const BATCH_MAX = 200;
+    /* El tope de destinatarios por lote NO vive acá: la única fuente es
+       ClaudeLeadsOutboundController::MAX_BATCH, que es la constante que efectivamente se aplica.
+       Había una copia en este archivo con otro valor (200 contra los 50 reales) que solo
+       alimentaba claude/schema, así que el schema publicaba un tope que el endpoint rechazaba. */
 
     /** Cantidad de caracteres de `whatsapp_send_error` que definen un grupo en `group_by=error`. */
     const ERROR_GROUP_CHARS_DEFAULT = 120;
@@ -464,6 +466,25 @@ class ClaudeLeadQueryService
             $query->where('lead_messages.followup_template_id', (int) $filtros['followup_template_id']);
         }
 
+        /*
+         * 🔴 `has_followup_template` existe por un motivo puntual y no por simetría: la columna
+         * `whatsapp_send_error` se agregó el 13/7/2026 (migración 2026_07_13_170000), así que
+         * TODO seguimiento que falló antes de esa fecha la tiene en null y queda afuera de un
+         * filtro que dependa de `has_send_error=1`. Ese filtro devolvería menos filas sin avisar,
+         * y parecería un dato.
+         *
+         * Con `is_followup=1 + delivery=no_confirmado + has_followup_template=1` la consulta
+         * identifica un envío por plantilla que no salió SIN depender del texto del error, así
+         * que también alcanza a los caídos anteriores al 13/7/2026. De paso deja afuera las
+         * notificaciones al closer, que son is_followup=1 sin followup_template_id.
+         */
+        $has_followup_template = isset($filtros['has_followup_template']) ? $filtros['has_followup_template'] : null;
+        if ($has_followup_template === true) {
+            $query->whereNotNull('lead_messages.followup_template_id');
+        } elseif ($has_followup_template === false) {
+            $query->whereNull('lead_messages.followup_template_id');
+        }
+
         $include_status_events = ! empty($filtros['include_status_events']);
         if (! $include_status_events) {
             $query->where('lead_messages.is_status_event', 0);
@@ -579,16 +600,29 @@ class ClaudeLeadQueryService
                 'lead_messages.lead_id as lead_id, '
                 . 'COUNT(*) as mensajes_total, '
                 . "SUM(CASE WHEN lead_messages.sender = 'lead' THEN 1 ELSE 0 END) as entrantes, "
-                . "SUM(CASE WHEN lead_messages.sender = 'setter' THEN 1 ELSE 0 END) as salientes, "
+                /* 🔴 Saliente = setter O sistema, igual que saliente_salido_sql(), que es la base de
+                   las tasas de respuesta. Antes esto contaba solo 'setter', así que un lead trabajado
+                   enteramente por la IA aparecía con salientes=0 y primer_saliente_at=null —o sea
+                   "nunca lo contactamos"— mientras claude/metrics lo contaba en el denominador de
+                   "leads con al menos un saliente". Dos respuestas contradictorias sobre el mismo lead. */
+                . "SUM(CASE WHEN lead_messages.sender IN ('setter','sistema') THEN 1 ELSE 0 END) as salientes, "
+                . "SUM(CASE WHEN lead_messages.sender = 'setter' THEN 1 ELSE 0 END) as salientes_de_admin, "
                 . "SUM(CASE WHEN lead_messages.sender = 'sistema' THEN 1 ELSE 0 END) as sistema, "
-                . 'SUM(CASE WHEN lead_messages.is_followup = 1 THEN 1 ELSE 0 END) as seguimientos, '
-                . 'SUM(CASE WHEN lead_messages.is_followup = 1 AND lead_messages.whatsapp_message_id IS NOT NULL THEN 1 ELSE 0 END) as seguimientos_confirmados, '
-                . 'SUM(CASE WHEN lead_messages.is_followup = 1 AND lead_messages.whatsapp_message_id IS NULL THEN 1 ELSE 0 END) as seguimientos_no_confirmados, '
+                /* 🔴 Seguimiento = envío REAL por plantilla al lead, con el mismo criterio que
+                   ClaudeLeadMetricsService::seguimientos(). Sin status='enviado' y sin
+                   followup_template_id se cuelan tres cosas que no son envíos caídos: sugerencias sin
+                   aprobar (status='sugerido'), sugerencias rechazadas, y las notificaciones al closer
+                   (is_followup=1 sin followup_template_id, donde el WhatsApp fue al closer y no al
+                   lead). Si estos conteos y la serie de métricas usan criterios distintos, dan números
+                   distintos para lo mismo — que es justo el número que hay que medir. */
+                . "SUM(CASE WHEN lead_messages.is_followup = 1 AND lead_messages.status = 'enviado' AND lead_messages.followup_template_id IS NOT NULL THEN 1 ELSE 0 END) as seguimientos, "
+                . "SUM(CASE WHEN lead_messages.is_followup = 1 AND lead_messages.status = 'enviado' AND lead_messages.followup_template_id IS NOT NULL AND lead_messages.whatsapp_message_id IS NOT NULL THEN 1 ELSE 0 END) as seguimientos_confirmados, "
+                . "SUM(CASE WHEN lead_messages.is_followup = 1 AND lead_messages.status = 'enviado' AND lead_messages.followup_template_id IS NOT NULL AND lead_messages.whatsapp_message_id IS NULL THEN 1 ELSE 0 END) as seguimientos_no_confirmados, "
                 . "SUM(CASE WHEN lead_messages.whatsapp_delivery_status = 'fallido' THEN 1 ELSE 0 END) as entregas_fallidas, "
                 . "MIN(CASE WHEN lead_messages.sender = 'lead' THEN " . $time_sql . ' END) as primer_entrante_at, '
                 . "MAX(CASE WHEN lead_messages.sender = 'lead' THEN " . $time_sql . ' END) as ultimo_entrante_at, '
-                . "MIN(CASE WHEN lead_messages.sender = 'setter' THEN " . $time_sql . ' END) as primer_saliente_at, '
-                . "MAX(CASE WHEN lead_messages.sender = 'setter' THEN " . $time_sql . ' END) as ultimo_saliente_at'
+                . "MIN(CASE WHEN lead_messages.sender IN ('setter','sistema') THEN " . $time_sql . ' END) as primer_saliente_at, '
+                . "MAX(CASE WHEN lead_messages.sender IN ('setter','sistema') THEN " . $time_sql . ' END) as ultimo_saliente_at'
             )
             ->get();
 
@@ -598,6 +632,7 @@ class ClaudeLeadQueryService
                 'mensajes_total'              => (int) $row->mensajes_total,
                 'entrantes'                   => (int) $row->entrantes,
                 'salientes'                   => (int) $row->salientes,
+                'salientes_de_admin'          => (int) $row->salientes_de_admin,
                 'sistema'                     => (int) $row->sistema,
                 'seguimientos'                => (int) $row->seguimientos,
                 'seguimientos_confirmados'    => (int) $row->seguimientos_confirmados,
@@ -626,6 +661,7 @@ class ClaudeLeadQueryService
             'mensajes_total'              => 0,
             'entrantes'                   => 0,
             'salientes'                   => 0,
+            'salientes_de_admin'          => 0,
             'sistema'                     => 0,
             'seguimientos'                => 0,
             'seguimientos_confirmados'    => 0,

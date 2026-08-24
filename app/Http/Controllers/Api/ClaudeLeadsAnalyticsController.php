@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\ClaudeLeadsOutboundController;
 use App\Http\Controllers\Controller;
 use App\Models\FollowupTemplate;
 use App\Models\LeadPipelineStatus;
@@ -84,9 +85,16 @@ class ClaudeLeadsAnalyticsController extends Controller
                 'group_by' => ClaudeLeadQueryService::MESSAGES_GROUP_BY,
                 'includes' => ClaudeLeadQueryService::MESSAGES_INCLUDES,
                 'campos'   => ClaudeLeadQueryService::MESSAGE_COLUMNS,
-                'caso_seguimientos_caidos' => 'GET claude/messages?is_followup=1&delivery=no_confirmado&has_send_error=1&from=...&to=... '
-                    . 'devuelve los seguimientos por plantilla que no se pudieron entregar. '
-                    . '🔴 Ese filtro captura TODO seguimiento que no salió: también números inválidos, plantilla despausada '
+                'caso_seguimientos_caidos' => 'GET claude/messages?is_followup=1&delivery=no_confirmado'
+                    . '&has_followup_template=1&from=...&to=... devuelve los seguimientos por plantilla que no se '
+                    . 'pudieron entregar. '
+                    . '🔴 USAR has_followup_template=1, NO has_send_error=1: la columna whatsapp_send_error se agregó el '
+                    . '13/7/2026, así que todo seguimiento que falló ANTES de esa fecha la tiene en null y un filtro por '
+                    . 'has_send_error lo deja afuera en silencio — devuelve menos filas y parece un dato. '
+                    . 'has_followup_template=1 no depende del texto del error, así que también alcanza a los caídos '
+                    . 'viejos, y de paso excluye las notificaciones al closer (is_followup=1 sin followup_template_id). '
+                    . 'Agregá has_send_error=1 solo si querés restringirte a los que SÍ tienen motivo registrado. '
+                    . '🔴 El filtro captura TODO seguimiento que no salió: también números inválidos, plantilla despausada '
                     . 'y caídas de Kapso, no solo el impago de Meta. Agrupá con group_by=error ANTES de mandarle un mensaje '
                     . 'a alguien cuyo número simplemente está mal.',
             ],
@@ -118,10 +126,61 @@ class ClaudeLeadsAnalyticsController extends Controller
                 'nota'    => 'Sin paginación (son pocas filas). El campo `variables` dice qué significa cada {{n}} de cada '
                     . 'plantilla, así no hay que adivinar al enviar.',
             ],
+            /*
+             * Los dos endpoints de ESCRITURA se describen acá aunque vivan en el otro controlador.
+             * Sin esto, el protocolo de envío —que dry_run viene en true, que hace falta repetir la
+             * llamada con confirm_count exacto, qué campos acepta variables_desde_lead— había que
+             * leerlo del código fuente, y el sentido de este endpoint es no tener que adivinar nada.
+             */
+            'envio' => [
+                'un_lead' => [
+                    'ruta'       => 'POST claude/leads/{id}/send-template',
+                    'body'       => [
+                        'template_name'        => 'OBLIGATORIO. Nombre de la plantilla aprobada en Meta (ver claude/templates).',
+                        'content'              => 'OBLIGATORIO. El texto YA renderizado, que es lo que se guarda como cuerpo '
+                            . 'del mensaje en la conversación. Lo que viaja a Meta son las `variables`, no esto: los dos '
+                            . 'tienen que quedar consistentes.',
+                        'variables'            => 'Array POSICIONAL: el primero es {{1}}, el segundo {{2}}, etc.',
+                        'language_code'        => 'Default ' . ClaudeLeadsOutboundController::IDIOMA_POR_DEFECTO . '.',
+                        'followup_template_id' => 'Opcional, solo para trazabilidad.',
+                        'context'              => 'Opcional. Texto del aviso a admins si el envío falla.',
+                    ],
+                    'nota'       => 'Envía de una: NO tiene dry_run. Sí respeta el cooldown de '
+                        . ClaudeLeadsOutboundController::COOLDOWN_HORAS . ' hs (se saltea con ignorar_cooldown=true). '
+                        . 'Para mandarle a varios leads usá el lote, que tiene simulación.',
+                ],
+                'lote' => [
+                    'ruta' => 'POST claude/send-template-batch',
+                    'body' => [
+                        'lead_ids'             => 'OBLIGATORIO. Ids explícitos, máximo ' . ClaudeLeadsOutboundController::MAX_BATCH
+                            . '. 🔴 No hay ningún filtro de selección de este lado a propósito: hay que nombrar a cada '
+                            . 'destinatario. Los ids se sacan de claude/messages con group_by=lead.',
+                        'template_name'        => 'OBLIGATORIO.',
+                        'content_template'     => 'OBLIGATORIO. Texto con {{1}}, {{2}}... que se renderiza por lead.',
+                        'variables_desde_lead' => 'Lista de campos del lead a usar como variables, en orden. Permitidos: '
+                            . implode(', ', ClaudeLeadsOutboundController::CAMPOS_DE_LEAD_PERMITIDOS)
+                            . '. 🔴 phone y email NO están y no se pueden usar.',
+                        'variables_por_lead'   => 'Alternativa: mapa lead_id => array de variables. Gana sobre variables_desde_lead.',
+                        'dry_run'              => 'Default TRUE. Simula sin enviar nada ni crear ningún mensaje.',
+                        'confirm_count'        => 'OBLIGATORIO cuando dry_run=false. Tiene que coincidir EXACTO con el '
+                            . '`enviarian` que devolvió la simulación; si no, 422 y cero envíos.',
+                        'include_closed'       => 'Default false. Los leads en estado cerrado se omiten salvo que lo pongas.',
+                    ],
+                    'protocolo' => 'Son SIEMPRE dos llamadas. Primero sin dry_run (simula y devuelve `enviarian` + los '
+                        . 'destinatarios con el texto ya renderizado y el teléfono enmascarado). Revisás esa lista. Después '
+                        . 'la MISMA llamada con dry_run=false y confirm_count=<el enviarian que te devolvió>.',
+                    'nota' => 'Cooldown de ' . ClaudeLeadsOutboundController::COOLDOWN_HORAS . ' hs por lead (un lead que ya '
+                        . 'recibió un mensaje de Claude se omite): es lo que hace seguro reintentar un lote cortado. '
+                        . 'El request se corta limpio a los ' . ClaudeLeadsOutboundController::PRESUPUESTO_SEGUNDOS
+                        . ' s y devuelve `no_procesados` con los que no se intentaron; esos se reintentan sin riesgo.',
+                ],
+            ],
             'limites' => [
                 'limit_default' => ClaudeLeadQueryService::LIMIT_DEFAULT,
                 'limit_max'     => ClaudeLeadQueryService::LIMIT_MAX,
-                'batch_max'     => ClaudeLeadQueryService::BATCH_MAX,
+                /* Se lee del controlador de envío, que es donde se aplica: una copia local
+                   publicaba 200 mientras el endpoint rechazaba a partir de 51. */
+                'batch_max'     => ClaudeLeadsOutboundController::MAX_BATCH,
                 'metrics_max_dias' => ClaudeLeadMetricsService::MAX_DIAS,
             ],
             'notas' => [
@@ -190,8 +249,8 @@ class ClaudeLeadsAnalyticsController extends Controller
             }
         }
 
-        $order_by  = (string) $request->input('order_by', 'id');
-        $direction = (string) $request->input('order', 'asc');
+        $order_by  = $this->texto_con_default($request, 'order_by', 'id');
+        $direction = $this->texto_con_default($request, 'order', 'asc');
         $limit     = ClaudeLeadQueryService::resolve_limit($request->input('limit'));
         $after_id  = $this->entero_o_null($request->input('after_id'));
 
@@ -323,7 +382,7 @@ class ClaudeLeadsAnalyticsController extends Controller
         $filtros = $this->armar_filtros_de_mensajes($request);
         $filtros['lead_ids'] = [$lead_id];
 
-        $direction = (string) $request->input('order', 'asc');
+        $direction = $this->texto_con_default($request, 'order', 'asc');
         $limit     = ClaudeLeadQueryService::resolve_limit($request->input('limit'));
         $after_id  = $this->entero_o_null($request->input('after_id'));
 
@@ -403,7 +462,7 @@ class ClaudeLeadsAnalyticsController extends Controller
         }
 
         /* Modo 3: las filas, paginadas por cursor. */
-        $direction = (string) $request->input('order', 'asc');
+        $direction = $this->texto_con_default($request, 'order', 'asc');
         $limit     = ClaudeLeadQueryService::resolve_limit($request->input('limit'));
         $after_id  = $this->entero_o_null($request->input('after_id'));
 
@@ -482,7 +541,7 @@ class ClaudeLeadsAnalyticsController extends Controller
             );
         }
 
-        $granularity = (string) $request->input('granularity', 'day');
+        $granularity = $this->texto_con_default($request, 'granularity', 'day');
 
         return response()->json(ClaudeLeadMetricsService::build($from, $to, $granularity), 200);
     }
@@ -678,6 +737,7 @@ class ClaudeLeadsAnalyticsController extends Controller
             'to'                    => 'nullable|date',
             'include_status_events' => 'nullable|boolean',
             'has_send_error'        => 'nullable|boolean',
+            'has_followup_template' => 'nullable|boolean',
             'delivery'              => 'nullable|string|in:' . implode(',', ClaudeLeadQueryService::DELIVERY),
             'max_content_chars'     => 'nullable|integer|min:1',
             'after_id'              => 'nullable|integer|min:1',
@@ -704,6 +764,7 @@ class ClaudeLeadsAnalyticsController extends Controller
             /* Default FALSE: los is_status_event=1 son ruido interno. */
             'include_status_events' => $this->booleano_o_null($request, 'include_status_events') === true,
             'has_send_error'        => $this->booleano_o_null($request, 'has_send_error'),
+            'has_followup_template' => $this->booleano_o_null($request, 'has_followup_template'),
             'delivery'              => $this->texto_o_null($request->input('delivery')),
             'from'                  => ClaudeLeadQueryService::normalize_date_boundary($request->input('from'), false),
             'to'                    => ClaudeLeadQueryService::normalize_date_boundary($request->input('to'), true),
@@ -960,6 +1021,28 @@ class ClaudeLeadsAnalyticsController extends Controller
         }
 
         return (int) $valor;
+    }
+
+    /**
+     * Texto de un parámetro, cayendo al default cuando llega vacío o ausente.
+     *
+     * 🔴 Existe porque `$request->input('order', 'asc')` NO alcanza. El middleware global
+     * `ConvertEmptyStringsToNull` (app/Http/Kernel.php) convierte `?order=` en null, y como la
+     * clave EXISTE con valor null, `input()` devuelve null en vez del default. Ese null se
+     * casteaba a `''` y llegaba a `orderBy('')`, que en Laravel 8 tira InvalidArgumentException:
+     * un `?order=` de más en la URL devolvía **500** en vez del 422 legible que este controlador
+     * se propone devolver siempre. Con `order_by=` era peor: `Unknown column 'leads.'`.
+     *
+     * @param  Request $request
+     * @param  string  $clave
+     * @param  string  $default
+     * @return string
+     */
+    protected function texto_con_default(Request $request, string $clave, string $default): string
+    {
+        $valor = $this->texto_o_null($request->input($clave));
+
+        return $valor !== null ? $valor : $default;
     }
 
     /**

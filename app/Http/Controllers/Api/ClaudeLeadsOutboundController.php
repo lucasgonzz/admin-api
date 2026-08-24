@@ -38,21 +38,38 @@ class ClaudeLeadsOutboundController extends Controller
      * Tope duro de leads por llamada al lote.
      *
      * 🔴 50 y no más, y el motivo es medido, no de gusto: `KapsoHttpClient` arranca con
-     * `services.client_api.timeout` (15 s por defecto) y `send_template()` hace `->retry(2, 500)`,
-     * así que UN envío que falla puede tardar ~45 s. Con Meta caído —que es exactamente el escenario
-     * que este endpoint existe para recuperar— 200 leads serían horas dentro de un solo request HTTP:
-     * lo mata `max_execution_time` o nginx a mitad de camino y nadie sabe qué salió y qué no.
+     * `services.client_api.timeout` (15 s por defecto) y `send_template()` hace `->retry(2, 500)`
+     * —o sea 2 intentos, ~30 s—, y si el envío falla, `notify_admins_of_failure()` dispara además un
+     * `send_text()` a los admins DENTRO de la misma iteración, con su propio timeout y reintentos.
+     * Con Meta caído —que es exactamente el escenario que este endpoint existe para recuperar— 200
+     * leads serían horas dentro de un solo request HTTP: lo mata `max_execution_time` o nginx a
+     * mitad de camino y nadie sabe qué salió y qué no.
      */
     const MAX_BATCH = 50;
 
     /**
-     * Presupuesto de tiempo del loop de envío, en segundos.
+     * Presupuesto de tiempo total del loop de envío, en segundos.
      *
      * Cuando se agota, el lote corta LIMPIO y devuelve 200 con lo que alcanzó a enviar más los
      * `no_procesados`. Preferimos una respuesta honesta e incompleta antes que un request colgado
      * que muere sin contarle a nadie dónde quedó.
      */
     const PRESUPUESTO_SEGUNDOS = 50;
+
+    /**
+     * Reserva de tiempo, en segundos, que se le guarda al PRÓXIMO envío antes de arrancarlo.
+     *
+     * 🔴 Sin esto el presupuesto no acota nada, y ese era el bug: la comprobación miraba solo el
+     * tiempo YA transcurrido, así que un envío que arrancaba en el segundo 49 podía correr otros
+     * ~60 s (30 s de la plantilla + 30 s del aviso a admins si falla) y el request terminaba
+     * muriendo a los ~110 s — exactamente lo que el presupuesto dice evitar, y encima sin respuesta,
+     * que es el peor de los casos porque nadie sabe qué salió.
+     *
+     * Con la reserva, el loop no arranca un envío nuevo si no le entra el peor caso completo dentro
+     * del presupuesto. Cuando los envíos salen rápido (~1 s) esto no se nota y pasan los 50; cuando
+     * están lentos, corta temprano y devuelve `no_procesados`, que es justo cuando hace falta.
+     */
+    const RESERVA_POR_ENVIO_SEGUNDOS = 35;
 
     /** Horas de enfriamiento: un lead que ya recibió un mensaje de Claude no vuelve a recibir otro. */
     const COOLDOWN_HORAS = 24;
@@ -120,13 +137,17 @@ class ClaudeLeadsOutboundController extends Controller
      */
     public function send_template_json(Request $request, $lead_id, WhatsappSendService $sender)
     {
-        $request->validate([
+        /* En try/catch y no `validate()` pelado: sin header Accept: application/json, Laravel
+           responde un 302 de redirect en vez del 422, y del otro lado eso es indiagnosticable. */
+        try {
+            $request->validate([
             'template_name'        => 'required|string|max:255',
             'language_code'        => 'nullable|string|max:20',
             'variables'            => 'nullable|array',
             'content'              => 'required|string',
             'followup_template_id' => 'nullable|integer',
             'context'              => 'nullable|string|max:500',
+            'ignorar_cooldown'     => 'nullable|boolean',
         ], [
             'template_name.required' => 'El nombre de la plantilla es obligatorio.',
             'template_name.string'   => 'El nombre de la plantilla tiene que ser texto.',
@@ -135,7 +156,13 @@ class ClaudeLeadsOutboundController extends Controller
             'variables.array'        => 'variables tiene que ser un array posicional ({{1}}, {{2}}…).',
             'language_code.string'   => 'language_code tiene que ser texto (ej. es_AR).',
             'followup_template_id.integer' => 'followup_template_id tiene que ser un id numérico.',
-        ]);
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'message' => 'Parámetros inválidos. No se envió nada.',
+                'errors'  => $e->errors(),
+            ], 422);
+        }
 
         $content = trim((string) $request->input('content', ''));
         if ($content === '') {
@@ -154,6 +181,28 @@ class ClaudeLeadsOutboundController extends Controller
             return response()->json([
                 'message' => 'El lead #' . (int) $lead->id . ' no tiene teléfono cargado: no se envió nada.',
             ], 422);
+        }
+
+        /*
+         * 🔴 Cooldown también acá, y no solo en el lote. El lote lo tenía desde el principio; este
+         * endpoint no, y esa asimetría era un agujero real: iterar POST claude/leads/{id}/send-template
+         * sobre una lista de leads saltea el tope de lote, la simulación y la confirmación de conteo,
+         * y con el rate limit en 60 req/min eso son 60 mensajes por minuto sin ninguna fricción.
+         * También es lo único que hace idempotente un reintento después de un corte de red.
+         *
+         * Se puede saltear con ignorar_cooldown=true, que es el caso legítimo de "mandale otro
+         * mensaje a este lead puntual": tiene que ser una decisión explícita, no el default.
+         */
+        if ($request->boolean('ignorar_cooldown') !== true) {
+            $en_cooldown = $this->leads_en_cooldown([(int) $lead->id]);
+            if (in_array((int) $lead->id, $en_cooldown, true)) {
+                return response()->json([
+                    'message' => 'El lead #' . (int) $lead->id . ' ya recibió un mensaje de Claude en las últimas '
+                        . self::COOLDOWN_HORAS . ' hs: no se envió nada. Si de verdad querés mandarle otro, repetí la '
+                        . 'llamada con ignorar_cooldown=true.',
+                    'en_cooldown' => true,
+                ], 422);
+            }
         }
 
         $resultado = $this->enviar_plantilla_al_lead($sender, $lead, [
@@ -202,7 +251,9 @@ class ClaudeLeadsOutboundController extends Controller
      */
     public function send_template_batch_json(Request $request, WhatsappSendService $sender)
     {
-        $request->validate([
+        /* Ver el comentario del endpoint individual: garantiza 422 JSON y no un 302. */
+        try {
+            $request->validate([
             'lead_ids'               => 'required|array|min:1',
             'lead_ids.*'             => 'required|integer|min:1',
             'template_name'          => 'required|string|max:255',
@@ -214,6 +265,7 @@ class ClaudeLeadsOutboundController extends Controller
             'variables_desde_lead.*' => 'required|string|max:60',
             'dry_run'                => 'nullable|boolean',
             'confirm_count'          => 'nullable|integer|min:0',
+            'confirm_token'          => 'nullable|string|max:64',
             'include_closed'         => 'nullable|boolean',
             'context'                => 'nullable|string|max:500',
         ], [
@@ -228,7 +280,13 @@ class ClaudeLeadsOutboundController extends Controller
             'include_closed.boolean'    => 'include_closed tiene que ser true o false.',
             'variables_por_lead.array'  => 'variables_por_lead tiene que ser un mapa lead_id → array de variables.',
             'variables_desde_lead.array'=> 'variables_desde_lead tiene que ser un array de nombres de campo del lead.',
-        ]);
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'message' => 'Parámetros inválidos. No se envió nada.',
+                'errors'  => $e->errors(),
+            ], 422);
+        }
 
         /* --- Freno 1: tope duro por llamada, antes de tocar la base siquiera. --- */
         $lead_ids_crudos = $request->input('lead_ids', []);
@@ -292,6 +350,26 @@ class ClaudeLeadsOutboundController extends Controller
             $variables_por_lead = [];
         }
 
+        /*
+         * 🔴 Tiene que ser un MAPA lead_id => variables, nunca una lista posicional.
+         *
+         * Si llega `[["Juan"], ["Ana"]]`, las claves son 0 y 1, y el lookup por id haría que el lead
+         * con id 1 se lleve las variables del índice 1 — o sea, el mensaje de OTRA persona, con el
+         * nombre de otra persona, enviado a un teléfono real. Es el peor error posible de este
+         * endpoint y es silencioso: el lote sale completo y nadie se entera hasta que alguien
+         * contesta "¿quién es Ana?".
+         *
+         * Se rechaza de entrada en vez de intentar adivinar la intención.
+         */
+        if (! empty($variables_por_lead) && array_keys($variables_por_lead) === range(0, count($variables_por_lead) - 1)) {
+            return response()->json([
+                'message' => 'variables_por_lead tiene que ser un mapa lead_id => array de variables, no una lista '
+                    . 'posicional. Con una lista, las claves son 0,1,2... y un lead cuyo id coincida con un índice se '
+                    . 'llevaría las variables de otro destinatario. No se envió nada. '
+                    . 'Ejemplo válido: {"' . (int) reset($lead_ids_crudos) . '": ["Juan"]}.',
+            ], 422);
+        }
+
         $destinatarios = [];
         foreach ($lead_ids as $id) {
             if (! isset($leads_por_id[$id])) {
@@ -308,7 +386,9 @@ class ClaudeLeadsOutboundController extends Controller
             }
 
             $status = (string) ($lead->status ?? '');
-            if (! $incluir_cerrados && in_array($status, self::ESTADOS_CERRADOS, true)) {
+            /* strtolower: la comparación estricta dejaba pasar un 'CERRADO_GANADO' cargado con
+               otra capitalización, y ese lead recibía el mensaje igual. */
+            if (! $incluir_cerrados && in_array(strtolower($status), self::ESTADOS_CERRADOS, true)) {
                 $omitidos[] = [
                     'lead_id' => $id,
                     'motivo'  => 'el lead está en estado "' . $status . '" (cerrado); mandá include_closed=true si igual querés escribirle',
@@ -339,6 +419,10 @@ class ClaudeLeadsOutboundController extends Controller
 
         $enviarian = count($destinatarios);
 
+        /* Huella del conjunto exacto de destinatarios, para que la confirmación no pueda referirse
+           a un lote distinto del que se simuló. Ver el docblock de calcular_confirm_token(). */
+        $confirm_token = $this->calcular_confirm_token($destinatarios, $template_name);
+
         /* --- Freno 3: simulación. Es el default, y no toca el sender ni crea ningún LeadMessage. --- */
         $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
         if ($dry_run) {
@@ -347,8 +431,11 @@ class ClaudeLeadsOutboundController extends Controller
                 'enviarian'     => $enviarian,
                 'omitidos'      => $omitidos,
                 'destinatarios' => $destinatarios,
+                'confirm_token' => $confirm_token,
                 'nota'          => 'Simulación: no se envió ningún mensaje ni se creó ningún LeadMessage. '
-                    . 'Para enviar de verdad, repetí la misma llamada con dry_run=false y confirm_count=' . $enviarian . '.',
+                    . 'REVISÁ la lista de destinatarios y el texto renderizado antes de seguir. '
+                    . 'Para enviar de verdad, repetí la misma llamada con dry_run=false, confirm_count=' . $enviarian
+                    . ' y confirm_token=' . $confirm_token . '.',
             ], 200);
         }
 
@@ -372,6 +459,35 @@ class ClaudeLeadsOutboundController extends Controller
             ], 422);
         }
 
+        /*
+         * --- Freno 5: el token ata la confirmación al CONJUNTO, no solo a la cantidad. ---
+         *
+         * 🔴 Sin esto, `confirm_count` se satisface con cualquier lote del mismo tamaño: simular con
+         * los leads A y B y después enviar a C y D pasaba el chequeo sin una sola advertencia. El
+         * conteo protege de "la lista cambió de tamaño entre la simulación y el envío"; no protege de
+         * "es otra lista". Y el error de buena fe más probable acá —armar la segunda llamada con una
+         * lista distinta de la que se revisó— cae justo en ese hueco.
+         */
+        $token_recibido = trim((string) $request->input('confirm_token', ''));
+        if ($token_recibido === '') {
+            return response()->json([
+                'message'       => 'confirm_token es obligatorio cuando dry_run es false. Corré primero la simulación '
+                    . '(sin dry_run), revisá los destinatarios y volvé con el token que te devolvió. No se envió nada.',
+                'enviarian'     => $enviarian,
+                'confirm_token' => $confirm_token,
+            ], 422);
+        }
+
+        if (! hash_equals($confirm_token, $token_recibido)) {
+            return response()->json([
+                'message' => 'confirm_token no corresponde a este conjunto de destinatarios: la lista de leads, la '
+                    . 'plantilla o el texto cambiaron respecto de la simulación que generó ese token. No se envió nada. '
+                    . 'Volvé a simular y usá el token nuevo.',
+                'enviarian'              => $enviarian,
+                'confirm_token_esperado' => $confirm_token,
+            ], 422);
+        }
+
         /* --- Envío real, uno por uno. --- */
         $language_code        = $this->resolver_idioma($request->input('language_code'));
         $followup_template_id = $request->filled('followup_template_id')
@@ -390,11 +506,16 @@ class ClaudeLeadsOutboundController extends Controller
 
         foreach ($destinatarios as $destinatario) {
             /* Presupuesto de tiempo: cortamos limpio y devolvemos lo que se hizo, en vez de dejar el
-               request colgado hasta que lo mate PHP (ahí no hay respuesta y nadie sabe dónde quedó). */
-            if ($indice > 0 && (microtime(true) - $arranque) >= self::PRESUPUESTO_SEGUNDOS) {
+               request colgado hasta que lo mate PHP (ahí no hay respuesta y nadie sabe dónde quedó).
+               🔴 Se le RESERVA al próximo envío su peor caso: mirar solo el tiempo transcurrido no
+               acota nada, porque un envío que arranca justo antes del límite corre igual sus ~35 s.
+               Ver el docblock de RESERVA_POR_ENVIO_SEGUNDOS. */
+            $transcurrido = microtime(true) - $arranque;
+            if ($indice > 0 && ($transcurrido + self::RESERVA_POR_ENVIO_SEGUNDOS) >= self::PRESUPUESTO_SEGUNDOS) {
                 $abortado     = true;
-                $motivo_corte = 'se agotó el presupuesto de ' . self::PRESUPUESTO_SEGUNDOS
-                    . ' s del request; los leads no procesados no recibieron nada y se pueden reintentar';
+                $motivo_corte = 'se agotó el presupuesto de ' . self::PRESUPUESTO_SEGUNDOS . ' s del request ('
+                    . round($transcurrido, 1) . ' s usados, y no entra otro envío sin pasarse); los leads no '
+                    . 'procesados NO recibieron nada y se pueden reintentar sin riesgo de duplicar';
             }
 
             if ($abortado) {
@@ -447,14 +568,26 @@ class ClaudeLeadsOutboundController extends Controller
                     : null,
             ];
 
-            /* Si el PRIMER envío falla con un error que no es transitorio, el problema no es este lead:
-               es Meta/Kapso. Repetir 49 veces el mismo timeout no ayuda a nadie y garantiza que el
-               request se muera por tiempo. Cortamos y devolvemos los no procesados. */
-            if ($indice === 0 && ! $resultado['ok'] && ! $sender->last_send_was_transient()) {
+            /*
+             * Si el PRIMER envío falla, el problema casi nunca es ese lead: es Meta/Kapso. Repetir 49
+             * veces el mismo timeout no ayuda a nadie y garantiza que el request se muera por tiempo.
+             * Cortamos y devolvemos los no procesados, que se pueden reintentar sin riesgo.
+             *
+             * 🔴 A propósito NO se consulta `WhatsappSendService::last_send_was_transient()`, aunque
+             * el nombre invite. Ese método lee `last_send_status_code`, que hoy solo se asigna dentro
+             * de `send_text()`: `send_template()` lo resetea a null al arrancar y no lo vuelve a
+             * setear nunca, así que después de un fallo de plantilla devuelve SIEMPRE false. Apoyarse
+             * en él sería depender de un bug de otro archivo para ser seguro: el día que alguien
+             * corrija esa asimetría —que es la corrección obvia y correcta— este lote empezaría a
+             * seguir mandando los 49 restantes contra un Meta caído, en silencio y sin que ningún
+             * test lo note. Cortamos ante cualquier primer fallo, y que sea una decisión explícita.
+             */
+            if ($indice === 0 && ! $resultado['ok']) {
                 $abortado     = true;
-                $motivo_corte = 'el primer envío falló con un error no transitorio ('
+                $motivo_corte = 'el primer envío del lote falló ('
                     . ($resultado['error'] !== null ? $resultado['error'] : self::ERROR_GENERICO)
-                    . '); se cortó el lote para no repetir el mismo fallo en el resto';
+                    . '); se cortó el lote para no repetir el mismo fallo en los demás. Los no procesados NO '
+                    . 'recibieron nada: revisá el motivo y reintentá cuando esté resuelto';
             }
 
             $indice++;
@@ -523,8 +656,10 @@ class ClaudeLeadsOutboundController extends Controller
             }
         } catch (\Throwable $e) {
             /* send_template() ya atrapa sus propias excepciones y devuelve null: esto es defensa en
-               profundidad para que nada raro se lleve puesto el registro del intento. */
-            $error = $e->getMessage();
+               profundidad para que nada raro se lleve puesto el registro del intento.
+               🔴 El texto de la excepción va al log, NUNCA a la respuesta: una excepción de PDO trae
+               el INSERT completo con los valores atados, incluido el contenido del mensaje. */
+            $error = self::ERROR_GENERICO;
             Log::channel('daily')->error('ClaudeLeadsOutboundController: excepción al enviar la plantilla.', [
                 'lead_id'       => $lead->id,
                 'template_name' => $template_name,
@@ -532,27 +667,196 @@ class ClaudeLeadsOutboundController extends Controller
             ]);
         }
 
-        $message = LeadMessage::create([
+        /*
+         * 🔴 EL ORDEN IMPORTA Y LA FALLA DE ACÁ ES LA MÁS CARA DE TODO EL CONTROLADOR.
+         *
+         * El WhatsApp ya salió (o no) ANTES de esta línea. Si el INSERT explota —índice único de
+         * whatsapp_message_id, deadlock, corte de conexión— y dejamos que la excepción suba, pasa lo
+         * peor posible: el mensaje LLEGÓ al lead, no queda ninguna fila, el lead NO entra en cooldown,
+         * y la respuesta dice `ok:false`. El reintento vuelve a mandar y el lead recibe el mensaje dos
+         * veces. Es exactamente el escenario que el cooldown existe para impedir.
+         *
+         * Por eso: si el envío se confirmó, la fila se escribe SÍ O SÍ. Si el insert normal falla, se
+         * intenta uno mínimo que al menos deje el whatsapp_message_id y el sent_via, que es lo único
+         * que el cooldown necesita para frenar el reintento. Y pase lo que pase, un mensaje que salió
+         * se reporta como `ok:true`: mentir en la otra dirección es lo que duplica envíos.
+         */
+        $message = null;
+        $fallo_de_persistencia = false;
+
+        try {
+            $message = $this->persistir_mensaje($lead, [
+                'content'              => $content,
+                'whatsapp_message_id'  => $whatsapp_message_id,
+                'error'                => $error,
+                'followup_template_id' => $followup_template_id,
+            ]);
+        } catch (\Throwable $e) {
+            $fallo_de_persistencia = true;
+            Log::channel('daily')->error(
+                'ClaudeLeadsOutboundController: 🔴 no se pudo registrar el mensaje DESPUÉS de intentar el envío.',
+                [
+                    'lead_id'             => $lead->id,
+                    'whatsapp_message_id' => $whatsapp_message_id,
+                    'salio_el_mensaje'    => $whatsapp_message_id !== null,
+                    'error'               => $e->getMessage(),
+                ]
+            );
+
+            /* Si el mensaje salió, hace falta una fila igual para que el cooldown frene el reintento. */
+            if ($whatsapp_message_id !== null) {
+                try {
+                    $message = $this->persistir_mensaje($lead, [
+                        'content'              => $content,
+                        'whatsapp_message_id'  => $whatsapp_message_id,
+                        'error'                => 'El mensaje salió pero no se pudo registrar completo (ver log del día).',
+                        'followup_template_id' => null,
+                    ]);
+                } catch (\Throwable $e2) {
+                    Log::channel('daily')->error(
+                        'ClaudeLeadsOutboundController: 🔴🔴 el mensaje SALIÓ y NO quedó registrado. '
+                            . 'El lead no está en cooldown: un reintento se lo manda de nuevo.',
+                        [
+                            'lead_id'             => $lead->id,
+                            'whatsapp_message_id' => $whatsapp_message_id,
+                            'error'               => $e2->getMessage(),
+                        ]
+                    );
+                }
+            }
+        }
+
+        if ($message === null) {
+            /* Sin fila. Se reporta según lo único que importa: si el mensaje salió o no. */
+            return [
+                'ok'                  => $whatsapp_message_id !== null,
+                'whatsapp_message_id' => $whatsapp_message_id,
+                'error'               => $whatsapp_message_id !== null
+                    ? '🔴 El mensaje SE ENVIÓ pero no se pudo registrar en la conversación. NO reintentar este lead: '
+                        . 'no está en cooldown y un reintento se lo manda de nuevo. Ver el log del día.'
+                    : ($error !== null ? $error : self::ERROR_GENERICO),
+                'lead_message'        => null,
+                'persistencia_fallida' => true,
+            ];
+        }
+
+        if ($fallo_de_persistencia) {
+            Log::channel('daily')->warning('ClaudeLeadsOutboundController: el mensaje se registró en modo mínimo.', [
+                'lead_id'         => $lead->id,
+                'lead_message_id' => $message->id,
+            ]);
+        }
+
+        return $this->cerrar_envio($sender, $lead, $message, $whatsapp_message_id, $error, $template_name, $registrar_en_hilo);
+    }
+
+    /**
+     * Huella determinista del lote simulado: ata la confirmación al conjunto exacto de
+     * destinatarios y al texto que se les va a mandar.
+     *
+     * Entra el id de cada destinatario en orden, el contenido ya renderizado de cada uno y el
+     * nombre de la plantilla. Cambiar un solo lead, o el texto de uno solo, da otro token.
+     *
+     * Determinista y sin estado: no hace falta ninguna tabla ni ninguna sesión para validarlo,
+     * se recalcula del mismo input. No es un secreto ni pretende serlo — no defiende contra
+     * alguien que quiere burlarlo (ya tiene la clave de la API), defiende contra el error de
+     * armar la segunda llamada con una lista distinta de la que se revisó en la simulación.
+     *
+     * @param array  $destinatarios Lista ya resuelta, en el orden en que se va a enviar.
+     * @param string $template_name
+     *
+     * @return string
+     */
+    protected function calcular_confirm_token(array $destinatarios, string $template_name): string
+    {
+        $partes = [];
+        foreach ($destinatarios as $destinatario) {
+            $partes[] = (int) $destinatario['lead_id'] . ':' . md5((string) $destinatario['content']);
+        }
+        sort($partes);
+
+        return substr(hash('sha256', $template_name . '|' . implode('|', $partes)), 0, 32);
+    }
+
+    /**
+     * Escribe la fila del mensaje en la conversación del lead.
+     *
+     * Aislado del resto para poder reintentarlo en modo mínimo si el insert completo falla:
+     * ver el bloque de persistencia de enviar_plantilla_al_lead().
+     *
+     * @param Lead  $lead
+     * @param array $datos content, whatsapp_message_id, error, followup_template_id.
+     *
+     * @return LeadMessage
+     */
+    protected function persistir_mensaje(Lead $lead, array $datos): LeadMessage
+    {
+        $whatsapp_message_id = isset($datos['whatsapp_message_id']) ? $datos['whatsapp_message_id'] : null;
+
+        return LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'setter',
-            'content'               => $content,
+            'content'               => (string) $datos['content'],
             'status'                => 'enviado',
             'whatsapp_message_id'   => $whatsapp_message_id,
-            'whatsapp_send_error'   => $error,
-            'sent_at'               => AppTime::now(),
+            'whatsapp_send_error'   => isset($datos['error']) ? $datos['error'] : null,
+            /* Solo se estampa si el envío se confirmó. Un mensaje que nunca salió no tiene hora de
+               envío, y además LeadMessage::booted() prefiere sent_at sobre created_at para mover
+               leads.last_message_at: con sent_at cargado, un envío caído haría figurar actividad
+               reciente en la bandeja que en realidad nunca existió. Es el mismo criterio que usa
+               LeadFollowupService::send_followup_via_template(), que deja sent_at nulo al fallar. */
+            'sent_at'               => $whatsapp_message_id !== null ? AppTime::now() : null,
             /* 🔴 false a propósito: el envío de Claude no consume el cupo de max_followups del lead.
                followup_template_id se guarda igual, solo para trazabilidad de qué plantilla se usó. */
             'is_followup'           => false,
-            'followup_template_id'  => $followup_template_id,
+            'followup_template_id'  => isset($datos['followup_template_id']) ? $datos['followup_template_id'] : null,
             'requiere_verificacion' => false,
             /* Acá no hay admin: la request entra por claude.task.key, sin sesión de Sanctum. */
             'sent_by_admin_id'      => null,
             'sent_via'              => self::ORIGEN_CLAUDE,
         ]);
+    }
 
+    /**
+     * Cierra un envío ya persistido: broadcast, log y bloque rojo si corresponde.
+     *
+     * @param WhatsappSendService $sender
+     * @param Lead                $lead
+     * @param LeadMessage         $message
+     * @param string|null         $whatsapp_message_id
+     * @param string|null         $error
+     * @param string              $template_name
+     * @param bool                $registrar_en_hilo
+     *
+     * @return array
+     */
+    protected function cerrar_envio(
+        WhatsappSendService $sender,
+        Lead $lead,
+        LeadMessage $message,
+        $whatsapp_message_id,
+        $error,
+        string $template_name,
+        bool $registrar_en_hilo
+    ): array {
         if ($whatsapp_message_id !== null) {
-            /* Envío confirmado: avisamos a la SPA para que la conversación se actualice en vivo. */
-            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+            /*
+             * Envío confirmado: avisamos a la SPA para que la conversación se actualice en vivo.
+             * 🔴 En try/catch a propósito: LeadConversationUpdated implementa ShouldBroadcastNow,
+             * o sea que la llamada al broadcaster es SÍNCRONA. Si Pusher se cae, una excepción acá
+             * marcaría como fallido un mensaje que sí salió y sí quedó registrado — y en el lote,
+             * si es el primero, abortaría el lote entero. El mensaje ya llegó al lead: que la SPA
+             * no se entere en vivo es un problema mucho menor que mentir sobre el envío.
+             */
+            try {
+                LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+            } catch (\Throwable $e) {
+                Log::channel('daily')->warning('ClaudeLeadsOutboundController: falló el broadcast, el envío sí salió.', [
+                    'lead_id'         => $lead->id,
+                    'lead_message_id' => $message->id,
+                    'error'           => $e->getMessage(),
+                ]);
+            }
         } else {
             Log::channel('daily')->warning('ClaudeLeadsOutboundController: el envío de plantilla no se confirmó.', [
                 'lead_id'         => $lead->id,
@@ -601,9 +905,24 @@ class ClaudeLeadsOutboundController extends Controller
            el reloj virtual en local. Comparar contra el reloj real daría una ventana corrida. */
         $desde = AppTime::now()->subHours(self::COOLDOWN_HORAS);
 
+        /*
+         * 🔴 whereNotNull(whatsapp_message_id): el cooldown cuenta mensajes que EFECTIVAMENTE
+         * salieron, no intentos.
+         *
+         * Sin esta condición el endpoint se autobloqueaba justo en el caso para el que existe: con
+         * Meta caído, el envío falla, igual se graba la fila (a propósito, para la trazabilidad), y
+         * el lead quedaba 24 hs sin poder recibir nada habiendo recibido nada. La recuperación se
+         * saboteaba sola.
+         *
+         * Es seguro mirar whatsapp_message_id porque el bloque de persistencia de
+         * enviar_plantilla_al_lead() garantiza que un envío confirmado SIEMPRE deja fila, incluso
+         * si el insert completo falla. Las dos cosas van juntas: si alguna vez se afloja esa
+         * garantía, este filtro deja de frenar reintentos y se duplican mensajes.
+         */
         $ids = LeadMessage::query()
             ->whereIn('lead_id', $lead_ids)
             ->where('sent_via', self::ORIGEN_CLAUDE)
+            ->whereNotNull('whatsapp_message_id')
             ->where('created_at', '>=', $desde)
             ->distinct()
             ->pluck('lead_id')

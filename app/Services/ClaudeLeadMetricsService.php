@@ -320,6 +320,10 @@ class ClaudeLeadMetricsService
                 $num_alguna,
                 $den_alguna,
                 'Leads con al menos un mensaje del lead, sobre leads con al menos un saliente que SALIÓ. '
+                    . '🔴 OJO CON EL NOMBRE: el numerador NO exige que el mensaje del lead sea POSTERIOR al saliente, '
+                    . 'así que mide "el lead escribió alguna vez", no "el lead nos contestó". En un pipeline donde la '
+                    . 'mayoría de los leads escriben primero, esta tasa tiende a 100% y no informa nada por sí sola. '
+                    . 'Para la tasa con orden real usá respondio_al_primer_contacto o respondio_a_seguimiento. '
                     . $nota_denominador
             ),
             'respondio_alguna_vez_entregado' => static::definicion(
@@ -374,9 +378,27 @@ class ClaudeLeadMetricsService
         $time_sql = ClaudeLeadQueryService::message_time_sql();
         $periodo  = ClaudeLeadQueryService::period_expression($time_sql, $granularity);
 
+        /*
+         * 🔴 Las dos condiciones de abajo no son cosméticas: sin ellas esta serie —que es
+         * justamente la que se mira para dimensionar el daño del impago de Meta— queda inflada
+         * con filas que NO son envíos caídos. Hay tres caminos de producción que escriben
+         * is_followup=true con whatsapp_message_id nulo sin que ningún envío haya fallado:
+         *
+         *   1. LeadFollowupService::create_pending_followup_for_verification() → status='sugerido'.
+         *      Es un seguimiento esperando aprobación: nunca se intentó enviar.
+         *   2. El rechazo de esa misma sugerencia → status='rechazado'. Ídem.
+         *   3. LeadFollowupService, notificación al closer (~línea 302) → status='enviado' pero
+         *      SIN followup_template_id, y el WhatsApp fue al closer, no al lead. Es una fila de
+         *      contabilidad interna para que suba el contador de cupo.
+         *
+         * status='enviado' saca las dos primeras; followup_template_id NOT NULL saca la tercera.
+         * Hacen falta las dos: ninguna sola alcanza.
+         */
         $rows = DB::table('lead_messages')
             ->where('lead_messages.is_followup', 1)
             ->where('lead_messages.is_status_event', 0)
+            ->where('lead_messages.status', 'enviado')
+            ->whereNotNull('lead_messages.followup_template_id')
             ->whereRaw($time_sql . ' >= ?', [$from])
             ->whereRaw($time_sql . ' <= ?', [$to])
             ->groupByRaw($periodo)
@@ -406,6 +428,10 @@ class ClaudeLeadMetricsService
         return [
             'serie' => $serie,
             'nota'  => 'Recortado por el instante del mensaje (COALESCE(sent_at, created_at)), no por la cohorte del lead. '
+                . 'Cuenta SOLO seguimientos reales por plantilla al lead: status=enviado y followup_template_id no nulo. '
+                . 'Quedan excluidos a propósito los seguimientos sugeridos sin aprobar (status=sugerido), los rechazados, '
+                . 'y las notificaciones al closer (is_followup=1 sin followup_template_id, donde el WhatsApp fue al closer '
+                . 'y no al lead): ninguno de los tres es un envío que haya fallado. '
                 . 'no_confirmados = Kapso nunca devolvió id: el envío no salió. entregados/fallidos = lo que reportó el '
                 . 'webhook de Meta. 🔴 no_confirmados alto NO es solo el impago de Meta: también hay números inválidos y '
                 . 'plantillas despausadas. Para separarlos, usar claude/messages con group_by=error.',
