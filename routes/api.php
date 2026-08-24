@@ -139,6 +139,14 @@ Route::middleware('claude.task.key')
         Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');
         Route::post('version-items', 'Api\ClaudeVersionItemsIngestController@store_json');
 
+        /* Análisis de leads: lectura. `schema` describe los filtros de todos los demás. */
+        Route::get('schema', 'Api\ClaudeLeadsAnalyticsController@schema_json');
+        Route::get('leads', 'Api\ClaudeLeadsAnalyticsController@leads_json');
+        Route::get('leads/{id}/messages', 'Api\ClaudeLeadsAnalyticsController@lead_messages_json');
+        Route::get('messages', 'Api\ClaudeLeadsAnalyticsController@messages_json');
+        Route::get('metrics', 'Api\ClaudeLeadsAnalyticsController@metrics_json');
+        Route::get('templates', 'Api\ClaudeLeadsAnalyticsController@templates_json');
+
         /* Recuperación de leads: envío de plantillas Meta. */
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
