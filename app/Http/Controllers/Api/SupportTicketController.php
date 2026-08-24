@@ -5,9 +5,13 @@ namespace App\Http\Controllers\Api;
 use App\Events\SupportTicketUpdated;
 use App\Http\Controllers\CommonLaravel\BaseController;
 use App\Models\Admin;
+use App\Models\Client;
 use App\Models\SupportTicket;
 use App\Models\SupportMessage;
+use App\Services\ClientPhoneDirectory;
 use App\Services\SupportClientSyncService;
+use App\Services\SupportWhatsappOpenerService;
+use App\Services\WhatsappSessionWindowService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -261,9 +265,17 @@ class SupportTicketController extends BaseController
 
     /**
      * Crea ticket nuevo desde admin-spa para un usuario de cliente.
+     *
+     * Con `source=whatsapp` abre la conversación por WhatsApp en vez de replicarla al ERP
+     * del cliente. Sin ese parámetro el comportamiento es exactamente el de siempre, para no
+     * romper el modal que ya está en producción.
      */
     public function store(Request $request, SupportClientSyncService $sync_service)
     {
+        if ($request->input('source') === 'whatsapp') {
+            return $this->store_whatsapp($request);
+        }
+
         // Crea ticket con data enviada por operador de soporte.
         $ticket = SupportTicket::create([
             'client_id' => (int) $request->input('client_id'),
@@ -282,6 +294,84 @@ class SupportTicketController extends BaseController
         return response()->json([
             'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
         ], 201);
+    }
+
+    /**
+     * Abre una conversación de soporte por WhatsApp desde la bandeja.
+     *
+     * @param Request $request Alta con client_id, whatsapp_phone y body.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function store_whatsapp(Request $request)
+    {
+        $validated = $request->validate([
+            'client_id'      => 'required|integer|exists:clients,id',
+            'whatsapp_phone' => 'required|string',
+            'body'           => 'required|string|min:1',
+            'name'           => 'nullable|string|max:255',
+        ]);
+
+        $client = Client::findOrFail((int) $validated['client_id']);
+
+        $admin = Admin::find((int) Auth::id());
+        if ($admin === null) {
+            return response()->json(['error' => 'admin no encontrado'], 401);
+        }
+
+        $opener = app(SupportWhatsappOpenerService::class);
+
+        try {
+            $result = $opener->open(
+                $client,
+                (string) $validated['whatsapp_phone'],
+                (string) $validated['body'],
+                $admin,
+                (string) $request->input('name', '')
+            );
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['error' => $exception->getMessage()], 422);
+        }
+
+        return response()->json([
+            'model'    => $this->ticketQueryForInbox()->where('id', $result['ticket']->id)->first(),
+            'message'  => $result['message'],
+            'reused'   => $result['reused'],
+            'whatsapp' => $result['whatsapp'],
+        ], $result['reused'] ? 200 : 201);
+    }
+
+    /**
+     * Contactos de WhatsApp de un cliente y estado de la ventana de 24hs de cada uno.
+     *
+     * Lo consume el modal de alta para avisarle al operador, ANTES de mandar, si su texto
+     * va a salir tal cual o metido dentro de la plantilla aprobada.
+     *
+     * @param Request $request Con client_id obligatorio.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function whatsapp_contacts(Request $request)
+    {
+        $validated = $request->validate([
+            'client_id' => 'required|integer|exists:clients,id',
+        ]);
+
+        $client = Client::findOrFail((int) $validated['client_id']);
+
+        $phone_directory = app(ClientPhoneDirectory::class);
+        $window_service = app(WhatsappSessionWindowService::class);
+
+        $contacts = [];
+        foreach ($phone_directory->phones_for_client($client) as $contact) {
+            $contact['window'] = $window_service->window_state((string) $contact['phone']);
+            $contacts[] = $contact;
+        }
+
+        return response()->json([
+            'contacts'      => $contacts,
+            'template_name' => app(SupportWhatsappOpenerService::class)->resolve_template_name(),
+        ], 200);
     }
 
     /**
