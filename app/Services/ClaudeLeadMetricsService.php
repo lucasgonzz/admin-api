@@ -464,10 +464,20 @@ class ClaudeLeadMetricsService
      */
     protected static function labels_por_slug(): array
     {
+        /* 🔴 UNA sola consulta al catálogo, no una por slug. LeadPipelineStatus::label_for() hace
+           un SELECT por llamada, así que usarlo dentro de un foreach sobre all_slugs() son ~16
+           consultas para resolver etiquetas de un catálogo de 15 filas — justo lo contrario de la
+           doctrina que este archivo declara. Está acotado por el catálogo, pero no hay motivo. */
         $map = [];
+        foreach (LeadPipelineStatus::query()->get(['slug', 'label']) as $fila) {
+            $map[(string) $fila->slug] = (string) $fila->label;
+        }
+
+        /* Los slugs del catálogo por defecto que todavía no tienen fila propia se humanizan. */
         foreach (LeadPipelineStatus::all_slugs() as $slug) {
-            $label = LeadPipelineStatus::label_for($slug);
-            $map[$slug] = $label !== null ? $label : LeadPipelineStatus::humanize_slug($slug);
+            if (! isset($map[$slug])) {
+                $map[$slug] = LeadPipelineStatus::humanize_slug($slug);
+            }
         }
 
         return $map;

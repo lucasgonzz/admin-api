@@ -22,12 +22,28 @@ use Illuminate\Support\Facades\Log;
  * `sent_via = 'claude'`, que es lo que la burbuja del admin-spa lee para rotular "Enviado por Claude".
  *
  * Estos endpoints tocan leads REALES: no hay entorno intermedio entre esto y el WhatsApp de la
- * gente. De ahí los cuatro frenos del lote, que no son adorno:
- *   1. `dry_run` en true por defecto — sin llamadas al sender ni LeadMessage creados.
- *   2. `confirm_count` obligatorio para enviar de verdad, y tiene que coincidir exacto.
- *   3. Tope duro de MAX_BATCH leads por llamada.
- *   4. Solo ids explícitos: no hay lenguaje de filtros del lado de escritura, así un filtro mal
- *      escrito no se puede convertir en un envío masivo.
+ * gente. De ahí los frenos, que no son adorno:
+ *   1. `dry_run` en true por defecto — sin llamadas al sender ni LeadMessage creados.  [solo lote]
+ *   2. `confirm_count` obligatorio para enviar de verdad, y tiene que coincidir exacto. [solo lote]
+ *   3. `confirm_token`: ata la confirmación al CONJUNTO exacto, no solo a la cantidad. [solo lote]
+ *   4. Tope duro de MAX_BATCH leads por llamada.                                       [solo lote]
+ *   5. Solo ids explícitos: no hay lenguaje de filtros del lado de escritura, así un filtro mal
+ *      escrito no se puede convertir en un envío masivo.                               [solo lote]
+ *   6. Cooldown de COOLDOWN_HORAS por lead.                            [LOS DOS endpoints]
+ *   7. Estados cerrados omitidos salvo `include_closed`.                                [solo lote]
+ *   8. Presupuesto de tiempo con reserva, y aborto ante el primer fallo.                [solo lote]
+ *
+ * 🔴 La asimetría está marcada a propósito y hay que tenerla presente: el endpoint individual solo
+ * tiene el cooldown. Iterarlo sobre una lista de leads saltea todo lo demás —y con el rate limit del
+ * grupo `api` en 60 req/min, eso serían 60 mensajes por minuto sin ninguna confirmación—. El
+ * cooldown es lo único que lo hace no-catastrófico, y por eso está en los dos lados aunque el lote
+ * haya nacido con él solo. Para mandarle a varios leads, el camino es el LOTE, que sí simula.
+ *
+ * 🔴 Lo que NINGÚN freno cubre, y conviene saberlo: si la lista de `lead_ids` está mal armada desde
+ * el principio (50 ids equivocados que existen, tienen teléfono y no están cerrados), el lote los
+ * confirma y los manda. `confirm_token` protege de que la lista CAMBIE entre la simulación y el
+ * envío; no protege de que estuviera mal desde el principio. Lo único que tapa ese caso es leer los
+ * `destinatarios` que devuelve la simulación antes de confirmar.
  *
  * Reusa `WhatsappSendService` tal cual está: este controlador no modifica ni un renglón del camino
  * de envío que ya usan los seguimientos automáticos y el panel.
@@ -172,7 +188,10 @@ class ClaudeLeadsOutboundController extends Controller
         /* Lead destinatario. No se usa findOrFail para devolver un mensaje en español y no una página de error. */
         $lead = Lead::query()->find($lead_id);
         if ($lead === null) {
-            return response()->json(['message' => 'No existe ningún lead con id ' . (int) $lead_id . '.'], 404);
+            return response()->json([
+                /* El valor crudo y no (int): con 'abc' el casteo decía "id 0", que confunde al diagnosticar. */
+                'message' => 'No existe ningún lead con id ' . var_export($lead_id, true) . '.',
+            ], 404);
         }
 
         /* Sin teléfono no hay a dónde mandar: 422 y no se crea absolutamente nada. */

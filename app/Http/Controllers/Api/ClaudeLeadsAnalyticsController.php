@@ -46,13 +46,19 @@ class ClaudeLeadsAnalyticsController extends Controller
      */
     public function schema_json(Request $request)
     {
-        /* Catálogo de estados leído de la base (LeadPipelineStatus), no hardcodeado. */
+        /* Catálogo de estados leído de la base (LeadPipelineStatus), no hardcodeado.
+           🔴 UNA sola consulta: LeadPipelineStatus::label_for() hace un SELECT por llamada, y
+           dentro de este foreach eran ~16 consultas para un catálogo de 15 filas. */
+        $labels = [];
+        foreach (LeadPipelineStatus::query()->get(['slug', 'label']) as $fila) {
+            $labels[(string) $fila->slug] = (string) $fila->label;
+        }
+
         $pipeline_statuses = [];
         foreach (LeadPipelineStatus::all_slugs() as $slug) {
-            $label = LeadPipelineStatus::label_for($slug);
             $pipeline_statuses[] = [
                 'slug'  => $slug,
-                'label' => $label !== null ? $label : LeadPipelineStatus::humanize_slug($slug),
+                'label' => isset($labels[$slug]) ? $labels[$slug] : LeadPipelineStatus::humanize_slug($slug),
             ];
         }
 
@@ -449,10 +455,20 @@ class ClaudeLeadsAnalyticsController extends Controller
                 ->selectRaw('COUNT(*) as cantidad, COUNT(DISTINCT lead_messages.lead_id) as leads_distintos')
                 ->first();
 
-            return response()->json([
+            $respuesta_conteo = [
                 'count'           => $row !== null ? (int) $row->cantidad : 0,
                 'leads_distintos' => $row !== null ? (int) $row->leads_distintos : 0,
-            ], 200);
+            ];
+
+            /* count_only le gana a group_by, pero decirlo en vez de ignorarlo en silencio: pedir los
+               dos y recibir solo un total, sin ninguna señal, se lee como si el agrupado no tuviera
+               resultados. */
+            if ($this->texto_o_null($request->input('group_by')) !== null) {
+                $respuesta_conteo['nota'] = 'Mandaste count_only y group_by juntos: count_only tiene prioridad y el '
+                    . 'group_by se ignoró. Sacá count_only si lo que querés es el desglose.';
+            }
+
+            return response()->json($respuesta_conteo, 200);
         }
 
         /* Modo 2: desglose agregado. Tampoco viaja ninguna fila cruda. */
