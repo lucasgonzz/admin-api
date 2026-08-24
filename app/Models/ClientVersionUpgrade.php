@@ -11,6 +11,13 @@ class ClientVersionUpgrade extends Model
     use HasUuid;
 
     /**
+     * Valor de `created_via` para los upgrades creados por Claude (POST claude/upgrades).
+     * La columna es nullable y sin default: NULL = origen no marcado (panel / admin-spa,
+     * y todo lo anterior a la migración 2026_08_24_160200).
+     */
+    const CREATED_VIA_CLAUDE = 'claude';
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     public static function properties()
