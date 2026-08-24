@@ -166,6 +166,20 @@ Route::middleware('claude.task.key')
         Route::get('upgrades', 'Api\ClaudeClientOpsController@upgrades_json');
         Route::get('upgrades/{id}', 'Api\ClaudeClientOpsController@upgrade_json');
         Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');
+
+        /* Operación de clientes y actualizaciones: ESCRITURA.
+           🔴 Estas seis rutas crean actualizaciones sobre clientes REALES y arrancan deployments por
+           SSH que pueden dejar un negocio sin sistema. Los frenos (confirm_client_name en todas,
+           dry_run por defecto al crear, allow_deploy_to_active_api y el gate de horario del
+           post-cierre) están en ClaudeUpgradeOpsController.
+           `upgrades/preview` se declara ANTES que cualquier ruta con {id}, para que ninguna la
+           capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
+        Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
+        Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');
+        Route::post('upgrades/{id}/deploy/start', 'Api\ClaudeUpgradeOpsController@deploy_start_json');
+        Route::post('upgrades/{id}/mark-crons', 'Api\ClaudeUpgradeOpsController@mark_crons_json');
+        Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
+        Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
     });
 
 /*
