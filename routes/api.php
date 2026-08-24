@@ -120,8 +120,16 @@ Route::middleware('admin.inbound.key')
 
 /*
 |--------------------------------------------------------------------------
-| Ingesta de tareas creadas por Claude (protegida por X-Claude-Task-Key)
+| Ingesta y consultas de Claude (protegidas por X-Claude-Task-Key)
 |--------------------------------------------------------------------------
+| Tres grupos de rutas, todas contra el mismo middleware:
+|   - Ingesta: tareas de admin y items de versión que Claude crea desde la conversación.
+|   - Análisis: lectura de leads, mensajes y métricas, para que Claude analice el pipeline
+|     comercial sin que Lucas tenga que exportar la base entera y pasársela por chat.
+|   - Recuperación: envío de plantillas Meta a leads, con simulación obligatoria por defecto.
+|
+| 🔴 Las rutas de envío tocan leads REALES en producción. Los frenos (dry_run por defecto,
+| confirm_count exacto, tope de lote y cooldown) están en ClaudeLeadsOutboundController.
 */
 Route::middleware('claude.task.key')
     ->prefix('claude')
@@ -130,6 +138,10 @@ Route::middleware('claude.task.key')
         Route::post('task', 'Api\ClaudeTaskIngestController@store_json');
         Route::get('draft-version', 'Api\ClaudeVersionItemsIngestController@draft_version_json');
         Route::post('version-items', 'Api\ClaudeVersionItemsIngestController@store_json');
+
+        /* Recuperación de leads: envío de plantillas Meta. */
+        Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
+        Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
     });
 
 /*

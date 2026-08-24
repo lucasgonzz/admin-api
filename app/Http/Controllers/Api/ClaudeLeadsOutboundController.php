@@ -63,12 +63,11 @@ class ClaudeLeadsOutboundController extends Controller
     /**
      * Valor de `lead_messages.sent_via` para los mensajes que salen por acá.
      *
-     * Se deja literal a propósito (y no como referencia a una constante del modelo) para que este
-     * controlador no dependa del orden en que se apliquen los cambios del modelo. Tiene que valer
-     * exactamente lo mismo que `LeadMessage::SENT_VIA_CLAUDE`, y es el mismo string que
-     * `ClaudeTaskIngestController` ya escribe en `admin_tasks.created_via`.
+     * Referencia a la constante del modelo, que es donde vive la definición: es el mismo string
+     * que `ClaudeTaskIngestController` ya escribe en `admin_tasks.created_via`. Se apunta al
+     * modelo y no se repite el literal para que no haya dos fuentes del mismo valor.
      */
-    const ORIGEN_CLAUDE = 'claude';
+    const ORIGEN_CLAUDE = LeadMessage::SENT_VIA_CLAUDE;
 
     /**
      * Estados del pipeline que se consideran cerrados: por defecto no se les envía nada.

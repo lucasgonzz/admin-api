@@ -12,6 +12,15 @@ class LeadMessage extends Model
 {
     use UsesVirtualTime;
 
+    /**
+     * Valor de `sent_via` para los mensajes que envió Claude por los endpoints `claude/*`
+     * (analítica y recuperación de leads). Mismo criterio que `admin_tasks.created_via`.
+     *
+     * La columna es nullable: null significa "origen no marcado", que es el estado de todo
+     * lo anterior a la migración 2026_08_24_150000. Ver el docblock de esa migración.
+     */
+    public const SENT_VIA_CLAUDE = 'claude';
+
     protected $guarded = [];
 
     /**
