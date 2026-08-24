@@ -151,6 +151,18 @@ Route::middleware('claude.task.key')
         /* Recuperación de leads: envío de plantillas Meta. */
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
+
+        /* Operación de clientes y actualizaciones: LECTURA.
+           `ops-schema` describe todo este sub-bloque (filtros, enumeraciones, la máquina de estados
+           del deployment y los frenos de escritura). 🔴 No se toca `schema`, que es el de leads. */
+        Route::get('ops-schema', 'Api\ClaudeClientOpsController@ops_schema_json');
+        Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
+        Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
+        Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
+        Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
+        Route::get('upgrades', 'Api\ClaudeClientOpsController@upgrades_json');
+        Route::get('upgrades/{id}', 'Api\ClaudeClientOpsController@upgrade_json');
+        Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');
     });
 
 /*
