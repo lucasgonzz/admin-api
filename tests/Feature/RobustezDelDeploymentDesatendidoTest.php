@@ -556,38 +556,54 @@ class RobustezDelDeploymentDesatendidoTest extends TestCase
     }
 
     /**
-     * 11. 🔴 El ORDEN de los tres umbrales que actúan sobre el mismo deployment.
+     * 11. 🔴 Los DOS umbrales que pueden marcar `failed` tienen que quedar por encima del que MATA
+     * el proceso.
      *
-     * De menor a mayor, y el criterio es cuánto sabe cada uno antes de escribir:
+     * Son tres números sobre el mismo deployment:
      *
-     *   1. `RunDeploymentJob::TIMEOUT_SEGUNDOS` — MATA el proceso vivo.
-     *   2. `VencerDeploymentsColgados::min_timeout_minutos()` — marca `failed`, pero solo si no
-     *      hubo actividad de logs: mira evidencia.
-     *   3. `retry_after` — marca `failed` A CIEGAS, sin mirar logs ni ancla.
+     *   1. `RunDeploymentJob::TIMEOUT_SEGUNDOS` — mata el proceso vivo.
+     *   2. `VencerDeploymentsColgados` — marca `failed`, pero solo si no hubo actividad de logs.
+     *   3. `retry_after` — marca `failed` A CIEGAS.
      *
-     * El que menos sabe va último. La primera versión de esta misión dejó `retry_after` en 31
-     * minutos, o sea metido entre el 1 y el 2: el camino de `MaxAttemptsExceededException` marcaba
-     * `failed` sin evidencia de nada mientras el worker original podía seguir con el SSH abierto
-     * contra el hosting del cliente — y desde `failed` las dos puertas invitan a reintentar.
+     * 🔴 El invariante es **2 > 1 y 3 > 1**, y se afirma sobre el DEFAULT y el PISO del umbral 2,
+     * no solo sobre el piso. La primera versión de este test comparaba `retry_after` contra
+     * `min_timeout_minutos()` y afirmaba en el comentario que `retry_after` era "el más alto de los
+     * tres": el test pasaba en verde mientras el valor que realmente corre (el default, 45 min) lo
+     * violaba. Era la misma forma del error que esta misión dice arreglar — un test que verifica
+     * una propiedad más débil que la que el comentario afirma.
+     *
+     * Que el umbral 2 quede por ENCIMA del 3 no es un problema y por eso no se asegura: el 2 mira
+     * evidencia antes de escribir, así que es seguro a cualquier valor. El que tiene que estar
+     * holgado es el 3, que escribe sin mirar nada.
      *
      * @return void
      */
-    public function test_los_tres_umbrales_se_disparan_en_el_orden_correcto(): void
+    public function test_los_dos_umbrales_que_marcan_failed_quedan_sobre_el_que_mata(): void
     {
-        $timeout_job  = RunDeploymentJob::TIMEOUT_SEGUNDOS;
-        $piso_vencer  = VencerDeploymentsColgados::min_timeout_minutos() * 60;
-        $retry_after  = (int) config('queue.connections.database.retry_after');
+        $timeout_job = RunDeploymentJob::TIMEOUT_SEGUNDOS;
+        $retry_after = (int) config('queue.connections.database.retry_after');
+
+        /* Los tres valores del umbral 2: piso, default y techo configurable. */
+        $piso    = VencerDeploymentsColgados::min_timeout_minutos() * 60;
+        $default = VencerDeploymentsColgados::DEFAULT_TIMEOUT_MINUTOS * 60;
+        $techo   = VencerDeploymentsColgados::MAX_TIMEOUT_MINUTOS * 60;
+
+        foreach (['piso' => $piso, 'default' => $default, 'techo' => $techo] as $cual => $valor) {
+            $this->assertGreaterThan(
+                $timeout_job,
+                $valor,
+                "El {$cual} del vencimiento quedó por debajo del timeout del job: marcaría failed procesos vivos."
+            );
+        }
+
+        /* El default tiene que estar entre el piso y el techo, si no el clamp lo estaría moviendo. */
+        $this->assertGreaterThanOrEqual($piso, $default);
+        $this->assertLessThanOrEqual($techo, $default);
 
         $this->assertGreaterThan(
             $timeout_job,
-            $piso_vencer,
-            'El vencimiento tiene que quedar por encima del techo del job, si no marca failed procesos vivos.'
-        );
-
-        $this->assertGreaterThan(
-            $piso_vencer,
             $retry_after,
-            'retry_after escribe failed a ciegas: tiene que ser el MÁS ALTO de los tres.'
+            'retry_after escribe failed a ciegas: por debajo del timeout del job, pisa deployments vivos.'
         );
     }
 

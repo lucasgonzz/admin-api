@@ -231,7 +231,25 @@ class VencerDeploymentsColgados extends Command
     }
 
     /**
-     * Umbral efectivo, en minutos: el `--minutos` de la corrida a mano, o el de `admin_settings`.
+     * Umbral efectivo de la corrida automática, en minutos: lo que diga `admin_settings`, acotado.
+     *
+     * 🔴 Es público y estático porque `claude/*` publica este número en
+     * `salud.vencimiento_minutos` y en `limites.vencimiento_minutos`, y **tiene que publicar el
+     * valor que realmente se aplica, no la constante**. Publicar `DEFAULT_TIMEOUT_MINUTOS` a secas
+     * hacía que el endpoint le mintiera a Claude apenas alguien tocara el setting — y la `nota` de
+     * ese mismo bloque remite a este campo para explicar el comportamiento.
+     *
+     * @return int
+     */
+    public static function timeout_minutos_efectivo(): int
+    {
+        return self::acotar_minutos(
+            (int) AdminSetting::get(self::KEY_TIMEOUT_MINUTOS, (string) self::DEFAULT_TIMEOUT_MINUTOS)
+        );
+    }
+
+    /**
+     * Umbral efectivo de ESTA corrida: el `--minutos` de la corrida a mano, o el configurado.
      *
      * @return int
      */
@@ -243,7 +261,7 @@ class VencerDeploymentsColgados extends Command
             return $this->acotar((int) $opcion);
         }
 
-        return $this->acotar((int) AdminSetting::get(self::KEY_TIMEOUT_MINUTOS, (string) self::DEFAULT_TIMEOUT_MINUTOS));
+        return self::timeout_minutos_efectivo();
     }
 
     /**
@@ -258,15 +276,32 @@ class VencerDeploymentsColgados extends Command
      */
     private function acotar(int $minutos): int
     {
+        $acotado = self::acotar_minutos($minutos);
+
+        if ($acotado !== $minutos) {
+            /* Se avisa, no se corrige en silencio: alguien que carga 10 esperando vencimientos
+             * rápidos tiene que enterarse de que le quedaron en 35 y por qué. */
+            $this->warn("Umbral pedido: {$minutos} min. Se aplica {$acotado} min. El piso es el techo "
+                . 'del job más el margen: por debajo de eso este comando podría marcar fallido un '
+                . 'deployment todavía vivo.');
+        }
+
+        return $acotado;
+    }
+
+    /**
+     * El acotado propiamente dicho, sin consola de por medio para que lo pueda usar el getter
+     * estático que consume `claude/*`.
+     *
+     * @param int $minutos Valor crudo.
+     *
+     * @return int
+     */
+    private static function acotar_minutos(int $minutos): int
+    {
         $piso = self::min_timeout_minutos();
 
         if ($minutos < $piso) {
-            /* Se avisa, no se corrige en silencio: alguien que carga 10 esperando vencimientos
-             * rápidos tiene que enterarse de que le quedaron en 35 y por qué. */
-            $this->warn("Umbral pedido: {$minutos} min. Se aplica el piso de {$piso} min, que es el "
-                . 'techo del job más el margen: por debajo de eso este comando podría marcar fallido '
-                . 'un deployment todavía vivo.');
-
             return $piso;
         }
 

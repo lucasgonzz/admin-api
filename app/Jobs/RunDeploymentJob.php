@@ -157,7 +157,7 @@ class RunDeploymentJob implements ShouldQueue
         $deployment_log = DeploymentLog::create([
             'client_version_upgrade_id' => $upgrade->id,
             'step'                      => VencerDeploymentsColgados::STEP_VENCIMIENTO,
-            'line'                      => $this->motivo_del_fallo($e),
+            'line'                      => $this->motivo_del_fallo($e, $afectadas === 1),
             'level'                     => 'error',
             'created_at'                => now(),
         ]);
@@ -182,17 +182,28 @@ class RunDeploymentJob implements ShouldQueue
      * primero. La configuración está puesta para que esto no llegue a pasar —`retry_after` es el
      * más alto de los tres umbrales—, pero si llega, el texto tiene que decir la verdad.
      *
-     * @param \Throwable $e Motivo del fallo.
+     * Y tampoco puede afirmar que el job "no pudo reportar" cuando sí reportó: si el estado ya
+     * estaba en `failed`, el `catch` de `handle()` llegó a escribirlo y `DeploymentService`
+     * probablemente ya dejó su propia línea de error. Ahí esta línea es un cierre, no la noticia.
+     *
+     * @param \Throwable $e                Motivo del fallo.
+     * @param bool       $escribio_el_estado Si este método fue el que dejó el upgrade en `failed`.
      *
      * @return string
      */
-    private function motivo_del_fallo(\Throwable $e)
+    private function motivo_del_fallo(\Throwable $e, $escribio_el_estado)
     {
         if ($e instanceof MaxAttemptsExceededException) {
             return 'La cola dio por agotado este job, pero eso NO prueba que el proceso haya muerto: '
                 . 'el worker original puede seguir corriendo el pipeline por SSH en este momento. '
                 . '🔴 NO reintentes hasta confirmar en el servidor del cliente que no quedó nada '
                 . 'corriendo. Detalle: ' . $e->getMessage();
+        }
+
+        if (! $escribio_el_estado) {
+            return 'El job terminó fallado: ' . $e->getMessage()
+                . '. El estado ya estaba escrito, así que el motivo real es la línea de error de '
+                . 'más arriba.';
         }
 
         return 'El job del deployment murió sin poder reportar: ' . $e->getMessage()

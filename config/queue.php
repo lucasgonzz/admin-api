@@ -54,28 +54,37 @@ return [
              * encolar deployments acá, porque el job más largo de esta conexión dejó de ser
              * `RunDemoSetupJob` (600) y pasó a ser `RunDeploymentJob` (1800).
              *
-             * 🔴 2400 (40 min), y el número sale de un ORDEN de tres umbrales, no de sumarle un
-             * margen a uno solo (misión 61). Los tres actúan sobre el mismo deployment y tienen que
-             * dispararse en este orden, de menor a mayor:
+             * 🔴 2400 (40 min) = 1800 + 600 (misión 61). Hay TRES umbrales actuando sobre el mismo
+             * deployment y conviene tenerlos a la vista, porque no son intercambiables:
              *
              *   1. `RunDeploymentJob::TIMEOUT_SEGUNDOS` — 30 min. MATA el proceso vivo.
-             *   2. `VencerDeploymentsColgados::min_timeout_minutos()` — 35 min. Marca `failed`,
-             *      pero SOLO si no hubo actividad de logs: mira evidencia antes de escribir.
+             *   2. `VencerDeploymentsColgados` — piso 35 min, default 45. Marca `failed`, pero SOLO
+             *      si no hubo actividad de `deployment_logs`: **mira evidencia antes de escribir**.
              *   3. `retry_after` — 40 min. Marca `failed` A CIEGAS, sin mirar logs ni el ancla.
              *
-             * El que menos sabe va último, y por eso `retry_after` tiene que ser el MÁS ALTO de los
-             * tres. La versión anterior de esta misión lo dejó en 1860 (31 min), o sea metido entre
-             * el 1 y el 2: el camino de `MaxAttemptsExceededException` marcaba `failed` a los 31
-             * minutos sin evidencia de nada, mientras el worker original podía seguir con el SSH
-             * abierto contra el hosting del cliente — y desde `failed` las dos puertas invitan a
-             * reintentar, o sea dos `DeploymentService` sobre el mismo cliente.
+             * 🔴 EL INVARIANTE es que **2 y 3 tienen que ser mayores que 1**, no que estén en un
+             * orden entre ellos. Una versión anterior de este comentario afirmaba que `retry_after`
+             * tenía que ser "el más alto de los tres", y era un sobre-reclamo imposible de cumplir:
+             * el umbral 2 es configurable hasta 720 minutos, así que ningún `retry_after` razonable
+             * puede quedar por encima. Que el 2 sea más alto que el 3 tampoco es un problema —
+             * justamente porque el 2 mira evidencia, es seguro a cualquier valor.
              *
-             * ⚠️ El punto 1 solo existe si el CLI del servidor tiene `pcntl`
-             * (`Worker::supportsAsyncSignals()`). Sin `pcntl` no hay `SIGALRM`, `$timeout` es letra
-             * muerta y el único corte real de los tres pasa a ser el 3.
+             * Lo que sí importa del 3 es que sea **holgadamente mayor que 1**: mientras `$timeout`
+             * acote de verdad al job, ningún proceso vivo llega a los 40 minutos y este camino
+             * simplemente no se dispara nunca. Con los 660 anteriores se disparaba siempre; con los
+             * 1860 de la primera corrección de esta misión, a los 31.
              *
-             * Este orden lo verifica `RobustezDelDeploymentDesatendidoTest`, y ahí también se
-             * chequea que ningún OTRO job de esta conexión tenga un `$timeout` por encima — hoy
+             * ⚠️ Y acá está el agujero honesto: el punto 1 solo existe si el CLI del servidor tiene
+             * `pcntl` (`Worker::supportsAsyncSignals()`). Sin `pcntl` no hay `SIGALRM`, `$timeout`
+             * es letra muerta, `exec_ssh_session` usa `setTimeout(0)` y un pipeline colgado no tiene
+             * ninguna cota superior — o sea que NINGÚN valor finito de `retry_after` garantiza no
+             * pisar un proceso vivo. Lo único que queda en ese escenario es que el texto que escribe
+             * `RunDeploymentJob::motivo_del_fallo()` para `MaxAttemptsExceededException` avisa que
+             * NO se reintente sin confirmar. Verificar `pcntl` en el servidor es un paso previo al
+             * despliegue, no un detalle.
+             *
+             * El invariante lo verifica `RobustezDelDeploymentDesatendidoTest`, que además chequea
+             * que ningún OTRO job de esta conexión tenga un `$timeout` por encima — hoy
              * `RunClientInstallationGroupJob` (3900) y `RunDemoUpdateJob` (3600) están a un
              * `->onConnection('database')` de romper esto. */
             'retry_after' => 2400,

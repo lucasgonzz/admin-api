@@ -324,7 +324,7 @@ class ClaudeClientOpsController extends Controller
                 'dias_schedule_max'           => self::DIAS_SCHEDULE_MAX,
                 /* Los dos juntos, para que se lea la relación: 15 REPORTA el cuelgue, 45 lo VENCE. */
                 'stale_minutos'               => self::STALE_MINUTOS,
-                'vencimiento_minutos'         => VencerDeploymentsColgados::DEFAULT_TIMEOUT_MINUTOS,
+                'vencimiento_minutos'         => VencerDeploymentsColgados::timeout_minutos_efectivo(),
             ],
 
             'limitaciones' => [
@@ -1539,7 +1539,7 @@ class ClaudeClientOpsController extends Controller
             'jobs_en_cola'              => (int) DB::table('jobs')->count(),
             'stale_minutos'             => self::STALE_MINUTOS,
             'deployment_running_since'  => $deployment_running_since,
-            'vencimiento_minutos'       => VencerDeploymentsColgados::DEFAULT_TIMEOUT_MINUTOS,
+            'vencimiento_minutos'       => VencerDeploymentsColgados::timeout_minutos_efectivo(),
             'nota'                      => '`deployment_stale` REPORTA que el worker no está avanzando; no lo arregla. '
                 . 'Quien lo destraba es `deployments:vencer-colgados`, que el scheduler corre cada cinco minutos y que '
                 . 'pasa el upgrade a `failed` con el motivo escrito como línea de log cuando no reporta actividad por '
