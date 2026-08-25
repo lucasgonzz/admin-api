@@ -56,6 +56,20 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
             return;
         }
 
+        // 🔴 Freno del modo "espera aprobación". Más abajo, la condición de la fecha es
+        // `ai_auto_send_at !== null && now()->lt(...)`: con la fecha en NULL —que es justo como
+        // queda un borrador que espera a una persona— esa guarda NO frena y el mensaje sale
+        // solo. Alcanza con que quede dando vueltas un job de un ciclo anterior, o que se
+        // apague la verificación y se vuelva a prender, para mandarle al cliente algo que
+        // nadie leyó. Se chequea el ticket, que es la fuente de verdad del modo.
+        if ((bool) $ticket->requiere_verificacion_mensajes) {
+            Log::channel('daily')->debug('AutoSendPendingSupportSuggestion: omitido (el ticket exige aprobación humana).', [
+                'ticket_id' => $ticket->id,
+            ]);
+
+            return;
+        }
+
         $draft_message = SupportMessage::query()
             ->where('support_ticket_id', $ticket->id)
             ->where('is_ai_suggestion_draft', true)
@@ -63,7 +77,12 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
             ->first();
 
         if ($draft_message !== null) {
-            if ($draft_message->ai_auto_send_at !== null && now()->lt($draft_message->ai_auto_send_at)) {
+            // Sin fecha de autoenvío no hay autoenvío: el borrador espera a una persona.
+            if ($draft_message->ai_auto_send_at === null) {
+                return;
+            }
+
+            if (now()->lt($draft_message->ai_auto_send_at)) {
                 return;
             }
 
@@ -83,7 +102,12 @@ class AutoSendPendingSupportSuggestion implements ShouldQueue
             return;
         }
 
-        if ($ticket->ai_suggestion_send_at !== null && now()->lt($ticket->ai_suggestion_send_at)) {
+        // Mismo criterio que con el borrador: sin fecha, no se manda solo.
+        if ($ticket->ai_suggestion_send_at === null) {
+            return;
+        }
+
+        if (now()->lt($ticket->ai_suggestion_send_at)) {
             return;
         }
 

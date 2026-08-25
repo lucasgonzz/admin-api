@@ -34,6 +34,8 @@ class SupportRetryPendingSyncs extends Command
         // reintentaba cada cinco minutos contra un empresa-api que no conoce ese ticket. Con
         // veinte conversaciones abiertas eso son decenas de miles de POST fallidos por día.
         $pending_messages = SupportMessage::where('sender_type', 'admin')
+            // Un borrador del agente no se replica a ningún lado: todavía no es un mensaje.
+            ->where('is_ai_suggestion_draft', false)
             ->whereNull('synced_to_client_at')
             ->whereHas('ticket', function ($query) {
                 $query->where('source', '!=', 'whatsapp');

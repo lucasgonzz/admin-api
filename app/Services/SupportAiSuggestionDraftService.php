@@ -86,6 +86,9 @@ class SupportAiSuggestionDraftService
             'body'                    => $text_body,
             'is_ai_suggestion_draft'  => true,
             'ai_auto_send_at'         => $auto_send_at,
+            /* Sello de autoría: sobrevive a la aprobación, cuando el mensaje deja de ser
+             * borrador y pasa a figurar a nombre del operador que lo mandó. */
+            'ai_generated_at'         => now(),
         ]);
 
         $ticket->ai_pending_suggestion = $text_body;

@@ -9,6 +9,7 @@ use App\Models\Client;
 use App\Models\SupportTicket;
 use App\Models\SupportMessage;
 use App\Services\ClientPhoneDirectory;
+use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSessionWindowService;
@@ -355,6 +356,75 @@ class SupportTicketController extends BaseController
             'reused'   => $result['reused'],
             'whatsapp' => $result['whatsapp'],
         ], $result['reused'] ? 200 : 201);
+    }
+
+    /**
+     * Prende o apaga el agente de IA para un ticket puntual.
+     *
+     * Apagarlo también se lleva el borrador que esté esperando: con el agente apagado, un
+     * borrador con fecha de autoenvío igual saldría, y apagar el agente y ver que le contesta
+     * al cliente lo mismo es lo peor que puede hacer este botón. No hace falta cancelar el job
+     * encolado: SendSupportAiSuggestion relee el flag antes de mandar.
+     *
+     * @param int|string $id Id del ticket.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_claude_auto_reply($id)
+    {
+        $ticket = SupportTicket::findOrFail($id);
+
+        $ticket->claude_auto_reply = ! (bool) $ticket->claude_auto_reply;
+        $ticket->save();
+
+        // Apagarlo también se lleva lo que ya estaba en curso: un borrador con fecha de
+        // autoenvío sigue saliendo aunque el agente quede apagado, y apagar el agente y ver
+        // que igual le contesta al cliente es lo peor que puede hacer este botón.
+        if (! $ticket->claude_auto_reply) {
+            (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        }
+
+        event(new SupportTicketUpdated((int) $ticket->id));
+
+        return response()->json([
+            'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
+        ], 200);
+    }
+
+    /**
+     * Prende o apaga la verificación humana obligatoria para un ticket puntual.
+     *
+     * Con esto prendido —que es como nace todo ticket— ninguna sugerencia del agente sale sola:
+     * queda como borrador esperando que una persona la mande, con o sin ajustes.
+     *
+     * @param int|string $id Id del ticket.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_requiere_verificacion($id)
+    {
+        $ticket = SupportTicket::findOrFail($id);
+
+        $ticket->requiere_verificacion_mensajes = ! (bool) $ticket->requiere_verificacion_mensajes;
+        $ticket->save();
+
+        // Al prenderla, hay que apagar el reloj del borrador que ya estaba en curso. El job de
+        // autoenvío lo frena bien, pero la pantalla seguiría mostrando el contador corriendo
+        // hasta cero sin que pase nada, y el operador no sabe si el mensaje salió o no.
+        if ($ticket->requiere_verificacion_mensajes) {
+            SupportMessage::where('support_ticket_id', $ticket->id)
+                ->where('is_ai_suggestion_draft', true)
+                ->update(['ai_auto_send_at' => null]);
+
+            $ticket->ai_suggestion_send_at = null;
+            $ticket->save();
+        }
+
+        event(new SupportTicketUpdated((int) $ticket->id));
+
+        return response()->json([
+            'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
+        ], 200);
     }
 
     /**

@@ -87,6 +87,11 @@ class SupportTicketUpdated implements ShouldBroadcastNow
                 'status',
                 'source',
                 'whatsapp_phone',
+                /* Interruptores del agente: sin esto, el operador que recibe el broadcast ve
+                 * el estado viejo del botón —el merge del store conserva lo que ya tenía— y
+                 * al tocarlo hace lo contrario de lo que cree. */
+                'claude_auto_reply',
+                'requiere_verificacion_mensajes',
                 'last_client_message_at',
                 'alert_sent_at',
                 'escalated_at',

@@ -9,6 +9,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
+use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportWhatsappOpenerService;
@@ -170,6 +171,116 @@ class SupportMessageController extends BaseController
         $admin_name = $admin !== null ? trim((string) $admin->name) : '';
 
         return $admin_name !== '' ? $admin_name : 'Soporte';
+    }
+
+    /**
+     * Aprueba un borrador del agente y lo manda al cliente, con o sin ajustes.
+     *
+     * Si el operador cambió el texto, el que había propuesto el agente se guarda en
+     * `ai_original_body`: teniendo el par (propuesto, enviado) se puede medir después en qué se
+     * equivoca, que es para lo que Lucas pidió que quedara guardada la edición.
+     *
+     * @param Request    $request Puede traer `body` con el texto final editado.
+     * @param int|string $id      Id del mensaje borrador.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function approve_ai_draft(Request $request, $id)
+    {
+        $message = SupportMessage::with('ticket')->findOrFail($id);
+
+        $ticket = $message->ticket;
+        if ($ticket === null || $ticket->status !== 'open') {
+            return response()->json(['error' => 'El ticket está cerrado.'], 422);
+        }
+
+        // Se toma el borrador con un UPDATE condicional en vez de leer-y-después-escribir. El
+        // job de autoenvío y el operador pueden estar los dos sobre el mismo borrador —el
+        // operador aprieta Enviar en el segundo 119 de una demora de 120— y sin esto los dos
+        // pasaban el chequeo y el cliente recibía el mensaje dos veces. Quien gane la carrera
+        // se lo lleva: el que pierde, ve 0 filas afectadas y corta acá.
+        $tomado = SupportMessage::where('id', $message->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->update(['is_ai_suggestion_draft' => false, 'ai_auto_send_at' => null]);
+
+        if ($tomado === 0) {
+            return response()->json(['error' => 'Ese borrador ya se envió o se descartó.'], 422);
+        }
+
+        $message->refresh();
+
+        $original_body = trim((string) ($message->body ?? ''));
+        $final_body = $request->has('body') ? trim((string) $request->input('body')) : $original_body;
+
+        if ($final_body === '') {
+            return response()->json(['error' => 'El mensaje no puede quedar vacío.'], 422);
+        }
+
+        if ($final_body !== $original_body) {
+            $message->ai_original_body = $original_body;
+            $message->body = $final_body;
+        }
+
+        // Queda a nombre de quien lo aprueba: el agente propone, la persona firma.
+        $message->sender_admin_id = (int) Auth::id();
+        $message->save();
+
+        $delivered = app(SupportAiSuggestionDeliveryService::class)->deliver_draft_message($message, $ticket);
+
+        // Limpia solo el estado pendiente del TICKET. clear_ticket_pending_state() también
+        // borra borradores, y este mensaje ya dejó de serlo arriba, así que no se lo lleva.
+        $ticket->ai_pending_suggestion = null;
+        $ticket->ai_suggestion_send_at = null;
+        $ticket->save();
+
+        $message = SupportMessage::where('id', $message->id)->withAll()->first();
+
+        if ($delivered === null) {
+            // El ticket no tiene canal por dónde salir. El mensaje quedó guardado y visible,
+            // pero decirle 200 al operador le haría creer que el cliente lo recibió.
+            return response()->json([
+                'model' => $message,
+                'error' => 'El mensaje quedó guardado pero no se pudo entregar: el ticket no tiene un canal de WhatsApp válido.',
+            ], 422);
+        }
+
+        // El servicio se traga los fallos de Meta, así que devolver true por haber recibido un
+        // modelo mentiría: lo que dice si salió es el estado que quedó estampado en el mensaje.
+        $entregado = $message !== null && $message->remote_delivery_status !== 'not_received';
+
+        return response()->json([
+            'model'     => $message,
+            'delivered' => $entregado,
+        ], 200);
+    }
+
+    /**
+     * Descarta un borrador del agente sin mandarlo.
+     *
+     * @param int|string $id Id del mensaje borrador.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function discard_ai_draft($id)
+    {
+        $message = SupportMessage::with('ticket')->findOrFail($id);
+
+        if (! (bool) $message->is_ai_suggestion_draft) {
+            return response()->json(['error' => 'Ese mensaje no es un borrador del agente.'], 422);
+        }
+
+        $ticket = $message->ticket;
+
+        if ($ticket !== null) {
+            // clear_ticket_pending_state() ya borra los borradores del ticket además de
+            // limpiar el pendiente: llamar antes a delete_drafts_for_ticket() era una query
+            // repetida.
+            (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        } else {
+            (new SupportAiSuggestionDraftService())->delete_drafts_for_ticket((int) $message->support_ticket_id);
+        }
+
+        return response()->json(['ok' => true], 200);
     }
 
     /**

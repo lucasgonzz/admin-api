@@ -495,6 +495,10 @@ Route::prefix('admin')->group(function () {
         Route::post('support-ticket/{ticket_id}/suggest', [\App\Http\Controllers\Api\SupportAiSuggestionController::class, 'suggest']);
         Route::post('support-message/{id}/retry-remote-sync', [\App\Http\Controllers\Api\SupportMessageController::class, 'retry_remote_sync']);
         Route::post('support-message/{id}/mark-read', [\App\Http\Controllers\Api\SupportMessageController::class, 'mark_read']);
+        Route::post('support-message/{id}/approve-ai-draft', [\App\Http\Controllers\Api\SupportMessageController::class, 'approve_ai_draft']);
+        Route::post('support-message/{id}/discard-ai-draft', [\App\Http\Controllers\Api\SupportMessageController::class, 'discard_ai_draft']);
+        Route::post('support-ticket/{id}/toggle-claude-auto-reply', [\App\Http\Controllers\Api\SupportTicketController::class, 'toggle_claude_auto_reply']);
+        Route::post('support-ticket/{id}/toggle-requiere-verificacion', [\App\Http\Controllers\Api\SupportTicketController::class, 'toggle_requiere_verificacion']);
         Route::post('support-ticket/{ticket_id}/typing', [\App\Http\Controllers\Api\SupportMessageController::class, 'typing']);
 
         Route::get('support-knowledge-base', [\App\Http\Controllers\Api\SupportKnowledgeBaseController::class, 'index']);

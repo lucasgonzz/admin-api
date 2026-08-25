@@ -43,6 +43,8 @@ class Admin extends Authenticatable
         'es_setter'                => 'boolean',
         // Flag para recibir WhatsApp cuando el agente escala una conversación de lead.
         'notify_lead_escalation_whatsapp' => 'boolean',
+        // Flag para recibir WhatsApp cuando el agente escala un ticket de soporte de un cliente.
+        'notify_support_escalation_whatsapp' => 'boolean',
         // Flag para recibir WhatsApp cuando se agenda una demo.
         'notify_demo_scheduled_whatsapp'  => 'boolean',
         // Flag para recibir WhatsApp cuando falla el envío automático de un mensaje del sistema.
