@@ -226,6 +226,17 @@ class SupportWhatsappOpenerService
         $message->loadMissing('attachments');
         $has_attachments = $message->attachments !== null && count($message->attachments) > 0;
 
+        // Ventana abierta, texto del agente y separadores: sale partido en varios mensajes.
+        // Solo acá: una plantilla no puede llevar tres mensajes, y partir el texto de una
+        // persona sería cambiarle lo que escribió sin que lo haya pedido.
+        if ($window['open'] && ! $has_attachments && $message->ai_generated_at !== null) {
+            $partes = $this->split_en_partes((string) ($message->body ?? ''));
+
+            if (count($partes) > 1) {
+                return $this->deliver_en_partes($ticket, $message, $partes);
+            }
+        }
+
         // Ventana abierta, o adjunto que la plantilla no puede transportar: camino de siempre.
         if ($window['open'] || $has_attachments) {
             $whatsapp_message_id = $this->sender->send_support_message($to, $message);
@@ -295,6 +306,196 @@ class SupportWhatsappOpenerService
         }
 
         return $this->mark_failed($message, $this->sender->last_send_error, true, false, $template_name);
+    }
+
+    /**
+     * Parte un texto en los mensajes que el agente quiso mandar por separado.
+     *
+     * El separador es una línea con tres guiones, igual que en el agente de leads. Se descartan
+     * las partes vacías, así que un separador de más no genera un mensaje en blanco.
+     *
+     * @param string $body Texto completo del agente.
+     *
+     * @return array<int, string>
+     */
+    public function split_en_partes(string $body): array
+    {
+        $partes = preg_split('/\n\s*---\s*\n/', $body);
+        if ($partes === false) {
+            return [trim($body)];
+        }
+
+        $limpias = [];
+        foreach ($partes as $parte) {
+            $parte = trim($parte);
+            if ($parte !== '') {
+                $limpias[] = $parte;
+            }
+        }
+
+        return empty($limpias) ? [trim($body)] : $limpias;
+    }
+
+    /**
+     * Manda un texto partido en varios mensajes de WhatsApp, uno tras otro.
+     *
+     * 🔴 Las pausas y los reintentos de acá no son precaución teórica: son la solución a un
+     * incidente real del agente de leads (lead #440, 22/7/2026). Kapso devuelve 409 "otro
+     * mensaje en vuelo para esta conversación" si las partes salen una pegada a la otra, y
+     * aquella vez una sugerencia de cuatro partes llegó hasta la tercera, falló la cuarta, y el
+     * sistema lo registró como "no se envió nada" mientras el lead ya había recibido y contestado.
+     *
+     * De ahí las tres reglas: 1200ms entre parte y parte, hasta tres intentos por parte con
+     * backoff cuando el fallo es transitorio, y cortar si una parte no sale —mandar la cuarta
+     * cuando la tercera nunca llegó deja la conversación sin sentido—.
+     *
+     * La primera parte se queda en el mensaje que ya existe; las demás se persisten como
+     * mensajes propios, para que el hilo muestre exactamente lo que recibió el cliente y cada
+     * parte tenga su whatsapp_message_id, que es con lo que Meta correlaciona las entregas.
+     *
+     * @param SupportTicket      $ticket  Ticket de la conversación.
+     * @param SupportMessage     $message Mensaje original, que pasa a ser la primera parte.
+     * @param array<int, string> $partes  Partes ya limpias, dos o más.
+     *
+     * @return array<string, mixed>
+     */
+    private function deliver_en_partes(SupportTicket $ticket, SupportMessage $message, array $partes): array
+    {
+        $to = (string) $ticket->whatsapp_phone;
+        $total = count($partes);
+        $enviadas = 0;
+        $error = null;
+        $primer_id = null;
+
+        foreach ($partes as $indice => $parte) {
+            $whatsapp_message_id = $this->send_con_reintentos($to, $parte);
+
+            if ($whatsapp_message_id === null) {
+                $error = $this->sender->last_send_error;
+                break;
+            }
+
+            if ($indice === 0) {
+                $message->body = $parte;
+                $message->whatsapp_message_id = $whatsapp_message_id;
+                $message->remote_delivery_status = null;
+                $message->save();
+                $primer_id = $whatsapp_message_id;
+            } else {
+                $this->persistir_parte($ticket, $message, $parte, $whatsapp_message_id);
+            }
+
+            $enviadas++;
+
+            // Pausa antes de la siguiente: le da tiempo a Kapso a soltar el bloqueo de la
+            // conversación, que es la causa de raíz del 409.
+            if ($indice < $total - 1) {
+                usleep(1200000);
+            }
+        }
+
+        if ($enviadas === 0) {
+            return $this->mark_failed($message, $error, false, true, null);
+        }
+
+        if ($enviadas < $total) {
+            // Envío parcial: al cliente le llegaron las primeras partes. Decir "no se envió"
+            // sería mentir, y decir "se envió" también.
+            $message->remote_delivery_status = 'not_received';
+            $message->save();
+
+            Log::channel('daily')->warning('SupportWhatsappOpenerService: envío parcial de un mensaje partido.', [
+                'ticket_id'  => $ticket->id,
+                'message_id' => $message->id,
+                'enviadas'   => $enviadas,
+                'total'      => $total,
+                'error'      => $error,
+            ]);
+
+            return [
+                'delivery'      => 'partial',
+                'message_id'    => $primer_id,
+                'error'         => 'Salieron ' . $enviadas . ' de ' . $total . ' mensajes. El resto no se envió: ' . (string) $error,
+                'used_template' => false,
+                'window_open'   => true,
+                'template_name' => null,
+                'sent_parts'    => $enviadas,
+                'total_parts'   => $total,
+            ];
+        }
+
+        return [
+            'delivery'      => 'sent',
+            'message_id'    => $primer_id,
+            'error'         => null,
+            'used_template' => false,
+            'window_open'   => true,
+            'template_name' => null,
+            'sent_parts'    => $enviadas,
+            'total_parts'   => $total,
+        ];
+    }
+
+    /**
+     * Manda una parte, reintentando cuando el fallo es transitorio.
+     *
+     * Los intentos intermedios piden que NO se notifique el fallo a los admins: un reintento
+     * que después sale bien no tiene por qué despertar a nadie.
+     *
+     * @param string $to    Teléfono destino.
+     * @param string $parte Texto de la parte.
+     *
+     * @return string|null Id de Meta, o null si no salió tras los tres intentos.
+     */
+    private function send_con_reintentos(string $to, string $parte)
+    {
+        for ($intento = 1; $intento <= 3; $intento++) {
+            $es_el_ultimo = $intento === 3;
+
+            $whatsapp_message_id = $this->sender->send_text($to, $parte, null, ! $es_el_ultimo);
+            if ($whatsapp_message_id !== null) {
+                return $whatsapp_message_id;
+            }
+
+            if (! $es_el_ultimo && $this->sender->last_send_was_transient()) {
+                usleep($intento === 1 ? 1500000 : 3500000);
+
+                continue;
+            }
+
+            break;
+        }
+
+        return null;
+    }
+
+    /**
+     * Persiste una parte adicional como mensaje propio del hilo.
+     *
+     * @param SupportTicket  $ticket              Ticket.
+     * @param SupportMessage $original            Mensaje de la primera parte, del que hereda la autoría.
+     * @param string         $parte               Texto de esta parte.
+     * @param string         $whatsapp_message_id Id que devolvió Meta.
+     *
+     * @return void
+     */
+    private function persistir_parte(SupportTicket $ticket, SupportMessage $original, string $parte, string $whatsapp_message_id): void
+    {
+        $nuevo = SupportMessage::create([
+            'support_ticket_id'   => $ticket->id,
+            'sender_type'         => 'admin',
+            'sender_admin_id'     => $original->sender_admin_id,
+            'kind'                => 'text',
+            'body'                => $parte,
+            'delivered_at'        => now(),
+            'whatsapp_message_id' => $whatsapp_message_id,
+            'ai_generated_at'     => $original->ai_generated_at,
+        ]);
+
+        $cargado = SupportMessage::query()->where('id', $nuevo->id)->withAll()->first();
+        if ($cargado !== null) {
+            event(new SupportMessageReceived((int) $cargado->id));
+        }
     }
 
     /**
