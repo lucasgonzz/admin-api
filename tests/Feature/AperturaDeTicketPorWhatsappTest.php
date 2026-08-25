@@ -490,4 +490,137 @@ class AperturaDeTicketPorWhatsappTest extends TestCase
 
         Http::assertNothingSent();
     }
+
+    /**
+     * El ticket queda asignado al operador que lo abre, no al dueño por defecto de soporte.
+     *
+     * Si quedara asignado al dueño por defecto, la bandeja del operador —que filtra por
+     * "mine"— lo sacaría de la lista apenas lo crea, y no podría seguir la conversación que
+     * acaba de abrir. El alta del canal ERP ya asigna al operador; esto lo iguala.
+     *
+     * @return void
+     */
+    public function test_el_ticket_queda_asignado_al_operador_que_lo_abre()
+    {
+        $otro                           = $this->crear_admin('dueno-de-soporte@test.local');
+        $otro->is_default_support_owner = true;
+        $otro->save();
+
+        $admin  = $this->crear_admin('operador-que-abre@test.local');
+        $client = $this->crear_cliente('+5493415550010');
+        $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'client_id'      => $client->id,
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550010',
+            'body'           => 'Hola',
+        ])->assertStatus(201);
+
+        $ticket = SupportTicket::where('client_id', $client->id)->first();
+        $this->assertNotNull($ticket);
+        $this->assertSame(
+            (int) $admin->id,
+            (int) $ticket->assigned_admin_id,
+            'El ticket no quedó en la bandeja del operador que lo abrió.'
+        );
+    }
+
+    /**
+     * Un cuerpo que es solo espacios se rechaza antes de crear nada.
+     *
+     * @return void
+     */
+    public function test_un_mensaje_en_blanco_se_rechaza()
+    {
+        $admin  = $this->crear_admin('mensaje-en-blanco@test.local');
+        $client = $this->crear_cliente('+5493415550011');
+        $espia  = $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'client_id'      => $client->id,
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550011',
+            'body'           => '   ',
+        ])->assertStatus(422);
+
+        $this->assertCount(0, $espia->textos);
+        $this->assertCount(0, $espia->plantillas);
+        $this->assertSame(0, SupportTicket::where('client_id', $client->id)->count());
+    }
+
+    /**
+     * La respuesta del operador con la ventana ya cerrada sale por plantilla, no por texto libre.
+     *
+     * Antes de esta misión todo ticket de WhatsApp nacía de un entrante, así que la ventana
+     * estaba siempre abierta. Con la apertura desde el admin se puede abrir una conversación
+     * fuera de la ventana y que el cliente no conteste: sin esta rama, el segundo mensaje lo
+     * rechaza Meta y el operador ve "no recibido" sin ningún motivo.
+     *
+     * @return void
+     */
+    public function test_la_respuesta_con_la_ventana_cerrada_sale_por_plantilla()
+    {
+        $admin  = $this->crear_admin('respuesta-fuera-de-ventana@test.local');
+        $client = $this->crear_cliente('+5493415550012');
+
+        $ticket = SupportTicket::create([
+            'client_id'      => $client->id,
+            'client_user_id' => 0,
+            'client_user_name' => 'Contacto',
+            'status'         => 'open',
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550012',
+            'opened_at'      => now()->subDays(3),
+        ]);
+
+        $espia = $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/message', [
+            'kind' => 'text',
+            'body' => 'Che, te mandé lo del remito.',
+        ])->assertStatus(201);
+
+        $this->assertCount(0, $espia->textos, 'Se mandó texto libre con la ventana cerrada: Meta lo rechaza.');
+        $this->assertCount(1, $espia->plantillas, 'La respuesta no salió por plantilla.');
+        $this->assertSame('cc_soporte_apertura', $espia->plantillas[0]['template_name']);
+    }
+
+    /**
+     * La respuesta del operador con la ventana abierta sigue saliendo como texto libre.
+     *
+     * @return void
+     */
+    public function test_la_respuesta_con_la_ventana_abierta_sale_como_texto_libre()
+    {
+        $admin  = $this->crear_admin('respuesta-en-ventana@test.local');
+        $client = $this->crear_cliente('+5493415550013');
+
+        $ticket = SupportTicket::create([
+            'client_id'      => $client->id,
+            'client_user_id' => 0,
+            'status'         => 'open',
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550013',
+            'opened_at'      => now()->subDay(),
+        ]);
+
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => 'Buenas',
+            'delivered_at'      => now()->subMinutes(30),
+        ]);
+
+        $espia = $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket/' . $ticket->id . '/message', [
+            'kind' => 'text',
+            'body' => 'Ya lo miro.',
+        ])->assertStatus(201);
+
+        $this->assertCount(1, $espia->textos, 'La respuesta no salió como texto libre.');
+        $this->assertCount(0, $espia->plantillas, 'Se usó plantilla con la ventana abierta.');
+    }
 }

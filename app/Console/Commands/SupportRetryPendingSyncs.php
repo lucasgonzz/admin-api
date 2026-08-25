@@ -28,8 +28,16 @@ class SupportRetryPendingSyncs extends Command
     public function handle(SupportClientSyncService $sync_service)
     {
         // Mensajes de admins pendientes de replicación al cliente.
+        //
+        // Solo los del canal ERP: un mensaje de un ticket de WhatsApp nunca setea
+        // synced_to_client_at, así que sin este filtro quedaba en la cola PARA SIEMPRE y se
+        // reintentaba cada cinco minutos contra un empresa-api que no conoce ese ticket. Con
+        // veinte conversaciones abiertas eso son decenas de miles de POST fallidos por día.
         $pending_messages = SupportMessage::where('sender_type', 'admin')
             ->whereNull('synced_to_client_at')
+            ->whereHas('ticket', function ($query) {
+                $query->where('source', '!=', 'whatsapp');
+            })
             ->orderBy('id')
             ->get();
         // Cantidad de mensajes sincronizados en esta ejecución.

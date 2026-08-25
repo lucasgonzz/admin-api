@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Events\SupportMessageReceived;
-use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Models\Client;
@@ -74,28 +73,18 @@ class SupportWhatsappOpenerService
     private $phone_directory;
 
     /**
-     * Asignación inicial del ticket.
-     *
-     * @var SupportTicketAssignmentService
-     */
-    private $assignment_service;
-
-    /**
-     * @param WhatsappSendService            $sender             Envío a Kapso/Meta.
-     * @param WhatsappSessionWindowService   $window_service     Estado de la ventana de 24hs.
-     * @param ClientPhoneDirectory           $phone_directory    Contactos del cliente.
-     * @param SupportTicketAssignmentService $assignment_service Asignación inicial.
+     * @param WhatsappSendService          $sender          Envío a Kapso/Meta.
+     * @param WhatsappSessionWindowService $window_service  Estado de la ventana de 24hs.
+     * @param ClientPhoneDirectory         $phone_directory Contactos del cliente.
      */
     public function __construct(
         WhatsappSendService $sender,
         WhatsappSessionWindowService $window_service,
-        ClientPhoneDirectory $phone_directory,
-        SupportTicketAssignmentService $assignment_service
+        ClientPhoneDirectory $phone_directory
     ) {
         $this->sender = $sender;
         $this->window_service = $window_service;
         $this->phone_directory = $phone_directory;
-        $this->assignment_service = $assignment_service;
     }
 
     /**
@@ -162,13 +151,15 @@ class SupportWhatsappOpenerService
             &$message
         ) {
             if ($ticket === null) {
-                $assigned_admin_id = $this->assignment_service->resolve_assigned_admin_id($client);
                 $ticket = SupportTicket::create([
                     'client_id'          => $client->id,
                     'client_employee_id' => $client_employee_id,
                     'client_user_id'     => 0,
                     'client_user_name'   => $contact_name !== '' ? $contact_name : null,
-                    'assigned_admin_id'  => $assigned_admin_id !== null ? $assigned_admin_id : (int) $admin->id,
+                    // Al operador que la abre, igual que el alta del canal ERP. Asignarla al
+                    // dueño por defecto (criterio de los tickets ENTRANTES) la sacaría de su
+                    // bandeja apenas la crea: el filtro por defecto es "mine".
+                    'assigned_admin_id'  => (int) $admin->id,
                     'name'               => trim($ticket_name) !== '' ? trim($ticket_name) : null,
                     'status'             => 'open',
                     'source'             => 'whatsapp',
@@ -204,6 +195,137 @@ class SupportWhatsappOpenerService
                 'window_open'   => (bool) $window['open'],
                 'window'        => $window,
             ]),
+        ];
+    }
+
+    /**
+     * Entrega una respuesta del operador en un hilo de WhatsApp que ya existe.
+     *
+     * Antes de esta misión todo ticket de WhatsApp nacía de un mensaje entrante, así que la
+     * ventana estaba siempre abierta y mandar texto libre alcanzaba. Con la apertura desde el
+     * admin eso deja de ser cierto: se puede abrir una conversación con la ventana cerrada y
+     * que el cliente no conteste. Sin esta rama, el segundo mensaje del operador lo rechaza
+     * Meta y el operador ve "no recibido" sin ningún motivo.
+     *
+     * Los adjuntos no se pueden mandar por plantilla, así que con la ventana cerrada se
+     * intenta igual y se deja el motivo escrito si falla.
+     *
+     * @param SupportTicket  $ticket  Ticket de WhatsApp con whatsapp_phone cargado.
+     * @param SupportMessage $message Mensaje del operador ya persistido.
+     * @param string         $admin_name Nombre del operador que responde.
+     *
+     * @return array{delivery: string, message_id: string|null, error: string|null, used_template: bool, window_open: bool, template_name: string|null}
+     */
+    public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
+    {
+        $to = (string) $ticket->whatsapp_phone;
+        $window = $this->window_service->window_state($to);
+
+        $message->loadMissing('attachments');
+        $has_attachments = $message->attachments !== null && count($message->attachments) > 0;
+
+        // Ventana abierta, o adjunto que la plantilla no puede transportar: camino de siempre.
+        if ($window['open'] || $has_attachments) {
+            $whatsapp_message_id = $this->sender->send_support_message($to, $message);
+
+            if ($whatsapp_message_id !== null) {
+                return $this->mark_sent($message, $whatsapp_message_id, false, (bool) $window['open'], null);
+            }
+
+            $error = $this->sender->last_send_error;
+            if (! $window['open'] && $has_attachments) {
+                $error = 'La ventana de 24hs está cerrada y un adjunto no se puede mandar por plantilla. '
+                    . 'Esperá a que el cliente escriba, o mandale un texto primero. ' . (string) $error;
+            }
+
+            return $this->mark_failed($message, $error, false, (bool) $window['open'], null);
+        }
+
+        // Ventana cerrada y mensaje de texto: va por plantilla, con el texto adentro.
+        $contact_name = $ticket->resolve_contact_display_name();
+        $operator_text = trim((string) ($message->body ?? ''));
+        $template_name = $this->resolve_template_name();
+
+        // El body guardado pasa a ser lo que el cliente realmente recibe, no solo el fragmento.
+        $message->body = $this->build_opening_body($contact_name, $admin_name, $operator_text);
+        $message->save();
+
+        $whatsapp_message_id = $this->sender->send_template(
+            $to,
+            $template_name,
+            [
+                $this->sanitize_template_variable($contact_name),
+                $this->sanitize_template_variable($admin_name),
+                $this->sanitize_template_variable($operator_text),
+            ],
+            $this->resolve_template_language(),
+            'Respuesta de soporte a ' . $contact_name . ' con la ventana cerrada'
+        );
+
+        if ($whatsapp_message_id !== null) {
+            return $this->mark_sent($message, $whatsapp_message_id, true, false, $template_name);
+        }
+
+        return $this->mark_failed($message, $this->sender->last_send_error, true, false, $template_name);
+    }
+
+    /**
+     * Estampa un envío exitoso en el mensaje.
+     *
+     * @param SupportMessage $message             Mensaje persistido.
+     * @param string         $whatsapp_message_id Id devuelto por Meta.
+     * @param bool           $used_template       Si salió por plantilla.
+     * @param bool           $window_open         Estado de la ventana al momento de mandar.
+     * @param string|null    $template_name       Plantilla usada, si hubo.
+     *
+     * @return array<string, mixed>
+     */
+    private function mark_sent(SupportMessage $message, string $whatsapp_message_id, bool $used_template, bool $window_open, $template_name): array
+    {
+        $message->whatsapp_message_id = $whatsapp_message_id;
+        $message->remote_delivery_status = null;
+        $message->save();
+
+        return [
+            'delivery'      => 'sent',
+            'message_id'    => $whatsapp_message_id,
+            'error'         => null,
+            'used_template' => $used_template,
+            'window_open'   => $window_open,
+            'template_name' => $template_name,
+        ];
+    }
+
+    /**
+     * Estampa un envío fallido en el mensaje.
+     *
+     * @param SupportMessage $message       Mensaje persistido.
+     * @param string|null    $error         Motivo del fallo.
+     * @param bool           $used_template Si se intentó por plantilla.
+     * @param bool           $window_open   Estado de la ventana al momento de mandar.
+     * @param string|null    $template_name Plantilla intentada, si hubo.
+     *
+     * @return array<string, mixed>
+     */
+    private function mark_failed(SupportMessage $message, $error, bool $used_template, bool $window_open, $template_name): array
+    {
+        $message->remote_delivery_status = 'not_received';
+        $message->save();
+
+        Log::channel('daily')->warning('SupportWhatsappOpenerService: no se pudo entregar el mensaje.', [
+            'message_id'    => $message->id,
+            'used_template' => $used_template,
+            'window_open'   => $window_open,
+            'error'         => $error,
+        ]);
+
+        return [
+            'delivery'      => 'failed',
+            'message_id'    => null,
+            'error'         => $error,
+            'used_template' => $used_template,
+            'window_open'   => $window_open,
+            'template_name' => $template_name,
         ];
     }
 
@@ -392,15 +514,4 @@ class SupportWhatsappOpenerService
         return $configured !== '' ? $configured : self::DEFAULT_TEMPLATE_LANGUAGE;
     }
 
-    /**
-     * Normaliza un teléfono con el mismo criterio que el resto de la integración.
-     *
-     * @param string $phone Teléfono en cualquier formato.
-     *
-     * @return string
-     */
-    public function normalize_phone(string $phone): string
-    {
-        return WhatsappNormalizer::normalize($phone);
-    }
 }

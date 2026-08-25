@@ -4,12 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Events\SupportMessageReceived;
 use App\Http\Controllers\CommonLaravel\BaseController;
+use App\Models\Admin;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
+use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -111,33 +113,30 @@ class SupportMessageController extends BaseController
         }
 
         try {
-            $whatsapp_send_service = new WhatsappSendService();
-            $message->loadMissing('attachments');
-            $whatsapp_message_id = $whatsapp_send_service->send_support_message(
-                (string) $ticket->whatsapp_phone,
-                $message
-            );
+            // Pasa por el opener y no derecho por WhatsappSendService: con la ventana de 24hs
+            // de Meta cerrada el texto libre se rechaza, y hasta ahora eso se perdía en
+            // silencio. Antes casi no pasaba —todo ticket de WhatsApp nacía de un entrante—,
+            // pero desde que el operador puede abrir la conversación él, es el caso normal.
+            $resultado = app(SupportWhatsappOpenerService::class)
+                ->deliver_follow_up($ticket, $message, $this->resolve_current_admin_name());
 
-            if ($whatsapp_message_id) {
-                $message->update([
-                    'whatsapp_message_id'     => $whatsapp_message_id,
-                    'remote_delivery_status'  => null,
-                ]);
-
+            if ($resultado['delivery'] === 'sent') {
                 Log::channel('daily')->info('SupportMessageController: mensaje enviado por WhatsApp.', [
                     'ticket_id'           => $ticket->id,
                     'to'                  => $ticket->whatsapp_phone,
-                    'whatsapp_message_id' => $whatsapp_message_id,
+                    'whatsapp_message_id' => $resultado['message_id'],
+                    'used_template'       => $resultado['used_template'],
                 ]);
 
                 return;
             }
 
             Log::channel('daily')->error('SupportMessageController: falló envío por WhatsApp.', [
-                'ticket_id' => $ticket->id,
-                'to'        => $ticket->whatsapp_phone,
+                'ticket_id'     => $ticket->id,
+                'to'            => $ticket->whatsapp_phone,
+                'used_template' => $resultado['used_template'],
+                'error'         => $resultado['error'],
             ]);
-            $this->mark_whatsapp_delivery_failed($message);
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('SupportMessageController: excepción al enviar por WhatsApp.', [
                 'ticket_id' => $ticket->id,
@@ -159,6 +158,19 @@ class SupportMessageController extends BaseController
     {
         $message->remote_delivery_status = 'not_received';
         $message->save();
+    }
+
+    /**
+     * Nombre del operador autenticado, para la plantilla de WhatsApp.
+     *
+     * @return string
+     */
+    private function resolve_current_admin_name(): string
+    {
+        $admin = Admin::find((int) Auth::id());
+        $admin_name = $admin !== null ? trim((string) $admin->name) : '';
+
+        return $admin_name !== '' ? $admin_name : 'Soporte';
     }
 
     /**

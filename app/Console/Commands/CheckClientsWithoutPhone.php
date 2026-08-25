@@ -40,11 +40,6 @@ class CheckClientsWithoutPhone extends Command
     protected $description = 'Crea una tarea cuando un cliente activo queda sin ningún teléfono cargado';
 
     /**
-     * Clave de admin_settings con el mapa de clientes ya alertados.
-     */
-    const KEY_ALERTED = 'support_missing_phone_alerted';
-
-    /**
      * Clave de admin_settings con los días antes de volver a alertar el mismo cliente.
      */
     const KEY_RECHECK_DAYS = 'support_missing_phone_recheck_days';
@@ -55,6 +50,11 @@ class CheckClientsWithoutPhone extends Command
     const DEFAULT_RECHECK_DAYS = 30;
 
     /**
+     * Origen que queda estampado en admin_tasks.created_via.
+     */
+    const CREATED_VIA = 'sin_telefono';
+
+    /**
      * Recorre los clientes activos y alerta los que no tienen ningún teléfono.
      *
      * @param ClientPhoneDirectory $phone_directory Criterio único de "teléfono del cliente".
@@ -63,36 +63,62 @@ class CheckClientsWithoutPhone extends Command
      */
     public function handle(ClientPhoneDirectory $phone_directory): int
     {
-        $alerted = $this->read_alerted_map();
         $recheck_days = $this->resolve_recheck_days();
         $created = 0;
 
         $clients = Client::where('is_active', true)->orderBy('id')->get();
 
         foreach ($clients as $client) {
-            $client_key = (string) $client->id;
-
             if ($phone_directory->has_any_phone($client)) {
-                // Ya tiene teléfono: se olvida la marca para que vuelva a alertar si se lo sacan.
-                unset($alerted[$client_key]);
                 continue;
             }
 
-            if ($this->was_alerted_recently($alerted, $client_key, $recheck_days)) {
+            if ($this->already_alerted($client, $recheck_days)) {
                 continue;
             }
 
             if ($this->create_task_for($client)) {
-                $alerted[$client_key] = now()->toIso8601String();
                 $created++;
             }
         }
 
-        $this->write_alerted_map($alerted);
-
         $this->info('Clientes activos revisados: ' . $clients->count() . '. Alertas nuevas: ' . $created . '.');
 
         return 0;
+    }
+
+    /**
+     * Indica si no corresponde volver a alertar a este cliente.
+     *
+     * El estado de la alerta se deduce de las tareas mismas y no de una marca aparte: una
+     * marca separada se desincroniza del panel, y ya pasó —una marca puesta sin haber creado
+     * tarea dejaba al cliente en silencio treinta días.
+     *
+     * @param Client $client       Cliente sin teléfono.
+     * @param int    $recheck_days Días antes de volver a avisar por el mismo cliente.
+     *
+     * @return bool
+     */
+    private function already_alerted(Client $client, int $recheck_days): bool
+    {
+        $title = self::task_title_for($client->resolve_display_name());
+
+        // Con la tarea todavía sin hacer no hay nada que agregar: dice justo lo mismo.
+        $abierta = AdminTask::where('created_via', self::CREATED_VIA)
+            ->where('is_done', false)
+            ->where('title', $title)
+            ->exists();
+
+        if ($abierta) {
+            return true;
+        }
+
+        // Cerrada, pero el cliente sigue sin teléfono: se vuelve a avisar, aunque no todos los
+        // días. Alguien la dio por hecha sin cargar nada y hay que insistir, no acosar.
+        return AdminTask::where('created_via', self::CREATED_VIA)
+            ->where('title', $title)
+            ->where('created_at', '>=', now()->subDays($recheck_days))
+            ->exists();
     }
 
     /**
@@ -117,22 +143,36 @@ class CheckClientsWithoutPhone extends Command
 
         try {
             $task = AdminTask::create([
-                'created_by_admin_id' => $this->resolve_creator_admin_id($owner_id),
+                // Creador cero: la tarea la crea el cron, no una persona. La columna no tiene
+                // foreign key y TaskCard ya oculta el "Creado por" si la relación viene vacía.
+                // Además AdminTaskNotificationService nunca le avisa al creador de una tarea:
+                // poner acá a un admin real dejaría sin aviso justo a quien tiene que enterarse.
+                'created_by_admin_id' => 0,
                 'assigned_admin_id'   => $owner_id,
                 'lead_id'             => null,
-                'title'               => 'Cargar el teléfono de ' . $client_name,
+                'title'               => self::task_title_for($client_name),
                 'content'             => 'El cliente ' . $client_name . ' está activo y no tiene ningún teléfono cargado: ni en la ficha, ni como empleado, ni en el lead del que salió. '
                     . 'Mientras siga así, cualquier mensaje de WhatsApp que mande va a caer en el pipeline de leads en vez de abrir un ticket de soporte, y nadie se va a enterar. '
                     . 'Cargalo en la ficha del cliente o como contacto.',
                 'todos'               => null,
                 'is_done'             => false,
                 'sort_order'          => 0,
-                'created_via'         => 'sin_telefono',
+                'created_via'         => self::CREATED_VIA,
             ]);
 
             $task->assigned_admins()->sync([$owner_id]);
 
-            AdminTaskNotificationService::create_for_task($task);
+            // En su propio try: si el aviso falla, la tarea ya quedó creada y el cliente tiene
+            // que quedar marcado igual. Si no, mañana se crea otra tarea idéntica, y pasado
+            // otra. Mismo criterio que ClaudeTaskIngestController y LeadAiService.
+            try {
+                AdminTaskNotificationService::create_for_task($task);
+            } catch (\Throwable $notification_exception) {
+                Log::channel('daily')->error('support:check-clients-without-phone: la tarea quedó creada pero el aviso falló.', [
+                    'task_id' => $task->id,
+                    'error'   => $notification_exception->getMessage(),
+                ]);
+            }
 
             Log::channel('daily')->info('support:check-clients-without-phone alertó un cliente.', [
                 'client_id' => $client->id,
@@ -168,80 +208,24 @@ class CheckClientsWithoutPhone extends Command
         return $first !== null ? (int) $first->id : null;
     }
 
-    /**
-     * Admin que figura como creador de la tarea.
-     *
-     * AdminTaskNotificationService nunca le avisa al creador de una tarea, así que el creador
-     * tiene que ser alguien distinto del destinatario o la alerta no le llega a nadie —que es
-     * justo la falla silenciosa que este comando viene a resolver. Si el admin es uno solo, la
-     * tarea igual queda creada y visible en el panel, pero sin aviso.
-     *
-     * @param int $owner_id Admin que va a recibir la alerta.
-     *
-     * @return int
-     */
-    private function resolve_creator_admin_id(int $owner_id): int
-    {
-        $other = Admin::where('id', '!=', $owner_id)->orderBy('id')->first(['id']);
-
-        return $other !== null ? (int) $other->id : $owner_id;
-    }
 
     /**
-     * Indica si ese cliente ya fue alertado dentro de la ventana de re-chequeo.
+     * Título de la tarea de alerta de un cliente.
      *
-     * @param array<string, string> $alerted      Mapa client_id => fecha ISO de la alerta.
-     * @param string                $client_key   Id del cliente como string.
-     * @param int                   $recheck_days Días antes de repetir.
+     * Es también la llave con la que se detecta si ya hay una tarea abierta para ese cliente,
+     * porque admin_tasks no tiene columna client_id.
      *
-     * @return bool
+     * @param string $client_name Razón social del cliente.
+     *
+     * @return string
      */
-    private function was_alerted_recently(array $alerted, string $client_key, int $recheck_days): bool
+    private static function task_title_for(string $client_name): string
     {
-        if (! isset($alerted[$client_key])) {
-            return false;
-        }
-
-        try {
-            $alerted_at = \Illuminate\Support\Carbon::parse($alerted[$client_key]);
-        } catch (\Throwable $exception) {
-            return false;
-        }
-
-        return $alerted_at->greaterThan(now()->subDays($recheck_days));
+        return 'Cargar el teléfono de ' . $client_name;
     }
 
-    /**
-     * Mapa de clientes ya alertados, guardado en admin_settings.
-     *
-     * No vive en una columna del cliente a propósito: es estado del aviso, no del cliente, y
-     * admin_settings.value es TEXT, así que no hace falta migración.
-     *
-     * @return array<string, string>
-     */
-    private function read_alerted_map(): array
-    {
-        $raw = (string) AdminSetting::get(self::KEY_ALERTED, '');
-        if (trim($raw) === '') {
-            return [];
-        }
 
-        $decoded = json_decode($raw, true);
 
-        return is_array($decoded) ? $decoded : [];
-    }
-
-    /**
-     * Persiste el mapa de clientes alertados.
-     *
-     * @param array<string, string> $alerted Mapa client_id => fecha ISO.
-     *
-     * @return void
-     */
-    private function write_alerted_map(array $alerted): void
-    {
-        AdminSetting::set(self::KEY_ALERTED, json_encode($alerted));
-    }
 
     /**
      * Días antes de volver a alertar el mismo cliente.

@@ -172,10 +172,21 @@ php artisan support:check-response-alerts
 ---
 
 #### `support:retry-pending-syncs`
-**Propósito:** Reintenta sincronizar mensajes de soporte que quedaron pendientes de envío hacia `empresa-api`.
+**Propósito:** Reintenta sincronizar mensajes de soporte que quedaron pendientes de envío hacia `empresa-api`. Solo los del canal `erp`: los tickets de WhatsApp no tienen contraparte allá.
 
 ```bash
 php artisan support:retry-pending-syncs
+```
+
+---
+
+#### `support:check-clients-without-phone`
+**Propósito:** Crea una tarea del panel cuando un cliente activo no tiene ningún teléfono cargado. Sin teléfono, el webhook de WhatsApp no lo reconoce como cliente y sus mensajes caen en el pipeline de leads, sin error ni log. Cuenta como teléfono el de la ficha, el de cualquier empleado, y el del lead promovido.
+
+Programado todos los días a las 09:00. No apila tareas: mientras la anterior siga abierta no crea otra, y si se cerró sin cargar el teléfono espera `support_missing_phone_recheck_days` días (30 por defecto, configurable en `admin_settings`) antes de insistir.
+
+```bash
+php artisan support:check-clients-without-phone
 ```
 
 ---

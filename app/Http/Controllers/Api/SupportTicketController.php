@@ -308,9 +308,16 @@ class SupportTicketController extends BaseController
         $validated = $request->validate([
             'client_id'      => 'required|integer|exists:clients,id',
             'whatsapp_phone' => 'required|string',
-            'body'           => 'required|string|min:1',
+            'body'           => 'required|string|max:4096',
             'name'           => 'nullable|string|max:255',
         ]);
+
+        // min:1 dejaba pasar un espacio en blanco: el servicio lo trimea, WhatsApp rechaza el
+        // cuerpo vacío y quedaba una conversación abierta con un mensaje vacío sin entregar.
+        $body = trim((string) $validated['body']);
+        if ($body === '') {
+            return response()->json(['error' => 'El mensaje no puede estar vacío.'], 422);
+        }
 
         $client = Client::findOrFail((int) $validated['client_id']);
 
@@ -325,7 +332,7 @@ class SupportTicketController extends BaseController
             $result = $opener->open(
                 $client,
                 (string) $validated['whatsapp_phone'],
-                (string) $validated['body'],
+                $body,
                 $admin,
                 (string) $request->input('name', '')
             );

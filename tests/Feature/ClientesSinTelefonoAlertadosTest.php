@@ -4,12 +4,13 @@ namespace Tests\Feature;
 
 use App\Console\Commands\CheckClientsWithoutPhone;
 use App\Models\Admin;
-use App\Models\AdminSetting;
 use App\Models\AdminTask;
+use App\Models\AdminTaskNotification;
 use App\Models\Client;
 use App\Models\ClientEmployee;
 use App\Models\Lead;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Carbon;
 use Tests\TestCase;
 
 /**
@@ -219,11 +220,14 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
     }
 
     /**
-     * Si el cliente carga el teléfono, se olvida la marca y vuelve a alertar si se lo sacan.
+     * Con la tarea todavía abierta no se apila otra; cerrada y pasado el plazo, vuelve a avisar.
+     *
+     * El caso que importa es el del medio: alguien marca la tarea como hecha sin haber cargado
+     * el teléfono. Si el comando se callara para siempre, la falla silenciosa volvería.
      *
      * @return void
      */
-    public function test_vuelve_a_alertar_si_le_sacan_el_telefono()
+    public function test_no_apila_tareas_pero_vuelve_a_avisar_pasado_el_plazo()
     {
         $this->crear_admins();
         $client = $this->crear_cliente('Distribuidora Ida Y Vuelta');
@@ -231,26 +235,97 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
         $this->correr();
         $this->assertSame(1, $this->tareas_de('Distribuidora Ida Y Vuelta'));
 
-        // Carga el teléfono: la marca de "ya alertado" tiene que borrarse.
-        $client->phone = '+5493413334444';
-        $client->save();
+        // La tarea sigue sin hacerse: no se apila otra idéntica.
         $this->correr();
-
         $this->assertSame(
-            '[]',
-            (string) AdminSetting::get(CheckClientsWithoutPhone::KEY_ALERTED, ''),
-            'La marca de alertado no se limpió cuando el cliente cargó el teléfono.'
+            1,
+            $this->tareas_de('Distribuidora Ida Y Vuelta'),
+            'Se apiló una segunda tarea con la primera todavía abierta.'
         );
 
-        // Se lo sacan de nuevo: tiene que volver a alertar sin esperar los 30 días.
-        $client->phone = null;
-        $client->save();
+        // Marcada como hecha, pero el teléfono nunca se cargó. El mismo día no insiste.
+        AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)
+            ->update(['is_done' => true]);
         $this->correr();
+        $this->assertSame(
+            1,
+            $this->tareas_de('Distribuidora Ida Y Vuelta'),
+            'Volvió a avisar el mismo día de haberse cerrado la tarea.'
+        );
+
+        // Pasado el plazo de re-chequeo, insiste.
+        Carbon::setTestNow(now()->addDays(CheckClientsWithoutPhone::DEFAULT_RECHECK_DAYS + 1));
+        $this->correr();
+        Carbon::setTestNow();
 
         $this->assertSame(
             2,
             $this->tareas_de('Distribuidora Ida Y Vuelta'),
-            'No volvió a alertar después de que le sacaran el teléfono.'
+            'No volvió a avisar por un cliente que sigue sin teléfono pasado el plazo.'
+        );
+    }
+
+    /**
+     * Si el cliente carga el teléfono, deja de alertarse.
+     *
+     * @return void
+     */
+    public function test_deja_de_alertar_cuando_se_carga_el_telefono()
+    {
+        $this->crear_admins();
+        $client = $this->crear_cliente('Distribuidora Que Cargo El Telefono');
+
+        $this->correr();
+        $this->assertSame(1, $this->tareas_de('Distribuidora Que Cargo El Telefono'));
+
+        $client->phone = '+5493413334444';
+        $client->save();
+
+        AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)
+            ->update(['is_done' => true]);
+        Carbon::setTestNow(now()->addDays(CheckClientsWithoutPhone::DEFAULT_RECHECK_DAYS + 1));
+        $this->correr();
+        Carbon::setTestNow();
+
+        $this->assertSame(
+            1,
+            $this->tareas_de('Distribuidora Que Cargo El Telefono'),
+            'Siguió alertando un cliente que ya tiene el teléfono cargado.'
+        );
+    }
+
+    /**
+     * La alerta le llega al dueño de soporte aunque sea el único admin de la base.
+     *
+     * AdminTaskNotificationService nunca le avisa al creador de una tarea. Si el creador fuera
+     * un admin real, con un solo admin cargado el aviso no le llegaría a nadie: la tarea
+     * quedaría en el panel y la falla seguiría siendo silenciosa, que es justo lo que este
+     * comando viene a evitar.
+     *
+     * @return void
+     */
+    public function test_avisa_aunque_haya_un_solo_admin()
+    {
+        $unico                           = new Admin();
+        $unico->name                     = 'Lucas';
+        $unico->email                    = 'unico-admin@test.local';
+        $unico->password                 = bcrypt('secret');
+        $unico->is_default_support_owner = true;
+        $unico->save();
+
+        $this->crear_cliente('Distribuidora Un Solo Admin');
+
+        $this->correr();
+
+        $task = AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)
+            ->latest('id')
+            ->first();
+
+        $this->assertNotNull($task, 'No se creó la tarea de alerta.');
+        $this->assertSame(
+            1,
+            AdminTaskNotification::where('admin_task_id', $task->id)->where('admin_id', $unico->id)->count(),
+            'Con un solo admin la alerta no le llegó a nadie.'
         );
     }
 }

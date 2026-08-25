@@ -26,6 +26,16 @@ class WhatsappSessionWindowService
     const WINDOW_HOURS = 24;
 
     /**
+     * Entrantes de las últimas 24hs por canal, cacheados durante el request.
+     *
+     * El endpoint de contactos pregunta por la ventana una vez por teléfono del cliente, y sin
+     * esto un cliente con seis empleados traía seis veces el mismo conjunto de filas.
+     *
+     * @var array<string, \Illuminate\Support\Collection>
+     */
+    private $rows_cache = [];
+
+    /**
      * Estado de la ventana para un teléfono.
      *
      * @param string $phone Teléfono en cualquier formato.
@@ -95,15 +105,17 @@ class WhatsappSessionWindowService
      */
     private function find_support_inbound(string $phone, $cutoff)
     {
-        $rows = DB::table('support_messages')
-            ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
-            ->where('support_messages.sender_type', 'user')
-            ->whereNotNull('support_messages.delivered_at')
-            ->where('support_messages.delivered_at', '>=', $cutoff)
-            ->whereNotNull('support_tickets.whatsapp_phone')
-            ->select('support_tickets.whatsapp_phone as phone', 'support_messages.delivered_at as at')
-            ->orderByDesc('support_messages.delivered_at')
-            ->get();
+        $rows = $this->rows_for('soporte', function () use ($cutoff) {
+            return DB::table('support_messages')
+                ->join('support_tickets', 'support_tickets.id', '=', 'support_messages.support_ticket_id')
+                ->where('support_messages.sender_type', 'user')
+                ->whereNotNull('support_messages.delivered_at')
+                ->where('support_messages.delivered_at', '>=', $cutoff)
+                ->whereNotNull('support_tickets.whatsapp_phone')
+                ->select('support_tickets.whatsapp_phone as phone', 'support_messages.delivered_at as at')
+                ->orderByDesc('support_messages.delivered_at')
+                ->get();
+        });
 
         return $this->first_matching_row($rows, $phone, 'soporte');
     }
@@ -118,14 +130,16 @@ class WhatsappSessionWindowService
      */
     private function find_lead_inbound(string $phone, $cutoff)
     {
-        $rows = DB::table('lead_messages')
-            ->join('leads', 'leads.id', '=', 'lead_messages.lead_id')
-            ->where('lead_messages.sender', 'lead')
-            ->where('lead_messages.created_at', '>=', $cutoff)
-            ->whereNotNull('leads.phone')
-            ->select('leads.phone as phone', 'lead_messages.created_at as at')
-            ->orderByDesc('lead_messages.created_at')
-            ->get();
+        $rows = $this->rows_for('leads', function () use ($cutoff) {
+            return DB::table('lead_messages')
+                ->join('leads', 'leads.id', '=', 'lead_messages.lead_id')
+                ->where('lead_messages.sender', 'lead')
+                ->where('lead_messages.created_at', '>=', $cutoff)
+                ->whereNotNull('leads.phone')
+                ->select('leads.phone as phone', 'lead_messages.created_at as at')
+                ->orderByDesc('lead_messages.created_at')
+                ->get();
+        });
 
         return $this->first_matching_row($rows, $phone, 'leads');
     }
@@ -143,16 +157,35 @@ class WhatsappSessionWindowService
      */
     private function find_implementation_inbound(string $phone, $cutoff)
     {
-        $rows = DB::table('implementation_messages')
-            ->where('direction', 'inbound')
-            ->where('created_at', '>=', $cutoff)
-            ->whereNotNull('phone')
-            ->where('phone', '!=', '')
-            ->select('phone', 'created_at as at')
-            ->orderByDesc('created_at')
-            ->get();
+        $rows = $this->rows_for('implementacion', function () use ($cutoff) {
+            return DB::table('implementation_messages')
+                ->where('direction', 'inbound')
+                ->where('created_at', '>=', $cutoff)
+                ->whereNotNull('phone')
+                ->where('phone', '!=', '')
+                ->select('phone', 'created_at as at')
+                ->orderByDesc('created_at')
+                ->get();
+        });
 
         return $this->first_matching_row($rows, $phone, 'implementacion');
+    }
+
+    /**
+     * Devuelve las filas de un canal, consultándolas una sola vez por request.
+     *
+     * @param string   $key      Canal.
+     * @param callable $resolver Consulta que devuelve las filas.
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    private function rows_for(string $key, callable $resolver)
+    {
+        if (! array_key_exists($key, $this->rows_cache)) {
+            $this->rows_cache[$key] = $resolver();
+        }
+
+        return $this->rows_cache[$key];
     }
 
     /**
