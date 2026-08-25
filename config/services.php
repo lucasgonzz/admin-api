@@ -34,6 +34,21 @@ return [
     'client_api' => [
         'timeout' => env('CLIENT_API_TIMEOUT', 15),
         'retries' => env('CLIENT_API_RETRIES', 2),
+        /*
+         * Techo propio, en segundos, para la única llamada saliente que dispara una operación
+         * destructiva y larga del otro lado: el demo setup (RunDemoSetupService).
+         *
+         * 🔴 Va aparte del 'timeout' genérico y de su multiplicador ×20 a propósito. Ese techo lo
+         * comparten PublishVersionService y compañía, que hacen operaciones cortas; subírselo a
+         * todos para que entre el setup les cambiaría el comportamiento a cambio de nada.
+         *
+         * 900 y no 300: medido el 25/8/2026, una corrida sola de DemoSetupHelper::run tarda
+         * 565,7 s (9 m 26 s). Con el techo viejo de 300 s el admin daba por muerta una corrida que
+         * seguía perfectamente viva del otro lado —el endpoint corre con ignore_user_abort(true) y
+         * set_time_limit(0)—, la marcaba `fallido`, el panel volvía a mostrar el botón, y el
+         * segundo click le hacía otro migrate:fresh a la base que la primera estaba sembrando.
+         */
+        'demo_setup_timeout' => env('CLIENT_API_DEMO_SETUP_TIMEOUT', 900),
     ],
 
     // Integración inbound desde empresa-api (rutas /api/inbound/*).

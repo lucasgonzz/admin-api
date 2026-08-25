@@ -11,6 +11,7 @@ use App\Services\ImplementationSettings;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
 use App\Services\ClientEmpresaApiUrlResolver;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -39,6 +40,25 @@ class RunDemoSetupService
 
     /** Zona horaria de referencia de todo el ciclo de demo (misma que usan el resto de los comandos). */
     const TZ = 'America/Argentina/Buenos_Aires';
+
+    /**
+     * Estado de `demo_setup_status` para una corrida cuyo desenlace NO se conoce.
+     *
+     * 🔴 No es un sinónimo elegante de `fallido`: es información distinta. `fallido` afirma que el
+     * armado salió mal; `sin_confirmar` dice que el admin dejó de escuchar (timeout de la llamada)
+     * o que la instancia avisó que ya tenía una corrida viva (HTTP 409). En los dos casos la
+     * corrida del otro lado puede estar sembrando la base en este mismo instante, así que mostrar
+     * el botón "Correr demo setup ahora" encima sería exactamente el segundo `migrate:fresh` que
+     * esta misión vino a evitar.
+     *
+     * Cabe sin migración: `demo_setup_status` ya es un string(20) con default `pendiente`.
+     *
+     * 🔴 Y NO es un estado terminal: lo destraba `leads:check-demo-setup-timeout`, que es otro
+     * proceso distinto del que lo puso acá. Es la regla que dejó escrita el 13/8/2026 en
+     * APRENDER_NO_PARCHEAR después de que tres leads quedaran colgados en `ejecutandose` con el
+     * error en NULL para siempre. Un estado intermedio sin vencimiento es una fuga, no un estado.
+     */
+    const ESTADO_SIN_CONFIRMAR = 'sin_confirmar';
 
     /**
      * Servicio que centraliza el cálculo de vencimiento del token de ingreso a la demo
@@ -144,38 +164,38 @@ class RunDemoSetupService
             $response = Http::withHeaders([
                     'Accept'          => 'application/json',
                 ])
-                // El timeout default es bajo; el setup puede tardar minutos entre migraciones y seeders
-                ->timeout((int) config('services.client_api.timeout', 15) * 20)
-                /* 🔴 UN solo intento para la dinámica nueva, a diferencia del resto de los
-                 * llamadores de este cliente HTTP (misión 60). No es preferencia de estilo:
+                /* Techo propio y alto (900 s por default), no el genérico ×20 de los otros
+                 * servicios. Una corrida sola del setup tardó 565,7 s medidos el 25/8/2026: con los
+                 * 300 s de antes, el camino normal terminaba SIEMPRE en timeout mientras la
+                 * instancia seguía sembrando la base tan campante. Ver el comentario largo de
+                 * `services.client_api.demo_setup_timeout` en config/services.php. */
+                ->timeout((int) config('services.client_api.demo_setup_timeout', 900))
+                /* 🔴 SIN `->retry()`, y esto no se repone. Cualquiera que venga a "emparejarlo con
+                 * el resto de los llamadores de este cliente HTTP" tiene que leer esto primero:
                  *
+                 *  - En Laravel 8, con `tries > 1` una respuesta NO exitosa se relanza
+                 *    (`PendingRequest::send`, línea 702 del vendor). O sea que el reintento no es
+                 *    sólo para errores de red: un 500 del armado vuelve a hacer el POST y le
+                 *    re-dispara a la instancia el `migrate:fresh` ENTERO 500 ms después. Es la
+                 *    única llamada de este repo que dispara una operación destructiva del otro
+                 *    lado; las demás (PublishVersionService y compañía) son idempotentes o
+                 *    baratas, y por eso `config('services.client_api.retries')` sigue intacto: lo
+                 *    comparten ellas, no esta.
                  *  - Reintentar un timeout del servidor da el mismo timeout. Duplica la espera con
                  *    cero probabilidad de éxito, y era justamente lo que empujaba a admin-api más
                  *    allá de su propio techo de ejecución.
-                 *  - Peor: el segundo intento le manda otro `migrate:fresh` a una instancia que
-                 *    puede estar todavía procesando el primero. Es la única llamada de este repo
-                 *    que dispara una operación destructiva y larga del otro lado; las demás
-                 *    (PublishVersionService y compañía) son idempotentes o baratas, y por eso
-                 *    `config('services.client_api.retries')` NO se toca: lo comparten.
-                 *  - Efecto lateral buscado: con `tries = 1` el cliente de Laravel deja de llamar
-                 *    solo a `$response->throw()`, así que una respuesta no exitosa vuelve por el
-                 *    camino normal y la maneja el `if ($response->successful())` de acá abajo, que
-                 *    guarda el cuerpo. Antes se convertía en excepción y el mensaje llegaba
-                 *    truncado por `RequestException`.
+                 *  - Y con `tries = 1` el cliente de Laravel deja de llamar solo a
+                 *    `$response->throw()`: la respuesta no exitosa vuelve por el camino normal y la
+                 *    maneja el `if` de acá abajo, que es lo que permite distinguir el 409 del 500.
+                 *    Con reintentos, un 409 llegaba convertido en `RequestException` al `catch` y
+                 *    con el mensaje truncado — indistinguible de un fallo real del armado.
                  *
-                 * 🔴 Y por qué la dinámica ACTUAL conserva los reintentos de la config, aunque el
-                 * argumento de arriba también le aplicaría: lo corrigió la verificación de esta
-                 * misión. `run()` es compartido —lo llaman el comando, el job y el botón manual del
-                 * panel, ninguno mirando la dinámica—, así que bajarlo a 1 para todos le cambiaba
-                 * tres cosas a los leads de producción que hoy andan: perdían el reintento que
-                 * salva un 502 transitorio, les cambiaba el formato del error guardado, y dejaban
-                 * de generar el `Log::error` del catch (con `tries = 1` la respuesta no exitosa ya
-                 * no se convierte en excepción). El criterio de aceptación de la misión es
-                 * explícito y no admite lectura: *ningún* lead con `demo_experiencia` distinto de
-                 * 'nueva' cambia de comportamiento en *ningún* camino. La mejora entra por la
-                 * dinámica nueva, que es donde se midió el problema; llevarla a la actual es una
-                 * decisión de producto aparte y está escalada. */
-                ->retry($lead->usa_experiencia_demo_nueva() ? 1 : (int) config('services.client_api.retries', 2), 500)
+                 * 🔴 Sí: esto le cambia el comportamiento también a la dinámica ACTUAL, que hasta
+                 * la misión 60 conservaba los reintentos de la config. Es a propósito y está
+                 * decidido en el plan del 25/8/2026: el argumento de arriba no depende de la
+                 * dinámica del lead, porque la base que se vacía es la misma. Lo que pierde un lead
+                 * 'actual' es el reintento que salvaba un 502 transitorio; lo que gana es que un
+                 * 500 del armado no le dispare un segundo `migrate:fresh`. */
                 ->post($erp_api_url . '/api/admin-sync/demo-setup', $payload);
 
             if ($response->successful()) {
@@ -187,18 +207,58 @@ class RunDemoSetupService
                 return $lead->refresh();
             }
 
+            /* 🔴 409 = la instancia ya tiene un demo setup corriendo, y NO tocó la base para
+             * decírnoslo (empresa-api toma un candado con flock antes de llamar al helper). Eso no
+             * es un fallo del armado: es la confirmación de que hay otra corrida viva. Marcarlo
+             * `fallido` haría reaparecer el botón del panel justo encima de esa corrida, que es la
+             * secuencia exacta que vació la base de la demo.
+             *
+             * Compatibilidad hacia atrás: una instancia con un deploy anterior al 22/8/2026 nunca
+             * devuelve 409, así que para ella esta rama simplemente no existe y todo sigue como
+             * antes. No hace falta ninguna negociación de versión. */
+            if ($response->status() === 409) {
+                Log::info('RunDemoSetupService: la instancia ya tenía un demo setup corriendo (HTTP 409).', [
+                    'lead_id' => $lead->id,
+                    'demo_id' => $demo->id,
+                ]);
+
+                return $this->mark_sin_confirmar(
+                    $lead,
+                    'Ya hay un demo setup corriendo en la instancia. No se disparó otro; esperá a que termine el que está en curso.'
+                );
+            }
+
             /* 2000 y no 500: la columna es TEXT y el cuerpo de un 500 de Laravel trae el mensaje
              * de la excepción y el principio del stack, que es lo único que se tiene para saber
              * por qué falló el armado. Con 500 caracteres el mensaje útil quedaba cortado justo
              * cuando más falta hace.
              *
-             * Para la dinámica ACTUAL esta rama sigue siendo inalcanzable, igual que antes de la
-             * misión 60: con sus reintentos de config el cliente llama solo a `$response->throw()`
-             * y la respuesta no exitosa sale por el `catch`, con su `Log::error` y su formato de
-             * mensaje de siempre. */
+             * El resto de los códigos no exitosos sigue yendo a `fallido`, como siempre. */
             return $this->mark_failed(
                 $lead,
                 'HTTP ' . $response->status() . ': ' . substr($response->body(), 0, 2000)
+            );
+        } catch (ConnectionException $e) {
+            /* 🔴 ANTES del catch genérico, y no es orden estético: un timeout de la llamada no es
+             * un fallo del setup, es "no sé cómo terminó".
+             *
+             * `ConnectionException` es lo que tira el cliente HTTP de Laravel cuando se vence el
+             * `timeout()` de arriba o cuando no se pudo conectar. Del otro lado el endpoint corre
+             * con `ignore_user_abort(true)` y `set_time_limit(0)` a propósito: que nosotros dejemos
+             * de escuchar NO detiene nada. La corrida sigue viva, sembrando la base, y en unos
+             * minutos puede terminar bien. Escribir `fallido` ahí afirma algo que nadie midió, y
+             * peor: devuelve el botón "Correr demo setup ahora" al panel, cuyo segundo click le
+             * hace un `migrate:fresh` a la base que la primera corrida está llenando. Es la cadena
+             * causal completa del bug que esta misión vino a cortar. */
+            Log::warning('RunDemoSetupService@run: sin respuesta del setup (timeout o conexión caída). La corrida puede seguir viva.', [
+                'lead_id' => $lead->id,
+                'demo_id' => $demo->id,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return $this->mark_sin_confirmar(
+                $lead,
+                'Sin respuesta del setup (timeout). La corrida puede seguir viva en la instancia.'
             );
         } catch (\Throwable $e) {
             Log::error('RunDemoSetupService@run error: ' . $e->getMessage(), [
@@ -593,6 +653,53 @@ class RunDemoSetupService
         $lead->update($campos);
 
         return $token;
+    }
+
+    /**
+     * Helper interno que deja el Lead en `sin_confirmar` con el motivo dado, y devuelve el lead
+     * refrescado.
+     *
+     * Se usa en los dos casos en que el admin NO sabe cómo terminó el armado: el timeout de la
+     * llamada y el HTTP 409 de una instancia que ya tenía una corrida viva. Ver el docblock de
+     * `ESTADO_SIN_CONFIRMAR` para el por qué de que no sea `fallido`.
+     *
+     * 🔴 La guarda de `exitoso` va para las DOS dinámicas, a diferencia de `mark_failed()`, y el
+     * motivo es distinto del de allá. Acá el orden "la instancia termina bien → recién después se
+     * vence nuestra espera" no es una hipótesis: es EL caso normal desde que el techo son 900 s y
+     * la instancia avisa por el canal de eventos apenas termina. Pisar un `exitoso` real con
+     * `sin_confirmar` dejaría al lead sin botón de ingreso teniendo la demo perfectamente armada.
+     * Y para la dinámica actual la guarda no cambia nada que se pueda notar: su único `exitoso`
+     * posible es el de un POST anterior, y volver a correr el setup para que se venza la espera no
+     * es información suficiente para borrar ese dato.
+     *
+     * Como en `mark_failed()`, la condición viaja ADENTRO del UPDATE y no en un `if` sobre `$lead`:
+     * la instancia en memoria trae el estado de hace hasta 900 segundos.
+     *
+     * @param Lead   $lead
+     * @param string $reason Motivo, en castellano, que se muestra en el panel.
+     *
+     * @return Lead
+     */
+    protected function mark_sin_confirmar(Lead $lead, string $reason)
+    {
+        $marcados = Lead::where('id', $lead->id)
+            ->where('demo_setup_status', '!=', 'exitoso')
+            ->update([
+                'demo_setup_status'     => self::ESTADO_SIN_CONFIRMAR,
+                'demo_setup_last_error' => $reason,
+                // A mano porque el query builder no estampa los timestamps, y el panel ordena por
+                // esta columna. Mismo criterio que mark_failed().
+                'updated_at'            => now(),
+            ]);
+
+        if ($marcados !== 1) {
+            Log::info('RunDemoSetupService: no se escribió el sin_confirmar (el setup ya estaba en exitoso, o el mismo motivo ya estaba escrito).', [
+                'lead_id'           => $lead->id,
+                'motivo_descartado' => $reason,
+            ]);
+        }
+
+        return $lead->refresh();
     }
 
     /**
