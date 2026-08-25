@@ -2,11 +2,13 @@
 
 namespace Tests\Feature;
 
+use App\Models\AdminSetting;
 use App\Models\Demo;
 use App\Models\Lead;
 use App\Services\LeadDemoSettings;
 use App\Services\RunDemoSetupService;
 use Carbon\Carbon;
+use Database\Seeders\SubirDemoSetupTimeoutMinutosSeeder;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
@@ -19,17 +21,19 @@ use Tests\TestCase;
  *
  * Lo que se midió el 25/8/2026 y estos tests protegen:
  *
- *  - Una corrida sola de `DemoSetupHelper::run()` tarda 565,7 s (9 m 26 s), contra el techo de
+ *  - Una corrida SANA de `DemoSetupHelper::run()` tarda 565,7 s (9 m 26 s), contra el techo de
  *    300 s que admin-api le daba (`CLIENT_API_TIMEOUT × 20`). O sea que el camino normal terminaba
  *    SIEMPRE en timeout.
  *  - Vencido el techo, la corrida del otro lado sigue viva igual (`ignore_user_abort(true)` +
  *    `set_time_limit(0)`, a propósito), pero el admin la marcaba `fallido`, el panel volvía a
  *    mostrar el botón, y el segundo click le hacía otro `migrate:fresh` a la base que la primera
  *    corrida estaba sembrando.
+ *  - Y el umbral del comando de vencimiento, en 10 minutos, era una de las causas y no la red:
+ *    declaraba muerto un armado de 9 m 26 s que estaba andando bien.
  *
  * De ahí el estado `sin_confirmar`: no es un sinónimo de `fallido`, es "no sé cómo terminó". Y de
- * ahí que tenga su propio vencimiento — un estado intermedio sin un proceso que lo destrabe es la
- * fuga del 13/8/2026 con otra cara (APRENDER_NO_PARCHEAR).
+ * ahí que lo destrabe `leads:vencer-demo-setups-colgados` — un estado intermedio sin un proceso que
+ * lo saque de ahí es la fuga del 13/8/2026 con otra cara (APRENDER_NO_PARCHEAR).
  */
 class DemoSetupSinCorridasSolapadasTest extends TestCase
 {
@@ -110,6 +114,16 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
         $lead->save();
 
         return $lead->refresh();
+    }
+
+    /**
+     * Momento anterior al umbral de vencimiento, para dar por colgado un setup.
+     *
+     * @return Carbon
+     */
+    private function ya_vencido(): Carbon
+    {
+        return $this->momento_base()->copy()->subMinutes(LeadDemoSettings::get_setup_timeout_minutos() + 5);
     }
 
     /**
@@ -235,35 +249,38 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
     }
 
     /**
-     * 5. El vencimiento saca del limbo a `sin_confirmar` Y a `ejecutandose`.
+     * 5. El vencimiento saca del limbo a `sin_confirmar` Y a `ejecutandose`, con motivos distintos.
      *
-     * Los dos estados a propósito: si el PHP del admin se muere por `max_execution_time` durante el
-     * botón manual, el lead queda en `ejecutandose` con el error en NULL — la fuga exacta del
-     * 13/8/2026. Un estado intermedio necesita un proceso que lo destrabe que no sea el mismo que
-     * lo puso ahí.
+     * Un solo comando para los dos estados (`leads:vencer-demo-setups-colgados`): dos vencedores
+     * corriendo cada minuto con umbrales distintos es exactamente la clase de cosa que después
+     * nadie entiende.
+     *
+     * Y los motivos no dicen lo mismo porque no se sabe lo mismo: desde `ejecutandose` no hubo
+     * ningún reporte y lo más probable es que el proceso se haya muerto; desde `sin_confirmar` sí
+     * se sabe que la corrida seguía viva del otro lado.
      */
     public function test_el_vencimiento_destraba_los_dos_estados_intermedios(): void
     {
         Carbon::setTestNow($this->momento_base());
 
-        $timeout = LeadDemoSettings::get_setup_sin_confirmar_timeout_minutos();
-        $viejo   = $this->momento_base()->copy()->subMinutes($timeout + 5);
-
         $sin_confirmar = $this->crear_lead(
             Lead::EXPERIENCIA_NUEVA,
             RunDemoSetupService::ESTADO_SIN_CONFIRMAR,
-            $viejo
+            $this->ya_vencido()
         );
-        $ejecutandose = $this->crear_lead(Lead::EXPERIENCIA_NUEVA, 'ejecutandose', $viejo);
+        $ejecutandose = $this->crear_lead(Lead::EXPERIENCIA_NUEVA, 'ejecutandose', $this->ya_vencido());
 
-        $this->artisan('leads:check-demo-setup-timeout')->assertExitCode(0);
+        $this->artisan('leads:vencer-demo-setups-colgados')->assertExitCode(0);
 
         $this->assertSame('fallido', (string) $sin_confirmar->refresh()->demo_setup_status);
-        $this->assertStringContainsString('no reportó resultado', (string) $sin_confirmar->demo_setup_last_error);
-        $this->assertStringContainsString('sin_confirmar', (string) $sin_confirmar->demo_setup_last_error);
+        $this->assertStringContainsString(
+            'seguía viva en la instancia',
+            (string) $sin_confirmar->demo_setup_last_error,
+            'Desde sin_confirmar se sabe que la corrida estaba viva: el texto no puede decir que el proceso murió.'
+        );
 
         $this->assertSame('fallido', (string) $ejecutandose->refresh()->demo_setup_status);
-        $this->assertStringContainsString('ejecutandose', (string) $ejecutandose->demo_setup_last_error);
+        $this->assertStringContainsString('no reportó resultado', (string) $ejecutandose->demo_setup_last_error);
     }
 
     /**
@@ -288,7 +305,7 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
             null
         );
 
-        $this->artisan('leads:check-demo-setup-timeout')->assertExitCode(0);
+        $this->artisan('leads:vencer-demo-setups-colgados')->assertExitCode(0);
 
         $this->assertSame(
             RunDemoSetupService::ESTADO_SIN_CONFIRMAR,
@@ -301,7 +318,52 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
     }
 
     /**
-     * 7. 🔴 Un `exitoso` ya escrito no se pisa con `sin_confirmar`.
+     * 7. 🔴 El criterio de dinámica es DISTINTO para cada estado, y a propósito.
+     *
+     *  - Un lead 'actual' en `sin_confirmar` vencido **sí** se destraba. Ese estado nació el
+     *    25/8/2026 y lo escribe `RunDemoSetupService` para las dos dinámicas (ni el timeout ni el
+     *    409 miran la dinámica del lead). Si el vencimiento lo barriera sólo para la nueva, un lead
+     *    'actual' quedaría colgado ahí para siempre: la fuga del 13/8/2026 otra vez.
+     *  - Un lead 'actual' en `ejecutandose` vencido **no** se toca. Ahí sí hay leads viejos parados,
+     *    y el criterio de aceptación de la misión 60 sigue valiendo: ningún lead con
+     *    `demo_experiencia` distinto de 'nueva' cambia de comportamiento en ningún camino.
+     *
+     * Si alguien "unifica" el filtro en cualquiera de las dos direcciones, este test se pone rojo.
+     */
+    public function test_el_criterio_de_dinamica_es_distinto_para_cada_estado(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $actual_sin_confirmar = $this->crear_lead(
+            Lead::EXPERIENCIA_ACTUAL,
+            RunDemoSetupService::ESTADO_SIN_CONFIRMAR,
+            $this->ya_vencido()
+        );
+        $actual_ejecutandose = $this->crear_lead(
+            Lead::EXPERIENCIA_ACTUAL,
+            'ejecutandose',
+            $this->ya_vencido()
+        );
+
+        $this->artisan('leads:vencer-demo-setups-colgados')->assertExitCode(0);
+
+        $this->assertSame(
+            'fallido',
+            (string) $actual_sin_confirmar->refresh()->demo_setup_status,
+            'sin_confirmar se destraba para las dos dinámicas: nadie puede quedarse colgado ahí.'
+        );
+        $this->assertStringContainsString('seguía viva en la instancia', (string) $actual_sin_confirmar->demo_setup_last_error);
+
+        $this->assertSame(
+            'ejecutandose',
+            (string) $actual_ejecutandose->refresh()->demo_setup_status,
+            'ejecutandose sigue siendo sólo de la dinámica nueva, como desde la misión 60.'
+        );
+        $this->assertEmpty((string) $actual_ejecutandose->demo_setup_last_error);
+    }
+
+    /**
+     * 8. 🔴 Un `exitoso` ya escrito no se pisa con `sin_confirmar`.
      *
      * Es el orden normal desde que el techo de la llamada son 900 s: la instancia termina de
      * armarse, avisa por el canal de eventos (`demo.setup.completado` → `exitoso`), y recién
@@ -324,5 +386,45 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
         (new RunDemoSetupService())->run($lead);
 
         $this->assertSame('exitoso', (string) $lead->refresh()->demo_setup_status);
+    }
+
+    /**
+     * 9. 🔴 El seeder sube el umbral viejo a 25, y no pisa uno más alto elegido a mano.
+     *
+     * El default en código no alcanza para producción: `seed_defaults_if_missing()` sólo escribe
+     * las claves en null, y allá `demo_setup_timeout_minutos` ya vale 10. La clave tampoco es
+     * editable desde el panel. Sin el seeder, el arreglo se queda en el repo.
+     *
+     * Y el piso es un piso, no un techo: 25 salieron de medir 9 m 26 s en local, y el hosting
+     * compartido puede necesitar más. Si alguien eligió 40, se respeta.
+     */
+    public function test_el_seeder_sube_el_umbral_viejo_y_respeta_uno_mas_alto(): void
+    {
+        // (a) El caso de producción: la clave existe y vale menos que el piso medido.
+        AdminSetting::set(LeadDemoSettings::KEY_SETUP_TIMEOUT_MINUTOS, '10');
+
+        $this->seed(SubirDemoSetupTimeoutMinutosSeeder::class);
+
+        $this->assertSame(
+            25,
+            (int) AdminSetting::get(LeadDemoSettings::KEY_SETUP_TIMEOUT_MINUTOS),
+            'Un umbral de 10 minutos declara muerto un armado sano de 9 m 26 s.'
+        );
+
+        // (b) Idempotente: correrlo de nuevo sobre una base ya corregida no cambia nada.
+        $this->seed(SubirDemoSetupTimeoutMinutosSeeder::class);
+
+        $this->assertSame(25, (int) AdminSetting::get(LeadDemoSettings::KEY_SETUP_TIMEOUT_MINUTOS));
+
+        // (c) Sólo sube: un valor mayor elegido a mano no se toca.
+        AdminSetting::set(LeadDemoSettings::KEY_SETUP_TIMEOUT_MINUTOS, '40');
+
+        $this->seed(SubirDemoSetupTimeoutMinutosSeeder::class);
+
+        $this->assertSame(
+            40,
+            (int) AdminSetting::get(LeadDemoSettings::KEY_SETUP_TIMEOUT_MINUTOS),
+            'El seeder nunca baja el umbral: 25 es un piso, no un techo.'
+        );
     }
 }
