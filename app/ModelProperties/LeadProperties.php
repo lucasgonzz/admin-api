@@ -261,39 +261,6 @@ class LeadProperties
                 'readonly' => true,
             ],
             [
-                /*
-                 * Token de ingreso directo a la demo (grupo 233, prompt 01). Solo lectura:
-                 * se emite por código en RunDemoSetupService, nunca editable a mano.
-                 */
-                'key' => 'demo_ingreso_token',
-                'text' => 'Token de ingreso',
-                'type' => 'text',
-                'value' => '',
-                'only_show' => true,
-                'exclude_on_update' => true,
-                'not_show_on_table' => true,
-            ],
-            [
-                'key' => 'demo_ingreso_token_expira_at',
-                'text' => 'Vencimiento token de ingreso',
-                'type' => 'date',
-                'value' => null,
-                'only_show' => true,
-                'exclude_on_update' => true,
-                'not_show_on_table' => true,
-                'width' => 170,
-            ],
-            [
-                'key' => 'demo_ingreso_token_revocado_at',
-                'text' => 'Token revocado',
-                'type' => 'date',
-                'value' => null,
-                'only_show' => true,
-                'exclude_on_update' => true,
-                'not_show_on_table' => true,
-                'width' => 170,
-            ],
-            [
                 'key' => 'personalized_demo_videos',
                 'text' => 'Videos tutoriales personalizados (mail demo)',
                 'type' => 'custom',
@@ -375,6 +342,74 @@ class LeadProperties
                 'text' => 'Lista de precio 3',
                 'type' => 'text',
                 'value' => '',
+            ],
+
+            /*
+             * Acceso a la demo. Va al FINAL del grupo Demo y no en el medio, donde estaba hasta el
+             * 25/8/2026, por un motivo de layout y no de gusto: el formulario genérico pinta cada
+             * campo en una columna `col-lg-3`, y el token son 64 caracteres sin un solo espacio.
+             * Estando en el medio del grupo, ese chorro se comía las columnas de al lado y tapaba
+             * los campos que seguían. Ver además la nota de `demo_ingreso_token` sobre por qué
+             * dejó de ser `only_show`.
+             */
+            [
+                /*
+                 * Link completo de ingreso a la demo, con el token ya puesto: es el que abre la
+                 * demo con la sesión iniciada y con el panel de tutoriales a la vista.
+                 *
+                 * `not_persisted_on_model`: no es una columna, es el accesor
+                 * `Lead::getDemoIngresoUrlAttribute()`, que `LeadController::prepare_lead_for_detail_json()`
+                 * inyecta en la respuesta del detalle. Componente propio (y no un `text` a secas)
+                 * para poder ofrecer copiar y abrir sin obligar a seleccionar el texto a mano.
+                 */
+                'key' => 'demo_ingreso_url',
+                'text' => 'Link de ingreso a la demo',
+                'type' => 'custom',
+                'custom_component' => 'lead_demo_ingreso_link',
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+                'exclude_on_update' => true,
+                'full_width' => true,
+                'value' => '',
+            ],
+            [
+                /*
+                 * Token de ingreso directo a la demo (grupo 233, prompt 01). Solo lectura:
+                 * se emite por código en RunDemoSetupService, nunca editable a mano.
+                 *
+                 * 🔴 `exclude_on_update` SIN `only_show`, y esa combinación es deliberada: el
+                 * formulario genérico pinta los `only_show` como un `<p>` suelto, que con un valor
+                 * largo y sin espacios desborda la columna y tapa lo de al lado (reportado por
+                 * Lucas el 25/8/2026). Sin `only_show` sale como `<input readonly>`, que recorta el
+                 * texto adentro de su caja y además deja seleccionarlo entero. `exclude_on_update`
+                 * es lo que sigue garantizando que no se pueda editar ni viaje en el update.
+                 */
+                'key' => 'demo_ingreso_token',
+                'text' => 'Token de ingreso',
+                'type' => 'text',
+                'value' => '',
+                'exclude_on_update' => true,
+                'not_show_on_table' => true,
+            ],
+            [
+                'key' => 'demo_ingreso_token_expira_at',
+                'text' => 'Vencimiento token de ingreso',
+                'type' => 'date',
+                'value' => null,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'not_show_on_table' => true,
+                'width' => 170,
+            ],
+            [
+                'key' => 'demo_ingreso_token_revocado_at',
+                'text' => 'Token revocado',
+                'type' => 'date',
+                'value' => null,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'not_show_on_table' => true,
+                'width' => 170,
             ],
             // [
             //     'key' => 'iva_included',

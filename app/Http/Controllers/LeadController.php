@@ -512,6 +512,20 @@ class LeadController extends Controller
             ->where('admin_id', Auth::id())
             ->exists();
 
+        /*
+         * Link completo de ingreso a la demo, para el bloque "Link de ingreso a la demo" del modal
+         * (`lead_demo_ingreso_link` en LeadProperties). El accesor ya normaliza el esquema con
+         * DemoUrlNormalizer, así que lo que sale de acá es navegable tal cual.
+         *
+         * 🔴 Se inyecta ACÁ, en el detalle de un solo lead, y a propósito NO se agrega a un
+         * `$appends` del modelo. El accesor lee `$this->demo`, así que en `$appends` correría en
+         * todos los lugares donde el modelo se serializa entero — el listado de leads, el
+         * `broadcastWith()` de LeadSuggestionCreated y los endpoints públicos de
+         * DemoExperienciaController —, sumando una query por lead donde la relación no esté
+         * cargada y, peor, mandando el link CON el token en claro a payloads que hoy no lo llevan.
+         */
+        $lead->demo_ingreso_url = $lead->getDemoIngresoUrlAttribute();
+
         return $lead;
     }
 
