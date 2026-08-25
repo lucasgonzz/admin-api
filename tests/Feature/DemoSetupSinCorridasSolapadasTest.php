@@ -215,22 +215,19 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
     }
 
     /**
-     * 4. 🔴 Un 500 dispara UNA sola llamada: la operación destructiva no se reintenta.
+     * Cuenta los POST al endpoint del setup que dispara una corrida que termina en 500.
      *
-     * En Laravel 8, con `tries > 1` una respuesta no exitosa se relanza (`PendingRequest::send`,
-     * línea 702 del vendor) y le re-dispara a la instancia el `migrate:fresh` entero 500 ms
-     * después. Si alguien repone el `->retry()` "para emparejarlo con el resto de los llamadores",
-     * este test se pone rojo antes de que lo pague una demo.
+     * @param string $experiencia Lead::EXPERIENCIA_NUEVA | Lead::EXPERIENCIA_ACTUAL.
+     *
+     * @return int
      */
-    public function test_la_llamada_destructiva_no_se_reintenta(): void
+    private function disparos_de_una_corrida_con_500(string $experiencia): int
     {
-        Carbon::setTestNow($this->momento_base());
-
         Http::fake([
             '*' => Http::response('boom', 500),
         ]);
 
-        $lead = $this->crear_lead();
+        $lead = $this->crear_lead($experiencia);
 
         (new RunDemoSetupService())->run($lead);
 
@@ -245,7 +242,48 @@ class DemoSetupSinCorridasSolapadasTest extends TestCase
             return true;
         });
 
-        $this->assertSame(1, $disparos, 'El endpoint que vacía la base no puede tener retry automático.');
+        return $disparos;
+    }
+
+    /**
+     * 4. 🔴 Un 500 dispara UNA sola llamada: la operación destructiva no se reintenta.
+     *
+     * En Laravel 8, con `tries > 1` una respuesta no exitosa se relanza (`PendingRequest::send`,
+     * línea 702 del vendor) y le re-dispara a la instancia el `migrate:fresh` entero 500 ms
+     * después.
+     */
+    public function test_la_llamada_destructiva_no_se_reintenta(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $this->assertSame(
+            1,
+            $this->disparos_de_una_corrida_con_500(Lead::EXPERIENCIA_NUEVA),
+            'El endpoint que vacía la base no puede tener retry automático.'
+        );
+    }
+
+    /**
+     * 4bis. 🔴 Y el mismo caso para la dinámica ACTUAL, que es el que de verdad atrapa la regresión.
+     *
+     * Lo corrigió la verificación de esta misión. El test de arriba, solo, no protegía nada: la
+     * línea que se sacó era `->retry($lead->usa_experiencia_demo_nueva() ? 1 : config(...), 500)`,
+     * o sea que para un lead de la dinámica NUEVA ya daba `tries = 1`. Si alguien repone esa línea
+     * tal cual —un revert, que es el escenario más probable— el test de la dinámica nueva sigue
+     * verde y la regresión pasa igual.
+     *
+     * La dinámica actual es además la única cuyo comportamiento este branch cambió a propósito: es
+     * la que perdió los 2 intentos del default de `CLIENT_API_RETRIES`.
+     */
+    public function test_la_dinamica_actual_tampoco_reintenta_la_llamada_destructiva(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $this->assertSame(
+            1,
+            $this->disparos_de_una_corrida_con_500(Lead::EXPERIENCIA_ACTUAL),
+            'Con el retry repuesto, acá salen 2 POST: la base que se vacía es la misma para las dos dinámicas.'
+        );
     }
 
     /**
