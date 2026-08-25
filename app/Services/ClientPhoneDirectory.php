@@ -90,7 +90,7 @@ class ClientPhoneDirectory
                 continue;
             }
 
-            $lead_name = trim((string) ($lead->name ?? ''));
+            $lead_name = trim((string) ($lead->contact_name ?? ''));
 
             $seen[$normalized] = true;
             $rows[] = [
@@ -108,9 +108,11 @@ class ClientPhoneDirectory
     /**
      * Busca un teléfono dentro de los contactos del cliente.
      *
-     * Compara con phones_match() y no con igualdad de strings: es el mismo criterio con el
-     * que el webhook decide de quién es un número entrante, y usar otro haría que el alta
-     * acepte un formato que después el webhook no reconoce.
+     * Primero por igualdad exacta del E.164 y recién después con el phones_match() del
+     * webhook: ese último cae a comparar los últimos ocho dígitos, y usarlo solo haría que un
+     * cliente con dos contactos de provincias distintas resuelva al equivocado. La pasada
+     * laxa se conserva para que un teléfono tipeado a mano en otro formato siga resolviendo,
+     * que es el criterio con el que el webhook enruta la respuesta.
      *
      * @param Client $client Cliente dueño de la conversación.
      * @param string $phone  Teléfono elegido por el operador, en cualquier formato.
@@ -123,7 +125,21 @@ class ClientPhoneDirectory
             return null;
         }
 
-        foreach ($this->phones_for_client($client) as $row) {
+        $rows = $this->phones_for_client($client);
+        $normalized = WhatsappNormalizer::normalize($phone);
+
+        // Primero la igualdad exacta. El select del modal manda el número ya normalizado, así
+        // que casi siempre entra por acá; sin esta pasada, un empleado de Rosario y otro de
+        // Córdoba que compartan los últimos ocho dígitos se pisan entre sí.
+        foreach ($rows as $row) {
+            if ($normalized !== '' && (string) $row['phone'] === $normalized) {
+                return $row;
+            }
+        }
+
+        // Recién después el criterio laxo, que es el mismo con el que el webhook enruta: un
+        // teléfono tipeado a mano en otro formato tiene que seguir resolviendo.
+        foreach ($rows as $row) {
             if (WhatsappNormalizer::phones_match((string) $row['phone'], $phone)) {
                 return $row;
             }

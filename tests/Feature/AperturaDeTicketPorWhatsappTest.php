@@ -623,4 +623,200 @@ class AperturaDeTicketPorWhatsappTest extends TestCase
         $this->assertCount(1, $espia->textos, 'La respuesta no salió como texto libre.');
         $this->assertCount(0, $espia->plantillas, 'Se usó plantilla con la ventana abierta.');
     }
+
+    /**
+     * Reintentar un envío fallido no vuelve a envolver el mensaje sobre sí mismo.
+     *
+     * El body se guarda crudo y solo pasa a ser el texto de la plantilla cuando el envío se
+     * confirma. Si se guardara envuelto de entrada, cada reintento lo metería adentro de otro
+     * saludo y al tercero el corte a 600 caracteres se comería el texto del operador.
+     *
+     * @return void
+     */
+    public function test_reintentar_no_envuelve_el_mensaje_dos_veces()
+    {
+        $admin  = $this->crear_admin('reintento@test.local');
+        $client = $this->crear_cliente('+5493415550020');
+        $espia  = $this->espiar_sender(false);
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'client_id'      => $client->id,
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550020',
+            'body'           => 'Te escribo por el remito.',
+        ])->assertStatus(201);
+
+        $message = SupportMessage::latest('id')->first();
+        $this->assertSame(
+            'Te escribo por el remito.',
+            (string) $message->body,
+            'El envío falló y el body igual quedó envuelto en la plantilla.'
+        );
+
+        // El operador aprieta reintentar; el envío vuelve a fallar.
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-message/' . $message->id . '/retry-remote-sync')
+            ->assertStatus(200);
+
+        $texto_reintentado = (string) $espia->plantillas[1]['variables'][2];
+        $this->assertSame(
+            'Te escribo por el remito.',
+            $texto_reintentado,
+            'El reintento mandó el texto ya envuelto adentro de otra plantilla.'
+        );
+        $this->assertStringNotContainsString(
+            'ComercioCity',
+            $texto_reintentado,
+            'La variable del reintento arrastra el saludo del intento anterior.'
+        );
+    }
+
+    /**
+     * Con el envío confirmado, el body sí guarda el texto completo que recibió el cliente.
+     *
+     * @return void
+     */
+    public function test_confirmado_el_body_guarda_el_texto_que_recibio_el_cliente()
+    {
+        $admin  = $this->crear_admin('body-confirmado@test.local');
+        $client = $this->crear_cliente('+5493415550021');
+        $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'client_id'      => $client->id,
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550021',
+            'body'           => 'Te escribo por el remito.',
+        ])->assertStatus(201);
+
+        $message = SupportMessage::latest('id')->first();
+        $this->assertStringContainsString('del equipo de soporte de ComercioCity', (string) $message->body);
+        $this->assertStringContainsString('Te escribo por el remito.', (string) $message->body);
+    }
+
+    /**
+     * A un cliente dado de baja no se le abre conversación: el webhook no lo reconoce.
+     *
+     * @return void
+     */
+    public function test_no_se_le_abre_conversacion_a_un_cliente_inactivo()
+    {
+        $admin             = $this->crear_admin('cliente-inactivo@test.local');
+        $client            = $this->crear_cliente('+5493415550022');
+        $client->is_active = false;
+        $client->save();
+        $espia = $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'client_id'      => $client->id,
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550022',
+            'body'           => 'Hola',
+        ])->assertStatus(422);
+
+        $this->assertCount(0, $espia->textos);
+        $this->assertCount(0, $espia->plantillas);
+        $this->assertSame(0, SupportTicket::where('client_id', $client->id)->count());
+    }
+
+    /**
+     * El endpoint de contactos lista los teléfonos con el estado de su ventana.
+     *
+     * Cubre además el orden de las rutas: si `support-ticket/{id}` estuviera declarada antes,
+     * se comería la palabra "whatsapp-contacts" y esto devolvería 404.
+     *
+     * @return void
+     */
+    public function test_el_endpoint_de_contactos_lista_telefonos_y_ventana()
+    {
+        $admin    = $this->crear_admin('contactos@test.local');
+        $client   = $this->crear_cliente('+5493415550023');
+        $employee = $this->crear_empleado($client, '+5493415550024');
+        $this->abrir_ventana_por_soporte($client, '+5493415550024');
+
+        $response = $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/admin/support-ticket/whatsapp-contacts?client_id=' . $client->id);
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('template_name', 'cc_soporte_apertura');
+
+        $contacts = $response->json('contacts');
+        $this->assertCount(2, $contacts, 'No listó el teléfono del empleado y el de la ficha.');
+
+        $por_telefono = [];
+        foreach ($contacts as $contact) {
+            $por_telefono[$contact['phone']] = $contact;
+        }
+
+        $this->assertSame('Brisa', $por_telefono['+5493415550024']['label']);
+        $this->assertSame((int) $employee->id, (int) $por_telefono['+5493415550024']['client_employee_id']);
+        $this->assertTrue($por_telefono['+5493415550024']['window']['open'], 'La ventana del empleado tendría que estar abierta.');
+        $this->assertFalse($por_telefono['+5493415550023']['window']['open'], 'La ventana de la ficha tendría que estar cerrada.');
+    }
+
+    /**
+     * El contacto que sale del lead promovido se muestra con su nombre real.
+     *
+     * La columna se llama contact_name; leerla como `name` devolvía null y el saludo que le
+     * llegaba al cliente decía literalmente "Hola Contacto del lead".
+     *
+     * @return void
+     */
+    public function test_el_contacto_del_lead_promovido_usa_su_nombre_real()
+    {
+        $admin  = $this->crear_admin('lead-promovido@test.local');
+        $client = $this->crear_cliente('');
+
+        $lead                     = new Lead();
+        $lead->contact_name       = 'Marcela';
+        $lead->company_name       = 'Distribuidora de prueba';
+        $lead->phone              = '+5493415550025';
+        $lead->status             = 'cliente';
+        $lead->promoted_client_id = $client->id;
+        $lead->save();
+
+        $response = $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/admin/support-ticket/whatsapp-contacts?client_id=' . $client->id);
+
+        $response->assertStatus(200);
+        $this->assertSame('Marcela (del lead)', $response->json('contacts.0.label'));
+    }
+
+    /**
+     * Dos contactos que comparten los últimos ocho dígitos no se pisan entre sí.
+     *
+     * phones_match() cae a comparar sufijos, así que sin una pasada previa de igualdad exacta
+     * el mensaje se le mandaba al contacto equivocado y el ticket quedaba atado al empleado
+     * equivocado.
+     *
+     * @return void
+     */
+    public function test_dos_contactos_con_el_mismo_sufijo_no_se_confunden()
+    {
+        $admin = $this->crear_admin('sufijo-repetido@test.local');
+        // Rosario (341) y Córdoba (351): números distintos, mismos ocho dígitos finales.
+        $client = $this->crear_cliente('+5493415550026');
+        $this->crear_empleado($client, '+5493515550026');
+        $espia = $this->espiar_sender();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'client_id'      => $client->id,
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => '+5493415550026',
+            'body'           => 'Hola',
+        ])->assertStatus(201);
+
+        $ticket = SupportTicket::where('client_id', $client->id)->first();
+        $this->assertNotNull($ticket);
+        $this->assertSame(
+            '+5493415550026',
+            $ticket->whatsapp_phone,
+            'El alta resolvió al contacto de Córdoba teniendo el de Rosario exacto.'
+        );
+        $this->assertNull(
+            $ticket->client_employee_id,
+            'El ticket quedó atado al empleado equivocado por coincidencia de sufijo.'
+        );
+        $this->assertSame('+5493415550026', $espia->plantillas[0]['to']);
+    }
 }

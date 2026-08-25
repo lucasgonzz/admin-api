@@ -192,8 +192,11 @@ class WhatsappSessionWindowService
      * Primera fila cuyo teléfono coincide con el buscado.
      *
      * La comparación va en PHP y no en SQL porque los números están guardados en formatos
-     * distintos según por dónde entraron; phones_match() es el mismo criterio con el que el
-     * webhook enruta. El conjunto ya viene acotado a 24hs, así que recorrerlo es barato.
+     * distintos según por dónde entraron. Acá se exige igualdad EXACTA del E.164 y no el
+     * phones_match() del webhook, que cae a comparar los últimos ocho dígitos: contra los
+     * mensajes de todos los leads del sistema, ese criterio da falsos "ventana abierta", y un
+     * texto libre fuera de ventana lo rechaza Meta. Errar para el lado de "cerrada" solo
+     * cuesta mandar una plantilla de más.
      *
      * @param \Illuminate\Support\Collection $rows   Filas con phone y at.
      * @param string                         $phone  Teléfono buscado.
@@ -203,9 +206,14 @@ class WhatsappSessionWindowService
      */
     private function first_matching_row($rows, string $phone, string $origin)
     {
+        $normalized = WhatsappNormalizer::normalize($phone);
+        if ($normalized === '') {
+            return null;
+        }
+
         foreach ($rows as $row) {
             $row_phone = (string) ($row->phone ?? '');
-            if ($row_phone === '' || ! WhatsappNormalizer::phones_match($row_phone, $phone)) {
+            if ($row_phone === '' || WhatsappNormalizer::normalize($row_phone) !== $normalized) {
                 continue;
             }
 

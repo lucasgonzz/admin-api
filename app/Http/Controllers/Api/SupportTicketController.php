@@ -321,6 +321,15 @@ class SupportTicketController extends BaseController
 
         $client = Client::findOrFail((int) $validated['client_id']);
 
+        // El webhook exige is_active en sus tres formas de reconocer un número. Abrirle una
+        // conversación a un cliente dado de baja garantiza que su respuesta caiga en el
+        // pipeline de leads, que es justo la falla silenciosa que este trabajo viene a evitar.
+        if (! $client->is_active) {
+            return response()->json([
+                'error' => 'Ese cliente está dado de baja: el webhook no lo va a reconocer y su respuesta caería en el pipeline de leads.',
+            ], 422);
+        }
+
         $admin = Admin::find((int) Auth::id());
         if ($admin === null) {
             return response()->json(['error' => 'admin no encontrado'], 401);

@@ -112,8 +112,6 @@ class SupportWhatsappOpenerService
         $normalized_phone = (string) $contact['phone'];
         $client_employee_id = $contact['client_employee_id'];
 
-        // Se decide el canal ANTES de persistir: el body que se guarda tiene que ser el texto
-        // que realmente le llega al cliente, y con plantilla ese texto es más largo.
         $window = $this->window_service->window_state($normalized_phone);
         $use_template = ! $window['open'];
 
@@ -123,17 +121,14 @@ class SupportWhatsappOpenerService
             $admin_name = 'Soporte';
         }
 
+        // Se persiste el texto CRUDO del operador. El body solo pasa a ser el texto completo
+        // de la plantilla cuando el envío se confirma: si se guardara envuelto de entrada, un
+        // envío fallido dejaría en la bandeja un mensaje con saludo y firma que el cliente
+        // nunca recibió, y el botón de reintentar lo volvería a envolver sobre sí mismo.
         $operator_text = trim($operator_text);
-        $body = $use_template
-            ? $this->build_opening_body($contact_name, $admin_name, $operator_text)
-            : $operator_text;
 
         $reused = false;
-        $ticket = $this->find_reusable_ticket($client, $normalized_phone, $client_employee_id);
-        if ($ticket !== null) {
-            $reused = true;
-        }
-
+        $ticket = null;
         $message = null;
 
         // La transacción cubre solo la escritura local. El POST a Kapso queda afuera a
@@ -146,10 +141,17 @@ class SupportWhatsappOpenerService
             $contact_name,
             $ticket_name,
             $admin,
-            $body,
+            $operator_text,
             &$ticket,
-            &$message
+            &$message,
+            &$reused
         ) {
+            // La búsqueda va adentro de la transacción y con lock: suelta, dos operadores
+            // simultáneos (o un operador y un mensaje entrante) abrían dos hilos del mismo
+            // contacto, y el webhook después engancha las respuestas en uno solo.
+            $ticket = $this->find_reusable_ticket($client, $normalized_phone, $client_employee_id, true);
+            $reused = $ticket !== null;
+
             if ($ticket === null) {
                 $ticket = SupportTicket::create([
                     'client_id'          => $client->id,
@@ -176,7 +178,7 @@ class SupportWhatsappOpenerService
                 'sender_type'       => 'admin',
                 'sender_admin_id'   => (int) $admin->id,
                 'kind'              => 'text',
-                'body'              => $body,
+                'body'              => $operator_text,
                 'delivered_at'      => now(),
             ]);
         });
@@ -242,13 +244,12 @@ class SupportWhatsappOpenerService
         }
 
         // Ventana cerrada y mensaje de texto: va por plantilla, con el texto adentro.
+        // Las relaciones se cargan a mano: resolve_contact_display_name() las mira con
+        // relationLoaded(), y el ticket llega acá desde un findOrFail() pelado.
+        $ticket->loadMissing('client', 'client_employee');
         $contact_name = $ticket->resolve_contact_display_name();
         $operator_text = trim((string) ($message->body ?? ''));
         $template_name = $this->resolve_template_name();
-
-        // El body guardado pasa a ser lo que el cliente realmente recibe, no solo el fragmento.
-        $message->body = $this->build_opening_body($contact_name, $admin_name, $operator_text);
-        $message->save();
 
         $whatsapp_message_id = $this->sender->send_template(
             $to,
@@ -263,6 +264,13 @@ class SupportWhatsappOpenerService
         );
 
         if ($whatsapp_message_id !== null) {
+            // Recién ahora el body pasa a ser lo que el cliente de verdad recibió. Pisarlo
+            // antes del envío dejaba dos cosas rotas: en la bandeja quedaba un mensaje con
+            // saludo y firma que nunca salió, y el botón de reintentar volvía a envolver lo
+            // ya envuelto —a los tres reintentos el corte a 600 se comía el texto original—.
+            $message->body = $this->build_opening_body($contact_name, $admin_name, $operator_text);
+            $message->save();
+
             return $this->mark_sent($message, $whatsapp_message_id, true, false, $template_name);
         }
 
@@ -339,10 +347,11 @@ class SupportWhatsappOpenerService
      * @param Client   $client             Cliente dueño del ticket.
      * @param string   $normalized_phone   Teléfono en E.164.
      * @param int|null $client_employee_id Empleado, si el contacto es un empleado.
+     * @param bool     $lock               Si hay que bloquear la fila hasta cerrar la transacción.
      *
      * @return SupportTicket|null
      */
-    private function find_reusable_ticket(Client $client, string $normalized_phone, $client_employee_id)
+    private function find_reusable_ticket(Client $client, string $normalized_phone, $client_employee_id, bool $lock = false)
     {
         $query = SupportTicket::where('client_id', $client->id)
             ->where('source', 'whatsapp')
@@ -353,6 +362,10 @@ class SupportWhatsappOpenerService
             $query->where('client_employee_id', $client_employee_id);
         } else {
             $query->whereNull('client_employee_id');
+        }
+
+        if ($lock) {
+            $query->lockForUpdate();
         }
 
         return $query->first();
@@ -394,12 +407,16 @@ class SupportWhatsappOpenerService
         } else {
             $whatsapp_message_id = $this->sender->send_text(
                 $to,
-                $message->body,
+                $operator_text,
                 'Apertura de conversación de soporte con ' . $contact_name
             );
         }
 
         if ($whatsapp_message_id !== null) {
+            if ($use_template) {
+                // Confirmado: el body pasa a ser lo que el cliente realmente recibió.
+                $message->body = $this->build_opening_body($contact_name, $admin_name, $operator_text);
+            }
             $message->whatsapp_message_id = $whatsapp_message_id;
             $message->remote_delivery_status = null;
             $message->save();

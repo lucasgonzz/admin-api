@@ -229,4 +229,54 @@ class GuardasDeCanalEnElSyncDeSoporteTest extends TestCase
 
         Http::assertSentCount(1);
     }
+
+    /**
+     * El cron de reintentos no vuelve a intentar los mensajes de tickets de WhatsApp.
+     *
+     * Esos mensajes nunca setean `synced_to_client_at`, así que sin el filtro quedaban en la
+     * cola para siempre: cada cinco minutos, un POST con dos reintentos y 15s de timeout por
+     * cada mensaje de cada conversación de WhatsApp abierta.
+     *
+     * @return void
+     */
+    public function test_el_cron_de_reintentos_ignora_los_tickets_de_whatsapp()
+    {
+        $client = $this->crear_cliente();
+        $datos  = $this->crear_ticket_con_mensaje($client, 'whatsapp');
+
+        SupportMessage::create([
+            'support_ticket_id' => $datos['ticket']->id,
+            'sender_type'       => 'admin',
+            'kind'              => 'text',
+            'body'              => 'Respuesta del operador',
+            'delivered_at'      => now(),
+        ]);
+
+        $this->artisan('support:retry-pending-syncs')->assertExitCode(0);
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * El cron de reintentos sigue reintentando los mensajes del canal ERP.
+     *
+     * @return void
+     */
+    public function test_el_cron_de_reintentos_sigue_atendiendo_al_erp()
+    {
+        $client = $this->crear_cliente();
+        $datos  = $this->crear_ticket_con_mensaje($client, 'erp');
+
+        SupportMessage::create([
+            'support_ticket_id' => $datos['ticket']->id,
+            'sender_type'       => 'admin',
+            'kind'              => 'text',
+            'body'              => 'Respuesta del operador',
+            'delivered_at'      => now(),
+        ]);
+
+        $this->artisan('support:retry-pending-syncs')->assertExitCode(0);
+
+        Http::assertSentCount(1);
+    }
 }

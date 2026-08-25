@@ -27,6 +27,22 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
     use DatabaseTransactions;
 
     /**
+     * Deja la base neutral: sin dueños de soporte previos ni tareas de este origen.
+     *
+     * La base del slot puede venir sembrada, y sin esto el resultado depende de qué haya
+     * quedado de antes. DatabaseTransactions revierte todo al terminar.
+     *
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Admin::query()->update(['is_default_support_owner' => false]);
+        AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)->delete();
+    }
+
+    /**
      * Deja dos admins: el dueño de soporte recibe la alerta, el otro figura como creador.
      *
      * @return Admin El dueño de soporte.
@@ -87,7 +103,7 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
      */
     private function tareas_de(string $client_name): int
     {
-        return AdminTask::where('created_via', 'sin_telefono')
+        return AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)
             ->where('title', 'like', '%' . $client_name . '%')
             ->count();
     }
@@ -106,7 +122,7 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
 
         $this->assertSame(1, $this->tareas_de('Distribuidora Pelada'), 'No se creó la tarea de alerta.');
 
-        $task = AdminTask::where('created_via', 'sin_telefono')->latest('id')->first();
+        $task = AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)->latest('id')->first();
         $this->assertSame((int) $owner->id, (int) $task->assigned_admin_id, 'La alerta no quedó asignada al dueño de soporte.');
         $this->assertNotSame(
             (int) $owner->id,
@@ -245,6 +261,7 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
 
         // Marcada como hecha, pero el teléfono nunca se cargó. El mismo día no insiste.
         AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)
+            ->where('title', 'like', '%Distribuidora Ida Y Vuelta%')
             ->update(['is_done' => true]);
         $this->correr();
         $this->assertSame(
@@ -282,6 +299,7 @@ class ClientesSinTelefonoAlertadosTest extends TestCase
         $client->save();
 
         AdminTask::where('created_via', CheckClientsWithoutPhone::CREATED_VIA)
+            ->where('title', 'like', '%Distribuidora Que Cargo El Telefono%')
             ->update(['is_done' => true]);
         Carbon::setTestNow(now()->addDays(CheckClientsWithoutPhone::DEFAULT_RECHECK_DAYS + 1));
         $this->correr();

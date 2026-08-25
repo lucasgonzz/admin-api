@@ -160,12 +160,12 @@ class CheckClientsWithoutPhone extends Command
                 'created_via'         => self::CREATED_VIA,
             ]);
 
-            $task->assigned_admins()->sync([$owner_id]);
-
-            // En su propio try: si el aviso falla, la tarea ya quedó creada y el cliente tiene
-            // que quedar marcado igual. Si no, mañana se crea otra tarea idéntica, y pasado
-            // otra. Mismo criterio que ClaudeTaskIngestController y LeadAiService.
+            // La asignación y el aviso van en su propio try: si fallan, la tarea YA está
+            // creada y commiteada, así que reportar "no se pudo crear" sería mentira y dejaría
+            // el aviso sin reintentar nunca (la corrida siguiente ve la tarea abierta y pasa
+            // de largo). Mismo criterio que ClaudeTaskIngestController y LeadAiService.
             try {
+                $task->assigned_admins()->sync([$owner_id]);
                 AdminTaskNotificationService::create_for_task($task);
             } catch (\Throwable $notification_exception) {
                 Log::channel('daily')->error('support:check-clients-without-phone: la tarea quedó creada pero el aviso falló.', [
