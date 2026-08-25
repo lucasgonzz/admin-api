@@ -66,7 +66,21 @@ class RunUserSetupService
                     'Accept' => 'application/json',
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15) * 20)
-                ->retry((int) config('services.client_api.retries', 2), 500)
+                /* 🔴 SIN `->retry()`, por el mismo argumento que ya está escrito largo en
+                 * `RunDemoSetupService::run()`, y no se repone. `UserSetupHelper::run()` del otro
+                 * lado también arranca con un `migrate:fresh`: en Laravel 8, con `tries > 1` una
+                 * respuesta NO exitosa se relanza (`PendingRequest::send`, línea 702 del vendor),
+                 * o sea que un error del armado vuelve a hacer el POST y le re-dispara la
+                 * operación destructiva entera 500 ms después, sobre la base de un cliente de
+                 * PRODUCCIÓN. `CLIENT_API_RETRIES` no está en el `.env`, así que hasta hoy esto
+                 * corría con los 2 intentos del default.
+                 *
+                 * Y hay un segundo daño, el que destapó la misión cruzada del 25/8/2026: desde
+                 * esta misión el endpoint puede contestar 409 ("ya hay una corrida viva"). Con
+                 * reintentos, ese 409 se convertía en `RequestException` y caía al
+                 * `catch (\Throwable)` como `Excepción: ...` — se perdía el motivo real justo
+                 * cuando es lo único que explica qué pasó. Con `tries = 1` la respuesta no exitosa
+                 * vuelve por el camino normal y la maneja el `if` de acá abajo. */
                 ->post($production_api_url . '/api/admin-sync/user-setup', $payload);
 
             if ($response->successful()) {
@@ -76,6 +90,32 @@ class RunUserSetupService
                 ]);
 
                 return $lead->refresh();
+            }
+
+            /* 🔴 409 = el empresa-api ya tiene un setup corriendo sobre esa instancia, y NO tocó
+             * la base para decírnoslo (toma un candado con `flock` antes de llamar al helper).
+             * Eso no es un fallo del armado: es la confirmación de que hay otra corrida viva.
+             * Marcarlo `fallido` invitaría a volver a apretar el botón encima de esa corrida, que
+             * es exactamente la secuencia que vacía una base a mitad de camino.
+             *
+             * `sin_confirmar` cabe sin migración (`user_setup_status` es un string(20)) y ningún
+             * lector actual se rompe: `LeadController:364` y `:1488` comparan contra `'exitoso'`,
+             * y el badge de `leads/show.blade.php` cae a `badge-light` mostrando el texto crudo del
+             * estado. admin-spa no lee esta columna.
+             *
+             * Compatibilidad hacia atrás: un empresa-api anterior al 22/8/2026 nunca devuelve 409,
+             * así que para esas instancias esta rama simplemente no se usa. */
+            if ($response->status() === 409) {
+                Log::info('RunUserSetupService: la instancia ya tenía un user setup corriendo (HTTP 409).', [
+                    'lead_id'   => $lead->id,
+                    'client_id' => $client->id,
+                ]);
+
+                return $this->mark_sin_confirmar(
+                    $lead,
+                    'Ya hay un setup corriendo en la instancia del cliente. No se disparó otro; '
+                    . 'esperá a que termine el que está en curso.'
+                );
             }
 
             return $this->mark_failed(
@@ -387,6 +427,30 @@ class RunUserSetupService
     {
         $lead->update([
             'user_setup_status'     => 'fallido',
+            'user_setup_last_error' => $reason,
+        ]);
+
+        return $lead->refresh();
+    }
+
+    /**
+     * Deja el Lead en `sin_confirmar`: el armado NO falló, pero tampoco se sabe que haya terminado.
+     *
+     * Hoy tiene un solo llamador —el HTTP 409 de una instancia que ya tenía una corrida viva— y a
+     * propósito no se le agregó la rama de `ConnectionException` que sí tiene
+     * `RunDemoSetupService`: el user-setup corre contra un cliente de producción, por un botón
+     * manual, y ampliar su máquina de estados más allá de lo que esta misión necesita es trabajo
+     * que nadie midió. Si algún día hace falta, el estado ya está y el lugar es éste.
+     *
+     * @param Lead   $lead
+     * @param string $reason Motivo, en castellano, que se muestra en el panel.
+     *
+     * @return Lead
+     */
+    protected function mark_sin_confirmar(Lead $lead, string $reason)
+    {
+        $lead->update([
+            'user_setup_status'     => RunDemoSetupService::ESTADO_SIN_CONFIRMAR,
             'user_setup_last_error' => $reason,
         ]);
 
