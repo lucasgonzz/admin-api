@@ -2420,7 +2420,35 @@ class EcommerceInstallationService
 
         $this->log($step, "Asegurando que exista el directorio de tienda-api en el hosting ({$api_path})");
         $this->reconnect_hosting_ssh();
+
+        // Se pregunta si existía ANTES de crearlo, igual que ensure_hosting_spa_directory(): es la
+        // misma guarda y le faltaba a esta mitad (corrección del chequeo independiente de la misión
+        // ecommerce-paths-subcarpeta).
+        //
+        // POR QUÉ IMPORTA ACÁ TAMBIÉN: desde esta misión el path de la API también se carga a mano
+        // en el modal. Si tiene un typo —o si se deja vacío y se deriva a una carpeta que ningún
+        // vhost sirve— el mkdir -p de abajo crea el árbol igual, el pipeline sube el ZIP, corre
+        // composer, escribe el .env y termina "instalación completada" con la API muerta. Este
+        // warning es lo único que lo denuncia: no lo saques.
+        $api_check = $this->exec_hosting_ssh(
+            $step,
+            'test -d ' . escapeshellarg($api_path)
+            . ' && echo API_DIR_EXISTS || echo API_DIR_MISSING',
+            false
+        );
+
         $this->exec_hosting_ssh($step, 'mkdir -p ' . escapeshellarg($api_path));
+
+        // Prohibido str_contains en PHP 7.4: se usa strpos !== false.
+        if (strpos($api_check, 'API_DIR_MISSING') !== false) {
+            $this->log(
+                $step,
+                "El directorio {$api_path} no existía y se acaba de crear. Revisá que el "
+                . '(sub)dominio de la API esté dado de alta en hPanel apuntando a esa carpeta: si '
+                . 'no lo está, el deploy va a terminar bien pero la API no va a responder.',
+                'warning'
+            );
+        }
     }
 
     /**
@@ -2680,14 +2708,30 @@ class EcommerceInstallationService
         // dist/ del SPA trajera su propia versión de esa ruta, gana la nueva). Cada bloque queda
         // detrás de un `if [ -e ... ]` para que la ausencia de la entrada no aborte el script con
         // `set -e` activo.
+        //
+        // 🔴 LA ENTRADA VA POR UNA VARIABLE DE SHELL, NUNCA INTERPOLADA CRUDA (corrección del
+        // chequeo independiente de la misión ecommerce-paths-subcarpeta). Hasta ese chequeo,
+        // `$entry` se pegaba tal cual adentro de las comillas dobles en cinco lugares y el
+        // escapeshellarg() se usaba solo en el `echo`. Eso alcanzaba mientras el valor solo podía
+        // ser `api` o `.well-known` (dos literales del código), pero desde esta misión el subpath
+        // sale de api_subpath_inside_spa_docroot(), o sea de un campo de texto del modal: con
+        // `ecommerce_api_path = comerciocity.store/public_html/tienda/a";id;"b` el script remoto
+        // ejecutaba `id` en el hosting. Y el caso NO malicioso pesa más todavía: una carpeta con
+        // un `$` o una comilla en el nombre rompía el script DESPUÉS del `mv` del docroot, o sea
+        // con la tienda ya swapeada y el contenido viejo todavía sin rescatar.
+        //
+        // Se asigna una sola vez con escapeshellarg() y se usa "$ENTRY" (entre comillas dobles) en
+        // las cinco interpolaciones. La asignación devuelve 0, así que no aborta con `set -e`, y
+        // el `echo SPA_PRESERVED` imprime exactamente lo mismo que antes.
         $preserve_shell = '';
         foreach ($preserve_entries as $entry) {
             $entry_escaped = escapeshellarg($entry);
             // mkdir -p del padre por si la entrada tuviera más de un nivel (hoy "api" es un solo
             // nivel, pero no se asume): dirname de un valor de un nivel da ".", mkdir -p "." es no-op.
-            $preserve_shell .= 'if [ -e "$OLD/' . $entry . '" ] && [ ! -e "$DOCROOT/' . $entry . '" ]; then '
-                . 'mkdir -p "$(dirname "$DOCROOT/' . $entry . '")"; '
-                . 'mv "$OLD/' . $entry . '" "$DOCROOT/' . $entry . '"; '
+            $preserve_shell .= 'ENTRY=' . $entry_escaped . '; '
+                . 'if [ -e "$OLD/$ENTRY" ] && [ ! -e "$DOCROOT/$ENTRY" ]; then '
+                . 'mkdir -p "$(dirname "$DOCROOT/$ENTRY")"; '
+                . 'mv "$OLD/$ENTRY" "$DOCROOT/$ENTRY"; '
                 . 'echo SPA_PRESERVED ' . $entry_escaped . '; '
                 . 'fi; ';
         }
