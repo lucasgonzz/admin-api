@@ -9,6 +9,7 @@ use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
+use App\Services\SupportAiSuggestionDeliveryService;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportWhatsappOpenerService;
@@ -170,6 +171,85 @@ class SupportMessageController extends BaseController
         $admin_name = $admin !== null ? trim((string) $admin->name) : '';
 
         return $admin_name !== '' ? $admin_name : 'Soporte';
+    }
+
+    /**
+     * Aprueba un borrador del agente y lo manda al cliente, con o sin ajustes.
+     *
+     * Si el operador cambió el texto, el que había propuesto el agente se guarda en
+     * `ai_original_body`: teniendo el par (propuesto, enviado) se puede medir después en qué se
+     * equivoca, que es para lo que Lucas pidió que quedara guardada la edición.
+     *
+     * @param Request    $request Puede traer `body` con el texto final editado.
+     * @param int|string $id      Id del mensaje borrador.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function approve_ai_draft(Request $request, $id)
+    {
+        $message = SupportMessage::with('ticket')->findOrFail($id);
+
+        if (! (bool) $message->is_ai_suggestion_draft) {
+            return response()->json(['error' => 'Ese mensaje no es un borrador del agente.'], 422);
+        }
+
+        $ticket = $message->ticket;
+        if ($ticket === null || $ticket->status !== 'open') {
+            return response()->json(['error' => 'El ticket está cerrado.'], 422);
+        }
+
+        $original_body = trim((string) ($message->body ?? ''));
+        $final_body = $request->has('body') ? trim((string) $request->input('body')) : $original_body;
+
+        if ($final_body === '') {
+            return response()->json(['error' => 'El mensaje no puede quedar vacío.'], 422);
+        }
+
+        if ($final_body !== $original_body) {
+            $message->ai_original_body = $original_body;
+            $message->body = $final_body;
+        }
+
+        // Queda a nombre de quien lo aprueba: el agente propone, la persona firma.
+        $message->sender_admin_id = (int) Auth::id();
+        $message->save();
+
+        $delivered = app(SupportAiSuggestionDeliveryService::class)->deliver_draft_message($message, $ticket);
+
+        (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+
+        $message = SupportMessage::where('id', $message->id)->withAll()->first();
+
+        return response()->json([
+            'model'     => $message,
+            'delivered' => $delivered !== null,
+        ], 200);
+    }
+
+    /**
+     * Descarta un borrador del agente sin mandarlo.
+     *
+     * @param int|string $id Id del mensaje borrador.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function discard_ai_draft($id)
+    {
+        $message = SupportMessage::with('ticket')->findOrFail($id);
+
+        if (! (bool) $message->is_ai_suggestion_draft) {
+            return response()->json(['error' => 'Ese mensaje no es un borrador del agente.'], 422);
+        }
+
+        $ticket = $message->ticket;
+
+        (new SupportAiSuggestionDraftService())->delete_drafts_for_ticket((int) $message->support_ticket_id);
+
+        if ($ticket !== null) {
+            (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        }
+
+        return response()->json(['ok' => true], 200);
     }
 
     /**

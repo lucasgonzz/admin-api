@@ -358,6 +358,56 @@ class SupportTicketController extends BaseController
     }
 
     /**
+     * Prende o apaga el agente de IA para un ticket puntual.
+     *
+     * Apagarlo solo afecta a las sugerencias FUTURAS: un borrador que ya esté esperando sigue
+     * ahí, para que el operador lo mande o lo descarte a mano. Es el mismo criterio que
+     * LeadController::toggle_claude_auto_reply_json(). No hace falta cancelar el job encolado:
+     * SendSupportAiSuggestion vuelve a mirar el flag cuando corre.
+     *
+     * @param int|string $id Id del ticket.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_claude_auto_reply($id)
+    {
+        $ticket = SupportTicket::findOrFail($id);
+
+        $ticket->claude_auto_reply = ! (bool) $ticket->claude_auto_reply;
+        $ticket->save();
+
+        event(new SupportTicketUpdated((int) $ticket->id));
+
+        return response()->json([
+            'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
+        ], 200);
+    }
+
+    /**
+     * Prende o apaga la verificación humana obligatoria para un ticket puntual.
+     *
+     * Con esto prendido —que es como nace todo ticket— ninguna sugerencia del agente sale sola:
+     * queda como borrador esperando que una persona la mande, con o sin ajustes.
+     *
+     * @param int|string $id Id del ticket.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_requiere_verificacion($id)
+    {
+        $ticket = SupportTicket::findOrFail($id);
+
+        $ticket->requiere_verificacion_mensajes = ! (bool) $ticket->requiere_verificacion_mensajes;
+        $ticket->save();
+
+        event(new SupportTicketUpdated((int) $ticket->id));
+
+        return response()->json([
+            'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
+        ], 200);
+    }
+
+    /**
      * Contactos de WhatsApp de un cliente y estado de la ventana de 24hs de cada uno.
      *
      * Lo consume el modal de alta para avisarle al operador, ANTES de mandar, si su texto

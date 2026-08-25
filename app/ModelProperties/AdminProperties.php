@@ -96,6 +96,15 @@ class AdminProperties
                 'description' => 'Recibís un WhatsApp cuando el agente no puede resolver algo solo y necesita que un humano intervenga en la conversación (una pregunta fuera de lo habitual, un pedido inusual, una objeción que requiere criterio). También te llega este mismo aviso cuando un lead confirma que terminó la demo y ya está listo para la llamada del closer — comparte este flag con la escalación general.',
             ],
             [
+                // Recibir WhatsApp cuando el agente escala un ticket de SOPORTE (cliente activo).
+                'key'   => 'notify_support_escalation_whatsapp',
+                'text'  => 'Notificar escalaciones de soporte por WhatsApp',
+                'type'  => 'boolean',
+                'value' => false,
+                'show'  => true,
+                'description' => 'El de arriba es para leads; este es para clientes que ya compraron. Recibís un WhatsApp cuando el agente de soporte no encuentra la respuesta en la documentación y escala el ticket para que lo revises. El aviso trae el nombre del cliente, el motivo y un link directo al ticket. Necesitás tener cargado tu teléfono acá abajo.',
+            ],
+            [
                 // Recibir WhatsApp cuando se agenda una demo.
                 'key'   => 'notify_demo_scheduled_whatsapp',
                 'text'  => 'Notificar demos agendadas por WhatsApp',

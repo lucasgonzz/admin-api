@@ -18,6 +18,22 @@ class SupportTicket extends Model
     protected $guarded = [];
 
     /**
+     * Valores por defecto de los interruptores del agente.
+     *
+     * Van acá y no solo en la migración porque un `SupportTicket::create()` devuelve el modelo
+     * con lo que se le pasó, no con lo que la base rellenó: sin esto, el código que crea un
+     * ticket y enseguida lee `requiere_verificacion_mensajes` sobre esa misma instancia lee
+     * null, y `(bool) null` es false — o sea, el default se daría vuelta justo en el camino
+     * más peligroso, el de mandarle algo al cliente sin que nadie lo lea.
+     *
+     * @var array<string, mixed>
+     */
+    protected $attributes = [
+        'claude_auto_reply' => true,
+        'requiere_verificacion_mensajes' => true,
+    ];
+
+    /**
      * Casts de fechas y canal para respuestas JSON consistentes.
      * Campos WhatsApp mass-assignables vía guarded=[]: source, whatsapp_phone,
      * last_client_message_at, alert_sent_at.
@@ -32,6 +48,9 @@ class SupportTicket extends Model
         'ai_suggestion_send_at' => 'datetime',
         /* Momento en que Claude escaló el ticket a revisión humana. */
         'escalated_at' => 'datetime',
+        /* Interruptores del agente por ticket, espejo de los que ya tiene `leads`. */
+        'claude_auto_reply' => 'boolean',
+        'requiere_verificacion_mensajes' => 'boolean',
     ];
 
     /**

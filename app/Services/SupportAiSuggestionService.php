@@ -442,6 +442,14 @@ USER;
             if ($body === '') {
                 $body = '['.strtoupper((string) $message->kind).']';
             }
+
+            /* Si el operador corrigió lo que había propuesto el agente, se marca y se manda el
+             * texto que de verdad salió. Es la señal más barata que tiene el agente para
+             * aprender en qué se equivoca: mismo criterio que el historial de leads. */
+            if (trim((string) ($message->ai_original_body ?? '')) !== '') {
+                $label .= ' (corrigió la sugerencia del agente)';
+            }
+
             $lines[] = $label.': '.$body;
         }
 
