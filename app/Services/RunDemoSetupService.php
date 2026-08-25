@@ -53,7 +53,7 @@ class RunDemoSetupService
      *
      * Cabe sin migración: `demo_setup_status` ya es un string(20) con default `pendiente`.
      *
-     * 🔴 Y NO es un estado terminal: lo destraba `leads:check-demo-setup-timeout`, que es otro
+     * 🔴 Y NO es un estado terminal: lo destraba `leads:vencer-demo-setups-colgados`, que es otro
      * proceso distinto del que lo puso acá. Es la regla que dejó escrita el 13/8/2026 en
      * APRENDER_NO_PARCHEAR después de que tres leads quedaran colgados en `ejecutandose` con el
      * error en NULL para siempre. Un estado intermedio sin vencimiento es una fuga, no un estado.
@@ -719,13 +719,15 @@ class RunDemoSetupService
          * por el canal de eventos (`demo.setup.completado`) que terminó de armarse, y ese aviso
          * llega por su propia conexión, independiente del POST que estamos esperando acá. El orden
          * "llega el evento → después vence/se corta el POST" es real y no una hipótesis: el POST
-         * espera hasta 300 segundos y el evento sale apenas el setup termina. Sin esta guarda, ese
+         * espera hasta 900 segundos (`services.client_api.demo_setup_timeout`; eran 300 hasta la
+         * misión cruzada del 25/8/2026) y el evento sale apenas el setup termina, que medido son
+         * 565,7 s. O sea que ahora el orden no es sólo posible: es el NORMAL. Sin esta guarda, ese
          * orden vuelve a dejar al lead en `fallido` con la demo perfectamente armada, y
          * `evaluar_ingreso()` no le habilita nunca el botón — que es el caso exacto que la misión
          * vino a arreglar.
          *
          * La condición viaja ADENTRO del propio UPDATE y no en un `if` sobre `$lead`, por dos
-         * motivos: la instancia en memoria trae el estado de hace hasta 300 segundos (es lo que
+         * motivos: la instancia en memoria trae el estado de hace hasta 900 segundos (es lo que
          * puede haber durado el POST que estamos por dar por perdido), y un chequeo seguido de un
          * update es exactamente la ventana de carrera que hay que cerrar. Mismo criterio que el
          * claim atómico de `run()`.

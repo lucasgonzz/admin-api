@@ -15,9 +15,15 @@ use Illuminate\Database\Seeder;
  * que están en null**. Es lo correcto para sembrar un default —así no le pisa a nadie un valor
  * elegido a mano—, pero justamente por eso no sirve para CORREGIR uno: en la base de producción
  * `demo_setup_timeout_minutos` ya vale `10`, así que cambiar el default en código no cambia nada
- * allá. Y la clave todavía no es editable desde el panel (`LeadDemoSettings::to_array()` no la
- * expone y admin-spa no la manda en el PUT de settings), o sea que tampoco hay forma de arreglarlo
- * a mano. Sin este seeder, el arreglo se queda en el repo y producción sigue con el número viejo.
+ * allá.
+ *
+ * Y tampoco se puede arreglar a mano desde el panel. Ojo con el motivo, porque una versión anterior
+ * de este comentario lo tenía mal: la clave **sí** está en `LeadDemoSettings::to_array()` y
+ * `persist_from_request()` **sí** la acepta. Lo que falta es la otra punta — admin-spa no manda
+ * `setup_timeout_minutos` en el PUT de settings (no aparece en ninguna línea de `admin-spa/src`), y
+ * la guarda `isset()` del persist hace que un front que no la manda no la pise. O sea que el campo
+ * existe en la API y no existe en la pantalla: guardar los settings desde el panel deja el valor
+ * como estaba. Sin este seeder, el arreglo se queda en el repo y producción sigue con el 10.
  *
  * 🔴 Y por qué el número importa: medido el 25/8/2026 contra `empresa_testing_s1`, una corrida
  * SANA de `DemoSetupHelper::run()` tarda **565,7 s — 9 minutos y 26 segundos**. Con el umbral en
