@@ -14,6 +14,7 @@ use App\Models\Version;
 use App\Models\VersionCommand;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Queue\MaxAttemptsExceededException;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
@@ -520,14 +521,18 @@ class RobustezDelDeploymentDesatendidoTest extends TestCase
     }
 
     /**
-     * 10. Y `failed()` NO pisa una pausa legítima que el pipeline ya escribió.
+     * 10. Y `failed()` NO pisa una pausa legítima que el pipeline ya escribió — pero SÍ deja
+     * constancia.
      *
-     * `paused` y `paused_post_tasks` los escribe `DeploymentService` a propósito al terminar una
-     * etapa. Si el job falla DESPUÉS de eso, el estado bueno es el de la pausa.
+     * Son dos cosas separadas y conviene que se lean separadas: el ESTADO no se toca (`paused` y
+     * `paused_post_tasks` los escribe `DeploymentService` a propósito al terminar una etapa, y son
+     * la verdad), pero la LÍNEA sí se escribe, porque que el job haya muerto después de la pausa es
+     * información que el operador necesita. Desacoplar las dos es justo lo que arregló el agujero
+     * del test 13.
      *
      * @return void
      */
-    public function test_el_job_fallado_no_pisa_una_pausa_legitima(): void
+    public function test_el_job_fallado_no_pisa_una_pausa_legitima_pero_deja_constancia(): void
     {
         Carbon::setTestNow($this->momento_base());
 
@@ -539,33 +544,205 @@ class RobustezDelDeploymentDesatendidoTest extends TestCase
         $job = new RunDeploymentJob($upgrade->uuid);
         $job->failed(new \RuntimeException('Cualquier cosa'));
 
-        $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+        $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status, 'La pausa es la verdad: el fallo del job no la pisa.');
+
         $this->assertSame(
-            0,
+            1,
             DeploymentLog::where('client_version_upgrade_id', $upgrade->id)
                 ->where('step', VencerDeploymentsColgados::STEP_VENCIMIENTO)
-                ->count()
+                ->count(),
+            'El estado no se toca, pero el operador tiene que enterarse igual de que el job murió.'
         );
     }
 
     /**
-     * 11. `retry_after` de la conexión `database` tiene que ser MAYOR que el `$timeout` del job más
-     * largo que corre ahí.
+     * 11. 🔴 El ORDEN de los tres umbrales que actúan sobre el mismo deployment.
      *
-     * Si no, el job vuelve a quedar disponible mientras el primer worker lo sigue corriendo bien: el
-     * worker del tick siguiente lo reserva, ve `attempts > tries` y lo manda a `failed_jobs` sin
-     * que haya fallado nada. Estaba en 660 con un `RunDeploymentJob` de 1800, o sea que TODO
-     * deployment de más de once minutos se marcaba fallido sin serlo — y esta misión, que manda
-     * también los cuatro despachos del panel a esta conexión, lo volvía el caso normal.
+     * De menor a mayor, y el criterio es cuánto sabe cada uno antes de escribir:
+     *
+     *   1. `RunDeploymentJob::TIMEOUT_SEGUNDOS` — MATA el proceso vivo.
+     *   2. `VencerDeploymentsColgados::min_timeout_minutos()` — marca `failed`, pero solo si no
+     *      hubo actividad de logs: mira evidencia.
+     *   3. `retry_after` — marca `failed` A CIEGAS, sin mirar logs ni ancla.
+     *
+     * El que menos sabe va último. La primera versión de esta misión dejó `retry_after` en 31
+     * minutos, o sea metido entre el 1 y el 2: el camino de `MaxAttemptsExceededException` marcaba
+     * `failed` sin evidencia de nada mientras el worker original podía seguir con el SSH abierto
+     * contra el hosting del cliente — y desde `failed` las dos puertas invitan a reintentar.
      *
      * @return void
      */
-    public function test_el_retry_after_de_la_cola_es_mayor_que_el_timeout_del_job(): void
+    public function test_los_tres_umbrales_se_disparan_en_el_orden_correcto(): void
     {
+        $timeout_job  = RunDeploymentJob::TIMEOUT_SEGUNDOS;
+        $piso_vencer  = VencerDeploymentsColgados::min_timeout_minutos() * 60;
+        $retry_after  = (int) config('queue.connections.database.retry_after');
+
         $this->assertGreaterThan(
-            RunDeploymentJob::TIMEOUT_SEGUNDOS,
-            (int) config('queue.connections.database.retry_after'),
-            'Con retry_after por debajo del timeout, un deployment vivo termina en failed_jobs sin haber fallado.'
+            $timeout_job,
+            $piso_vencer,
+            'El vencimiento tiene que quedar por encima del techo del job, si no marca failed procesos vivos.'
+        );
+
+        $this->assertGreaterThan(
+            $piso_vencer,
+            $retry_after,
+            'retry_after escribe failed a ciegas: tiene que ser el MÁS ALTO de los tres.'
+        );
+    }
+
+    /**
+     * 12. Y ningún OTRO job de la conexión `database` puede tener un `$timeout` por encima de
+     * `retry_after`.
+     *
+     * Comparar contra `RunDeploymentJob` a mano no alcanza: hoy `RunClientInstallationGroupJob`
+     * ($timeout = 3900) y `RunDemoUpdateJob` ($timeout = 3600) corren en `sync`, pero están a un
+     * `->onConnection('database')` de romper el invariante sin que nada lo denuncie. Este test
+     * recorre `app/Jobs/` por reflexión para que el día que alguien los mueva, se entere acá.
+     *
+     * @return void
+     */
+    public function test_ningun_job_de_la_conexion_supera_el_retry_after(): void
+    {
+        $retry_after = (int) config('queue.connections.database.retry_after');
+
+        $conexiones_explicitas = [];
+        foreach (glob(app_path('Jobs/*.php')) as $archivo) {
+            $conexiones_explicitas[basename($archivo, '.php')] = strpos(
+                (string) file_get_contents($archivo),
+                "onConnection('database')"
+            ) !== false;
+        }
+
+        /* Los despachos viven en los controladores, no en los jobs, así que se barre todo `app/`
+         * buscando qué clase de job se encola explícitamente en `database`. */
+        $fuentes = '';
+        $iterador = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator(app_path()));
+        foreach ($iterador as $archivo) {
+            if ($archivo->isFile() && $archivo->getExtension() === 'php') {
+                $fuentes .= (string) file_get_contents($archivo->getPathname());
+            }
+        }
+
+        foreach (array_keys($conexiones_explicitas) as $clase_corta) {
+            $clase = 'App\\Jobs\\' . $clase_corta;
+            if (! class_exists($clase)) {
+                continue;
+            }
+
+            /* Se encola en `database` si en algún lado aparece su despacho seguido del onConnection
+             * explícito, o si el propio job lo declara. */
+            $encolado_en_database = preg_match(
+                '/' . preg_quote($clase_corta, '/') . '::dispatch\([^;]*onConnection\(\s*(self::CONEXION_DE_COLA|\'database\')/s',
+                $fuentes
+            ) === 1;
+
+            if (! $encolado_en_database) {
+                continue;
+            }
+
+            $reflexion = new \ReflectionClass($clase);
+            $defaults  = $reflexion->getDefaultProperties();
+            $timeout   = isset($defaults['timeout']) ? (int) $defaults['timeout'] : 0;
+
+            $this->assertLessThan(
+                $retry_after,
+                $timeout,
+                $clase_corta . ' corre en la conexión `database` con $timeout = ' . $timeout
+                    . ', por encima del retry_after de ' . $retry_after
+                    . ': va a terminar en failed_jobs sin haber fallado. Subí el retry_after.'
+            );
+        }
+    }
+
+    /**
+     * 13. 🔴 `failed()` escribe el motivo AUNQUE el estado ya sea `failed`.
+     *
+     * Es el camino más común y la primera versión no lo cubría: el `catch` de `handle()` escribe
+     * `failed` y re-tira, así que cuando el worker llama a `failed()` el CAS afecta 0 filas. Con el
+     * `return` temprano que tenía, el operador se quedaba sin ningún motivo — y si lo que falló fue
+     * `connect()`, `DeploymentService` tampoco había escrito una sola línea: el panel mostraba rojo
+     * sin una pista.
+     *
+     * @return void
+     */
+    public function test_el_job_fallado_escribe_el_motivo_aunque_el_estado_ya_sea_failed(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $upgrade = $this->crear_upgrade([
+            'deployment_status'        => 'failed',
+            'deployment_running_since' => $this->momento_base(),
+        ]);
+
+        $job = new RunDeploymentJob($upgrade->uuid);
+        $job->failed(new \RuntimeException('No se pudo conectar por SSH'));
+
+        $linea = DeploymentLog::where('client_version_upgrade_id', $upgrade->id)
+            ->where('step', VencerDeploymentsColgados::STEP_VENCIMIENTO)
+            ->first();
+
+        $this->assertNotNull($linea, 'Sin esta línea, un fallo de connect() deja el panel en rojo y vacío.');
+        $this->assertStringContainsString('No se pudo conectar por SSH', (string) $linea->line);
+    }
+
+    /**
+     * 14. 🔴 Un `MaxAttemptsExceededException` NO dice lo mismo que "el proceso murió".
+     *
+     * Significa que la cola dio el job por agotado, y el worker original puede seguir vivo con el
+     * SSH abierto. Invitar a reintentar ahí es pedir un segundo `DeploymentService` encima del
+     * primero.
+     *
+     * @return void
+     */
+    public function test_el_agotamiento_de_la_cola_avisa_que_puede_haber_un_proceso_vivo(): void
+    {
+        Carbon::setTestNow($this->momento_base());
+
+        $upgrade = $this->crear_upgrade([
+            'deployment_status'        => 'running',
+            'deployment_running_since' => $this->momento_base(),
+        ]);
+
+        $job = new RunDeploymentJob($upgrade->uuid);
+        $job->failed(new MaxAttemptsExceededException('agotado'));
+
+        $linea = DeploymentLog::where('client_version_upgrade_id', $upgrade->id)
+            ->where('step', VencerDeploymentsColgados::STEP_VENCIMIENTO)
+            ->first();
+
+        $this->assertNotNull($linea);
+        $this->assertStringContainsString('NO reintentes', (string) $linea->line);
+        $this->assertStringNotContainsString('murió sin poder reportar', (string) $linea->line);
+    }
+
+    /**
+     * 15. El backfill de la migración alcanza a los upgrades que ya estaban colgados.
+     *
+     * Sin él, todo lo que hoy está en `running` en producción quedaba fuera del vencimiento para
+     * siempre — o sea, el problema que motivó la misión seguía saliendo a mano justo para los casos
+     * que ya existen.
+     *
+     * @return void
+     */
+    public function test_la_columna_quedo_rellenada_para_los_running_previos(): void
+    {
+        /* Se simula el estado post-migración a la inversa: una fila en `running` con el ancla en
+         * NULL es exactamente lo que el backfill tenía que evitar que existiera. */
+        $upgrade = $this->crear_upgrade(['deployment_status' => 'running']);
+
+        \Illuminate\Support\Facades\DB::table('client_version_upgrades')
+            ->where('id', $upgrade->id)
+            ->update(['deployment_running_since' => null, 'updated_at' => $this->momento_base()->copy()->subDays(4)]);
+
+        \Illuminate\Support\Facades\DB::table('client_version_upgrades')
+            ->where('deployment_status', 'running')
+            ->whereNull('deployment_running_since')
+            ->update(['deployment_running_since' => \Illuminate\Support\Facades\DB::raw('COALESCE(`updated_at`, `deployment_started_at`)')]);
+
+        $this->assertNotNull(
+            $upgrade->refresh()->deployment_running_since,
+            'El backfill de la migración es lo que saca del limbo a los upgrades colgados de hoy.'
         );
     }
 }

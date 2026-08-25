@@ -240,10 +240,10 @@ class VencerDeploymentsColgados extends Command
         $opcion = $this->option('minutos');
 
         if ($opcion !== null && $opcion !== '') {
-            return $this->clamp((int) $opcion);
+            return $this->acotar((int) $opcion);
         }
 
-        return $this->clamp((int) AdminSetting::get(self::KEY_TIMEOUT_MINUTOS, (string) self::DEFAULT_TIMEOUT_MINUTOS));
+        return $this->acotar((int) AdminSetting::get(self::KEY_TIMEOUT_MINUTOS, (string) self::DEFAULT_TIMEOUT_MINUTOS));
     }
 
     /**
@@ -256,11 +256,17 @@ class VencerDeploymentsColgados extends Command
      *
      * @return int
      */
-    private function clamp(int $minutos): int
+    private function acotar(int $minutos): int
     {
         $piso = self::min_timeout_minutos();
 
         if ($minutos < $piso) {
+            /* Se avisa, no se corrige en silencio: alguien que carga 10 esperando vencimientos
+             * rápidos tiene que enterarse de que le quedaron en 35 y por qué. */
+            $this->warn("Umbral pedido: {$minutos} min. Se aplica el piso de {$piso} min, que es el "
+                . 'techo del job más el margen: por debajo de eso este comando podría marcar fallido '
+                . 'un deployment todavía vivo.');
+
             return $piso;
         }
 

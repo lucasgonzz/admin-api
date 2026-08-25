@@ -48,16 +48,37 @@ return [
              * pasaba al `RunDemoSetupJob` ($timeout = 600), que fue el caso que lo destapó en la
              * misión 60.
              *
-             * 1860 = 1800 + 60 (misión 61). El job más largo de esta conexión NO es
-             * `RunDemoSetupJob` sino `RunDeploymentJob`, con `$timeout = 1800`: ese cálculo quedó
-             * viejo cuando `ClaudeUpgradeOpsController` empezó a encolar deployments acá, y la
-             * misión 61 —que manda también los cuatro despachos del panel a esta conexión— lo
-             * volvió el caso normal en vez de la excepción. Con los 660 anteriores, TODO deployment
-             * de más de once minutos —que son casi todos: `npm ci` + `npm run build` + dos zips +
-             * `composer install`— se marcaba fallido sin serlo.
+             * Con los 660 anteriores, TODO deployment de más de once minutos —que son casi todos:
+             * `npm ci` + `npm run build` + dos zips + `composer install`— se marcaba fallido sin
+             * serlo. El cálculo de 660 quedó viejo cuando `ClaudeUpgradeOpsController` empezó a
+             * encolar deployments acá, porque el job más largo de esta conexión dejó de ser
+             * `RunDemoSetupJob` (600) y pasó a ser `RunDeploymentJob` (1800).
              *
-             * Si algún día un job de esta conexión sube su `$timeout`, este número sube con él. */
-            'retry_after' => 1860,
+             * 🔴 2400 (40 min), y el número sale de un ORDEN de tres umbrales, no de sumarle un
+             * margen a uno solo (misión 61). Los tres actúan sobre el mismo deployment y tienen que
+             * dispararse en este orden, de menor a mayor:
+             *
+             *   1. `RunDeploymentJob::TIMEOUT_SEGUNDOS` — 30 min. MATA el proceso vivo.
+             *   2. `VencerDeploymentsColgados::min_timeout_minutos()` — 35 min. Marca `failed`,
+             *      pero SOLO si no hubo actividad de logs: mira evidencia antes de escribir.
+             *   3. `retry_after` — 40 min. Marca `failed` A CIEGAS, sin mirar logs ni el ancla.
+             *
+             * El que menos sabe va último, y por eso `retry_after` tiene que ser el MÁS ALTO de los
+             * tres. La versión anterior de esta misión lo dejó en 1860 (31 min), o sea metido entre
+             * el 1 y el 2: el camino de `MaxAttemptsExceededException` marcaba `failed` a los 31
+             * minutos sin evidencia de nada, mientras el worker original podía seguir con el SSH
+             * abierto contra el hosting del cliente — y desde `failed` las dos puertas invitan a
+             * reintentar, o sea dos `DeploymentService` sobre el mismo cliente.
+             *
+             * ⚠️ El punto 1 solo existe si el CLI del servidor tiene `pcntl`
+             * (`Worker::supportsAsyncSignals()`). Sin `pcntl` no hay `SIGALRM`, `$timeout` es letra
+             * muerta y el único corte real de los tres pasa a ser el 3.
+             *
+             * Este orden lo verifica `RobustezDelDeploymentDesatendidoTest`, y ahí también se
+             * chequea que ningún OTRO job de esta conexión tenga un `$timeout` por encima — hoy
+             * `RunClientInstallationGroupJob` (3900) y `RunDemoUpdateJob` (3600) están a un
+             * `->onConnection('database')` de romper esto. */
+            'retry_after' => 2400,
             'after_commit' => false,
         ],
 

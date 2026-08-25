@@ -2,8 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
 use App\Console\Commands\VencerDeploymentsColgados;
+use App\Http\Controllers\Controller;
 use App\Http\Controllers\UpdateController;
 use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
@@ -1495,9 +1495,11 @@ class ClaudeClientOpsController extends Controller
     /**
      * Señales de si el worker está vivo, calculadas y NO persistidas.
      *
-     * 🔴 `deployment_status = 'running'` es un estado intermedio que hoy no destraba nadie: si el
-     * cron del scheduler no corre, el upgrade se queda ahí para siempre y el job duerme en la
-     * tabla `jobs`. `jobs_en_cola` es la medición honesta de eso: `running` + `jobs_en_cola > 0`
+     * 🔴 `deployment_status = 'running'` es un estado intermedio del que, desde la misión 61, sí se
+     * sale solo: lo destraba `deployments:vencer-colgados`. Lo que sigue sin tener salida es el
+     * caso en que **el scheduler entero no corre** en el servidor — ahí ni el worker avanza ni el
+     * comando que vence llega a correr, y el upgrade se queda para siempre con el job durmiendo en
+     * la tabla `jobs`. `jobs_en_cola` es la medición honesta de eso: `running` + `jobs_en_cola > 0`
      * sostenido varios minutos significa que el worker no está consumiendo. Es un dato, no una
      * conjetura.
      *

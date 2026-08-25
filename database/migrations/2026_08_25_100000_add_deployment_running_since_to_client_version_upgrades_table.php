@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -25,9 +26,21 @@ use Illuminate\Support\Facades\Schema;
  * excepción. Una entrada que se olvide del sello es un upgrade que se vence solo a los N minutos
  * aunque esté sano — el modo de falla más grave de este diseño.
  *
- * Nullable a propósito: los upgrades que ya estaban en `running` antes de esta migración quedan
- * con la columna en NULL y `deployments:vencer-colgados` NO los toca. No se sabe hace cuánto están
- * ahí, y adivinarlo sería inventar la medición.
+ * Nullable, y con BACKFILL para los que ya están en `running`. La primera versión de esta migración
+ * los dejaba en NULL con el argumento de que "no se sabe hace cuánto están ahí" — y eso dejaba
+ * afuera del vencimiento justo a los upgrades colgados que existen HOY en producción, que son los
+ * que motivaron la misión. El problema de "se sale tocando la base a mano" habría seguido intacto
+ * para todos los casos ya existentes.
+ *
+ * Se rellena con `updated_at`, que para una fila en `running` es siempre POSTERIOR a su entrada a
+ * ese estado (el `update` que escribió `running` lo tocó, y cualquier escritura de
+ * `DeploymentService` posterior también). O sea que solo puede errar hacia NO vencer, nunca hacia
+ * vencer de más. No es inventar una medición: es una cota conservadora, y encima el criterio real
+ * del comando es `max(ancla, última línea de log)`, así que un deployment que de verdad está vivo
+ * se salva solo con sus propios logs.
+ *
+ * Las filas que NO están en `running` quedan en NULL a propósito: el ancla no significa nada fuera
+ * de ese estado y el comando ni las mira.
  *
  * ⚠️ Y la otra mitad de la máquina, escrita para que nadie la lea como un olvido: **el ancla NO se
  * limpia al salir de `running`**, a propósito. Ninguna de las cinco salidas la toca
@@ -50,6 +63,16 @@ class AddDeploymentRunningSinceToClientVersionUpgradesTable extends Migration
             // Momento en que el upgrade entró al tramo `running` en curso.
             $table->timestamp('deployment_running_since')->nullable()->after('deployment_started_at');
         });
+
+        /* Backfill de los que YA están colgados: sin esto quedarían fuera del vencimiento para
+         * siempre, que es justo el caso que motivó la misión. `updated_at` es la cota conservadora
+         * (ver el docblock de arriba); el `COALESCE` cubre una fila sin `updated_at` cargado. */
+        DB::table('client_version_upgrades')
+            ->where('deployment_status', 'running')
+            ->whereNull('deployment_running_since')
+            ->update([
+                'deployment_running_since' => DB::raw('COALESCE(`updated_at`, `deployment_started_at`)'),
+            ]);
     }
 
     /**

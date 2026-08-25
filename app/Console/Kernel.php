@@ -89,7 +89,22 @@ class Kernel extends ConsoleKernel
          * No es teórico ni nuevo: en la base de producción había tres `RunDemoSetupJob` encolados
          * con `attempts = 0`, es decir jamás intentados. Alguien ya encolaba a `database` y nadie
          * los consumía. */
-        $schedule->command('queue:work database --stop-when-empty')->everyMinute();
+        /* 🔴 `runInBackground()` desde la misión 61, y no es cosmético. `$schedule->command()` corre
+         * el proceso SINCRÓNICAMENTE adentro de `schedule:run`: mientras el worker está ocupado, esa
+         * invocación del scheduler queda clavada y NO ejecuta ninguno de los ~20 comandos que vienen
+         * antes ni después. Hasta la misión 61 el job más largo de esta conexión era
+         * `RunDemoSetupJob` (600 s) y se toleraba; con `RunDeploymentJob` (1800 s) serían treinta
+         * minutos de scheduler parado por cada deployment, y se apilarían hasta treinta procesos
+         * `schedule:run` vivos. En shared hosting eso toca el límite de procesos concurrentes y lo
+         * que se cae es el scheduler ENTERO — incluido `deployments:vencer-colgados`, que es
+         * justamente la red que atrapa un deployment colgado. El arreglo se comía a sí mismo.
+         *
+         * Y NO `withoutOverlapping()`: eso serializaría toda la conexión, y un deployment de treinta
+         * minutos dejaría sin worker a los `RunDemoSetupJob`, que sí tienen un turno que cumplir.
+         * Es exactamente el daño que costó tres demos mudas. */
+        $schedule->command('queue:work database --stop-when-empty')
+            ->everyMinute()
+            ->runInBackground();
     }
 
     /**
