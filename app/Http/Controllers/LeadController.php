@@ -512,6 +512,27 @@ class LeadController extends Controller
             ->where('admin_id', Auth::id())
             ->exists();
 
+        /*
+         * Link completo de ingreso a la demo, para el bloque "Link de ingreso a la demo" del modal
+         * (`lead_demo_ingreso_link` en LeadProperties). El accesor ya normaliza el esquema con
+         * DemoUrlNormalizer, así que lo que sale de acá es navegable tal cual.
+         *
+         * 🔴 Se inyecta ACÁ, en el detalle de un solo lead, y a propósito NO se agrega a un
+         * `$appends` del modelo. El accesor lee `$this->demo`, así que en `$appends` correría en
+         * todos los lugares donde el modelo se serializa entero — el listado de leads, el
+         * `broadcastWith()` de LeadSuggestionCreated y los endpoints públicos de
+         * DemoExperienciaController —, sumando una query por lead donde la relación no esté
+         * cargada y, peor, mandando el link CON el token en claro a payloads que hoy no lo llevan.
+         *
+         * 🔴 Y es `append()` de instancia, no una asignación (`$lead->demo_ingreso_url = ...`). La
+         * asignación mete una clave que no es columna adentro de `$attributes` y deja el modelo
+         * *dirty*: hoy no rompe porque el único que llama acá es `show_json()` y devuelve sin
+         * guardar, pero el día que alguien agregue un `save()` después de esta línea el UPDATE
+         * incluiría `demo_ingreso_url` y saldría `Unknown column`. `append()` produce el mismo
+         * JSON sin ensuciar los atributos.
+         */
+        $lead->append('demo_ingreso_url');
+
         return $lead;
     }
 
