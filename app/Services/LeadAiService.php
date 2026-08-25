@@ -1996,6 +1996,19 @@ TXT;
             'requiere_intervencion_humana' => true,
         ]);
 
+        /* Bajar `tiene_sugerencia_pendiente` ahora que el mensaje pasó a `rechazado`: si queda
+         * prendida, LeadFollowupService y los comandos de recordatorio saltean el lead hasta el
+         * próximo ciclo de sugerencias.
+         *
+         * 🔴 Va sobre un $lead->fresh() y NO sobre $lead: sync_suggestion_flags() termina en un
+         * save(), y el $lead de este método ya tiene mutaciones a medias en memoria (ver el
+         * comentario de arriba). El fresh() es un modelo recién leído de la base — trae el
+         * requiere_intervencion_humana que se acaba de escribir y no arrastra nada sin persistir. */
+        $lead_fresco = $lead->fresh();
+        if ($lead_fresco !== null) {
+            $lead_fresco->sync_suggestion_flags();
+        }
+
         /* 🔴 Y alguien se tiene que enterar fuera del navegador. El camino normal de
          * requiere_intervencion_humana (apply_parsed_response) crea una AdminTask, busca el
          * is_default_task_assignee y notifica; acá, sin eso, el único aviso sería el toast del 422
