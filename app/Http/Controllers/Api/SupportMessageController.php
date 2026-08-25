@@ -4,13 +4,14 @@ namespace App\Http\Controllers\Api;
 
 use App\Events\SupportMessageReceived;
 use App\Http\Controllers\CommonLaravel\BaseController;
+use App\Models\Admin;
 use App\Models\SupportMessage;
 use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Models\SupportTypingState;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
-use App\Services\WhatsappSendService;
+use App\Services\SupportWhatsappOpenerService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
@@ -111,33 +112,30 @@ class SupportMessageController extends BaseController
         }
 
         try {
-            $whatsapp_send_service = new WhatsappSendService();
-            $message->loadMissing('attachments');
-            $whatsapp_message_id = $whatsapp_send_service->send_support_message(
-                (string) $ticket->whatsapp_phone,
-                $message
-            );
+            // Pasa por el opener y no derecho por WhatsappSendService: con la ventana de 24hs
+            // de Meta cerrada el texto libre se rechaza, y hasta ahora eso se perdía en
+            // silencio. Antes casi no pasaba —todo ticket de WhatsApp nacía de un entrante—,
+            // pero desde que el operador puede abrir la conversación él, es el caso normal.
+            $resultado = app(SupportWhatsappOpenerService::class)
+                ->deliver_follow_up($ticket, $message, $this->resolve_current_admin_name());
 
-            if ($whatsapp_message_id) {
-                $message->update([
-                    'whatsapp_message_id'     => $whatsapp_message_id,
-                    'remote_delivery_status'  => null,
-                ]);
-
+            if ($resultado['delivery'] === 'sent') {
                 Log::channel('daily')->info('SupportMessageController: mensaje enviado por WhatsApp.', [
                     'ticket_id'           => $ticket->id,
                     'to'                  => $ticket->whatsapp_phone,
-                    'whatsapp_message_id' => $whatsapp_message_id,
+                    'whatsapp_message_id' => $resultado['message_id'],
+                    'used_template'       => $resultado['used_template'],
                 ]);
 
                 return;
             }
 
             Log::channel('daily')->error('SupportMessageController: falló envío por WhatsApp.', [
-                'ticket_id' => $ticket->id,
-                'to'        => $ticket->whatsapp_phone,
+                'ticket_id'     => $ticket->id,
+                'to'            => $ticket->whatsapp_phone,
+                'used_template' => $resultado['used_template'],
+                'error'         => $resultado['error'],
             ]);
-            $this->mark_whatsapp_delivery_failed($message);
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('SupportMessageController: excepción al enviar por WhatsApp.', [
                 'ticket_id' => $ticket->id,
@@ -162,16 +160,49 @@ class SupportMessageController extends BaseController
     }
 
     /**
+     * Nombre del operador autenticado, para la plantilla de WhatsApp.
+     *
+     * @return string
+     */
+    private function resolve_current_admin_name(): string
+    {
+        $admin = Admin::find((int) Auth::id());
+        $admin_name = $admin !== null ? trim((string) $admin->name) : '';
+
+        return $admin_name !== '' ? $admin_name : 'Soporte';
+    }
+
+    /**
      * Marca lectura de mensaje desde admin-spa y la sincroniza al cliente.
      */
     public function mark_read($id, SupportClientSyncService $sync_service)
     {
-        $message = SupportMessage::findOrFail($id);
+        $message = SupportMessage::with('ticket')->findOrFail($id);
         $message->read_at = now();
         $message->save();
-        $sync_service->sync_read_to_client($message);
+
+        // En un ticket de WhatsApp el cliente no tiene chat del ERP donde ver la lectura:
+        // sincronizar sería un POST con dos reintentos y 15s de timeout contra una API que
+        // ni siquiera conoce este ticket, por cada mensaje que el operador abre.
+        if (! $this->ticket_is_whatsapp($message->ticket)) {
+            $sync_service->sync_read_to_client($message);
+        }
 
         return response()->json(['ok' => true], 200);
+    }
+
+    /**
+     * Indica si el ticket viaja por WhatsApp y por lo tanto no se sincroniza al ERP.
+     *
+     * Un ticket nulo se trata como ERP: es el comportamiento que había antes de esta guarda.
+     *
+     * @param SupportTicket|null $ticket Ticket del mensaje.
+     *
+     * @return bool
+     */
+    private function ticket_is_whatsapp($ticket): bool
+    {
+        return $ticket !== null && $ticket->source === 'whatsapp';
     }
 
     /**
@@ -227,7 +258,11 @@ class SupportMessageController extends BaseController
         ]);
         $typing_state->last_typing_at = now();
         $typing_state->save();
-        $sync_service->sync_typing_to_client($ticket);
+
+        // Mismo motivo que en mark_read(), pero peor: acá el POST salía por cada tecla.
+        if (! $this->ticket_is_whatsapp($ticket)) {
+            $sync_service->sync_typing_to_client($ticket);
+        }
 
         return response()->json(['ok' => true], 200);
     }

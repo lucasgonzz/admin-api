@@ -314,6 +314,7 @@ TrustProxies, HandleCors, PreventRequestsDuringMaintenance, TrimStrings, Convert
 | Comando | Frecuencia |
 |---------|------------|
 | `support:retry-pending-syncs` | Cada 5 min |
+| `support:check-clients-without-phone` | Todos los días 09:00 |
 | `leads:check-followups` | Cada 2 h |
 | `leads:send-demo-reminders` | Cada 5 min |
 

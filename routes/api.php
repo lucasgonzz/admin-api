@@ -486,6 +486,8 @@ Route::prefix('admin')->group(function () {
         // Soporte tipo bandeja estilo Front.
         Route::get('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'index']);
         Route::get('support-ticket/unread-badges', [\App\Http\Controllers\Api\SupportTicketController::class, 'unread_badges']);
+        // Va antes de support-ticket/{id}: si no, {id} se come "whatsapp-contacts".
+        Route::get('support-ticket/whatsapp-contacts', [\App\Http\Controllers\Api\SupportTicketController::class, 'whatsapp_contacts']);
         Route::get('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'show']);
         Route::post('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'store']);
         Route::put('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'update']);
