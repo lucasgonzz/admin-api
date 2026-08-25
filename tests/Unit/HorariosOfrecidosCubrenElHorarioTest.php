@@ -122,6 +122,92 @@ class HorariosOfrecidosCubrenElHorarioTest extends TestCase
     }
 
     /**
+     * 5ter. 🔴 Una hora FUERA DE RANGO tampoco ensancha el permiso.
+     *
+     *       Es el caso más traicionero de todos: "25:99" y "99:99" pasan el preg_match de
+     *       (\d{1,2}):(\d{2}) sin problema, o sea que eran "legibles" — y como la comparación de
+     *       rango es lexicográfica sobre "HH:MM", un `hasta` así le gana a CUALQUIER hora real y
+     *       convierte el ítem en "de `desde` hasta el fin del día". Un `hasta` basura del modelo
+     *       daba permiso para saltarse el margen en todo el día.
+     *
+     * @return void
+     */
+    public function test_un_hasta_fuera_de_rango_no_ensancha_el_permiso(): void
+    {
+        $casos = ['25:99', '99:99', '24:00', '17:60'];
+
+        foreach ($casos as $hasta) {
+            $ofrecidos = [
+                ['fecha' => self::FECHA, 'desde' => '15:00', 'hasta' => $hasta],
+            ];
+
+            $this->assertTrue(
+                LeadMessage::horarios_ofrecidos_cubren($ofrecidos, self::FECHA, '15:00'),
+                'Con hasta = "' . $hasta . '" se perdió hasta el propio `desde`.'
+            );
+            $this->assertFalse(
+                LeadMessage::horarios_ofrecidos_cubren($ofrecidos, self::FECHA, '15:05'),
+                'Con hasta = "' . $hasta . '" el ítem se comportó como un rango hasta el fin del día.'
+            );
+            $this->assertFalse(
+                LeadMessage::horarios_ofrecidos_cubren($ofrecidos, self::FECHA, '23:55'),
+                'Con hasta = "' . $hasta . '" quedó cubierto el día entero.'
+            );
+        }
+    }
+
+    /**
+     * 5quater. Y una hora fuera de rango en `desde` deja el ítem directamente ilegible: no cubre
+     *          nada, ni siquiera a sí misma.
+     *
+     * @return void
+     */
+    public function test_un_desde_fuera_de_rango_no_cubre_nada(): void
+    {
+        $ofrecidos = [
+            ['fecha' => self::FECHA, 'desde' => '25:99', 'hasta' => '25:99'],
+        ];
+
+        $this->assertFalse(LeadMessage::horarios_ofrecidos_cubren($ofrecidos, self::FECHA, '25:99'));
+        $this->assertFalse(LeadMessage::horarios_ofrecidos_cubren($ofrecidos, self::FECHA, '15:00'));
+    }
+
+    /**
+     * 5quinquies. La fecha se normaliza igual que la hora: un "2026-08-25T00:00:00" o un
+     *             "2026-08-25 00:00:00" declarados por el modelo matchean contra el Y-m-d pelado
+     *             que trae el paquete de agendamiento. Antes se comparaba cruda con !== y el
+     *             rescate fallaba EN SILENCIO.
+     *
+     * @return void
+     */
+    public function test_la_fecha_se_normaliza_antes_de_comparar(): void
+    {
+        $formatos = [
+            self::FECHA,
+            self::FECHA . 'T00:00:00',
+            self::FECHA . ' 00:00:00',
+            self::FECHA . 'T17:05:00-03:00',
+        ];
+
+        foreach ($formatos as $fecha_declarada) {
+            $ofrecidos = [
+                ['fecha' => $fecha_declarada, 'desde' => '17:05', 'hasta' => '17:05'],
+            ];
+
+            $this->assertTrue(
+                LeadMessage::horarios_ofrecidos_cubren($ofrecidos, self::FECHA, '17:05'),
+                'La fecha declarada como "' . $fecha_declarada . '" no matcheó: el rescate fallaría en silencio.'
+            );
+        }
+
+        /* Y sigue sin matchear lo que de verdad es otra fecha. */
+        $otra = [
+            ['fecha' => '2026-08-24T00:00:00', 'desde' => '17:05', 'hasta' => '17:05'],
+        ];
+        $this->assertFalse(LeadMessage::horarios_ofrecidos_cubren($otra, self::FECHA, '17:05'));
+    }
+
+    /**
      * 5bis. Y si el `hasta` falta directamente como clave, el ítem sigue siendo un punto válido.
      *
      * @return void

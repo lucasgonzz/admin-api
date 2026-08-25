@@ -251,7 +251,7 @@ class LeadMessage extends Model
      */
     public static function horarios_ofrecidos_cubren(array $horarios_ofrecidos, string $fecha, string $hora): bool
     {
-        $fecha = trim($fecha);
+        $fecha = self::normalizar_fecha_ofrecida($fecha);
         $hora  = self::normalizar_hora_ofrecida($hora);
 
         if ($fecha === '' || $hora === '') {
@@ -272,7 +272,15 @@ class LeadMessage extends Model
              * release() del lock de la instancia: el lock quedaría tomado sus 8s de TTL y toda
              * otra aprobación sobre esa demo caería en el camino de "no se pudo tomar el lock",
              * marcando para intervención humana a leads que no tenían nada. */
-            $fecha_item = isset($item['fecha']) && is_scalar($item['fecha']) ? trim((string) $item['fecha']) : '';
+            /* 🔴 La fecha se NORMALIZA, no se compara cruda. La hora ya toleraba "9:05", " 09:05 "
+             * y "17:05:00", pero la fecha se comparaba con !== contra el string tal cual vino: un
+             * modelo que emita "2026-08-25T00:00:00" o "2026-08-25 00:00:00" hacía fallar el
+             * rescate EN SILENCIO — y como este fix acopló dos perillas, el resultado no era
+             * volver al comportamiento viejo sino caer en "no se envía nada". Se extrae el Y-m-d
+             * con el MISMO criterio de sufijo/prefijo de fecha que ya usa el resto de
+             * LeadAiService para las claves ("martes 2026-08-25"). Si no matchea, el ítem se
+             * descarta, igual que antes. */
+            $fecha_item = isset($item['fecha']) && is_scalar($item['fecha']) ? self::normalizar_fecha_ofrecida((string) $item['fecha']) : '';
             if ($fecha_item === '' || $fecha_item !== $fecha) {
                 continue;
             }
@@ -312,12 +320,18 @@ class LeadMessage extends Model
      *   mensaje `sugerido` (sin aprobar) o `rechazado` no llegó, y darle permiso a saltar el margen
      *   por un texto que nadie mandó abriría la puerta a que una sugerencia descartada habilite un
      *   horario.
-     * - Ventana de 24hs: no es arbitraria. En este flujo el lead solo puede aceptar escribiendo, y
-     *   para que su mensaje entre por texto libre la ventana de WhatsApp tiene que estar abierta —
-     *   24hs desde su último mensaje (ver LeadSuggestionSendService::is_within_whatsapp_window()).
-     *   Una oferta de hace más de un día no puede estar siendo aceptada por un turno de esta
-     *   conversación. Es una guarda defensiva barata: aunque no estuviera, la grilla fresca seguiría
-     *   atajando "ya pasó" y "se ocupó".
+     * 🔴 NO hay filtro por antigüedad, y sacarlo fue deliberado (25/8/2026). Hasta acá había una
+     * ventana de 24hs que comparaba AppTime::now() contra `sent_at`, y esos son DOS RELOJES
+     * DISTINTOS: AppTime::now() respeta el reloj virtual con el que se prueba el sistema, mientras
+     * que `sent_at` se escribe con el now() de Laravel, que es el reloj real. Con el reloj virtual
+     * corrido, la consulta no devolvía NADA y el rescate no disparaba nunca — sin un solo log que
+     * lo dijera. El razonamiento escrito para justificar la ventana además era incorrecto: la
+     * ventana de WhatsApp son 24hs desde el ÚLTIMO MENSAJE DEL LEAD, no desde nuestro `sent_at`.
+     *
+     * Y no debilita nada material: la fecha del ítem tiene que coincidir EXACTO con la fecha que se
+     * está confirmando, así que una oferta vieja es una oferta para una fecha vieja y no matchea; y
+     * quien decide disponibilidad de verdad sigue siendo la grilla fresca, que ataja "ya pasó" y
+     * "se ocupó".
      *
      * `whereNotNull('horarios_ofrecidos')` deja afuera solo los mensajes de
      * LeadConversationErrorLogger (que son `enviado` con ese campo en null). No hace falta índice
@@ -335,19 +349,11 @@ class LeadMessage extends Model
             return false;
         }
 
-        $desde_ts = \App\Helpers\AppTime::now()->copy()->subHours(24);
-
         $mensajes = self::query()
             ->where('lead_id', $lead_id)
             ->where('sender', 'sistema')
             ->where('status', 'enviado')
             ->whereNotNull('horarios_ofrecidos')
-            ->where(function ($q) use ($desde_ts) {
-                $q->where('sent_at', '>=', $desde_ts)
-                  ->orWhere(function ($q2) use ($desde_ts) {
-                      $q2->whereNull('sent_at')->where('created_at', '>=', $desde_ts);
-                  });
-            })
             ->orderBy('id', 'desc')
             ->limit(20)
             ->get(['id', 'horarios_ofrecidos']);
@@ -372,9 +378,16 @@ class LeadMessage extends Model
      * Mismo criterio que LeadAiService::descartar_agendamiento_fuera_de_slots() (preg_match de
      * (\d{1,2}):(\d{2}) + str_pad a dos dígitos): tolera "9:05", " 09:05 " y "09:05:00".
      *
+     * 🔴 Y además VALIDA EL RANGO (00-23 / 00-59), que el criterio original no hacía. Acá no es
+     * cosmético: "25:99" o "99:99" son "legibles" para el preg_match y, como la comparación de
+     * rango es lexicográfica sobre "HH:MM", un `hasta: "25:99"` gana contra cualquier hora real y
+     * convierte el ítem en "de `desde` hasta el fin del día" — o sea, una declaración basura del
+     * modelo ensanchaba el permiso para saltarse el margen. Una hora fuera de rango es ilegible
+     * ('') y, cuando viene en `hasta`, el ítem se degrada a punto (solo `desde`).
+     *
      * @param string $hora Hora cruda declarada por el agente.
      *
-     * @return string "HH:MM" o '' si no se pudo leer.
+     * @return string "HH:MM" o '' si no se pudo leer o está fuera de rango.
      */
     private static function normalizar_hora_ofrecida(string $hora): string
     {
@@ -382,7 +395,33 @@ class LeadMessage extends Model
             return '';
         }
 
+        $h = (int) $m[1];
+        $i = (int) $m[2];
+        if ($h < 0 || $h > 23 || $i < 0 || $i > 59) {
+            return '';
+        }
+
         return str_pad($m[1], 2, '0', STR_PAD_LEFT) . ':' . $m[2];
+    }
+
+    /**
+     * Normaliza una fecha suelta a "Y-m-d", o string vacío si no es legible.
+     *
+     * Extrae el Y-m-d del texto con el mismo criterio que ya usa LeadAiService para las claves de
+     * fecha del JSON de disponibilidad ("martes 2026-08-25"): así un "2026-08-25T00:00:00" o un
+     * "2026-08-25 00:00:00" declarados por el modelo matchean igual que un "2026-08-25" pelado.
+     *
+     * @param string $fecha Fecha cruda.
+     *
+     * @return string "Y-m-d" o '' si no se pudo leer.
+     */
+    private static function normalizar_fecha_ofrecida(string $fecha): string
+    {
+        if (! preg_match('/(\d{4}-\d{2}-\d{2})/', $fecha, $m)) {
+            return '';
+        }
+
+        return $m[1];
     }
 
     /**
