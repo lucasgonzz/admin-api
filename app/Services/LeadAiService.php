@@ -96,6 +96,20 @@ TXT;
     const DIAS_DISPONIBILIDAD = 7;
 
     /**
+     * Ventana en la que un horario que YA ARRANCÓ todavía se puede reagendar solo al próximo slot.
+     *
+     * Decisión del 25/8/2026: un lead que contesta "dale" a las 23:40 sobre un horario de las 17:05
+     * no está aceptando un turno, está contestando tarde. Agendarle a las 23:45 y mandarle el link
+     * quema una instancia para alguien que probablemente no entre. Pasada esta ventana va el
+     * correctivo, que ahora sí le dice el motivo real y lo deja decidir a él.
+     *
+     * 🔴 NO convertir esto en una setting: el grupo 330 prohíbe explícitamente agregar settings o
+     * banderas de instancia a este flujo (una bandera con estado se filtra a la próxima llamada del
+     * mismo request y convierte esto en un bug intermitente imposible de reproducir).
+     */
+    const REAGENDADO_VENTANA_MINUTOS = 60;
+
+    /**
      * Último minuto del día, en minutos desde medianoche (23:59). Es el techo duro de una ventana
      * extendida: no existe fecha de fin, así que la ventana no puede cruzar la medianoche.
      */
@@ -1750,10 +1764,13 @@ TXT;
      *                                         MISMA grilla margen-0. Si el slot se rescata, su
      *                                         ventana tiene que salir de acá y no de la grilla con
      *                                         margen, donde ese slot ni existe.
+     * @param string|null $permiso_por_horario Horario VIEJO con el que se consulta el permiso, en
+     *                                         vez de $demo_start (misión reagendado-al-proximo-slot).
+     *                                         Default null = comportamiento de siempre.
      *
      * @return bool true si el horario se rescata del margen.
      */
-    protected function oferta_vigente_sin_margen(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null): bool
+    protected function oferta_vigente_sin_margen(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null, ?string $permiso_por_horario = null): bool
     {
         $ventanas_sin_margen = [];
 
@@ -1784,8 +1801,21 @@ TXT;
         }
 
         /* Primero la pregunta barata: ¿se lo ofrecimos nosotros? Una alucinación del modelo (un
-         * horario que el lead nunca recibió) muere acá, sin pagar el recálculo de la grilla. */
-        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $demo_start)) {
+         * horario que el lead nunca recibió) muere acá, sin pagar el recálculo de la grilla.
+         *
+         * 🔴 $permiso_por_horario (misión reagendado-al-proximo-slot): el permiso para saltar el
+         * margen es "este horario se lo ofrecimos nosotros" y vive en `lead_messages.horarios_ofrecidos`
+         * de un mensaje ENVIADO. Cuando el sistema le corre el turno al próximo slot, ese slot nuevo
+         * no está en ninguno: lo eligió PHP hace un minuto y el mensaje todavía es `sugerido`. Por
+         * eso lo que viaja en el paquete no es un permiso, es el horario VIEJO —el que sí se le
+         * ofreció— y acá se consulta con ÉL: mismo criterio de siempre, misma consulta a la misma
+         * base. Un modelo que invente esa clave no se auto-otorga nada. Sin esto, el reagendado se
+         * frena solo en los 5 minutos previos al slot nuevo, que es justo cuando el admin aprueba. */
+        $hora_del_permiso = ($permiso_por_horario !== null && $permiso_por_horario !== '')
+            ? $permiso_por_horario
+            : $demo_start;
+
+        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $hora_del_permiso)) {
             /* 🔴 Alerta a propósito, y en warning: este es el único camino por el que el rescate
              * NO dispara sin que haya pasado nada raro con el horario. Hay un guard conocido (ver
              * el bloque que exige `horarios_ofrecidos` en el paquete del agente) que existe
@@ -1796,10 +1826,11 @@ TXT;
             Log::channel('disponibilidad')->warning(
                 '[DISPONIBILIDAD] El horario no se rescató del margen: no figura como ofrecido a este lead en ningún mensaje enviado.',
                 [
-                    'lead_id'    => $lead->id,
-                    'demo_id'    => $demo_id,
-                    'demo_date'  => $demo_date,
-                    'demo_start' => $demo_start,
+                    'lead_id'          => $lead->id,
+                    'demo_id'          => $demo_id,
+                    'demo_date'        => $demo_date,
+                    'demo_start'       => $demo_start,
+                    'hora_del_permiso' => $hora_del_permiso,
                 ]
             );
 
@@ -1874,14 +1905,16 @@ TXT;
      * @param int        $demo_id
      * @param string     $demo_date
      * @param string     $demo_start
-     * @param array|null $ventanas_sin_margen Referencia de salida (ver oferta_vigente_sin_margen()).
+     * @param array|null  $ventanas_sin_margen Referencia de salida (ver oferta_vigente_sin_margen()).
+     * @param string|null $permiso_por_horario Horario VIEJO con el que se consulta el permiso (ver
+     *                                         oferta_vigente_sin_margen()). Default null = de siempre.
      *
      * @return bool true si el horario se rescata del margen; false también si el rescate falló.
      */
-    protected function rescate_del_margen_seguro(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null): bool
+    protected function rescate_del_margen_seguro(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null, ?string $permiso_por_horario = null): bool
     {
         try {
-            return $this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen);
+            return $this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen, $permiso_por_horario);
         } catch (\Throwable $e) {
             Log::channel('disponibilidad')->warning(
                 '[DISPONIBILIDAD] Falló el rescate del margen de anticipación; se sigue por el camino normal (sin rescate).',
