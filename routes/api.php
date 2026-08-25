@@ -12,6 +12,7 @@ use App\Http\Controllers\ClientApiController;
 use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientMensualidadController;
+use App\Http\Controllers\ClientScheduleController;
 use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
@@ -150,6 +151,35 @@ Route::middleware('claude.task.key')
         /* Recuperación de leads: envío de plantillas Meta. */
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
+
+        /* Operación de clientes y actualizaciones: LECTURA.
+           `ops-schema` describe todo este sub-bloque (filtros, enumeraciones, la máquina de estados
+           del deployment y los frenos de escritura). 🔴 No se toca `schema`, que es el de leads. */
+        Route::get('ops-schema', 'Api\ClaudeClientOpsController@ops_schema_json');
+        Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
+        Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
+        Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
+        /* Reintento del push de horarios al empresa-api del cliente. Idempotente y sin frenos:
+           reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
+        Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
+        Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
+        Route::get('upgrades', 'Api\ClaudeClientOpsController@upgrades_json');
+        Route::get('upgrades/{id}', 'Api\ClaudeClientOpsController@upgrade_json');
+        Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');
+
+        /* Operación de clientes y actualizaciones: ESCRITURA.
+           🔴 Estas seis rutas crean actualizaciones sobre clientes REALES y arrancan deployments por
+           SSH que pueden dejar un negocio sin sistema. Los frenos (confirm_client_name en todas,
+           dry_run por defecto al crear, allow_deploy_to_active_api y el gate de horario del
+           post-cierre) están en ClaudeUpgradeOpsController.
+           `upgrades/preview` se declara ANTES que cualquier ruta con {id}, para que ninguna la
+           capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
+        Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
+        Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');
+        Route::post('upgrades/{id}/deploy/start', 'Api\ClaudeUpgradeOpsController@deploy_start_json');
+        Route::post('upgrades/{id}/mark-crons', 'Api\ClaudeUpgradeOpsController@mark_crons_json');
+        Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
+        Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
     });
 
 /*
@@ -225,6 +255,11 @@ Route::prefix('admin')->group(function () {
         // Mensualidad del cliente (inputs manuales + total calculado de forma autónoma, prompt 329).
         Route::get('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'show_json']);
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
+        // Horarios comerciales del cliente: el PUT reemplaza el conjunto entero de días y rangos.
+        Route::get('client/{clientId}/horarios', [ClientScheduleController::class, 'show_json']);
+        Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);
+        /* Botón "Reintentar sincronización" de la pestaña Horarios: encola el push al empresa-api. */
+        Route::post('client/{clientId}/horarios/sync', [ClientScheduleController::class, 'sync_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).

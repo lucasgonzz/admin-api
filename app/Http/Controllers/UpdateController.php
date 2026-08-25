@@ -7,14 +7,11 @@ use App\Http\Controllers\CommonLaravel\Helpers\ModelPropertiesHelper;
 use App\Models\Client;
 use App\Models\ClientNotificationRead;
 use App\Models\ClientVersionUpgrade;
-use App\Models\UpdateCommand;
-use App\Models\UpdateSeeder;
 use App\Models\Version;
+use App\Services\ClientVersionUpgradeCreationService;
 use App\Services\PublishVersionService;
-use App\Services\SharedDatabaseAutoSkipService;
 use App\Services\VersionPathService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
 
 class UpdateController extends BaseController
 {
@@ -111,7 +108,7 @@ class UpdateController extends BaseController
         ));
     }
 
-    function store(Request $request) {
+    function store(Request $request, ClientVersionUpgradeCreationService $creation_service) {
         $request->validate([
             'client_id'     => 'required|exists:clients,id',
             'to_version_id' => 'required|exists:versions,id',
@@ -128,44 +125,18 @@ class UpdateController extends BaseController
             abort(422, 'La versión destino debe estar publicada.');
         }
 
-        $confirmed_ids = $this->resolve_confirmed_version_ids(
+        $confirmed_ids = $creation_service->resolve_confirmed_version_ids(
             $client,
             $to,
             array_map('intval', $request->input('version_ids'))
         );
 
-        $upgrade = ClientVersionUpgrade::create(
-            $this->build_upgrade_create_attributes($client, $client->current_version_id, $to->id, $request)
+        $upgrade = $creation_service->create(
+            $client,
+            $to,
+            $confirmed_ids,
+            $creation_service->options_from_request($request)
         );
-
-        $upgrade->confirmed_versions()->sync($confirmed_ids);
-
-        $path = VersionPathService::withSeedersAndCommands(
-            Version::whereIn('id', $confirmed_ids)->get(),
-            (int) $client->id
-        );
-
-        foreach ($path as $pathVersion) {
-            foreach ($pathVersion->seeders as $seeder) {
-                UpdateSeeder::create([
-                    'client_version_upgrade_id' => $upgrade->id,
-                    'version_seeder_id'         => $seeder->id,
-                    'status'                    => 'pendiente',
-                ]);
-            }
-        }
-
-        foreach ($path as $pathVersion) {
-            foreach ($pathVersion->commands as $command) {
-                UpdateCommand::create([
-                    'client_version_upgrade_id' => $upgrade->id,
-                    'version_command_id'        => $command->id,
-                    'status'                    => 'pendiente',
-                ]);
-            }
-        }
-
-        $this->apply_shared_database_auto_skip($upgrade);
 
         return redirect()->route('updates.show', $upgrade->id)
                          ->with('success', 'Actualización creada.');
@@ -316,7 +287,7 @@ class UpdateController extends BaseController
         return response()->json(['model' => $m], 200);
     }
 
-    public function store_json(Request $request)
+    public function store_json(Request $request, ClientVersionUpgradeCreationService $creation_service)
     {
         // 🔴 `confirmed_version_ids` es obligatorio, igual que `version_ids` en el flujo web.
         // Antes había un fallback que armaba el conjunto solo (troncal + destino) cuando la
@@ -339,43 +310,18 @@ class UpdateController extends BaseController
             return response()->json(['message' => 'La versión destino debe estar publicada.'], 422);
         }
 
-        $confirmed_ids = $this->resolve_confirmed_version_ids(
+        $confirmed_ids = $creation_service->resolve_confirmed_version_ids(
             $client,
             $to,
             array_map('intval', $request->input('confirmed_version_ids'))
         );
 
-        $upgrade = ClientVersionUpgrade::create(
-            $this->build_upgrade_create_attributes($client, $client->current_version_id, $to->id, $request)
+        $upgrade = $creation_service->create(
+            $client,
+            $to,
+            $confirmed_ids,
+            $creation_service->options_from_request($request)
         );
-
-        $upgrade->confirmed_versions()->sync($confirmed_ids);
-
-        $path = VersionPathService::withSeedersAndCommands(
-            Version::whereIn('id', $confirmed_ids)->get(),
-            (int) $client->id
-        );
-
-        foreach ($path as $pathVersion) {
-            foreach ($pathVersion->seeders as $seeder) {
-                UpdateSeeder::create([
-                    'client_version_upgrade_id' => $upgrade->id,
-                    'version_seeder_id' => $seeder->id,
-                    'status' => 'pendiente',
-                ]);
-            }
-        }
-        foreach ($path as $pathVersion) {
-            foreach ($pathVersion->commands as $command) {
-                UpdateCommand::create([
-                    'client_version_upgrade_id' => $upgrade->id,
-                    'version_command_id' => $command->id,
-                    'status' => 'pendiente',
-                ]);
-            }
-        }
-
-        $this->apply_shared_database_auto_skip($upgrade);
 
         return response()->json(['model' => $this->fullModel('update', $upgrade->id)], 201);
     }
@@ -532,148 +478,5 @@ class UpdateController extends BaseController
             'notifications' => $notifications->values(),
             'manual_tasks'  => $aggregated_manual_tasks->values(),
         ], 200);
-    }
-
-    /**
-     * Calcula el conjunto final de `version_id`s a confirmar para el upgrade.
-     *
-     * Valida pertenencia contra `candidatesBetween()` (el rango real entre la versión
-     * actual del cliente y el destino): filtra qué del conjunto pedido pertenece, nunca
-     * agrega versiones fuera de ese rango. Si algo pedido no pertenece, aborta con 422 —
-     * regla dura: acá NO se recalcula el rango para decidir qué guardar, solo para
-     * validar pertenencia. La versión destino siempre queda incluida, pertenezca o no
-     * al resultado de `candidatesBetween` (puede no pertenecer si, por ejemplo, no está
-     * publicada): define el upgrade y no puede quedar afuera.
-     *
-     * @param  Client  $client
-     * @param  Version  $to
-     * @param  array<int, int>  $requested_ids
-     * @return array<int, int>
-     */
-    protected function resolve_confirmed_version_ids(Client $client, Version $to, array $requested_ids): array
-    {
-        $candidates    = VersionPathService::candidatesBetween($client->current_version, $to);
-        $candidate_ids = $candidates->pluck('id')->all();
-
-        // Se trabaja con conjuntos ya deduplicados de las dos puntas: un mismo id repetido
-        // en el request es un pedido válido (el conjunto pedido es el mismo), no un error.
-        // Comparar contra `array_intersect` sin deduplicar antes rechazaba esos casos con
-        // 422 y, mezclado con ids inválidos, podía compensar los conteos y dejar pasar algo
-        // que el propio mensaje de error dice que rechaza.
-        $requested_ids = array_values(array_unique(array_map('intval', $requested_ids)));
-        $candidate_ids = array_values(array_unique(array_map('intval', $candidate_ids)));
-
-        $confirmed_ids = array_values(array_intersect($requested_ids, $candidate_ids));
-
-        if (count($confirmed_ids) !== count($requested_ids)) {
-            abort(422, 'Se enviaron versiones que no pertenecen al rango calculado.');
-        }
-
-        if (! in_array((int) $to->id, $confirmed_ids, true)) {
-            $confirmed_ids[] = (int) $to->id;
-        }
-
-        return $confirmed_ids;
-    }
-
-    /**
-     * Atributos comunes al crear un ClientVersionUpgrade (web y JSON).
-     * target_client_api_id: del request si es válido; si no, primera API distinta de active_client_api_id.
-     *
-     * @param  Client  $client
-     * @param  int|null  $from_version_id
-     * @param  int  $to_version_id
-     * @param  Request|null  $request
-     * @return array<string, mixed>
-     */
-    protected function build_upgrade_create_attributes(Client $client, $from_version_id, $to_version_id, $request = null)
-    {
-        $notes = $request ? $request->input('notes') : null;
-
-        $attributes = [
-            'client_id'           => $client->id,
-            'from_version_id'     => $from_version_id,
-            'to_version_id'       => $to_version_id,
-            'status'              => 'pendiente',
-            'notes'               => $notes,
-            'scheduled_date'      => ($request && $request->input('scheduled_date'))
-                ? $request->input('scheduled_date')
-                : now()->toDateString(),
-            'created_by_admin_id' => Auth::id(),
-        ];
-
-        $target_id = $request ? $request->input('target_client_api_id') : null;
-        if ($target_id !== null && $target_id !== '') {
-            $this->assert_target_client_api_belongs_to_client($client, (int) $target_id);
-            $attributes['target_client_api_id'] = (int) $target_id;
-        } else {
-            $default_target_id = $this->resolve_default_target_client_api_id($client);
-            if ($default_target_id !== null) {
-                $attributes['target_client_api_id'] = $default_target_id;
-            }
-        }
-
-        return $attributes;
-    }
-
-    /**
-     * API destino por defecto: la primera ClientApi del cliente que no sea la activa en producción.
-     *
-     * @param  Client  $client
-     * @return int|null
-     */
-    protected function resolve_default_target_client_api_id(Client $client)
-    {
-        $client->loadMissing('client_apis');
-
-        $active_id = $client->active_client_api_id ? (int) $client->active_client_api_id : null;
-        $fallback_id = null;
-
-        foreach ($client->client_apis as $client_api) {
-            $api_id = (int) $client_api->id;
-            if ($fallback_id === null) {
-                $fallback_id = $api_id;
-            }
-            if ($active_id !== null && $api_id !== $active_id) {
-                return $api_id;
-            }
-        }
-
-        return $fallback_id;
-    }
-
-    /**
-     * Verifica que la ClientApi pertenezca al cliente del upgrade.
-     *
-     * @param  Client  $client
-     * @param  int  $target_client_api_id
-     * @return void
-     */
-    protected function assert_target_client_api_belongs_to_client(Client $client, $target_client_api_id)
-    {
-        $belongs = $client->client_apis()
-            ->where('id', $target_client_api_id)
-            ->exists();
-
-        if (! $belongs) {
-            abort(422, 'La API destino no pertenece al cliente seleccionado.');
-        }
-    }
-
-    /**
-     * Marca como skipped los seeders/comandos per_database ya ejecutados
-     * en clientes hermanos del mismo grupo de BD compartida.
-     *
-     * @param ClientVersionUpgrade $upgrade
-     * @return void
-     */
-    protected function apply_shared_database_auto_skip(ClientVersionUpgrade $upgrade)
-    {
-        $service = new SharedDatabaseAutoSkipService();
-        $service->apply($upgrade->load([
-            'client.shared_database_group',
-            'update_seeders.version_seeder',
-            'update_commands.version_command',
-        ]));
     }
 }

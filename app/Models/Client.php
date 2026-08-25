@@ -162,6 +162,20 @@ class Client extends Model
     }
 
     /**
+     * Días del horario comercial del cliente (uno por día cargado, incluido 'todos').
+     *
+     * 🔴 A propósito NO se suma a scopeWithAll(): ese scope lo usa index_json() para listar TODOS
+     * los clientes y sumarle una relación más engorda ese payload sin que nadie lo pida. La
+     * interfaz de horarios es una pestaña con su propio fetch, y los endpoints que necesitan los
+     * horarios cargan la relación explícitamente.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function schedule_days() {
+        return $this->hasMany(ClientScheduleDay::class);
+    }
+
+    /**
      * Grupo de base de datos compartida al que pertenece este cliente (si aplica).
      *
      * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
