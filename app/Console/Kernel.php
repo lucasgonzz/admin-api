@@ -65,6 +65,14 @@ class Kernel extends ConsoleKernel
         // Pasa a closer_activo los leads en demo_pendiente_de_terminar que superaron el timeout desde el fin de la demo.
         $schedule->command('leads:check-demo-pendiente-terminar-timeout')->everyMinute();
 
+        // Destraba los deployments que quedaron en `running` sin reportar actividad. Es el
+        // equivalente de `leads:vencer-demo-setups-colgados` para la máquina de estados del
+        // deployment: sin esto, `running` es un estado del que no se sale — lo rechazan las dos
+        // puertas (el panel y `claude/*`) y había que tocar la base a mano.
+        // Cada cinco minutos y no cada minuto, a diferencia del molde: acá no hay ningún reintento
+        // que tenga que llegar a tiempo, y el umbral es de 45 minutos.
+        $schedule->command('deployments:vencer-colgados')->everyFiveMinutes();
+
         // Genera el reporte diario del agente a la hora configurada en admin_settings.
         // La hora se lee cada vez que corre el scheduler; si cambió desde la última corrida, usa la nueva.
         $report_hour = (int) \App\Models\AdminSetting::get('agent_report_hour', 8);

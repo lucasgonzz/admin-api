@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Console\Commands\VencerDeploymentsColgados;
 use App\Http\Controllers\UpdateController;
 use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
@@ -73,8 +74,13 @@ class ClaudeClientOpsController extends Controller
 
     /**
      * Minutos sin una sola línea de log nueva a partir de los cuales un deployment `running` se
-     * reporta como colgado. No lo destraba nadie (no existe el equivalente de
-     * `leads:vencer-demo-setups-colgados` para deployments): esto lo REPORTA, no lo arregla.
+     * reporta como colgado. Esto lo REPORTA; quien lo DESTRABA es
+     * `deployments:vencer-colgados` —el gemelo de `leads:vencer-demo-setups-colgados`, que existe
+     * desde la misión 61 y corre cada cinco minutos—.
+     *
+     * 🔴 Los dos números son distintos a propósito: 15 acá porque reportar de más no cuesta nada, y
+     * 45 allá porque vencer DESTRUYE ESTADO y tiene que quedar por encima del `$timeout` del job
+     * para no matar un deployment vivo. Si alguna vez se igualan, el que está mal es este.
      */
     const STALE_MINUTOS = 15;
 
@@ -316,7 +322,9 @@ class ClaudeClientOpsController extends Controller
                 'logs_limit_max'              => self::LIMIT_LOGS_MAX,
                 'logs_max_line_chars_default' => self::MAX_LINE_CHARS_DEFAULT,
                 'dias_schedule_max'           => self::DIAS_SCHEDULE_MAX,
+                /* Los dos juntos, para que se lea la relación: 15 REPORTA el cuelgue, 45 lo VENCE. */
                 'stale_minutos'               => self::STALE_MINUTOS,
+                'vencimiento_minutos'         => VencerDeploymentsColgados::DEFAULT_TIMEOUT_MINUTOS,
             ],
 
             'limitaciones' => [
@@ -326,8 +334,12 @@ class ClaudeClientOpsController extends Controller
                 'Los endpoints de deploy encolan en la conexión `database` y devuelven 202 al toque. Si el scheduler no '
                     . 'corre en el servidor, no pasa NADA visible: el upgrade queda en `running` y el job dormido en la '
                     . 'tabla `jobs`. `GET claude/upgrades/{id}` mide eso en `salud.jobs_en_cola` y `salud.deployment_stale`.',
-                'Nadie destraba un deployment colgado en `running`: no existe un comando que lo venza. Si ves '
-                    . '`deployment_stale: true` sostenido, hace falta intervención manual.',
+                'Un deployment colgado en `running` lo destraba `deployments:vencer-colgados`, que el scheduler corre '
+                    . 'cada cinco minutos: lo pasa a `failed` con el motivo escrito como línea de log cuando no reporta '
+                    . 'actividad por más de `salud.vencimiento_minutos`. Desde ahí se puede reintentar. Dos '
+                    . 'excepciones que SÍ necesitan intervención manual: un upgrade que quedó en `running` antes de que '
+                    . 'existiera `deployment_running_since`, y un `deployment_stale: true` sostenido con el scheduler '
+                    . 'caído (si no corre el scheduler, tampoco corre el que vence).',
                 'Marcar los crons (endpoint 12) NO los mueve. Moverlos en el panel de Hostinger es trabajo manual.',
                 'Los horarios del cliente son de SOLO LECTURA desde claude/*. Se cargan desde el modal del cliente en el '
                     . 'admin.',
@@ -910,6 +922,7 @@ class ClaudeClientOpsController extends Controller
             'client_version_upgrades.status',
             'client_version_upgrades.deployment_status',
             'client_version_upgrades.deployment_started_at',
+            'client_version_upgrades.deployment_running_since',
             'client_version_upgrades.scheduled_date',
             'client_version_upgrades.target_client_api_id',
             'client_version_upgrades.created_by_admin_id',
@@ -1010,7 +1023,12 @@ class ClaudeClientOpsController extends Controller
                 'ultimo_error'  => $logs['ultimo_error'],
                 'consultar_en'  => 'GET claude/upgrades/' . (int) $fila['id'] . '/logs',
             ],
-            'salud'            => $this->salud_del_deployment($deployment_status, $fila['deployment_started_at'], $logs['ultimo_at']),
+            'salud'            => $this->salud_del_deployment(
+                $deployment_status,
+                $fila['deployment_started_at'],
+                $logs['ultimo_at'],
+                $fila['deployment_running_since']
+            ),
             'horario_cliente'  => $horario,
             'siguiente_accion' => $this->siguiente_accion(
                 (int) $fila['id'],
@@ -1483,17 +1501,27 @@ class ClaudeClientOpsController extends Controller
      * sostenido varios minutos significa que el worker no está consumiendo. Es un dato, no una
      * conjetura.
      *
-     * @param string|null $deployment_status     Estado del deployment.
-     * @param string|null $deployment_started_at Cuándo arrancó.
-     * @param string|null $ultimo_log_at         Instante del último log.
+     * 🔴 El ancla es `deployment_running_since`, NO `deployment_started_at`. Este método usaba la
+     * segunda y por eso mentía: `deployment_started_at` solo lo estampa el `start`, mientras que
+     * post-cierre, configure-system y retry-commands entran a `running` sin tocarla. Un upgrade que
+     * estuvo dos días en `paused` y al que recién le apretaron "post-cierre" tenía el arranque y el
+     * último log con dos días de antigüedad, así que este método devolvía `deployment_stale: true`
+     * para un deployment que acababa de encolarse. Se cae a `deployment_started_at` solo para los
+     * upgrades anteriores a la migración que agregó la columna.
+     *
+     * @param string|null $deployment_status        Estado del deployment.
+     * @param string|null $deployment_started_at    Cuándo arrancó el deployment entero.
+     * @param string|null $ultimo_log_at            Instante del último log.
+     * @param string|null $deployment_running_since Cuándo entró al tramo `running` en curso.
      *
      * @return array<string, mixed>
      */
-    private function salud_del_deployment($deployment_status, $deployment_started_at, $ultimo_log_at)
+    private function salud_del_deployment($deployment_status, $deployment_started_at, $ultimo_log_at, $deployment_running_since = null)
     {
         $limite  = Carbon::now()->subMinutes(self::STALE_MINUTOS);
         $ultimo  = $this->parsear_o_null($ultimo_log_at);
-        $arranco = $this->parsear_o_null($deployment_started_at);
+        $sello   = $this->parsear_o_null($deployment_running_since);
+        $arranco = $sello === null ? $this->parsear_o_null($deployment_started_at) : $sello;
 
         $stale = false;
         if ($deployment_status === 'running') {
@@ -1508,8 +1536,13 @@ class ClaudeClientOpsController extends Controller
             'segundos_desde_ultimo_log' => $ultimo === null ? null : Carbon::now()->diffInSeconds($ultimo),
             'jobs_en_cola'              => (int) DB::table('jobs')->count(),
             'stale_minutos'             => self::STALE_MINUTOS,
-            'nota'                      => 'Nadie destraba un deployment colgado en `running`: no existe un comando que '
-                . 'lo venza. `deployment_stale` lo REPORTA, no lo arregla.',
+            'deployment_running_since'  => $deployment_running_since,
+            'vencimiento_minutos'       => VencerDeploymentsColgados::DEFAULT_TIMEOUT_MINUTOS,
+            'nota'                      => '`deployment_stale` REPORTA que el worker no está avanzando; no lo arregla. '
+                . 'Quien lo destraba es `deployments:vencer-colgados`, que el scheduler corre cada cinco minutos y que '
+                . 'pasa el upgrade a `failed` con el motivo escrito como línea de log cuando no reporta actividad por '
+                . 'más de `vencimiento_minutos`. Un upgrade que quedó en `running` ANTES de que existiera '
+                . '`deployment_running_since` no se vence solo: ese sigue saliendo a mano.',
         ];
     }
 
