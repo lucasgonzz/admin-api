@@ -42,6 +42,8 @@ class SupportAiSuggestionDeliveryService
             'kind'              => 'text',
             'body'              => $text_body,
             'delivered_at'      => now(),
+            /* Lo escribió el agente, aunque salga sin pasar por una persona. */
+            'ai_generated_at'   => now(),
         ]);
 
         $this->entregar($ticket, $message, 'excepción al enviar');

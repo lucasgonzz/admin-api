@@ -9,6 +9,7 @@ use App\Models\Client;
 use App\Models\SupportTicket;
 use App\Models\SupportMessage;
 use App\Services\ClientPhoneDirectory;
+use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSessionWindowService;
@@ -375,6 +376,13 @@ class SupportTicketController extends BaseController
 
         $ticket->claude_auto_reply = ! (bool) $ticket->claude_auto_reply;
         $ticket->save();
+
+        // Apagarlo también se lleva lo que ya estaba en curso: un borrador con fecha de
+        // autoenvío sigue saliendo aunque el agente quede apagado, y apagar el agente y ver
+        // que igual le contesta al cliente es lo peor que puede hacer este botón.
+        if (! $ticket->claude_auto_reply) {
+            (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        }
 
         event(new SupportTicketUpdated((int) $ticket->id));
 

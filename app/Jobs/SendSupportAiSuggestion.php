@@ -222,6 +222,11 @@ class SendSupportAiSuggestion implements ShouldQueue
         /* Motivo del escalado: texto libre generado por Claude. */
         $escalation_reason = trim((string) ($result['escalation_reason'] ?? ''));
 
+        /* Claude puede volver a escalar el mismo ticket con cada mensaje del cliente. El aviso
+         * por WhatsApp sale solo en la TRANSICIÓN a escalado: si no, un cliente insistente le
+         * manda cinco WhatsApp seguidos al operador y el aviso se vuelve ruido que se ignora. */
+        $ya_estaba_escalado = $ticket->escalated_at !== null;
+
         /* Persistir el escalado en el ticket. */
         $ticket->escalated_at      = now();
         $ticket->escalation_reason = $escalation_reason !== '' ? $escalation_reason : null;
@@ -257,7 +262,9 @@ class SendSupportAiSuggestion implements ShouldQueue
          * Va en su propio try: si el aviso falla, el ticket YA quedó escalado y con badge, y
          * perder eso por un problema de Meta sería peor que quedarse sin el WhatsApp. */
         try {
-            app(SupportEscalationWhatsappService::class)->notify($ticket, $escalation_reason);
+            if (! $ya_estaba_escalado) {
+                app(SupportEscalationWhatsappService::class)->notify($ticket, $escalation_reason);
+            }
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('SendSupportAiSuggestion: el ticket quedó escalado pero el aviso por WhatsApp falló.', [
                 'ticket_id' => $ticket->id,
@@ -291,6 +298,18 @@ class SendSupportAiSuggestion implements ShouldQueue
         /* Enviar mensaje de cierre al cliente antes de cerrar el ticket. */
         if ($suggested_message !== '') {
             $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service);
+        }
+
+        /* Con verificación pendiente el ticket NO se cierra: el mensaje de despedida todavía
+         * no salió, y cerrar acá lo volvería inaprobable (deliver_draft_message() exige el
+         * ticket abierto) además de dejar al cliente sin la última respuesta. Lo cierra la
+         * persona desde el selector de estado, después de aprobar el mensaje. */
+        if ((bool) $ticket->requiere_verificacion_mensajes && $suggested_message !== '') {
+            Log::channel('daily')->info('SendSupportAiSuggestion: Claude propuso cerrar, pero el ticket espera aprobación humana.', [
+                'ticket_id' => $ticket->id,
+            ]);
+
+            return;
         }
 
         /* Cerrar el ticket, limpiar escalado y notificar la bandeja. */

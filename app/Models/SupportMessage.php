@@ -28,6 +28,8 @@ class SupportMessage extends Model
         'synced_to_client_at'     => 'datetime',
         'is_ai_suggestion_draft'  => 'boolean',
         'ai_auto_send_at'         => 'datetime',
+        /* Sello de que el texto lo escribió el agente; sobrevive a la aprobación humana. */
+        'ai_generated_at'         => 'datetime',
     ];
 
     /**

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Admin;
+use App\Models\AdminSetting;
 use App\Models\SupportTicket;
 use Illuminate\Support\Facades\Log;
 
@@ -26,7 +27,16 @@ use Illuminate\Support\Facades\Log;
 class SupportEscalationWhatsappService
 {
     /** Nombre de la plantilla aprobada en Meta Business Manager. */
-    const TEMPLATE_NAME = 'soporte_escalacion_humana';
+    const DEFAULT_TEMPLATE_NAME = 'soporte_escalacion_humana';
+
+    /** Idioma por defecto de la plantilla de escalado. */
+    const DEFAULT_TEMPLATE_LANGUAGE = 'es_AR';
+
+    /** Clave de admin_settings para pisar el nombre de la plantilla sin deploy. */
+    const KEY_TEMPLATE_NAME = 'support_escalation_template_name';
+
+    /** Clave de admin_settings para pisar el idioma de la plantilla sin deploy. */
+    const KEY_TEMPLATE_LANGUAGE = 'support_escalation_template_language';
 
     /** @var WhatsappSendService Servicio encargado del envío efectivo a la API de Meta. */
     private $sender;
@@ -82,13 +92,13 @@ class SupportEscalationWhatsappService
             try {
                 $whatsapp_message_id = $this->sender->send_template(
                     (string) $admin->phone_number,
-                    self::TEMPLATE_NAME,
+                    $this->resolve_template_name(),
                     [
                         $this->sanitize_variable($client_name),
                         $this->sanitize_variable($motivo_limpio),
                         $link_ticket,
                     ],
-                    'es_AR',
+                    $this->resolve_template_language(),
                     'Escalado de soporte del ticket #' . $ticket->id
                 );
 
@@ -118,6 +128,34 @@ class SupportEscalationWhatsappService
         }
 
         return $notified;
+    }
+
+    /**
+     * Nombre de la plantilla de escalado, con override sin deploy.
+     *
+     * El override existe para un caso concreto: la plantilla propia todavía puede estar sin
+     * aprobar en Meta, y con esta clave se la puede apuntar a una ya aprobada de la misma
+     * forma (tres variables) para que el aviso funcione desde el día uno.
+     *
+     * @return string
+     */
+    public function resolve_template_name(): string
+    {
+        $configured = trim((string) AdminSetting::get(self::KEY_TEMPLATE_NAME, ''));
+
+        return $configured !== '' ? $configured : self::DEFAULT_TEMPLATE_NAME;
+    }
+
+    /**
+     * Idioma de la plantilla de escalado, con override sin deploy.
+     *
+     * @return string
+     */
+    public function resolve_template_language(): string
+    {
+        $configured = trim((string) AdminSetting::get(self::KEY_TEMPLATE_LANGUAGE, ''));
+
+        return $configured !== '' ? $configured : self::DEFAULT_TEMPLATE_LANGUAGE;
     }
 
     /**

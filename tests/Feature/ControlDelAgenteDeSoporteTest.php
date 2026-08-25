@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\AutoSendPendingSupportSuggestion;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\SupportMessage;
@@ -499,5 +500,175 @@ class ControlDelAgenteDeSoporteTest extends TestCase
         $escalado = SupportTicket::find($ticket->id);
         $this->assertNotNull($escalado->escalated_at);
         $this->assertSame('Reclamo de facturación', $escalado->escalation_reason);
+    }
+
+    /**
+     * Un ticket ya escalado no vuelve a avisar por WhatsApp.
+     *
+     * El agente puede escalar de nuevo con cada mensaje del cliente: sin este freno, alguien
+     * insistente le manda cinco WhatsApp seguidos al operador y el aviso se vuelve ruido.
+     *
+     * @return void
+     */
+    public function test_no_avisa_dos_veces_por_el_mismo_escalado()
+    {
+        $suscrito                                     = $this->crear_admin('escalado-repetido@test.local');
+        $suscrito->phone_number                       = '+5493410000003';
+        $suscrito->notify_support_escalation_whatsapp = true;
+        $suscrito->save();
+
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+
+        $this->espiar_claude([
+            'suggested_message' => '',
+            'reasoning'         => 'Sigue sin estar en el manual.',
+            'should_close'      => false,
+            'should_escalate'   => true,
+            'escalation_reason' => 'No puedo confirmar si es un bug',
+        ]);
+
+        $this->correr_agente($ticket);
+        $this->assertCount(1, $espia->plantillas);
+
+        // El cliente insiste y el agente vuelve a escalar el mismo ticket.
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => '¿Hola? ¿Alguien?',
+            'delivered_at'      => now(),
+        ]);
+        $this->correr_agente($ticket->fresh());
+
+        $this->assertCount(1, $espia->plantillas, 'El segundo escalado del mismo ticket volvió a avisar.');
+    }
+
+    /**
+     * El auto-envío no manda un borrador que está esperando aprobación.
+     *
+     * Es el freno más importante de la misión. La condición de fecha del job es
+     * `ai_auto_send_at !== null && now()->lt(...)`: con la fecha en NULL —que es justo como
+     * queda un borrador que espera a una persona— esa guarda no frena nada y el mensaje sale.
+     * Alcanza con un job de un ciclo anterior dando vueltas.
+     *
+     * @return void
+     */
+    public function test_el_autoenvio_no_manda_un_borrador_que_espera_aprobacion()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+        $this->espiar_claude($this->respuesta_del_agente('Una respuesta que nadie aprobó.'));
+
+        $this->correr_agente($ticket);
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->firstOrFail();
+
+        $this->assertNull($borrador->ai_auto_send_at);
+
+        // Un job huérfano corre sobre ese ticket.
+        dispatch_sync(new AutoSendPendingSupportSuggestion((int) $ticket->id));
+
+        $this->assertCount(0, $espia->textos, 'El autoenvío mandó un borrador que estaba esperando aprobación.');
+        $this->assertCount(0, $espia->plantillas);
+        $this->assertNotNull(SupportMessage::find($borrador->id), 'El borrador desapareció sin que nadie lo aprobara.');
+        $this->assertTrue((bool) SupportMessage::find($borrador->id)->is_ai_suggestion_draft);
+    }
+
+    /**
+     * Con verificación pendiente, el agente no cierra el ticket.
+     *
+     * Cerrarlo dejaría el mensaje de despedida sin poder aprobarse —deliver_draft_message()
+     * exige el ticket abierto— y al cliente sin la última respuesta.
+     *
+     * @return void
+     */
+    public function test_el_agente_no_cierra_el_ticket_si_falta_aprobar_la_despedida()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender();
+
+        $this->espiar_claude([
+            'suggested_message' => 'Cualquier cosa, escribinos. ¡Saludos!',
+            'reasoning'         => 'Quedó resuelto.',
+            'should_close'      => true,
+            'should_escalate'   => false,
+            'escalation_reason' => null,
+        ]);
+
+        $this->correr_agente($ticket);
+
+        $this->assertSame(
+            'open',
+            SupportTicket::find($ticket->id)->status,
+            'Cerró el ticket con el mensaje de despedida todavía sin aprobar.'
+        );
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->first();
+
+        $this->assertNotNull($borrador, 'No quedó el borrador de despedida para aprobar.');
+    }
+
+    /**
+     * Apagar el agente se lleva el borrador que ya estaba en curso.
+     *
+     * @return void
+     */
+    public function test_apagar_el_agente_descarta_lo_que_estaba_pendiente()
+    {
+        $admin  = $this->crear_admin('apaga-con-pendiente@test.local');
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender();
+        $this->espiar_claude($this->respuesta_del_agente('Una respuesta a medio camino.'));
+
+        $this->correr_agente($ticket);
+        $this->assertNotNull(SupportTicket::find($ticket->id)->ai_pending_suggestion);
+
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-claude-auto-reply')
+            ->assertStatus(200);
+
+        $this->assertNull(
+            SupportTicket::find($ticket->id)->ai_pending_suggestion,
+            'Se apagó el agente y quedó una sugerencia pendiente que igual iba a salir.'
+        );
+    }
+
+    /**
+     * El texto del agente queda sellado como suyo aunque salga sin correcciones.
+     *
+     * Sin el sello, una sugerencia aprobada tal cual queda indistinguible de un mensaje
+     * tipeado a mano — y ese es justo el caso que más interesa medir.
+     *
+     * @return void
+     */
+    public function test_el_mensaje_del_agente_queda_sellado_como_suyo()
+    {
+        $admin  = $this->crear_admin('sello@test.local');
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender();
+        $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
+
+        $this->correr_agente($ticket);
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->firstOrFail();
+
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-message/' . $borrador->id . '/approve-ai-draft')
+            ->assertStatus(200);
+
+        $enviado = SupportMessage::find($borrador->id);
+        $this->assertNotNull($enviado->ai_generated_at, 'El mensaje perdió la marca de que lo escribió el agente.');
     }
 }
