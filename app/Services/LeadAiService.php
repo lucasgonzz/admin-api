@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\HorarioYaNoDisponibleException;
 use App\Events\LeadSuggestionCreated;
 use App\Services\CloserGoogleCalendarBusyService;
 use App\Services\CloserGoogleCalendarEventService;
@@ -1807,6 +1808,85 @@ TXT;
         $ventanas_sin_margen = ($rescatado && is_array($ventanas_grilla)) ? $ventanas_grilla : [];
 
         return $rescatado;
+    }
+
+    /**
+     * Frena una APROBACIÓN cuyo horario ya no está disponible: no se le envía nada al lead, se le
+     * avisa al admin y se tira, para que LeadController devuelva 422.
+     *
+     * 🔴 La regla, desde el 25/8/2026: nunca más se envía un texto reescrito firmado con el nombre
+     * del admin que aprobó otra cosa. Hasta acá, cuando el slot se caía entre la aprobación y la
+     * escritura, el sistema pisaba el `content` del mensaje aprobado con un correctivo y lo mandaba
+     * igual — y como el mensaje ya tenía `sent_by_admin_id`, al lead le salía "Sugerido por la IA ·
+     * aprobado por <admin>" arriba de un texto que ese admin nunca leyó. Peor todavía con texto
+     * editado: approve_message_with_edit_json() usa el texto del admin y descarta el correctivo, o
+     * sea que el lead recibía "confirmado 17:05" sin que hubiera demo agendada.
+     *
+     * Es, además, lo que el docblock de LeadSuggestionSendService::send_suggestion() ya declaraba
+     * ("si la validación falla no se envía nada al lead: el error se propaga para que
+     * LeadController devuelva 422") y el código contradecía. Esto no cambia un contrato: hace que
+     * el código cumpla el que ya tenía escrito.
+     *
+     * Mismo mecanismo que el bloque de horarios caducados de LeadSuggestionSendService (marca el
+     * lead, deja bloque rojo en el hilo, refresca el panel), que ya cumplía esta regla.
+     *
+     * @param Lead             $lead             Lead dueño de la conversación.
+     * @param LeadMessage|null $existing_message Mensaje aprobado que se estaba aplicando.
+     * @param int              $demo_id          Instancia física de demo (solo para el log).
+     * @param string           $demo_date        Fecha en Y-m-d.
+     * @param string           $demo_start       Horario de inicio en HH:MM.
+     * @param string           $motivo           Motivo legible, va al log y al bloque rojo.
+     *
+     * @throws HorarioYaNoDisponibleException Siempre. Es el punto de la función.
+     *
+     * @return void
+     */
+    private function frenar_por_horario_no_disponible(Lead $lead, ?LeadMessage $existing_message, int $demo_id, string $demo_date, string $demo_start, string $motivo): void
+    {
+        Log::channel('disponibilidad')->error(
+            '[DISPONIBILIDAD] Aprobación frenada: el horario que el mensaje confirmaba ya no está disponible. No se envió nada al lead.',
+            [
+                'lead_id'    => $lead->id,
+                'demo_id'    => $demo_id,
+                'demo_date'  => $demo_date,
+                'demo_start' => $demo_start,
+                'message_id' => $existing_message !== null ? $existing_message->id : null,
+                'motivo'     => $motivo,
+            ]
+        );
+
+        /* Cancela el token del job y limpia ai_auto_send_at: la burbuja no puede seguir mostrando
+         * un countdown que va a fallar igual (mismo criterio que
+         * LeadSuggestionSendService::handle_auto_send_agendamiento_gate()). */
+        if ($existing_message !== null) {
+            (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $existing_message->id);
+        }
+
+        /* 🔴 Update acotado a dos columnas sobre el query builder, y NO $lead->save(). Para cuando
+         * se llega acá, $lead ya tiene mutaciones en memoria de bloques anteriores del mismo
+         * método (cancelar_demo pudo haber limpiado demo_date, guardar_nombre pudo haber cambiado
+         * contact_name). Un save() las persistiría A MEDIAS: la demo vieja cancelada y la nueva sin
+         * agendar. Esto es exactamente lo que alguien "simplificaría" a $lead->save(): no se hace. */
+        Lead::query()->whereKey($lead->id)->update([
+            'requiere_intervencion_humana' => true,
+            'claude_auto_reply'            => false,
+        ]);
+
+        (new LeadConversationErrorLogger())->log(
+            (int) $lead->id,
+            'No se envió: el horario que este mensaje confirmaba ya no está disponible',
+            'El turno del ' . $demo_date . ' a las ' . $demo_start . ' ya no está libre (' . $motivo . '). '
+            . 'No se le envió nada al lead y la demo no se agendó. Pedí una sugerencia nueva con disponibilidad fresca.'
+        );
+
+        LeadBroadcastService::emit_conversation_updated(
+            (int) $lead->id,
+            $existing_message !== null ? (int) $existing_message->id : 0
+        );
+
+        throw new HorarioYaNoDisponibleException(
+            'El horario que este mensaje confirmaba ya no está disponible. No se envió nada al lead: pedí una sugerencia nueva.'
+        );
     }
 
     /**
@@ -3982,6 +4062,29 @@ TXT;
                         'demo_id' => $demo_id,
                     ]);
 
+                    /* 🔴 Camino de APROBACIÓN: no se reescribe ni se envía nada. El mensaje ya lo
+                     * firmó un humano, y pisarle el texto con un correctivo lo manda al lead con el
+                     * nombre de ese admin arriba de algo que nunca leyó. Se frena, se le avisa al
+                     * admin (422 + bloque rojo en el hilo) y que pida una sugerencia nueva.
+                     *
+                     * $for_approval es exactamente la pregunta "¿hay un mensaje que un humano ya
+                     * firmó?": solo es true cuando el llamador es apply_pending_actions(). La rama
+                     * de abajo NO es código muerto — en producción el gate de
+                     * requires_agendamiento_verification_gate() difiere todo paquete con
+                     * agendar_demo, pero la ejercitan los tests que llaman a apply_parsed_response()
+                     * directo (DemoExtendidaHastaElFinDelDiaTest). Acá no hay lock que liberar: no
+                     * se tomó. */
+                    if ($for_approval) {
+                        $this->frenar_por_horario_no_disponible(
+                            $lead,
+                            $existing_message,
+                            $demo_id,
+                            $demo_date,
+                            $demo_start,
+                            'otra aprobación está tomando esta misma instancia en este instante'
+                        );
+                    }
+
                     $mensaje_correctivo = $this->call_corrective_availability_response($lead, $demo_start, $demo_date, []);
                     $mensaje            = $mensaje_correctivo !== '' ? $mensaje_correctivo : 'Ese horario se acaba de ocupar. Decime otro día u horario y lo confirmamos.';
                     $estado_raw         = 'solicita_disponibilidad';
@@ -4166,6 +4269,31 @@ TXT;
                         'demo_start'         => $demo_start,
                         'slots_disponibles'  => $slots_demo,
                     ]);
+
+                    /* 🔴 Camino de APROBACIÓN: no se reescribe ni se envía nada. Ver el porqué
+                     * completo en frenar_por_horario_no_disponible(). El correctivo de abajo se
+                     * conserva SOLO para el camino de generación (borrador que nadie firmó), que
+                     * es donde pisar el texto es lo correcto. */
+                    if ($for_approval) {
+                        /* 🔴 El lock se libera ANTES de tirar: el throw se saltea el "FIN DEL LOCK"
+                         * de más abajo. Tiene TTL de 8s y se soltaría solo, pero dejarlo colgado
+                         * serializa de más a cualquier otra aprobación sobre la misma instancia
+                         * física. */
+                        if ($demo_slot_lock_acquired) {
+                            $demo_slot_lock->release();
+                        }
+
+                        $this->frenar_por_horario_no_disponible(
+                            $lead,
+                            $existing_message,
+                            $demo_id,
+                            $demo_date,
+                            $demo_start,
+                            $ventana_hasta_invalida
+                                ? 'la franja que se le prometió ya no entra'
+                                : 'el turno ya pasó o lo tomó otro lead'
+                        );
+                    }
 
                     /*
                      * Camino "slot inválido detectado por servidor":
