@@ -15,6 +15,31 @@ use Illuminate\Http\Request;
 class DeploymentController extends BaseController
 {
     /**
+     * Conexión de cola de TODOS los despachos de este controlador.
+     *
+     * 🔴 `database` explícito, nunca un `dispatch()` pelado. `config/queue.php` es
+     * `env('QUEUE_CONNECTION', 'sync')` y en este entorno vale `sync`: sin el nombre de la conexión,
+     * `RunDeploymentJob` corría INLINE, adentro del request HTTP, con el pipeline SSH entero
+     * —`compile_spa` con `npm ci` y `npm run build` incluidos— colgado del navegador de Lucas. Bajo
+     * `apache2handler` (mod_php, medido el 14/8/2026) eso lo mata `max_execution_time` a los 120
+     * segundos, y **un fatal por tiempo no es capturable**: el `catch (\Throwable)` del job nunca
+     * corre y el upgrade queda en `running` para siempre.
+     *
+     * Es la misma clase de error que ya costó tres demos mudas con `RunDemoSetupJob`, arreglada en
+     * la misión 60 (`DemoExperienciaController::disparar_setup_si_corresponde()`, con el detalle de
+     * la medición). Este controlador había quedado afuera de esa corrección.
+     *
+     * Quién lo levanta: `Kernel.php` corre `queue:work database --stop-when-empty` cada minuto, en
+     * un proceso de CLI donde `max_execution_time` vale 0 y el `$timeout = 1800` del job recién
+     * entonces significa algo. El costo asumido es hasta 60 segundos de latencia hasta el próximo
+     * tick; el panel los muestra como `running` con "Esperando líneas de log…", porque el estado se
+     * escribe ANTES del despacho y eso es lo que arranca el poleo de la SPA.
+     *
+     * @var string
+     */
+    const CONEXION_DE_COLA = 'database';
+
+    /**
      * Estados que indican un deployment aún activo (no se puede iniciar otro).
      *
      * @var array<int, string>
@@ -48,12 +73,15 @@ class DeploymentController extends BaseController
         // Reinicio limpio: borrar logs del intento anterior (fallido o incompleto).
         $upgrade->deployment_logs()->delete();
 
+        /* `deployment_running_since` acompaña SIEMPRE a `deployment_status => 'running'`: es el
+         * ancla con la que `deployments:vencer-colgados` decide si esto está colgado. */
         $upgrade->update([
-            'deployment_status'     => 'running',
-            'deployment_started_at' => now(),
+            'deployment_status'        => 'running',
+            'deployment_started_at'    => now(),
+            'deployment_running_since' => now(),
         ]);
 
-        RunDeploymentJob::dispatch($upgrade);
+        RunDeploymentJob::dispatch($upgrade)->onConnection(self::CONEXION_DE_COLA);
 
         return response()->json([
             'model' => $upgrade->fresh()->loadMissing('target_client_api', 'deployment_logs'),
@@ -82,11 +110,14 @@ class DeploymentController extends BaseController
             ], 422);
         }
 
+        /* Sello del tramo: sin esto, un upgrade que estuvo días en `paused` entraría a `running`
+         * con el ancla vieja y el vencimiento lo mataría en el primer tick. */
         $upgrade->update([
-            'deployment_status' => 'running',
+            'deployment_status'        => 'running',
+            'deployment_running_since' => now(),
         ]);
 
-        RunDeploymentJob::dispatch($upgrade, 'run_seeders');
+        RunDeploymentJob::dispatch($upgrade, 'run_seeders')->onConnection(self::CONEXION_DE_COLA);
 
         return response()->json([
             'model' => $upgrade->fresh()->loadMissing('target_client_api', 'deployment_logs'),
@@ -114,11 +145,13 @@ class DeploymentController extends BaseController
             ], 422);
         }
 
+        /* Sello del tramo, igual que en las otras entradas a `running`. */
         $upgrade->update([
-            'deployment_status' => 'running',
+            'deployment_status'        => 'running',
+            'deployment_running_since' => now(),
         ]);
 
-        RunDeploymentJob::dispatch($upgrade, 'update_default_version');
+        RunDeploymentJob::dispatch($upgrade, 'update_default_version')->onConnection(self::CONEXION_DE_COLA);
 
         return response()->json([
             'model' => $upgrade->fresh()->loadMissing('target_client_api', 'deployment_logs'),
@@ -181,11 +214,13 @@ class DeploymentController extends BaseController
             ], 422);
         }
 
+        /* Sello del tramo, igual que en las otras entradas a `running`. */
         $upgrade->update([
-            'deployment_status' => 'running',
+            'deployment_status'        => 'running',
+            'deployment_running_since' => now(),
         ]);
 
-        RunDeploymentJob::dispatch($upgrade, 'run_commands');
+        RunDeploymentJob::dispatch($upgrade, 'run_commands')->onConnection(self::CONEXION_DE_COLA);
 
         return response()->json([
             'model' => $upgrade->fresh()->loadMissing('target_client_api', 'deployment_logs'),
