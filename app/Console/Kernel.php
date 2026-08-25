@@ -41,6 +41,13 @@ class Kernel extends ConsoleKernel
         // habilita este vencimiento tiene que llegar a tiempo para servirle de algo.
         $schedule->command('leads:vencer-demo-setups-colgados')->everyMinute();
 
+        // Destraba los setups que quedaron en `sin_confirmar` —la corrida cuyo desenlace el admin
+        // no conoce, por timeout de la llamada o por el 409 de la instancia— o en `ejecutandose`
+        // porque el PHP del panel se murió antes de escribir nada. Sin este vencimiento,
+        // `sin_confirmar` sería un estado del que no se sale: la fuga del 13/8/2026 con otra cara.
+        // Cada minuto por el mismo motivo que el de arriba: el turno del lead dura una hora.
+        $schedule->command('leads:check-demo-setup-timeout')->everyMinute();
+
         // Envía check de ingreso X minutos después del inicio de la demo.
         $schedule->command('leads:check-demo-ingress')->everyMinute();
 

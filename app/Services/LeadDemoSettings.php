@@ -31,6 +31,29 @@ class LeadDemoSettings
     public const KEY_SETUP_TIMEOUT_MINUTOS = 'demo_setup_timeout_minutos';
 
     /**
+     * Clave: minutos que un setup puede pasar en `sin_confirmar` (o en `ejecutandose`) antes de
+     * que `leads:check-demo-setup-timeout` lo dé por vencido y lo pase a `fallido`.
+     *
+     * 🔴 Existe porque `sin_confirmar` —el estado nuevo del 25/8/2026, para la corrida cuyo
+     * desenlace el admin no conoce— sin vencimiento sería el mismo bug del 13/8/2026 con otra
+     * cara: tres leads quedaron en `ejecutandose` con el error en NULL para siempre porque
+     * `leads:run-demo-setup` filtra `pendiente` y nadie los sacaba de ahí. La regla que quedó
+     * escrita en APRENDER_NO_PARCHEAR es *"todo estado intermedio necesita un proceso que lo
+     * destrabe que no sea el mismo que lo puso ahí"*, así que el vencimiento es parte del arreglo
+     * y no un extra.
+     *
+     * Holgado a propósito frente al techo de la llamada (`services.client_api.demo_setup_timeout`,
+     * 900 s = 15 min): el vencimiento tiene que darle a la corrida viva el tiempo de terminar y
+     * avisar por el canal de eventos ANTES de declararla perdida. 25 minutos son los 15 del techo
+     * más diez de margen sobre los 9 m 26 s que tardó la corrida medida el 25/8/2026.
+     *
+     * No está en `to_array()` a propósito: ese array alimenta el formulario de settings del panel
+     * y el PUT valida las claves. Sumarlo sin tocar admin-spa rompería el guardado, y el default
+     * en código alcanza.
+     */
+    public const KEY_SETUP_SIN_CONFIRMAR_TIMEOUT_MINUTOS = 'demo_setup_sin_confirmar_timeout_minutos';
+
+    /**
      * Clave: margen mínimo, en minutos desde ahora, para ofrecer un horario de demo HOY (grupo
      * 306, prompt 02). Solo aplica a leads en la dinámica nueva — la actual sigue sin ofrecer
      * horarios de hoy.
@@ -162,6 +185,19 @@ class LeadDemoSettings
      * `migrate:fresh` sobre una instancia ocupada.
      */
     private const DEFAULT_SETUP_TIMEOUT_MINUTOS = 10;
+
+    /**
+     * Valor por defecto: minutos en `sin_confirmar` (o en `ejecutandose`) antes de que
+     * `leads:check-demo-setup-timeout` los pase a `fallido`.
+     *
+     * 25 y no 10: acá el error de quedarse corto es peor que en DEFAULT_SETUP_TIMEOUT_MINUTOS,
+     * porque `sin_confirmar` se escribe sabiendo que la corrida del otro lado sigue viva. Vencerla
+     * antes de tiempo devuelve el botón al panel y habilita el segundo `migrate:fresh` sobre la
+     * base que se está sembrando — el bug entero de la misión. 25 = los 15 minutos del techo de la
+     * llamada (`services.client_api.demo_setup_timeout` = 900 s) más diez de margen sobre los
+     * 9 m 26 s que tardó la corrida medida el 25/8/2026.
+     */
+    private const DEFAULT_SETUP_SIN_CONFIRMAR_TIMEOUT_MINUTOS = 25;
 
     /**
      * Valor por defecto: margen mínimo para ofrecer un horario de HOY (minutos). Es el tiempo en
@@ -587,6 +623,27 @@ class LeadDemoSettings
     public static function get_setup_timeout_minutos(): int
     {
         return self::clamp_setup_timeout((int) AdminSetting::get(self::KEY_SETUP_TIMEOUT_MINUTOS, (string) self::DEFAULT_SETUP_TIMEOUT_MINUTOS));
+    }
+
+    /**
+     * Minutos que un setup puede pasar en `sin_confirmar` (o en `ejecutandose`) antes de que
+     * `leads:check-demo-setup-timeout` lo dé por vencido.
+     *
+     * Ver el docblock de KEY_SETUP_SIN_CONFIRMAR_TIMEOUT_MINUTOS: el vencimiento no es un extra
+     * del estado nuevo, es la mitad que evita que se convierta en una fuga.
+     *
+     * Mismo patrón que `get_ingreso_timeout_minutos()`: `AdminSetting::get` con el default en
+     * código y `clamp()`. La clave no está en `to_array()` ni en el PUT del panel, así que hoy no
+     * hay forma de escribirla desde la aplicación y el valor efectivo es siempre el default.
+     *
+     * @return int
+     */
+    public static function get_setup_sin_confirmar_timeout_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(
+            self::KEY_SETUP_SIN_CONFIRMAR_TIMEOUT_MINUTOS,
+            (string) self::DEFAULT_SETUP_SIN_CONFIRMAR_TIMEOUT_MINUTOS
+        ));
     }
 
     /**
