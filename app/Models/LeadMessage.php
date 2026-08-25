@@ -219,6 +219,164 @@ class LeadMessage extends Model
     }
 
     /**
+     * ¿Alguno de los horarios que un mensaje declaró haber ofrecido cubre este (fecha, hora)?
+     *
+     * Lógica pura sobre el campo `horarios_ofrecidos`: no consulta la base ni decide
+     * disponibilidad. Vive acá y no en LeadAiService porque es del modelo, se testea sin base, y
+     * LeadAiService ya tiene 6000 líneas.
+     *
+     * Normaliza la hora con el MISMO criterio que ya usan
+     * LeadAiService::descartar_agendamiento_fuera_de_slots() y ::revalidar_horarios_ofrecidos()
+     * (preg_match de (\d{1,2}):(\d{2}) + cero a la izquierda): no se inventa una tercera forma de
+     * normalizar una hora.
+     *
+     * 🔴 `hasta` es INCLUSIVO a propósito. La oferta primaria se declara con desde == hasta, así
+     * que un `hasta` exclusivo no matchearía nunca el caso principal; y cuando el agente ofrece un
+     * rango ("de 13 a 16:30") el texto nombró las 16:30, así que negárselas al lead es justo el bug
+     * que este método arregla. Y NO se exige que la hora sea un slot de la grilla: este método da
+     * PERMISO para ignorar el margen de anticipación, no decide disponibilidad — eso lo decide la
+     * grilla fresca que recalcula LeadAiService::oferta_vigente_sin_margen(), que por construcción
+     * solo trae slots reales. Para saber si "16:07" era slot al momento de ofrecer haría falta la
+     * grilla de ese instante, que no guardamos.
+     *
+     * Si `hasta` viene vacío, ilegible o lexicográficamente menor que `desde`, el ítem se trata
+     * como un punto (solo `desde`): una declaración mal formada no puede ensanchar el permiso.
+     *
+     * @param array<int, mixed> $horarios_ofrecidos Contenido de lead_messages.horarios_ofrecidos:
+     *                                              [{fecha: Y-m-d, desde: HH:MM, hasta: HH:MM}, ...].
+     * @param string            $fecha              Fecha buscada, en Y-m-d.
+     * @param string            $hora               Hora buscada (se normaliza a HH:MM).
+     *
+     * @return bool true si ese (fecha, hora) figura entre lo ofrecido.
+     */
+    public static function horarios_ofrecidos_cubren(array $horarios_ofrecidos, string $fecha, string $hora): bool
+    {
+        $fecha = trim($fecha);
+        $hora  = self::normalizar_hora_ofrecida($hora);
+
+        if ($fecha === '' || $hora === '') {
+            return false;
+        }
+
+        foreach ($horarios_ofrecidos as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+
+            $fecha_item = isset($item['fecha']) ? trim((string) $item['fecha']) : '';
+            if ($fecha_item === '' || $fecha_item !== $fecha) {
+                continue;
+            }
+
+            $desde = self::normalizar_hora_ofrecida(isset($item['desde']) ? (string) $item['desde'] : '');
+            if ($desde === '') {
+                continue;
+            }
+
+            $hasta = self::normalizar_hora_ofrecida(isset($item['hasta']) ? (string) $item['hasta'] : '');
+            /* Declaración mal formada (hasta vacío, ilegible o anterior al desde): se trata como
+             * un punto, no como un rango abierto. */
+            if ($hasta === '' || $hasta < $desde) {
+                $hasta = $desde;
+            }
+
+            /* Con cero a la izquierda, el orden lexicográfico de "HH:MM" ES el cronológico. */
+            if ($hora >= $desde && $hora <= $hasta) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * ¿Le ofrecimos ESTE (fecha, hora) a ESTE lead, en un mensaje que ya recibió?
+     *
+     * Es la fuente de verdad del permiso para ignorar el margen mínimo de anticipación
+     * (ver LeadAiService::oferta_vigente_sin_margen()). Consulta `lead_messages.horarios_ofrecidos`
+     * y delega el matching en horarios_ofrecidos_cubren().
+     *
+     * Qué mensajes cuentan y por qué:
+     * - Solo del MISMO lead: el permiso es "se lo ofrecimos a ESE lead", no "existe en el sistema".
+     * - Solo `sender = 'sistema'`: un mensaje del lead no ofrece nada.
+     * - Solo `status = 'enviado'`: la fuente de verdad es lo que el lead EFECTIVAMENTE recibió. Un
+     *   mensaje `sugerido` (sin aprobar) o `rechazado` no llegó, y darle permiso a saltar el margen
+     *   por un texto que nadie mandó abriría la puerta a que una sugerencia descartada habilite un
+     *   horario.
+     * - Ventana de 24hs: no es arbitraria. En este flujo el lead solo puede aceptar escribiendo, y
+     *   para que su mensaje entre por texto libre la ventana de WhatsApp tiene que estar abierta —
+     *   24hs desde su último mensaje (ver LeadSuggestionSendService::is_within_whatsapp_window()).
+     *   Una oferta de hace más de un día no puede estar siendo aceptada por un turno de esta
+     *   conversación. Es una guarda defensiva barata: aunque no estuviera, la grilla fresca seguiría
+     *   atajando "ya pasó" y "se ocupó".
+     *
+     * `whereNotNull('horarios_ofrecidos')` deja afuera solo los mensajes de
+     * LeadConversationErrorLogger (que son `enviado` con ese campo en null). No hace falta índice
+     * nuevo: `lead_id` y `status` ya están indexados, y la columna nunca se busca por contenido.
+     *
+     * @param int    $lead_id Lead dueño de la conversación.
+     * @param string $fecha   Fecha buscada, en Y-m-d.
+     * @param string $hora    Hora buscada (se normaliza a HH:MM).
+     *
+     * @return bool true si ese (fecha, hora) figura entre los horarios ofrecidos a este lead.
+     */
+    public static function horario_figura_como_ofrecido(int $lead_id, string $fecha, string $hora): bool
+    {
+        if ($lead_id <= 0 || trim($fecha) === '' || trim($hora) === '') {
+            return false;
+        }
+
+        $desde_ts = \App\Helpers\AppTime::now()->copy()->subHours(24);
+
+        $mensajes = self::query()
+            ->where('lead_id', $lead_id)
+            ->where('sender', 'sistema')
+            ->where('status', 'enviado')
+            ->whereNotNull('horarios_ofrecidos')
+            ->where(function ($q) use ($desde_ts) {
+                $q->where('sent_at', '>=', $desde_ts)
+                  ->orWhere(function ($q2) use ($desde_ts) {
+                      $q2->whereNull('sent_at')->where('created_at', '>=', $desde_ts);
+                  });
+            })
+            ->orderBy('id', 'desc')
+            ->limit(20)
+            ->get(['id', 'horarios_ofrecidos']);
+
+        foreach ($mensajes as $mensaje) {
+            $horarios = $mensaje->horarios_ofrecidos;
+            if (! is_array($horarios) || empty($horarios)) {
+                continue;
+            }
+
+            if (self::horarios_ofrecidos_cubren($horarios, $fecha, $hora)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Normaliza una hora suelta a "HH:MM", o string vacío si no es legible.
+     *
+     * Mismo criterio que LeadAiService::descartar_agendamiento_fuera_de_slots() (preg_match de
+     * (\d{1,2}):(\d{2}) + str_pad a dos dígitos): tolera "9:05", " 09:05 " y "09:05:00".
+     *
+     * @param string $hora Hora cruda declarada por el agente.
+     *
+     * @return string "HH:MM" o '' si no se pudo leer.
+     */
+    private static function normalizar_hora_ofrecida(string $hora): string
+    {
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $hora, $m)) {
+            return '';
+        }
+
+        return str_pad($m[1], 2, '0', STR_PAD_LEFT) . ':' . $m[2];
+    }
+
+    /**
      * Lista legible (en español) de las acciones que se van a ejecutar si se aprueba este
      * mensaje pendiente (`pending_actions`, motivo agendamiento — ver
      * LeadAiService::create_pending_agendamiento_message()). Permite que admin-spa muestre a
