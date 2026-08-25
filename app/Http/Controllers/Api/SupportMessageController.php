@@ -225,7 +225,9 @@ class SupportMessageController extends BaseController
         $message->sender_admin_id = (int) Auth::id();
         $message->save();
 
-        $delivered = app(SupportAiSuggestionDeliveryService::class)->deliver_draft_message($message, $ticket);
+        $delivery_service = app(SupportAiSuggestionDeliveryService::class);
+        $delivered = $delivery_service->deliver_draft_message($message, $ticket);
+        $resultado_envio = $delivery_service->ultimo_resultado();
 
         // Limpia solo el estado pendiente del TICKET. clear_ticket_pending_state() también
         // borra borradores, y este mensaje ya dejó de serlo arriba, así que no se lo lleva.
@@ -242,6 +244,23 @@ class SupportMessageController extends BaseController
                 'model' => $message,
                 'error' => 'El mensaje quedó guardado pero no se pudo entregar: el ticket no tiene un canal de WhatsApp válido.',
             ], 422);
+        }
+
+        // 🔴 Un envío PARTIDO a medias deja la primera parte entregada, así que mirar solo el
+        // estado de esa fila decía "entregado" mientras las otras dos nunca llegaron al cliente.
+        // Es el mismo error que esta misión vino a arreglar, una capa más arriba: la verdad la
+        // tiene el resultado del envío, no el mensaje.
+        if (is_array($resultado_envio) && $resultado_envio['delivery'] === 'partial') {
+            return response()->json([
+                'model'       => $message,
+                'delivered'   => false,
+                'partial'     => true,
+                'sent_parts'  => $resultado_envio['sent_parts'],
+                'total_parts' => $resultado_envio['total_parts'],
+                'error'       => 'Salieron ' . $resultado_envio['sent_parts'] . ' de '
+                    . $resultado_envio['total_parts'] . ' mensajes. Los que faltan quedaron en la '
+                    . 'conversación marcados como no enviados: reintentalos desde ahí.',
+            ], 200);
         }
 
         // El servicio se traga los fallos de Meta, así que devolver true por haber recibido un

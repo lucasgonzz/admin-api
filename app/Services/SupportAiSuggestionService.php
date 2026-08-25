@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AgentIdentity;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use Illuminate\Http\Client\PendingRequest;
@@ -80,7 +81,7 @@ class SupportAiSuggestionService
             $http    = $this->build_http_client();
             $tools   = $this->build_github_tools();
             $messages = [
-                ['role' => 'user', 'content' => $user_content],
+                ['role' => 'user', 'content' => $this->build_user_blocks($ticket, $user_content)],
             ];
 
             // Agentic loop: repite hasta end_turn o hasta el límite de iteraciones.
@@ -272,9 +273,14 @@ Respondé SOLO en JSON con este formato exacto:
         // Protocolo de escalado y cierre leído directamente desde el repositorio.
         $escalation_rules = $this->fetch_escalation_rules();
 
+        // Identidad compartida con el agente de leads: es la MISMA persona para el cliente,
+        // antes y después de comprar. Se comparte solo quién es, no cómo trabaja: las
+        // instrucciones operativas de leads traen calificación, agenda de demo y post-demo,
+        // que no tienen nada que hacer en una conversación con alguien que ya es cliente.
+        $identidad = $this->build_identity_block();
+
         return <<<SYSTEM
-Sos un asistente de soporte técnico de ComercioCity, una plataforma de operación comercial para distribuidoras y comercios argentinos.
-Tu tarea es sugerir al operador la respuesta más útil para el cliente.
+{$identidad}Tu tarea es sugerir al operador la respuesta más útil para el cliente.
 Respondé siempre en español rioplatense.
 
 ESTILO:
@@ -292,6 +298,23 @@ CUÁNDO HACER UNA PREGUNTA:
 - No hagas preguntas de cortesía ni de cierre. Solo preguntás cuando la respuesta
   depende de información que el cliente no dio.
 
+VARIOS MENSAJES:
+- Cuando el contenido lo permite, partí la respuesta en dos o tres mensajes cortos en vez de un
+  bloque largo. Separalos con una línea que tenga solamente tres guiones. El sistema los manda uno
+  tras otro y la conversación se siente como la de una persona, no como la de un formulario.
+- Cada parte tiene que poder leerse sola. No partas una oración al medio ni dejes una parte que
+  solo se entienda con la siguiente.
+- Si la respuesta es corta, mandala en un solo mensaje. Partir de más también queda raro.
+
+IMÁGENES:
+- Cuando el cliente manda una captura de pantalla, mirala antes de contestar: leé el mensaje de
+  error tal como está escrito, fijate en qué pantalla del sistema está y qué botones se ven.
+- Si en la imagen hay un mensaje de error, citalo textual en tu respuesta. Al cliente le confirma
+  que lo estás mirando de verdad, y evita que contestes sobre otra cosa.
+- La imagen no reemplaza al manual: seguí necesitando get_manual_file para saber qué hacer con lo
+  que viste. Reconocer un error no es lo mismo que saber cómo se resuelve.
+- Si la imagen está borrosa, cortada o no se entiende, pedile otra en vez de adivinar.
+
 Tenés acceso a la herramienta get_manual_file para leer archivos del repositorio de documentación de ComercioCity.
 Antes de responder cualquier duda técnica o funcional del cliente, leé el archivo relevante usando get_manual_file.
 Si no sabés cuál leer, empezá por README.md que contiene el índice y casos de uso frecuentes.
@@ -301,6 +324,126 @@ Archivos disponibles en el repositorio:
 
 {$escalation_rules}
 SYSTEM;
+    }
+
+    /**
+     * Arma el contenido del primer mensaje: las imágenes del cliente y después el texto.
+     *
+     * La doc de la API es explícita en que las imágenes rinden mejor ANTES del texto, y en que
+     * conviene rotularlas para poder referirse a ellas. Sin imágenes devuelve el string pelado,
+     * que es exactamente lo que había antes: un ticket sin fotos no cambia en nada.
+     *
+     * El `cache_control` del system prompt no se toca y sigue funcionando: la caché es por
+     * prefijo y el orden de render es tools → system → messages, así que meter bloques en el
+     * primer mensaje del usuario no invalida nada de lo que está antes.
+     *
+     * @param SupportTicket $ticket       Ticket en curso.
+     * @param string        $user_content Texto ya armado con el historial y el formato de salida.
+     *
+     * @return array<int, array<string, mixed>>|string
+     */
+    protected function build_user_blocks(SupportTicket $ticket, string $user_content)
+    {
+        try {
+            $collector = app(SupportAiImageCollector::class);
+            $imagenes = $collector->collect((int) $ticket->id);
+            $descartadas = $collector->descartadas();
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('SupportAiSuggestionService: no se pudieron juntar las imágenes.', [
+                'ticket_id' => $ticket->id,
+                'error'     => $exception->getMessage(),
+            ]);
+
+            return $user_content;
+        }
+
+        // Aviso de descarte: el historial le va a mostrar igual que hubo una imagen. Si no se
+        // le dice que no la recibió, lo más probable es que invente qué decía.
+        $aviso = '';
+        if ($descartadas > 0) {
+            $aviso = "\n\nAVISO: el cliente mandó " . $descartadas . " imagen(es) más que NO estás viendo en "
+                . "esta consulta. Puede ser por el formato, por el tamaño, o simplemente porque solo se adjuntan "
+                . "las últimas. NO supongas qué decían ni las des por vistas. Si tu respuesta depende de ellas, "
+                . "pedile al cliente que te mande de nuevo la que importa, sacada como foto y no como archivo.";
+        }
+
+        if (empty($imagenes)) {
+            return $aviso !== '' ? $user_content . $aviso : $user_content;
+        }
+
+        $bloques = [];
+        $numero = 0;
+
+        foreach ($imagenes as $imagen) {
+            $numero++;
+            $bloques[] = [
+                'type' => 'text',
+                'text' => 'Imagen ' . $numero . ', que mandó el cliente:',
+            ];
+            $bloques[] = [
+                'type'   => 'image',
+                'source' => [
+                    'type'       => 'base64',
+                    'media_type' => $imagen['media_type'],
+                    'data'       => $imagen['data'],
+                ],
+            ];
+        }
+
+        $bloques[] = [
+            'type' => 'text',
+            'text' => $user_content . $aviso,
+        ];
+
+        return $bloques;
+    }
+
+    /**
+     * Encabezado de identidad del agente, compartido con el agente de leads.
+     *
+     * Sale de `agent_identities`, que `AgentPromptSyncService` sincroniza desde
+     * `agentes/lead/identidad.md` del repo de conocimiento cada diez minutos. O sea: cambiar
+     * la personalidad no requiere deploy, y el agente de soporte y el de leads no se pueden
+     * desincronizar entre sí, que es justo lo que pasaría con dos textos separados.
+     *
+     * Si no hay identidad activa se cae al encabezado de siempre: quedarse sin agente porque
+     * nadie sincronizó un .md sería mucho peor que quedarse sin personalidad.
+     *
+     * @return string Bloque listo para encabezar el system prompt, terminado en salto de línea.
+     */
+    protected function build_identity_block(): string
+    {
+        $generico = "Sos un asistente de soporte técnico de ComercioCity, una plataforma de operación comercial para distribuidoras y comercios argentinos.
+";
+
+        try {
+            $identidad = AgentIdentity::obtener_activo();
+        } catch (\Throwable $exception) {
+            Log::warning('SupportAiSuggestionService: no se pudo leer la identidad del agente.', [
+                'error' => $exception->getMessage(),
+            ]);
+
+            return $generico;
+        }
+
+        if ($identidad === null) {
+            return $generico;
+        }
+
+        $descripcion = trim((string) ($identidad->description ?? ''));
+        if ($descripcion === '') {
+            return $generico;
+        }
+
+        return $descripcion . "
+
+"
+            . "Eso es quién sos. Lo que sigue es tu trabajo en soporte: acá hablás con clientes que YA compraron
+"
+            . "y usan el sistema todos los días, no con alguien a quien le estás vendiendo. Nada de calificar, de
+"
+            . "ofrecer una demo ni de coordinar agenda: eso es de la otra punta de tu trabajo y acá no va.
+";
     }
 
     /**
