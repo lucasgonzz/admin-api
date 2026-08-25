@@ -196,6 +196,13 @@ class LeadSuggestionSendService
          * validación falla (ej. el horario ya se ocupó mientras esperaba aprobación), no se envía
          * nada al lead: el error se propaga para que LeadController devuelva 422 y el admin pida
          * una sugerencia nueva.
+         *
+         * ⚠️ Este párrafo describía el contrato, pero hasta el 25/8/2026 el código NO lo cumplía:
+         * cuando el horario no validaba, apply_parsed_response() reescribía el mensaje in-place con
+         * un correctivo ("ese horario se ocupó") y lo enviaba igual — con el sent_by_admin_id de
+         * esta aprobación, o sea firmado por un admin que nunca leyó ese texto. Desde ese día el
+         * camino de aprobación tira HorarioYaNoDisponibleException y no envía nada
+         * (LeadAiService::frenar_por_horario_no_disponible), que es lo que este comentario ya decía.
          */
         if (! empty($message->pending_actions)) {
             if ($is_auto_send) {
