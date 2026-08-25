@@ -339,4 +339,231 @@ class PathsDeInstalacionDeLaTiendaCargadosAManoTest extends TestCase
         $this->assertSame('', $respuesta->json('model.ecommerce_spa_path'));
         $this->assertSame('', $respuesta->json('model.ecommerce_api_path'));
     }
+
+    /**
+     * 8) 🔴 GUARDA DE FORMA: una entrada DEMASIADO CORTA para ser un path de instalación se
+     *    descarta entera y se cae a la derivación automática, que siempre es una ruta segura.
+     *
+     *    LAS TRES ENTRADAS SON DE COPY/PASTE REAL, y las tres eran catastróficas antes de esta
+     *    guarda: con `comerciocity.store` guardado como spa_path, get_spa_docroot() daba
+     *    `domains/comerciocity.store` y el swap atómico (`mv "$DOCROOT" "$OLD"` + `rm -rf "$OLD"`)
+     *    borraba el public_html ENTERO de ese dominio, con todas las otras tiendas que colgaran de
+     *    ahí. El warning de ensure_hosting_spa_directory() no lo cubría: el padre (`domains`)
+     *    existe siempre, así que el deploy no tenía nada que denunciar.
+     */
+    public function test_una_entrada_demasiado_corta_cae_a_la_derivacion()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $entradas = [
+            // El dominio a secas, olvidándose la cola.
+            'comerciocity.store',
+            // La ruta absoluta copiada de una sesión SSH: normaliza al caso de arriba.
+            '/home/u123456/domains/comerciocity.store',
+            // Lo que muestra el File Manager de hPanel parado ADENTRO del dominio: sin el dominio
+            // adelante quedaría como `domains/public_html/tienda/spa`, una carpeta inventada al
+            // lado de los dominios reales que ningún vhost sirve.
+            'public_html/tienda/spa',
+        ];
+
+        foreach ($entradas as $entrada) {
+            $respuesta = $this->putJson($this->url($client), [
+                'ecommerce_spa_url'  => 'https://tienda.cliente.com.ar',
+                'ecommerce_api_url'  => 'https://api-tienda.cliente.com.ar',
+                'ecommerce_spa_path' => $entrada,
+                'ecommerce_api_path' => $entrada,
+            ]);
+
+            $respuesta->assertStatus(200);
+
+            $ecommerce = $this->tienda($client);
+            $this->assertSame(
+                'tienda.cliente.com.ar/public_html',
+                $ecommerce->spa_path,
+                'Esta entrada tendría que haberse descartado entera: ' . $entrada
+            );
+            $this->assertSame('tienda.cliente.com.ar/public_html/api', $ecommerce->api_path);
+            $this->assertSame('', $respuesta->json('model.ecommerce_spa_path'));
+            $this->assertSame('', $respuesta->json('model.ecommerce_api_path'));
+        }
+    }
+
+    /**
+     * 9) 🔴 EL TEST DE NO-REGRESIÓN DE LOS ~40 CLIENTES: la guarda de forma del test 8 NO puede
+     *    rechazar `{dominio}/public_html` ni `{dominio}/public_html/api`, que son exactamente los
+     *    paths derivados y legítimos que hoy tienen guardados todos los clientes en producción.
+     *    Si este test se pone en rojo, la guarda quedó demasiado estricta y se rompen todas las
+     *    tiendas ya instaladas.
+     */
+    public function test_los_paths_de_los_clientes_existentes_siguen_siendo_aceptados()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        // Se cargan a mano paths con la FORMA de siempre (dos y tres segmentos), pero de un
+        // dominio distinto al de la URL, para que cuenten como manuales y se pueda ver que se
+        // guardaron tal cual en vez de rechazarse.
+        $respuesta = $this->putJson($this->url($client), [
+            'ecommerce_spa_url'  => 'https://tienda.cliente.com.ar',
+            'ecommerce_api_url'  => 'https://api-tienda.cliente.com.ar',
+            'ecommerce_spa_path' => 'cliente.com.ar/public_html',
+            'ecommerce_api_path' => 'cliente.com.ar/public_html/api',
+        ]);
+
+        $respuesta->assertStatus(200);
+
+        $ecommerce = $this->tienda($client);
+        $this->assertSame('cliente.com.ar/public_html', $ecommerce->spa_path);
+        $this->assertSame('cliente.com.ar/public_html/api', $ecommerce->api_path);
+        $this->assertSame('cliente.com.ar/public_html', $respuesta->json('model.ecommerce_spa_path'));
+        $this->assertSame('cliente.com.ar/public_html/api', $respuesta->json('model.ecommerce_api_path'));
+    }
+
+    /**
+     * 10) Un cliente nuevo al que se le cargan SOLO los paths, con las dos URLs vacías, no pierde
+     *     lo cargado.
+     *
+     *     EL DEFECTO QUE PROTEGE (encontrado en el chequeo independiente de la misión): el
+     *     `return` temprano de sync_ecommerce_urls_from_request() para "las dos URLs vacías" corría
+     *     ANTES de los bloques que aplican los paths, así que se descartaban en silencio, sin
+     *     ningún error. Y el hint del modal invitaba explícitamente a hacer eso.
+     */
+    public function test_con_las_dos_urls_vacias_un_path_cargado_igual_se_guarda()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $respuesta = $this->putJson($this->url($client), [
+            'ecommerce_spa_url'  => '',
+            'ecommerce_api_url'  => '',
+            'ecommerce_spa_path' => 'comerciocity.store/public_html/tienda/spa',
+            'ecommerce_api_path' => 'comerciocity.store/public_html/tienda/api',
+        ]);
+
+        $respuesta->assertStatus(200);
+
+        $ecommerce = $this->tienda($client);
+        $this->assertSame('comerciocity.store/public_html/tienda/spa', $ecommerce->spa_path);
+        $this->assertSame('comerciocity.store/public_html/tienda/api', $ecommerce->api_path);
+
+        // Las URLs vacías se guardan en null, igual que hacía el early return.
+        $this->assertNull($ecommerce->spa_url);
+        $this->assertNull($ecommerce->api_url);
+        $this->assertSame('pending', $ecommerce->status);
+
+        $this->assertSame(
+            'comerciocity.store/public_html/tienda/spa',
+            $respuesta->json('model.ecommerce_spa_path')
+        );
+    }
+
+    /**
+     * 11) Y el camino de al lado sigue igual que siempre: las dos URLs vacías SIN paths no crean
+     *     ninguna tienda. Es la guarda de que la corrección del test 10 no convirtió cualquier
+     *     guardado de cliente en un alta de tienda.
+     */
+    public function test_con_las_dos_urls_vacias_y_sin_paths_no_se_crea_ninguna_tienda()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $this->putJson($this->url($client), [
+            'ecommerce_spa_url'  => '',
+            'ecommerce_api_url'  => '',
+            'ecommerce_spa_path' => '',
+            'ecommerce_api_path' => '',
+        ])->assertStatus(200);
+
+        $this->assertNull(
+            ClientEcommerce::where('client_id', $client->id)->first(),
+            'Un guardado sin URLs ni paths no tiene por qué crear una tienda.'
+        );
+    }
+
+    /**
+     * 12) Espacios invisibles pegados desde una web o un chat (espacio duro U+00A0, BOM U+FEFF).
+     *
+     *     EL DEFECTO QUE PROTEGE: el `.trim()` de JavaScript del modal los recorta y el `trim()`
+     *     de PHP no, aunque los dos docblocks prometen que las implementaciones son equivalentes.
+     *     El hint mostraba la ruta limpia, la columna guardaba la ruta con el carácter invisible
+     *     pegado, y el deploy terminaba creando en el hosting una carpeta con un carácter
+     *     invisible al final que ningún (sub)dominio servía.
+     */
+    public function test_los_espacios_invisibles_se_recortan_igual_que_en_el_modal()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $respuesta = $this->putJson($this->url($client), [
+            'ecommerce_spa_url'  => 'https://tienda.cliente.com.ar',
+            'ecommerce_api_url'  => 'https://api-tienda.cliente.com.ar',
+            // Espacio duro (U+00A0) al final.
+            'ecommerce_spa_path' => "comerciocity.store/public_html/tienda/spa\xC2\xA0",
+            // BOM (U+FEFF) adelante.
+            'ecommerce_api_path' => "\xEF\xBB\xBFcomerciocity.store/public_html/tienda/api",
+        ]);
+
+        $respuesta->assertStatus(200);
+
+        $ecommerce = $this->tienda($client);
+        $this->assertSame('comerciocity.store/public_html/tienda/spa', $ecommerce->spa_path);
+        $this->assertSame('comerciocity.store/public_html/tienda/api', $ecommerce->api_path);
+    }
+
+    /**
+     * 13) Un array en la clave del path no puede terminar guardado como el string "Array".
+     *
+     *     `(string) []` devuelve literalmente "Array" (con warning), y ese "Array" quedaba en la
+     *     columna que después es destino de un `rm -rf`. Un valor que no es escalar se descarta y
+     *     se cae a la derivación.
+     */
+    public function test_un_array_en_la_clave_del_path_cae_a_la_derivacion()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $respuesta = $this->putJson($this->url($client), [
+            'ecommerce_spa_url'  => 'https://tienda.cliente.com.ar',
+            'ecommerce_api_url'  => 'https://api-tienda.cliente.com.ar',
+            'ecommerce_spa_path' => ['comerciocity.store', 'public_html'],
+            'ecommerce_api_path' => ['clave' => 'valor'],
+        ]);
+
+        $respuesta->assertStatus(200);
+
+        $ecommerce = $this->tienda($client);
+        $this->assertSame('tienda.cliente.com.ar/public_html', $ecommerce->spa_path);
+        $this->assertSame('tienda.cliente.com.ar/public_html/api', $ecommerce->api_path);
+        $this->assertNotSame('Array', $ecommerce->spa_path);
+    }
+
+    /**
+     * 14) Un path con caracteres de shell se guarda normalizado (la normalización no es un
+     *     validador de nombres de carpeta), pero el script del deploy no lo interpola crudo.
+     *
+     *     La mitad de shell la cubre tests/Unit/GuardasDelPathDeInstalacionDeLaTiendaTest.php,
+     *     que llama a build_spa_atomic_deploy_shell() por reflexión. Acá se deja constancia de
+     *     que el valor efectivamente llega hasta la columna, que es de dónde lo saca el script.
+     */
+    public function test_un_path_con_caracteres_de_shell_llega_a_la_columna_tal_cual()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+
+        $respuesta = $this->putJson($this->url($client), [
+            'ecommerce_spa_url'  => 'https://tienda.comerciocity.store',
+            'ecommerce_api_url'  => 'https://api-tienda.comerciocity.store',
+            'ecommerce_spa_path' => 'comerciocity.store/public_html/tienda',
+            'ecommerce_api_path' => 'comerciocity.store/public_html/tienda/a";id;"b',
+        ]);
+
+        $respuesta->assertStatus(200);
+
+        $ecommerce = $this->tienda($client);
+        $this->assertSame('comerciocity.store/public_html/tienda/a";id;"b', $ecommerce->api_path);
+
+        // Y el subpath que va a parar al script del deploy es el tramo peligroso.
+        $this->assertSame('a";id;"b', $ecommerce->api_subpath_inside_spa_docroot());
+    }
 }
