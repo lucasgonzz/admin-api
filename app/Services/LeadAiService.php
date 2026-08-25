@@ -1773,16 +1773,11 @@ TXT;
         $snapshot_unused = null;
         $config_unused   = null;
         $ventanas_grilla = null;
-        $fresca = $this->build_availability_json(
-            self::DIAS_DISPONIBILIDAD,
-            $snapshot_unused,
-            $demo_date,
-            (int) $lead->id,
-            true,
-            0,
-            $config_unused,
-            $ventanas_grilla
-        );
+        /* La llamada va en UNA sola línea, igual que la de revalidar_horarios_ofrecidos(): el
+         * detector del §7 de la misión enumera los call sites que NO pasan margen, y es un awk
+         * línea por línea. Partida en varias líneas, este call site aparecería como candidato en
+         * cada triage futuro aunque el 0 esté puesto. */
+        $fresca = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $snapshot_unused, $demo_date, (int) $lead->id, true, 0, $config_unused, $ventanas_grilla);
 
         $slots_por_fecha = isset($fresca['demos'][$demo_id]) && is_array($fresca['demos'][$demo_id])
             ? $fresca['demos'][$demo_id]
