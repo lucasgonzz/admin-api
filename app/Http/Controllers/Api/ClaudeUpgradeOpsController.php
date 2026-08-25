@@ -37,9 +37,11 @@ use Illuminate\Validation\ValidationException;
  *  3. `allow_deploy_to_active_api` — el `start` rechaza desplegar sobre la API ACTIVA en
  *     producción salvo que venga el flag explícito. La API destino por defecto PUEDE ser la
  *     activa cuando el cliente tiene una sola `ClientApi`.
- *  4. Gate de horario — el post-cierre solo corre con el negocio CERRADO. `abierto` rechaza y
- *     `sin_configurar` TAMBIÉN rechaza: no se asume que un cliente sin horarios cargados esté
- *     cerrado.
+ *  4. Gate de horario — el post-cierre solo corre cuando la JORNADA DE HOY YA TERMINÓ, que no es
+ *     lo mismo que "el negocio está cerrado en este instante": a las 14:00 de un 8–13 / 16–21 está
+ *     cerrado y reabre a las 16. `abierto` rechaza, `sin_configurar` TAMBIÉN rechaza (no se asume
+ *     que un cliente sin horarios cargados esté cerrado), y también rechaza cuando el próximo
+ *     cierre del día cae hoy.
  *
  * 🔴 Todo freno que rechaza devuelve 422 y no escribe absolutamente nada: ni estado, ni log, ni
  * job encolado.
@@ -202,6 +204,15 @@ class ClaudeUpgradeOpsController extends Controller
 
         $service = app(ClientVersionUpgradeCreationService::class);
 
+        /* 🔴 La pertenencia de la API destino se chequea ACÁ y sale por error_422(), como todo el
+           resto del bloque. El servicio la valida con `abort(422)`, que en un dry-run saldría por el
+           handler de Laravel: sin `error`, sin `ayuda`, con otra forma. El contrato del bloque tiene
+           que ser uno solo aunque el caso no escriba nada. */
+        $rechazo_api = $this->rechazar_si_la_api_destino_no_es_del_cliente($request, $client);
+        if ($rechazo_api !== null) {
+            return $rechazo_api;
+        }
+
         /* Resuelve y valida pertenencia al rango SIN crear nada: si viene una versión de afuera,
            esto aborta con 422 antes de tocar la base. */
         $confirmed_ids = $service->resolve_confirmed_version_ids(
@@ -262,7 +273,7 @@ class ClaudeUpgradeOpsController extends Controller
 
         /* La respuesta es el MISMO payload que `GET claude/upgrades/{id}`: una sola forma de leer un
            upgrade, no dos que se pueden desincronizar. */
-        return $this->payload_de_upgrade($request, (int) $upgrade->id, 201);
+        return $this->payload_de_upgrade((int) $upgrade->id, 201);
     }
 
     /* ==============================================================================================
@@ -415,7 +426,7 @@ class ClaudeUpgradeOpsController extends Controller
             'crons_supervisor_at' => $desmarcar ? null : now(),
         ]);
 
-        return $this->payload_de_upgrade($request, (int) $upgrade->id, 200);
+        return $this->payload_de_upgrade((int) $upgrade->id, 200);
     }
 
     /* ==============================================================================================
@@ -428,14 +439,19 @@ class ClaudeUpgradeOpsController extends Controller
      * 🔴 Este es el endpoint que amarra las dos mitades de la misión. El post-cierre corre seeders
      * y comandos sobre el sistema EN USO del cliente: si el negocio está abierto, no se ejecuta.
      *
-     * El gate tiene tres salidas, no dos:
-     *   - `cerrado`        → pasa.
-     *   - `abierto`        → 422 con el detalle (rangos del día y próximo cierre).
-     *   - `sin_configurar` → 422. 🔴 NO se asume que esté cerrado. "No sé" no es "está cerrado":
-     *     ese es exactamente el caso donde adivinar deja a un negocio sin sistema en pleno horario.
+     * 🔴 La condición que se exige es que **la jornada de hoy haya terminado**, no que el negocio
+     * esté cerrado en este instante. La regla completa y por qué está en
+     * `rechazo_del_gate_de_horario()`; en corto, rechaza con 422:
+     *   - `sin_configurar` → NO se asume que esté cerrado. "No sé" no es "está cerrado".
+     *   - `abierto`        → obvio.
+     *   - un día sin configurar en la ventana del próximo cierre → no se adivina.
+     *   - el próximo cierre cae HOY → o todavía no abrió, o está en el hueco entre turnos.
+     * Y deja pasar cuando el próximo cierre cae otro día (la jornada terminó), cuando el día está
+     * cerrado entero y cuando el cliente está cerrado toda la ventana.
      *
      * Se saltea con `force=true` + `force_reason` (mínimo 10 caracteres), y eso deja constancia en
-     * el log diario: un freno que se puede saltear sin dejar rastro no es un freno.
+     * el log diario SIEMPRE que el gate hubiera rechazado: un freno que se puede saltear sin dejar
+     * rastro no es un freno.
      *
      * @param Request    $request Request entrante.
      * @param int|string $id      Id numérico o uuid del upgrade.
@@ -495,6 +511,13 @@ class ClaudeUpgradeOpsController extends Controller
         $resolver = app(ClientScheduleResolver::class);
         $estado   = $resolver->estado_en($client, $ahora, $tz);
 
+        /*
+         * 🔴 La decisión NO es "¿está cerrado en este instante?" sino "¿ya terminó la jornada de
+         * hoy?". Un `estado_en()` de instante deja pasar el hueco del mediodía y el rato de antes
+         * de abrir, y en los dos casos el negocio reabre con el post-cierre a medio correr.
+         */
+        $rechazo_del_gate = $this->rechazo_del_gate_de_horario($resolver, $client, $ahora, $tz, $estado);
+
         $forzado = $this->pidio_en_true($request, 'force');
 
         if ($forzado) {
@@ -511,35 +534,24 @@ class ClaudeUpgradeOpsController extends Controller
                 );
             }
 
-            if ($estado !== ClientScheduleResolver::ESTADO_CERRADO) {
-                /* 🔴 La constancia del salteo. Sin esto, forzar sería gratis y silencioso. */
+            /*
+             * 🔴 La constancia del salteo se escribe SIEMPRE que el gate hubiera rechazado, no solo
+             * cuando el estado del instante no era `cerrado`. Un negocio "cerrado a las 14:00 pero
+             * que reabre a las 16" forzado tiene que dejar rastro igual que uno abierto.
+             */
+            if ($rechazo_del_gate !== null) {
                 Log::channel('daily')->warning('[claude/upgrades] Gate de horario SALTEADO con force en el post-cierre.', [
                     'client_id'          => (int) $client->id,
                     'upgrade_id'         => (int) $upgrade->id,
                     'estado_ahora'       => $estado,
+                    'motivo_del_gate'    => $rechazo_del_gate['motivo_del_gate'],
                     'force_reason'       => $motivo,
                     'timezone'           => $tz,
                     'momento_evaluado'   => $ahora->toIso8601String(),
                 ]);
             }
-        } elseif ($estado === ClientScheduleResolver::ESTADO_ABIERTO) {
-            return $this->error_422(
-                'El negocio del cliente está ABIERTO en este momento: las tareas post-cierre corren seeders y comandos '
-                    . 'sobre el sistema en uso. No se encoló nada.',
-                $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado)
-            );
-        } elseif ($estado === ClientScheduleResolver::ESTADO_SIN_CONFIGURAR) {
-            return $this->error_422(
-                'El cliente NO tiene horarios cargados: no se puede saber si está cerrado, y no se asume que lo esté. '
-                    . 'No se encoló nada.',
-                array_merge(
-                    $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado),
-                    [
-                        'ayuda' => 'Cargá los horarios del cliente desde el modal del cliente en el admin (pestaña '
-                            . 'Horarios), o repetí con force=true y force_reason si sabés a mano que está cerrado.',
-                    ]
-                )
-            );
+        } elseif ($rechazo_del_gate !== null) {
+            return $this->error_422($rechazo_del_gate['mensaje'], $rechazo_del_gate['detalle']);
         }
 
         $upgrade->update(['deployment_status' => 'running']);
@@ -550,11 +562,12 @@ class ClaudeUpgradeOpsController extends Controller
         $respuesta = $this->respuesta_de_encolado($upgrade, self::ETAPA_POST_CIERRE);
         $respuesta['horario_cliente'] = $this->horario_del_cliente($client);
 
-        if ($forzado && $estado !== ClientScheduleResolver::ESTADO_CERRADO) {
+        if ($forzado && $rechazo_del_gate !== null) {
             $respuesta['gate_de_horario_salteado'] = [
-                'estado_ahora' => $estado,
-                'motivo'       => $this->texto_o_null($request->input('force_reason')),
-                'registrado'   => true,
+                'estado_ahora'    => $estado,
+                'motivo_del_gate' => $rechazo_del_gate['motivo_del_gate'],
+                'motivo'          => $this->texto_o_null($request->input('force_reason')),
+                'registrado'      => true,
             ];
         }
 
@@ -653,6 +666,32 @@ class ClaudeUpgradeOpsController extends Controller
         $recibido = $this->normalizar_nombre($request->input('confirm_client_name'));
         $real     = $this->normalizar_nombre($client->name);
 
+        /*
+         * 🔴 Cliente sin nombre cargado: `$real` queda vacío y NINGÚN `confirm_client_name` puede
+         * coincidir, así que los seis endpoints de escritura le devolverían 422 para siempre con un
+         * mensaje que habla de que el nombre "no coincide" — o sea, mintiendo sobre la causa. El
+         * freno se mantiene cerrado (no se afloja), pero se dice qué pasa de verdad y cómo se
+         * arregla.
+         */
+        if ($real === '') {
+            $sin_nombre = [
+                'client_id'   => (int) $client->id,
+                'client_uuid' => (string) $client->uuid,
+                'ayuda'       => 'Abrí el cliente en el admin y cargale el campo Nombre. Sin nombre no hay con qué '
+                    . 'confirmar contra qué negocio se está operando, y este freno no se saltea.',
+            ];
+
+            if ($upgrade !== null) {
+                $sin_nombre['upgrade_id'] = (int) $upgrade->id;
+            }
+
+            return $this->error_422(
+                'El cliente NO tiene nombre cargado en el admin: por eso no se puede confirmar con '
+                    . 'confirm_client_name y esta operación no se puede hacer. No se escribió nada.',
+                $sin_nombre
+            );
+        }
+
         if ($recibido !== '' && $recibido === $real) {
             return null;
         }
@@ -671,6 +710,44 @@ class ClaudeUpgradeOpsController extends Controller
         return $this->error_422(
             'confirm_client_name no coincide con el nombre del cliente de esta operación. No se escribió nada.',
             $extra
+        );
+    }
+
+    /**
+     * Rechaza un `target_client_api_id` que no pertenezca al cliente, con el 422 del bloque.
+     *
+     * 🔴 Existe para que este caso NO salga por el `abort(422)` del servicio: un abort sale por el
+     * handler de Laravel, sin `error` ni `ayuda`, con una forma distinta a la de todos los demás
+     * rechazos de `claude/*`. No escribe nada en ninguno de los dos caminos, pero el contrato del
+     * bloque tiene que ser uno solo.
+     *
+     * @param Request $request Request entrante.
+     * @param Client  $client  Cliente destino.
+     *
+     * @return \Illuminate\Http\JsonResponse|null Null si no vino la API o si pertenece al cliente.
+     */
+    private function rechazar_si_la_api_destino_no_es_del_cliente(Request $request, Client $client)
+    {
+        $pedido = $request->input('target_client_api_id');
+
+        if ($pedido === null || $pedido === '') {
+            return null;
+        }
+
+        $pertenece = $client->client_apis()->where('id', (int) $pedido)->exists();
+
+        if ($pertenece) {
+            return null;
+        }
+
+        return $this->error_422(
+            'La API destino no pertenece al cliente seleccionado. No se creó nada.',
+            [
+                'target_client_api_id' => (int) $pedido,
+                'client_id'            => (int) $client->id,
+                'ayuda'                => 'Mirá las APIs del cliente con GET claude/clients/' . (int) $client->id
+                    . '?include=apis, y usá el id de una de ellas (o no mandes target_client_api_id y dejá el default).',
+            ]
         );
     }
 
@@ -827,7 +904,8 @@ class ClaudeUpgradeOpsController extends Controller
         $pedido = $request->input('target_client_api_id');
 
         if ($pedido !== null && $pedido !== '') {
-            $service->assert_target_client_api_belongs_to_client($client, (int) $pedido);
+            /* La pertenencia ya la chequeó `rechazar_si_la_api_destino_no_es_del_cliente()` arriba,
+               con error_422(): acá no se vuelve a validar con abort(). */
             $target_id = (int) $pedido;
             $origen    = 'pedido_explicito';
         } else {
@@ -860,6 +938,160 @@ class ClaudeUpgradeOpsController extends Controller
         }
 
         return $payload;
+    }
+
+    /**
+     * Decide si el gate de horario RECHAZA el arranque de las tareas post-cierre.
+     *
+     * 🔴 La regla NO es "¿el negocio está cerrado en este instante?", es "¿la jornada de hoy ya
+     * terminó?". `estado_en()` mira un instante y devuelve `cerrado` tanto a las 14:00 de un
+     * negocio 8–13 / 16–21 (que reabre a las 16) como a las 08:00 de uno 9–18 (que abre en una
+     * hora). En los dos casos el post-cierre correría seeders y comandos y el negocio abriría con
+     * eso a medio camino — que es exactamente el hazard que documenta
+     * `ClientScheduleResolver::proximo_cierre()`.
+     *
+     * Orden de evaluación:
+     *
+     *  1. `sin_configurar` → rechaza (no se asume que esté cerrado).
+     *  2. `abierto` → rechaza.
+     *  3. aparece un día sin configurar en la ventana del próximo cierre → rechaza (no se adivina).
+     *  4. el próximo cierre cae HOY → rechaza: la jornada no terminó. Se distingue "todavía no
+     *     abrió" de "está en el hueco entre turnos" mirando la primera apertura del día.
+     *  5. si no, deja pasar. Un día cerrado entero (fila propia, cero rangos) pasa: su próximo
+     *     cierre cae otro día. Un cliente cerrado toda la ventana también pasa: no hay jornada.
+     *
+     * @param ClientScheduleResolver $resolver Resolvedor.
+     * @param Client                 $client   Cliente del upgrade.
+     * @param Carbon                 $ahora    Instante evaluado, ya en $tz.
+     * @param string                 $tz       Timezone del gate.
+     * @param string                 $estado   Estado del negocio en ese instante.
+     *
+     * @return array<string, mixed>|null Null si el gate deja pasar; si no,
+     *                                   ['motivo_del_gate', 'mensaje', 'detalle'].
+     */
+    private function rechazo_del_gate_de_horario(ClientScheduleResolver $resolver, Client $client, Carbon $ahora, $tz, $estado)
+    {
+        if ($estado === ClientScheduleResolver::ESTADO_SIN_CONFIGURAR) {
+            return [
+                'motivo_del_gate' => 'sin_configurar',
+                'mensaje'         => 'El cliente NO tiene horarios cargados: no se puede saber si está cerrado, y no se '
+                    . 'asume que lo esté. No se encoló nada.',
+                'detalle'         => array_merge(
+                    $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado),
+                    [
+                        'ayuda' => 'Cargá los horarios del cliente desde el modal del cliente en el admin (pestaña '
+                            . 'Horarios), o repetí con force=true y force_reason si sabés a mano que está cerrado.',
+                    ]
+                ),
+            ];
+        }
+
+        if ($estado === ClientScheduleResolver::ESTADO_ABIERTO) {
+            return [
+                'motivo_del_gate' => 'abierto',
+                'mensaje'         => 'El negocio del cliente está ABIERTO en este momento: las tareas post-cierre corren '
+                    . 'seeders y comandos sobre el sistema en uso. No se encoló nada.',
+                'detalle'         => $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado),
+            ];
+        }
+
+        $cierre = $resolver->proximo_cierre_detallado($client, $ahora, self::DIAS_VENTANA, $tz);
+
+        if ($cierre['motivo'] === ClientScheduleResolver::MOTIVO_SIN_CONFIGURAR) {
+            return [
+                'motivo_del_gate' => 'dia_sin_configurar_en_la_ventana',
+                'mensaje'         => 'Hay un día SIN CONFIGURAR en la ventana del próximo cierre: no se puede afirmar que '
+                    . 'la jornada de hoy haya terminado, y no se adivina. No se encoló nada.',
+                'detalle'         => array_merge(
+                    $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado),
+                    [
+                        'ayuda' => 'Completá los horarios del cliente (pestaña Horarios del modal del cliente) para que la '
+                            . 'ventana quede sin huecos, o repetí con force=true y force_reason.',
+                    ]
+                ),
+            ];
+        }
+
+        /* Cerrado toda la ventana: no hay ninguna jornada pendiente que esperar. Pasa. */
+        if ($cierre['instante'] === null) {
+            return null;
+        }
+
+        $instante_local = $cierre['instante']->copy()->setTimezone($tz);
+
+        /* El próximo cierre cae otro día: la jornada de hoy terminó. Pasa. */
+        if ($instante_local->toDateString() !== $ahora->copy()->setTimezone($tz)->toDateString()) {
+            return null;
+        }
+
+        $hoy             = $resolver->resolve_for_date($client, $ahora, $tz);
+        $hora            = $ahora->copy()->setTimezone($tz)->format('H:i');
+        $primera         = $this->primera_apertura($hoy['rangos']);
+        $reapertura      = $this->proxima_apertura($hoy['rangos'], $hora);
+        $todavia_no_abrio = $primera !== null && $hora < $primera;
+
+        $mensaje = $todavia_no_abrio
+            ? 'El negocio del cliente TODAVÍA NO ABRIÓ hoy: abre a las ' . $primera . ' y su jornada recién termina a las '
+                . $hoy['cierre_del_dia'] . '. Las tareas post-cierre lo agarrarían con el negocio por abrir. No se encoló nada.'
+            : 'El negocio del cliente está en el HUECO ENTRE TURNOS: reabre a las '
+                . ($reapertura === null ? '—' : $reapertura) . ' y su jornada recién termina a las '
+                . $hoy['cierre_del_dia'] . '. Estar cerrado ahora no significa que la jornada haya terminado. No se encoló nada.';
+
+        return [
+            'motivo_del_gate' => $todavia_no_abrio ? 'todavia_no_abrio_hoy' : 'hueco_entre_turnos',
+            'mensaje'         => $mensaje,
+            'detalle'         => array_merge(
+                $this->detalle_del_gate($resolver, $client, $ahora, $tz, $estado),
+                [
+                    'jornada_de_hoy_termino' => false,
+                    'primera_apertura_de_hoy' => $primera,
+                    'reabre_a_las'           => $reapertura,
+                    'ayuda'                  => 'Esperá al cierre del día (' . $hoy['cierre_del_dia'] . ') y repetí, o '
+                        . 'repetí con force=true y force_reason si sabés a mano que el negocio no vuelve a abrir hoy.',
+                ]
+            ),
+        ];
+    }
+
+    /**
+     * Hora de la PRIMERA apertura de un día, mirando los rangos que rigen.
+     *
+     * @param array<int, array> $rangos Rangos del día, con claves 'desde' y 'hasta'.
+     *
+     * @return string|null 'HH:MM', o null si el día no tiene rangos.
+     */
+    private function primera_apertura(array $rangos)
+    {
+        $primera = null;
+
+        foreach ($rangos as $rango) {
+            if ($primera === null || $rango['desde'] < $primera) {
+                $primera = $rango['desde'];
+            }
+        }
+
+        return $primera;
+    }
+
+    /**
+     * Hora de la próxima apertura POSTERIOR a un momento del día.
+     *
+     * @param array<int, array> $rangos Rangos del día, con claves 'desde' y 'hasta'.
+     * @param string            $hora   Hora del día en formato 'HH:MM'.
+     *
+     * @return string|null 'HH:MM', o null si ya no vuelve a abrir hoy.
+     */
+    private function proxima_apertura(array $rangos, $hora)
+    {
+        $proxima = null;
+
+        foreach ($rangos as $rango) {
+            if ($rango['desde'] > $hora && ($proxima === null || $rango['desde'] < $proxima)) {
+                $proxima = $rango['desde'];
+            }
+        }
+
+        return $proxima;
     }
 
     /**
@@ -922,16 +1154,20 @@ class ClaudeUpgradeOpsController extends Controller
      * acá se armara un payload propio, el día que cambie uno el otro queda viejo y nadie se entera
      * hasta que algo del otro lado lee un campo que ya no existe.
      *
-     * @param Request $request    Request entrante.
-     * @param int     $upgrade_id Id del upgrade.
-     * @param int     $status     Código HTTP de la respuesta.
+     * 🔴 Se le pasa un Request LIMPIO, no el del POST de escritura. El endpoint de lectura valida
+     * su propio body (`timezone`), y con el body de escritura adentro un `timezone` inválido haría
+     * que este método devuelva 422 DESPUÉS de haber creado el upgrade: quien lee un 422 asume que
+     * no se escribió nada y reintenta, y queda un upgrade duplicado.
+     *
+     * @param int $upgrade_id Id del upgrade.
+     * @param int $status     Código HTTP de la respuesta.
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    private function payload_de_upgrade(Request $request, $upgrade_id, $status)
+    private function payload_de_upgrade($upgrade_id, $status)
     {
         $lectura   = app(ClaudeClientOpsController::class);
-        $respuesta = $lectura->upgrade_json($request, $upgrade_id);
+        $respuesta = $lectura->upgrade_json(Request::create('/', 'GET'), $upgrade_id);
 
         if ($respuesta->getStatusCode() !== 200) {
             return $respuesta;

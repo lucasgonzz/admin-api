@@ -378,6 +378,56 @@ class SincronizacionDeHorariosAlClienteTest extends TestCase
         $this->assertSame([], $payload_b['dias_crudos']);
     }
 
+    /**
+     * 35.b Un día SIN CONFIGURAR adentro de la semana viaja `abierto: null`, NO `abierto: false`.
+     *
+     * 🔴 `abierto` tiene tres valores, no dos: true (abre), false (cerrado) y null (no se sabe).
+     * Es el campo más obvio de consumir del otro lado —el que se lee solo, sin mirar `estado`—, así
+     * que si colapsara "sin dato" en `false`, el agente de WhatsApp afirmaría que el negocio está
+     * cerrado un martes a las 10 cuando en realidad no sabe.
+     */
+    public function test_un_dia_sin_configurar_viaja_con_abierto_en_null()
+    {
+        // Solo el martes tiene fila, y NO hay fila 'todos': los otros seis quedan sin configurar.
+        $client = $this->crear_cliente();
+        $this->cargar_dia($client, 'martes', [['08:00', '13:00']]);
+
+        $payload = $this->servicio()->build_payload($client);
+
+        $this->assertTrue($payload['configurado'], 'El cliente tiene una fila cargada: está configurado.');
+
+        $martes = $this->dia_de_la_semana($payload['semana'], 'martes');
+        $this->assertTrue($martes['abierto']);
+        $this->assertSame(ClientScheduleResolver::ESTADO_CON_HORARIO, $martes['estado']);
+
+        $sin_configurar = 0;
+        foreach ($payload['semana'] as $dia) {
+            if ($dia['dia'] === 'martes') {
+                continue;
+            }
+
+            $sin_configurar++;
+            $this->assertNull(
+                $dia['abierto'],
+                'Un día sin configurar tiene que viajar con abierto en null, no en false: ' . $dia['dia']
+            );
+            $this->assertSame(ClientScheduleResolver::ESTADO_SIN_CONFIGURAR, $dia['estado']);
+            $this->assertSame(ClientScheduleResolver::ORIGEN_SIN_CONFIGURAR, $dia['origen']);
+            $this->assertSame([], $dia['rangos']);
+        }
+
+        $this->assertSame(6, $sin_configurar, 'Se esperaban seis días sin configurar.');
+
+        // Y el día cerrado sigue viajando en false: null y false son cosas distintas.
+        $otro = $this->crear_cliente();
+        $this->cargar_dia($otro, 'todos', [['09:00', '18:00']]);
+        $this->cargar_dia($otro, 'domingo', []);
+
+        $domingo = $this->dia_de_la_semana($this->servicio()->build_payload($otro)['semana'], 'domingo');
+        $this->assertFalse($domingo['abierto']);
+        $this->assertNotNull($domingo['abierto'], 'Un día cerrado NO es null: es un dato.');
+    }
+
     // ---------------------------------------------------------------------
     // 36-38) Los desenlaces del push
     // ---------------------------------------------------------------------

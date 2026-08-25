@@ -475,6 +475,101 @@ class ActualizacionesYDeploymentPorClaudeTest extends TestCase
     }
 
     /**
+     * 29.b) Cliente SIN nombre cargado: el freno sigue cerrado (ningún `confirm_client_name` puede
+     * coincidir con un nombre vacío), pero el error dice LA CAUSA REAL en vez de hablar de que el
+     * nombre "no coincide".
+     */
+    public function test_un_cliente_sin_nombre_cargado_explica_por_que_no_se_puede_confirmar(): void
+    {
+        $e = $this->armar_escenario();
+
+        /* `clients.name` es NOT NULL en la base: el caso real es el vacío (o solo espacios). */
+        $e['client']->name = '   ';
+        $e['client']->save();
+
+        $antes = ClientVersionUpgrade::count();
+
+        $cuerpo = $this->postJson(
+            '/api/claude/upgrades',
+            $this->cuerpo_de_creacion($e, ['confirm_client_name' => 'Cliente Rioplatense']),
+            $this->headers()
+        )->assertStatus(422)->json();
+
+        $this->assertSame($antes, ClientVersionUpgrade::count(), 'No se puede haber creado nada.');
+        $this->assertStringContainsString('NO tiene nombre cargado', $cuerpo['error']);
+        $this->assertSame((int) $e['client']->id, $cuerpo['client_id']);
+
+        /* Y un string vacío tampoco pasa: fail-closed, no se afloja. */
+        $this->postJson(
+            '/api/claude/upgrades',
+            $this->cuerpo_de_creacion($e, ['confirm_client_name' => ' ']),
+            $this->headers()
+        )->assertStatus(422);
+
+        $this->assertSame($antes, ClientVersionUpgrade::count());
+    }
+
+    /**
+     * 29.b.2) 🔴 Crear el upgrade NO puede devolver 422 después de haberlo creado.
+     *
+     * El payload de la respuesta lo arma el endpoint de LECTURA, que valida su propio `timezone`.
+     * Si se le pasara el Request del POST de escritura, un `timezone` inválido en ese body haría
+     * que la creación conteste 422 con el upgrade YA creado — y quien lee un 422 asume que no se
+     * escribió nada y reintenta, dejando un duplicado.
+     */
+    public function test_un_timezone_invalido_en_el_body_no_convierte_la_creacion_en_un_422(): void
+    {
+        $e = $this->armar_escenario();
+
+        $antes = ClientVersionUpgrade::count();
+
+        $this->postJson(
+            '/api/claude/upgrades',
+            $this->cuerpo_de_creacion($e, ['timezone' => str_repeat('z', 120)]),
+            $this->headers()
+        )->assertStatus(201);
+
+        $this->assertSame($antes + 1, ClientVersionUpgrade::count(), 'Se tiene que haber creado exactamente uno.');
+    }
+
+    /**
+     * 29.c) Un `target_client_api_id` de OTRO cliente sale por el 422 del bloque (con `error` y
+     * `ayuda`), no por el `abort(422)` crudo del servicio. Vale también en dry-run, que no escribe
+     * nada: el contrato del bloque tiene que ser uno solo.
+     */
+    public function test_una_api_destino_de_otro_cliente_sale_por_el_422_del_bloque(): void
+    {
+        $e     = $this->armar_escenario();
+        $ajeno = $this->crear_cliente('Cliente Ajeno');
+        $api   = $this->crear_api($ajeno, 'https://api-ajena.ejemplo.test');
+
+        $antes = ClientVersionUpgrade::count();
+
+        /* Dry-run: el caso que salía por el handler de Laravel, sin `error` ni `ayuda`. */
+        $cuerpo = $this->postJson(
+            '/api/claude/upgrades',
+            $this->cuerpo_de_creacion($e, [
+                'dry_run'              => true,
+                'target_client_api_id' => $api->id,
+            ]),
+            $this->headers()
+        )->assertStatus(422)->json();
+
+        $this->assertArrayHasKey('error', $cuerpo);
+        $this->assertArrayHasKey('ayuda', $cuerpo);
+        $this->assertSame((int) $api->id, $cuerpo['target_client_api_id']);
+
+        /* Y en la escritura real tampoco crea nada. */
+        $this->postJson(
+            '/api/claude/upgrades',
+            $this->cuerpo_de_creacion($e, ['target_client_api_id' => $api->id]),
+            $this->headers()
+        )->assertStatus(422);
+
+        $this->assertSame($antes, ClientVersionUpgrade::count());
+    }
+
+    /**
      * 30) La creación real: upgrade con `created_by_admin_id = null` y `created_via = 'claude'`, con
      * los UpdateSeeder y UpdateCommand del camino confirmado.
      */
@@ -879,6 +974,185 @@ class ActualizacionesYDeploymentPorClaudeTest extends TestCase
         Queue::assertPushed(RunDeploymentJob::class, function ($job) {
             return $job->connection === 'database';
         });
+    }
+
+    /* ==========================================================================================
+     | 41.b) 🔴 El gate pregunta si la JORNADA DE HOY TERMINÓ, no si está cerrado en este instante
+     |
+     | `estado_en()` es un chequeo de INSTANTE: devuelve `cerrado` a las 14:00 de un negocio
+     | 8–13 / 16–21 (que reabre a las 16) y a las 08:00 de uno 9–18 (que abre en una hora). En los
+     | dos casos el post-cierre correría seeders y comandos, y el negocio abriría con eso a medio
+     | camino. Estos cinco tests fijan la regla correcta.
+     |========================================================================================= */
+
+    /**
+     * Momento del día del 25/8/2026 (martes), en el timezone de la app.
+     *
+     * @param string $hora Hora en formato 'HH:MM'.
+     *
+     * @return Carbon
+     */
+    private function momento_del_dia(string $hora): Carbon
+    {
+        return Carbon::parse('2026-08-25 ' . $hora . ':00', config('app.timezone'));
+    }
+
+    /** `day_key` del día de la fecha de prueba, sin hardcodearlo. */
+    private function day_key_de_hoy(): string
+    {
+        return ClientScheduleDay::DAY_KEYS_BY_DOW[$this->momento_del_dia('12:00')->dayOfWeek];
+    }
+
+    /**
+     * 43) 🔴 EL HUECO DEL MEDIODÍA. Cliente 08:00–13:00 y 16:00–21:00, a las 14:00: el negocio
+     * está cerrado en este instante pero REABRE A LAS 16. Rechaza.
+     *
+     * Y con `force` válido sí pasa, dejando constancia: el bloque `gate_de_horario_salteado` tiene
+     * que aparecer también en este caso, que es justo el que el gate viejo no veía.
+     */
+    public function test_el_post_cierre_en_el_hueco_entre_turnos_no_encola_nada(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->momento_del_dia('14:00'));
+
+        $e = $this->armar_escenario();
+        $this->cargar_dia($e['client'], 'todos', [['08:00', '13:00'], ['16:00', '21:00']]);
+
+        $upgrade = $this->upgrade_listo_para_post_cierre($e);
+
+        $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(422)->json();
+
+        $this->assertSame('cerrado', $cuerpo['estado_ahora'], 'A las 14:00 el instante es "cerrado"…');
+        $this->assertFalse($cuerpo['jornada_de_hoy_termino'], '…pero la jornada NO terminó.');
+        $this->assertSame('16:00', $cuerpo['reabre_a_las']);
+        $this->assertSame('21:00', $cuerpo['cierre_del_dia']);
+        $this->assertStringContainsString('HUECO ENTRE TURNOS', $cuerpo['error']);
+
+        Queue::assertNothingPushed();
+        $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+
+        /* Con force + motivo sí pasa, y queda declarado que se salteó el gate. */
+        $forzado = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+            'force'               => true,
+            'force_reason'        => 'Lucas avisó que hoy no reabren a la tarde.',
+        ], $this->headers())->assertStatus(202)->json();
+
+        $this->assertSame('hueco_entre_turnos', $forzado['gate_de_horario_salteado']['motivo_del_gate']);
+        $this->assertTrue($forzado['gate_de_horario_salteado']['registrado']);
+
+        Queue::assertPushed(RunDeploymentJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
+    }
+
+    /**
+     * 44) 🔴 ANTES DE ABRIR, que es el caso más común. Cliente 09:00–18:00 a las 08:00: cerrado en
+     * este instante, pero abre en una hora.
+     */
+    public function test_el_post_cierre_antes_de_que_el_negocio_abra_no_encola_nada(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->momento_del_dia('08:00'));
+
+        $e = $this->armar_escenario();
+        $this->cargar_dia($e['client'], 'todos', [['09:00', '18:00']]);
+
+        $upgrade = $this->upgrade_listo_para_post_cierre($e);
+
+        $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(422)->json();
+
+        $this->assertSame('cerrado', $cuerpo['estado_ahora']);
+        $this->assertFalse($cuerpo['jornada_de_hoy_termino']);
+        $this->assertSame('09:00', $cuerpo['primera_apertura_de_hoy']);
+        $this->assertSame('09:00', $cuerpo['reabre_a_las']);
+        $this->assertStringContainsString('TODAVÍA NO ABRIÓ', $cuerpo['error']);
+
+        Queue::assertNothingPushed();
+        $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+    }
+
+    /** 45) Después del cierre del día (22:00 con 09:00–18:00): la jornada terminó, pasa. */
+    public function test_el_post_cierre_despues_del_cierre_del_dia_si_encola(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->momento_del_dia('22:00'));
+
+        $e = $this->armar_escenario();
+        $this->cargar_dia($e['client'], 'todos', [['09:00', '18:00']]);
+
+        $upgrade = $this->upgrade_listo_para_post_cierre($e);
+
+        $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(202)->json();
+
+        $this->assertSame('run_seeders', $cuerpo['desde_etapa']);
+        $this->assertArrayNotHasKey('gate_de_horario_salteado', $cuerpo);
+
+        Queue::assertPushed(RunDeploymentJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
+        $this->assertSame('running', (string) $upgrade->refresh()->deployment_status);
+    }
+
+    /**
+     * 46) Día cerrado ENTERO (fila propia del día de hoy con cero rangos): pasa a cualquier hora.
+     *
+     * Es la diferencia con los dos casos de arriba: acá no hay ninguna jornada que esperar, porque
+     * hoy el negocio no abre nunca. El próximo cierre cae otro día.
+     */
+    public function test_el_post_cierre_con_el_dia_cerrado_entero_encola_a_cualquier_hora(): void
+    {
+        Carbon::setTestNow($this->momento_del_dia('12:00'));
+
+        $e = $this->armar_escenario();
+        $this->cargar_dia($e['client'], 'todos', [['09:00', '18:00']]);
+        /* La fila del día de hoy, con CERO rangos: así se dice "hoy cerramos". */
+        $this->cargar_dia($e['client'], $this->day_key_de_hoy(), []);
+
+        $upgrade = $this->upgrade_listo_para_post_cierre($e);
+
+        foreach (['10:00', '14:00', '22:00'] as $hora) {
+            Queue::fake();
+            Carbon::setTestNow($this->momento_del_dia($hora));
+
+            $upgrade->update(['deployment_status' => 'paused', 'crons_supervisor_at' => now()]);
+
+            $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+                'confirm_client_name' => 'Cliente Rioplatense',
+            ], $this->headers())->assertStatus(202)->json();
+
+            $this->assertSame('run_seeders', $cuerpo['desde_etapa'], 'Falló a las ' . $hora . '.');
+            $this->assertSame('running', (string) $upgrade->refresh()->deployment_status);
+        }
+    }
+
+    /** 47) Sin ninguna fila cargada sigue siendo 422 a cualquier hora: "no sé" no es "cerrado". */
+    public function test_el_post_cierre_sin_ninguna_fila_rechaza_a_cualquier_hora(): void
+    {
+        Carbon::setTestNow($this->momento_del_dia('12:00'));
+
+        $e       = $this->armar_escenario();
+        $upgrade = $this->upgrade_listo_para_post_cierre($e);
+
+        foreach (['08:00', '14:00', '22:00'] as $hora) {
+            Queue::fake();
+            Carbon::setTestNow($this->momento_del_dia($hora));
+
+            $cuerpo = $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+                'confirm_client_name' => 'Cliente Rioplatense',
+            ], $this->headers())->assertStatus(422)->json();
+
+            $this->assertSame('sin_configurar', $cuerpo['estado_ahora'], 'Falló a las ' . $hora . '.');
+
+            Queue::assertNothingPushed();
+            $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+        }
     }
 
     /** 42) Sin `crons_supervisor_at` no arranca, aunque el negocio esté cerrado. */

@@ -22,10 +22,12 @@ use Illuminate\Support\Facades\Log;
  *     uno se olvidaría. `dias_crudos` viaja solo como comodidad de lectura ("los sábados hasta las
  *     13") y NO es fuente de verdad.
  *
- *  2. **`configurado: false` significa "no hay dato", NO "cerrado".** Es el tercer estado del
- *     resolvedor cruzando el cable. Un cliente sin ningún día cargado viaja `configurado: false` y
- *     `semana: []`, y el agente de WhatsApp no puede afirmar que el negocio está cerrado: no sabe.
- *     Confundirlos le diría a un comprador que el comercio está cerrado un martes a las 10.
+ *  2. **"No hay dato" NUNCA viaja como "cerrado".** Es el tercer estado del resolvedor cruzando el
+ *     cable, y viaja en DOS niveles: un cliente sin ningún día cargado va con `configurado: false`
+ *     y `semana: []`; y adentro de la semana, un día sin configurar va con **`abierto: null`** (no
+ *     `false`) y `estado: 'sin_configurar'`. El agente de WhatsApp no puede afirmar que el negocio
+ *     está cerrado en ninguno de los dos casos: no sabe. Confundirlos le diría a un comprador que
+ *     el comercio está cerrado un martes a las 10.
  *
  *  3. **Nunca se propaga una excepción.** Cuando esto corre, el guardado de horarios en el admin ya
  *     terminó y fue exitoso: un empresa-api caído no puede convertirse en un error del admin. Los
@@ -207,17 +209,20 @@ class ClientScheduleSyncService
      *     'actualizado_en' => '2026-08-24T18:30:00-03:00',
      *     'configurado'    => true,
      *     'semana'         => [ ['dia_semana' => 0, 'dia' => 'domingo', 'abierto' => false,
-     *                            'estado' => 'cerrado', 'origen' => 'dia_propio', 'rangos' => []], … ],
+     *                            'estado' => 'cerrado', 'origen' => 'dia_propio', 'rangos' => []],
+     *                           ['dia_semana' => 1, 'dia' => 'lunes', 'abierto' => null,
+     *                            'estado' => 'sin_configurar', 'origen' => 'sin_configurar', 'rangos' => []], … ],
      *     'dias_crudos'    => [ ['dia' => 'todos', 'rangos' => [['desde' => '09:00', 'hasta' => '18:00']]] ],
      *   ]
      *
      * `dia_semana` es el índice de Carbon::dayOfWeek (0 = domingo), que es la convención que ya usa
      * la casa (CloserAgendaService::NOMBRES_DIA). No se inventa otra.
      *
-     * `abierto` es a nivel DÍA ("ese día el comercio abre en algún momento"), no a nivel instante.
-     * `estado` y `origen` viajan además del booleano para que el consumidor pueda distinguir un día
-     * `cerrado` (hay configuración y dice que no abre) de uno `sin_configurar` (no hay dato): con un
-     * solo booleano los dos se verían igual, que es justo el error que este contrato no quiere.
+     * `abierto` es a nivel DÍA ("ese día el comercio abre en algún momento"), no a nivel instante, y
+     * 🔴 tiene TRES valores: `true` (abre), `false` (cerrado) y **`null` = `sin_configurar`, o sea
+     * "no se sabe"**. No es un booleano: si lo fuera, "no hay dato" y "cerrado" viajarían iguales, y
+     * `abierto` es el campo más obvio de consumir del otro lado — el que se lee solo, sin mirar
+     * `estado`. `estado` y `origen` siguen viajando al lado, con el detalle completo.
      *
      * @param Client      $client   Cliente dueño de los horarios.
      * @param string|null $timezone Timezone; por defecto config('app.timezone').
@@ -267,8 +272,14 @@ class ClientScheduleSyncService
                 'dia_semana' => (int) array_search($resuelto['dia'], ClientScheduleDay::DAY_KEYS_BY_DOW, true),
                 'dia'        => $resuelto['dia'],
                 'dia_label'  => $resuelto['dia_label'],
-                // Abierto a nivel día: hay al menos un rango que rige ese día.
-                'abierto'    => $resuelto['estado'] === ClientScheduleResolver::ESTADO_CON_HORARIO,
+                /*
+                 * 🔴 Tres valores, no dos: true = abre en algún momento, false = cerrado,
+                 * null = SIN CONFIGURAR ("no se sabe"). Con un booleano, "no hay dato" y "cerrado"
+                 * viajan iguales, que es justo el error que este contrato no quiere — y `abierto`
+                 * es el campo más obvio de consumir del otro lado, así que tiene que ser honesto
+                 * por sí solo, sin obligar a leer `estado`.
+                 */
+                'abierto'    => $this->abierto_a_nivel_dia($resuelto['estado']),
                 'estado'     => $resuelto['estado'],
                 'origen'     => $resuelto['origen'],
                 'rangos'     => $resuelto['rangos'],
@@ -277,6 +288,26 @@ class ClientScheduleSyncService
         }
 
         return $semana;
+    }
+
+    /**
+     * Traduce el estado del resolvedor al campo `abierto` del contrato, que tiene TRES valores.
+     *
+     * 🔴 `null` no es "falso por defecto": es "no se sabe". Es el tercer estado del resolvedor
+     * cruzando el cable, igual que `configurado: false` a nivel payload. Colapsarlo a `false` le
+     * diría a un comprador que el comercio está cerrado un martes a las 10.
+     *
+     * @param string $estado Estado devuelto por ClientScheduleResolver::resolve_for_date().
+     *
+     * @return bool|null true = abre en algún momento, false = cerrado, null = sin configurar.
+     */
+    private function abierto_a_nivel_dia($estado)
+    {
+        if ($estado === ClientScheduleResolver::ESTADO_SIN_CONFIGURAR) {
+            return null;
+        }
+
+        return $estado === ClientScheduleResolver::ESTADO_CON_HORARIO;
     }
 
     /**
