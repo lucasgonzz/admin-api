@@ -945,6 +945,41 @@ TXT;
         $fecha_en_ventana = ($demo_date !== '' && isset($fechas_enviadas[$demo_date]));
         $hora_disponible  = ($demo_start !== '' && in_array($demo_start, $slots_de_esa_demo_y_fecha, true));
 
+        /* El margen mínimo de anticipación decide qué se puede OFRECER, no si lo ya ofrecido sigue
+         * en pie. La oferta primaria es SIEMPRE el primer slot que sobrevive al margen, así que
+         * nace pegada al borde: al turno siguiente, cuando el lead acepta, el reloj ya la sacó de
+         * la grilla y este guard la lee como "no disponible". Pasó con la lead Brisa el 25/8/2026:
+         * 17:05 ofrecido 16:57, aceptado 16:58, y el sistema le contestó "uh, justo se ocupó" con
+         * el horario libre.
+         *
+         * Este rescate sólo aplica si ESE (fecha, hora) figura en un mensaje que YA se le envió a
+         * ESTE lead (lead_messages.horarios_ofrecidos); un horario que el lead pide por su cuenta y
+         * no da el margen se sigue rechazando.
+         *
+         * 🔴 No "simplificar" esto pasándole margen 0 a la grilla de arriba: esa grilla es la que
+         * el agente usa para OFRECER, y con margen 0 empieza a ofrecer turnos a un minuto vista que
+         * la instancia no llega a preparar (el setup son 15 minutos antes). */
+        if ($demo_id > 0 && $fecha_en_ventana && ! $hora_disponible) {
+            $ventanas_sin_margen = null;
+            if ($this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
+                $hora_disponible = true;
+                /* La ventana extendida del slot rescatado tiene que salir de la MISMA grilla
+                 * margen-0: en la grilla con margen ese slot no existe, así que su entrada en
+                 * $ventanas_extendidas tampoco. */
+                $ventanas_extendidas = is_array($ventanas_sin_margen) ? $ventanas_sin_margen : [];
+
+                Log::channel('disponibilidad')->info(
+                    '[DISPONIBILIDAD] Horario ya ofrecido rescatado del margen de anticipación (generación).',
+                    [
+                        'lead_id'    => $lead->id,
+                        'demo_id'    => $demo_id,
+                        'demo_date'  => $demo_date,
+                        'demo_start' => $demo_start,
+                    ]
+                );
+            }
+        }
+
         /* Ventana extendida (misión 47): el mismo criterio que para el horario. Si el agente la
          * pidió sobre un inicio que el bloque VENTANA EXTENDIDA no ofrecía, es una ventana que el
          * sistema nunca le mostró — y el mensaje que la acompaña ya le prometió al lead una hora
@@ -1676,6 +1711,102 @@ TXT;
         }
 
         return $caducados;
+    }
+
+    /**
+     * ¿Este (fecha, hora) sigue en pie aunque el margen mínimo de anticipación ya lo haya sacado
+     * de la grilla, porque es un horario que YA le ofrecimos a ESTE lead en un mensaje enviado?
+     *
+     * El margen decide qué se puede OFRECER, no si lo ya ofrecido sigue en pie. Como la oferta
+     * primaria es siempre el primer slot que sobrevive al margen, nace pegada al borde: al turno
+     * siguiente, cuando el lead acepta, el reloj ya la sacó de la grilla. Este método es el
+     * segundo chequeo, acotado, que rescata exactamente ese caso — y sólo ese.
+     *
+     * El orden del cuerpo importa y es barato primero: gate por dinámica, después la consulta a
+     * `horarios_ofrecidos` (una alucinación del modelo muere ahí, sin pagar el recálculo), y recién
+     * al final la grilla margen-0.
+     *
+     * 🔴 Lo que este método NO relaja: "ya pasó" (la grilla margen-0 sigue descartando un slot que
+     * arrancó) y "lo ocupó otro" (la grilla pasa igual por la capa 1 de bloqueo por demo_id, con
+     * exclude_lead_id = este lead). O sea: no abre doble-booking. Sólo puede convertir un "no" en
+     * un "sí" cuando las tres cosas se dan juntas — está en un mensaje enviado a ESTE lead, no
+     * pasó, y nadie más lo tiene.
+     *
+     * @param Lead       $lead                 Lead que está aceptando el horario.
+     * @param int        $demo_id              Instancia física de demo.
+     * @param string     $demo_date            Fecha en Y-m-d.
+     * @param string     $demo_start           Horario de inicio en HH:MM.
+     * @param array|null $ventanas_sin_margen  Referencia de salida: las ventanas extendidas de la
+     *                                         MISMA grilla margen-0. Si el slot se rescata, su
+     *                                         ventana tiene que salir de acá y no de la grilla con
+     *                                         margen, donde ese slot ni existe.
+     *
+     * @return bool true si el horario se rescata del margen.
+     */
+    protected function oferta_vigente_sin_margen(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null): bool
+    {
+        $ventanas_sin_margen = [];
+
+        if ($demo_id <= 0 || $demo_date === '' || $demo_start === '') {
+            return false;
+        }
+
+        /* Gate por dinámica. En la dinámica actual el margen es 30 hardcodeado en
+         * compute_day_slots_for_demo() y el override no lo toca, así que el recálculo daría
+         * exactamente lo mismo: el gate ahorra una grilla entera y deja escrito que este fix es de
+         * la dinámica nueva (igual que el del grupo 330). */
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return false;
+        }
+
+        /* Primero la pregunta barata: ¿se lo ofrecimos nosotros? Una alucinación del modelo (un
+         * horario que el lead nunca recibió) muere acá, sin pagar el recálculo de la grilla. */
+        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $demo_start)) {
+            return false;
+        }
+
+        /* 🔴 El 0 va acá, como argumento explícito de ESTA llamada, y no como bandera de instancia
+         * ni como setting: una bandera con estado se filtra a la próxima llamada del mismo request
+         * y convierte esto en un bug intermitente imposible de reproducir (grupo 330, prompt 01,
+         * textual). El resto del sistema sigue leyendo la setting como siempre. */
+        $snapshot_unused = null;
+        $config_unused   = null;
+        $ventanas_grilla = null;
+        $fresca = $this->build_availability_json(
+            self::DIAS_DISPONIBILIDAD,
+            $snapshot_unused,
+            $demo_date,
+            (int) $lead->id,
+            true,
+            0,
+            $config_unused,
+            $ventanas_grilla
+        );
+
+        $slots_por_fecha = isset($fresca['demos'][$demo_id]) && is_array($fresca['demos'][$demo_id])
+            ? $fresca['demos'][$demo_id]
+            : [];
+
+        $rescatado = false;
+        foreach ($slots_por_fecha as $date_label => $slots) {
+            /* Las claves vienen como "martes 2026-08-25": mismo criterio de sufijo Y-m-d que ya
+             * usan descartar_agendamiento_fuera_de_slots(), revalidar_horarios_ofrecidos() y la
+             * revalidación bajo lock. */
+            if (! is_array($slots) || ! preg_match('/(\d{4}-\d{2}-\d{2})$/', (string) $date_label, $m_fecha) || $m_fecha[1] !== $demo_date) {
+                continue;
+            }
+
+            if (in_array($demo_start, array_map('strval', $slots), true)) {
+                $rescatado = true;
+                break;
+            }
+        }
+
+        /* Se asigna al final y de una sola vez: si el rescate no prosperó, el llamador recibe un
+         * array vacío y nunca un mapa a medio llenar (mismo criterio que build_availability_json). */
+        $ventanas_sin_margen = ($rescatado && is_array($ventanas_grilla)) ? $ventanas_grilla : [];
+
+        return $rescatado;
     }
 
     /**
@@ -3900,6 +4031,36 @@ TXT;
 
                 /* Slot presente en la disponibilidad real leída recién arriba. */
                 $slot_disponible = in_array($demo_start, $slots_demo, true);
+
+                /* Mismo rescate que en descartar_agendamiento_fuera_de_slots(): el margen mínimo de
+                 * anticipación decide qué se puede OFRECER, no si lo ya ofrecido sigue en pie. La
+                 * oferta primaria nace pegada al borde del margen, así que entre que se le ofrece y
+                 * que el lead acepta, el reloj sola la saca de la grilla (lead Brisa, 25/8/2026:
+                 * 17:05 ofrecido 16:57, aceptado 16:58, con el slot libre). Sólo se rescata si ese
+                 * (fecha, hora) figura en un mensaje que YA se le envió a ESTE lead.
+                 *
+                 * 🔴 Va adentro del lock y ANTES del bloque de ventana extendida a propósito: si el
+                 * slot se rescata, su ventana tiene que salir de la MISMA grilla margen-0 (en la
+                 * grilla con margen ese slot no existe, y su ventana tampoco). Y no se toca la
+                 * grilla de arriba: $slots_demo sigue alimentando las alternativas del mensaje
+                 * correctivo, que con margen 0 le ofrecerían al lead horarios imposibles. */
+                if (! $slot_disponible) {
+                    $ventanas_sin_margen = null;
+                    if ($this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
+                        $slot_disponible      = true;
+                        $ventanas_revalidadas = is_array($ventanas_sin_margen) ? $ventanas_sin_margen : [];
+
+                        Log::channel('disponibilidad')->info(
+                            '[DISPONIBILIDAD] Horario ya ofrecido rescatado del margen de anticipación (aprobación).',
+                            [
+                                'lead_id'    => $lead->id,
+                                'demo_id'    => $demo_id,
+                                'demo_date'  => $demo_date,
+                                'demo_start' => $demo_start,
+                            ]
+                        );
+                    }
+                }
 
                 /* Ventana extendida (misión 47). El "hasta" lo resuelve el servidor: el modelo solo
                  * pide la modalidad con un booleano. Si pidió ventana y en este instante ya no
