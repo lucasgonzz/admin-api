@@ -1048,6 +1048,195 @@ class LeadController extends Controller
     }
 
     /**
+     * Estados del pipeline en los que tiene sentido mover a mano la hora de fin de la demo
+     * (tarea 62): desde que quedó agendada hasta que el fin quedó pendiente de confirmar. Fuera
+     * de estos estados no hay "demo vigente" cuyo fin editar, y el endpoint responde 422.
+     *
+     * @var array<int, string>
+     */
+    const ESTADOS_CON_DEMO_EDITABLE = [
+        'demo_agendada',
+        'ingresando_demo',
+        'demo_en_curso',
+        'demo_pendiente_de_ingreso',
+        'demo_pendiente_de_terminar',
+    ];
+
+    /**
+     * Edita a mano la hora de fin de la demo del lead desde el panel (tarea 62).
+     *
+     * Es la palanca HUMANA sobre `demo_end_time` — la contracara de la misión 47, que le prohibió
+     * al modelo escribir ese campo. Este endpoint es de la UI del admin (auth:sanctum), no del
+     * canal del agente: la restricción de la 47 no se afloja acá, se complementa.
+     *
+     * Validación server-side, en este orden:
+     * 1. Formato HH:MM estricto (00:00–23:59). Como solo se acepta una hora del día y la fecha
+     *    sigue siendo `demo_date`, el fin queda por construcción en el MISMO día calendario que el
+     *    inicio, con techo 23:59 — el mismo criterio y clamp de la misión 47: la demo nunca cruza
+     *    de día. Un valor con fecha ("2026-08-26 15:00") o fuera de rango ("25:00") es 422.
+     * 2. Lead con demo vigente: demo_id + demo_date + demo_start_time cargados y status dentro de
+     *    ESTADOS_CON_DEMO_EDITABLE.
+     * 3. Fin estrictamente posterior al inicio (un fin "menor" sería cruzar de día: 422).
+     *
+     * Efectos, además de persistir el campo:
+     * - El TOKEN de ingreso acompaña (si hay uno emitido y no revocado): vencimiento nuevo =
+     *   demo_date + fin + gracia. Si se extiende, vía extender_vencimiento(); si se ACORTA, vía
+     *   acortar_vencimiento() con un piso de `now + gracia` — la instancia valida la vigencia en
+     *   cada request (middleware DemoSessionVigente de empresa-api), así que un vencimiento en el
+     *   pasado le cortaría la sesión al lead que está adentro en su próximo click. Con el piso, el
+     *   link deja de servir para entrar casi de inmediato pero el que ya está adentro tiene la
+     *   gracia para cerrar: no se lo patea a mitad de sesión. Si el aviso a la instancia falla, se
+     *   revierte TODO (fin y reprogramación) y se responde 422: nada de estados a medias.
+     * - El CHECK DE FIN se reprograma con el mecanismo ya existente del grupo 307
+     *   (`demo_fin_check_reprogramado_para`), que CheckDemoFin, CheckDemoFinSeguimiento y
+     *   CheckDemoFinTimeout ya usan como reemplazo del objetivo `inicio + duración`. Sin esto, a
+     *   una demo de 10 a 11 extendida hasta las 15 se le preguntaría "¿terminaste?" a las 11:00 —
+     *   o nunca, si el lead entra después de las 11. No se toca para un lead con ventana extendida
+     *   de la dinámica nueva: la misión 47 lo dejó fuera de esos relojes a propósito.
+     * - Trazabilidad (patrón del log de la 47 para el demo_end_time del modelo): un Log::info con
+     *   quién/de-qué-valor/a-qué-valor, más el evento visible en el hilo del lead.
+     *
+     * @param int|string              $id            Identificador del lead.
+     * @param Request                 $request       Debe traer `demo_end_time` (HH:MM).
+     * @param DemoIngresoTokenService $token_service Servicio que ajusta el vencimiento del token.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function update_demo_end_time_json($id, Request $request, DemoIngresoTokenService $token_service)
+    {
+        /* Lead objetivo de la edición manual del fin. */
+        $lead = Lead::findOrFail($id);
+
+        /* 1. Formato estricto HH:MM del mismo día. */
+        $fin_nuevo = trim((string) $request->input('demo_end_time', ''));
+        if (! preg_match('/^([01]\d|2[0-3]):([0-5]\d)$/', $fin_nuevo, $fin_match)) {
+            return response()->json([
+                'message' => 'La hora de fin tiene que ser una hora del día en formato HH:MM (00:00 a 23:59): la demo no cruza de día.',
+            ], 422);
+        }
+
+        /* 2. Demo vigente: campos cargados y estado del ciclo. */
+        if (is_null($lead->demo_date) || empty($lead->demo_start_time) || is_null($lead->demo_id)
+            || ! in_array((string) $lead->status, self::ESTADOS_CON_DEMO_EDITABLE, true)) {
+            return response()->json([
+                'message' => 'El lead no tiene una demo agendada o en curso: no hay fin que editar.',
+            ], 422);
+        }
+
+        /* 3. Fin posterior al inicio. El inicio se parsea con la misma regex tolerante que usa el
+         * resto del repo (demo_start_time es texto libre histórico). Si el inicio es ilegible no
+         * hay contra qué validar y se rechaza: mejor 422 que aceptar un fin incomparable. */
+        if (! preg_match('/(\d{1,2}):(\d{2})/', (string) $lead->demo_start_time, $inicio_match)) {
+            return response()->json([
+                'message' => 'La hora de inicio de la demo no tiene un formato legible: corregila antes de editar el fin.',
+            ], 422);
+        }
+        $inicio_minutos = (int) $inicio_match[1] * 60 + (int) $inicio_match[2];
+        $fin_minutos    = (int) $fin_match[1] * 60 + (int) $fin_match[2];
+        if ($fin_minutos <= $inicio_minutos) {
+            return response()->json([
+                'message' => 'La hora de fin tiene que ser posterior al inicio (' . $lead->demo_start_time . ') dentro del mismo día.',
+            ], 422);
+        }
+
+        /* Sin cambios reales (doble click o reenvío del mismo valor): no se escribe, no se avisa
+         * a la instancia y no se ensucia el hilo con eventos vacíos (patrón de demo-experiencia). */
+        $fin_anterior = (string) $lead->demo_end_time;
+        if ($fin_anterior === $fin_nuevo) {
+            return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+        }
+
+        /* Reloj y momentos derivados del fin nuevo. AppTime y no Carbon::now() directo: los
+         * relojes del ciclo corren sobre el reloj virtual de debug y este endpoint los reprograma. */
+        $now          = \App\Helpers\AppTime::now();
+        $fin_datetime = \Carbon\Carbon::parse(
+            $lead->demo_date->format('Y-m-d') . ' ' . $fin_nuevo,
+            'America/Argentina/Buenos_Aires'
+        );
+
+        /* Backup para revertir si el aviso del token a la instancia falla. */
+        $reprogramado_anterior = $lead->demo_fin_check_reprogramado_para !== null
+            ? $lead->demo_fin_check_reprogramado_para->copy()
+            : null;
+
+        /* Nuevo objetivo del check de fin (mecanismo del grupo 307):
+         * - Lead con ventana extendida de la dinámica nueva: null intacto — la misión 47 lo sacó
+         *   de esos relojes a propósito, no hay check que reprogramar.
+         * - Fin nuevo en el futuro: el check (y su seguimiento y su timeout) corren a esa hora.
+         * - Fin nuevo ya pasado y demo en curso: `now`, para que el check dispare en la próxima
+         *   corrida (la ventana del comando es ±2 minutos) en vez de quedar trabado para siempre
+         *   apuntando al pasado — el riesgo que documenta update_json() al limpiar este campo.
+         * - Fin nuevo ya pasado en cualquier otro estado: null (cálculo por defecto de siempre). */
+        if ($lead->demo_flexible && $lead->usa_experiencia_demo_nueva()) {
+            $reprogramado_nuevo = $reprogramado_anterior;
+        } elseif ($fin_datetime->gt($now)) {
+            $reprogramado_nuevo = $fin_datetime->copy();
+        } elseif ((string) $lead->status === 'demo_en_curso') {
+            $reprogramado_nuevo = $now->copy();
+        } else {
+            $reprogramado_nuevo = null;
+        }
+
+        $lead->update([
+            'demo_end_time'                    => $fin_nuevo,
+            'demo_fin_check_reprogramado_para' => $reprogramado_nuevo,
+        ]);
+
+        /* El token acompaña al fin editado. Solo si hay uno emitido y no revocado: un lead sin
+         * token todavía no tiene nada que ajustar (cuando se emita, calcular_expiracion() ya lee
+         * demo_end_time), y uno revocado se revocó a propósito — extenderlo acá lo reviviría. */
+        $gracia         = \App\Services\LeadDemoSettings::get_gracia_minutos_post();
+        $expira_nueva   = $fin_datetime->copy()->addMinutes($gracia);
+        $token_ajustado = false;
+        if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
+            try {
+                if ($lead->demo_ingreso_token_expira_at === null
+                    || $lead->demo_ingreso_token_expira_at->lt($expira_nueva)) {
+                    $token_ajustado = $token_service->extender_vencimiento($lead, $expira_nueva);
+                } else {
+                    /* Piso del acorte: nunca un vencimiento en el pasado (ver docblock). */
+                    $piso            = $now->copy()->addMinutes($gracia);
+                    $expira_objetivo = $expira_nueva->lt($piso) ? $piso : $expira_nueva;
+                    $token_ajustado  = $token_service->acortar_vencimiento($lead, $expira_objetivo);
+                }
+            } catch (\Throwable $e) {
+                /* El servicio ya revirtió el vencimiento del token; acá se revierte el resto para
+                 * no dejar un fin editado cuyo acceso no acompaña. */
+                $lead->update([
+                    'demo_end_time'                    => $fin_anterior !== '' ? $fin_anterior : null,
+                    'demo_fin_check_reprogramado_para' => $reprogramado_anterior,
+                ]);
+
+                return response()->json([
+                    'message' => 'No se pudo ajustar el token de ingreso: ' . $e->getMessage(),
+                    'model'   => $this->fullModel('lead', $lead->id),
+                ], 422);
+            }
+        }
+
+        /* Trazabilidad (tarea 62, pieza 6): quién, de qué valor, a qué valor — el mismo patrón
+         * lado a lado del log de la 47 cuando el modelo mandaba demo_end_time. */
+        $admin = Auth::user();
+        Log::info('LeadController: demo_end_time editado a mano desde el panel del lead.', [
+            'lead_id'                      => $lead->id,
+            'admin_id'                     => $admin ? $admin->id : null,
+            'admin_name'                   => $admin ? $admin->name : null,
+            'demo_end_time_anterior'       => $fin_anterior !== '' ? $fin_anterior : null,
+            'demo_end_time_nuevo'          => $fin_nuevo,
+            'token_ajustado'               => $token_ajustado,
+            'check_fin_reprogramado_para'  => $reprogramado_nuevo !== null ? $reprogramado_nuevo->format('Y-m-d H:i:s') : null,
+        ]);
+
+        /* Y el evento visible en el hilo del lead, reusando el helper genérico del panel. */
+        $this->registrar_evento_token_demo(
+            $lead,
+            'Fin de la demo cambiado de ' . ($fin_anterior !== '' ? $fin_anterior : 'sin hora') . ' a ' . $fin_nuevo
+        );
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Registra en `admin_notifications` (columna JSON de un LeadMessage) el evento de
      * reemisión/revocación manual del token de ingreso a la demo, siguiendo el mismo patrón que
      * ya usa LeadAiService para "Demo agendada" y "Mail de demo enviado": un elemento

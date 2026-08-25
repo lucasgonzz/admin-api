@@ -332,6 +332,12 @@ Route::prefix('admin')->group(function () {
         // la experiencia nueva con leads elegidos a mano antes de abrirla a todos vía la setting global.
         Route::post('lead/{id}/demo-experiencia', [LeadController::class, 'set_demo_experiencia_json']);
 
+        // Edición manual de la hora de fin de la demo (tarea 62): valida server-side (fin >
+        // inicio, mismo día, demo vigente), corre el vencimiento del token y reprograma el check
+        // de fin. Es la palanca HUMANA sobre demo_end_time; el canal del agente sigue sin poder
+        // escribir ese campo (misión 47).
+        Route::post('lead/{id}/demo-end-time', [LeadController::class, 'update_demo_end_time_json']);
+
         // Panel del closer: leads filtrados por rol y sección operativa.
         Route::get('closer/panel', [LeadController::class, 'closer_panel_json']);
         Route::post('lead-partner/{id}/confirm', [LeadController::class, 'confirm_partner_json']);

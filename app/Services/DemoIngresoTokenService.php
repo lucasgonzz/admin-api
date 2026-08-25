@@ -207,6 +207,80 @@ class DemoIngresoTokenService
     }
 
     /**
+     * Acorta el vencimiento del token de ingreso SIN cambiarle el valor (tarea 62): espejo de
+     * extender_vencimiento(), para cuando el admin ACHICA la hora de fin de la demo desde el
+     * panel y el token tiene que acompañar — un fin que se adelanta con un token que sigue
+     * valiendo hasta la hora vieja dejaría el link entrando a una demo que ya no existe.
+     *
+     * Misma mecánica que extender: se manda a la instancia el MISMO valor de token con el
+     * `expira_at` nuevo (el endpoint `admin-sync/demo-token`, acción `guardar`, borra los tokens
+     * previos del usuario antes de crear el que recibe: queda un único token vigente, mismo hash,
+     * vencimiento corrido hacia atrás). Si el aviso falla, el Lead se revierte al vencimiento
+     * anterior: acortar solo en admin-api dejaría a la instancia aceptando una sesión que el
+     * panel cree muerta.
+     *
+     * 🔴 El llamador es responsable de no pasar un vencimiento en el pasado: la instancia valida
+     * la vigencia EN CADA REQUEST (middleware DemoSessionVigente de empresa-api), así que un
+     * `expira_at` vencido corta la sesión del lead que está adentro en su próximo click. El caso
+     * de uso del panel aplica un piso de `now + gracia` antes de llamar acá.
+     *
+     * No hace nada (y no falla) si el lead no tiene token o si el vencimiento actual ya es menor
+     * o igual al pedido: es seguro llamarlo de más.
+     *
+     * @param Lead   $lead
+     * @param Carbon $nuevo_expira Vencimiento máximo que tiene que quedar garantizado.
+     *
+     * @return bool true si el vencimiento se acortó de verdad.
+     *
+     * @throws \RuntimeException Si no se pudo avisar a la instancia (el Lead queda revertido).
+     */
+    public function acortar_vencimiento(Lead $lead, Carbon $nuevo_expira)
+    {
+        if (empty($lead->demo_ingreso_token)) {
+            return false;
+        }
+
+        /* Ya alcanza: el vencimiento vigente no supera lo pedido, no hay nada que acortar. Un
+         * vencimiento null no se "acorta" (no hay valor conocido que achicar): ese caso lo
+         * resuelve extender_vencimiento(), que sí lo setea. */
+        if ($lead->demo_ingreso_token_expira_at === null
+            || $lead->demo_ingreso_token_expira_at->lte($nuevo_expira)) {
+            return false;
+        }
+
+        $lead->loadMissing('demo');
+        $demo = $lead->demo;
+
+        if (is_null($demo)) {
+            throw new \RuntimeException('El lead no tiene demo asignada.');
+        }
+
+        $expira_anterior = $lead->demo_ingreso_token_expira_at;
+
+        $lead->update(['demo_ingreso_token_expira_at' => $nuevo_expira]);
+
+        try {
+            $this->avisar_instancia($demo, [
+                'accion'    => 'guardar',
+                /* El MISMO valor de token, a propósito: solo se corre la fecha. */
+                'token'     => $lead->demo_ingreso_token,
+                'expira_at' => $nuevo_expira->format('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable $e) {
+            $lead->update(['demo_ingreso_token_expira_at' => $expira_anterior]);
+
+            Log::error('DemoIngresoTokenService::acortar_vencimiento error: ' . $e->getMessage(), [
+                'lead_id' => $lead->id,
+                'demo_id' => $demo->id,
+            ]);
+
+            throw new \RuntimeException('No se pudo avisar a la instancia: ' . $e->getMessage());
+        }
+
+        return true;
+    }
+
+    /**
      * Revoca el token de ingreso a la demo del lead (por ejemplo, si se compartió donde no
      * debia): marca `demo_ingreso_token_revocado_at` en el Lead y avisa a la instancia para que
      * revoque todos los tokens vigentes del usuario demo (hay uno solo por instancia).
