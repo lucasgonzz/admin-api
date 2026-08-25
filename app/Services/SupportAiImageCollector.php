@@ -115,7 +115,11 @@ class SupportAiImageCollector
         foreach ($mensajes as $mensaje) {
             foreach ($mensaje->attachments as $adjunto) {
                 if (count($imagenes) >= self::MAX_IMAGES) {
-                    break 2;
+                    // Las que sobran tambien cuentan como descartadas: si no, el agente ve
+                    // cinco [IMAGE] en el historial, recibe tres, y nadie le dice que faltan dos.
+                    $this->descartadas++;
+
+                    continue;
                 }
 
                 $imagen = $this->read_attachment($adjunto);

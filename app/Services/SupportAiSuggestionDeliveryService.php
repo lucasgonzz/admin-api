@@ -13,6 +13,27 @@ use Illuminate\Support\Facades\Log;
 class SupportAiSuggestionDeliveryService
 {
     /**
+     * Resultado del ultimo envio, para que el llamador pueda contarle la verdad al operador.
+     *
+     * Sin esto, quien aprueba un borrador solo veia el `remote_delivery_status` de la primera
+     * parte: en un envio partido a medias esa parte SI salio, asi que la pantalla decia
+     * "entregado" mientras las otras dos nunca llegaron al cliente.
+     *
+     * @var array<string, mixed>|null
+     */
+    private $ultimo_resultado = null;
+
+    /**
+     * Resultado del ultimo envio, o null si todavia no hubo ninguno.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function ultimo_resultado()
+    {
+        return $this->ultimo_resultado;
+    }
+
+    /**
      * Crea SupportMessage admin, envía por WhatsApp y emite realtime si el envío fue exitoso.
      *
      * @param SupportTicket $ticket Ticket abierto con source whatsapp y número destino.
@@ -115,7 +136,19 @@ class SupportAiSuggestionDeliveryService
             $resultado = app(SupportWhatsappOpenerService::class)
                 ->deliver_follow_up($ticket, $message, $this->resolver_nombre_del_operador($ticket));
 
-            if ($resultado['delivery'] !== 'sent') {
+            $this->ultimo_resultado = $resultado;
+
+            if ($resultado['delivery'] === 'partial') {
+                // Ni "salio" ni "no salio": salio a medias. Decirle "no salio" seria repetir el
+                // error del incidente del lead #440 en el log en vez de en la base.
+                Log::channel('daily')->warning('SupportAiSuggestionDeliveryService: el mensaje del agente salio a medias.', [
+                    'ticket_id'   => $ticket->id,
+                    'message_id'  => $message->id,
+                    'sent_parts'  => $resultado['sent_parts'],
+                    'total_parts' => $resultado['total_parts'],
+                    'error'       => $resultado['error'],
+                ]);
+            } elseif ($resultado['delivery'] !== 'sent') {
                 Log::channel('daily')->warning('SupportAiSuggestionDeliveryService: el mensaje del agente no salió.', [
                     'ticket_id'     => $ticket->id,
                     'message_id'    => $message->id,

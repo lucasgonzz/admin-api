@@ -818,6 +818,135 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
     }
 
     /**
+     * Al aprobar un borrador que sale a medias, la API NO dice que se entrego.
+     *
+     * Es el pecado del incidente del lead #440 una capa mas arriba: el opener devolvia un
+     * 'partial' honesto y el endpoint lo tiraba, porque miraba el estado de la primera parte
+     * -que si salio- en vez del resultado del envio. El operador apretaba Enviar, veia el tilde,
+     * y las otras dos partes nunca habian llegado.
+     *
+     * @return void
+     */
+    public function test_aprobar_un_borrador_que_sale_a_medias_no_dice_que_se_entrego()
+    {
+        $admin = new Admin();
+        $admin->name     = 'Lucas';
+        $admin->email    = 'aprueba-parcial@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender(2);
+        $this->opener_sin_pausas();
+
+        $borrador = SupportMessage::create([
+            'support_ticket_id'      => $ticket->id,
+            'sender_type'            => 'admin',
+            'kind'                   => 'text',
+            'body'                   => "Uno\n---\nDos\n---\nTres",
+            'is_ai_suggestion_draft' => true,
+            'ai_generated_at'        => now(),
+        ]);
+
+        $response = $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-message/' . $borrador->id . '/approve-ai-draft');
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('delivered', false);
+        $response->assertJsonPath('partial', true);
+        $response->assertJsonPath('sent_parts', 1);
+        $response->assertJsonPath('total_parts', 3);
+    }
+
+    /**
+     * Las partes que no salieron tambien se avisan a la pantalla.
+     *
+     * Persistirlas sin emitir el evento dejaba el estado a medias en la base y no en los ojos
+     * del operador, que era justo la mitad que faltaba. En el autoenvio, ademas, es la unica
+     * forma de enterarse: ahi no hay ningun request de por medio.
+     *
+     * @return void
+     */
+    public function test_las_partes_que_no_salieron_se_avisan_a_la_pantalla()
+    {
+        \Illuminate\Support\Facades\Event::fake([\App\Events\SupportMessageReceived::class]);
+
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender(2);
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Uno\n---\nDos\n---\nTres");
+
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        // Una por la que salio, y una por cada una de las dos que quedaron pendientes.
+        \Illuminate\Support\Facades\Event::assertDispatchedTimes(\App\Events\SupportMessageReceived::class, 3);
+    }
+
+    /**
+     * El aviso de fallo que reciben los admins dice de que ticket y de que parte se trata.
+     *
+     * Sin contexto decia solamente "Envio de texto a +549...", indistinguible de cualquier otro
+     * fallo de envio del sistema.
+     *
+     * @return void
+     */
+    public function test_el_aviso_de_fallo_dice_ticket_y_parte()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+
+        $espia = new class extends WhatsappSendService {
+            /** @var array<int, string|null> Contextos con los que se llamo. */
+            public $contextos = [];
+
+            public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
+            {
+                $this->contextos[] = $context;
+
+                return 'wamid.' . count($this->contextos);
+            }
+
+            public function last_send_was_transient(): bool
+            {
+                return false;
+            }
+        };
+        $this->app->instance(WhatsappSendService::class, $espia);
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Uno\n---\nDos");
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        $this->assertStringContainsString('ticket #' . $ticket->id, (string) $espia->contextos[0]);
+        $this->assertStringContainsString('mensaje 1 de 2', (string) $espia->contextos[0]);
+        $this->assertStringContainsString('mensaje 2 de 2', (string) $espia->contextos[1]);
+    }
+
+    /**
+     * Las imagenes que se caen por el tope tambien se le avisan al agente.
+     *
+     * Si no, el historial le muestra cinco [IMAGE], recibe tres, y nadie le dice que faltan dos:
+     * es la receta para que invente que decian.
+     *
+     * @return void
+     */
+    public function test_las_imagenes_que_no_entran_se_cuentan_como_descartadas()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+
+        for ($i = 1; $i <= 5; $i++) {
+            $this->agregar_imagen($ticket, 'captura_' . $i . '.png');
+        }
+
+        $collector = app(SupportAiImageCollector::class);
+        $collector->collect((int) $ticket->id);
+
+        $this->assertSame(2, $collector->descartadas(), 'Las imagenes que no entraron por el tope no se contaron.');
+    }
+
+    /**
      * El agente habla con la identidad compartida con el de leads.
      *
      * @return void

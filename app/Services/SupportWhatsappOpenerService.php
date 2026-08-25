@@ -221,7 +221,13 @@ class SupportWhatsappOpenerService
      * @param SupportMessage $message Mensaje del operador ya persistido.
      * @param string         $admin_name Nombre del operador que responde.
      *
-     * @return array{delivery: string, message_id: string|null, error: string|null, used_template: bool, window_open: bool, template_name: string|null}
+     * `delivery` vale `sent`, `failed` o `partial`. `partial` solo aparece en el envio partido:
+     * significa que al cliente le llegaron las primeras partes y las demas quedaron en el hilo,
+     * marcadas como no entregadas, para reintentarlas. En ese caso vienen ademas `sent_parts` y
+     * `total_parts`. Quien consuma esto TIENE que distinguir `partial` de `failed`: tratarlos
+     * igual es volver a decir "no se envio" sobre algo que el cliente ya recibio.
+     *
+     * @return array{delivery: string, message_id: string|null, error: string|null, used_template: bool, window_open: bool, template_name: string|null, sent_parts?: int, total_parts?: int}
      */
     public function deliver_follow_up(SupportTicket $ticket, SupportMessage $message, string $admin_name): array
     {
@@ -408,7 +414,7 @@ class SupportWhatsappOpenerService
         $primer_id = null;
 
         foreach ($filas as $indice => $fila) {
-            $whatsapp_message_id = $this->send_con_reintentos($to, (string) $fila->body);
+            $whatsapp_message_id = $this->send_con_reintentos($to, (string) $fila->body, $ticket, $indice + 1, $total);
 
             if ($whatsapp_message_id === null) {
                 // Se corta aca: mandar la parte 4 cuando la 3 nunca llego deja la conversacion
@@ -432,6 +438,15 @@ class SupportWhatsappOpenerService
             // conversacion, que es la causa de raiz del 409 "otro mensaje en vuelo".
             if ($indice < $total - 1) {
                 $this->pausar(1200000);
+            }
+        }
+
+        // Las partes que no salieron tambien se emiten: persistirlas sin avisarle a la pantalla
+        // deja el estado a medias en la base y no en los ojos del operador, que era justo la
+        // mitad que faltaba. En el camino de autoenvio, ademas, es la unica forma de enterarse.
+        foreach ($filas as $indice => $fila) {
+            if ($indice >= $enviadas) {
+                $this->emitir_mensaje($fila);
             }
         }
 
@@ -510,18 +525,26 @@ class SupportWhatsappOpenerService
      *
      * @return string|null Id de Meta, o null si no salió tras los tres intentos.
      */
-    private function send_con_reintentos(string $to, string $parte)
+    private function send_con_reintentos(string $to, string $parte, SupportTicket $ticket = null, int $numero = 0, int $total = 0)
     {
+        // El contexto viaja hasta la notificacion de fallo que reciben los admins. Sin esto el
+        // aviso decia solamente "Envio de texto a +549...", indistinguible de cualquier otro
+        // fallo: no se sabia que era un mensaje partido, ni de que ticket, ni que quedo a medias.
+        $contexto = null;
+        if ($ticket !== null && $total > 0) {
+            $contexto = 'Soporte, ticket #' . $ticket->id . ', mensaje ' . $numero . ' de ' . $total;
+        }
+
         for ($intento = 1; $intento <= 3; $intento++) {
             $es_el_ultimo = $intento === 3;
 
-            $whatsapp_message_id = $this->sender->send_text($to, $parte, null, ! $es_el_ultimo);
+            $whatsapp_message_id = $this->sender->send_text($to, $parte, $contexto, ! $es_el_ultimo);
             if ($whatsapp_message_id !== null) {
                 return $whatsapp_message_id;
             }
 
             if (! $es_el_ultimo && $this->sender->last_send_was_transient()) {
-                usleep($intento === 1 ? 1500000 : 3500000);
+                $this->pausar($intento === 1 ? 1500000 : 3500000);
 
                 continue;
             }

@@ -361,9 +361,10 @@ SYSTEM;
         // le dice que no la recibió, lo más probable es que invente qué decía.
         $aviso = '';
         if ($descartadas > 0) {
-            $aviso = "\n\nAVISO: el cliente mandó " . $descartadas . " imagen(es) más que no se pudieron adjuntar "
-                . "a esta consulta (formato o tamaño que no se puede procesar). NO supongas qué decían. Si tu "
-                . "respuesta depende de verlas, pedile que las mande de nuevo como foto normal, no como archivo.";
+            $aviso = "\n\nAVISO: el cliente mandó " . $descartadas . " imagen(es) más que NO estás viendo en "
+                . "esta consulta. Puede ser por el formato, por el tamaño, o simplemente porque solo se adjuntan "
+                . "las últimas. NO supongas qué decían ni las des por vistas. Si tu respuesta depende de ellas, "
+                . "pedile al cliente que te mande de nuevo la que importa, sacada como foto y no como archivo.";
         }
 
         if (empty($imagenes)) {
