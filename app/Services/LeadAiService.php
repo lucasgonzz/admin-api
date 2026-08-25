@@ -491,7 +491,7 @@ TXT;
             }
 
             if (! empty($lineas_ventana)) {
-                $availability_context .= "\n\nVENTANA EXTENDIDA (resuelta por el sistema — el \"hasta\" se COPIA de acá, nunca se calcula):";
+                $availability_context .= "\n\nVENTANA EXTENDIDA (resuelta por el sistema — el \"hasta\" de esta lista es el TOPE de cada horario: nunca lo calculás ni lo estirás):";
                 $availability_context .= implode('', $lineas_ventana);
                 $availability_context .= "\n- Un horario de inicio que no figure en esta lista NO admite ventana extendida: para ese horario solo se puede agendar la demo normal.";
             }
@@ -555,13 +555,16 @@ TXT;
             }
             $availability_context .= "\n- Si el slot está disponible: confirmalo al lead y devolvé agendar_demo con demo_id, demo_date (formato Y-m-d), demo_start_time (formato HH:MM). NO incluyas demo_end_time; el servidor lo calcula.";
             $availability_context .= "\n- El demo_id debe corresponder a una demo que tenga ese slot disponible en el JSON.";
-            /* Ventana extendida (misión 47): NO es la oferta por defecto. Aparece solo cuando el
-             * lead dice que no se puede comprometer a un horario, y el "hasta" se copia del bloque
-             * VENTANA EXTENDIDA. */
+            /* Ventana extendida (misión 47, franja negociable desde la tarea 62): NO es la oferta
+             * por defecto. Aparece solo cuando el lead dice que no se puede comprometer a un
+             * horario. El "hasta" del bloque VENTANA EXTENDIDA es el TOPE; si el lead nombra un
+             * "hasta" propio más corto ("de 12 a 18"), esa franja se pide con `ventana_hasta` y
+             * el SERVIDOR la valida y la escribe — el modelo sigue sin escribir demo_end_time. */
             $availability_context .= "\n- VENTANA EXTENDIDA: no la ofrezcas de entrada. El comportamiento normal sigue siendo un horario de inicio con una hora de duración.";
-            $availability_context .= "\n- Solo si el lead te dice que no puede comprometerse a un horario puntual: preguntale A PARTIR DE QUÉ HORA ya estaría disponible, y ofrecele la ventana desde esa hora hasta el \"hasta\" que figure para ese horario en el bloque VENTANA EXTENDIDA. Copiás ese valor; no lo calculás, no lo redondeás y no lo estirás.";
+            $availability_context .= "\n- Solo si el lead te dice que no puede comprometerse a un horario puntual: preguntale A PARTIR DE QUÉ HORA ya estaría disponible y HASTA QUÉ HORA quiere poder probarla. El tope para ese horario es el \"hasta\" que figure en el bloque VENTANA EXTENDIDA: no lo calculás, no lo redondeás y no lo estirás.";
+            $availability_context .= "\n- Si el lead nombra su propio \"hasta\" (\"la voy a probar hasta más o menos las seis\"), usá ESA hora como fin de la ventana, siempre que no pase el tope del bloque. Si pide más que el tope, ofrecele hasta el tope y decíselo con naturalidad.";
             $availability_context .= "\n- Cuando ofrezcas la ventana extendida, dejá claro el compromiso sin sonar a reproche: le reservamos la instancia todo ese tiempo para él, y a cambio necesitamos que se tome alrededor de una hora de verdad para recorrerla. La ventana es HASTA CUÁNDO PUEDE ENTRAR, no cuánto dura la demo.";
-            $availability_context .= "\n- Para confirmar una ventana extendida devolvé agendar_demo con ventana_extendida: true, además de demo_id, demo_date y demo_start_time. El servidor calcula la hora de fin: vos NUNCA mandás demo_end_time, ni en la ventana extendida ni en una demo normal.";
+            $availability_context .= "\n- Para confirmar una ventana extendida devolvé agendar_demo con ventana_extendida: true, además de demo_id, demo_date y demo_start_time. Si el lead nombró su propio \"hasta\", agregá ventana_hasta: \"HH:MM\" con esa hora (copiada de lo que dijo el lead, nunca mayor que el tope del bloque); si no lo nombró, NO mandes ventana_hasta y el servidor reserva hasta el tope. La hora de fin la valida y la escribe siempre el servidor: vos NUNCA mandás demo_end_time, ni en la ventana extendida ni en una demo normal.";
             $availability_context .= "\n- PROHIBIDO calcular una fecha por tu cuenta. No hagas aritmética de calendario nunca. Para saber qué fecha es 'el jueves', 'mañana' o 'el viernes que viene', leé la tabla CALENDARIO de arriba o la clave del JSON de disponibilidad (las claves ya vienen con el nombre del día: \"jueves 2026-07-16\").";
             $availability_context .= "\n- demo_date se COPIA LITERALMENTE de la parte Y-m-d de una clave del JSON de disponibilidad. No se escribe de memoria, no se deduce, no se calcula.";
             $availability_context .= "\n- demo_start_time se COPIA LITERALMENTE de un horario que figure en la lista de slots de ESA demo en ESA fecha. Si el horario que pidió el lead no está en esa lista, NO está disponible — punto. No importa cuán claro haya sido el lead ni cuánto lo haya pedido: no se confirma.";
@@ -952,11 +955,23 @@ TXT;
          * otro bloque lo agendaba como demo normal. Uno rechazaba y el otro aceptaba lo mismo. */
         $pidio_ventana     = ! empty($agendar['ventana_extendida']) && $lead->usa_experiencia_demo_nueva();
         $ventana_ofrecida  = true;
+        /* `ventana_hasta` (tarea 62): la franja que el agente negoció con el lead ("de 12 a 18").
+         * Solo se evalúa junto con `ventana_extendida: true`, y con el MISMO criterio que el
+         * horario: si el "hasta" pedido no es una hora legible, no es posterior al inicio o se
+         * pasa del tope que el sistema ofreció para ese slot, es una franja que nunca se mostró
+         * — y el mensaje ya se la prometió al lead. Se descarta el paquete entero, igual que un
+         * horario inventado, y la llamada correctiva reofrece. */
+        $ventana_hasta_valida = true;
         if ($pidio_ventana) {
-            $ventana_ofrecida = $this->buscar_ventana_ofrecida($ventanas_extendidas, $demo_id, $demo_date, $demo_start) !== null;
+            $hasta_maximo     = $this->buscar_ventana_ofrecida($ventanas_extendidas, $demo_id, $demo_date, $demo_start);
+            $ventana_ofrecida = $hasta_maximo !== null;
+
+            if ($ventana_ofrecida && array_key_exists('ventana_hasta', $agendar)) {
+                $ventana_hasta_valida = $this->normalizar_ventana_hasta($agendar['ventana_hasta'], $demo_start, $hasta_maximo) !== null;
+            }
         }
 
-        if ($demo_id > 0 && $fecha_en_ventana && $hora_disponible && $ventana_ofrecida) {
+        if ($demo_id > 0 && $fecha_en_ventana && $hora_disponible && $ventana_ofrecida && $ventana_hasta_valida) {
             /* Todo en orden: la fecha y la hora salen de los slots que le mandamos nosotros. */
             return $parsed;
         }
@@ -965,7 +980,9 @@ TXT;
             ? 'fecha fuera de la ventana enviada a Claude'
             : (! $hora_disponible
                 ? 'horario no disponible en esa fecha'
-                : (! $ventana_ofrecida ? 'ventana extendida sobre un horario que no la admite' : 'demo_id inválido'));
+                : (! $ventana_ofrecida
+                    ? 'ventana extendida sobre un horario que no la admite'
+                    : (! $ventana_hasta_valida ? 'ventana_hasta fuera de la franja ofrecida (otro día o pasado el tope)' : 'demo_id inválido')));
 
         Log::channel('disponibilidad')->error(
             '[DISPONIBILIDAD] agendar_demo DESCARTADO: ' . $motivo . '. Claude confirmó un slot que el sistema nunca le ofreció.',
@@ -1052,6 +1069,56 @@ TXT;
         }
 
         return null;
+    }
+
+    /**
+     * Normaliza y valida el `ventana_hasta` que negoció el agente (tarea 62): la hora hasta la
+     * que el lead pidió tener reservada la ventana extendida ("de 12 a 18" → "18:00").
+     *
+     * 🔴 El modelo sigue sin escribir `demo_end_time`: este valor es un PEDIDO que el servidor
+     * valida contra el tope que él mismo resolvió con calcular_fin_ventana_extendida() — que ya
+     * trae los clamps de la misión 47 (máximo de horas de la setting, corte a las 23:59 y franja
+     * libre en la grilla). Un "hasta" menor que ese tope siempre deja franja libre por inclusión,
+     * así que validar `inicio < hasta <= tope` es validar los tres clamps a la vez.
+     *
+     * Devuelve null (inválido) cuando:
+     * - no parsea como hora del día (un valor con fecha o "02:00 del día siguiente" no existe acá:
+     *   la demo nunca cruza de día, decisión de Lucas 13/8/2026),
+     * - no es estrictamente posterior al inicio (cruzar la medianoche cae en este caso), o
+     * - se pasa del tope ofrecido para ese slot.
+     *
+     * @param mixed  $crudo       Lo que mandó el modelo en `ventana_hasta`.
+     * @param string $slot_inicio Inicio del slot en HH:MM.
+     * @param string $tope        Tope resuelto por el servidor para ese slot (HH:MM).
+     *
+     * @return string|null "HH:MM" normalizado, o null si el pedido no entra en lo ofrecido.
+     */
+    protected function normalizar_ventana_hasta($crudo, string $slot_inicio, string $tope)
+    {
+        /* Estricto a propósito, sin la regex tolerante del resto del archivo: acá un "resto" que
+         * acompañe a la hora (una fecha adelante, un "del día siguiente" atrás) cambia el
+         * significado, no es ruido de formato. */
+        if (! is_string($crudo) && ! is_numeric($crudo)) {
+            return null;
+        }
+        if (! preg_match('/^\s*([01]?\d|2[0-3]):([0-5]\d)\s*$/', (string) $crudo, $m)) {
+            return null;
+        }
+
+        $hasta_min = (int) $m[1] * 60 + (int) $m[2];
+
+        if (! preg_match('/^(\d{1,2}):(\d{2})$/', $slot_inicio, $mi)
+            || ! preg_match('/^(\d{1,2}):(\d{2})$/', $tope, $mt)) {
+            return null;
+        }
+        $inicio_min = (int) $mi[1] * 60 + (int) $mi[2];
+        $tope_min   = (int) $mt[1] * 60 + (int) $mt[2];
+
+        if ($hasta_min <= $inicio_min || $hasta_min > $tope_min) {
+            return null;
+        }
+
+        return sprintf('%02d:%02d', intdiv($hasta_min, 60), $hasta_min % 60);
     }
 
     /**
@@ -3295,10 +3362,14 @@ TXT;
      * ```
      * final_actions: {
      *   estado_sugerido: string|null,               // null = no tocó el estado, se conserva el de Claude
-     *   agendar_demo: {demo_id, demo_date, demo_start_time, ventana_extendida?} | null, // null = admin desactivó la demo
+     *   agendar_demo: {demo_id, demo_date, demo_start_time, ventana_extendida?, ventana_hasta?} | null, // null = admin desactivó la demo
      *                                                // ventana_extendida (bool, misión 47): el modelo
      *                                                // pide la MODALIDAD; la hora de fin la calcula
      *                                                // el servidor. demo_end_time nunca se lee de acá.
+     *                                                // ventana_hasta (HH:MM, tarea 62): la franja que
+     *                                                // negoció el agente; solo válida junto con
+     *                                                // ventana_extendida y validada por el servidor
+     *                                                // contra el tope de la 47.
      *   forzar_slot: bool,                           // true = agendar aunque el slot figure ocupado
      *   enviar_mail_demo: bool,                       // Mail 1 on/off (solo aplica si hay demo)
      *   guardar_nombre: string|null,
@@ -3383,6 +3454,16 @@ TXT;
                     && ! array_key_exists('ventana_extendida', $agendar_admin)
                     && isset($parsed['agendar_demo']['ventana_extendida'])) {
                     $agendar_admin['ventana_extendida'] = $parsed['agendar_demo']['ventana_extendida'];
+                }
+
+                /* `ventana_hasta` (tarea 62): misma lección que `ventana_extendida` — el panel
+                 * reconstruye el objeto clave por clave, así que un SPA que no conozca la clave la
+                 * dejaría caer y la franja negociada ("de 12 a 18") degradaría en silencio al tope
+                 * automático. Si el panel no la manda, se conserva la del paquete original. */
+                if (is_array($agendar_admin)
+                    && ! array_key_exists('ventana_hasta', $agendar_admin)
+                    && isset($parsed['agendar_demo']['ventana_hasta'])) {
+                    $agendar_admin['ventana_hasta'] = $parsed['agendar_demo']['ventana_hasta'];
                 }
 
                 $parsed_efectivo['agendar_demo'] = $agendar_admin;
@@ -3826,6 +3907,11 @@ TXT;
                 $quiere_ventana_extendida = ! empty($agendar_demo['ventana_extendida'])
                     && $lead->usa_experiencia_demo_nueva();
                 $fin_ventana_extendida    = null;
+                /* Bandera propia del `ventana_hasta` inválido (tarea 62): fuerza el camino de
+                 * slot inválido INCLUSO con forzar_slot. El panel no edita esta clave (solo la
+                 * conserva), así que un valor fuera del tope nunca es una decisión del admin:
+                 * escribir otro fin en silencio es justo lo que la 47 prohíbe. */
+                $ventana_hasta_invalida = false;
 
                 if ($quiere_ventana_extendida) {
                     $fin_ventana_extendida = $this->buscar_ventana_ofrecida(
@@ -3872,9 +3958,42 @@ TXT;
                             'fin_forzado' => $fin_ventana_extendida,
                         ]);
                     }
+
+                    /* `ventana_hasta` (tarea 62): la franja que el agente negoció con el lead
+                     * ("de 12 a 18"). El modelo SIGUE sin escribir demo_end_time: esto es un
+                     * pedido que se valida acá, bajo el mismo lock y contra el tope que el
+                     * servidor acaba de revalidar (o de forzar) — que ya trae los clamps de la 47
+                     * (máximo de horas, 23:59, franja libre). Un "hasta" menor que el tope deja
+                     * franja libre por inclusión; uno que no entra (otro día, cruza medianoche,
+                     * pasado el tope) tira el agendamiento por el camino de slot inválido, que
+                     * reofrece. Si la clave no viene, el fin es el tope calculado — el
+                     * comportamiento de la 47, intacto y compatible hacia atrás. */
+                    if ($fin_ventana_extendida !== null && array_key_exists('ventana_hasta', $agendar_demo)) {
+                        $hasta_pedido = $this->normalizar_ventana_hasta(
+                            $agendar_demo['ventana_hasta'],
+                            $demo_start,
+                            $fin_ventana_extendida
+                        );
+
+                        if ($hasta_pedido === null) {
+                            Log::error('LeadAiService: ventana_hasta fuera de la franja ofrecida. Se descarta el agendamiento.', [
+                                'lead_id'       => $lead->id,
+                                'demo_id'       => $demo_id,
+                                'demo_date'     => $demo_date,
+                                'demo_start'    => $demo_start,
+                                'ventana_hasta' => (string) $agendar_demo['ventana_hasta'],
+                                'tope_ofrecido' => $fin_ventana_extendida,
+                            ]);
+
+                            $ventana_hasta_invalida = true;
+                            $fin_ventana_extendida  = null;
+                        } else {
+                            $fin_ventana_extendida = $hasta_pedido;
+                        }
+                    }
                 }
 
-                if (! $slot_disponible && ! $forzar_slot) {
+                if (($slot_disponible === false && ! $forzar_slot) || $ventana_hasta_invalida) {
                     Log::error('LeadAiService: Claude devolvió un agendar_demo con slot no disponible. Se ignora.', [
                         'lead_id'            => $lead->id,
                         'demo_id'            => $demo_id,
