@@ -966,7 +966,9 @@ TXT;
             $hasta_maximo     = $this->buscar_ventana_ofrecida($ventanas_extendidas, $demo_id, $demo_date, $demo_start);
             $ventana_ofrecida = $hasta_maximo !== null;
 
-            if ($ventana_ofrecida && array_key_exists('ventana_hasta', $agendar)) {
+            /* isset y no array_key_exists: un `ventana_hasta: null` explícito se trata como
+             * ausente (cae al tope automático), no como franja inválida. */
+            if ($ventana_ofrecida && isset($agendar['ventana_hasta'])) {
                 $ventana_hasta_valida = $this->normalizar_ventana_hasta($agendar['ventana_hasta'], $demo_start, $hasta_maximo) !== null;
             }
         }
@@ -3968,7 +3970,9 @@ TXT;
                      * pasado el tope) tira el agendamiento por el camino de slot inválido, que
                      * reofrece. Si la clave no viene, el fin es el tope calculado — el
                      * comportamiento de la 47, intacto y compatible hacia atrás. */
-                    if ($fin_ventana_extendida !== null && array_key_exists('ventana_hasta', $agendar_demo)) {
+                    /* isset y no array_key_exists: un `ventana_hasta: null` explícito se trata
+                     * como ausente (cae al tope automático), no como franja inválida. */
+                    if ($fin_ventana_extendida !== null && isset($agendar_demo['ventana_hasta'])) {
                         $hasta_pedido = $this->normalizar_ventana_hasta(
                             $agendar_demo['ventana_hasta'],
                             $demo_start,
