@@ -208,7 +208,6 @@ class CheckClientsWithoutPhone extends Command
         return $first !== null ? (int) $first->id : null;
     }
 
-
     /**
      * Título de la tarea de alerta de un cliente.
      *
@@ -223,9 +222,6 @@ class CheckClientsWithoutPhone extends Command
     {
         return 'Cargar el teléfono de ' . $client_name;
     }
-
-
-
 
     /**
      * Días antes de volver a alertar el mismo cliente.

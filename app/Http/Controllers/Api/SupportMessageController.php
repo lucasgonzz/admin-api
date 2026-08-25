@@ -12,7 +12,6 @@ use App\Models\SupportTypingState;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
 use App\Services\SupportWhatsappOpenerService;
-use App\Services\WhatsappSendService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
