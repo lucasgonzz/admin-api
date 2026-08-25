@@ -523,8 +523,15 @@ class LeadController extends Controller
          * `broadcastWith()` de LeadSuggestionCreated y los endpoints públicos de
          * DemoExperienciaController —, sumando una query por lead donde la relación no esté
          * cargada y, peor, mandando el link CON el token en claro a payloads que hoy no lo llevan.
+         *
+         * 🔴 Y es `append()` de instancia, no una asignación (`$lead->demo_ingreso_url = ...`). La
+         * asignación mete una clave que no es columna adentro de `$attributes` y deja el modelo
+         * *dirty*: hoy no rompe porque el único que llama acá es `show_json()` y devuelve sin
+         * guardar, pero el día que alguien agregue un `save()` después de esta línea el UPDATE
+         * incluiría `demo_ingreso_url` y saldría `Unknown column`. `append()` produce el mismo
+         * JSON sin ensuciar los atributos.
          */
-        $lead->demo_ingreso_url = $lead->getDemoIngresoUrlAttribute();
+        $lead->append('demo_ingreso_url');
 
         return $lead;
     }
