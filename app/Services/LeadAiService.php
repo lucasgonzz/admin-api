@@ -4260,6 +4260,27 @@ TXT;
                     $agendar_admin['ventana_hasta'] = $parsed['agendar_demo']['ventana_hasta'];
                 }
 
+                /* `reagendado_desde` (misión reagendado-al-proximo-slot): TERCERA clave de la serie
+                 * de `ventana_extendida` y `ventana_hasta`, por el mismo motivo — el panel
+                 * reconstruye agendar_demo clave por clave y lo que no conoce se pierde. Sin esto,
+                 * la marca se cae al aprobar y el turno que el sistema corrió se frena solo en los
+                 * 5 minutos previos al slot nuevo.
+                 *
+                 * 🔴 Con una salvaguarda propia: se preserva SÓLO si el horario efectivo es el
+                 * mismo que el que el sistema eligió. Si el admin movió la hora (o la fecha) a
+                 * mano, el reagendado del sistema ya no aplica y el permiso no puede viajar con una
+                 * hora que nadie eligió: ahí manda su `forzar_slot`, como con cualquier otra
+                 * edición manual. */
+                if (is_array($agendar_admin)
+                    && ! array_key_exists('reagendado_desde', $agendar_admin)
+                    && ! empty($parsed['agendar_demo']['reagendado_desde'])
+                    && isset($agendar_admin['demo_start_time'], $parsed['agendar_demo']['demo_start_time'])
+                    && trim((string) $agendar_admin['demo_start_time']) === trim((string) $parsed['agendar_demo']['demo_start_time'])
+                    && isset($agendar_admin['demo_date'], $parsed['agendar_demo']['demo_date'])
+                    && trim((string) $agendar_admin['demo_date']) === trim((string) $parsed['agendar_demo']['demo_date'])) {
+                    $agendar_admin['reagendado_desde'] = $parsed['agendar_demo']['reagendado_desde'];
+                }
+
                 $parsed_efectivo['agendar_demo'] = $agendar_admin;
             }
 
@@ -4757,9 +4778,24 @@ TXT;
                  * grilla con margen ese slot no existe, y su ventana tampoco). Y no se toca la
                  * grilla de arriba: $slots_demo sigue alimentando las alternativas del mensaje
                  * correctivo, que con margen 0 le ofrecerían al lead horarios imposibles. */
+                /* 🔴 `reagendado_desde` (misión reagendado-al-proximo-slot): cuando el turno lo
+                 * corrió el SISTEMA en generación, el permiso se consulta con el horario VIEJO.
+                 * El permiso para saltar el margen es "este horario se lo ofrecimos nosotros" y
+                 * vive en `lead_messages.horarios_ofrecidos` de un mensaje ENVIADO; el slot nuevo
+                 * no está en ninguno (lo eligió PHP y el mensaje todavía era `sugerido`). Por eso
+                 * lo que viaja en el paquete no es un permiso, es el horario viejo: acá se llama a
+                 * `horario_figura_como_ofrecido()` con ÉL, o sea el mismo criterio de siempre y
+                 * contra la misma base — un modelo que invente esta clave no se auto-otorga nada, y
+                 * la grilla margen-0 sigue exigiendo que el slot nuevo no haya arrancado y esté
+                 * libre. Sin esto, el reagendado se frena solo en los 5 minutos previos al slot
+                 * nuevo, que es justo la ventana en que el admin aprueba. */
+                $permiso_reagendado = isset($agendar_demo['reagendado_desde']) && trim((string) $agendar_demo['reagendado_desde']) !== ''
+                    ? trim((string) $agendar_demo['reagendado_desde'])
+                    : null;
+
                 if (! $slot_disponible) {
                     $ventanas_sin_margen = null;
-                    if ($this->rescate_del_margen_seguro($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
+                    if ($this->rescate_del_margen_seguro($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen, $permiso_reagendado)) {
                         $slot_disponible      = true;
                         $ventanas_revalidadas = is_array($ventanas_sin_margen) ? $ventanas_sin_margen : [];
 
