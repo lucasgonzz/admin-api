@@ -244,9 +244,13 @@ class SupportMessageController extends BaseController
             ], 422);
         }
 
+        // El servicio se traga los fallos de Meta, así que devolver true por haber recibido un
+        // modelo mentiría: lo que dice si salió es el estado que quedó estampado en el mensaje.
+        $entregado = $message !== null && $message->remote_delivery_status !== 'not_received';
+
         return response()->json([
             'model'     => $message,
-            'delivered' => true,
+            'delivered' => $entregado,
         ], 200);
     }
 

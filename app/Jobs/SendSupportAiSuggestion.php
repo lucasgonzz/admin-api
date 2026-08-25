@@ -245,10 +245,12 @@ class SendSupportAiSuggestion implements ShouldQueue
          * como freno: `escalated_at` solo se limpia al CERRAR el ticket, así que un escalado
          * nuevo por un motivo distinto, semanas después, no avisaría a nadie. Se compara el
          * motivo: mismo motivo, no se repite; motivo nuevo, se avisa. */
+        // Se comparan los motivos tal cual, incluso vacíos: exigir que el anterior no fuera
+        // vacío dejaba el freno sin efecto cuando Claude escala sin llenar el motivo —el
+        // prompt lo pide, no lo garantiza—, y volvía a un WhatsApp por cada mensaje del cliente.
         $motivo_anterior = trim((string) ($ticket->escalation_reason ?? ''));
-        $es_el_mismo_escalado = $ticket->escalated_at !== null
-            && $motivo_anterior !== ''
-            && $motivo_anterior === trim((string) ($result['escalation_reason'] ?? ''));
+        $motivo_nuevo = trim((string) ($result['escalation_reason'] ?? ''));
+        $es_el_mismo_escalado = $ticket->escalated_at !== null && $motivo_anterior === $motivo_nuevo;
 
         /* Persistir el escalado en el ticket. */
         $ticket->escalated_at      = now();

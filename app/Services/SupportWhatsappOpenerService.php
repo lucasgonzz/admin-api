@@ -276,11 +276,12 @@ class SupportWhatsappOpenerService
         );
 
         if ($whatsapp_message_id !== null) {
-            // Si el texto lo escribió el agente y nadie lo corrigió, se guarda antes de pisarlo.
-            // Si no, envolverlo en la plantilla borraría para siempre lo que el agente había
-            // propuesto, que es justo el dato que se guarda para medir cómo viene.
-            if ($message->ai_generated_at !== null && trim((string) ($message->ai_original_body ?? '')) === '') {
-                $message->ai_original_body = $operator_text;
+            // El texto previo al envoltorio va a su propia columna, NO a ai_original_body:
+            // esa significa "el operador corrigió al agente" y el historial que se le manda a
+            // Claude la lee así. Escribir ahí le diría que lo corrigieron cada vez que su
+            // respuesta salió tal cual pero envuelta en la plantilla.
+            if ($message->ai_generated_at !== null && trim((string) ($message->ai_body_before_template ?? '')) === '') {
+                $message->ai_body_before_template = $operator_text;
             }
 
             // Recién ahora el body pasa a ser lo que el cliente de verdad recibió. Pisarlo

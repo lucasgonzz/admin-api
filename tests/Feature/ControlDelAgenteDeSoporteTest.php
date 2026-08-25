@@ -685,6 +685,52 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     }
 
     /**
+     * Dos escalados seguidos sin motivo tampoco duplican el aviso.
+     *
+     * El prompt le pide a Claude que llene el motivo, pero no lo garantiza. El freno comparaba
+     * motivos exigiendo que el anterior no fuera vacío, así que con motivo vacío no frenaba
+     * nunca y volvía el WhatsApp por cada mensaje del cliente.
+     *
+     * @return void
+     */
+    public function test_dos_escalados_sin_motivo_no_duplican_el_aviso()
+    {
+        $suscrito                                     = $this->crear_admin('escalado-sin-motivo@test.local');
+        $suscrito->phone_number                       = '+5493410000005';
+        $suscrito->notify_support_escalation_whatsapp = true;
+        $suscrito->save();
+
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+
+        $sin_motivo = [
+            'suggested_message' => '',
+            'reasoning'         => 'No sé.',
+            'should_close'      => false,
+            'should_escalate'   => true,
+            'escalation_reason' => null,
+        ];
+
+        $this->espiar_claude($sin_motivo);
+        $this->correr_agente($ticket);
+        $this->assertCount(1, $espia->plantillas);
+
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => '¿Hola?',
+            'delivered_at'      => now(),
+        ]);
+
+        $this->espiar_claude($sin_motivo);
+        $this->correr_agente($ticket->fresh());
+
+        $this->assertCount(1, $espia->plantillas, 'Con el motivo vacío volvió a avisar por el mismo escalado.');
+    }
+
+    /**
      * Un escalado nuevo, por un motivo distinto, sí vuelve a avisar.
      *
      * `escalated_at` solo se limpia al cerrar el ticket, y en soporte por WhatsApp los tickets
@@ -893,8 +939,12 @@ class ControlDelAgenteDeSoporteTest extends TestCase
         $enviado = SupportMessage::find($borrador->id);
         $this->assertSame(
             'Te respondo tarde, disculpá.',
-            $enviado->ai_original_body,
+            $enviado->ai_body_before_template,
             'Se perdió el texto que había propuesto el agente al envolverlo en la plantilla.'
+        );
+        $this->assertNull(
+            $enviado->ai_original_body,
+            'Salió tal cual y quedó marcado como corregido: eso le miente al agente en su propio historial.'
         );
     }
 }
