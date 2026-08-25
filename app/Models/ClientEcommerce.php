@@ -79,6 +79,35 @@ class ClientEcommerce extends Model
     }
 
     /**
+     * Recorta los espacios "invisibles" de las dos puntas usando EL MISMO conjunto de caracteres
+     * que `String.prototype.trim()` de JavaScript.
+     *
+     * POR QUÉ NO ALCANZA `trim()` de PHP (defecto encontrado en el chequeo de la misión
+     * ecommerce-paths-subcarpeta): `trim()` recorta solo " \t\n\r\0\x0B", mientras que el `.trim()`
+     * de `ClientEcommerceUrls.vue` —que promete en su docblock ser equivalente a esta
+     * implementación— recorta todo el whitespace Unicode, incluidos el espacio duro (U+00A0) y el
+     * BOM (U+FEFF). Un path pegado desde una página web o desde un chat arrastra uno de esos con
+     * mucha facilidad: el hint del modal mostraba la ruta limpia y la columna terminaba guardando
+     * la ruta con el carácter invisible pegado, así que el deploy creaba en el hosting una carpeta
+     * con un carácter invisible al final y nadie entendía por qué el (sub)dominio no servía nada.
+     *
+     * @param  string  $value  Texto crudo.
+     * @return string          Texto sin espacios (en el sentido de JS) al principio ni al final.
+     */
+    protected static function js_trim(string $value): string
+    {
+        // Mismo conjunto que WhiteSpace + LineTerminator de la spec de ECMAScript.
+        $espacios = '\x{0009}-\x{000D}\x{0020}\x{00A0}\x{1680}\x{2000}-\x{200A}'
+            . '\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}';
+
+        $trimmed = preg_replace('/^[' . $espacios . ']+|[' . $espacios . ']+$/u', '', $value);
+
+        // preg_replace() devuelve null si el string no es UTF-8 válido. En ese caso se cae al trim
+        // clásico de PHP en vez de perder el valor entero.
+        return $trimmed === null ? trim($value) : $trimmed;
+    }
+
+    /**
      * Normaliza un path de instalación del hosting cargado a mano: lo deja relativo a `domains/`,
      * sin barras al inicio/fin, sin barras dobles y sin tramos "." ni "..".
      *
@@ -94,7 +123,15 @@ class ClientEcommerce extends Model
      */
     public static function normalize_hosting_path($path)
     {
-        $value = trim((string) $path);
+        // Un valor que no es escalar no puede ser un path (defecto del chequeo de la misión
+        // ecommerce-paths-subcarpeta): `(string) []` da literalmente "Array" —con warning— y ese
+        // "Array" terminaba guardado como path de instalación, o sea como destino de un `rm -rf`.
+        // null también cae acá y sale por el mismo camino que un campo vacío.
+        if (! is_scalar($path)) {
+            return '';
+        }
+
+        $value = self::js_trim((string) $path);
         if ($value === '') {
             return '';
         }
@@ -122,7 +159,7 @@ class ClientEcommerce extends Model
 
         $clean_segments = [];
         foreach ($segments as $segment) {
-            $segment = trim($segment);
+            $segment = self::js_trim($segment);
 
             // Barras dobles y "./" no cambian el significado del path: se descartan.
             if ($segment === '' || $segment === '.') {
@@ -139,6 +176,44 @@ class ClientEcommerce extends Model
             }
 
             $clean_segments[] = $segment;
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────────────
+        // GUARDA DE FORMA (agregada por el chequeo independiente de la misión
+        // ecommerce-paths-subcarpeta). Este valor termina siendo el destino de un `rm -rf` en el
+        // swap atómico del deploy: build_spa_atomic_deploy_shell() hace `mv "$DOCROOT" "$OLD"` y
+        // después `rm -rf "$OLD"`. Por eso una entrada que no tiene forma de path de instalación
+        // NO se "arregla" ni se acepta a medias: se rechaza ENTERA devolviendo cadena vacía, y el
+        // sistema se cae a la derivación automática, que siempre es una ruta segura.
+        // ─────────────────────────────────────────────────────────────────────────────────────
+
+        // 1) Menos de dos segmentos nunca es un path de instalación válido: el primero es siempre
+        //    el dominio, y abajo tiene que colgar por lo menos el docroot.
+        //
+        //    EL CASO CONCRETO QUE LO ORIGINÓ: pegar `comerciocity.store` a secas (olvidándose la
+        //    cola), o pegar `/home/u123456/domains/comerciocity.store` copiado de una sesión SSH,
+        //    que normaliza a lo mismo. Con eso guardado como spa_path, get_spa_docroot() daba
+        //    `domains/comerciocity.store` y el próximo deploy movía y borraba el public_html
+        //    ENTERO de ese dominio, con todas las otras tiendas que colgaran de ahí. El warning
+        //    de ensure_hosting_spa_directory() no cubre este caso: el padre (`domains`) siempre
+        //    existe, así que el deploy no tenía nada que denunciar.
+        if (count($clean_segments) < 2) {
+            return '';
+        }
+
+        // 2) El primer segmento tiene que PARECER un dominio, o sea tener al menos un punto.
+        //
+        //    EL CASO CONCRETO QUE LO ORIGINÓ: el File Manager de hPanel, cuando estás parado
+        //    adentro del dominio, muestra `public_html/tienda/spa` — sin el dominio adelante.
+        //    Pegado tal cual quedaba como `domains/public_html/tienda/spa`, una carpeta inventada
+        //    al lado de los dominios reales, que ningún vhost sirve.
+        //
+        // 🔴 LO QUE ESTA GUARDA NO RECHAZA, Y NO LE AGREGUES NADA QUE LO RECHACE:
+        //    `{dominio}/public_html` (dos segmentos) es el path derivado y legítimo de los ~40
+        //    clientes en producción, igual que `{dominio}/public_html/api`. Una guarda del estilo
+        //    "mínimo tres segmentos" o "prohibido terminar en public_html" rompe a todos.
+        if (strpos($clean_segments[0], '.') === false) {
+            return '';
         }
 
         return implode('/', $clean_segments);
