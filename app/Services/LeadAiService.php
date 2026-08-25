@@ -5485,6 +5485,16 @@ TXT;
      * Si la respuesta parece estructurada (empieza con ``` o {) se trata como fallo y se
      * devuelve string vacío para que el caller active su fallback fijo de PHP.
      *
+     * 🔴 Desde el 25/8/2026 este método sirve SOLO al camino de GENERACIÓN: los llamadores reales
+     * son descartar_agendamiento_fuera_de_slots() y las ramas `$for_approval === false` de
+     * apply_parsed_response(). En la APROBACIÓN ya no se reescribe nada: si el horario que el
+     * mensaje confirmaba ya no está disponible, se frena y se avisa (ver
+     * frenar_por_horario_no_disponible()). El porqué es de Lucas: pisar in-place el contenido de un
+     * mensaje que un admin ya aprobó hace que el correctivo herede la autoría de lo que reemplazó,
+     * y el lead termina recibiendo —con el nombre de esa persona— un texto que esa persona nunca
+     * leyó. En generación no hay nadie que haya firmado el borrador, así que ahí pisarlo sigue
+     * siendo lo correcto.
+     *
      * @param Lead     $lead                Lead al que se le responde.
      * @param string   $slot_invalido       Horario alucinado que el servidor descartó (HH:MM).
      * @param string   $demo_date           Fecha de la demo propuesta (Y-m-d).
