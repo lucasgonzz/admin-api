@@ -33,8 +33,30 @@ class Kernel extends ConsoleKernel
         // Cada 5 minutos garantiza que ninguna demo se pierda dentro de la ventana.
         $schedule->command('leads:send-demo-reminders')->everyFiveMinutes();
 
-        // Corre demo setup automático X minutos antes del inicio de cada demo.
-        $schedule->command('leads:run-demo-setup')->everyMinute();
+        /* Corre demo setup automático X minutos antes del inicio de cada demo.
+         *
+         * 🔴 `runInBackground()` desde la misión cruzada del 25/8/2026, y no es cosmético. Este
+         * comando llama a `RunDemoSetupService::run()` INLINE (`RunDemoSetup.php:161`), no despacha
+         * el job — verificado, no supuesto: `RunDemoSetupJob` sólo lo despacha el POST del
+         * formulario inmersivo. Y `$schedule->command()` corre el proceso sincrónicamente adentro
+         * de `schedule:run`, así que mientras el setup está en vuelo esa invocación del scheduler
+         * queda clavada y NO ejecuta ninguno de los ~20 comandos que vienen después.
+         *
+         * Hasta hoy eso podía durar 300 s. Al subir el techo del service a 900 lo triplicamos
+         * nosotros, y entre los comandos que quedaban sin correr está
+         * `leads:vencer-demo-setups-colgados` — o sea, justo la red que atrapa un setup colgado.
+         * El arreglo se comía a sí mismo. Es el mismo razonamiento, y el mismo daño, que ya está
+         * escrito abajo para `queue:work` a raíz de `RunDeploymentJob` en la misión 61.
+         *
+         * 🔴 Y NO `withoutOverlapping()`, a pesar de que la corrida en segundo plano puede apilar
+         * hasta quince procesos. Serializar acá es peor que apilar: un tick que tarda quince
+         * minutos dejaría sin disparar el setup de TODOS los demás leads durante esa ventana, y el
+         * turno de un lead no espera —la ventana de preparación se mide en minutos—. El apilamiento
+         * es seguro por otro lado: el claim atómico de `run($lead, true)` hace que dos procesos
+         * concurrentes no puedan tomar el mismo lead, que es la única carrera que importa. Y sin
+         * `runInBackground()` los procesos se apilaban IGUAL (un `schedule:run` clavado por tick);
+         * la diferencia es que además se llevaban puesto el resto del scheduler. */
+        $schedule->command('leads:run-demo-setup')->everyMinute()->runInBackground();
 
         // Saca del limbo los setups que quedaron en `ejecutandose` o en `sin_confirmar` y nunca
         // reportaron (misión 60; `sin_confirmar` desde la misión cruzada del 25/8/2026 — un estado
