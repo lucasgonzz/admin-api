@@ -1097,8 +1097,11 @@ TXT;
          * cuando el slot se ocupa entre la sugerencia y la aprobación).
          *
          * El motivo real viaja SIEMPRE: sin él el modelo lo inventa (ver el comentario en
-         * call_corrective_availability_response()). El clasificador ya distingue "fecha fuera de la
-         * ventana" y "la franja extendida no entra" de los motivos de hora, igual que $motivo. */
+         * call_corrective_availability_response()).
+         *
+         * La franja extendida se declara como causa SÓLO si la hora estaba bien ($hora_disponible):
+         * misma precedencia que el $motivo de acá arriba. Si lo que falló fue la hora, la causa que
+         * el lead tiene que escuchar es la de la hora, aunque de paso la franja tampoco entrara. */
         $mensaje_correctivo = $this->call_corrective_availability_response(
             $lead,
             $demo_start,
@@ -1110,7 +1113,7 @@ TXT;
                 $demo_start,
                 $slots_de_esa_demo_y_fecha,
                 $fecha_en_ventana,
-                (! $ventana_ofrecida || ! $ventana_hasta_valida)
+                ($hora_disponible && (! $ventana_ofrecida || ! $ventana_hasta_valida))
             )
         );
 
@@ -4811,6 +4814,13 @@ TXT;
                     }
                 }
 
+                /* Foto de si la HORA estaba bien, tomada antes de que el bloque de ventana extendida
+                 * de abajo pueda poner $slot_disponible en false por su cuenta. La usa el
+                 * clasificador del motivo real: si lo que falló fue la hora, esa es la causa que el
+                 * lead tiene que escuchar, aunque de paso la franja tampoco entrara. Misma
+                 * precedencia que el $motivo de descartar_agendamiento_fuera_de_slots(). */
+                $hora_estaba_disponible = $slot_disponible;
+
                 /* Ventana extendida (misión 47). El "hasta" lo resuelve el servidor: el modelo solo
                  * pide la modalidad con un booleano. Si pidió ventana y en este instante ya no
                  * entra, el agendamiento cae por el MISMO camino de slot inválido que ya está
@@ -4966,7 +4976,7 @@ TXT;
                             $demo_start,
                             array_map('strval', is_array($slots_demo) ? $slots_demo : []),
                             true,
-                            ($ventana_hasta_invalida || ($quiere_ventana_extendida && $fin_ventana_extendida === null))
+                            ($hora_estaba_disponible && ($ventana_hasta_invalida || ($quiere_ventana_extendida && $fin_ventana_extendida === null)))
                         )
                     );
 
