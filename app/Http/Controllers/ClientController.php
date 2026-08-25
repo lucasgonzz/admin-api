@@ -201,8 +201,18 @@ class ClientController extends BaseController
 
         $existing = $client->client_ecommerce()->first();
 
-        if ($spa_url === '' && $api_url === '') {
-            // Las dos vinieron vacías: si el cliente no tiene tienda, no se crea una
+        // Un path de instalación con valor alcanza para que este guardado cuente como "del modal
+        // de tienda", aunque las dos URLs vengan vacías.
+        //
+        // POR QUÉ (defecto encontrado en el chequeo independiente de la misión
+        // ecommerce-paths-subcarpeta): el `return` de abajo se ejecutaba ANTES de los bloques que
+        // aplican los paths, así que a un cliente nuevo al que se le cargaban SOLO los dos paths
+        // se le perdían en silencio, sin ningún error. Y el hint del modal invitaba explícitamente
+        // a hacer eso ("Cargá la URL de la tienda o los paths de instalación").
+        $hay_path_cargado = $spa_path_input !== '' || $api_path_input !== '';
+
+        if ($spa_url === '' && $api_url === '' && ! $hay_path_cargado) {
+            // Las dos vinieron vacías y no hay paths: si el cliente no tiene tienda, no se crea una
             // por esto. Si ya la tiene, se limpian las URLs pero se conserva el
             // resto (domain, paths, status) por si se vuelven a cargar después.
             if ($existing) {
@@ -214,12 +224,22 @@ class ClientController extends BaseController
             return;
         }
 
-        // Al menos una vino con valor: se crea o reutiliza el ClientEcommerce del cliente.
+        // Al menos una URL vino con valor, o vino un path cargado a mano: se crea o reutiliza el
+        // ClientEcommerce del cliente.
         $ecommerce = ClientEcommerce::firstOrNew(['client_id' => $client->id]);
         $is_new = ! $ecommerce->exists;
 
         $ecommerce->spa_url = $spa_url;
         $ecommerce->api_url = $api_url;
+
+        // Guardado que trae solo paths: las URLs se escriben en null, no en cadena vacía, que es
+        // exactamente lo que dejaba el bloque de arriba antes de esta corrección. "Sin URL
+        // cargada" se representa con null en estas dos columnas y no se cambia por esto.
+        if ($spa_url === '' && $api_url === '') {
+            $ecommerce->spa_url = null;
+            $ecommerce->api_url = null;
+        }
+
         if ($is_new) {
             $ecommerce->status = 'pending';
         }
