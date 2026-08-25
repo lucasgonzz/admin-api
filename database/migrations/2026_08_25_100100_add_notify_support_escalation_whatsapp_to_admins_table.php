@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -11,8 +12,11 @@ use Illuminate\Support\Facades\Schema;
  * que pasaba era un aviso Pusher: si el operador no tenía el admin abierto, no se enteraba.
  * Con este flag, el escalado también sale por WhatsApp al `phone_number` del perfil.
  *
- * Es el mismo mecanismo que ya usa `notify_lead_escalation_whatsapp` para el agente de leads,
- * y a propósito arranca apagado: quien lo quiera lo prende en su perfil.
+ * Es el mismo mecanismo que ya usa `notify_lead_escalation_whatsapp` para el agente de leads.
+ * Arranca apagado para todos MENOS para el dueño por defecto de soporte: lo que se pidió fue
+ * "que me avise a mí", y dejar la función entera dependiendo de que alguien se acuerde de
+ * prender un check en su perfil es entregarla apagada. Al que ya es responsable de soporte le
+ * llega desde el primer escalado; el resto la prende si la quiere.
  */
 class AddNotifySupportEscalationWhatsappToAdminsTable extends Migration
 {
@@ -30,6 +34,12 @@ class AddNotifySupportEscalationWhatsappToAdminsTable extends Migration
                   ->after('notify_lead_escalation_whatsapp')
                   ->comment('Recibir WhatsApp cuando el agente escala un ticket de soporte a revisión humana.');
         });
+
+        /* El dueño por defecto de soporte lo recibe sin tener que ir a prenderlo. Si no hay
+         * ninguno marcado, no se toca a nadie y el flag queda apagado para todos. */
+        DB::table('admins')
+            ->where('is_default_support_owner', true)
+            ->update(['notify_support_escalation_whatsapp' => true]);
     }
 
     /**

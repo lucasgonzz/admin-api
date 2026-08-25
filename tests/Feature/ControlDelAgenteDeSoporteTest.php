@@ -481,6 +481,12 @@ class ControlDelAgenteDeSoporteTest extends TestCase
      */
     public function test_el_escalado_queda_registrado_aunque_no_haya_a_quien_avisar()
     {
+        // Hay operadores cargados y con teléfono, pero ninguno pidió recibir el aviso: sin
+        // esto el test pasaba por ausencia de admins y no probaba nada del código nuevo.
+        $sin_flag                = $this->crear_admin('escalado-sin-flag@test.local');
+        $sin_flag->phone_number  = '+5493410000009';
+        $sin_flag->save();
+
         $client = $this->crear_cliente();
         $ticket = $this->crear_ticket($client);
         $espia  = $this->espiar_sender();
@@ -495,7 +501,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
 
         $this->correr_agente($ticket);
 
-        $this->assertCount(0, $espia->plantillas);
+        $this->assertCount(0, $espia->plantillas, 'Le avisó a un operador que no pidió recibir escalados.');
 
         $escalado = SupportTicket::find($ticket->id);
         $this->assertNotNull($escalado->escalated_at);
@@ -570,7 +576,13 @@ class ControlDelAgenteDeSoporteTest extends TestCase
 
         $this->assertNull($borrador->ai_auto_send_at);
 
-        // Un job huérfano corre sobre ese ticket.
+        // El caso que de verdad importa: un borrador CON fecha vencida sobre un ticket que
+        // exige verificación. Es lo que queda si se apaga la verificación, se genera el
+        // borrador con timer, y se la vuelve a prender. Sin la guarda del ticket, la condición
+        // de fecha no frena nada y el mensaje sale.
+        $borrador->ai_auto_send_at = now()->subMinute();
+        $borrador->save();
+
         dispatch_sync(new AutoSendPendingSupportSuggestion((int) $ticket->id));
 
         $this->assertCount(0, $espia->textos, 'El autoenvío mandó un borrador que estaba esperando aprobación.');
@@ -670,5 +682,219 @@ class ControlDelAgenteDeSoporteTest extends TestCase
 
         $enviado = SupportMessage::find($borrador->id);
         $this->assertNotNull($enviado->ai_generated_at, 'El mensaje perdió la marca de que lo escribió el agente.');
+    }
+
+    /**
+     * Un escalado nuevo, por un motivo distinto, sí vuelve a avisar.
+     *
+     * `escalated_at` solo se limpia al cerrar el ticket, y en soporte por WhatsApp los tickets
+     * se quedan abiertos. Frenar por "alguna vez se escaló" dejaba mudo el segundo escalado,
+     * semanas después y por otra cosa, que es justo el agujero que esta misión venía a cerrar.
+     *
+     * @return void
+     */
+    public function test_un_escalado_por_otro_motivo_vuelve_a_avisar()
+    {
+        $suscrito                                     = $this->crear_admin('escalado-otro-motivo@test.local');
+        $suscrito->phone_number                       = '+5493410000004';
+        $suscrito->notify_support_escalation_whatsapp = true;
+        $suscrito->save();
+
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+
+        $this->espiar_claude([
+            'suggested_message' => '',
+            'reasoning'         => 'Primera vez.',
+            'should_close'      => false,
+            'should_escalate'   => true,
+            'escalation_reason' => 'El cliente reporta pérdida de datos',
+        ]);
+        $this->correr_agente($ticket);
+        $this->assertCount(1, $espia->plantillas);
+
+        // El operador respondió y dejó el ticket abierto. Semanas después, otro problema.
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => 'Otra cosa: no me anda la facturación',
+            'delivered_at'      => now(),
+        ]);
+
+        $this->espiar_claude([
+            'suggested_message' => '',
+            'reasoning'         => 'Otra cosa distinta.',
+            'should_close'      => false,
+            'should_escalate'   => true,
+            'escalation_reason' => 'Problema de facturación con ARCA',
+        ]);
+        $this->correr_agente($ticket->fresh());
+
+        $this->assertCount(2, $espia->plantillas, 'El segundo escalado, por otro motivo, no avisó a nadie.');
+        $this->assertSame('Problema de facturación con ARCA', $espia->plantillas[1]['variables'][1]);
+    }
+
+    /**
+     * Con verificación apagada y demora, el ticket no se cierra hasta que la despedida salga.
+     *
+     * El borrador con timer también es un borrador: cerrar el ticket antes de que el job lo
+     * mande deja al cliente sin la última respuesta, porque el autoenvío corta por ticket
+     * cerrado y el mensaje queda colgado para siempre.
+     *
+     * @return void
+     */
+    public function test_no_cierra_el_ticket_con_una_despedida_todavia_en_el_timer()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $ticket->requiere_verificacion_mensajes = false;
+        $ticket->save();
+
+        AdminSetting::set(SupportAiSettings::KEY_AUTO_SEND_DELAY_SECONDS, 120);
+        $this->espiar_sender();
+        $this->espiar_claude([
+            'suggested_message' => 'Cualquier cosa escribinos. ¡Saludos!',
+            'reasoning'         => 'Quedó resuelto.',
+            'should_close'      => true,
+            'should_escalate'   => false,
+            'escalation_reason' => null,
+        ]);
+
+        $this->correr_agente($ticket);
+
+        $this->assertSame(
+            'open',
+            SupportTicket::find($ticket->id)->status,
+            'Cerró el ticket con la despedida todavía esperando el timer: nunca le va a llegar al cliente.'
+        );
+    }
+
+    /**
+     * Prender la verificación apaga el reloj del borrador que estaba en curso.
+     *
+     * Si no, el operador ve el contador corriendo hasta cero sin que pase nada y no sabe si el
+     * mensaje salió.
+     *
+     * @return void
+     */
+    public function test_prender_la_verificacion_apaga_el_contador_en_curso()
+    {
+        $admin  = $this->crear_admin('apaga-contador@test.local');
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $ticket->requiere_verificacion_mensajes = false;
+        $ticket->save();
+
+        AdminSetting::set(SupportAiSettings::KEY_AUTO_SEND_DELAY_SECONDS, 300);
+        $this->espiar_sender();
+        $this->espiar_claude($this->respuesta_del_agente('Una respuesta con timer.'));
+
+        $this->correr_agente($ticket);
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->firstOrFail();
+        $this->assertNotNull($borrador->ai_auto_send_at);
+
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-ticket/' . $ticket->id . '/toggle-requiere-verificacion')
+            ->assertStatus(200);
+
+        $this->assertNull(
+            SupportMessage::find($borrador->id)->ai_auto_send_at,
+            'El borrador quedó con el reloj corriendo después de exigir verificación.'
+        );
+        $this->assertNull(SupportTicket::find($ticket->id)->ai_suggestion_send_at);
+    }
+
+    /**
+     * Aprobar dos veces el mismo borrador no manda el mensaje dos veces.
+     *
+     * El job de autoenvío y el operador pueden estar los dos sobre el mismo borrador. Quien
+     * gana la carrera se lo lleva; el que pierde tiene que ver un error, no un segundo envío.
+     *
+     * @return void
+     */
+    public function test_aprobar_dos_veces_no_duplica_el_envio()
+    {
+        $admin  = $this->crear_admin('doble-aprobacion@test.local');
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+        $this->espiar_claude($this->respuesta_del_agente('Se carga desde Ventas.'));
+
+        $this->correr_agente($ticket);
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->firstOrFail();
+
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-message/' . $borrador->id . '/approve-ai-draft')
+            ->assertStatus(200);
+
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-message/' . $borrador->id . '/approve-ai-draft')
+            ->assertStatus(422);
+
+        $this->assertCount(1, $espia->textos, 'El cliente recibió el mismo mensaje dos veces.');
+    }
+
+    /**
+     * Con la ventana de 24hs cerrada, la respuesta del agente sale por plantilla.
+     *
+     * Es el hallazgo heredado de la misión 1: antes salía como texto libre y Meta la rechazaba
+     * sin dejar motivo.
+     *
+     * @return void
+     */
+    public function test_la_respuesta_del_agente_fuera_de_la_ventana_sale_por_plantilla()
+    {
+        $admin  = $this->crear_admin('agente-fuera-de-ventana@test.local');
+        $client = $this->crear_cliente();
+
+        // Ticket sin ningún entrante reciente: la ventana está cerrada.
+        $ticket = SupportTicket::create([
+            'client_id'        => $client->id,
+            'client_user_id'   => 0,
+            'client_user_name' => 'Contacto',
+            'status'           => 'open',
+            'source'           => 'whatsapp',
+            'whatsapp_phone'   => '+5493416660001',
+            'opened_at'        => now()->subDays(4),
+        ]);
+
+        SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => 'Una consulta vieja',
+            'delivered_at'      => now()->subDays(3),
+        ]);
+
+        $espia = $this->espiar_sender();
+        $this->espiar_claude($this->respuesta_del_agente('Te respondo tarde, disculpá.'));
+
+        $this->correr_agente($ticket);
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->firstOrFail();
+
+        $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/support-message/' . $borrador->id . '/approve-ai-draft')
+            ->assertStatus(200);
+
+        $this->assertCount(0, $espia->textos, 'Salió texto libre con la ventana cerrada: Meta lo rechaza.');
+        $this->assertCount(1, $espia->plantillas, 'No salió por plantilla.');
+
+        $enviado = SupportMessage::find($borrador->id);
+        $this->assertSame(
+            'Te respondo tarde, disculpá.',
+            $enviado->ai_original_body,
+            'Se perdió el texto que había propuesto el agente al envolverlo en la plantilla.'
+        );
     }
 }

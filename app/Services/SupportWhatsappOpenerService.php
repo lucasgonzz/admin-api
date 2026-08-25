@@ -251,6 +251,18 @@ class SupportWhatsappOpenerService
         $operator_text = trim((string) ($message->body ?? ''));
         $template_name = $this->resolve_template_name();
 
+        // Una plantilla no puede transportar un texto largo: Meta lo recorta. Antes se mandaba
+        // truncado con puntos suspensivos, que en una respuesta de soporte con instrucciones
+        // significa mandarle al cliente media explicación. Es preferible no mandar nada y
+        // decir por qué: el operador espera a que el cliente escriba, o lo llama.
+        if (mb_strlen($this->sanitize_template_variable($operator_text)) >= self::TEMPLATE_VARIABLE_MAX_LENGTH) {
+            $this->sender->last_send_error = 'El mensaje es demasiado largo para mandarlo por plantilla ('
+                . mb_strlen($operator_text) . ' caracteres, el tope es ' . self::TEMPLATE_VARIABLE_MAX_LENGTH
+                . '). La ventana de 24hs está cerrada, así que hay que esperar a que el cliente escriba, o acortarlo.';
+
+            return $this->mark_failed($message, $this->sender->last_send_error, true, false, $template_name);
+        }
+
         $whatsapp_message_id = $this->sender->send_template(
             $to,
             $template_name,
@@ -264,6 +276,13 @@ class SupportWhatsappOpenerService
         );
 
         if ($whatsapp_message_id !== null) {
+            // Si el texto lo escribió el agente y nadie lo corrigió, se guarda antes de pisarlo.
+            // Si no, envolverlo en la plantilla borraría para siempre lo que el agente había
+            // propuesto, que es justo el dato que se guarda para medir cómo viene.
+            if ($message->ai_generated_at !== null && trim((string) ($message->ai_original_body ?? '')) === '') {
+                $message->ai_original_body = $operator_text;
+            }
+
             // Recién ahora el body pasa a ser lo que el cliente de verdad recibió. Pisarlo
             // antes del envío dejaba dos cosas rotas: en la bandeja quedaba un mensaje con
             // saludo y firma que nunca salió, y el botón de reintentar volvía a envolver lo

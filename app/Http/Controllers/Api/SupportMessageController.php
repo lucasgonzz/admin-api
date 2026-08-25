@@ -189,14 +189,25 @@ class SupportMessageController extends BaseController
     {
         $message = SupportMessage::with('ticket')->findOrFail($id);
 
-        if (! (bool) $message->is_ai_suggestion_draft) {
-            return response()->json(['error' => 'Ese mensaje no es un borrador del agente.'], 422);
-        }
-
         $ticket = $message->ticket;
         if ($ticket === null || $ticket->status !== 'open') {
             return response()->json(['error' => 'El ticket está cerrado.'], 422);
         }
+
+        // Se toma el borrador con un UPDATE condicional en vez de leer-y-después-escribir. El
+        // job de autoenvío y el operador pueden estar los dos sobre el mismo borrador —el
+        // operador aprieta Enviar en el segundo 119 de una demora de 120— y sin esto los dos
+        // pasaban el chequeo y el cliente recibía el mensaje dos veces. Quien gane la carrera
+        // se lo lleva: el que pierde, ve 0 filas afectadas y corta acá.
+        $tomado = SupportMessage::where('id', $message->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->update(['is_ai_suggestion_draft' => false, 'ai_auto_send_at' => null]);
+
+        if ($tomado === 0) {
+            return response()->json(['error' => 'Ese borrador ya se envió o se descartó.'], 422);
+        }
+
+        $message->refresh();
 
         $original_body = trim((string) ($message->body ?? ''));
         $final_body = $request->has('body') ? trim((string) $request->input('body')) : $original_body;
@@ -216,13 +227,26 @@ class SupportMessageController extends BaseController
 
         $delivered = app(SupportAiSuggestionDeliveryService::class)->deliver_draft_message($message, $ticket);
 
-        (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        // Limpia solo el estado pendiente del TICKET. clear_ticket_pending_state() también
+        // borra borradores, y este mensaje ya dejó de serlo arriba, así que no se lo lleva.
+        $ticket->ai_pending_suggestion = null;
+        $ticket->ai_suggestion_send_at = null;
+        $ticket->save();
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
 
+        if ($delivered === null) {
+            // El ticket no tiene canal por dónde salir. El mensaje quedó guardado y visible,
+            // pero decirle 200 al operador le haría creer que el cliente lo recibió.
+            return response()->json([
+                'model' => $message,
+                'error' => 'El mensaje quedó guardado pero no se pudo entregar: el ticket no tiene un canal de WhatsApp válido.',
+            ], 422);
+        }
+
         return response()->json([
             'model'     => $message,
-            'delivered' => $delivered !== null,
+            'delivered' => true,
         ], 200);
     }
 
@@ -243,10 +267,13 @@ class SupportMessageController extends BaseController
 
         $ticket = $message->ticket;
 
-        (new SupportAiSuggestionDraftService())->delete_drafts_for_ticket((int) $message->support_ticket_id);
-
         if ($ticket !== null) {
+            // clear_ticket_pending_state() ya borra los borradores del ticket además de
+            // limpiar el pendiente: llamar antes a delete_drafts_for_ticket() era una query
+            // repetida.
             (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
+        } else {
+            (new SupportAiSuggestionDraftService())->delete_drafts_for_ticket((int) $message->support_ticket_id);
         }
 
         return response()->json(['ok' => true], 200);

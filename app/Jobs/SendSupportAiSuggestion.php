@@ -108,6 +108,22 @@ class SendSupportAiSuggestion implements ShouldQueue
             return;
         }
 
+        /* 🔴 La instancia que se cargó arriba quedó vieja: entre medio hubo una llamada a
+         * Claude con tool use contra GitHub, que tarda decenas de segundos, y en ese rato el
+         * operador puede haber tocado cualquiera de los dos interruptores. Sin este refresh,
+         * prender "con verificación" mientras el agente está pensando no frena nada: el
+         * mensaje sale igual, con el candado prendido en la pantalla. El token del debounce ya
+         * se revalida acá arriba justo por esto; los flags necesitaban lo mismo. */
+        $ticket->refresh();
+
+        if (! (bool) $ticket->claude_auto_reply) {
+            Log::channel('daily')->info('SendSupportAiSuggestion: descartada (apagaron el agente durante la generación).', [
+                'ticket_id' => $ticket->id,
+            ]);
+
+            return;
+        }
+
         /* Mensaje sugerido por Claude para enviar al cliente (puede ser vacío). */
         $suggested_message = trim((string) ($result['suggested_message'] ?? ''));
 
@@ -161,14 +177,14 @@ class SendSupportAiSuggestion implements ShouldQueue
      * @param SupportAiSuggestionDeliveryService $delivery_service
      * @param SupportAiSuggestionDraftService    $draft_service
      *
-     * @return void
+     * @return bool True si quedó un borrador sin entregar al cliente.
      */
     private function entregar_o_dejar_en_borrador(
         SupportTicket $ticket,
         string $suggested_message,
         SupportAiSuggestionDeliveryService $delivery_service,
         SupportAiSuggestionDraftService $draft_service
-    ): void {
+    ): bool {
         if ((bool) $ticket->requiere_verificacion_mensajes) {
             // create_draft() con demora 0 deja ai_auto_send_at en null: el borrador espera.
             $draft_service->create_draft($ticket, $suggested_message, 0);
@@ -179,7 +195,7 @@ class SendSupportAiSuggestion implements ShouldQueue
                 'ticket_id' => $ticket->id,
             ]);
 
-            return;
+            return true;
         }
 
         $delay = SupportAiSettings::get_auto_send_delay_seconds();
@@ -187,7 +203,7 @@ class SendSupportAiSuggestion implements ShouldQueue
         if ($delay <= 0) {
             $delivery_service->deliver_text_reply($ticket, $suggested_message);
 
-            return;
+            return false;
         }
 
         $draft_message = $draft_service->create_draft($ticket, $suggested_message, $delay);
@@ -198,6 +214,8 @@ class SendSupportAiSuggestion implements ShouldQueue
             AutoSendPendingSupportSuggestion::dispatch($ticket->id)
                 ->delay($draft_message->ai_auto_send_at);
         }
+
+        return true;
     }
 
     /**
@@ -222,10 +240,15 @@ class SendSupportAiSuggestion implements ShouldQueue
         /* Motivo del escalado: texto libre generado por Claude. */
         $escalation_reason = trim((string) ($result['escalation_reason'] ?? ''));
 
-        /* Claude puede volver a escalar el mismo ticket con cada mensaje del cliente. El aviso
-         * por WhatsApp sale solo en la TRANSICIÓN a escalado: si no, un cliente insistente le
-         * manda cinco WhatsApp seguidos al operador y el aviso se vuelve ruido que se ignora. */
-        $ya_estaba_escalado = $ticket->escalated_at !== null;
+        /* Claude puede volver a escalar el mismo ticket con cada mensaje del cliente, y el
+         * aviso repetido se vuelve ruido que se ignora. Pero "ya estaba escalado" no alcanza
+         * como freno: `escalated_at` solo se limpia al CERRAR el ticket, así que un escalado
+         * nuevo por un motivo distinto, semanas después, no avisaría a nadie. Se compara el
+         * motivo: mismo motivo, no se repite; motivo nuevo, se avisa. */
+        $motivo_anterior = trim((string) ($ticket->escalation_reason ?? ''));
+        $es_el_mismo_escalado = $ticket->escalated_at !== null
+            && $motivo_anterior !== ''
+            && $motivo_anterior === trim((string) ($result['escalation_reason'] ?? ''));
 
         /* Persistir el escalado en el ticket. */
         $ticket->escalated_at      = now();
@@ -262,7 +285,7 @@ class SendSupportAiSuggestion implements ShouldQueue
          * Va en su propio try: si el aviso falla, el ticket YA quedó escalado y con badge, y
          * perder eso por un problema de Meta sería peor que quedarse sin el WhatsApp. */
         try {
-            if (! $ya_estaba_escalado) {
+            if (! $es_el_mismo_escalado) {
                 app(SupportEscalationWhatsappService::class)->notify($ticket, $escalation_reason);
             }
         } catch (\Throwable $exception) {
@@ -296,15 +319,17 @@ class SendSupportAiSuggestion implements ShouldQueue
         SupportAiSuggestionDraftService $draft_service
     ): void {
         /* Enviar mensaje de cierre al cliente antes de cerrar el ticket. */
+        $quedo_borrador = false;
         if ($suggested_message !== '') {
-            $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service);
+            $quedo_borrador = $this->entregar_o_dejar_en_borrador($ticket, $suggested_message, $delivery_service, $draft_service);
         }
 
-        /* Con verificación pendiente el ticket NO se cierra: el mensaje de despedida todavía
-         * no salió, y cerrar acá lo volvería inaprobable (deliver_draft_message() exige el
-         * ticket abierto) además de dejar al cliente sin la última respuesta. Lo cierra la
-         * persona desde el selector de estado, después de aprobar el mensaje. */
-        if ((bool) $ticket->requiere_verificacion_mensajes && $suggested_message !== '') {
+        /* Si quedó un borrador sin mandar, el ticket NO se cierra. Vale para los DOS modos que
+         * dejan borrador —el que espera aprobación y el que espera el timer—, no solo para el
+         * primero: cerrar acá deja al cliente sin la última respuesta y vuelve inentregable el
+         * borrador, porque tanto deliver_draft_message() como approve_ai_draft() exigen el
+         * ticket abierto. Lo cierra la persona desde el selector de estado. */
+        if ($quedo_borrador) {
             Log::channel('daily')->info('SendSupportAiSuggestion: Claude propuso cerrar, pero el ticket espera aprobación humana.', [
                 'ticket_id' => $ticket->id,
             ]);

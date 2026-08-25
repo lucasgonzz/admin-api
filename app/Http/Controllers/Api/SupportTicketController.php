@@ -361,10 +361,10 @@ class SupportTicketController extends BaseController
     /**
      * Prende o apaga el agente de IA para un ticket puntual.
      *
-     * Apagarlo solo afecta a las sugerencias FUTURAS: un borrador que ya esté esperando sigue
-     * ahí, para que el operador lo mande o lo descarte a mano. Es el mismo criterio que
-     * LeadController::toggle_claude_auto_reply_json(). No hace falta cancelar el job encolado:
-     * SendSupportAiSuggestion vuelve a mirar el flag cuando corre.
+     * Apagarlo también se lleva el borrador que esté esperando: con el agente apagado, un
+     * borrador con fecha de autoenvío igual saldría, y apagar el agente y ver que le contesta
+     * al cliente lo mismo es lo peor que puede hacer este botón. No hace falta cancelar el job
+     * encolado: SendSupportAiSuggestion relee el flag antes de mandar.
      *
      * @param int|string $id Id del ticket.
      *
@@ -407,6 +407,18 @@ class SupportTicketController extends BaseController
 
         $ticket->requiere_verificacion_mensajes = ! (bool) $ticket->requiere_verificacion_mensajes;
         $ticket->save();
+
+        // Al prenderla, hay que apagar el reloj del borrador que ya estaba en curso. El job de
+        // autoenvío lo frena bien, pero la pantalla seguiría mostrando el contador corriendo
+        // hasta cero sin que pase nada, y el operador no sabe si el mensaje salió o no.
+        if ($ticket->requiere_verificacion_mensajes) {
+            SupportMessage::where('support_ticket_id', $ticket->id)
+                ->where('is_ai_suggestion_draft', true)
+                ->update(['ai_auto_send_at' => null]);
+
+            $ticket->ai_suggestion_send_at = null;
+            $ticket->save();
+        }
 
         event(new SupportTicketUpdated((int) $ticket->id));
 
