@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\EnvTemplate;
@@ -95,6 +96,21 @@ class EcommerceInstallationService
      * @var string
      */
     protected const HOSTING_PREFIX = 'domains/';
+
+    /**
+     * Segundos labels que, junto a un TLD, forman un sufijo público y NO un dominio registrable.
+     *
+     * Los usa derive_session_domain() para no escribir un SESSION_DOMAIN como `.com.ar`, que
+     * cualquier navegador rechaza por estar en la Public Suffix List. Es una lista corta y a mano a
+     * propósito: los clientes son argentinos y de dominios .com/.com.ar/.store, y arrastrar la PSL
+     * entera (miles de entradas, actualización periódica) para esto sería desproporcionado. Si
+     * algún día hace falta más cobertura, se agrega un label acá.
+     *
+     * @var array
+     */
+    protected const PUBLIC_SUFFIX_LABELS = [
+        'com', 'net', 'org', 'gob', 'gov', 'edu', 'mil', 'co', 'ne', 'or', 'ac', 'tur',
+    ];
 
     /**
      * Orden de etapas del pipeline de instalación del ecommerce.
@@ -973,11 +989,20 @@ class EcommerceInstallationService
         // Sube el ZIP a una ruta TEMPORAL en el hosting (nunca directo al docroot en vivo).
         // Se usa resolve_spa_path() (no la columna cruda spa_path, que puede estar vacía) para que
         // el dirname() no dé basura: dirname('') devolvería '.' y armaría una ruta inválida.
-        // dirname('{dominio}/public_html') da '{dominio}', o sea que el ZIP queda en
-        // domains/{dominio}/, fuera del docroot público.
+        //
+        // OJO con dónde cae este ZIP: es siempre el directorio PADRE del docroot del SPA. Con la
+        // derivación por dominio ({dominio}/public_html) cae en domains/{dominio}/, fuera de todo
+        // docroot. Con un spa_path cargado a mano que apunte a una subcarpeta de otro dominio
+        // (comerciocity.store/public_html/tienda/spa) cae DENTRO del public_html de ese dominio, o
+        // sea que durante la ventana del deploy es descargable por HTTP. No expone nada nuevo (el
+        // contenido es el dist/ compilado, que se sirve público igual), pero si una corrida falla
+        // entre el put y el swap, el ZIP queda ahí y hay que borrarlo a mano. Ver el informe de la
+        // misión ecommerce-paths-subcarpeta.
         $spa_docroot   = $this->get_spa_docroot();
         $temp_zip_name = 'dist_' . $this->installation->uuid . '.zip';
         $temp_zip_path = self::HOSTING_PREFIX . dirname($this->ecommerce->resolve_spa_path()) . '/' . $temp_zip_name;
+
+        $this->ensure_hosting_spa_directory('upload_spa');
 
         $sftp_hosting = $this->open_sftp_session('shared_hosting');
         $this->sftp_upload_file($sftp_hosting, $local_zip, $temp_zip_path, 'upload_spa');
@@ -1147,12 +1172,40 @@ class EcommerceInstallationService
         $vars_to_write['APP_URL']  = rtrim((string) $this->ecommerce->api_url, '/');
 
         // c) Variables derivadas del dominio único de la tienda.
+        //
+        // SANCTUM_STATEFUL_DOMAINS y los dos SANCTUM_STATEFUL_CORS NO cambiaron con la misión
+        // ecommerce-paths-subcarpeta: siguen siendo el host del SPA, que es el que origina los
+        // requests. El único que se calcula aparte es SESSION_DOMAIN (ver derive_session_domain()).
         $domain = trim((string) $this->ecommerce->domain);
         if ($domain !== '') {
             $vars_to_write['SANCTUM_STATEFUL_DOMAINS']  = $domain;
             $vars_to_write['SANCTUM_STATEFUL_CORS']     = 'https://' . $domain;
             $vars_to_write['SANCTUM_STATEFUL_CORS_WWW'] = 'https://www.' . $domain;
-            $vars_to_write['SESSION_DOMAIN']            = $domain;
+
+            // Se le pasa $domain (el dominio EFECTIVO de la tienda) y no $this->ecommerce->spa_url
+            // a propósito: $domain es exactamente el valor que esta línea escribía antes de la
+            // misión, y la columna `domain` puede estar pisada a mano en la base (ver
+            // ClientEcommerce::resolve_domain()). Pasando la URL cruda, ese caso pinchado cambiaría
+            // de valor. domain_from_url() acepta un host pelado sin esquema, así que entra igual.
+            $session_domain = self::derive_session_domain($domain, (string) $this->ecommerce->api_url);
+
+            // Cadena vacía = no hay un padre común seguro entre los dos hosts. Se escribe el literal
+            // "null" (Laravel lo convierte a null real al leer el .env) para que la cookie quede
+            // host-only de la API en vez de arrastrar un dominio equivocado. No se deja la clave sin
+            // escribir: la plantilla base podría traer un valor viejo y quedaría peor.
+            $vars_to_write['SESSION_DOMAIN'] = $session_domain !== '' ? $session_domain : 'null';
+
+            if ($session_domain === '') {
+                $this->log(
+                    'write_env',
+                    'El host del SPA (' . $domain . ') y el de la API ('
+                    . ClientEcommerce::domain_from_url((string) $this->ecommerce->api_url)
+                    . ') no comparten un dominio padre seguro: se escribe SESSION_DOMAIN=null y la '
+                    . 'cookie de sesión queda host-only de la API. Si la tienda necesita login de '
+                    . 'compradores o carrito, las dos URLs tienen que vivir bajo el mismo dominio.',
+                    'warning'
+                );
+            }
         }
 
         // d) DB y APP_KEY: se copian del .env de empresa-api del mismo cliente (misma base de
@@ -2238,6 +2291,79 @@ class EcommerceInstallationService
     }
 
     /**
+     * Valor de SESSION_DOMAIN para el .env de tienda-api, a partir de los hosts del SPA y de la API.
+     *
+     * POR QUÉ NO ES SIEMPRE EL HOST DEL SPA (que es lo que hacía hasta la misión
+     * ecommerce-paths-subcarpeta): la cookie de sesión la setea la API, y un host solo puede setear
+     * cookies para sí mismo o para un dominio PADRE suyo. Mientras la API vivió en el mismo host que
+     * el SPA ({spa_url}/api) daba igual. Con la API en un subdominio hermano
+     * (spa=tienda.comerciocity.store, api=api-tienda.comerciocity.store) el navegador DESCARTA la
+     * cookie y la tienda queda sin login de compradores ni carrito, sin ningún error visible en el
+     * deploy. tienda-spa autentica por cookie de sesión (withCredentials + /sanctum/csrf-cookie,
+     * guard `buyer`), así que esto no es cosmético.
+     *
+     * Es público y estático a propósito: así se puede testear sin instanciar el servicio, que en su
+     * constructor necesita conexiones SSH y una corrida real en la base.
+     *
+     * @param  string  $spa_url  URL (o host pelado) del SPA de la tienda.
+     * @param  string  $api_url  URL (o host pelado) de tienda-api.
+     * @return string  Valor a escribir. Cadena vacía = no hay un dominio padre común seguro y el
+     *                 llamador debe escribir SESSION_DOMAIN=null (cookie host-only de la API).
+     */
+    public static function derive_session_domain($spa_url, $api_url): string
+    {
+        $spa_host = ClientEcommerce::domain_from_url($spa_url);
+        $api_host = ClientEcommerce::domain_from_url($api_url);
+
+        // Regla 1 — mismo host (o API sin URL cargada): el valor de siempre, el host del SPA.
+        // 🔴 ESTE ES EL CAMINO DE LOS 40 CLIENTES EN PRODUCCIÓN, donde la API vive en
+        // {spa_url}/api. Tiene que devolver exactamente lo mismo que escribía el código viejo, byte
+        // por byte: cualquier cambio acá les rompe la sesión a todos.
+        if ($api_host === '' || $api_host === $spa_host) {
+            return $spa_host;
+        }
+
+        // Sin host del SPA no hay nada que comparar (no debería pasar: el llamador ya validó que el
+        // dominio de la tienda no esté vacío).
+        if ($spa_host === '') {
+            return '';
+        }
+
+        // Regla 2 — sufijo de labels común, comparando desde la derecha.
+        // tienda.comerciocity.store vs api-tienda.comerciocity.store → comerciocity.store
+        $spa_labels = array_reverse(explode('.', $spa_host));
+        $api_labels = array_reverse(explode('.', $api_host));
+
+        $common_reversed = [];
+        $labels_to_check = min(count($spa_labels), count($api_labels));
+        for ($index = 0; $index < $labels_to_check; $index++) {
+            if ($spa_labels[$index] !== $api_labels[$index]) {
+                break;
+            }
+
+            $common_reversed[] = $spa_labels[$index];
+        }
+
+        $common = array_reverse($common_reversed);
+
+        // Regla 3 — con menos de dos labels en común no hay dominio, hay TLD (o nada).
+        if (count($common) < 2) {
+            return '';
+        }
+
+        // Regla 4 — dos labels donde el primero es un sufijo público conocido tampoco es un dominio:
+        // un SPA en tienda.com.ar con la API en api.otrodominio.com.ar daría `.com.ar`, que el
+        // navegador rechaza por estar en la Public Suffix List. Ojo que tienda.cliente.com.ar +
+        // api.cliente.com.ar da cliente.com.ar (TRES labels) y no cae acá, que es lo correcto.
+        if (count($common) === 2 && in_array($common[0], self::PUBLIC_SUFFIX_LABELS, true)) {
+            return '';
+        }
+
+        // Regla 5 — el punto inicial es la forma convencional de "este dominio y sus subdominios".
+        return '.' . implode('.', $common);
+    }
+
+    /**
      * Ruta absoluta del docroot del SPA en el hosting (raíz del dominio del cliente).
      *
      * @return string
@@ -2295,6 +2421,58 @@ class EcommerceInstallationService
         $this->log($step, "Asegurando que exista el directorio de tienda-api en el hosting ({$api_path})");
         $this->reconnect_hosting_ssh();
         $this->exec_hosting_ssh($step, 'mkdir -p ' . escapeshellarg($api_path));
+    }
+
+    /**
+     * Se asegura de que el directorio destino del ZIP del SPA exista en el hosting ANTES del SFTP
+     * put (misión ecommerce-paths-subcarpeta). Simétrico a ensure_hosting_api_directory().
+     *
+     * 🔴 EL DESTINO NO ES EL DOCROOT, ES SU PADRE. step_upload_spa() sube el ZIP temporal a
+     * `dirname(resolve_spa_path())`, no al docroot; el docroot lo crea el `mv` del swap atómico.
+     * Por eso acá se hace `mkdir -p` del padre y de nada más: crear el docroot vacío de antemano
+     * no aporta (el `mv "$STAGING" "$DOCROOT"` lo crea) y confunde al que lea el script.
+     *
+     * POR QUÉ NO ALCANZA con el `mkdir -p "$(dirname "$DOCROOT")"` que ya tiene
+     * build_spa_atomic_deploy_shell(): ese corre DESPUÉS del put, o sea después del punto exacto
+     * donde la corrida se muere. Con la convención vieja no se notaba porque el padre era
+     * `domains/{dominio}`, que Hostinger ya tenía creado; con una tienda instalada en una
+     * subcarpeta (`comerciocity.store/public_html/tienda/spa`) el padre puede no existir todavía.
+     *
+     * @param  string  $step  Nombre de la etapa, para el log en vivo de la corrida.
+     * @return void
+     */
+    protected function ensure_hosting_spa_directory(string $step): void
+    {
+        $spa_parent_dir = dirname($this->get_spa_docroot());
+
+        $this->log($step, "Asegurando que exista el directorio destino del SPA en el hosting ({$spa_parent_dir})");
+        $this->reconnect_hosting_ssh();
+
+        // Se pregunta si existía ANTES de crearlo, solo para poder decirlo en el log. Hasta esta
+        // misión, un padre inexistente se manifestaba como un SFTP put fallido: ruidoso, pero
+        // clarísimo para diagnosticar. Ahora el mkdir lo tapa, y si el (sub)dominio no está dado
+        // de alta en hPanel apuntando a esa carpeta, el deploy termina "OK" contra un directorio
+        // que ningún vhost sirve. El warning de abajo es lo que evita que eso se pierda en
+        // silencio: no lo saques.
+        $parent_check = $this->exec_hosting_ssh(
+            $step,
+            'test -d ' . escapeshellarg($spa_parent_dir)
+            . ' && echo SPA_PARENT_EXISTS || echo SPA_PARENT_MISSING',
+            false
+        );
+
+        $this->exec_hosting_ssh($step, 'mkdir -p ' . escapeshellarg($spa_parent_dir));
+
+        // Prohibido str_contains en PHP 7.4: se usa strpos !== false.
+        if (strpos($parent_check, 'SPA_PARENT_MISSING') !== false) {
+            $this->log(
+                $step,
+                "El directorio {$spa_parent_dir} no existía y se acaba de crear. Revisá que el "
+                . '(sub)dominio esté dado de alta en hPanel apuntando a la carpeta del SPA: si no '
+                . 'lo está, el deploy va a terminar bien pero la tienda no va a responder.',
+                'warning'
+            );
+        }
     }
 
     /**
