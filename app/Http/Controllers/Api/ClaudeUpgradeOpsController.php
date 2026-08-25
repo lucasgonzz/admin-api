@@ -354,9 +354,12 @@ class ClaudeUpgradeOpsController extends Controller
         /* Reinicio limpio, igual que el panel. */
         $upgrade->deployment_logs()->delete();
 
+        /* `deployment_running_since` acompaña SIEMPRE a `deployment_status => 'running'`: es el
+         * ancla con la que `deployments:vencer-colgados` decide si esto está colgado. */
         $upgrade->update([
-            'deployment_status'     => 'running',
-            'deployment_started_at' => now(),
+            'deployment_status'        => 'running',
+            'deployment_started_at'    => now(),
+            'deployment_running_since' => now(),
         ]);
 
         /* 🔴 onConnection('database') explícito: sin esto el pipeline SSH entero correría adentro
@@ -554,7 +557,12 @@ class ClaudeUpgradeOpsController extends Controller
             return $this->error_422($rechazo_del_gate['mensaje'], $rechazo_del_gate['detalle']);
         }
 
-        $upgrade->update(['deployment_status' => 'running']);
+        /* Sello del tramo: sin esto, un upgrade que estuvo días en `paused` entraría a `running`
+         * con el ancla vieja y el vencimiento lo mataría en el primer tick. */
+        $upgrade->update([
+            'deployment_status'        => 'running',
+            'deployment_running_since' => now(),
+        ]);
 
         /* 🔴 onConnection('database') explícito. */
         RunDeploymentJob::dispatch($upgrade, self::ETAPA_POST_CIERRE)->onConnection(self::CONEXION_DE_COLA);
@@ -631,7 +639,12 @@ class ClaudeUpgradeOpsController extends Controller
             );
         }
 
-        $upgrade->update(['deployment_status' => 'running']);
+        /* Sello del tramo: sin esto, un upgrade que estuvo días en `paused` entraría a `running`
+         * con el ancla vieja y el vencimiento lo mataría en el primer tick. */
+        $upgrade->update([
+            'deployment_status'        => 'running',
+            'deployment_running_since' => now(),
+        ]);
 
         /* 🔴 onConnection('database') explícito. */
         RunDeploymentJob::dispatch($upgrade, self::ETAPA_CONFIGURACION)->onConnection(self::CONEXION_DE_COLA);

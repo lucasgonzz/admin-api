@@ -38,15 +38,26 @@ return [
             'driver' => 'database',
             'table' => 'jobs',
             'queue' => 'default',
-            /* 🔴 660 y no los 90 de siempre (misión 60). `retry_after` tiene que ser MAYOR que el
-             * timeout del job más largo de esta conexión, y desde esta misión el `RunDemoSetupJob`
-             * corre acá con `$timeout = 600`. Con 90, un setup real —que tarda hasta dos minutos—
-             * volvía a quedar disponible mientras el primer worker lo seguía corriendo bien: el
-             * worker del minuto siguiente lo reservaba, veía `attempts > tries` y lo mandaba a
-             * `failed_jobs` con MaxAttemptsExceededException. No habría doble `migrate:fresh` (el
-             * claim atómico lo tapa), pero `failed_jobs` se llenaría de fallos falsos, que es lo
-             * primero que va a mirar el próximo que venga a debuggear esto. */
-            'retry_after' => 660,
+            /* 🔴 `retry_after` tiene que ser MAYOR que el timeout del job más largo de esta
+             * conexión. Si no, el job vuelve a quedar disponible mientras el primer worker lo sigue
+             * corriendo bien: el worker del tick siguiente lo reserva, ve `attempts > tries` y lo
+             * manda a `failed_jobs` con MaxAttemptsExceededException. No hay doble ejecución
+             * (Laravel falla antes de `handle()`), pero `failed_jobs` se llena de fallos falsos y
+             * `salud.jobs_en_cola` pasa a leer 0 para un trabajo que sigue vivo — o sea, mienten
+             * justo las dos señales que uno mira para debuggear esto. Con los 90 de siempre le
+             * pasaba al `RunDemoSetupJob` ($timeout = 600), que fue el caso que lo destapó en la
+             * misión 60.
+             *
+             * 1860 = 1800 + 60 (misión 61). El job más largo de esta conexión NO es
+             * `RunDemoSetupJob` sino `RunDeploymentJob`, con `$timeout = 1800`: ese cálculo quedó
+             * viejo cuando `ClaudeUpgradeOpsController` empezó a encolar deployments acá, y la
+             * misión 61 —que manda también los cuatro despachos del panel a esta conexión— lo
+             * volvió el caso normal en vez de la excepción. Con los 660 anteriores, TODO deployment
+             * de más de once minutos —que son casi todos: `npm ci` + `npm run build` + dos zips +
+             * `composer install`— se marcaba fallido sin serlo.
+             *
+             * Si algún día un job de esta conexión sube su `$timeout`, este número sube con él. */
+            'retry_after' => 1860,
             'after_commit' => false,
         ],
 
