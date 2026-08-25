@@ -263,17 +263,26 @@ class LeadMessage extends Model
                 continue;
             }
 
-            $fecha_item = isset($item['fecha']) ? trim((string) $item['fecha']) : '';
+            /* 🔴 is_scalar antes de cada cast, y no (string) a secas. `horarios_ofrecidos` lo
+             * escribe el modelo de lenguaje y se guarda crudo, sin validar forma: un
+             * {"fecha": ["2026-08-25"]} alcanza para que el cast emita "Array to string
+             * conversion". Y en Laravel un E_NOTICE NO es cosmético — HandleExceptions corre con
+             * error_reporting(-1) y lo convierte en ErrorException. Esa excepción no es
+             * InvalidArgumentException, así que se saltearía el catch que devuelve 422 Y el
+             * release() del lock de la instancia: el lock quedaría tomado sus 8s de TTL y toda
+             * otra aprobación sobre esa demo caería en el camino de "no se pudo tomar el lock",
+             * marcando para intervención humana a leads que no tenían nada. */
+            $fecha_item = isset($item['fecha']) && is_scalar($item['fecha']) ? trim((string) $item['fecha']) : '';
             if ($fecha_item === '' || $fecha_item !== $fecha) {
                 continue;
             }
 
-            $desde = self::normalizar_hora_ofrecida(isset($item['desde']) ? (string) $item['desde'] : '');
+            $desde = self::normalizar_hora_ofrecida(isset($item['desde']) && is_scalar($item['desde']) ? (string) $item['desde'] : '');
             if ($desde === '') {
                 continue;
             }
 
-            $hasta = self::normalizar_hora_ofrecida(isset($item['hasta']) ? (string) $item['hasta'] : '');
+            $hasta = self::normalizar_hora_ofrecida(isset($item['hasta']) && is_scalar($item['hasta']) ? (string) $item['hasta'] : '');
             /* Declaración mal formada (hasta vacío, ilegible o anterior al desde): se trata como
              * un punto, no como un rango abierto. */
             if ($hasta === '' || $hasta < $desde) {
