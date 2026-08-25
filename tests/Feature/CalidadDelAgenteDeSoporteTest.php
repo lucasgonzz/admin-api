@@ -10,7 +10,9 @@ use App\Models\SupportMessageAttachment;
 use App\Models\SupportTicket;
 use App\Services\SupportAiImageCollector;
 use App\Services\SupportAiSuggestionService;
+use App\Services\ClientPhoneDirectory;
 use App\Services\SupportWhatsappOpenerService;
+use App\Services\WhatsappSessionWindowService;
 use App\Services\WhatsappSendService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
@@ -111,7 +113,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
         ]);
 
         $path = 'support_messages/' . $ticket->id . '/' . $nombre;
-        $contenido = str_repeat('x', $bytes);
+        $contenido = $this->png_de_verdad($bytes);
 
         if ($en_disco) {
             Storage::disk('public')->put($path, $contenido);
@@ -122,10 +124,34 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
             'disk'               => 'public',
             'path'               => $path,
             'mime'               => $mime,
-            'size'               => $bytes,
+            'size'               => strlen($contenido),
         ]);
 
         return $mensaje;
+    }
+
+    /**
+     * Un PNG valido de 1x1, opcionalmente inflado hasta el tamaño pedido.
+     *
+     * Tiene que ser una imagen DE VERDAD: el collector resuelve el media_type leyendo los bytes
+     * y no la columna, justamente para que una columna mal cargada no le mande a la API un tipo
+     * que no corresponde. Con bytes de mentira no se probaria nada de eso.
+     *
+     * @param int $bytes_minimos Tamaño al que inflar el archivo, si hace falta.
+     *
+     * @return string
+     */
+    private function png_de_verdad(int $bytes_minimos = 0): string
+    {
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC');
+
+        // Se rellena DESPUES del IEND: getimagesizefromstring lo sigue leyendo como PNG valido
+        // y el archivo pesa lo que el test necesite.
+        if ($bytes_minimos > strlen($png)) {
+            $png .= str_repeat('x', $bytes_minimos - strlen($png));
+        }
+
+        return $png;
     }
 
     /**
@@ -135,7 +161,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
      *
      * @return WhatsappSendService
      */
-    private function espiar_sender(int $falla_en_la_parte = 0): WhatsappSendService
+    private function espiar_sender(int $falla_en_la_parte = 0, bool $transitorio = false): WhatsappSendService
     {
         $espia = new class extends WhatsappSendService {
             /** @var array<int, string> Textos enviados, en orden. */
@@ -157,17 +183,46 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
                 return 'wamid.' . count($this->textos);
             }
 
+            /** @var bool Si el fallo simulado es transitorio (409/429/5xx). */
+            public $transitorio = false;
+
             public function last_send_was_transient(): bool
             {
-                // Sin esto, el reintento espera 1500ms y 3500ms de verdad y el test se arrastra.
-                return false;
+                return $this->transitorio;
             }
         };
 
         $espia->falla_en = $falla_en_la_parte;
+        $espia->transitorio = $transitorio;
         $this->app->instance(WhatsappSendService::class, $espia);
 
         return $espia;
+    }
+
+    /**
+     * El opener con las pausas anuladas.
+     *
+     * Las esperas son reales y necesarias en producción —1200ms entre partes, 1500ms y 3500ms
+     * de backoff—, pero acá sumarían segundos a cada corrida sin probar nada.
+     *
+     * @return SupportWhatsappOpenerService
+     */
+    private function opener_sin_pausas(): SupportWhatsappOpenerService
+    {
+        $opener = new class(
+            app(WhatsappSendService::class),
+            app(WhatsappSessionWindowService::class),
+            app(ClientPhoneDirectory::class)
+        ) extends SupportWhatsappOpenerService {
+            protected function pausar(int $microsegundos): void
+            {
+                // A propósito: en el test no se espera.
+            }
+        };
+
+        $this->app->instance(SupportWhatsappOpenerService::class, $opener);
+
+        return $opener;
     }
 
     /**
@@ -205,7 +260,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
         $this->assertCount(1, $imagenes, 'No se juntó la imagen que mandó el cliente.');
         $this->assertSame('image/png', $imagenes[0]['media_type']);
-        $this->assertSame(base64_encode(str_repeat('x', 64)), $imagenes[0]['data']);
+        $this->assertSame(base64_encode($this->png_de_verdad(64)), $imagenes[0]['data']);
     }
 
     /**
@@ -259,7 +314,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
         $imagenes = app(SupportAiImageCollector::class)->collect((int) $ticket->id);
 
         $this->assertCount(1, $imagenes, 'Arrastró imágenes de antes de la última respuesta del operador.');
-        $this->assertSame(base64_encode(str_repeat('x', 128)), $imagenes[0]['data'], 'Mandó la imagen vieja en vez de la nueva.');
+        $this->assertSame(base64_encode($this->png_de_verdad(128)), $imagenes[0]['data'], 'Mando la imagen vieja en vez de la nueva.');
     }
 
     /**
@@ -344,7 +399,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
         $mensaje = $this->crear_mensaje_del_agente($ticket, "Hola, ya lo vi.\n---\nEs el aviso de stock negativo.\n---\n¿Querés que te lo desactive?");
 
-        $resultado = app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $mensaje, 'Lucas');
+        $resultado = $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
 
         $this->assertSame('sent', $resultado['delivery']);
         $this->assertCount(3, $espia->textos, 'No salió partido en tres mensajes.');
@@ -382,7 +437,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
             'delivered_at'      => now(),
         ]);
 
-        app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $mensaje, 'Lucas');
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
 
         $this->assertCount(1, $espia->textos, 'Se partió el mensaje de una persona.');
     }
@@ -410,7 +465,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
         $espia = $this->espiar_sender();
         $mensaje = $this->crear_mensaje_del_agente($ticket, "Una parte\n---\ny otra parte");
 
-        $resultado = app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $mensaje, 'Lucas');
+        $resultado = $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
 
         $this->assertCount(0, $espia->textos, 'Mandó texto libre con la ventana cerrada.');
         $this->assertTrue((bool) $resultado['used_template'], 'No salió por plantilla.');
@@ -432,7 +487,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
         $mensaje = $this->crear_mensaje_del_agente($ticket, "Uno\n---\nDos\n---\nTres");
 
-        $resultado = app(SupportWhatsappOpenerService::class)->deliver_follow_up($ticket, $mensaje, 'Lucas');
+        $resultado = $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
 
         $this->assertSame('partial', $resultado['delivery'], 'Un envío a medias se registró como si fuera entero, o como si no hubiera salido nada.');
         $this->assertSame(1, $resultado['sent_parts']);
@@ -440,6 +495,146 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
         // No se manda la tercera si la segunda nunca llegó.
         $this->assertCount(2, $espia->textos, 'Siguió mandando partes después de que una falló.');
+    }
+
+    /**
+     * En un envio parcial NO se pierde el texto que no salio.
+     *
+     * Es el defecto central que tuvo la primera version de esto: el body se pisaba con la parte
+     * que habia salido, y el resto no quedaba en ningun lado -ni en la base, ni en el log, ni en
+     * la pantalla-. El cliente recibia media respuesta y la otra mitad desaparecia del sistema.
+     *
+     * @return void
+     */
+    public function test_el_texto_que_no_salio_queda_en_el_hilo()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender(2);
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Ya vi la captura.\n---\nEs el aviso de stock negativo, se saca en Config.\n---\nTe lo dejo desactivado?");
+
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        $filas = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('sender_type', 'admin')
+            ->orderBy('id')
+            ->get();
+
+        $this->assertCount(3, $filas, 'Las partes que no salieron no quedaron en el hilo.');
+
+        $textos = $filas->pluck('body')->all();
+        $this->assertSame('Es el aviso de stock negativo, se saca en Config.', $textos[1], 'Se perdio el texto de la parte que no salio.');
+        $this->assertSame('Te lo dejo desactivado?', $textos[2], 'Se perdio el texto de la ultima parte.');
+    }
+
+    /**
+     * La parte que SI salio no queda marcada como no entregada.
+     *
+     * Marcarla seria el mismo error del incidente de leads al reves: decirle al operador que no
+     * llego algo que el cliente ya recibio. Y encima el boton de reintentar no la tocaria,
+     * porque ya tiene id de Meta, asi que el cartel rojo no se iria nunca.
+     *
+     * @return void
+     */
+    public function test_la_parte_que_salio_no_queda_marcada_como_fallida()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender(2);
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Uno\n---\nDos\n---\nTres");
+
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        $primera = SupportMessage::find($mensaje->id);
+        $this->assertNotNull($primera->whatsapp_message_id, 'La parte que salio quedo sin id de Meta.');
+        $this->assertNull($primera->remote_delivery_status, 'Se marco como no entregada una parte que el cliente si recibio.');
+
+        // Y las que faltan quedan justo al reves: sin id y marcadas, que es lo que las hace
+        // reintentables desde la conversacion.
+        $pendientes = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('sender_type', 'admin')
+            ->whereNull('whatsapp_message_id')
+            ->get();
+
+        $this->assertCount(2, $pendientes);
+        foreach ($pendientes as $pendiente) {
+            $this->assertSame('not_received', $pendiente->remote_delivery_status);
+        }
+    }
+
+    /**
+     * Un 409 de Kapso se reintenta y la parte termina saliendo.
+     *
+     * Es el camino que motivo todo el mecanismo -Kapso rechaza con 409 cuando hay otro mensaje
+     * en vuelo para la misma conversacion- y el que la primera version del test no ejercitaba,
+     * porque el espia anulaba last_send_was_transient() y el reintento nunca corria.
+     *
+     * @return void
+     */
+    public function test_un_fallo_transitorio_se_reintenta_y_la_parte_sale()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender(2, true);
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Uno\n---\nDos");
+
+        $resultado = $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        // Tres llamadas: la parte 1, la parte 2 que falla, y la parte 2 reintentada.
+        $this->assertCount(3, $espia->textos, 'No reintento la parte que fallo por un motivo transitorio.');
+        $this->assertSame('Dos', $espia->textos[2]);
+        $this->assertSame('sent', $resultado['delivery'], 'El reintento salio bien pero se registro como parcial.');
+    }
+
+    /**
+     * Mas de tres partes se recortan a tres.
+     *
+     * El prompt le pide dos o tres, pero es un modelo: ocho separadores serian ocho mensajes
+     * seguidos al cliente y ocho pausas adentro del request del operador.
+     *
+     * @return void
+     */
+    public function test_mas_de_tres_partes_se_recortan()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Uno\n---\nDos\n---\nTres\n---\nCuatro\n---\nCinco");
+
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        $this->assertCount(3, $espia->textos, 'Mando mas mensajes de los que el tope permite.');
+        $this->assertStringContainsString('Tres', $espia->textos[2]);
+        $this->assertStringContainsString('Cinco', $espia->textos[2], 'Se perdio texto al recortar las partes.');
+    }
+
+    /**
+     * Un mensaje del agente con adjunto no se parte.
+     *
+     * @return void
+     */
+    public function test_un_mensaje_con_adjunto_no_se_parte()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $espia  = $this->espiar_sender();
+
+        $mensaje = $this->crear_mensaje_del_agente($ticket, "Mira esto\n---\ny esto");
+        SupportMessageAttachment::create([
+            'support_message_id' => $mensaje->id,
+            'disk'               => 'public',
+            'path'               => 'support_messages/' . $ticket->id . '/adjunto.png',
+            'mime'               => 'image/png',
+            'size'               => 10,
+        ]);
+
+        $this->opener_sin_pausas()->deliver_follow_up($ticket, $mensaje, 'Lucas');
+
+        $this->assertCount(0, $espia->textos, 'Un mensaje con adjunto tiene que ir por el camino de siempre, no partido.');
     }
 
     /**
@@ -472,7 +667,9 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
         app(SupportAiSuggestionService::class)->generate($ticket);
 
-        Http::assertSent(function ($request) {
+        $esperado = base64_encode($this->png_de_verdad(64));
+
+        Http::assertSent(function ($request) use ($esperado) {
             if (strpos($request->url(), 'api.anthropic.com') === false) {
                 return false;
             }
@@ -497,7 +694,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
             return $imagen['source']['type'] === 'base64'
                 && $imagen['source']['media_type'] === 'image/png'
-                && $imagen['source']['data'] === base64_encode(str_repeat('x', 64));
+                && $imagen['source']['data'] === $esperado;
         });
     }
 
@@ -533,6 +730,91 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
 
             return is_string($request->data()['messages'][0]['content']);
         });
+    }
+
+    /**
+     * El tipo que viaja a la API sale de los BYTES, no de la columna.
+     *
+     * Si la columna dice PNG y los bytes son otra cosa, la API devuelve 400 y `generate()` sale
+     * sin ninguna sugerencia: una columna mal cargada apagaria al agente para toda esa
+     * conversacion. Aca la columna miente diciendo jpeg y el archivo es un PNG de verdad.
+     *
+     * @return void
+     */
+    public function test_el_tipo_real_le_gana_a_la_columna()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->agregar_imagen($ticket, 'mentirosa.png', 'image/jpeg');
+
+        $imagenes = app(SupportAiImageCollector::class)->collect((int) $ticket->id);
+
+        $this->assertCount(1, $imagenes);
+        $this->assertSame('image/png', $imagenes[0]['media_type'], 'Le mando a la API el tipo de la columna en vez del real.');
+    }
+
+    /**
+     * `image/jpg` no se descarta: es como lo reporta Meta y este repo ya lo sabe.
+     *
+     * @return void
+     */
+    public function test_image_jpg_no_se_descarta()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->agregar_imagen($ticket, 'de-meta.jpg', 'image/jpg');
+
+        $this->assertCount(
+            1,
+            app(SupportAiImageCollector::class)->collect((int) $ticket->id),
+            'Se descarto una imagen que Meta manda como image/jpg y el cliente si mando.'
+        );
+    }
+
+    /**
+     * Un mime con parametros tampoco se descarta.
+     *
+     * @return void
+     */
+    public function test_un_mime_con_parametros_no_se_descarta()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->agregar_imagen($ticket, 'con-charset.png', 'image/png; charset=binary');
+
+        $this->assertCount(1, app(SupportAiImageCollector::class)->collect((int) $ticket->id));
+    }
+
+    /**
+     * Un archivo que no es una imagen se descarta aunque la columna diga que si.
+     *
+     * @return void
+     */
+    public function test_un_archivo_que_no_es_imagen_se_descarta()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+
+        $mensaje = SupportMessage::create([
+            'support_ticket_id' => $ticket->id,
+            'sender_type'       => 'user',
+            'kind'              => 'image',
+            'body'              => '',
+            'delivered_at'      => now(),
+        ]);
+
+        $path = 'support_messages/' . $ticket->id . '/no-es-imagen.png';
+        Storage::disk('public')->put($path, 'esto es texto plano, no una imagen');
+
+        SupportMessageAttachment::create([
+            'support_message_id' => $mensaje->id,
+            'disk'               => 'public',
+            'path'               => $path,
+            'mime'               => 'image/png',
+            'size'               => 34,
+        ]);
+
+        $this->assertCount(0, app(SupportAiImageCollector::class)->collect((int) $ticket->id));
     }
 
     /**

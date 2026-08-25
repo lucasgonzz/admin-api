@@ -345,7 +345,9 @@ SYSTEM;
     protected function build_user_blocks(SupportTicket $ticket, string $user_content)
     {
         try {
-            $imagenes = app(SupportAiImageCollector::class)->collect((int) $ticket->id);
+            $collector = app(SupportAiImageCollector::class);
+            $imagenes = $collector->collect((int) $ticket->id);
+            $descartadas = $collector->descartadas();
         } catch (\Throwable $exception) {
             Log::channel('daily')->warning('SupportAiSuggestionService: no se pudieron juntar las imágenes.', [
                 'ticket_id' => $ticket->id,
@@ -355,8 +357,17 @@ SYSTEM;
             return $user_content;
         }
 
+        // Aviso de descarte: el historial le va a mostrar igual que hubo una imagen. Si no se
+        // le dice que no la recibió, lo más probable es que invente qué decía.
+        $aviso = '';
+        if ($descartadas > 0) {
+            $aviso = "\n\nAVISO: el cliente mandó " . $descartadas . " imagen(es) más que no se pudieron adjuntar "
+                . "a esta consulta (formato o tamaño que no se puede procesar). NO supongas qué decían. Si tu "
+                . "respuesta depende de verlas, pedile que las mande de nuevo como foto normal, no como archivo.";
+        }
+
         if (empty($imagenes)) {
-            return $user_content;
+            return $aviso !== '' ? $user_content . $aviso : $user_content;
         }
 
         $bloques = [];
@@ -380,7 +391,7 @@ SYSTEM;
 
         $bloques[] = [
             'type' => 'text',
-            'text' => $user_content,
+            'text' => $user_content . $aviso,
         ];
 
         return $bloques;

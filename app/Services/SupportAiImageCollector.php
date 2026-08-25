@@ -16,8 +16,9 @@ use Illuminate\Support\Facades\Storage;
  * Se manda un conjunto ACOTADO a propósito. Tres razones, en orden de importancia:
  *   1. El agentic loop reenvía el primer mensaje en cada iteración (hasta cinco), así que cada
  *      imagen se paga hasta cinco veces por consulta.
- *   2. Un request con más de veinte imágenes activa un límite de dimensión más estricto de Meta
- *      para TODAS las imágenes del request, no solo las que sobran.
+ *   2. Un request con más de veinte imágenes activa un límite de dimensión más estricto de la
+ *      API de Anthropic para TODAS las imágenes del request, no solo las que sobran. (Es de
+ *      Anthropic, no de Meta: acá el request va a api.anthropic.com, WhatsApp no participa.)
  *   3. Las fotos viejas de un ticket largo casi nunca son de lo que el cliente está preguntando
  *      ahora; meterlas encima confunde al agente en vez de ayudarlo.
  */
@@ -31,10 +32,29 @@ class SupportAiImageCollector
     /**
      * Tope por imagen, en bytes del archivo original.
      *
-     * La API rechaza a partir de 10 MB de base64, y base64 infla cerca de un 33%: 7 MB de
-     * archivo quedan holgados por debajo, y cualquier captura de pantalla real pesa mucho menos.
+     * 2,5 MB de archivo son unos 3,3 MB de base64. Es holgado para cualquier captura de
+     * pantalla real y deja las tres imagenes bien lejos del limite del request (ver
+     * MAX_BASE64_TOTAL). El tope anterior de 7 MB pasaba el limite POR IMAGEN por dos por
+     * ciento y no miraba el acumulado en absoluto.
      */
-    const MAX_BYTES_PER_IMAGE = 7340032;
+    const MAX_BYTES_PER_IMAGE = 2621440;
+
+    /**
+     * Tope del acumulado de las tres imagenes, en bytes de base64.
+     *
+     * El limite del request entero de la API es 32 MB, y adentro de ese request tambien viajan
+     * el system prompt, el historial y -en las iteraciones 2 a 5 del agentic loop- los archivos
+     * del manual que el agente fue leyendo, sin truncar. Toparlo solo por imagen no alcanzaba:
+     * tres imagenes en el tope viejo daban 29,4 MB de base64 y dejaban 2,6 MB para todo lo
+     * demas, asi que a la tercera o cuarta iteracion el request se pasaba y la API devolvia un
+     * error que dejaba al operador sin ninguna sugerencia.
+     */
+    const MAX_BASE64_TOTAL = 10485760;
+
+    /**
+     * Lado maximo, en pixeles. Arriba de esto la API rechaza el request entero.
+     */
+    const MAX_DIMENSION = 8000;
 
     /**
      * Formatos que la API acepta. No hay otros: un BMP o un HEIC se descartan.
@@ -42,6 +62,27 @@ class SupportAiImageCollector
      * @var array<int, string>
      */
     const SUPPORTED_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+    /**
+     * Cuántas imágenes se descartaron en la última corrida de collect().
+     *
+     * Sirve para avisarle al agente. Sin ese aviso, el historial le muestra que hubo una imagen
+     * (la línea `[IMAGE]`), la imagen no le llega, y nadie le dice que no le llegó: es la receta
+     * para que invente qué decía el cartel.
+     *
+     * @var int
+     */
+    private $descartadas = 0;
+
+    /**
+     * Cuántas imágenes quedaron afuera en la última corrida.
+     *
+     * @return int
+     */
+    public function descartadas(): int
+    {
+        return $this->descartadas;
+    }
 
     /**
      * Devuelve las últimas imágenes que mandó el cliente en este ticket.
@@ -58,6 +99,8 @@ class SupportAiImageCollector
     public function collect(int $ticket_id): array
     {
         $desde_id = $this->last_admin_message_id($ticket_id);
+        $acumulado = 0;
+        $this->descartadas = 0;
 
         $mensajes = SupportMessage::query()
             ->where('support_ticket_id', $ticket_id)
@@ -76,9 +119,27 @@ class SupportAiImageCollector
                 }
 
                 $imagen = $this->read_attachment($adjunto);
-                if ($imagen !== null) {
-                    $imagenes[] = $imagen;
+                if ($imagen === null) {
+                    $this->descartadas++;
+
+                    continue;
                 }
+
+                // Tope del acumulado: la que no entra se descarta, no se manda un request que
+                // la API va a rechazar entero y que dejaria al operador sin sugerencia.
+                $peso = strlen($imagen['data']);
+                if ($acumulado + $peso > self::MAX_BASE64_TOTAL) {
+                    $this->descartadas++;
+                    Log::channel('daily')->info('SupportAiImageCollector: imagen descartada por el tope acumulado.', [
+                        'attachment_id' => $adjunto->id,
+                        'acumulado'     => $acumulado,
+                    ]);
+
+                    continue;
+                }
+
+                $acumulado += $peso;
+                $imagenes[] = $imagen;
             }
         }
 
@@ -118,8 +179,12 @@ class SupportAiImageCollector
      */
     private function read_attachment($adjunto)
     {
-        $mime = strtolower(trim((string) ($adjunto->mime ?? '')));
-        if (! in_array($mime, self::SUPPORTED_MIMES, true)) {
+        // La columna se usa solo como filtro barato de primera pasada. Se normaliza porque el
+        // mime lo escribe Kapso tal como venga: este mismo repo ya sabe que Meta manda
+        // `image/jpg` (ver el mapa de WhatsappInboundMediaService::resolve_extension), y
+        // tambien llegan mimes con parametros del tipo `image/jpeg; charset=binary`.
+        $mime = $this->normalizar_mime((string) ($adjunto->mime ?? ''));
+        if ($mime !== '' && ! in_array($mime, self::SUPPORTED_MIMES, true)) {
             return null;
         }
 
@@ -160,15 +225,61 @@ class SupportAiImageCollector
             return null;
         }
 
-        // El tope real es el del base64, no el del archivo: se re-chequea con el tamaño de
-        // verdad y no con la columna `size`, que un adjunto viejo puede tener mal cargada.
+        // Re-chequeo con el tamaño de verdad y no con la columna `size`, que en los adjuntos
+        // que vienen del ERP del cliente se copia sin validar.
         if (strlen($binario) > self::MAX_BYTES_PER_IMAGE) {
             return null;
         }
 
+        // 🔴 El media_type que viaja sale de los BYTES, nunca de la columna. Si la columna dice
+        // `image/png` y los bytes son JPEG, la API devuelve 400 y `generate()` sale sin ninguna
+        // sugerencia: una columna mal cargada apagaria al agente para toda esa conversación.
+        // De paso se leen las dimensiones, porque arriba de 8000px la API rechaza igual.
+        $info = @getimagesizefromstring($binario);
+        if ($info === false || empty($info['mime'])) {
+            return null;
+        }
+
+        $mime_real = $this->normalizar_mime((string) $info['mime']);
+        if (! in_array($mime_real, self::SUPPORTED_MIMES, true)) {
+            return null;
+        }
+
+        if ((int) $info[0] > self::MAX_DIMENSION || (int) $info[1] > self::MAX_DIMENSION) {
+            Log::channel('daily')->info('SupportAiImageCollector: imagen descartada por dimensiones.', [
+                'attachment_id' => $adjunto->id,
+                'ancho'         => $info[0],
+                'alto'          => $info[1],
+            ]);
+
+            return null;
+        }
+
         return [
-            'media_type' => $mime,
+            'media_type' => $mime_real,
             'data'       => base64_encode($binario),
         ];
+    }
+
+    /**
+     * Normaliza un mime para poder compararlo.
+     *
+     * Baja a minusculas, corta los parametros despues del `;` y unifica `image/jpg`, que es
+     * como lo reporta Meta a veces, con el `image/jpeg` que espera la API.
+     *
+     * @param string $mime Mime crudo.
+     *
+     * @return string
+     */
+    private function normalizar_mime(string $mime): string
+    {
+        $limpio = strtolower(trim($mime));
+
+        $punto_y_coma = strpos($limpio, ';');
+        if ($punto_y_coma !== false) {
+            $limpio = trim(substr($limpio, 0, $punto_y_coma));
+        }
+
+        return $limpio === 'image/jpg' ? 'image/jpeg' : $limpio;
     }
 }
