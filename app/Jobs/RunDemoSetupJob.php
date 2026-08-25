@@ -47,13 +47,39 @@ class RunDemoSetupJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     /**
-     * Tiempo máximo de ejecución en segundos. El setup remoto hace migraciones y seeders sobre la
-     * instancia de la demo: el propio service usa timeout de config('services.client_api.timeout')
-     * por 20 (300s con el default), así que este techo va por encima.
+     * Tiempo máximo de ejecución en segundos: cuánto deja el worker corriendo este job antes de
+     * matarle el proceso.
+     *
+     * 🔴 **INVARIANTE: este techo tiene que quedar POR ENCIMA del que pide el service**, que desde
+     * la misión cruzada del 25/8/2026 es `config('services.client_api.demo_setup_timeout')` — 900 s
+     * por default, ya NO el `services.client_api.timeout` × 20 que decía este docblock. Si el
+     * worker corta primero, el proceso muere antes de que el service pueda ejecutar su
+     * `catch (ConnectionException)`, así que **el lead nunca llega a `sin_confirmar` y se queda en
+     * `ejecutandose`**: todo el manejo del timeout de `RunDemoSetupService` se vuelve código muerto
+     * justo por el camino del formulario inmersivo, que es el principal desde la misión 46.
+     *
+     * Es lo que pasó entre los dos commits de esta misma misión: el service subió a 900 y este
+     * techo se quedó en 600, o sea diez minutos contra quince. Quien vuelva a mover
+     * `services.client_api.demo_setup_timeout` tiene que mover este número en el mismo commit.
+     *
+     * Los tres números que actúan sobre el mismo job, y en qué orden tienen que estar:
+     *
+     *   1. `services.client_api.demo_setup_timeout` — 900 s. El service deja de esperar la
+     *      respuesta y escribe `sin_confirmar`.
+     *   2. `$timeout` de acá — 1200 s. El worker mata el proceso. Tiene que ser MAYOR que 1, con
+     *      margen suficiente para que el service alcance a escribir el estado.
+     *   3. `retry_after` de la conexión `database` (`config/queue.php`) — 2400 s. Tiene que ser
+     *      MAYOR que 2, o el job vuelve a quedar disponible mientras el primer worker lo sigue
+     *      corriendo y `failed_jobs` se llena de fallos falsos.
+     *
+     * 1200 y no 950: los 900 son el techo de UNA llamada, y antes de ella `run()` emite el token de
+     * ingreso, congela el plan y arma el payload contra la base. Con 950 el margen sobre la corrida
+     * sana medida el 25/8/2026 (565,7 s) sería de segundos; con 1200 son cinco minutos, y sigue muy
+     * por debajo del `retry_after` de 2400, así que `config/queue.php` no se toca.
      *
      * @var int
      */
-    public $timeout = 600;
+    public $timeout = 1200;
 
     /**
      * 🔴 Sin reintentos. Un reintento automático volvería a hacer `migrate:fresh` sobre una

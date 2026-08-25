@@ -47,6 +47,13 @@ return [
          * seguía perfectamente viva del otro lado —el endpoint corre con ignore_user_abort(true) y
          * set_time_limit(0)—, la marcaba `fallido`, el panel volvía a mostrar el botón, y el
          * segundo click le hacía otro migrate:fresh a la base que la primera estaba sembrando.
+         *
+         * 🔴 Si movés este número, movés `RunDemoSetupJob::$timeout` en el MISMO commit. El worker
+         * mata el proceso a los 1200 s, así que un techo de acá por encima de ése deja al service
+         * sin llegar nunca a su `catch (ConnectionException)`: el lead se queda en `ejecutandose`
+         * en vez de `sin_confirmar`, y todo el manejo del timeout se vuelve código muerto por el
+         * camino automático. Está explicado entero en el docblock de esa propiedad, con los tres
+         * umbrales y el orden en que tienen que estar.
          */
         'demo_setup_timeout' => env('CLIENT_API_DEMO_SETUP_TIMEOUT', 900),
     ],
