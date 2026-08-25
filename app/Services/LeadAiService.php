@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\AprobacionEnCursoException;
 use App\Exceptions\HorarioYaNoDisponibleException;
 use App\Events\LeadSuggestionCreated;
 use App\Services\CloserGoogleCalendarBusyService;
@@ -16,6 +17,7 @@ use App\Models\LeadPartner;
 use App\Models\LeadPipelineStatus;
 use App\Helpers\AppTime;
 use Carbon\Carbon;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -962,7 +964,7 @@ TXT;
          * la instancia no llega a preparar (el setup son 15 minutos antes). */
         if ($demo_id > 0 && $fecha_en_ventana && ! $hora_disponible) {
             $ventanas_sin_margen = null;
-            if ($this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
+            if ($this->rescate_del_margen_seguro($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
                 $hora_disponible = true;
                 /* La ventana extendida del slot rescatado tiene que salir de la MISMA grilla
                  * margen-0: en la grilla con margen ese slot no existe, así que su entrada en
@@ -1729,9 +1731,16 @@ TXT;
      *
      * 🔴 Lo que este método NO relaja: "ya pasó" (la grilla margen-0 sigue descartando un slot que
      * arrancó) y "lo ocupó otro" (la grilla pasa igual por la capa 1 de bloqueo por demo_id, con
-     * exclude_lead_id = este lead). O sea: no abre doble-booking. Sólo puede convertir un "no" en
-     * un "sí" cuando las tres cosas se dan juntas — está en un mensaje enviado a ESTE lead, no
-     * pasó, y nadie más lo tiene.
+     * exclude_lead_id = este lead). Sólo puede convertir un "no" en un "sí" cuando las tres cosas
+     * se dan juntas — está en un mensaje enviado a ESTE lead, no pasó, y nadie más lo tiene.
+     *
+     * ⚠️ Alcance exacto de esa garantía, para no afirmar de más: este método corre ADENTRO del lock
+     * `demo_slot_hold_{demo_id}`, así que ÉL no abre ninguna ventana de doble-booking. Pero existe
+     * una ventana PREEXISTENTE, anterior a este fix y fuera de su alcance: el lock se libera bastante
+     * antes del único $lead->save() que persiste demo_date/demo_start_time, así que dos aprobaciones
+     * concurrentes sobre la misma instancia pueden validar las dos y recién chocar al escribir. Ese
+     * agujero no se toca acá (es cirugía sobre el ciclo de vida del lock, decisión aparte): lo que
+     * este método garantiza es que no la ensancha.
      *
      * @param Lead       $lead                 Lead que está aceptando el horario.
      * @param int        $demo_id              Instancia física de demo.
@@ -1760,9 +1769,40 @@ TXT;
             return false;
         }
 
+        /* 🔴 Gate por fecha, y va ANTES de la consulta y de la grilla porque es el que saca el
+         * costo del camino mayoritario. El margen mínimo de anticipación SÓLO filtra slots de HOY:
+         * el filtro de compute_day_slots_for_demo() es `if ($is_today && $slot_start < $now_minutes
+         * + $margen)`. Para cualquier otra fecha, la grilla margen-0 devuelve exactamente lo mismo
+         * que la grilla con margen, así que el rescate no puede cambiar nada y recalcular sería
+         * pagar una grilla entera (N+1 medido: ~365 queries / ~475ms con una sola demo, y en
+         * producción hay 3) adentro de un lock con TTL de 8s, para nada.
+         *
+         * No sacar esto por creerlo redundante: agendar para mañana o más adelante es el caso
+         * mayoritario, y es justo el que este gate deja afuera. */
+        if ($demo_date !== AppTime::now()->format('Y-m-d')) {
+            return false;
+        }
+
         /* Primero la pregunta barata: ¿se lo ofrecimos nosotros? Una alucinación del modelo (un
          * horario que el lead nunca recibió) muere acá, sin pagar el recálculo de la grilla. */
         if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $demo_start)) {
+            /* 🔴 Alerta a propósito, y en warning: este es el único camino por el que el rescate
+             * NO dispara sin que haya pasado nada raro con el horario. Hay un guard conocido (ver
+             * el bloque que exige `horarios_ofrecidos` en el paquete del agente) que existe
+             * justamente porque el modelo a veces NO declara los horarios que ofreció; cuando eso
+             * pasa, el permiso no existe, el rescate no dispara y el síntoma del 25/8/2026 vuelve
+             * — sólo que ahora el lead queda mudo en vez de recibir un correctivo falso. Queremos
+             * poder verlo en el log en vez de deducirlo. */
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] El horario no se rescató del margen: no figura como ofrecido a este lead en ningún mensaje enviado.',
+                [
+                    'lead_id'    => $lead->id,
+                    'demo_id'    => $demo_id,
+                    'demo_date'  => $demo_date,
+                    'demo_start' => $demo_start,
+                ]
+            );
+
             return false;
         }
 
@@ -1773,11 +1813,21 @@ TXT;
         $snapshot_unused = null;
         $config_unused   = null;
         $ventanas_grilla = null;
-        /* La llamada va en UNA sola línea, igual que la de revalidar_horarios_ofrecidos(): el
+        /* Ventana de UN día en vez de self::DIAS_DISPONIBILIDAD, y es seguro: acá $demo_date ya es
+         * HOY (lo garantiza el gate de arriba), y prepare_slot_availability_context() con
+         * $specific_date recorre desde la fecha mínima aceptable —que en la dinámica nueva es hoy—
+         * hasta el mayor entre (mínima + days_ahead - 1) y la fecha pedida. Con days_ahead = 1 los
+         * dos extremos son hoy, así que working_days queda en [hoy]. Los slots de una fecha se
+         * calculan por fecha (blocked_by_demo[$demo_id][$fecha], closer_busy[$fecha]) y no dependen
+         * de qué otras fechas haya en la ventana, así que el resultado para $demo_date es idéntico
+         * al de la ventana completa — con una fracción de las queries, que es lo que importa
+         * cuando esto corre adentro de un lock con TTL de 8s.
+         *
+         * La llamada va en UNA sola línea, igual que la de revalidar_horarios_ofrecidos(): el
          * detector del §7 de la misión enumera los call sites que NO pasan margen, y es un awk
          * línea por línea. Partida en varias líneas, este call site aparecería como candidato en
          * cada triage futuro aunque el 0 esté puesto. */
-        $fresca = $this->build_availability_json(self::DIAS_DISPONIBILIDAD, $snapshot_unused, $demo_date, (int) $lead->id, true, 0, $config_unused, $ventanas_grilla);
+        $fresca = $this->build_availability_json(1, $snapshot_unused, $demo_date, (int) $lead->id, true, 0, $config_unused, $ventanas_grilla);
 
         $slots_por_fecha = isset($fresca['demos'][$demo_id]) && is_array($fresca['demos'][$demo_id])
             ? $fresca['demos'][$demo_id]
@@ -1806,6 +1856,51 @@ TXT;
     }
 
     /**
+     * Envoltorio fail-safe de oferta_vigente_sin_margen(): si el rescate revienta, se degrada a
+     * "no rescata" y el flujo sigue por el camino normal.
+     *
+     * 🔴 Por qué existe, y por qué los DOS llamadores entran por acá y no por el método directo:
+     * el rescate corre adentro del lock `demo_slot_hold_{demo_id}` y hace una consulta a base más
+     * una grilla completa. Si cualquiera de las dos tira (deadlock de MySQL, error en el armado de
+     * la grilla), la excepción se propaga, se saltea el release() del lock, y el lock queda tomado
+     * sus 8s de TTL: en esa ventana toda otra aprobación sobre esa misma instancia cae en el camino
+     * de "no se pudo tomar el lock". Un error de infraestructura no puede dejar un lock colgado ni
+     * tumbar una aprobación.
+     *
+     * Es la misma degradación segura que ya usa LeadSuggestionSendService alrededor de
+     * revalidar_horarios_ofrecidos(): se sigue, y queda constancia en el log.
+     *
+     * @param Lead       $lead
+     * @param int        $demo_id
+     * @param string     $demo_date
+     * @param string     $demo_start
+     * @param array|null $ventanas_sin_margen Referencia de salida (ver oferta_vigente_sin_margen()).
+     *
+     * @return bool true si el horario se rescata del margen; false también si el rescate falló.
+     */
+    protected function rescate_del_margen_seguro(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null): bool
+    {
+        try {
+            return $this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen);
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] Falló el rescate del margen de anticipación; se sigue por el camino normal (sin rescate).',
+                [
+                    'lead_id'    => $lead->id,
+                    'demo_id'    => $demo_id,
+                    'demo_date'  => $demo_date,
+                    'demo_start' => $demo_start,
+                    'error'      => $e->getMessage(),
+                ]
+            );
+
+            $ventanas_sin_margen = [];
+
+            return false;
+        }
+    }
+
+    /**
      * Frena una APROBACIÓN cuyo horario ya no está disponible: no se le envía nada al lead, se le
      * avisa al admin y se tira, para que LeadController devuelva 422.
      *
@@ -1822,8 +1917,16 @@ TXT;
      * LeadController devuelva 422") y el código contradecía. Esto no cambia un contrato: hace que
      * el código cumpla el que ya tenía escrito.
      *
-     * Mismo mecanismo que el bloque de horarios caducados de LeadSuggestionSendService (marca el
-     * lead, deja bloque rojo en el hilo, refresca el panel), que ya cumplía esta regla.
+     * Mismo mecanismo que el bloque de horarios caducados de LeadSuggestionSendService (pasa el
+     * mensaje a `rechazado` + requiere_verificacion, marca el lead, deja bloque rojo en el hilo,
+     * refresca el panel), que ya cumplía esta regla.
+     *
+     * 🔴 Esto es SÓLO para descartes LEGÍTIMOS y definitivos: el turno ya pasó, lo tomó otro lead,
+     * o la franja prometida ya no entra. Reintentar no los cambia, y por eso acá se paga el precio
+     * completo (lead marcado, tarea abierta, mensaje rechazado). Un timeout del lock de la
+     * instancia NO entra por acá: es contención transitoria y reintentable, y tiene su propia
+     * excepción (AprobacionEnCursoException), que no marca nada y sólo le pide al admin que vuelva
+     * a aprobar en unos segundos.
      *
      * @param Lead             $lead             Lead dueño de la conversación.
      * @param LeadMessage|null $existing_message Mensaje aprobado que se estaba aplicando.
@@ -1857,16 +1960,59 @@ TXT;
             (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $existing_message->id);
         }
 
-        /* 🔴 Update acotado a dos columnas sobre el query builder, y NO $lead->save(). Para cuando
-         * se llega acá, $lead ya tiene mutaciones en memoria de bloques anteriores del mismo
-         * método (cancelar_demo pudo haber limpiado demo_date, guardar_nombre pudo haber cambiado
+        /* 🔴 El mensaje NO puede quedar en `sugerido`, y esto no es cosmético del panel.
+         * build_user_content() sólo tiene rama especial para `rechazado` ("SISTEMA (sugerencia no
+         * enviada al lead)"); un `sugerido` cae en la rama genérica y se le manda a Claude como
+         * "[fecha] SISTEMA: <texto que confirma las 17:05>", así que la PRÓXIMA generación cree que
+         * al lead se le confirmó el turno — cuando no se le envió nada y no hay demo en la base.
+         * Además el panel seguiría mostrando el botón de aprobar sobre un paquete que ya se frenó,
+         * y LeadAiSuggestionScheduler::clear_stale_pending_suggestions() BORRA los `sugerido` en el
+         * próximo inbound, con lo que se perdería el rastro.
+         *
+         * Se reutiliza `rechazado` + requiere_verificacion, exactamente como el bloque de horarios
+         * caducados de LeadSuggestionSendService: no se inventa un estado nuevo, y el registro
+         * queda en el hilo (no se borra) para poder auditar qué se había aprobado y por qué no
+         * salió. */
+        if ($existing_message !== null) {
+            $existing_message->status                = 'rechazado';
+            $existing_message->requiere_verificacion = true;
+            $existing_message->save();
+        }
+
+        /* 🔴 Update acotado sobre el query builder, y NO $lead->save(). Para cuando se llega acá,
+         * $lead ya tiene mutaciones en memoria de bloques anteriores del mismo método
+         * (cancelar_demo pudo haber limpiado demo_date, guardar_nombre pudo haber cambiado
          * contact_name). Un save() las persistiría A MEDIAS: la demo vieja cancelada y la nueva sin
-         * agendar. Esto es exactamente lo que alguien "simplificaría" a $lead->save(): no se hace. */
+         * agendar. Esto es exactamente lo que alguien "simplificaría" a $lead->save(): no se hace.
+         *
+         * 🔴 Y se marca SOLO requiere_intervencion_humana: claude_auto_reply NO se apaga. Apagarlo
+         * deja al lead mudo — LeadAiSuggestionScheduler corta al toque si claude_auto_reply es
+         * false, así que el lead escribe "¿che, quedó lo de las 17:05?" y no pasa nada; y resolver
+         * requiere_intervencion_humana desde el panel NO lo vuelve a prender (LeadController lo
+         * documenta). Lucas pidió que quede pendiente, marcado para intervención humana y con el
+         * error visible en la conversación; apagar el agente es una consecuencia extra que no
+         * pidió. */
         Lead::query()->whereKey($lead->id)->update([
             'requiere_intervencion_humana' => true,
-            'claude_auto_reply'            => false,
         ]);
 
+        /* 🔴 Y alguien se tiene que enterar fuera del navegador. El camino normal de
+         * requiere_intervencion_humana (apply_parsed_response) crea una AdminTask, busca el
+         * is_default_task_assignee y notifica; acá, sin eso, el único aviso sería el toast del 422
+         * en la pantalla del admin que apretó aprobar — si cerró la pestaña o estaba aprobando en
+         * tanda, el lead se enfría sin que nada lo denuncie. Es el MISMO mecanismo, no una copia:
+         * el bloque se extrajo a crear_tarea_de_intervencion_humana() y lo llaman los dos. No tira
+         * nunca (try/catch adentro): fallar creando una tarea no puede impedir el freno. */
+        $this->crear_tarea_de_intervencion_humana(
+            $lead,
+            'No se envió la sugerencia aprobada: el turno del ' . $demo_date . ' a las ' . $demo_start
+            . ' ya no está disponible (' . $motivo . '). La demo no se agendó. Revisá la conversación y '
+            . 'pedí una sugerencia nueva con disponibilidad fresca.'
+        );
+
+        /* El log del hilo emite emit_conversation_updated() por dentro (ver
+         * LeadConversationErrorLogger::log()), así que acá NO se vuelve a emitir: serían dos
+         * eventos Pusher y dos GET de la conversación desde el SPA por un solo cambio. */
         (new LeadConversationErrorLogger())->log(
             (int) $lead->id,
             'No se envió: el horario que este mensaje confirmaba ya no está disponible',
@@ -1874,14 +2020,123 @@ TXT;
             . 'No se le envió nada al lead y la demo no se agendó. Pedí una sugerencia nueva con disponibilidad fresca.'
         );
 
-        LeadBroadcastService::emit_conversation_updated(
-            (int) $lead->id,
-            $existing_message !== null ? (int) $existing_message->id : 0
-        );
-
         throw new HorarioYaNoDisponibleException(
             'El horario que este mensaje confirmaba ya no está disponible. No se envió nada al lead: pedí una sugerencia nueva.'
         );
+    }
+
+    /**
+     * Crea la AdminTask de "revisar conversación" para un lead que quedó marcado para intervención
+     * humana, la asigna a los setters y notifica.
+     *
+     * 🔴 Es el bloque que antes vivía inline en apply_parsed_response(), extraído tal cual y sin
+     * cambiarle una línea de comportamiento, porque ahora tiene DOS llamadores: el camino normal
+     * (`requiere_intervencion_humana` en el paquete del agente) y el freno por horario ya no
+     * disponible (frenar_por_horario_no_disponible()). Ese segundo camino marca el lead igual que
+     * el primero, y sin la tarea el único aviso sería el toast del 422 en el navegador del admin
+     * que apretó aprobar: si cerró la pestaña o estaba aprobando en tanda, el lead se enfría sin
+     * que nada lo denuncie.
+     *
+     * No tira nunca: todo el cuerpo está envuelto en try/catch, porque fallar creando una tarea no
+     * puede impedir ni el procesamiento del mensaje ni el freno de la aprobación.
+     *
+     * @param Lead   $lead                Lead que requiere revisión humana.
+     * @param string $motivo_intervencion Motivo legible; vacío cae a un texto por defecto.
+     *
+     * @return void
+     */
+    private function crear_tarea_de_intervencion_humana(Lead $lead, string $motivo_intervencion): void
+    {
+        try {
+            /* Obtener el admin con is_default_task_assignee = true para notificarlo (si existe). */
+            $default_assignee = \App\Models\Admin::where('is_default_task_assignee', true)->first();
+
+            /* Armar título legible: priorizar nombre del lead, luego empresa, luego teléfono. */
+            $identificador = '';
+            if (! empty($lead->contact_name)) {
+                $identificador = $lead->contact_name;
+            } elseif (! empty($lead->company_name)) {
+                $identificador = $lead->company_name;
+            } else {
+                $identificador = $lead->phone ?? "Lead #{$lead->id}";
+            }
+
+            $task_title   = "Revisar conversación de {$identificador}";
+            $task_content = $motivo_intervencion !== ''
+                ? $motivo_intervencion
+                : 'Claude detectó que esta conversación requiere revisión humana.';
+
+            /* Obtener el sort_order más bajo disponible para que aparezca primero. */
+            \App\Models\AdminTask::increment('sort_order');
+
+            /* Admin creador: default assignee, primer admin o ID 1 (compatible PHP 7, sin ?->). */
+            $created_by_admin_id = 1;
+            if ($default_assignee) {
+                $created_by_admin_id = $default_assignee->id;
+            } else {
+                $fallback_admin = \App\Models\Admin::first();
+                if ($fallback_admin) {
+                    $created_by_admin_id = $fallback_admin->id;
+                }
+            }
+
+            /* Se crea sin asignar por defecto: la asignación real (si corresponde) se
+             * resuelve más abajo vía la pivot admin_task_assignees. "Sin asignar" significa
+             * que la puede tomar cualquier admin, no que la vean todos (corrección de Lucas,
+             * grupo 180 prompt 05). */
+            $task = \App\Models\AdminTask::create([
+                'created_by_admin_id' => $created_by_admin_id,
+                'assigned_admin_id'   => null,
+                'lead_id'             => $lead->id,
+                'title'               => $task_title,
+                'content'             => $task_content,
+                'todos'               => null,
+                'is_done'             => false,
+                'sort_order'          => 0,
+                /* Origen de la tarea: alerta automática generada por LeadAiService. */
+                'created_via'         => 'lead_alert',
+            ]);
+
+            /* Regla nueva (grupo 180, prompt 05): las tareas que nacen de conversaciones de
+             * leads se asignan a todos los admins marcados como "setter". Si no hay ninguno
+             * configurado, la tarea queda sin asignar (comportamiento previo, "la puede
+             * tomar cualquiera") y no se rompe nada. */
+            $setter_ids = \App\Services\AdminTaskAssignmentResolver::for_lead_task();
+            if (! empty($setter_ids)) {
+                $task->assigned_admins()->sync($setter_ids);
+
+                /* Mantener sincronizada la columna legacy assigned_admin_id con el primer id
+                 * de la lista, mismo criterio que el resto de los orígenes de AdminTask
+                 * (AdminTaskController, ClaudeTaskIngestController). */
+                $task->assigned_admin_id = $setter_ids[0];
+                $task->save();
+            }
+
+            /* Notificaciones in-app (+ broadcast / Web Push) para los admins asignados (o
+             * todos, si quedó sin asignar). Envuelto en try/catch propio: un fallo acá no
+             * debe impedir que la tarea recién creada quede persistida ni que el mensaje del
+             * lead se siga procesando. */
+            try {
+                \App\Services\AdminTaskNotificationService::create_for_task($task);
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: error al crear notificaciones de tarea de alerta.', [
+                    'lead_id' => $lead->id,
+                    'task_id' => $task->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+
+            Log::info('LeadAiService: tarea de alerta creada por intervención humana requerida.', [
+                'lead_id'            => $lead->id,
+                'motivo'             => $task_content,
+                'assigned_admin_ids' => $setter_ids,
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('LeadAiService: error al crear tarea de alerta de intervención humana.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -4044,14 +4299,27 @@ TXT;
                  * "else" de abajo; se libera en el punto de salida — ver "FIN DEL LOCK" más
                  * abajo, en el punto 3 de este prompt.
                  */
-                $demo_slot_lock          = Cache::lock("demo_slot_hold_{$demo_id}", 8);
-                $demo_slot_lock_acquired = $demo_slot_lock->block(5);
+                $demo_slot_lock = Cache::lock("demo_slot_hold_{$demo_id}", 8);
+
+                /* 🔴 block() NO devuelve false cuando vence el tiempo de espera: tira
+                 * LockTimeoutException (ver Illuminate\Cache\Lock::block(), que solo puede devolver
+                 * true). Sin este try/catch la rama de "no se pudo tomar el lock" era INALCANZABLE
+                 * y un timeout de contención salía como error no manejado (500), sin pasar por
+                 * ninguno de los dos caminos previstos. Se traduce a la bandera booleana que el
+                 * resto del bloque ya esperaba, y de ahí en más la decisión la toma $for_approval. */
+                $demo_slot_lock_acquired = false;
+                try {
+                    $demo_slot_lock_acquired = (bool) $demo_slot_lock->block(5);
+                } catch (LockTimeoutException $e) {
+                    $demo_slot_lock_acquired = false;
+                }
 
                 if (! $demo_slot_lock_acquired) {
                     /* No se pudo tomar el lock en 5s: otra request está asignando esta misma
-                     * demo física en este instante. Se trata igual que un slot recién ocupado,
-                     * reutilizando la misma tercera llamada correctiva que ya existe para ese
-                     * caso, en vez de arriesgar una doble escritura. */
+                     * demo física en este instante. En el camino de GENERACIÓN se trata igual que
+                     * un slot recién ocupado, reutilizando la misma tercera llamada correctiva que
+                     * ya existe para ese caso, en vez de arriesgar una doble escritura. En el de
+                     * APROBACIÓN, ver el bloque de abajo: se pide reintentar. */
                     Log::warning('LeadAiService: no se pudo tomar el lock de demo_id para validar/asignar slot (timeout 5s).', [
                         'lead_id' => $lead->id,
                         'demo_id' => $demo_id,
@@ -4059,24 +4327,35 @@ TXT;
 
                     /* 🔴 Camino de APROBACIÓN: no se reescribe ni se envía nada. El mensaje ya lo
                      * firmó un humano, y pisarle el texto con un correctivo lo manda al lead con el
-                     * nombre de ese admin arriba de algo que nunca leyó. Se frena, se le avisa al
-                     * admin (422 + bloque rojo en el hilo) y que pida una sugerencia nueva.
+                     * nombre de ese admin arriba de algo que nunca leyó.
+                     *
+                     * 🔴 Pero esto NO es un descarte legítimo, y por eso NO entra por
+                     * frenar_por_horario_no_disponible(). Un block(5) que vence es contención
+                     * transitoria y REINTENTABLE: no es "el turno ya pasó" ni "lo ocupó otro lead",
+                     * que son los dos únicos motivos por los que un horario se cae de verdad. Si
+                     * acá se frenara como allá, un timeout de cinco segundos quemaría la
+                     * conversación para siempre — lead marcado, tarea abierta y mensaje rechazado
+                     * por un problema de concurrencia que se resuelve apretando aprobar de nuevo.
+                     * Así que se tira una excepción distinta, que el admin lee como "reintentá":
+                     * no marca el lead, no crea tarea, no toca el status del mensaje y no deja
+                     * bloque rojo. Lo único que comparte con el otro camino es que tampoco envía
+                     * nada. La diferencia está escrita también en las dos clases de excepción.
                      *
                      * $for_approval es exactamente la pregunta "¿hay un mensaje que un humano ya
-                     * firmó?": solo es true cuando el llamador es apply_pending_actions(). La rama
-                     * de abajo NO es código muerto — en producción el gate de
+                     * firmó?": solo es true cuando el llamador es apply_pending_actions(). Acá no
+                     * hay lock que liberar: no se tomó.
+                     *
+                     * ⚠️ La rama de abajo (el correctivo) EN PRODUCCIÓN NO SE ALCANZA: el gate de
                      * requires_agendamiento_verification_gate() difiere todo paquete con
-                     * agendar_demo, pero la ejercitan los tests que llaman a apply_parsed_response()
-                     * directo (DemoExtendidaHastaElFinDelDiaTest). Acá no hay lock que liberar: no
-                     * se tomó. */
+                     * agendar_demo, así que ningún paquete llega acá por el camino de generación.
+                     * La ejercitan sólo los tests que llaman a apply_parsed_response() directo
+                     * (DemoExtendidaHastaElFinDelDiaTest). Se conserva en vez de borrarse porque es
+                     * el comportamiento probado de esa rama y borrarla rompería esos tests, no
+                     * porque "los tests la ejerciten" la vuelva código vivo. */
                     if ($for_approval) {
-                        $this->frenar_por_horario_no_disponible(
-                            $lead,
-                            $existing_message,
-                            $demo_id,
-                            $demo_date,
-                            $demo_start,
-                            'otra aprobación está tomando esta misma instancia en este instante'
+                        throw new AprobacionEnCursoException(
+                            'Se está procesando otra aprobación sobre esta misma instancia de demo. '
+                            . 'Esperá unos segundos y volvé a aprobar. No se le envió nada al lead.'
                         );
                     }
 
@@ -4144,7 +4423,7 @@ TXT;
                  * correctivo, que con margen 0 le ofrecerían al lead horarios imposibles. */
                 if (! $slot_disponible) {
                     $ventanas_sin_margen = null;
-                    if ($this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
+                    if ($this->rescate_del_margen_seguro($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
                         $slot_disponible      = true;
                         $ventanas_revalidadas = is_array($ventanas_sin_margen) ? $ventanas_sin_margen : [];
 
@@ -4777,96 +5056,11 @@ TXT;
             $lead->requiere_intervencion_humana = true;
             $lead->claude_auto_reply            = false;
 
-            try {
-                /* Obtener el admin con is_default_task_assignee = true para notificarlo (si existe). */
-                $default_assignee = \App\Models\Admin::where('is_default_task_assignee', true)->first();
-
-                /* Armar título legible: priorizar nombre del lead, luego empresa, luego teléfono. */
-                $identificador = '';
-                if (! empty($lead->contact_name)) {
-                    $identificador = $lead->contact_name;
-                } elseif (! empty($lead->company_name)) {
-                    $identificador = $lead->company_name;
-                } else {
-                    $identificador = $lead->phone ?? "Lead #{$lead->id}";
-                }
-
-                $task_title   = "Revisar conversación de {$identificador}";
-                $task_content = $motivo_intervencion !== ''
-                    ? $motivo_intervencion
-                    : 'Claude detectó que esta conversación requiere revisión humana.';
-
-                /* Obtener el sort_order más bajo disponible para que aparezca primero. */
-                \App\Models\AdminTask::increment('sort_order');
-
-                /* Admin creador: default assignee, primer admin o ID 1 (compatible PHP 7, sin ?->). */
-                $created_by_admin_id = 1;
-                if ($default_assignee) {
-                    $created_by_admin_id = $default_assignee->id;
-                } else {
-                    $fallback_admin = \App\Models\Admin::first();
-                    if ($fallback_admin) {
-                        $created_by_admin_id = $fallback_admin->id;
-                    }
-                }
-
-                /* Se crea sin asignar por defecto: la asignación real (si corresponde) se
-                 * resuelve más abajo vía la pivot admin_task_assignees. "Sin asignar" significa
-                 * que la puede tomar cualquier admin, no que la vean todos (corrección de Lucas,
-                 * grupo 180 prompt 05). */
-                $task = \App\Models\AdminTask::create([
-                    'created_by_admin_id' => $created_by_admin_id,
-                    'assigned_admin_id'   => null,
-                    'lead_id'             => $lead->id,
-                    'title'               => $task_title,
-                    'content'             => $task_content,
-                    'todos'               => null,
-                    'is_done'             => false,
-                    'sort_order'          => 0,
-                    /* Origen de la tarea: alerta automática generada por LeadAiService. */
-                    'created_via'         => 'lead_alert',
-                ]);
-
-                /* Regla nueva (grupo 180, prompt 05): las tareas que nacen de conversaciones de
-                 * leads se asignan a todos los admins marcados como "setter". Si no hay ninguno
-                 * configurado, la tarea queda sin asignar (comportamiento previo, "la puede
-                 * tomar cualquiera") y no se rompe nada. */
-                $setter_ids = \App\Services\AdminTaskAssignmentResolver::for_lead_task();
-                if (! empty($setter_ids)) {
-                    $task->assigned_admins()->sync($setter_ids);
-
-                    /* Mantener sincronizada la columna legacy assigned_admin_id con el primer id
-                     * de la lista, mismo criterio que el resto de los orígenes de AdminTask
-                     * (AdminTaskController, ClaudeTaskIngestController). */
-                    $task->assigned_admin_id = $setter_ids[0];
-                    $task->save();
-                }
-
-                /* Notificaciones in-app (+ broadcast / Web Push) para los admins asignados (o
-                 * todos, si quedó sin asignar). Envuelto en try/catch propio: un fallo acá no
-                 * debe impedir que la tarea recién creada quede persistida ni que el mensaje del
-                 * lead se siga procesando. */
-                try {
-                    \App\Services\AdminTaskNotificationService::create_for_task($task);
-                } catch (\Throwable $e) {
-                    Log::error('LeadAiService: error al crear notificaciones de tarea de alerta.', [
-                        'lead_id' => $lead->id,
-                        'task_id' => $task->id,
-                        'error'   => $e->getMessage(),
-                    ]);
-                }
-
-                Log::info('LeadAiService: tarea de alerta creada por intervención humana requerida.', [
-                    'lead_id'            => $lead->id,
-                    'motivo'             => $task_content,
-                    'assigned_admin_ids' => $setter_ids,
-                ]);
-            } catch (\Throwable $e) {
-                Log::error('LeadAiService: error al crear tarea de alerta de intervención humana.', [
-                    'lead_id' => $lead->id,
-                    'error'   => $e->getMessage(),
-                ]);
-            }
+            /* La tarea vive en su propio método porque este mismo bloque lo necesita también el
+             * freno por horario ya no disponible (frenar_por_horario_no_disponible()): ese camino
+             * marca el lead igual que este, y sin tarea el único aviso sería un toast en el
+             * navegador del admin que apretó aprobar. Extraído sin cambiarle el comportamiento. */
+            $this->crear_tarea_de_intervencion_humana($lead, $motivo_intervencion);
 
             /* Notificar por WhatsApp a los admins suscritos a escalaciones de lead.
              * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte

@@ -2,9 +2,11 @@
 
 namespace Tests\Feature;
 
+use App\Exceptions\AprobacionEnCursoException;
 use App\Exceptions\HorarioYaNoDisponibleException;
 use App\Helpers\AppTime;
 use App\Models\AdminSetting;
+use App\Models\AdminTask;
 use App\Models\Demo;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -12,6 +14,7 @@ use App\Services\LeadAiService;
 use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -32,10 +35,16 @@ use Tests\TestCase;
  *                                              no abre doble-booking;
  *   (d) nunca ofrecido, bajo el margen       → se sigue rechazando como antes.
  *
- * 🔴 En (b) y (c) lo que más importa no es que no se agende: es que el LeadMessage que el admin
- * aprobó siga intacto (status `sugerido`, `pending_actions` puestas, `content` sin tocar,
- * `sent_by_admin_id` en null). Antes de esta misión el sistema pisaba ese texto con un correctivo y
- * lo mandaba igual, firmado "aprobado por <admin>" arriba de algo que ese admin nunca leyó.
+ * 🔴 En (b) y (c) lo que más importa no es que no se agende: es que el TEXTO que el admin aprobó no
+ * se toque ni se envíe (`content` intacto, `pending_actions` puestas, `sent_by_admin_id` en null).
+ * Antes de esta misión el sistema pisaba ese texto con un correctivo y lo mandaba igual, firmado
+ * "aprobado por <admin>" arriba de algo que ese admin nunca leyó. El mensaje sí cambia de estado, a
+ * `rechazado`: es la única forma de que build_user_content() no se lo pase a Claude como si el lead
+ * lo hubiera recibido.
+ *
+ * Y hay un quinto final, que NO es ninguno de los cuatro: un timeout del lock de la instancia es
+ * contención transitoria y reintentable, así que se pide reintentar sin castigar la conversación
+ * (ver test_un_timeout_del_lock_pide_reintentar_y_no_castiga_la_conversacion).
  */
 class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
 {
@@ -316,13 +325,22 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
     }
 
     /**
-     * (f) La ventana de 24 horas: una oferta de hace 30hs no puede estar siendo aceptada por un
-     *     turno de esta conversación (para escribir por texto libre, la ventana de WhatsApp tiene
-     *     que estar abierta).
+     * (f) 🔴 El rescate NO depende del reloj con el que se escribió `sent_at`.
+     *
+     *     Hasta el 25/8/2026 la consulta de ofertas filtraba por una ventana de 24hs comparando
+     *     AppTime::now() (que respeta el RELOJ VIRTUAL con el que Lucas prueba el sistema) contra
+     *     `sent_at`, que se escribe con el now() de Laravel (RELOJ REAL). Con el reloj virtual
+     *     corrido, la consulta no devolvía nada y el rescate no disparaba NUNCA, sin un solo log
+     *     que lo dijera — o sea que el fix entero quedaba mudo justo en el escenario en el que se
+     *     lo estaba probando. El filtro de tiempo se sacó por eso, y este test lo clava: una
+     *     oferta con un `sent_at` viejo, pero para la fecha que se está confirmando, rescata igual.
+     *
+     *     Lo que sostiene el permiso no es la antigüedad del mensaje sino la fecha del ítem, que
+     *     tiene que coincidir EXACTO — ver el test de abajo.
      *
      * @return void
      */
-    public function test_una_oferta_de_hace_mas_de_veinticuatro_horas_no_rescata_nada(): void
+    public function test_el_rescate_no_depende_del_reloj_con_el_que_se_escribio_sent_at(): void
     {
         Carbon::setTestNow($this->momento_de_la_oferta());
 
@@ -330,8 +348,36 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
         $lead = $this->crear_lead();
 
         $oferta = $this->mensaje_ya_enviado_ofreciendo($lead, self::FECHA, self::HORA);
+        /* Un `sent_at` de hace 30 horas: es lo que se ve cuando los dos relojes no coinciden. */
         $oferta->sent_at = AppTime::now()->copy()->subHours(30);
         $oferta->save();
+
+        $mensaje = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+
+        Carbon::setTestNow($this->momento_de_la_aceptacion());
+
+        $this->service()->apply_pending_actions($mensaje, $this->final_actions_del_panel($demo, self::FECHA, self::HORA));
+
+        $lead->refresh();
+        $this->assertSame(self::HORA, $lead->demo_start_time, 'El rescate no disparó por un sent_at escrito con otro reloj: es exactamente el bug del reloj virtual.');
+    }
+
+    /**
+     * (f2) Lo que SÍ acota el permiso, ahora que no hay ventana de tiempo: la fecha del ítem tiene
+     *      que coincidir exacto con la que se está confirmando. Una oferta vieja es una oferta para
+     *      una fecha vieja, y no rescata nada.
+     *
+     * @return void
+     */
+    public function test_una_oferta_para_otra_fecha_no_rescata_nada(): void
+    {
+        Carbon::setTestNow($this->momento_de_la_oferta());
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        /* Misma hora, otro día: no cubre el turno de hoy. */
+        $this->mensaje_ya_enviado_ofreciendo($lead, '2026-08-24', self::HORA);
 
         $mensaje        = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
         $texto_que_leyo = $mensaje->content;
@@ -388,6 +434,146 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
     }
 
     /* ------------------------------------------------------------------ */
+    /* Los dos finales, que NO son el mismo                                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * 🔴 Un TIMEOUT DEL LOCK es contención transitoria, no un descarte: se le pide al admin que
+     * reintente y no se castiga la conversación.
+     *
+     * Un block(5) que vence no es "el turno ya pasó" ni "lo ocupó otro lead" — que son los dos
+     * únicos motivos por los que un horario se cae de verdad. Si entrara por el mismo freno,
+     * cinco segundos de contención quemarían el lead: marcado para intervención humana, tarea
+     * abierta, mensaje rechazado y bloque rojo, todo por algo que se arregla apretando aprobar
+     * de nuevo. Lo único que comparte con el otro final es que tampoco se envía nada.
+     *
+     * @return void
+     */
+    public function test_un_timeout_del_lock_pide_reintentar_y_no_castiga_la_conversacion(): void
+    {
+        Carbon::setTestNow($this->momento_de_la_oferta());
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        $this->mensaje_ya_enviado_ofreciendo($lead, self::FECHA, self::HORA);
+        $mensaje        = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+        $texto_que_leyo = $mensaje->content;
+
+        Carbon::setTestNow($this->momento_de_la_aceptacion());
+
+        /* El lock de la instancia, tomado por otra aprobación en este mismo instante. Se simula
+         * con un doble en vez de tomarlo de verdad porque Illuminate\Cache\Lock::block() mide el
+         * tiempo con Carbon::now(), que en este archivo está CONGELADO: el block() real no
+         * vencería nunca y giraría para siempre. Y tira LockTimeoutException — no devuelve false,
+         * que es justamente lo que hacía inalcanzable esta rama antes de la corrección. */
+        $lock = \Mockery::mock(\Illuminate\Contracts\Cache\Lock::class);
+        $lock->shouldReceive('block')->andThrow(new \Illuminate\Contracts\Cache\LockTimeoutException());
+        Cache::partialMock()->shouldReceive('lock')->andReturn($lock);
+
+        $tiro = false;
+        try {
+            $this->service()->apply_pending_actions($mensaje, $this->final_actions_del_panel($demo, self::FECHA, self::HORA));
+        } catch (AprobacionEnCursoException $e) {
+            $tiro = true;
+        }
+
+        $this->assertTrue($tiro, 'Un timeout del lock no tiró AprobacionEnCursoException: o siguió adelante, o cayó en el freno definitivo.');
+
+        /* Nada de lo que hace el freno definitivo pasó acá. */
+        $lead_fresco = $lead->fresh();
+        $this->assertFalse((bool) $lead_fresco->requiere_intervencion_humana, 'Un timeout de 5 segundos marcó el lead para intervención humana.');
+        $this->assertTrue((bool) $lead_fresco->claude_auto_reply, 'Un timeout de 5 segundos apagó el agente.');
+        $this->assertNull($lead_fresco->demo_start_time, 'Se agendó la demo sin haber tomado el lock de la instancia.');
+
+        $mensaje_fresco = $mensaje->fresh();
+        $this->assertSame('sugerido', $mensaje_fresco->status, 'Un timeout reintentable dejó el mensaje rechazado: el admin ya no puede volver a aprobarlo.');
+        $this->assertSame($texto_que_leyo, $mensaje_fresco->content, 'Se reescribió el texto que el admin aprobó.');
+        $this->assertNull($mensaje_fresco->sent_by_admin_id, 'El mensaje quedó firmado por un admin sin haberse enviado.');
+
+        $this->assertFalse(
+            LeadMessage::query()->where('lead_id', $lead->id)->where('is_error', true)->exists(),
+            'Un timeout reintentable dejó un bloque rojo permanente en la conversación.'
+        );
+        $this->assertFalse(
+            AdminTask::query()->where('lead_id', $lead->id)->exists(),
+            'Un timeout reintentable abrió una tarea en el tablero.'
+        );
+    }
+
+    /**
+     * 🔴 Y el freno LEGÍTIMO sí paga el precio completo, pero sólo el que corresponde: mensaje
+     * `rechazado`, lead marcado para intervención humana, tarea abierta — y el agente SIGUE
+     * PRENDIDO.
+     *
+     * Las tres cosas juntas son el contrato de la decisión B, y cada una tapa un agujero distinto:
+     * el `rechazado` evita que el texto no enviado se le cuele a Claude como si el lead lo hubiera
+     * recibido; la tarea evita que el único aviso sea un toast en el navegador del admin; y no
+     * apagar claude_auto_reply evita dejar al lead mudo por algo que Lucas no pidió.
+     *
+     * @return void
+     */
+    public function test_el_freno_legitimo_marca_el_lead_abre_tarea_y_no_apaga_el_agente(): void
+    {
+        Carbon::setTestNow($this->momento_de_la_oferta());
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        $this->mensaje_ya_enviado_ofreciendo($lead, self::FECHA, self::HORA);
+        $mensaje = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+
+        /* El turno ya pasó: descarte legítimo y definitivo. */
+        Carbon::setTestNow(Carbon::parse(self::FECHA . ' 17:06:00', 'America/Argentina/Buenos_Aires'));
+
+        $tiro = false;
+        try {
+            $this->service()->apply_pending_actions($mensaje, $this->final_actions_del_panel($demo, self::FECHA, self::HORA));
+        } catch (HorarioYaNoDisponibleException $e) {
+            $tiro = true;
+        }
+
+        $this->assertTrue($tiro, 'No se frenó una aprobación cuyo horario ya había pasado.');
+
+        $this->assertSame('rechazado', $mensaje->fresh()->status);
+
+        $lead_fresco = $lead->fresh();
+        $this->assertTrue((bool) $lead_fresco->requiere_intervencion_humana, 'El lead no quedó marcado para intervención humana.');
+        $this->assertTrue((bool) $lead_fresco->claude_auto_reply, 'Se apagó el agente: el lead queda mudo y resolver la intervención no lo vuelve a prender.');
+
+        $tarea = AdminTask::query()->where('lead_id', $lead->id)->first();
+        $this->assertNotNull($tarea, 'No se abrió ninguna tarea: nadie fuera del navegador del admin se entera del freno.');
+        $this->assertSame('lead_alert', $tarea->created_via);
+        $this->assertSame('Revisar conversación de ' . $lead->contact_name, $tarea->title);
+    }
+
+    /**
+     * La fecha de `horarios_ofrecidos` la escribe el modelo y no siempre viene en Y-m-d pelado. Un
+     * "2026-08-25T00:00:00" tiene que rescatar igual: si no, el rescate falla EN SILENCIO — y como
+     * el fix acopló dos perillas, el resultado no es volver al comportamiento viejo sino caer en
+     * "no se envía nada".
+     *
+     * @return void
+     */
+    public function test_una_fecha_ofrecida_en_otro_formato_rescata_igual(): void
+    {
+        Carbon::setTestNow($this->momento_de_la_oferta());
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        $this->mensaje_ya_enviado_ofreciendo($lead, self::FECHA . 'T00:00:00', self::HORA);
+        $mensaje = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+
+        Carbon::setTestNow($this->momento_de_la_aceptacion());
+
+        $this->service()->apply_pending_actions($mensaje, $this->final_actions_del_panel($demo, self::FECHA, self::HORA));
+
+        $lead->refresh();
+        $this->assertSame(self::HORA, $lead->demo_start_time, 'Una fecha declarada como "Y-m-dT00:00:00" hizo fallar el rescate en silencio.');
+    }
+
+    /* ------------------------------------------------------------------ */
     /* Aserciones compartidas                                              */
     /* ------------------------------------------------------------------ */
 
@@ -423,18 +609,37 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
         $this->assertNull($lead_fresco->demo_start_time, 'Se agendó igual un horario que ya no estaba disponible.');
         $this->assertTrue((bool) $lead_fresco->requiere_intervencion_humana, 'El lead no quedó marcado para intervención humana.');
 
-        /* 🔴 Y el mensaje que el admin leyó y aprobó sigue exactamente como estaba: sin reescribir,
-         * sin enviar y sin la firma de nadie. Esto es lo que Lucas pidió literalmente. */
+        /* 🔴 Y el agente NO se apaga. Lucas pidió que el mensaje quede pendiente, que se marque
+         * para intervención humana y que el error aparezca en la conversación — nada de eso
+         * incluye dejar al lead mudo. Con claude_auto_reply en false, LeadAiSuggestionScheduler
+         * corta al toque y el lead puede escribir "¿che, quedó lo de las 17:05?" sin que pase
+         * nada; y resolver requiere_intervencion_humana no lo vuelve a prender. */
+        $this->assertTrue((bool) $lead_fresco->claude_auto_reply, 'Se apagó claude_auto_reply: el lead queda mudo y resolver la intervención no lo vuelve a prender.');
+
+        /* 🔴 El mensaje que el admin aprobó NO puede quedar en `sugerido`: build_user_content()
+         * solo tiene rama especial para `rechazado`, así que un `sugerido` se le manda a Claude
+         * como "SISTEMA: <texto que confirma las 17:05>" y la próxima generación cree que al lead
+         * se le confirmó un turno que nunca se envió ni existe en la base. */
         $mensaje_fresco = $mensaje->fresh();
-        $this->assertSame('sugerido', $mensaje_fresco->status, 'El mensaje salió del estado sugerido: algo se envió.');
+        $this->assertSame('rechazado', $mensaje_fresco->status, 'El mensaje frenado quedó en sugerido: se le cuela a Claude como si el lead lo hubiera recibido.');
+        $this->assertTrue((bool) $mensaje_fresco->requiere_verificacion, 'El mensaje frenado no quedó marcado para verificación.');
+
+        /* Y sigue sin reescribirse, sin enviarse y sin la firma de nadie. Esto es lo que Lucas
+         * pidió literalmente. */
         $this->assertNotNull($mensaje_fresco->pending_actions, 'Se consumieron las pending_actions de un mensaje que no se aplicó.');
         $this->assertSame($texto_que_leyo, $mensaje_fresco->content, 'Se reescribió in-place el texto que el admin aprobó.');
         $this->assertNull($mensaje_fresco->sent_by_admin_id, 'El mensaje quedó firmado por un admin sin haberse enviado.');
 
-        /* Y el admin se entera: bloque rojo en el hilo. */
+        /* Y el admin se entera por los dos canales: bloque rojo en el hilo y tarea en el tablero.
+         * El toast del 422 no alcanza — si cerró la pestaña o estaba aprobando en tanda, el lead
+         * se enfría sin que nada lo denuncie. */
         $this->assertTrue(
             LeadMessage::query()->where('lead_id', $lead->id)->where('is_error', true)->exists(),
             'No quedó ningún bloque rojo en el hilo: el admin no tiene cómo enterarse de que no se envió nada.'
+        );
+        $this->assertTrue(
+            AdminTask::query()->where('lead_id', $lead->id)->where('created_via', 'lead_alert')->exists(),
+            'No se creó ninguna AdminTask: el único aviso sería el toast en el navegador del admin que apretó aprobar.'
         );
     }
 
@@ -579,7 +784,10 @@ class OfertaAceptadaNoCaducaPorMargenTest extends TestCase
     {
         return LeadMessage::create([
             'lead_id'               => $lead->id,
-            'sender'                => 'agente',
+            /* 'sistema', igual que en producción (create_pending_agendamiento_message()). Importa:
+             * la rama de build_user_content() que aísla una sugerencia no enviada exige
+             * sender = 'sistema' + status = 'rechazado'. */
+            'sender'                => 'sistema',
             'content'               => 'Listo, te confirmo la demo hoy a las ' . $hora . '. Te paso el link apenas la preparo.',
             'status'                => 'sugerido',
             'is_followup'           => false,
