@@ -156,9 +156,14 @@ class ClientController extends BaseController
 
     /**
      * Crea o actualiza el ClientEcommerce del cliente a partir de las claves
-     * `ecommerce_spa_url` / `ecommerce_api_url` del request (modal de tienda
-     * online en admin-spa). No usa ModelPropertiesHelper porque esas claves
-     * no son columnas de `clients` sino de la relación `client_ecommerce`.
+     * `ecommerce_spa_url` / `ecommerce_api_url` / `ecommerce_spa_path` /
+     * `ecommerce_api_path` del request (modal de tienda online en admin-spa).
+     * No usa ModelPropertiesHelper porque esas claves no son columnas de
+     * `clients` sino de la relación `client_ecommerce`.
+     *
+     * Las dos claves de path son opcionales (misión ecommerce-paths-subcarpeta): describen la
+     * carpeta física del hosting donde está instalada la tienda, relativa a `domains/`, para el
+     * caso en que no coincida con la derivación por dominio. Vacías = derivación de siempre.
      *
      * @param  Client   $client   Cliente al que pertenece (o va a pertenecer) la tienda.
      * @param  Request  $request  Request original de store_json/update_json.
@@ -175,6 +180,18 @@ class ClientController extends BaseController
 
         $spa_url = ClientEcommerce::normalize_url($request->input('ecommerce_spa_url'));
         $api_url = ClientEcommerce::normalize_url($request->input('ecommerce_api_url'));
+
+        // Paths de instalación cargados a mano en el modal (opcionales, relativos a domains/).
+        // Se distingue "la clave vino" de "la clave vino vacía": vacía = volver a derivar;
+        // ausente = este flujo no los administra y no se tocan.
+        $has_spa_path_key = $request->has('ecommerce_spa_path');
+        $has_api_path_key = $request->has('ecommerce_api_path');
+        $spa_path_input   = $has_spa_path_key
+            ? ClientEcommerce::normalize_hosting_path($request->input('ecommerce_spa_path'))
+            : '';
+        $api_path_input   = $has_api_path_key
+            ? ClientEcommerce::normalize_hosting_path($request->input('ecommerce_api_path'))
+            : '';
 
         // Si vino solo la URL del SPA, la de la API se completa sola con la
         // convención del hosting ({spa_url}/api) sin que Lucas la tenga que escribir a mano.
@@ -207,23 +224,52 @@ class ClientController extends BaseController
             $ecommerce->status = 'pending';
         }
 
-        // Decisión explícita (22/7/2026, grupo 188): domain se re-deriva de
-        // spa_url cada vez que llega una spa_url con valor, incluso pisando el
-        // dominio que el cliente haya confirmado por WhatsApp en la etapa 1 de
-        // implementación. La URL que se carga acá en el admin es la que
-        // realmente quedó instalada y es la que manda. No "arreglar" esto
-        // creyendo que es un bug: es a propósito.
         if ($spa_url !== '') {
+            // 🔴 EL ORDEN DE ESTAS DOS COSAS IMPORTA Y NO ES CASUAL: primero se decide qué paths
+            // limpiar y RECIÉN DESPUÉS se pisa `domain`. manual_spa_path() compara lo guardado
+            // contra la derivación del dominio ACTUAL (el viejo). Si se pisara `domain` antes, el
+            // path derivado del dominio viejo dejaría de coincidir con la derivación del nuevo, el
+            // sistema lo tomaría por "cargado a mano" y no se recalcularía nunca más. Si estás
+            // reordenando esto para que quede "más prolijo", pará.
+
+            // Decisión explícita (22/7/2026, grupo 188): domain se re-deriva de spa_url cada vez
+            // que llega una spa_url con valor, incluso pisando el dominio que el cliente haya
+            // confirmado por WhatsApp en la etapa 1 de implementación. La URL que se carga acá en
+            // el admin es la que realmente quedó instalada y es la que manda. No "arreglar" esto
+            // creyendo que es un bug: es a propósito.
+            //
+            // Y por eso mismo se limpian los paths antes de derivar: resolve_spa_path() y
+            // resolve_api_path() priorizan la columna si ya tiene valor, así que si no se
+            // limpiaran acá el path viejo nunca se recalcularía al cambiar el dominio.
+            //
+            // EXCEPCIÓN (misión ecommerce-paths-subcarpeta): solo se limpia el path que HOY es
+            // derivado. Un path cargado a mano describe una carpeta física que no tiene por qué
+            // tener relación con el host de la URL pública — es exactamente el caso de una tienda
+            // servida desde tienda.comerciocity.store pero instalada en
+            // comerciocity.store/public_html/tienda/spa — así que cambiar el dominio no puede
+            // moverla de lugar.
+            if ($ecommerce->manual_spa_path() === '') {
+                $ecommerce->spa_path = null;
+            }
+            if ($ecommerce->manual_api_path() === '') {
+                $ecommerce->api_path = null;
+            }
+
             $ecommerce->domain = ClientEcommerce::domain_from_url($spa_url);
-            // spa_path/api_path se limpian antes de derivar: resolve_spa_path()
-            // y resolve_api_path() priorizan la columna si ya tiene valor (para
-            // permitir pisar un caso especial a mano en la base), así que si no
-            // se limpian acá el path viejo nunca se recalcularía al cambiar el dominio.
-            $ecommerce->spa_path = null;
-            $ecommerce->api_path = null;
         }
         // Si spa_url vino vacía pero ya había un domain cargado, se conserva (no se borra).
 
+        // Los paths que mandó el modal mandan sobre todo lo anterior, incluida la limpieza de
+        // arriba. Clave presente y vacía = el usuario borró el campo = volver a derivar.
+        if ($has_spa_path_key) {
+            $ecommerce->spa_path = $spa_path_input !== '' ? $spa_path_input : null;
+        }
+        if ($has_api_path_key) {
+            $ecommerce->api_path = $api_path_input !== '' ? $api_path_input : null;
+        }
+
+        // La columna guarda siempre el path EFECTIVO (cargado a mano o derivado), igual que antes
+        // de esta misión: así se puede mirar la base y ver dónde está instalada cada tienda.
         $ecommerce->spa_path = $ecommerce->resolve_spa_path();
         $ecommerce->api_path = $ecommerce->resolve_api_path();
 

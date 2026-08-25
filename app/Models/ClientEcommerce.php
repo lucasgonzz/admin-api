@@ -11,8 +11,8 @@ use Illuminate\Database\Eloquent\Model;
  * @property string|null $domain               Dominio final de la tienda.
  * @property string|null $api_url              URL de la API de la tienda.
  * @property string|null $spa_url              URL del SPA de la tienda.
- * @property string|null $api_path             Path de instalación del API.
- * @property string|null $spa_path             Path de instalación del SPA.
+ * @property string|null $api_path             Path efectivo de instalación de la API (cargado a mano o derivado).
+ * @property string|null $spa_path             Path efectivo de instalación del SPA (cargado a mano o derivado).
  * @property string      $status               pending | installing | active.
  * @property array|null  $ecommerce_setup_data Configuración recolectada por WhatsApp.
  */
@@ -79,6 +79,72 @@ class ClientEcommerce extends Model
     }
 
     /**
+     * Normaliza un path de instalación del hosting cargado a mano: lo deja relativo a `domains/`,
+     * sin barras al inicio/fin, sin barras dobles y sin tramos "." ni "..".
+     *
+     * POR QUÉ ES ASÍ Y NO MÁS SIMPLE (no lo "achiques" a un trim de barras): este valor lo escribe
+     * Lucas a mano en el modal y termina siendo el destino de un `rm -rf` en el swap atómico del
+     * deploy (`EcommerceInstallationService::build_spa_atomic_deploy_shell()`). Lo que se pega en
+     * ese campo, en la práctica, es una de tres cosas: la ruta relativa correcta, la ruta con el
+     * prefijo `domains/` de más, o la ruta absoluta entera copiada de una sesión SSH
+     * (`/home/uXXXXXXXX/domains/...`). Las tres tienen que terminar en el mismo string.
+     *
+     * @param  mixed  $path  Valor crudo del formulario.
+     * @return string        Path relativo a `domains/`, o cadena vacía si no queda nada usable.
+     */
+    public static function normalize_hosting_path($path)
+    {
+        $value = trim((string) $path);
+        if ($value === '') {
+            return '';
+        }
+
+        // Barras invertidas a barras normales (una ruta copiada de WinSCP/Windows).
+        $value = str_replace('\\', '/', $value);
+
+        $segments = explode('/', $value);
+
+        // Última aparición de un tramo llamado exactamente "domains": se descarta todo lo anterior
+        // y ese tramo también. De una sola pasada resuelve "domains/x/public_html/..." y
+        // "/home/u123/domains/x/public_html/...", porque el prefijo `domains/` lo agrega después
+        // EcommerceInstallationService::HOSTING_PREFIX y no debe quedar duplicado en la columna.
+        // (Contrapartida asumida: una carpeta real llamada "domains" adentro de un public_html
+        //  cortaría mal. No existe ni tiene sentido que exista en este hosting.)
+        $last_domains_index = -1;
+        foreach ($segments as $index => $segment) {
+            if ($segment === 'domains') {
+                $last_domains_index = $index;
+            }
+        }
+        if ($last_domains_index >= 0) {
+            $segments = array_slice($segments, $last_domains_index + 1);
+        }
+
+        $clean_segments = [];
+        foreach ($segments as $segment) {
+            $segment = trim($segment);
+
+            // Barras dobles y "./" no cambian el significado del path: se descartan.
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+
+            // "Subir un nivel" apuntaría fuera de domains/ y el pipeline hace `rm -rf` sobre este
+            // path: se rechaza la entrada ENTERA (se devuelve vacío) y el sistema vuelve a la
+            // derivación automática, que siempre es una ruta segura. Es a propósito que no se
+            // "limpie" el ".." resolviéndolo: resolver silenciosamente una ruta que alguien
+            // escribió mal es peor que ignorarla.
+            if ($segment === '..') {
+                return '';
+            }
+
+            $clean_segments[] = $segment;
+        }
+
+        return implode('/', $clean_segments);
+    }
+
+    /**
      * Resuelve el host (dominio) de una URL, sin el prefijo "www.".
      *
      * Si el valor no trae esquema (http/https) se le antepone "https://" antes
@@ -135,6 +201,42 @@ class ClientEcommerce extends Model
     }
 
     /**
+     * Path del SPA DERIVADO del dominio, ignorando la columna `spa_path`.
+     *
+     * Existe separado de resolve_spa_path() porque hay dos lugares que necesitan saber cuál sería
+     * el path si nadie hubiera cargado uno a mano: manual_spa_path() (para decidir si lo guardado
+     * es un path manual o el derivado que materializó el propio guardado) y el hint del modal.
+     *
+     * @return string
+     */
+    public function derived_spa_path(): string
+    {
+        $domain = $this->resolve_domain();
+        if ($domain === '') {
+            return '';
+        }
+
+        return $domain.'/public_html';
+    }
+
+    /**
+     * Path de la API DERIVADO del dominio, ignorando la columna `api_path`.
+     *
+     * Misma razón de ser que derived_spa_path(), para la API.
+     *
+     * @return string
+     */
+    public function derived_api_path(): string
+    {
+        $domain = $this->resolve_domain();
+        if ($domain === '') {
+            return '';
+        }
+
+        return $domain.'/public_html/api';
+    }
+
+    /**
      * Path de instalación del SPA, relativo a `domains/` en el hosting.
      *
      * Convención (definición de Lucas, 22/7/2026): la tienda de cada cliente
@@ -143,6 +245,11 @@ class ClientEcommerce extends Model
      * acá se guarda solo la parte relativa a `domains/`, o sea
      * `{dominio}/public_html` — el prefijo `domains/` lo agrega el servicio
      * de instalación. La columna `spa_path` siempre gana si tiene valor.
+     *
+     * Desde la misión ecommerce-paths-subcarpeta esa columna también puede traer un path cargado
+     * a mano en el modal, que apunta a una carpeta física arbitraria del hosting (por ejemplo
+     * `comerciocity.store/public_html/tienda/spa`) sin relación con el host de la URL pública.
+     * La derivación por dominio vive ahora en derived_spa_path().
      *
      * @return string
      */
@@ -153,12 +260,7 @@ class ClientEcommerce extends Model
             return $spa_path;
         }
 
-        $domain = $this->resolve_domain();
-        if ($domain === '') {
-            return '';
-        }
-
-        return $domain.'/public_html';
+        return $this->derived_spa_path();
     }
 
     /**
@@ -166,7 +268,8 @@ class ClientEcommerce extends Model
      *
      * Misma convención que resolve_spa_path(): tienda-api se sirve desde
      * `domains/{dominio}/public_html/api`. La columna `api_path` siempre
-     * gana si tiene valor.
+     * gana si tiene valor, y desde la misión ecommerce-paths-subcarpeta ese valor puede ser un
+     * path cargado a mano (una carpeta arbitraria del hosting, incluso hermana de la del SPA).
      *
      * @return string
      */
@@ -177,12 +280,54 @@ class ClientEcommerce extends Model
             return $api_path;
         }
 
-        $domain = $this->resolve_domain();
-        if ($domain === '') {
+        return $this->derived_api_path();
+    }
+
+    /**
+     * Path del SPA cargado A MANO, o cadena vacía si lo que hay guardado es el derivado.
+     *
+     * POR QUÉ EXISTE (no lo reemplaces por `$this->spa_path` a secas): la columna `spa_path`
+     * guarda SIEMPRE el path efectivo, incluido el derivado, porque
+     * ClientController::sync_ecommerce_urls_from_request() lo materializa en cada guardado (y así
+     * se puede mirar la base y ver dónde está instalada cada tienda). O sea que "columna con
+     * valor" NO significa "path cargado a mano". La única forma de distinguirlos sin agregar una
+     * columna es comparar contra la derivación: si coinciden, no es manual.
+     *
+     * De esto dependen dos cosas: que el campo del modal se vea VACÍO en los 40 clientes que hoy
+     * tienen el path derivado guardado, y que el recálculo por cambio de dominio siga funcionando
+     * para ellos.
+     *
+     * Limitación conocida y aceptada: si alguien carga a mano un path que es exactamente el
+     * derivado, el sistema lo trata como derivado (el campo se ve vacío la próxima vez). El
+     * efecto es idéntico salvo que después se cambie el dominio.
+     *
+     * @return string
+     */
+    public function manual_spa_path(): string
+    {
+        $stored = self::normalize_hosting_path($this->spa_path);
+        if ($stored === '' || $stored === $this->derived_spa_path()) {
             return '';
         }
 
-        return $domain.'/public_html/api';
+        return $stored;
+    }
+
+    /**
+     * Path de la API cargado A MANO, o cadena vacía si lo guardado es el derivado.
+     *
+     * Misma lógica y mismas advertencias que manual_spa_path().
+     *
+     * @return string
+     */
+    public function manual_api_path(): string
+    {
+        $stored = self::normalize_hosting_path($this->api_path);
+        if ($stored === '' || $stored === $this->derived_api_path()) {
+            return '';
+        }
+
+        return $stored;
     }
 
     /**

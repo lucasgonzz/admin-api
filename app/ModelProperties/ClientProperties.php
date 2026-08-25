@@ -155,12 +155,14 @@ class ClientProperties
                 'width' => 220,
                 'wrap_content' => true,
             ],
-            // Sección "Tienda online (ecommerce)" del modal del cliente (grupo 188, prompt 03).
-            // La primera propiedad dispara el render del componente custom, que dibuja los dos
-            // campos (URL del SPA y URL de la API). La segunda queda con 'show' => false solo
-            // para que build_draft() (model/Index.vue) siembre su clave en el borrador y viaje
-            // en el guardado; el componente custom es el que la edita, no un input suelto acá.
-            // Ambas llevan 'not_persisted_on_model' porque no son columnas de 'clients': las
+            // Sección "Tienda online (ecommerce)" del modal del cliente (grupo 188, prompt 03;
+            // ampliada por la misión ecommerce-paths-subcarpeta). Son CUATRO claves: la URL del
+            // SPA, la URL de la API, y los dos paths de instalación en el hosting.
+            // La primera propiedad dispara el render del componente custom, que dibuja los cuatro
+            // campos. Las otras TRES quedan con 'show' => false solo para que build_draft()
+            // (model/Index.vue) siembre sus claves en el borrador y viajen en el guardado; el
+            // componente custom es el que las edita, no un input suelto acá.
+            // Las cuatro llevan 'not_persisted_on_model' porque no son columnas de 'clients': las
             // escribe ClientController::sync_ecommerce_urls_from_request() sobre ClientEcommerce.
             [
                 'key' => 'ecommerce_spa_url',
@@ -175,6 +177,24 @@ class ClientProperties
             [
                 'key' => 'ecommerce_api_url',
                 'text' => 'URL de la API de la tienda',
+                'type' => 'text',
+                'value' => '',
+                'show' => false,
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+            ],
+            [
+                'key' => 'ecommerce_spa_path',
+                'text' => 'Path de instalación del SPA de la tienda',
+                'type' => 'text',
+                'value' => '',
+                'show' => false,
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+            ],
+            [
+                'key' => 'ecommerce_api_path',
+                'text' => 'Path de instalación de la API de la tienda',
                 'type' => 'text',
                 'value' => '',
                 'show' => false,

@@ -55,7 +55,12 @@ class Client extends Model
      *
      * @var array<int, string>
      */
-    protected $appends = ['ecommerce_spa_url', 'ecommerce_api_url'];
+    protected $appends = [
+        'ecommerce_spa_url',
+        'ecommerce_api_url',
+        'ecommerce_spa_path',
+        'ecommerce_api_path',
+    ];
 
     function scopeWithAll($query) {
         // Se agrega 'client_ecommerce' (eager load) para que los accessors
@@ -90,6 +95,33 @@ class Client extends Model
     public function getEcommerceApiUrlAttribute()
     {
         return $this->client_ecommerce ? (string) ($this->client_ecommerce->api_url ?? '') : '';
+    }
+
+    /**
+     * Path de instalación del SPA de la tienda CARGADO A MANO (accessor: ecommerce_spa_path).
+     *
+     * Devuelve vacío cuando el path guardado es el derivado del dominio, no el que alguien cargó
+     * a mano (ver ClientEcommerce::manual_spa_path()). Es lo que hace que el campo del modal
+     * signifique "vacío = derivar solo" y que los 40 clientes que ya existen no lo vean
+     * pre-cargado con una ruta que en realidad nadie escribió.
+     *
+     * @return string  Vacío si el cliente todavía no tiene ClientEcommerce.
+     */
+    public function getEcommerceSpaPathAttribute()
+    {
+        return $this->client_ecommerce ? $this->client_ecommerce->manual_spa_path() : '';
+    }
+
+    /**
+     * Path de instalación de la API de la tienda CARGADO A MANO (accessor: ecommerce_api_path).
+     *
+     * Mismo criterio que getEcommerceSpaPathAttribute().
+     *
+     * @return string  Vacío si el cliente todavía no tiene ClientEcommerce.
+     */
+    public function getEcommerceApiPathAttribute()
+    {
+        return $this->client_ecommerce ? $this->client_ecommerce->manual_api_path() : '';
     }
 
     /**
