@@ -1230,9 +1230,19 @@ TXT;
          * ninguno: lo eligió PHP hace un minuto y el mensaje todavía es `sugerido`. Por eso lo que
          * viaja no es un permiso, es el horario VIEJO: en la aprobación se consulta
          * `horario_figura_como_ofrecido()` con ÉL, o sea el mismo criterio de siempre y contra la
-         * misma base. Un modelo que invente esta clave no se auto-otorga nada. Sin esto, el
-         * reagendado se frena solo en los 5 minutos previos al slot nuevo — que es justo cuando el
-         * admin aprueba. */
+         * misma base.
+         *
+         * ⚠️ Qué garantiza exactamente eso, ni más ni menos: como `agendar_demo` lo escribe el
+         * MODELO, la clave se puede inventar, y por eso la aprobación la SANEA antes de usarla
+         * (marca_reagendado_coherente()). Con ese saneamiento puesto, un modelo que la invente no
+         * puede inventar un slot inexistente —la grilla margen-0 sigue exigiendo que el horario
+         * nuevo no haya arrancado y esté libre— NI una exención del margen fuera de la ventana del
+         * reagendado: la marca sólo se honra si el horario que declara es anterior al pedido, ya
+         * arrancó, y arrancó hace menos de REAGENDADO_VENTANA_MINUTOS. Sin ese saneamiento la clave
+         * SÍ es una llave que el modelo se firma solo, y esto era falso.
+         *
+         * Sin esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo — que
+         * es justo cuando el admin aprueba. */
         $parsed['agendar_demo']['reagendado_desde'] = $demo_start;
 
         /* El texto nuevo pisa al del modelo, que decía "te confirmo las 17:05". Dejarlo sería la
@@ -1368,6 +1378,79 @@ TXT;
         }
 
         return $mejor_todas;
+    }
+
+    /**
+     * ¿La marca `reagendado_desde` que trae el paquete es coherente con un reagendado REAL del
+     * sistema, o la inventó el modelo?
+     *
+     * 🔴 Por qué existe este método. `agendar_demo` lo escribe el MODELO y viaja crudo hasta la
+     * aprobación (`pending_actions`). `reagendado_desde` cambia CON QUÉ HORARIO se consulta el
+     * permiso del rescate del margen, así que una clave inventada es una exención del margen que el
+     * modelo se firma solo: ofrecimos 17:30, el lead escribe 17:00, el modelo devuelve
+     * `{demo_start_time: 17:20, reagendado_desde: 17:30}` y el paquete sale por el camino de éxito
+     * sin que el bloque del reagendado se ejecute nunca (17:20 estaba en la grilla). Al aprobar
+     * 17:16, el permiso de 17:30 —que sí figura como ofrecido— rescataría un turno a 4 minutos
+     * vista, que es exactamente lo que la misión del margen mandó rechazar.
+     *
+     * Las tres condiciones son LAS MISMAS que aplica el camino de generación cuando decide
+     * reagendar (ver reagendar_al_proximo_slot(), condición 4): el horario del permiso es
+     * estrictamente anterior al que se está agendando, ya arrancó, y arrancó hace menos de
+     * REAGENDADO_VENTANA_MINUTOS. Si no se cumplen las tres, la marca se ignora y el permiso se
+     * consulta con el horario pedido, o sea el comportamiento de siempre: no hay regresión posible
+     * sobre el rescate del margen, sólo se le saca al modelo la llave que no le corresponde.
+     *
+     * El gate "la fecha es hoy" no se repite acá porque ya lo aplica oferta_vigente_sin_margen()
+     * antes de mirar el permiso: para cualquier otra fecha el rescate devuelve false igual, y la
+     * comparación en minutos del día no llega a decidir nada.
+     *
+     * @param Lead   $lead              Lead que está agendando (para el log).
+     * @param string $demo_date         Fecha pedida, en Y-m-d.
+     * @param string $demo_start        Horario que se está agendando, en HH:MM.
+     * @param string $reagendado_desde  Horario que la marca declara como origen, en HH:MM.
+     *
+     * @return bool true si la marca se honra.
+     */
+    private function marca_reagendado_coherente(Lead $lead, string $demo_date, string $demo_start, string $reagendado_desde): bool
+    {
+        $motivo = '';
+
+        $permiso_min = $this->hhmm_a_minutos($reagendado_desde);
+        $pedido_min  = $this->hhmm_a_minutos($demo_start);
+        /* Un solo AppTime::now() para todo el cálculo: dos lecturas separadas pueden caer a los dos
+         * lados del borde de un minuto, y en local cada llamada es una consulta a admin_settings. */
+        $ahora   = AppTime::now();
+        $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
+
+        if ($permiso_min === null || $pedido_min === null) {
+            $motivo = 'alguno de los dos horarios no es un HH:MM válido';
+        } elseif ($permiso_min >= $pedido_min) {
+            $motivo = 'el horario de la marca no es anterior al que se está agendando';
+        } elseif ($permiso_min >= $now_min) {
+            $motivo = 'el horario de la marca todavía no arrancó';
+        } elseif (($now_min - $permiso_min) > self::REAGENDADO_VENTANA_MINUTOS) {
+            $motivo = 'el horario de la marca arrancó hace más de ' . self::REAGENDADO_VENTANA_MINUTOS . ' minutos';
+        }
+
+        if ($motivo === '') {
+            return true;
+        }
+
+        /* Warning y no info a propósito: una marca incoherente no es un caso borde del flujo, es la
+         * señal de que el modelo está inventando la clave. Queremos poder verlo en el log en vez de
+         * deducirlo de que el rescate no disparó. */
+        Log::channel('disponibilidad')->warning(
+            '[DISPONIBILIDAD] Se ignoró una marca `reagendado_desde` incoherente: el permiso se consulta con el horario pedido.',
+            [
+                'lead_id'           => $lead->id,
+                'demo_date'         => $demo_date,
+                'demo_start'        => $demo_start,
+                'reagendado_desde'  => $reagendado_desde,
+                'motivo'            => $motivo,
+            ]
+        );
+
+        return false;
     }
 
     /**
@@ -2097,8 +2180,18 @@ TXT;
          * no está en ninguno: lo eligió PHP hace un minuto y el mensaje todavía es `sugerido`. Por
          * eso lo que viaja en el paquete no es un permiso, es el horario VIEJO —el que sí se le
          * ofreció— y acá se consulta con ÉL: mismo criterio de siempre, misma consulta a la misma
-         * base. Un modelo que invente esa clave no se auto-otorga nada. Sin esto, el reagendado se
-         * frena solo en los 5 minutos previos al slot nuevo, que es justo cuando el admin aprueba. */
+         * base.
+         *
+         * ⚠️ Este método NO sanea ese parámetro y no puede hacerlo: le llega ya resuelto. Quien lo
+         * sanea es el llamador de la aprobación (apply_parsed_response() →
+         * marca_reagendado_coherente()), porque la clave la escribe el modelo y una marca inventada
+         * es una exención del margen. Con ese saneamiento, lo que el parámetro NO puede regalar es
+         * un slot inexistente (la grilla margen-0 de abajo sigue exigiendo que el horario pedido no
+         * haya arrancado y esté libre) ni una exención fuera de la ventana del reagendado. Si algún
+         * día aparece otro llamador que lo pase, tiene que sanearlo igual.
+         *
+         * Sin esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo, que es
+         * justo cuando el admin aprueba. */
         $hora_del_permiso = ($permiso_por_horario !== null && $permiso_por_horario !== '')
             ? $permiso_por_horario
             : $demo_start;
@@ -4802,13 +4895,34 @@ TXT;
                  * no está en ninguno (lo eligió PHP y el mensaje todavía era `sugerido`). Por eso
                  * lo que viaja en el paquete no es un permiso, es el horario viejo: acá se llama a
                  * `horario_figura_como_ofrecido()` con ÉL, o sea el mismo criterio de siempre y
-                 * contra la misma base — un modelo que invente esta clave no se auto-otorga nada, y
-                 * la grilla margen-0 sigue exigiendo que el slot nuevo no haya arrancado y esté
-                 * libre. Sin esto, el reagendado se frena solo en los 5 minutos previos al slot
-                 * nuevo, que es justo la ventana en que el admin aprueba. */
+                 * contra la misma base, y la grilla margen-0 sigue exigiendo que el slot nuevo no
+                 * haya arrancado y esté libre.
+                 *
+                 * ⚠️ Eso sólo alcanza CON la marca saneada abajo: la clave la escribe el modelo, así
+                 * que sin sanearla puede inventarla y consultar el permiso con un horario que nunca
+                 * reagendó nadie. Con el saneamiento puesto, lo que no puede inventar es ni un slot
+                 * inexistente ni una exención del margen fuera de la ventana del reagendado. Sin
+                 * esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo,
+                 * que es justo la ventana en que el admin aprueba. */
                 $permiso_reagendado = isset($agendar_demo['reagendado_desde']) && trim((string) $agendar_demo['reagendado_desde']) !== ''
                     ? trim((string) $agendar_demo['reagendado_desde'])
                     : null;
+
+                /* 🔴 Saneamiento OBLIGATORIO de la marca, y no es defensa en profundidad: `agendar_demo`
+                 * lo escribe el MODELO, así que sin esto `reagendado_desde` es una clave que el modelo
+                 * puede inventar para exigir que el permiso se consulte con un horario distinto del que
+                 * pidió. El caso concreto que rompe: ofrecimos 17:30, el lead escribe a las 17:00, el
+                 * modelo devuelve {demo_start_time: 17:20, reagendado_desde: 17:30}; en generación 17:20
+                 * está en la grilla, así que el bloque del reagendado ni corre y la clave inventada
+                 * viaja intacta hasta acá — y el permiso de 17:30 (que sí figura como ofrecido)
+                 * habilitaría agendar a 4 minutos vista, justo lo que el rescate del margen prohíbe.
+                 * Por eso se honra sólo si es coherente con un reagendado REAL del sistema; si no, se
+                 * ignora y el permiso se consulta con el horario pedido, exactamente como si la clave
+                 * no viniera. */
+                if ($permiso_reagendado !== null
+                    && ! $this->marca_reagendado_coherente($lead, $demo_date, $demo_start, $permiso_reagendado)) {
+                    $permiso_reagendado = null;
+                }
 
                 if (! $slot_disponible) {
                     $ventanas_sin_margen = null;
