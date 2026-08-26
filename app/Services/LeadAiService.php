@@ -4274,14 +4274,28 @@ TXT;
                  * mano, el reagendado del sistema ya no aplica y el permiso no puede viajar con una
                  * hora que nadie eligió: ahí manda su `forzar_slot`, como con cualquier otra
                  * edición manual. */
+                /* 🔴 La comparación va sobre los valores NORMALIZADOS, no con === sobre el string
+                 * crudo. El resto del archivo lee las horas con el regex tolerante
+                 * (\d{1,2}):(\d{2}) + cero a la izquierda, así que "17:15", "17:15:00" y "9:05" son
+                 * el mismo horario en todos lados menos acá. Con la comparación estricta, un panel
+                 * que mande "17:15:00" sin que el admin haya tocado nada tira la marca en silencio
+                 * y el reagendado se frena solo — que es EXACTAMENTE el modo de falla que la marca
+                 * existe para evitar. Normalizar no debilita la salvaguarda: una edición real
+                 * (17:20) sigue difiriendo de 17:15. Mismo criterio para la fecha. */
                 if (is_array($agendar_admin)
                     && ! array_key_exists('reagendado_desde', $agendar_admin)
                     && ! empty($parsed['agendar_demo']['reagendado_desde'])
                     && isset($agendar_admin['demo_start_time'], $parsed['agendar_demo']['demo_start_time'])
-                    && trim((string) $agendar_admin['demo_start_time']) === trim((string) $parsed['agendar_demo']['demo_start_time'])
-                    && isset($agendar_admin['demo_date'], $parsed['agendar_demo']['demo_date'])
-                    && trim((string) $agendar_admin['demo_date']) === trim((string) $parsed['agendar_demo']['demo_date'])) {
-                    $agendar_admin['reagendado_desde'] = $parsed['agendar_demo']['reagendado_desde'];
+                    && isset($agendar_admin['demo_date'], $parsed['agendar_demo']['demo_date'])) {
+                    $hora_admin   = $this->normalizar_hhmm_tolerante((string) $agendar_admin['demo_start_time']);
+                    $hora_sistema = $this->normalizar_hhmm_tolerante((string) $parsed['agendar_demo']['demo_start_time']);
+                    $fecha_admin   = $this->normalizar_ymd_tolerante((string) $agendar_admin['demo_date']);
+                    $fecha_sistema = $this->normalizar_ymd_tolerante((string) $parsed['agendar_demo']['demo_date']);
+
+                    if ($hora_admin !== '' && $hora_admin === $hora_sistema
+                        && $fecha_admin !== '' && $fecha_admin === $fecha_sistema) {
+                        $agendar_admin['reagendado_desde'] = $parsed['agendar_demo']['reagendado_desde'];
+                    }
                 }
 
                 $parsed_efectivo['agendar_demo'] = $agendar_admin;
@@ -6053,6 +6067,47 @@ TXT;
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
 
         return $msg;
+    }
+
+    /**
+     * Normaliza una hora suelta a "HH:MM", o '' si no es legible.
+     *
+     * Es la MISMA regex tolerante que usan descartar_agendamiento_fuera_de_slots(),
+     * revalidar_horarios_ofrecidos() y LeadMessage::horarios_ofrecidos_cubren(): tolera "9:05",
+     * " 09:05 " y "17:15:00". Existe para poder comparar dos horas sin repetir el patrón ni
+     * inventar una forma nueva de leerlas — comparar con === sobre el string crudo hace que
+     * "17:15" y "17:15:00" sean horarios distintos, que es un bug esperando.
+     *
+     * @param string $hora
+     *
+     * @return string "HH:MM" o ''.
+     */
+    private function normalizar_hhmm_tolerante(string $hora): string
+    {
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $hora, $m)) {
+            return '';
+        }
+
+        return str_pad($m[1], 2, '0', STR_PAD_LEFT) . ':' . $m[2];
+    }
+
+    /**
+     * Extrae la fecha "Y-m-d" de un string, o '' si no la tiene.
+     *
+     * Mismo criterio de sufijo que ya usa el archivo para leer las claves de fecha del JSON de
+     * disponibilidad ("martes 2026-08-25"), y que tolera un "2026-08-25T00:00:00".
+     *
+     * @param string $fecha
+     *
+     * @return string "Y-m-d" o ''.
+     */
+    private function normalizar_ymd_tolerante(string $fecha): string
+    {
+        if (! preg_match('/(\d{4}-\d{2}-\d{2})/', $fecha, $m)) {
+            return '';
+        }
+
+        return $m[1];
     }
 
     /**
