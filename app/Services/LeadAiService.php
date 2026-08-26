@@ -1044,16 +1044,40 @@ TXT;
          * un inicio concreto), y ANTES del `if` de éxito de abajo para que ese `if` vea el paquete
          * ya corregido y lo devuelva por el camino de éxito, sin tocar el bloque de descarte. */
         if (! $hora_disponible) {
-            $reagendado = $this->reagendar_al_proximo_slot(
-                $lead,
-                $parsed,
-                $availability_data,
-                $demo_id,
-                $demo_date,
-                $demo_start,
-                $fecha_en_ventana,
-                $pidio_ventana
-            );
+            /* 🔴 Fail-safe, mismo criterio que el envoltorio rescate_del_margen_seguro() de acá
+             * arriba: el reagendado hace una consulta a base (la del permiso, la MISMA que
+             * oferta_vigente_sin_margen()) más dos llamadas HTTP al modelo. Si cualquiera de esas
+             * tira, la excepción se propagaría hasta el llamador y tumbaría la generación entera —
+             * y con ella el correctivo, que es la respuesta que el lead sí tiene que recibir. Un
+             * deadlock de MySQL no puede dejar al lead sin ninguna sugerencia. Se degrada a "no se
+             * reagenda" y queda constancia en el log. */
+            $reagendado = null;
+
+            try {
+                $reagendado = $this->reagendar_al_proximo_slot(
+                    $lead,
+                    $parsed,
+                    $availability_data,
+                    $demo_id,
+                    $demo_date,
+                    $demo_start,
+                    $fecha_en_ventana,
+                    $pidio_ventana
+                );
+            } catch (\Throwable $e) {
+                Log::channel('disponibilidad')->warning(
+                    '[DISPONIBILIDAD] Falló el reagendado al próximo slot; se sigue por el camino correctivo de siempre.',
+                    [
+                        'lead_id'    => $lead->id,
+                        'demo_id'    => $demo_id,
+                        'demo_date'  => $demo_date,
+                        'demo_start' => $demo_start,
+                        'error'      => $e->getMessage(),
+                    ]
+                );
+
+                $reagendado = null;
+            }
 
             if ($reagendado !== null) {
                 $parsed          = $reagendado;
@@ -1215,7 +1239,59 @@ TXT;
             return null;
         }
 
-        /* 6. El permiso de siempre, y último porque es el único que toca la base: sólo se reagenda
+        /* 6. 🔴 El lead NO puede estar re-confirmando la demo que ya tiene agendada, y esto no es
+         *    defensa en profundidad: sin este corte el reagendado SE REALIMENTA y le mueve el turno
+         *    a alguien que está entrando a la demo. La secuencia, entera:
+         *      1) 17:10 — se reagenda de 17:05 a 17:15, y el paquete se lleva
+         *         horarios_ofrecidos = [{desde: 17:15, hasta: 17:15}] (obligatorio, ver más abajo).
+         *      2) 17:12 — el admin aprueba: el mensaje pasa a `enviado` CONSERVANDO ese
+         *         horarios_ofrecidos, y el lead queda con demo_start_time = 17:15.
+         *      3) 17:20 — el lead escribe "listo, ahí entro". El modelo re-emite agendar_demo con
+         *         17:15, que es lo que el lead ya tiene: no está aceptando nada nuevo.
+         *      4) 17:15 ya arrancó, así que no está en la grilla y el rescate del margen tampoco
+         *         lo salva.
+         *      5) La condición del permiso da TRUE —horario_figura_como_ofrecido() encuentra el
+         *         17:15 que dejó el propio mensaje del paso 2—: o sea que el reagendado se fabricó
+         *         a sí mismo el permiso para el próximo reagendado.
+         *      6) → se le corre el turno OTRA VEZ, a 17:35, con un texto que le dice "la de las
+         *         17:15 ya arrancó" a un lead que está entrando a esa demo.
+         *    Antes de esta misión el mismo turno producía el correctivo: molesto, pero no
+         *    destructivo (agendar_demo se nulea y la reserva no se toca). Reagendar acá REESCRIBE
+         *    una reserva ya confirmada. Se corta por los dos lados:
+         *
+         *    (a) El lead ya tiene exactamente esa demo agendada. Se comparan los valores
+         *        NORMALIZADOS con los helpers que ya usa el resto del archivo: demo_date viene
+         *        casteado a date (Carbon) y demo_start_time puede llegar como "17:15:00", así que
+         *        un === sobre el string crudo dejaría pasar el caso justo. */
+        $demo_date_lead = $lead->demo_date instanceof \DateTimeInterface
+            ? $lead->demo_date->format('Y-m-d')
+            : (is_scalar($lead->demo_date) ? $this->normalizar_ymd_tolerante((string) $lead->demo_date) : '');
+        $demo_start_lead = is_scalar($lead->demo_start_time)
+            ? $this->normalizar_hhmm_tolerante((string) $lead->demo_start_time)
+            : '';
+
+        if ($demo_date_lead !== '' && $demo_start_lead !== ''
+            && $demo_date_lead === $this->normalizar_ymd_tolerante($demo_date)
+            && $demo_start_lead === $this->normalizar_hhmm_tolerante($demo_start)) {
+            return null;
+        }
+
+        /*    (b) El lead está en un estado donde la demo ya arrancó o se la está esperando entrar.
+         *        Son los cuatro estados posteriores a `demo_agendada` del pipeline
+         *        (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO): demo_pendiente_de_ingreso lo pone
+         *        CheckDemoIngresoTimeout cuando pasó la hora y no confirmó, ingresando_demo y
+         *        demo_en_curso son la demo andando, y demo_pendiente_de_terminar es el tramo final.
+         *        En ninguno de los cuatro "correrle el turno" es una ayuda. */
+        if (in_array((string) $lead->status, [
+            'demo_pendiente_de_ingreso',
+            'ingresando_demo',
+            'demo_en_curso',
+            'demo_pendiente_de_terminar',
+        ], true)) {
+            return null;
+        }
+
+        /* 7. El permiso de siempre, y último porque es el único que toca la base: sólo se reagenda
          *    un horario que le ofrecimos NOSOTROS en un mensaje realmente enviado. Un horario
          *    pasado que el lead inventó se sigue descartando como hasta hoy. */
         if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $demo_start)) {
@@ -1345,7 +1421,12 @@ TXT;
         /* El razonamiento se ANEXA, no se pisa: el del modelo explica por qué aceptó, y sin esta
          * línea el `ai_reasoning` del panel seguiría diciendo "confirmo las 17:05" arriba de un
          * texto que dice 17:15. */
-        $razonamiento_original = isset($parsed['razonamiento']) ? trim((string) $parsed['razonamiento']) : '';
+        /* `is_scalar` antes del cast, misma clase ya registrada en
+         * LeadMessage::horarios_ofrecidos_cubren(): `razonamiento` lo escribe el modelo y llega
+         * crudo, así que un array acá sería "Array to string conversion" → ErrorException. */
+        $razonamiento_original = isset($parsed['razonamiento']) && is_scalar($parsed['razonamiento'])
+            ? trim((string) $parsed['razonamiento'])
+            : '';
         $linea_sistema         = '[sistema] El horario ofrecido (' . $demo_start . ') ya había arrancado cuando el lead aceptó: '
             . 'se reagendó automáticamente al próximo slot disponible (' . $slot_nuevo['hora'] . ') y el mensaje se reescribió para confirmarlo.';
         $parsed['razonamiento'] = $razonamiento_original !== ''
@@ -4495,11 +4576,20 @@ TXT;
                  * y el reagendado se frena solo — que es EXACTAMENTE el modo de falla que la marca
                  * existe para evitar. Normalizar no debilita la salvaguarda: una edición real
                  * (17:20) sigue difiriendo de 17:15. Mismo criterio para la fecha. */
+                /* 🔴 `is_scalar` antes de los cuatro casts, misma clase ya registrada y comentada en
+                 * LeadMessage::horarios_ofrecidos_cubren(). Las dos puntas son datos que escribe el
+                 * modelo (`$parsed`) o el panel (`$final_actions`), sin validación de forma: un
+                 * {"demo_start_time": ["17:15"]} convierte el cast en "Array to string conversion",
+                 * que con error_reporting(-1) es una ErrorException y no una InvalidArgumentException.
+                 * Acá no hay lock de por medio, pero es el mismo descuido: se trata como "no
+                 * comparable" y la marca simplemente no se preserva. */
                 if (is_array($agendar_admin)
                     && ! array_key_exists('reagendado_desde', $agendar_admin)
                     && ! empty($parsed['agendar_demo']['reagendado_desde'])
                     && isset($agendar_admin['demo_start_time'], $parsed['agendar_demo']['demo_start_time'])
-                    && isset($agendar_admin['demo_date'], $parsed['agendar_demo']['demo_date'])) {
+                    && isset($agendar_admin['demo_date'], $parsed['agendar_demo']['demo_date'])
+                    && is_scalar($agendar_admin['demo_start_time']) && is_scalar($parsed['agendar_demo']['demo_start_time'])
+                    && is_scalar($agendar_admin['demo_date']) && is_scalar($parsed['agendar_demo']['demo_date'])) {
                     $hora_admin   = $this->normalizar_hhmm_tolerante((string) $agendar_admin['demo_start_time']);
                     $hora_sistema = $this->normalizar_hhmm_tolerante((string) $parsed['agendar_demo']['demo_start_time']);
                     $fecha_admin   = $this->normalizar_ymd_tolerante((string) $agendar_admin['demo_date']);
@@ -5024,7 +5114,19 @@ TXT;
                  * inexistente ni una exención del margen fuera de la ventana del reagendado. Sin
                  * esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo,
                  * que es justo la ventana en que el admin aprueba. */
-                $permiso_reagendado = isset($agendar_demo['reagendado_desde']) && trim((string) $agendar_demo['reagendado_desde']) !== ''
+                /* 🔴 `is_scalar` ANTES del cast, y no `(string)` a secas. Es exactamente la clase ya
+                 * registrada y comentada en LeadMessage::horarios_ofrecidos_cubren(): `agendar_demo`
+                 * lo escribe el modelo de lenguaje y se guarda CRUDO en `pending_actions`, sin
+                 * validar forma, así que un {"reagendado_desde": ["17:05"]} alcanza para que el cast
+                 * emita "Array to string conversion". Y en Laravel eso no es cosmético —
+                 * HandleExceptions corre con error_reporting(-1) y lo convierte en ErrorException,
+                 * que NO es InvalidArgumentException: se saltearía el catch que devuelve 422 y, peor,
+                 * el release() de este lock (que se libera con una sentencia suelta, sin try/finally).
+                 * El lock `demo_slot_hold_{demo_id}` quedaría tomado sus 8s de TTL y toda otra
+                 * aprobación sobre esa instancia caería en AprobacionEnCursoException, marcando leads
+                 * que no tenían nada. Un valor no escalar se trata como "sin marca". */
+                $permiso_reagendado = isset($agendar_demo['reagendado_desde']) && is_scalar($agendar_demo['reagendado_desde'])
+                    && trim((string) $agendar_demo['reagendado_desde']) !== ''
                     ? trim((string) $agendar_demo['reagendado_desde'])
                     : null;
 
@@ -6312,13 +6414,28 @@ TXT;
      * inventar una forma nueva de leerlas — comparar con === sobre el string crudo hace que
      * "17:15" y "17:15:00" sean horarios distintos, que es un bug esperando.
      *
+     * 🔴 Y VALIDA EL RANGO (00-23 / 00-59), igual que LeadMessage::normalizar_hora_ofrecida(), que
+     * es el método que este imita. No es cosmético allá y no puede faltar acá: "25:99" o "99:99"
+     * son "legibles" para el preg_match, y como todas las comparaciones de hora del archivo son
+     * lexicográficas sobre "HH:MM", una hora basura gana contra cualquier hora real. Allá eso
+     * ensanchaba el permiso para saltarse el margen (por eso se le agregó la validación); acá, hoy,
+     * los dos llamadores sólo comparan igualdad y no rompe — pero copiar el helper SIN el fix deja
+     * la variante vieja a mano para el próximo que lo reuse, que es cómo vuelve un agujero ya
+     * cerrado. Una hora fuera de rango es ilegible ('').
+     *
      * @param string $hora
      *
-     * @return string "HH:MM" o ''.
+     * @return string "HH:MM", o '' si no se pudo leer o está fuera de rango.
      */
     private function normalizar_hhmm_tolerante(string $hora): string
     {
         if (! preg_match('/(\d{1,2}):(\d{2})/', $hora, $m)) {
+            return '';
+        }
+
+        $h = (int) $m[1];
+        $i = (int) $m[2];
+        if ($h < 0 || $h > 23 || $i < 0 || $i > 59) {
             return '';
         }
 
