@@ -19,7 +19,9 @@ use Illuminate\Support\Facades\Http;
  *   2. step_upload_spa()      — zip dist/ → sftp download → sftp upload al hosting
  *   3. step_upload_api()      — checkout en VPS + composer install + zip → sftp → hosting
  *   4. step_run_migrations()  — limpia caché de Laravel + `php artisan migrate --force` en el hosting
- *   5. step_verify_demo()     — verifica que la API y el SPA respondan con la URL realmente compilada
+ *   5. step_restart_queue_workers() — solo en VPS: `queue:restart` para que el worker de supervisor,
+ *                                     que es de larga vida, deje de correr el código anterior
+ *   6. step_verify_demo()     — verifica que la API y el SPA respondan con la URL realmente compilada
  *
  * El demo-setup NO forma parte de este pipeline (decisión del 14/7/2026): corre `migrate:fresh`
  * y vaciaría la base de la demo. Se dispara solo desde el módulo de Leads.
@@ -137,6 +139,7 @@ class DemoUpdateService
             $this->step_upload_spa();
             $this->step_upload_api();
             $this->step_run_migrations();
+            $this->step_restart_queue_workers();
             $this->step_verify_demo();
 
             // Pipeline exitoso: actualizar timestamps y estado.
@@ -499,7 +502,75 @@ class DemoUpdateService
     }
 
     /**
-     * Etapa 5: verifica que la demo realmente responda tras la actualización.
+     * Etapa 5: reinicia el worker de cola. Solo aplica a demos alojadas en VPS.
+     *
+     * En el VPS el worker vive bajo supervisor y es un proceso de LARGA VIDA: carga las clases en
+     * memoria al arrancar y no las recarga nunca. Sin esta etapa, después de cada update sigue
+     * procesando jobs con el código de la versión anterior, indefinidamente — y el síntoma no se
+     * parece en nada a la causa: jobs que fallan por clases o constantes que "no existen" aunque
+     * estén perfectas en disco, y notificaciones que nunca llegan.
+     *
+     * INCIDENTE (26/8/2026): la demo 1 se actualizó a v4.0.4 y el worker seguía siendo el de una
+     * hora antes, procesando con el código de 4.0.3. Hubo que reiniciarlo a mano. El mismo modo de
+     * falla en DeploymentService hacía que un job se cayera con "Undefined class constant
+     * 'CONDICION_MT'" y que al negocio no le llegara la notificación de la cotización del dólar.
+     *
+     * Va DESPUÉS de las migraciones (el worker nuevo arranca contra un esquema al día) y ANTES de
+     * step_verify_demo(), para que la verificación final corra con el worker ya renovado.
+     *
+     * En shared_hosting no hace falta: ahí el worker es el `queue:work --stop-when-empty` que
+     * lanza el cron, arranca y muere cada minuto, y toma el código nuevo solo.
+     *
+     * ⚠️ El `schedule:work` NO se reinicia y no hace falta: ese comando lanza `schedule:run` como
+     * subproceso nuevo cada minuto, así que las tareas programadas ya toman código fresco solas.
+     *
+     * @return void
+     */
+    private function step_restart_queue_workers(): void
+    {
+        if ($this->demo_hosting_type() !== 'vps') {
+            $this->append_log(
+                '[restart_queue_workers] Demo en hosting compartido: no hay worker de larga vida que '
+                . 'reiniciar (el cron lanza queue:work --stop-when-empty, que muere cada minuto).'
+            );
+
+            return;
+        }
+
+        $api_path = $this->demo_api_path();
+
+        $this->append_log('[restart_queue_workers] Reiniciando el worker de cola del VPS...');
+
+        /* must_succeed = false a propósito: llegado este punto el código ya está subido y las
+           migraciones corridas. Abortar acá dejaría el update a medias, que es peor que un worker
+           con código viejo. Se degrada a warning en el log. */
+        $output = $this->exec_hosting_ssh(
+            'restart_queue_workers',
+            'cd ' . escapeshellarg($api_path) . ' && php artisan queue:restart --no-ansi 2>&1',
+            false
+        );
+
+        /* `queue:restart` no reinicia nada por sí mismo: deja una marca en caché que cada worker
+           lee entre job y job. Si la caché no está disponible, artisan puede devolver 0 igual, así
+           que se confirma contra el texto de éxito en vez de confiar en el exit code. */
+        if (stripos((string) $output, 'Broadcasting queue restart signal') !== false) {
+            $this->append_log(
+                '[restart_queue_workers] Señal enviada: el worker termina el job en curso y arranca '
+                . 'con el código nuevo.'
+            );
+
+            return;
+        }
+
+        $this->append_log(
+            '[restart_queue_workers] AVISO: no se pudo confirmar el reinicio del worker. El update '
+            . 'sigue, pero el worker puede estar corriendo el código anterior. Reinicialo a mano con '
+            . '"php artisan queue:restart" en ' . $api_path
+        );
+    }
+
+    /**
+     * Etapa 6: verifica que la demo realmente responda tras la actualización.
      *
      * INCIDENTE (24/7/2026): el pipeline compiló, subió, migró y quedó en `completado` con la
      * demo devolviendo 404 en cada request porque el .env compilado tenía `/public/public`
