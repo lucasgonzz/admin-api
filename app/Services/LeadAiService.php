@@ -1146,6 +1146,14 @@ TXT;
      * Las seis condiciones van de barata a cara, igual que en oferta_vigente_sin_margen(): la
      * consulta a base (la del permiso) va última.
      *
+     * 🔴 Y después de las seis hay tres filtros más, que no son condiciones de entrada sino el
+     * blindaje de lo que el mensaje promete: (a) el slot elegido tiene que estar por encima de
+     * `ahora + margen` con el reloj leído en ese momento —la grilla se armó antes de una llamada al
+     * modelo con timeout de 90s, así que su primer slot puede estar ya a dos minutos vista—, (b) se
+     * vuelve a chequear lo mismo DESPUÉS de que el modelo redactó, porque ahí pasó otra llamada de
+     * hasta 90s, y (c) el texto tiene que nombrar el horario nuevo. Cualquiera de los tres que
+     * falle: no se reagenda y el paquete queda intacto.
+     *
      * @param Lead                 $lead
      * @param array<string, mixed> $parsed            Paquete del modelo, ya con agendar_demo array.
      * @param array<string, mixed> $availability_data Grilla de ESTA request (la que vio el modelo).
@@ -1172,9 +1180,16 @@ TXT;
             return null;
         }
 
+        /* 🔴 El reloj se lee UNA sola vez para todo el cálculo. Dos AppTime::now() separados pueden
+         * caer a los dos lados del borde de un minuto (y la hora sale corrida hasta 59 minutos si
+         * uno agarra la hora y el otro los minutos), y además en local cada llamada es una consulta
+         * a admin_settings. Más abajo hay una SEGUNDA lectura deliberada, después de la llamada al
+         * modelo: esa no es un descuido, es el punto 2 del blindaje de los cinco minutos. */
+        $ahora = AppTime::now();
+
         /* 3. El reagendado es siempre DENTRO DE HOY. Correrle el turno a otro día es cambiarle el
          *    día al lead, no correrle el horario. */
-        if ($demo_date !== AppTime::now()->format('Y-m-d')) {
+        if ($demo_date !== $ahora->format('Y-m-d')) {
             return null;
         }
 
@@ -1186,7 +1201,7 @@ TXT;
         if ($slot_min === null) {
             return null;
         }
-        $now_min = (int) AppTime::now()->format('H') * 60 + (int) AppTime::now()->format('i');
+        $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
         if ($now_min <= $slot_min || ($now_min - $slot_min) > self::REAGENDADO_VENTANA_MINUTOS) {
             return null;
         }
@@ -1207,9 +1222,17 @@ TXT;
             return null;
         }
 
-        $slot_nuevo = $this->proximo_slot_del_dia($availability_data, $demo_date, $slot_min, $demo_id);
+        /* 🔴 Los cinco minutos de antelación que pidió Lucas ("tiene que agendarle SIEMPRE con cinco
+         * minutos de antelación") no los garantiza la grilla: $availability_data se armó ANTES de la
+         * llamada al modelo que trajo este paquete (timeout de 90s), así que su primer slot puede
+         * estar hoy a dos minutos vista — o directamente haber arrancado. Por eso el slot se filtra
+         * contra el reloj LEÍDO RECIÉN, exigiendo el mismo margen que aplica
+         * compute_day_slots_for_demo(): la setting, que es la que decide qué se puede ofrecer. */
+        $margen_minutos = (int) LeadDemoSettings::get_demo_minimo_minutos_desde_ahora();
+
+        $slot_nuevo = $this->proximo_slot_del_dia($availability_data, $demo_date, $slot_min, $demo_id, $now_min + $margen_minutos);
         if ($slot_nuevo === null) {
-            /* No queda nada hoy: cae al correctivo, que ahora dice el motivo real. */
+            /* No queda nada hoy con la antelación mínima: cae al correctivo, que dice el motivo real. */
             return null;
         }
 
@@ -1217,6 +1240,62 @@ TXT;
          * intacto: no hay mutación que revertir. */
         $texto = $this->call_reagendado_al_proximo_slot_response($lead, $demo_start, $slot_nuevo['hora'], $demo_date);
         if ($texto === '') {
+            return null;
+        }
+
+        /* 🔴 Segunda lectura del reloj, y es deliberada: entre la grilla y esta línea pasaron DOS
+         * llamadas al modelo con timeout de 90s cada una (la que trajo el paquete y la que acaba de
+         * redactar el texto). El mensaje que estamos por escribir le promete al lead un horario
+         * concreto —"ya te la dejé lista para las 17:15"—, así que se vuelve a exigir el margen
+         * completo justo antes de mutar el paquete. Si ya no da, NO se reagenda: paquete intacto y
+         * cae al correctivo. Es barato y cierra la ventana de los 90 segundos.
+         *
+         * El cambio de fecha se contempla por el caso de la medianoche: si la segunda lectura ya es
+         * de otro día, comparar minutos del día daría un "sí" absurdo. */
+        $ahora_post     = AppTime::now();
+        $now_min_post   = (int) $ahora_post->format('H') * 60 + (int) $ahora_post->format('i');
+        $slot_nuevo_min = $this->hhmm_a_minutos((string) $slot_nuevo['hora']);
+
+        if ($slot_nuevo_min === null
+            || $ahora_post->format('Y-m-d') !== $demo_date
+            || $slot_nuevo_min < $now_min_post + $margen_minutos) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] El slot del reagendado dejó de cumplir la antelación mínima mientras el modelo redactaba: no se reagenda.',
+                [
+                    'lead_id'          => $lead->id,
+                    'demo_date'        => $demo_date,
+                    'slot_que_arranco' => $demo_start,
+                    'slot_nuevo'       => $slot_nuevo['hora'],
+                    'margen_minutos'   => $margen_minutos,
+                    'now_min_grilla'   => $now_min,
+                    'now_min_post'     => $now_min_post,
+                    'fecha_post'       => $ahora_post->format('Y-m-d'),
+                ]
+            );
+
+            return null;
+        }
+
+        /* 🔴 Post-validación del TEXTO contra el slot nuevo, misma clase que
+         * verificar_coherencia_dia_mensaje() hace con el día de la semana: acá el paquete se muta
+         * para agendar las 17:15, así que un texto que no nombra las 17:15 no confirma nada — o
+         * sigue confirmando el viejo, que es exactamente la falsificación que esta misión cierra.
+         * Si el texto no lo menciona, no se reagenda y el paquete queda intacto.
+         *
+         * El patrón es tolerante como los de verificar_coherencia_dia_mensaje(): acepta "17:15" y
+         * "17.15", con o sin espacios, y el cero inicial opcional para las horas de un dígito. */
+        if (! $this->mensaje_menciona_horario($texto, (string) $slot_nuevo['hora'])) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] El texto del reagendado no menciona el horario nuevo: se descarta y no se reagenda.',
+                [
+                    'lead_id'          => $lead->id,
+                    'demo_date'        => $demo_date,
+                    'slot_que_arranco' => $demo_start,
+                    'slot_nuevo'       => $slot_nuevo['hora'],
+                    'texto'            => $texto,
+                ]
+            );
+
             return null;
         }
 
@@ -1311,14 +1390,21 @@ TXT;
      * `exclude_lead_id` no hay que tocarlo: la grilla de origen ya se armó con $lead->id, así que
      * el propio lead no se bloquea a sí mismo y los demás sí.
      *
+     * 🔴 Lo que la grilla NO garantiza, y por eso existe $piso_minutos: se armó antes de la llamada
+     * al modelo (timeout 90s), así que su primer slot de hoy puede estar ya a dos minutos vista o
+     * directamente haber arrancado. "Estar en la grilla" no alcanza para prometerle un horario al
+     * lead: el piso lo pone el llamador con el reloj leído recién.
+     *
      * @param array<string, mixed> $availability_data Grilla de esta request.
      * @param string               $demo_date         Fecha, en Y-m-d (hoy).
      * @param int                  $slot_min          Horario que arrancó, en minutos del día.
      * @param int                  $demo_id_original  Instancia que traía el lead.
+     * @param int                  $piso_minutos      Mínimo aceptable en minutos del día (ahora +
+     *                                                margen). Un slot por debajo no se elige.
      *
      * @return array{fecha: string, dia_label: string, hora: string, demo_id: int}|null
      */
-    private function proximo_slot_del_dia(array $availability_data, string $demo_date, int $slot_min, int $demo_id_original): ?array
+    private function proximo_slot_del_dia(array $availability_data, string $demo_date, int $slot_min, int $demo_id_original, int $piso_minutos): ?array
     {
         $demos_json = isset($availability_data['demos']) && is_array($availability_data['demos'])
             ? $availability_data['demos']
@@ -1343,7 +1429,11 @@ TXT;
                 $posteriores = [];
                 foreach ($slots as $slot) {
                     $min = $this->hhmm_a_minutos((string) $slot);
-                    if ($min !== null && $min > $slot_min) {
+                    /* Dos condiciones, y las dos hacen falta: posterior al horario que arrancó (si
+                     * no, no es un corrimiento) y por encima del piso de antelación mínima (si no,
+                     * le prometemos al lead un horario que la aprobación va a rechazar, o que ya
+                     * arrancó). */
+                    if ($min !== null && $min > $slot_min && $min >= $piso_minutos) {
                         $posteriores[] = (string) $slot;
                     }
                 }
@@ -1378,6 +1468,36 @@ TXT;
         }
 
         return $mejor_todas;
+    }
+
+    /**
+     * ¿El texto que devolvió el modelo menciona este horario?
+     *
+     * Post-validación del mismo tipo que verificar_coherencia_dia_mensaje() hace con el día de la
+     * semana: el paquete se muta para agendar un horario concreto, así que un texto que no lo nombra
+     * no lo confirma, y aceptar "cualquier cosa que no esté vacía" deja pasar justo el mensaje que
+     * sigue confirmando el horario viejo.
+     *
+     * Tolerancias, con el mismo criterio que los patrones de días (que aceptan "miercoles" sin
+     * tilde): separador `:` o `.`, espacios alrededor, y cero inicial opcional en las horas de un
+     * dígito ("9:15" es lo que escribe el modelo aunque el slot sea "09:15"). Los lookarounds evitan
+     * que "17:15" matchee dentro de "117:150".
+     *
+     * @param string $texto Mensaje redactado por el modelo.
+     * @param string $hora  Horario en HH:MM.
+     *
+     * @return bool
+     */
+    private function mensaje_menciona_horario(string $texto, string $hora): bool
+    {
+        if (! preg_match('/^\s*(\d{1,2}):(\d{2})\s*$/', $hora, $m)) {
+            return false;
+        }
+
+        $hh   = (int) $m[1];
+        $h_re = $hh < 10 ? '0?' . $hh : (string) $hh;
+
+        return (bool) preg_match('/(?<!\d)' . $h_re . '\s*[:.]\s*' . $m[2] . '(?!\d)/', $texto);
     }
 
     /**
