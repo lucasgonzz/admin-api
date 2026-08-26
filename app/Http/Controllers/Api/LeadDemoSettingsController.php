@@ -65,6 +65,11 @@ class LeadDemoSettingsController extends Controller
                no minutos. "sometimes" por el mismo motivo que los de arriba — una versión del SPA
                anterior a esta misión no manda la clave y no tiene que tirar 422. */
             'demo_intro_umbral_pct'           => 'sometimes|integer|min:'.LeadDemoSettings::MIN_PCT.'|max:'.LeadDemoSettings::MAX_PCT,
+            /* Velocidad del video de introducción. `numeric` y NO `integer`: el pedido es poder
+               escribir 1, 1.1 o 1.5. Rango propio 0.5-3 -- ver clamp_velocidad(). "sometimes" por
+               el mismo motivo que los de arriba: una versión del SPA anterior a este cambio no
+               manda la clave y no tiene que comerse un 422. */
+            'demo_intro_velocidad'            => 'sometimes|numeric|min:'.LeadDemoSettings::MIN_VELOCIDAD.'|max:'.LeadDemoSettings::MAX_VELOCIDAD,
             /* Tope de la ventana extendida (misión 47), en horas. Rango propio 1-12: es una guarda
                contra que un solo lead bloquee la instancia el día entero. */
             'demo_ventana_extendida_max_horas' => 'sometimes|integer|min:'.LeadDemoSettings::MIN_HORAS_VENTANA.'|max:'.LeadDemoSettings::MAX_HORAS_VENTANA,

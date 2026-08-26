@@ -48,6 +48,14 @@ class LeadDemoSettings
     public const KEY_DEMO_INTRO_UMBRAL_PCT = 'demo_intro_umbral_pct';
 
     /**
+     * Clave: velocidad de reproducción del video de introducción en la página inmersiva.
+     *
+     * Es un float y no un entero: los valores útiles son 1, 1.1, 1.5. Hasta ahora estaba
+     * hardcodeada en `VideoIntro.vue`, así que cambiarla exigía un deploy del front.
+     */
+    public const KEY_DEMO_INTRO_VELOCIDAD = 'demo_intro_velocidad';
+
+    /**
      * Clave: tope de horas de la ventana extendida (misión 47).
      *
      * Es una GUARDA, no algo que el lead elija. Sin tope, "hasta el fin del día" significa que un
@@ -195,6 +203,9 @@ class LeadDemoSettings
     /** Valor por defecto: porcentaje del video de introducción exigido para entrar (misión 46). */
     private const DEFAULT_DEMO_INTRO_UMBRAL_PCT = 90;
 
+    /** Valor por defecto: la misma 1.5 que estaba hardcodeada, para no cambiar nada hasta que se edite. */
+    private const DEFAULT_DEMO_INTRO_VELOCIDAD = 1.5;
+
     /** Valor por defecto: tope de la ventana extendida, en horas (misión 47). */
     private const DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS = 6;
 
@@ -288,6 +299,12 @@ class LeadDemoSettings
     /** Máximo permitido para el umbral del video de introducción (porcentaje). */
     public const MAX_PCT = 100;
 
+    /** Mínimo permitido para la velocidad del video de introducción. */
+    public const MIN_VELOCIDAD = 0.5;
+
+    /** Máximo permitido para la velocidad del video de introducción. */
+    public const MAX_VELOCIDAD = 3.0;
+
     /** Mínimo permitido para el tope de la ventana extendida (horas). */
     public const MIN_HORAS_VENTANA = 1;
 
@@ -297,7 +314,7 @@ class LeadDemoSettings
     /**
      * Devuelve la configuración completa para el panel (GET settings).
      *
-     * @return array<string, int|string>
+     * @return array<string, int|float|string>
      */
     public static function to_array(): array
     {
@@ -307,6 +324,7 @@ class LeadDemoSettings
             'setup_timeout_minutos'               => self::get_setup_timeout_minutos(),
             'demo_minimo_minutos_desde_ahora'     => self::get_demo_minimo_minutos_desde_ahora(),
             'demo_intro_umbral_pct'               => self::get_demo_intro_umbral_pct(),
+            'demo_intro_velocidad'                => self::get_demo_intro_velocidad(),
             'demo_ventana_extendida_max_horas'    => self::get_ventana_extendida_max_horas(),
             'gracia_minutos_post'                 => self::get_gracia_minutos_post(),
             'recordatorio_minutos_antes'          => self::get_recordatorio_minutos_antes(),
@@ -361,6 +379,12 @@ class LeadDemoSettings
         // de arriba -- una version anterior del SPA que no lo mande no tiene que borrar el valor.
         if (isset($data['demo_intro_umbral_pct'])) {
             AdminSetting::set(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::clamp_pct((int) $data['demo_intro_umbral_pct']));
+        }
+
+        // Velocidad del video de introduccion: opcional por el mismo motivo que el campo de arriba.
+        // Float y no int -- el valor que se pide poder escribir es 1, 1.1 o 1.5.
+        if (isset($data['demo_intro_velocidad'])) {
+            AdminSetting::set(self::KEY_DEMO_INTRO_VELOCIDAD, (string) self::clamp_velocidad((float) $data['demo_intro_velocidad']));
         }
 
         // Tope de la ventana extendida (mision 47), en horas. "sometimes" por el mismo motivo.
@@ -505,6 +529,9 @@ class LeadDemoSettings
         if (AdminSetting::get(self::KEY_DEMO_INTRO_UMBRAL_PCT) === null) {
             AdminSetting::set(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::DEFAULT_DEMO_INTRO_UMBRAL_PCT);
         }
+        if (AdminSetting::get(self::KEY_DEMO_INTRO_VELOCIDAD) === null) {
+            AdminSetting::set(self::KEY_DEMO_INTRO_VELOCIDAD, (string) self::DEFAULT_DEMO_INTRO_VELOCIDAD);
+        }
         if (AdminSetting::get(self::KEY_VENTANA_EXTENDIDA_MAX_HORAS) === null) {
             AdminSetting::set(self::KEY_VENTANA_EXTENDIDA_MAX_HORAS, (string) self::DEFAULT_VENTANA_EXTENDIDA_MAX_HORAS);
         }
@@ -628,6 +655,16 @@ class LeadDemoSettings
     public static function get_demo_intro_umbral_pct(): int
     {
         return self::clamp_pct((int) AdminSetting::get(self::KEY_DEMO_INTRO_UMBRAL_PCT, (string) self::DEFAULT_DEMO_INTRO_UMBRAL_PCT));
+    }
+
+    /**
+     * Velocidad de reproducción del video de introducción.
+     *
+     * @return float
+     */
+    public static function get_demo_intro_velocidad(): float
+    {
+        return self::clamp_velocidad((float) AdminSetting::get(self::KEY_DEMO_INTRO_VELOCIDAD, (string) self::DEFAULT_DEMO_INTRO_VELOCIDAD));
     }
 
     /**
@@ -1007,6 +1044,35 @@ class LeadDemoSettings
         }
 
         return $value;
+    }
+
+    /**
+     * Acota la velocidad al rango [MIN_VELOCIDAD, MAX_VELOCIDAD], con un decimal.
+     *
+     * Clamp propio y no clamp(): no son minutos ni un porcentaje, y el mínimo es 0.5 y no 0 —
+     * `playbackRate = 0` no es "lento", es un video pausado que nunca avanza, y con el gate del
+     * intro eso dejaría al lead afuera de su demo para siempre. Un valor corrupto en la tabla cae
+     * en 0.5 por el mismo motivo: el piso tiene que ser reproducible.
+     *
+     * El redondeo a un decimal es para no guardar un 1.4999999 que después se muestre raro en el
+     * panel; con 0.1 de paso alcanza y sobra para lo que se pide.
+     *
+     * @param float $value
+     *
+     * @return float
+     */
+    private static function clamp_velocidad(float $value): float
+    {
+        $redondeado = round($value, 1);
+
+        if ($redondeado < self::MIN_VELOCIDAD) {
+            return self::MIN_VELOCIDAD;
+        }
+        if ($redondeado > self::MAX_VELOCIDAD) {
+            return self::MAX_VELOCIDAD;
+        }
+
+        return $redondeado;
     }
 
     /**

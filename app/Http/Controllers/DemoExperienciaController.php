@@ -431,6 +431,10 @@ class DemoExperienciaController extends Controller
             'visto_pct'   => (int) $lead->intro_visto_pct,
             'umbral_pct'  => LeadDemoSettings::get_demo_intro_umbral_pct(),
             'obligatorio' => $hay_video_cargado && ! $this->modo_prueba(),
+            // Velocidad de reproducción configurada desde el panel. Viaja acá y no en un endpoint
+            // aparte porque la página inmersiva es pública: el lead no está autenticado y este
+            // payload ya es el único canal por el que le llega la configuración del intro.
+            'velocidad'   => LeadDemoSettings::get_demo_intro_velocidad(),
         ];
     }
 
