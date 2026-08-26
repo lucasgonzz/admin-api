@@ -6,6 +6,7 @@ use App\Helpers\AppTime;
 use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Services\DemoHitosService;
+use App\Services\DemoPathResolver;
 use App\Services\DemoPlanResolver;
 use App\Services\ImplementationSettings;
 use App\Services\LeadDemoFormMapper;
@@ -103,10 +104,15 @@ class RunDemoSetupService
 
         /**
          * URL de ERP API de la demo asignada al lead.
-         * Se normaliza con la regla idempotente de /public en shared_hosting.
+         * Se normaliza con la regla idempotente de /public, que solo aplica si la demo vive en
+         * hosting compartido: en el VPS el docroot ya es public/ y el sufijo daría 404.
          */
         $resolver = new ClientEmpresaApiUrlResolver();
-        $erp_api_url = $resolver->normalize_demo_api_base_url($demo->erp_api_url);
+        $path_resolver = new DemoPathResolver();
+        $erp_api_url = $resolver->normalize_demo_api_base_url(
+            $demo->erp_api_url,
+            $path_resolver->hosting_type($demo)
+        );
         if ($erp_api_url === '') {
             return $this->mark_failed($lead, 'La demo asignada no tiene ERP API URL configurada.');
         }

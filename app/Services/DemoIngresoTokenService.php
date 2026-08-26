@@ -341,7 +341,14 @@ class DemoIngresoTokenService
      */
     protected function avisar_instancia($demo, array $payload)
     {
-        $erp_api_url = $this->api_url_resolver->normalize_demo_api_base_url($demo->erp_api_url);
+        /* El /public solo corresponde si la demo vive en hosting compartido: en el VPS el docroot
+         * ya es public/ y el sufijo daria 404 en todo. El tipo sale de DemoPathResolver y no de la
+         * columna cruda, para que el default y el rechazo de valores basura vivan en un solo lugar. */
+        $path_resolver = new DemoPathResolver();
+        $erp_api_url = $this->api_url_resolver->normalize_demo_api_base_url(
+            $demo->erp_api_url,
+            $path_resolver->hosting_type($demo)
+        );
         if ($erp_api_url === '') {
             throw new \RuntimeException('La demo asignada no tiene ERP API URL configurada.');
         }

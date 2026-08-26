@@ -187,25 +187,41 @@ class ClientEmpresaApiUrlResolver
     }
 
     /**
-     * Normaliza la URL de API de una demo aplicando la regla de /public para shared_hosting.
+     * Normaliza la URL de API de una demo aplicando la regla de /public según su hosting.
      *
-     * Todas las demos viven en hosting compartido bajo domains/comerciocity.com/public_html/{slug}/api.
-     * Si la URL es absoluta (http/https), delega en normalize_api_base_url() con hosting_type=shared_hosting.
-     * Si no es absoluta (ej: empresa.local:8000 del seeder local), devuelve el valor crudo con trim/rtrim
-     * pero SIN agregar /public, porque agregarle /public a una URL local rompería artisan serve.
+     * En hosting compartido la API se sirve desde domains/comerciocity.com/public_html/{slug}/api,
+     * y el subdominio apunta a esa carpeta: hay que entrar por /public. En el VPS el docroot YA es
+     * public/, así que agregarlo daría public/public y 404 en todo — la misma trampa que documenta
+     * §2.1 del informe 20260826-plan-migracion-shared-a-vps.md para los clientes.
+     *
+     * 🔴 El segundo parámetro es opcional y su default es shared_hosting: un llamador que no lo
+     * pase se comporta byte por byte como antes de que existiera. Esa es la compatibilidad hacia
+     * atrás, y no depende de que nadie se acuerde de nada. Quien sí lo pasa debe sacarlo de
+     * DemoPathResolver::hosting_type(), no de la columna cruda, para que el default y el rechazo
+     * de valores basura vivan en un solo lugar.
+     *
+     * Si la URL no es absoluta (ej: empresa.local:8000 del seeder local), devuelve el valor crudo
+     * con trim/rtrim pero SIN agregar /public en ningún hosting, porque agregarle /public a una URL
+     * local rompería artisan serve. Esa rama es además la que DemoUpdateService::step_verify_demo()
+     * usa para reconocer una demo local y saltearse los chequeos HTTP.
      *
      * @param  string|null  $url  URL de API de la demo (puede incluir o no /public)
+     * @param  string|null  $hosting_type  'shared_hosting', 'vps' o null (default shared_hosting)
      * @return string  URL normalizada, o cadena vacía si está vacía
      */
-    public function normalize_demo_api_base_url(?string $url): string
+    public function normalize_demo_api_base_url(?string $url, ?string $hosting_type = null): string
     {
         $url_trimmed = rtrim(trim((string) $url), '/');
         if ($url_trimmed === '') {
             return '';
         }
 
-        // Intentar normalizar como URL absoluta con hosting compartido
-        $normalized = $this->normalize_api_base_url($url_trimmed, 'shared_hosting');
+        if ($hosting_type === null) {
+            $hosting_type = 'shared_hosting';
+        }
+
+        // Intentar normalizar como URL absoluta con el hosting de la demo
+        $normalized = $this->normalize_api_base_url($url_trimmed, $hosting_type);
         if ($normalized !== '') {
             return $normalized;
         }

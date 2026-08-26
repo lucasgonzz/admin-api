@@ -1290,7 +1290,8 @@ class DemoUpdateService
      *
      * Valida que la URL no esté vacía (falla temprano si no está cargada).
      * Delega en ClientEmpresaApiUrlResolver::normalize_demo_api_base_url() para aplicar
-     * la regla idempotente de /public en shared_hosting.
+     * la regla idempotente de /public, que solo corresponde en hosting compartido: en el VPS el
+     * docroot ya es public/ y el sufijo daría 404 en todo.
      *
      * @return string  URL de API normalizada
      * @throws \RuntimeException Si erp_api_url está vacía
@@ -1306,7 +1307,27 @@ class DemoUpdateService
         }
 
         $resolver = new ClientEmpresaApiUrlResolver();
-        return $resolver->normalize_demo_api_base_url($url);
+        return $resolver->normalize_demo_api_base_url($url, $this->demo_hosting_type());
+    }
+
+    /**
+     * Tipo de hosting del ERP de esta demo ('shared_hosting' | 'vps'), vía DemoPathResolver.
+     *
+     * Con la demo sin cargar (DemoUpdate huérfano) devuelve 'shared_hosting': es el
+     * comportamiento que tenía el service cableado, y perder la relación no puede ser motivo para
+     * elegir el camino nuevo.
+     *
+     * @return string
+     */
+    private function demo_hosting_type(): string
+    {
+        if (! $this->demo instanceof Demo) {
+            return 'shared_hosting';
+        }
+
+        $resolver = new DemoPathResolver();
+
+        return $resolver->hosting_type($this->demo);
     }
 
     /**
