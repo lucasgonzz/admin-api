@@ -1111,6 +1111,16 @@ class ReagendadoAlProximoSlotTest extends TestCase
             {
                 return $this->requires_agendamiento_verification_gate($lead, $parsed);
             }
+
+            /**
+             * @param Lead $lead
+             *
+             * @return string
+             */
+            public function historial(Lead $lead): string
+            {
+                return $this->build_user_content($lead, false);
+            }
         };
     }
 
@@ -1321,5 +1331,57 @@ class ReagendadoAlProximoSlotTest extends TestCase
         }
 
         return [];
+    }
+
+    /**
+     * Los bloques rojos de error NO entran al historial que lee el agente.
+     *
+     * 🔴 Es el filtro más transversal de la misión —aplica a TODA conversación de TODO lead— y el
+     * único que no quedaba clavado por ningún test. Sin él, el agente lee el bloque de error del
+     * sistema como si fuera una línea de la conversación con el lead, y puede repetirle una causa
+     * que nadie le dijo: es la puerta por la que volvía el "se ocupó" que reportó Lucas, después de
+     * haber blindado los dos prompts aislados (que no llevan historial).
+     *
+     * El control positivo va en el mismo test: un mensaje normal del sistema, creado igual, SÍ
+     * tiene que estar en el historial. Sin eso, un `build_user_content()` que devolviera vacío por
+     * cualquier motivo haría pasar la aserción negativa sin probar nada.
+     *
+     * @return void
+     */
+    public function test_los_bloques_de_error_no_entran_al_historial_que_lee_el_agente(): void
+    {
+        $lead = $this->crear_lead();
+
+        /* Mensaje normal del sistema: el lead SÍ lo recibió. */
+        $enviado = new LeadMessage();
+        $enviado->lead_id = $lead->id;
+        $enviado->sender  = 'sistema';
+        $enviado->status  = 'enviado';
+        $enviado->content = 'Te la dejo lista para hoy a las 17:05.';
+        $enviado->save();
+
+        /* Bloque rojo: lo escribe el sistema para el admin, nunca salió al lead. */
+        (new \App\Services\LeadConversationErrorLogger())->log(
+            (int) $lead->id,
+            'No se envió: el horario ya no está disponible',
+            'El turno dejó de estar disponible mientras esperaba aprobación.'
+        );
+
+        /* Montaje: el bloque rojo existe de verdad y está marcado como error. */
+        $bloque = LeadMessage::query()->where('lead_id', $lead->id)->where('is_error', true)->first();
+        $this->assertNotNull($bloque, 'El montaje falló: no se creó el bloque de error.');
+
+        $historial = $this->service()->historial($lead->refresh());
+
+        $this->assertStringContainsString(
+            'Te la dejo lista para hoy a las 17:05.',
+            $historial,
+            'El control positivo falló: un mensaje enviado normal tiene que estar en el historial.'
+        );
+        $this->assertStringNotContainsString(
+            'dejó de estar disponible mientras esperaba aprobación',
+            $historial,
+            'El bloque rojo de error entró al historial que lee el agente.'
+        );
     }
 }
