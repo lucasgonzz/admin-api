@@ -4,6 +4,8 @@ namespace Tests\Unit;
 
 use App\Models\Demo;
 use App\Services\DemoPathResolver;
+use App\Services\DemoUpdateService;
+use ReflectionClass;
 use Tests\TestCase;
 
 /**
@@ -210,5 +212,101 @@ class DemoPathResolverTest extends TestCase
 
         $this->assertSame('shared_hosting', $resolver->hosting_type($demo));
         $this->assertSame('domains/comerciocity.com/public_html/demo3/api', $resolver->api_path($demo));
+    }
+
+    // =========================================================================
+    // El cableado del pipeline (DemoUpdateService)
+    // =========================================================================
+
+    /**
+     * Invoca un método privado de DemoUpdateService sobre una instancia sin construir, con la demo
+     * inyectada por reflexión.
+     *
+     * El pipeline no se puede probar de punta a punta sin SSH real, pero lo que decide a qué
+     * servidor va el despliegue es este puñado de helpers: se prueban acá, con el mismo patrón que
+     * ya usan DemoUpdateServiceSlugTest y DemoUpdateSpaBuildEnvTest.
+     *
+     * @param  Demo    $demo
+     * @param  string  $metodo
+     * @return mixed
+     */
+    private function del_service(Demo $demo, string $metodo)
+    {
+        $reflection = new ReflectionClass(DemoUpdateService::class);
+        $service    = $reflection->newInstanceWithoutConstructor();
+
+        $propiedad = $reflection->getProperty('demo');
+        $propiedad->setAccessible(true);
+        $propiedad->setValue($service, $demo);
+
+        $invocable = $reflection->getMethod($metodo);
+        $invocable->setAccessible(true);
+
+        return $invocable->invoke($service);
+    }
+
+    /**
+     * 🔴 Una demo de hosting compartido resuelve a las MISMAS rutas y la MISMA credencial que
+     * tenía el pipeline cableado. Es la prueba de que nada cambió para las demos de hoy.
+     *
+     * @return void
+     */
+    public function test_el_pipeline_de_una_demo_compartida_no_cambio(): void
+    {
+        $demo = $this->demo(['erp_spa_url' => 'https://demo3.comerciocity.com']);
+
+        $this->assertSame('shared_hosting', $this->del_service($demo, 'demo_credential_type'));
+        $this->assertSame(
+            'domains/comerciocity.com/public_html/demo3/api',
+            $this->del_service($demo, 'demo_api_path')
+        );
+        $this->assertSame(
+            'domains/comerciocity.com/public_html/demo3/spa',
+            $this->del_service($demo, 'demo_spa_path')
+        );
+    }
+
+    /**
+     * 🔴 Lo que pidió Lucas: con la demo marcada como VPS, el pipeline toma el otro camino —
+     * la credencial del VPS y las rutas absolutas de CloudPanel.
+     *
+     * @return void
+     */
+    public function test_el_pipeline_de_una_demo_en_vps_usa_la_credencial_y_las_rutas_del_vps(): void
+    {
+        $demo = $this->demo([
+            'erp_spa_url'      => 'https://demo3.comerciocity.com',
+            'erp_hosting_type' => 'vps',
+        ]);
+
+        $this->assertSame('vps', $this->del_service($demo, 'demo_credential_type'));
+        $this->assertSame('/home/api-demo3/empresa-api', $this->del_service($demo, 'demo_api_path'));
+        $this->assertSame(
+            '/home/demo3/htdocs/demo3.comerciocity.com',
+            $this->del_service($demo, 'demo_spa_path')
+        );
+    }
+
+    /**
+     * Un DemoUpdate sin demo asociada no puede resolver a ningún servidor: tira en vez de armar
+     * una ruta plausible. La credencial, en cambio, cae al hosting compartido — perder la relación
+     * nunca puede ser motivo para elegir el camino nuevo.
+     *
+     * @return void
+     */
+    public function test_sin_demo_asociada_el_pipeline_no_inventa_un_destino(): void
+    {
+        $reflection = new ReflectionClass(DemoUpdateService::class);
+        $service    = $reflection->newInstanceWithoutConstructor();
+
+        $credencial = $reflection->getMethod('demo_credential_type');
+        $credencial->setAccessible(true);
+        $this->assertSame('shared_hosting', $credencial->invoke($service));
+
+        $api_path = $reflection->getMethod('demo_api_path');
+        $api_path->setAccessible(true);
+
+        $this->expectException(\RuntimeException::class);
+        $api_path->invoke($service);
     }
 }

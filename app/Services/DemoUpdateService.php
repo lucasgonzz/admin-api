@@ -94,7 +94,7 @@ class DemoUpdateService
     private $compiled_api_url = '';
 
     /**
-     * Carga el DemoUpdate con sus relaciones y la credencial shared_hosting.
+     * Carga el DemoUpdate con sus relaciones y la credencial del servidor donde vive la demo.
      *
      * @param  DemoUpdate  $demo_update
      */
@@ -108,8 +108,9 @@ class DemoUpdateService
         $this->demo    = $this->demo_update->demo;
         $this->version = $this->demo_update->version;
 
-        // Credencial del hosting compartido requerida para SSH y SFTP.
-        $this->credential = ClientSshCredential::where('type', 'shared_hosting')->firstOrFail();
+        /* Credencial del servidor destino, requerida para SSH y SFTP. Sale del hosting de la demo:
+         * hasta el 26/8/2026 estaba cableada a 'shared_hosting' porque todas las demos vivían ahí. */
+        $this->credential = ClientSshCredential::where('type', $this->demo_credential_type())->firstOrFail();
     }
 
     /**
@@ -297,13 +298,14 @@ class DemoUpdateService
         $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
         $this->append_log('[upload_spa] ZIP descargado al servidor de admin');
 
-        // Calcula el path del SPA de la demo en hosting compartido.
-        $slug               = $this->slug_from_url((string) $this->demo->erp_spa_url);
-        $hosting_spa_dir    = "domains/comerciocity.com/public_html/{$slug}/spa";
+        /* Path del SPA de la demo en su servidor: relativo al home SSH en hosting compartido,
+         * absoluto en el VPS. Lo resuelve DemoPathResolver, que además tira si el path fuera a
+         * quedar con un segmento vacío — abajo hay un `find . -mindepth 1 -delete`. */
+        $hosting_spa_dir    = $this->demo_spa_path();
         $hosting_zip_remote = "{$hosting_spa_dir}/dist.zip";
 
-        // Sube el ZIP al hosting.
-        $sftp_hosting = $this->open_sftp_session('shared_hosting');
+        // Sube el ZIP al servidor de la demo.
+        $sftp_hosting = $this->open_sftp_session($this->demo_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $hosting_zip_remote, 'upload_spa');
         $this->append_log('[upload_spa] ZIP subido al hosting');
 
@@ -385,13 +387,12 @@ class DemoUpdateService
         $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
         $this->append_log('[upload_api] ZIP descargado al servidor de admin');
 
-        // Path del API de la demo en hosting compartido.
-        $slug        = $this->slug_from_url((string) $this->demo->erp_spa_url);
-        $api_path    = "domains/comerciocity.com/public_html/{$slug}/api";
+        // Path del API de la demo en su servidor (relativo en shared, absoluto en VPS).
+        $api_path    = $this->demo_api_path();
         $remote_zip  = "{$api_path}/{$zip_name}";
 
-        // Sube el ZIP al hosting.
-        $sftp_hosting = $this->open_sftp_session('shared_hosting');
+        // Sube el ZIP al servidor de la demo.
+        $sftp_hosting = $this->open_sftp_session($this->demo_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
         $this->append_log('[upload_api] ZIP subido al hosting');
 
@@ -448,9 +449,8 @@ class DemoUpdateService
      */
     private function step_run_migrations(): void
     {
-        // Path del API de la demo en hosting compartido, con el mismo criterio que step_upload_api().
-        $slug     = $this->slug_from_url((string) $this->demo->erp_spa_url);
-        $api_path = "domains/comerciocity.com/public_html/{$slug}/api";
+        // Path del API de la demo en su servidor, con el mismo criterio que step_upload_api().
+        $api_path = $this->demo_api_path();
 
         // step_upload_api() termina con reconnect_build_vps(), así que la sesión SSH activa
         // al cerrar esa etapa es la del VPS, no la del hosting: hay que reconectar acá.
@@ -1266,23 +1266,82 @@ class DemoUpdateService
      * Infiere el slug de la demo a partir de su URL de SPA.
      * Ejemplo: demo.comerciocity.com → "demo"; demo2.comerciocity.com → "demo2".
      *
+     * El cálculo vive en DemoPathResolver desde el 26/8/2026: es la misma regla que arma las rutas
+     * remotas, y tenerla escrita dos veces es exactamente lo que después diverge sin que nadie lo
+     * note.
+     *
+     * ⚠️ Las tres etapas del pipeline ya no lo llaman: piden la ruta entera a demo_api_path() /
+     * demo_spa_path(). Queda a propósito como delegación de una línea porque
+     * tests/Unit/DemoUpdateServiceSlugTest.php lo invoca por reflexión: ese test fija el bug del
+     * 17/8/2026 (URL sin esquema → slug vacío → ZIP a un directorio equivocado) y, delegando,
+     * sigue siendo una red efectiva sobre el cálculo real, ahora en el resolver.
+     *
      * @param  string  $url
      * @return string
      */
     private function slug_from_url(string $url): string
     {
-        // 🔴 Se normaliza ANTES de parsear (17/8/2026), y el caso que lo justifica es angosto:
-        // medido con PHP 7.4.33, `parse_url('demo3.comerciocity.com', PHP_URL_HOST)` devuelve
-        // **null** —sin puerto no reconoce host—, mientras que con puerto
-        // (`empresa.local:8080`) sí lo reconoce. O sea que el slug quedaba vacío justo para una
-        // demo de producción cargada a mano sin esquema, que es la forma más común, y las rutas
-        // del hosting se armaban como `public_html//spa`: el ZIP subido a un directorio
-        // equivocado, sin ningún error. `erp_spa_url` es texto libre y el módulo de Demos permite
-        // guardarla así. Misma familia que el link de ingreso que originó DemoUrlNormalizer.
-        $host = parse_url(DemoUrlNormalizer::absolute($url), PHP_URL_HOST) ?? '';
+        $resolver = new DemoPathResolver();
 
-        // El slug es el primer segmento del hostname (antes del primer punto).
-        return explode('.', $host)[0];
+        return $resolver->slug_from_url($url);
+    }
+
+    /**
+     * Tipo de credencial SSH/SFTP del servidor donde vive esta demo ('shared_hosting' | 'vps').
+     *
+     * @return string
+     */
+    private function demo_credential_type(): string
+    {
+        return $this->demo_hosting_type();
+    }
+
+    /**
+     * Directorio raíz de la API de la demo en su servidor.
+     *
+     * @return string
+     * @throws \RuntimeException Si la demo no está cargada o no se puede armar una ruta completa.
+     */
+    private function demo_api_path(): string
+    {
+        $resolver = new DemoPathResolver();
+
+        return $resolver->api_path($this->assert_demo());
+    }
+
+    /**
+     * Directorio del SPA de la demo en su servidor.
+     *
+     * @return string
+     * @throws \RuntimeException Si la demo no está cargada o no se puede armar una ruta completa.
+     */
+    private function demo_spa_path(): string
+    {
+        $resolver = new DemoPathResolver();
+
+        return $resolver->spa_path($this->assert_demo());
+    }
+
+    /**
+     * La demo del DemoUpdate, o excepción si la relación se perdió.
+     *
+     * Antes esto no hacía falta porque los paths se armaban interpolando un slug que, sin demo,
+     * quedaba vacío — y el pipeline seguía igual contra un directorio equivocado. Ahora que la
+     * ruta la arma un resolver tipado, la ausencia de demo se convierte en un error visible.
+     *
+     * @return Demo
+     * @throws \RuntimeException
+     */
+    private function assert_demo(): Demo
+    {
+        if (! $this->demo instanceof Demo) {
+            throw new \RuntimeException(
+                'El registro de actualización no tiene demo asociada: no hay forma de saber a qué '
+                . 'servidor subir el código.'
+            );
+        }
+
+        return $this->demo;
     }
 
     /**
