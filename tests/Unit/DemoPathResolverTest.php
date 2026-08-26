@@ -177,6 +177,96 @@ class DemoPathResolverTest extends TestCase
     }
 
     /**
+     * 🔴 EL TYPO QUE BORRA LA API. «ERP SPA URL» y «ERP API URL» son campos contiguos y casi
+     * homónimos en el modal, y nadie los valida: pegar la URL de la API en el campo del SPA se
+     * guarda con 200 OK. En el VPS, `/home/api-demo3/htdocs/api-demo3.comerciocity.com` es el
+     * symlink a `empresa-api/public`, y el deploy del SPA vacía el directorio antes de
+     * descomprimir. En hosting compartido el mismo typo era inofensivo (la ruta no existe).
+     *
+     * @return void
+     */
+    public function test_una_demo_en_vps_no_despliega_el_spa_sobre_el_sitio_de_la_api(): void
+    {
+        $resolver = new DemoPathResolver();
+        $demo     = $this->demo([
+            'erp_spa_url'      => 'https://api-demo3.comerciocity.com',
+            'erp_hosting_type' => 'vps',
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $resolver->spa_path($demo);
+    }
+
+    /**
+     * 🔴 El `vps_path` es texto libre y termina adentro de un `cd` remoto y de un `find -delete`.
+     * Un valor con barras, `..`, espacios o metacaracteres de shell no puede producir una ruta
+     * bien formada que apunte a otro lado: tiene que frenar acá, que es el único lugar donde
+     * alguien lo mira.
+     *
+     * @return void
+     */
+    public function test_un_vps_path_con_caracteres_de_shell_o_de_ruta_no_se_acepta(): void
+    {
+        $resolver = new DemoPathResolver();
+
+        $invalidos = ['x; rm -rf /tmp/zz', '..', '/home/demo3', 'demo3/htdocs', 'demo 3', "demo3'"];
+
+        foreach ($invalidos as $invalido) {
+            $demo = $this->demo([
+                'erp_spa_url'      => 'https://demo3.comerciocity.com',
+                'erp_hosting_type' => 'vps',
+                'erp_vps_path'     => $invalido,
+            ]);
+
+            $tiro = false;
+            try {
+                $resolver->api_path($demo);
+            } catch (\RuntimeException $e) {
+                $tiro = true;
+            }
+
+            $this->assertTrue($tiro, 'Se aceptó un vps_path inválido: ' . $invalido);
+        }
+    }
+
+    /**
+     * Un host en mayúsculas da un directorio que en Linux no existe. `parse_url()` no normaliza,
+     * pero `DemoUrlNormalizer` sí lo hace para decidir el esquema: mismo criterio acá.
+     *
+     * @return void
+     */
+    public function test_el_host_en_mayusculas_se_normaliza(): void
+    {
+        $resolver = new DemoPathResolver();
+        $demo     = $this->demo([
+            'erp_spa_url'      => 'https://DEMO3.comerciocity.com',
+            'erp_hosting_type' => 'vps',
+        ]);
+
+        $this->assertSame('/home/api-demo3/empresa-api', $resolver->api_path($demo));
+        $this->assertSame('/home/demo3/htdocs/demo3.comerciocity.com', $resolver->spa_path($demo));
+    }
+
+    /**
+     * 🔴 «VPS» escrito a mano en mayúsculas se guarda con 200 OK (el CRUD no valida). Sin
+     * normalizar, la grilla mostraba "VPS" y la demo se seguía deployando al hosting compartido:
+     * el usuario cree que guardó algo que no tiene efecto.
+     *
+     * @return void
+     */
+    public function test_el_hosting_escrito_en_mayusculas_igual_se_entiende(): void
+    {
+        $resolver = new DemoPathResolver();
+        $demo     = $this->demo([
+            'erp_spa_url'      => 'https://demo3.comerciocity.com',
+            'erp_hosting_type' => 'VPS',
+        ]);
+
+        $this->assertSame('vps', $resolver->hosting_type($demo));
+        $this->assertSame('/home/api-demo3/empresa-api', $resolver->api_path($demo));
+    }
+
+    /**
      * 🔴 Un valor basura en la columna cae a `shared_hosting`, NUNCA a `vps`. El camino nuevo se
      * elige solo cuando alguien lo eligió a propósito.
      *

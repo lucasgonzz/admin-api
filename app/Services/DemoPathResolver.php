@@ -30,6 +30,27 @@ class DemoPathResolver
     const SHARED_HOSTING_PREFIX = 'domains/comerciocity.com/public_html/';
 
     /**
+     * Caracteres válidos para un identificador de sitio: los que puede tener un subdominio.
+     *
+     * 🔴 No es cosmética. El identificador termina interpolado en un `cd` remoto y en el
+     * directorio que después se vacía con `find -delete`. Sin esta restricción, un `vps_path`
+     * cargado a mano como `x; rm -rf algo` o `../..` produce una ruta perfectamente bien formada
+     * que no es la que nadie quiso.
+     */
+    const SITE_ID_PATTERN = '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/';
+
+    /**
+     * Prefijo reservado del sitio de la API en el VPS.
+     *
+     * 🔴 En CloudPanel, `/home/api-{slug}/htdocs/api-{slug}.comerciocity.com` es un **symlink a
+     * `empresa-api/public`** (verificado por SSH el 26/8/2026, §1 del informe de migración). Si el
+     * SPA de una demo resolviera a un directorio `api-*`, el `find . -mindepth 1 -delete` del
+     * deploy seguiría el symlink y vaciaría el `public/` de la API. Y llegar ahí es un typo de un
+     * solo campo: pegar la URL de la API en «ERP SPA URL», que en el modal es el campo de al lado.
+     */
+    const API_SITE_PREFIX = 'api-';
+
+    /**
      * Tipo de hosting del ERP de la demo, normalizado.
      *
      * Cualquier valor que no sea exactamente 'vps' cae a 'shared_hosting': un dato basura en la
@@ -40,7 +61,11 @@ class DemoPathResolver
      */
     public function hosting_type(Demo $demo): string
     {
-        $hosting_type = trim((string) ($demo->erp_hosting_type ?? ''));
+        /* strtolower porque la columna es texto libre y nadie la valida: un "VPS" cargado a mano
+         * se guarda con 200 OK, y sin esto la demo se quedaba en hosting compartido en silencio
+         * mientras la grilla mostraba "VPS". Es el mismo criterio que DemoUrlNormalizer usa para
+         * el host. Un valor que igual no reconozcamos ('vpss') sigue cayendo a shared_hosting. */
+        $hosting_type = strtolower(trim((string) ($demo->erp_hosting_type ?? '')));
 
         return $hosting_type === 'vps' ? 'vps' : 'shared_hosting';
     }
@@ -104,9 +129,12 @@ class DemoPathResolver
             $host = '';
         }
 
-        // El slug es el primer segmento del hostname (antes del primer punto).
-        $partes = explode('.', $host);
+        /* A minúsculas: `parse_url()` NO normaliza el host, y en Linux `/home/DEMO3` no es
+         * `/home/demo3`. DemoUrlNormalizer::host_of() ya baja el host para decidir el esquema —
+         * el criterio estaba escrito en la casa de al lado. */
+        $partes = explode('.', strtolower($host));
 
+        // El slug es el primer segmento del hostname (antes del primer punto).
         return $partes[0];
     }
 
@@ -127,7 +155,8 @@ class DemoPathResolver
             return '';
         }
 
-        return (string) $host;
+        // A minúsculas, por el mismo motivo que slug_from_url(): el host es un directorio.
+        return strtolower((string) $host);
     }
 
     /**
@@ -139,9 +168,9 @@ class DemoPathResolver
      */
     public function vps_slug(Demo $demo): string
     {
-        $vps_path = trim((string) ($demo->erp_vps_path ?? ''));
+        $vps_path = strtolower(trim((string) ($demo->erp_vps_path ?? '')));
         if ($vps_path !== '') {
-            return $vps_path;
+            return $this->assert_site_id($vps_path, '«VPS Path ERP»');
         }
 
         $slug = $this->slug($demo);
@@ -153,7 +182,34 @@ class DemoPathResolver
             );
         }
 
-        return $slug;
+        return $this->assert_site_id($slug, 'el subdominio de la «ERP SPA URL»');
+    }
+
+    /**
+     * Valida que un identificador de sitio pueda usarse como segmento de una ruta remota.
+     *
+     * 🔴 Lo que ataja no es un ataque: es un campo de texto libre que termina adentro de un `cd`
+     * por SSH y de un `find -delete`. Un `vps_path` con una barra, un `..` o un `;` produce una
+     * ruta bien formada que apunta a otro lado, y ninguna etapa posterior lo nota. `DemoController`
+     * no valida nada (el CRUD es declarativo) y la columna es un `string` a secas, así que este es
+     * el único lugar donde se puede frenar.
+     *
+     * @param  string  $site_id
+     * @param  string  $origen  Cómo nombrar el dato en el mensaje de error
+     * @return string
+     * @throws \RuntimeException
+     */
+    private function assert_site_id(string $site_id, string $origen): string
+    {
+        if (preg_match(self::SITE_ID_PATTERN, $site_id) !== 1) {
+            throw new \RuntimeException(
+                'El identificador de la demo en el VPS ("' . $site_id . '", tomado de ' . $origen
+                . ') tiene caracteres que no puede tener el nombre de un sitio. Se esperan solo '
+                . 'letras, números y guiones (ej: demo3). Corregilo desde el módulo de Demos.'
+            );
+        }
+
+        return $site_id;
     }
 
     /**
@@ -198,10 +254,51 @@ class DemoPathResolver
                 );
             }
 
-            return '/home/' . $this->vps_slug($demo) . '/htdocs/' . $spa_domain;
+            $vps_slug = $this->vps_slug($demo);
+            $this->assert_no_es_el_sitio_de_la_api($vps_slug, $spa_domain);
+
+            return '/home/' . $vps_slug . '/htdocs/' . $spa_domain;
         }
 
         return self::SHARED_HOSTING_PREFIX . $this->assert_slug($demo) . '/spa';
+    }
+
+    /**
+     * Frena el despliegue del SPA si la ruta resuelta es la del sitio de la API.
+     *
+     * 🔴 EL CASO QUE ESTO ATAJA, Y POR QUÉ ES NUEVO (26/8/2026)
+     *
+     * En el modal de Demos, «ERP SPA URL» y «ERP API URL» son campos contiguos y casi homónimos, y
+     * `DemoController` no valida ninguno. Pegar la URL de la API en el campo del SPA se guarda con
+     * 200 OK. En hosting compartido ese typo era inofensivo: la ruta resultante
+     * (`public_html/api-demo3/spa`) no existe y el `cd` del deploy falla.
+     *
+     * En el VPS **sí existe**: `/home/api-demo3/htdocs/api-demo3.comerciocity.com` es el symlink a
+     * `empresa-api/public`. El `cd` lo sigue, y el `find . -mindepth 1 -delete` del deploy del SPA
+     * se lleva puesto el `index.php`, el `.htaccess` y el symlink de storage de la API — con el
+     * `2>/dev/null || true` comiéndose cualquier error. La etapa siguiente falla por otro motivo y
+     * nadie relaciona una cosa con la otra.
+     *
+     * @param  string  $vps_slug
+     * @param  string  $spa_domain
+     * @return void
+     * @throws \RuntimeException
+     */
+    private function assert_no_es_el_sitio_de_la_api(string $vps_slug, string $spa_domain): void
+    {
+        $prefijo = self::API_SITE_PREFIX;
+        $largo   = strlen($prefijo);
+
+        if (substr($vps_slug, 0, $largo) !== $prefijo && substr($spa_domain, 0, $largo) !== $prefijo) {
+            return;
+        }
+
+        throw new \RuntimeException(
+            'El SPA de esta demo resolvería a "/home/' . $vps_slug . '/htdocs/' . $spa_domain
+            . '", que en el VPS es el sitio de la API (y un symlink a su carpeta public). '
+            . 'Desplegar el SPA ahí borraría la API. Casi seguro la «ERP SPA URL» tiene cargada la '
+            . 'URL de la API: revisala en el módulo de Demos.'
+        );
     }
 
     /**

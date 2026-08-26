@@ -12,7 +12,7 @@ use App\Services\ClientEmpresaApiUrlResolver;
 use Illuminate\Support\Facades\Http;
 
 /**
- * Ejecuta el pipeline completo de actualización de una demo en hosting compartido.
+ * Ejecuta el pipeline completo de actualización de una demo, en el servidor donde esa demo viva.
  *
  * Pipeline de etapas:
  *   1. step_compile_spa()     — checkout en VPS + npm ci + npm run build
@@ -60,14 +60,14 @@ class DemoUpdateService
     private $version;
 
     /**
-     * Credencial SSH del hosting compartido.
+     * Credencial SSH del servidor de la demo (shared_hosting o vps, según su erp_hosting_type).
      *
      * @var ClientSshCredential
      */
     private $credential;
 
     /**
-     * Sesión SSH activa al hosting compartido (phpseclib).
+     * Sesión SSH activa al servidor de la demo (phpseclib).
      *
      * @var SSH2|null
      */
@@ -126,6 +126,11 @@ class DemoUpdateService
         $this->demo_update->status     = 'ejecutandose';
         $this->demo_update->started_at = now();
         $this->demo_update->save();
+
+        // Primera línea del log: a qué servidor va esta corrida. Toda la funcionalidad del hosting
+        // consiste en elegir un camino, así que el camino elegido tiene que quedar registrado —
+        // y arriba de todo, no deducible de las líneas `$ cd ...` que vengan 300 renglones después.
+        $this->log_destino();
 
         try {
             $this->step_compile_spa();
@@ -400,7 +405,12 @@ class DemoUpdateService
         $this->connect_hosting_ssh();
         $this->exec_hosting_ssh(
             'upload_api',
-            "cd {$api_path} && unzip -o {$zip_name} && rm {$zip_name}",
+            /* escapeshellarg en las tres, como el resto del archivo (472, 484, 1252). Era la única
+             * interpolación cruda que quedaba, y desde que el path puede salir de `erp_vps_path`
+             * —un campo de texto libre del modal de Demos— eso pasó de teórico a alcanzable. */
+            'cd ' . escapeshellarg($api_path)
+            . ' && unzip -o ' . escapeshellarg($zip_name)
+            . ' && rm ' . escapeshellarg($zip_name),
             true,
             true
         );
@@ -669,11 +679,11 @@ class DemoUpdateService
     }
 
     // =========================================================================
-    // Helpers SSH al hosting compartido
+    // Helpers SSH al servidor de la demo
     // =========================================================================
 
     /**
-     * Conecta por SSH al hosting compartido usando la credencial shared_hosting.
+     * Conecta por SSH al servidor de la demo con la credencial que resolvió el constructor.
      *
      * @return void
      */
@@ -689,7 +699,7 @@ class DemoUpdateService
     }
 
     /**
-     * Cierra la sesión SSH al hosting (evita "Please close the channel" en phpseclib).
+     * Cierra la sesión SSH al servidor de la demo (evita "Please close the channel" en phpseclib).
      *
      * @return void
      */
@@ -712,7 +722,7 @@ class DemoUpdateService
     }
 
     /**
-     * Ejecuta un comando en el hosting compartido y valida exit status.
+     * Ejecuta un comando en el servidor de la demo y valida exit status.
      *
      * @param  string  $step
      * @param  string  $command
@@ -1239,7 +1249,7 @@ class DemoUpdateService
      * Script bash que vacía el directorio del SPA y descomprime dist.zip en su raíz.
      * Misma lógica que DeploymentService::build_spa_hosting_deploy_shell().
      *
-     * @param  string  $spa_dir  Ruta relativa al directorio del SPA en hosting
+     * @param  string  $spa_dir  Directorio del SPA (relativo en shared, absoluto en VPS)
      * @return string
      */
     private function build_spa_hosting_deploy_shell(string $spa_dir): string
@@ -1293,7 +1303,13 @@ class DemoUpdateService
      */
     private function demo_credential_type(): string
     {
-        return $this->demo_hosting_type();
+        if (! $this->demo instanceof Demo) {
+            return 'shared_hosting';
+        }
+
+        $resolver = new DemoPathResolver();
+
+        return $resolver->credential_type($this->demo);
     }
 
     /**
@@ -1367,6 +1383,32 @@ class DemoUpdateService
 
         $resolver = new ClientEmpresaApiUrlResolver();
         return $resolver->normalize_demo_api_base_url($url, $this->demo_hosting_type());
+    }
+
+    /**
+     * Deja en el log a qué servidor y a qué rutas va esta corrida, antes de la primera etapa.
+     *
+     * No falla nunca: si las rutas no se pueden resolver, lo deja escrito y sigue — la etapa que
+     * las necesite va a tirar con su propio mensaje. Un log de diagnóstico que aborte el pipeline
+     * sería peor que no tenerlo.
+     *
+     * @return void
+     */
+    private function log_destino(): void
+    {
+        $hosting = $this->demo_hosting_type();
+        $destino = $hosting === 'vps' ? 'VPS' : 'hosting compartido';
+
+        try {
+            $this->append_log(
+                '[destino] Esta demo está en ' . $destino . ' (credencial SSH: '
+                . $this->demo_credential_type() . ', host: ' . $this->credential->host . ')'
+            );
+            $this->append_log('[destino] API: ' . $this->demo_api_path());
+            $this->append_log('[destino] SPA: ' . $this->demo_spa_path());
+        } catch (\Throwable $e) {
+            $this->append_log('[destino] No se pudieron resolver las rutas: ' . $e->getMessage());
+        }
     }
 
     /**

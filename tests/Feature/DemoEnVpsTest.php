@@ -3,15 +3,20 @@
 namespace Tests\Feature;
 
 use App\Models\Admin;
+use App\Models\ClientSshCredential;
 use App\Models\Demo;
+use App\Models\DemoUpdate;
 use App\Models\Lead;
+use App\Models\Version;
 use App\Services\DemoIngresoTokenService;
 use App\Services\DemoPathResolver;
+use App\Services\DemoUpdateService;
 use App\Services\RunDemoSetupService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use ReflectionProperty;
 use Tests\TestCase;
 
 /**
@@ -122,20 +127,33 @@ class DemoEnVpsTest extends TestCase
     }
 
     /**
-     * URL a la que se hizo el único POST registrado por Http::fake().
+     * URL del request que pegó al endpoint indicado.
+     *
+     * 🔴 Filtra por endpoint y exige exactamente uno. La versión ingenua —un callback que devuelve
+     * `true` siempre— se queda con el ÚLTIMO request registrado, no con el único: `assertSent()`
+     * corre el callback sobre todos. Hoy da igual porque cada service hace una sola llamada, pero
+     * el día que alguno sume un request más, el test asertaría sobre la URL equivocada en vez de
+     * fallar por el motivo real.
+     *
+     * @param string $endpoint Tramo final que identifica el endpoint (ej: admin-sync/demo-token)
      *
      * @return string
      */
-    private function url_del_post(): string
+    private function url_del_post(string $endpoint): string
     {
-        $url = '';
-        Http::assertSent(function ($request) use (&$url) {
+        $urls = [];
+        Http::assertSent(function ($request) use (&$urls, $endpoint) {
             $url = (string) $request->url();
+            if (strpos($url, $endpoint) !== false) {
+                $urls[] = $url;
+            }
 
             return true;
         });
 
-        return $url;
+        $this->assertCount(1, $urls, 'Se esperaba exactamente un POST a ' . $endpoint);
+
+        return $urls[0];
     }
 
     /**
@@ -205,6 +223,36 @@ class DemoEnVpsTest extends TestCase
     }
 
     /**
+     * 🔴 COMPATIBILIDAD HACIA ATRÁS, EL CASO QUE IMPORTA. El admin-spa de producción no conoce los
+     * campos nuevos y va a seguir mandando el payload viejo por un tiempo. Una demo YA marcada
+     * como VPS que recibe uno de esos PUT **no puede volver a hosting compartido**: si volviera,
+     * el siguiente pipeline le subiría el código al servidor equivocado, en silencio.
+     *
+     * @return void
+     */
+    public function test_un_put_sin_los_campos_nuevos_no_devuelve_una_demo_vps_al_hosting_compartido(): void
+    {
+        $admin = $this->crear_admin('demo-vps-4@test.local');
+        $demo  = $this->crear_demo('vps');
+        $demo->erp_vps_path = 'demo3';
+        $demo->save();
+
+        // El payload de siempre: solo las cuatro URLs, como lo manda el SPA que todavía no se actualizó.
+        $response = $this->actingAs($admin, 'sanctum')->putJson('/api/admin/demo/' . $demo->id, [
+            'erp_spa_url'       => 'https://demo3.comerciocity.com',
+            'erp_api_url'       => 'https://api-demo3.comerciocity.com',
+            'ecommerce_spa_url' => 'https://demo3-tienda.comerciocity.com',
+            'ecommerce_api_url' => 'https://api-demo3-tienda.comerciocity.com',
+        ]);
+
+        $response->assertStatus(200);
+
+        $demo->refresh();
+        $this->assertSame('vps', $demo->erp_hosting_type);
+        $this->assertSame('demo3', $demo->erp_vps_path);
+    }
+
+    /**
      * Marcar una demo existente como VPS desde el modal de edición.
      *
      * @return void
@@ -227,6 +275,76 @@ class DemoEnVpsTest extends TestCase
     }
 
     /**
+     * 🔴 EL PIPELINE, NO EL HELPER. Los tests por reflexión de DemoPathResolverTest verifican que
+     * los helpers DEVUELVAN la credencial correcta; ninguno verifica que el pipeline la USE. Sin
+     * este test se podían revertir las tres líneas que son todo el cambio del pipeline
+     * (la credencial del constructor y los dos `open_sftp_session()`) con los 15 tests en verde.
+     *
+     * Acá se construye un DemoUpdateService de verdad —constructor incluido, que es el que
+     * consulta `client_ssh_credentials`— y se mira con qué credencial quedó.
+     *
+     * @return void
+     */
+    public function test_el_pipeline_se_construye_con_la_credencial_del_servidor_de_la_demo(): void
+    {
+        $this->sembrar_credencial('shared_hosting', 'shared.test.local');
+        $this->sembrar_credencial('vps', 'vps.test.local');
+
+        /* Versión propia y no `Version::first()`: la base del slot puede estar vacía, y un test que
+         * se saltea solo es peor que no tenerlo — este es justamente el que cubre el cambio del
+         * pipeline. El pipeline no llega a usarla (solo se construye el service), pero la columna
+         * es NOT NULL. */
+        $version              = new Version();
+        $version->uuid        = (string) Str::uuid();
+        $version->version     = '99.99.' . random_int(100, 999);
+        $version->status      = 'draft';
+        $version->save();
+
+        foreach (['shared_hosting' => 'shared.test.local', 'vps' => 'vps.test.local'] as $hosting => $host_esperado) {
+            $demo = $this->crear_demo($hosting);
+
+            $demo_update = new DemoUpdate();
+            $demo_update->uuid       = (string) Str::uuid();
+            $demo_update->demo_id    = $demo->id;
+            $demo_update->version_id = $version->id;
+            $demo_update->status     = 'pendiente';
+            $demo_update->save();
+
+            $service = new DemoUpdateService($demo_update->fresh());
+
+            $propiedad = new ReflectionProperty(DemoUpdateService::class, 'credential');
+            $propiedad->setAccessible(true);
+            $credencial = $propiedad->getValue($service);
+
+            $this->assertSame($hosting, $credencial->type);
+            $this->assertSame($host_esperado, $credencial->host);
+        }
+    }
+
+    /**
+     * Crea (o reusa) la fila de credencial SSH de un tipo, para que el constructor la encuentre.
+     *
+     * @param string $type
+     * @param string $host
+     *
+     * @return void
+     */
+    private function sembrar_credencial(string $type, string $host): void
+    {
+        $credencial = ClientSshCredential::where('type', $type)->first();
+        if ($credencial === null) {
+            $credencial       = new ClientSshCredential();
+            $credencial->type = $type;
+        }
+
+        $credencial->host     = $host;
+        $credencial->port     = 22;
+        $credencial->username = 'usuario-de-prueba';
+        $credencial->password = 'secreto';
+        $credencial->save();
+    }
+
+    /**
      * El camino de siempre: con la demo en hosting compartido, el aviso a la instancia entra por
      * /public. Este test y el que sigue son el par que prueba que el campo cambia el camino.
      *
@@ -241,7 +359,7 @@ class DemoEnVpsTest extends TestCase
 
         $this->assertSame(
             'https://api-demo3.comerciocity.com/public/api/admin-sync/demo-token',
-            $this->url_del_post()
+            $this->url_del_post('admin-sync/demo-token')
         );
     }
 
@@ -260,7 +378,7 @@ class DemoEnVpsTest extends TestCase
 
         $this->assertSame(
             'https://api-demo3.comerciocity.com/api/admin-sync/demo-token',
-            $this->url_del_post()
+            $this->url_del_post('admin-sync/demo-token')
         );
     }
 
@@ -278,7 +396,7 @@ class DemoEnVpsTest extends TestCase
 
         $this->assertSame(
             'https://api-demo3.comerciocity.com/public/api/admin-sync/demo-setup',
-            $this->url_del_post()
+            $this->url_del_post('admin-sync/demo-setup')
         );
     }
 
@@ -297,7 +415,7 @@ class DemoEnVpsTest extends TestCase
 
         $this->assertSame(
             'https://api-demo3.comerciocity.com/api/admin-sync/demo-setup',
-            $this->url_del_post()
+            $this->url_del_post('admin-sync/demo-setup')
         );
     }
 }
