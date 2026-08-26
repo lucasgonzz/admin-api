@@ -484,12 +484,71 @@ class LeadController extends Controller
     }
 
     /**
-     * Marca un lead de detalle con alcance completo de mensajes.
+     * Agrega al lead el link completo de ingreso a la demo, para el bloque "Link de ingreso a la
+     * demo" del modal (`lead_demo_ingreso_link` en LeadProperties). El accesor ya normaliza el
+     * esquema con DemoUrlNormalizer, así que lo que sale de acá es navegable tal cual.
+     *
+     * 🔴 Este es el ÚNICO lugar del controlador donde se decide que el link viaja. Está separado
+     * a propósito de prepare_lead_for_detail_json(): los endpoints que cambian el token también
+     * lo necesitan y NO pueden usar aquel método (ver full_lead_with_demo_link()).
+     *
+     * 🔴 A propósito NO se agrega a un `$appends` del modelo. El accesor lee `$this->demo`, así
+     * que en `$appends` correría en todos los lugares donde el modelo se serializa entero — el
+     * listado de leads, el `broadcastWith()` de LeadSuggestionCreated (que emite sobre un
+     * `Channel` público de Pusher) y los endpoints públicos de DemoExperienciaController —,
+     * sumando una query por lead donde la relación no esté cargada y, peor, mandando el link CON
+     * el token en claro a payloads que hoy no lo llevan.
+     *
+     * 🔴 Y es `append()` de instancia, no una asignación (`$lead->demo_ingreso_url = ...`). La
+     * asignación mete una clave que no es columna adentro de `$attributes` y deja el modelo
+     * *dirty*: el día que alguien agregue un `save()` después del llamado, el UPDATE incluiría
+     * `demo_ingreso_url` y saldría `Unknown column`. `append()` produce el mismo JSON sin
+     * ensuciar los atributos.
      *
      * @param \App\Models\Lead|null $lead
      *
+     * @return \App\Models\Lead|null El mismo lead recibido.
+     */
+    protected function append_demo_ingreso_url(?Lead $lead)
+    {
+        if (! $lead) {
+            return null;
+        }
+
+        $lead->append('demo_ingreso_url');
+
+        return $lead;
+    }
+
+    /**
+     * Lead completo en formato fullModel CON el link de ingreso ya appendeado. Es lo que tienen
+     * que devolver los endpoints que cambian el token de ingreso (run-demo-setup,
+     * demo-token/reemitir, demo-token/revocar).
+     *
+     * Por qué existe, medido el 26/8/2026: cada corrida del setup y cada reemisión emiten un
+     * token nuevo y la instancia BORRA el anterior. El link no es una columna sino un accesor,
+     * así que en un `fullModel()` pelado la clave `demo_ingreso_url` no viaja — y el SPA fusiona
+     * la respuesta con `Object.assign()`, que deja intactas las claves ausentes. Resultado: el
+     * modal mostraba el token nuevo en un campo y el link VIEJO (ya muerto) en el otro, que es
+     * justo el que se copia y se le manda al lead.
+     *
+     * 🔴 Acá NO se llama a prepare_lead_for_detail_json(), por más que parezca el mismo trabajo y
+     * dé ganas de unificarlos. Ese método además hace `mark_messages_scope('full')`, y el front
+     * lee esa marca: la mutación `update_lead_en_conversacion` del store REEMPLAZA el hilo de
+     * mensajes cuando el scope viene en 'full' y lo FUSIONA cuando no. Las acciones de token se
+     * disparan desde el panel lateral de WhatsApp y commitean esa misma mutación, así que mandar
+     * el scope completo desde acá cambiaría el hilo de fusionar a reemplazar —perdiendo lo que el
+     * panel tenga en vuelo— a cambio de nada para este arreglo.
+     *
+     * @param int|string $id Identificador del lead.
+     *
      * @return \App\Models\Lead|null
      */
+    protected function full_lead_with_demo_link($id)
+    {
+        return $this->append_demo_ingreso_url($this->fullModel('lead', $id));
+    }
+
     /**
      * Marca un lead de detalle con alcance completo de mensajes e incluye
      * si el admin autenticado está suscrito a notificaciones WhatsApp del lead.
@@ -512,26 +571,9 @@ class LeadController extends Controller
             ->where('admin_id', Auth::id())
             ->exists();
 
-        /*
-         * Link completo de ingreso a la demo, para el bloque "Link de ingreso a la demo" del modal
-         * (`lead_demo_ingreso_link` en LeadProperties). El accesor ya normaliza el esquema con
-         * DemoUrlNormalizer, así que lo que sale de acá es navegable tal cual.
-         *
-         * 🔴 Se inyecta ACÁ, en el detalle de un solo lead, y a propósito NO se agrega a un
-         * `$appends` del modelo. El accesor lee `$this->demo`, así que en `$appends` correría en
-         * todos los lugares donde el modelo se serializa entero — el listado de leads, el
-         * `broadcastWith()` de LeadSuggestionCreated y los endpoints públicos de
-         * DemoExperienciaController —, sumando una query por lead donde la relación no esté
-         * cargada y, peor, mandando el link CON el token en claro a payloads que hoy no lo llevan.
-         *
-         * 🔴 Y es `append()` de instancia, no una asignación (`$lead->demo_ingreso_url = ...`). La
-         * asignación mete una clave que no es columna adentro de `$attributes` y deja el modelo
-         * *dirty*: hoy no rompe porque el único que llama acá es `show_json()` y devuelve sin
-         * guardar, pero el día que alguien agregue un `save()` después de esta línea el UPDATE
-         * incluiría `demo_ingreso_url` y saldría `Unknown column`. `append()` produce el mismo
-         * JSON sin ensuciar los atributos.
-         */
-        $lead->append('demo_ingreso_url');
+        /* Link completo de ingreso a la demo. La regla vive en append_demo_ingreso_url(): acá se
+           llama y nada más, para que el detalle y los endpoints de acción no se desincronicen. */
+        $this->append_demo_ingreso_url($lead);
 
         return $lead;
     }
@@ -854,13 +896,15 @@ class LeadController extends Controller
         // Ejecución encapsulada en servicio para mantener controlador liviano.
         $lead = $service->run($lead);
 
+        /* Con el link appendeado, y también en la rama 422: el setup emite el token nuevo ANTES de
+           llamar a la instancia, así que un setup fallido igual dejó el link viejo muerto. */
         if ($lead->demo_setup_status === 'exitoso') {
-            return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+            return response()->json(['model' => $this->full_lead_with_demo_link($lead->id)], 200);
         }
 
         return response()->json([
             'message' => 'No se pudo crear la demo: ' . $lead->demo_setup_last_error,
-            'model' => $this->fullModel('lead', $lead->id),
+            'model' => $this->full_lead_with_demo_link($lead->id),
         ], 422);
     }
 
@@ -979,16 +1023,18 @@ class LeadController extends Controller
         try {
             $lead = $service->reemitir($lead);
         } catch (\Throwable $e) {
+            /* También acá va el link: el servicio revierte al token anterior, y el panel tiene que
+               ver el link que efectivamente quedó vigente, no el que tenía dibujado. */
             return response()->json([
                 'message' => 'No se pudo reemitir el token: ' . $e->getMessage(),
-                'model' => $this->fullModel('lead', $lead->id),
+                'model' => $this->full_lead_with_demo_link($lead->id),
             ], 422);
         }
 
         /* Deja constancia en admin_notifications de quién reemitió el token y cuándo. */
         $this->registrar_evento_token_demo($lead, 'Token de ingreso a la demo reemitido');
 
-        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+        return response()->json(['model' => $this->full_lead_with_demo_link($lead->id)], 200);
     }
 
     /**
@@ -1011,14 +1057,14 @@ class LeadController extends Controller
         } catch (\Throwable $e) {
             return response()->json([
                 'message' => 'No se pudo revocar el token: ' . $e->getMessage(),
-                'model' => $this->fullModel('lead', $lead->id),
+                'model' => $this->full_lead_with_demo_link($lead->id),
             ], 422);
         }
 
         /* Deja constancia en admin_notifications de quién revocó el token y cuándo. */
         $this->registrar_evento_token_demo($lead, 'Token de ingreso a la demo revocado');
 
-        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+        return response()->json(['model' => $this->full_lead_with_demo_link($lead->id)], 200);
     }
 
     /**
