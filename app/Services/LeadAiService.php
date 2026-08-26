@@ -6399,10 +6399,15 @@ TXT;
         }
 
         $slot_min = $this->hhmm_a_minutos($demo_start);
-        $es_hoy   = ($demo_date !== '' && $demo_date === AppTime::now()->format('Y-m-d'));
+        /* Un solo AppTime::now() para la fecha y para la hora: dos lecturas separadas pueden caer a
+         * los dos lados del borde de un minuto (y con la hora y los minutos leídos por separado, la
+         * hora sale corrida hasta 59 minutos), y en local cada llamada es una consulta a
+         * admin_settings. */
+        $ahora  = AppTime::now();
+        $es_hoy = ($demo_date !== '' && $demo_date === $ahora->format('Y-m-d'));
 
         if ($es_hoy && $slot_min !== null) {
-            $now_min = (int) AppTime::now()->format('H') * 60 + (int) AppTime::now()->format('i');
+            $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
 
             if ($slot_min < $now_min) {
                 /* El caso central de esta misión: el horario ya arrancó. */
@@ -6467,8 +6472,17 @@ TXT;
             $user_content .= "1. Que la de las {$slot_que_arranco} ya arrancó y que necesitamos unos minutos de antelación.\n";
             $user_content .= "   🔴 Ese es el motivo REAL y es el único que podés dar. PROHIBIDO decir que \"se ocupó\", que \"se llenó\", que \"lo tomó otro\" o cualquier otra causa: es falso.\n";
             $user_content .= "2. Que se la dejaste lista para las {$slot_nuevo} de hoy. UN SOLO HORARIO. Prohibido enumerar alternativas, prohibido preguntarle si le sirve, prohibido pedirle que confirme.\n";
-            $user_content .= "3. El link, copiado TEXTUAL de acá abajo.\n";
-            $user_content .= $this->build_demo_experiencia_context($lead);
+
+            /* 🔴 La instrucción del link SÓLO si el bloque del link existe. build_demo_experiencia_context()
+             * devuelve '' cuando el lead no tiene URL de experiencia (uuid sin backfillear), y pedirle
+             * al modelo "copiá TEXTUAL el link de acá abajo" cuando abajo no hay ningún link es una
+             * invitación a que lo invente: es la misma clase de esta misión —el prompt que afirma
+             * algo y no da el dato— en versión link. */
+            $bloque_link = $this->build_demo_experiencia_context($lead);
+            if ($bloque_link !== '') {
+                $user_content .= "3. El link, copiado TEXTUAL de acá abajo.\n";
+                $user_content .= $bloque_link;
+            }
             $user_content .= "\n\nNunca menciones un horario que no sea {$slot_que_arranco} o {$slot_nuevo}. No devuelvas JSON ni bloques de código: sólo el texto del mensaje al lead.";
 
             /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
@@ -7165,6 +7179,18 @@ TXT;
         foreach ($lead->messages as $msg) {
             /* Saltar mensajes que el operador marcó como eliminados del contexto de IA. */
             if ($msg->deleted_from_context) {
+                continue;
+            }
+
+            /* 🔴 Bloques rojos de error interno (is_error, siempre junto con is_status_event): NUNCA
+             * se enviaron al lead. Son diagnóstico para el admin en el hilo, no turnos de la
+             * conversación, y meterlos acá los convierte en algo que el modelo lee como si el lead
+             * lo hubiera recibido. El caso concreto (25/8/2026): cuando una sugerencia caduca
+             * esperando aprobación, LeadConversationErrorLogger escribe "el horario que este mensaje
+             * ofrecía dejó de estar disponible"; el modelo leía esa línea y le repetía al lead una
+             * causa que nadie le dijo —el bug de la causa inventada, entrando por la única puerta
+             * que los prompts aislados no cubren, porque este es el único que lleva historial. */
+            if ((bool) $msg->is_error) {
                 continue;
             }
 

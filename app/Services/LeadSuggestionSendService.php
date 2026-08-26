@@ -140,7 +140,12 @@ class LeadSuggestionSendService
                 (new LeadConversationErrorLogger())->log(
                     (int) $lead->id,
                     'Horario ofrecido dejó de estar disponible',
-                    'El horario que este mensaje ofrecía ya no está disponible (se ocupó o pasó mientras esperaba aprobación). Se regeneró la sugerencia con disponibilidad fresca.'
+                    /* 🔴 Descriptivo, sin causa inventada: acá arriba sólo se sabe que la revalidación
+                     * lo marcó caducado, no SI se ocupó o SI pasó — decir "se ocupó" es afirmar un
+                     * hecho que el sistema no verificó, la misma clase de error que arregla la misión
+                     * del reagendado (25/8/2026, lead Brisa). Y este texto no se queda en el panel:
+                     * queda en el hilo, y hasta hoy entraba al historial que lee el agente. */
+                    'El horario que este mensaje ofrecía dejó de estar disponible mientras esperaba aprobación. Se regeneró la sugerencia con disponibilidad fresca.'
                 );
 
                 $lead->sync_suggestion_flags();
