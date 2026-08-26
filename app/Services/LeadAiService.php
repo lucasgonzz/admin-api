@@ -962,6 +962,21 @@ TXT;
         $fecha_en_ventana = ($demo_date !== '' && isset($fechas_enviadas[$demo_date]));
         $hora_disponible  = ($demo_start !== '' && in_array($demo_start, $slots_de_esa_demo_y_fecha, true));
 
+        /* ¿La instancia que pidió el modelo existe en la grilla que le mandamos? Se calcula acá
+         * porque es el único lugar que tiene la grilla entera, y lo consume el clasificador del
+         * motivo real: con un demo_id inventado, $slots_de_esa_demo_y_fecha queda vacío POR ESO, y
+         * sin este dato el clasificador afirmaría "no quedan horarios disponibles en esa fecha" —
+         * falso, hay slots de sobra en las otras instancias. */
+        $demo_id_invalido = true;
+        if ($demo_id > 0) {
+            foreach (array_keys($demos_json) as $demo_id_clave) {
+                if ((int) $demo_id_clave === $demo_id) {
+                    $demo_id_invalido = false;
+                    break;
+                }
+            }
+        }
+
         /* El margen mínimo de anticipación decide qué se puede OFRECER, no si lo ya ofrecido sigue
          * en pie. La oferta primaria es SIEMPRE el primer slot que sobrevive al margen, así que
          * nace pegada al borde: al turno siguiente, cuando el lead acepta, el reloj ya la sacó de
@@ -1137,7 +1152,8 @@ TXT;
                 $demo_start,
                 $slots_de_esa_demo_y_fecha,
                 $fecha_en_ventana,
-                ($hora_disponible && (! $ventana_ofrecida || ! $ventana_hasta_valida))
+                ($hora_disponible && (! $ventana_ofrecida || ! $ventana_hasta_valida)),
+                $demo_id_invalido
             )
         );
 
@@ -5326,7 +5342,11 @@ TXT;
                             $demo_start,
                             array_map('strval', is_array($slots_demo) ? $slots_demo : []),
                             true,
-                            ($hora_estaba_disponible && ($ventana_hasta_invalida || ($quiere_ventana_extendida && $fin_ventana_extendida === null)))
+                            ($hora_estaba_disponible && ($ventana_hasta_invalida || ($quiere_ventana_extendida && $fin_ventana_extendida === null))),
+                            /* Misma señal que en generación: si la instancia que pidió el modelo no
+                             * está en la grilla, $slots_demo viene vacío POR ESO y las ramas
+                             * descriptivas del clasificador mentirían sobre la disponibilidad. */
+                            ! isset($availability['demos'][$demo_id])
                         )
                     );
 
@@ -6492,9 +6512,10 @@ TXT;
      * "uh, justo se ocupó el de las 17:05"). Cuando no se sabe, la frase es descriptiva ("no figura
      * entre los disponibles") y el prompt le prohíbe explicar.
      *
-     * El orden de evaluación va de la causa más específica a la más genérica: primero la fecha,
-     * después la franja extendida, después el reloj (ya arrancó / está demasiado cerca), y recién
-     * al final las dos descriptivas.
+     * El orden de evaluación va de la causa más específica a la más genérica: primero la fecha
+     * pasada, después la fecha fuera de ventana, después la franja extendida, después el reloj (ya
+     * arrancó / está demasiado cerca), después la instancia inválida, y recién al final las dos
+     * descriptivas.
      *
      * @param Lead     $lead                Lead que está aceptando el horario (decide el margen).
      * @param string   $demo_date           Fecha pedida, en Y-m-d.
@@ -6502,11 +6523,36 @@ TXT;
      * @param string[] $slots_de_esa_fecha  Slots realmente disponibles para esa demo y fecha.
      * @param bool     $fecha_en_ventana    Si la fecha estaba dentro de la ventana consultada.
      * @param bool     $ventana_invalida    Si lo que falló fue la franja extendida, no la hora.
+     * @param bool     $demo_id_invalido    Si la instancia pedida no existe en la grilla. La lista
+     *                                      de slots viene vacía POR ESO, no porque no queden
+     *                                      horarios: sin este dato las dos ramas descriptivas
+     *                                      mienten.
      *
      * @return string Frase llana, sin punto final, lista para inyectar en el prompt.
      */
-    private function motivo_real_del_horario_descartado(Lead $lead, string $demo_date, string $demo_start, array $slots_de_esa_fecha, bool $fecha_en_ventana, bool $ventana_invalida): string
+    private function motivo_real_del_horario_descartado(Lead $lead, string $demo_date, string $demo_start, array $slots_de_esa_fecha, bool $fecha_en_ventana, bool $ventana_invalida, bool $demo_id_invalido = false): string
     {
+        $slot_min = $this->hhmm_a_minutos($demo_start);
+        /* Un solo AppTime::now() para la fecha y para la hora: dos lecturas separadas pueden caer a
+         * los dos lados del borde de un minuto (y con la hora y los minutos leídos por separado, la
+         * hora sale corrida hasta 59 minutos), y en local cada llamada es una consulta a
+         * admin_settings. */
+        $ahora  = AppTime::now();
+        $hoy    = $ahora->format('Y-m-d');
+        $es_hoy = ($demo_date !== '' && $demo_date === $hoy);
+
+        /* 🔴 La fecha PASADA va primero, antes que la ventana, y es el cruce de medianoche: le
+         * ofrecimos las 23:55, el lead contesta "dale" a las 00:03. La fecha de ayer no está en la
+         * ventana consultada (arranca hoy), así que sin esta rama el motivo salía "la fecha que
+         * pidió no está dentro de la ventana de disponibilidad" — y el lead NO pidió ninguna fecha:
+         * aceptó la nuestra. Afirmarle eso es tan falso como el "se ocupó" que esta misión cerró.
+         * La verdad, y la única que se puede afirmar sin saber quién propuso qué, es que ese
+         * horario era de un día que ya pasó. */
+        $fecha_pedida = $this->normalizar_ymd_tolerante($demo_date);
+        if ($fecha_pedida !== '' && $fecha_pedida < $hoy) {
+            return 'ese horario era de un día que ya pasó';
+        }
+
         if (! $fecha_en_ventana) {
             return 'la fecha que pidió no está dentro de la ventana de disponibilidad que consultamos';
         }
@@ -6514,14 +6560,6 @@ TXT;
         if ($ventana_invalida) {
             return 'la franja extendida que se le había prometido ya no entra completa';
         }
-
-        $slot_min = $this->hhmm_a_minutos($demo_start);
-        /* Un solo AppTime::now() para la fecha y para la hora: dos lecturas separadas pueden caer a
-         * los dos lados del borde de un minuto (y con la hora y los minutos leídos por separado, la
-         * hora sale corrida hasta 59 minutos), y en local cada llamada es una consulta a
-         * admin_settings. */
-        $ahora  = AppTime::now();
-        $es_hoy = ($demo_date !== '' && $demo_date === $ahora->format('Y-m-d'));
 
         if ($es_hoy && $slot_min !== null) {
             $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
@@ -6540,6 +6578,24 @@ TXT;
             if ($slot_min < $now_min + $margen) {
                 return 'ese horario queda demasiado cerca: la demo necesita unos minutos de anticipación para prepararse';
             }
+        }
+
+        /* 🔴 Instancia inválida: va acá, justo ANTES de las dos ramas descriptivas, y no es un
+         * detalle de orden. Las dos de abajo se calculan sobre $slots_de_esa_fecha, y cuando el
+         * modelo pide un demo_id que no existe esa lista viene vacía POR ESO — no porque no queden
+         * horarios. Sin esta rama el clasificador devolvía "no quedan horarios disponibles en esa
+         * fecha" y el lead escuchaba "hoy no queda nada" con la agenda de las otras instancias
+         * llena de slots libres: una mentira nueva, de la misma familia que el "se ocupó".
+         *
+         * Va DESPUÉS de las ramas del reloj a propósito: "ya arrancó" y "queda demasiado cerca" son
+         * afirmaciones sobre el reloj, ciertas sea cual sea la instancia, y son la causa más útil
+         * para el lead. Esta rama, en cambio, no afirma NADA sobre la disponibilidad general — es
+         * lo único honesto que se puede decir sin recalcular la grilla, que acá no se hace.
+         *
+         * Es la misma rama que el $motivo del log de descartar_agendamiento_fuera_de_slots() ya
+         * tenía ('demo_id inválido') y que este clasificador no modelaba. */
+        if ($demo_id_invalido) {
+            return 'no pudimos confirmar ese horario en este momento';
         }
 
         if (! empty($slots_de_esa_fecha)) {
@@ -6707,7 +6763,15 @@ TXT;
              * causa NO deja un hueco: obliga a inventarla, y la invención sale firmada por el
              * sistema y le llega al lead como un hecho. El motivo viaja siempre, y cuando no se
              * sabe, la instrucción explícita es NO explicar. */
-            $user_content = "El lead propuso agendar a las {$slot_invalido} para el {$demo_date}, pero ese horario no se pudo confirmar.\n";
+            /* 🔴 La frase es NEUTRA: "el horario de las X", no "el lead propuso las X". Este método
+             * lo llaman los dos caminos y en el más común el lead NO propuso nada — aceptó un
+             * horario que le ofrecimos NOSOTROS (es el caso entero de la misión del reagendado:
+             * ofrecemos 17:05, contesta "dale" a las 17:10). Atribuirle una propuesta que no hizo
+             * es de la misma familia que el "se ocupó": una afirmación falsa que el modelo repite
+             * como un hecho ("como me pediste las 17:05..."). Distinguir los dos casos acá exige
+             * otra consulta a `lead_messages.horarios_ofrecidos`, que no se justifica: neutro es
+             * verdadero en los dos. */
+            $user_content = "El horario de las {$slot_invalido} para el {$demo_date} no se pudo confirmar.\n";
 
             if ($motivo_real !== '') {
                 $user_content .= "MOTIVO REAL, y es el único que podés dar: {$motivo_real}.\n";
