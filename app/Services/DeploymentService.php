@@ -71,6 +71,7 @@ class DeploymentService
         'upload_spa',
         'upload_api',
         'run_migrations',
+        'restart_queue_workers',
         'pause_for_crons',
         'run_seeders',
         'run_commands',
@@ -182,6 +183,9 @@ class DeploymentService
                     $this->step_run_migrations();
                     // Marca el paso "Migraciones corridas" automáticamente.
                     $this->mark_upgrade_step_timestamp('migraciones_corridas_at');
+                    break;
+                case 'restart_queue_workers':
+                    $this->step_restart_queue_workers();
                     break;
                 case 'pause_for_crons':
                     $this->step_pause_for_crons();
@@ -829,6 +833,75 @@ class DeploymentService
 
         $this->upgrade->deployment_status = 'paused_post_tasks';
         $this->upgrade->save();
+    }
+
+    /**
+     * Etapa: reinicio del worker de cola. Solo aplica a instancias en VPS.
+     *
+     * En el VPS el worker vive bajo supervisor y es un proceso de LARGA VIDA: carga las clases
+     * en memoria al arrancar y no las recarga nunca. Sin este paso, después de cada deploy sigue
+     * ejecutando el código viejo indefinidamente, y el negocio ve jobs que fallan por clases o
+     * constantes que "no existen" aunque estén perfectas en disco.
+     *
+     * En shared_hosting NO hace falta: ahí el worker es el `queue:work --stop-when-empty` que
+     * lanza el cron, arranca y muere cada minuto, y toma el código nuevo solo.
+     *
+     * Se usa `queue:restart` y no `supervisorctl restart`: el primero es graceful (el worker
+     * termina el job que está procesando y recién ahí sale; supervisor lo relanza con el código
+     * nuevo), el segundo lo corta en seco a mitad de un job. Además `supervisorctl` pide root y
+     * la sesión del deploy no necesariamente lo es.
+     *
+     * @return void
+     */
+    private function step_restart_queue_workers()
+    {
+        $hosting_type = $this->target_api->hosting_type ?: 'shared_hosting';
+
+        if ($hosting_type !== 'vps') {
+            $this->log(
+                'restart_queue_workers',
+                'Instancia en shared_hosting: no hay worker de larga vida que reiniciar '
+                . '(el cron lanza queue:work --stop-when-empty, que muere cada minuto y toma el código nuevo solo).'
+            );
+
+            return;
+        }
+
+        $api_path = $this->get_api_path();
+
+        $this->log('restart_queue_workers', 'Reiniciando el worker de cola del VPS...');
+
+        /* must_succeed = false a propósito: llegado este punto el código ya está subido y las
+           migraciones corridas. Abortar acá dejaría el deploy a medias, que es peor que un worker
+           con código viejo. Se degrada a warning para que quede visible en deployment_logs. */
+        $output = $this->run_command(
+            'restart_queue_workers',
+            'cd ' . escapeshellarg($api_path) . ' && php artisan queue:restart --no-ansi 2>&1',
+            false
+        );
+
+        $output_trimmed = trim((string) $output);
+
+        /* `queue:restart` no reinicia nada por sí mismo: deja una marca en caché que cada worker
+           lee entre job y job. Si la caché no está disponible, artisan puede devolver 0 igual, así
+           que se confirma contra el texto de éxito en vez de confiar en el exit code. */
+        if (stripos($output_trimmed, 'Broadcasting queue restart signal') !== false) {
+            $this->log(
+                'restart_queue_workers',
+                'Señal de reinicio enviada: el worker va a terminar el job en curso y arrancar con el código nuevo.',
+                'success'
+            );
+
+            return;
+        }
+
+        $this->log(
+            'restart_queue_workers',
+            'No se pudo confirmar el reinicio del worker de cola. El deploy sigue, pero el worker puede '
+            . 'estar corriendo el código anterior: reinicialo a mano con "php artisan queue:restart" en '
+            . $api_path . '. Salida: ' . $this->truncate_for_log($output_trimmed),
+            'warning'
+        );
     }
 
     /**
