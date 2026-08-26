@@ -94,7 +94,10 @@ class DemoProperties
             ],
             [
                 'key' => 'ecommerce_hosting_type',
-                'text' => 'Hosting ecommerce',
+                /* "(informativo)" en el rótulo y no solo en la descripción: la columna se ve en la
+                 * grilla, y un desplegable que se puede cambiar sin que cambie nada en ningún lado
+                 * es exactamente la clase de cosa que hace creer que se guardó algo con efecto. */
+                'text' => 'Hosting ecommerce (informativo)',
                 'type' => 'select',
                 'value' => 'shared_hosting',
                 'show' => true,
