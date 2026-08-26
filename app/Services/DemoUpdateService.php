@@ -1334,20 +1334,35 @@ class DemoUpdateService
         // (no una URL re-resuelta desde $this->demo->erp_api_url).
         $this->compiled_api_url = $api_url;
 
-        $env_vars = [
-            'VUE_APP_API_URL'        => $api_url,
-            'VUE_APP_APP_URL'        => $spa_url,
-            'VUE_APP_PUSHER_KEY'     => trim((string) config('services.deploy.spa_pusher_key', '')),
-            'VUE_APP_PUSHER_CLUSTER' => trim((string) config('services.deploy.spa_pusher_cluster', 'sa1')),
-            // Buscador de imágenes de artículos (SearchImage.vue) necesita esta key desde el grupo
-            // 220 (26/7/2026) o queda muerto en silencio. Solo esta variable puntual — NO se
-            // mergea todo `spa_build_env` acá: la demo hoy compila sin VUE_APP_IDIOM,
-            // VUE_APP_ROUTE_INDEX, etc., y agregárselas de golpe le cambiaría el comportamiento a
-            // la demo, que no es el alcance de este cambio (grupo 267/02).
-            'VUE_APP_GOOGLE_SEARCH_API_KEY' => trim(
-                (string) config('services.deploy.spa_build_env.VUE_APP_GOOGLE_SEARCH_API_KEY', '')
-            ),
-        ];
+        // Defaults fijos del build de empresa-spa: los MISMOS que usan InstallationService y
+        // DeploymentService para cualquier cliente real (config/services.php → spa_build_env).
+        //
+        // Hasta el 25/8/2026 acá se copiaba a mano una sola variable de ese array
+        // (VUE_APP_GOOGLE_SEARCH_API_KEY) para no cambiarle el comportamiento a la demo. El costo
+        // de esa asimetría fue que la demo se compilaba sin VUE_APP_HAS_EXTRA_CONFIG y sin otras
+        // diez variables, y por eso "Configuración online" no aparecía en su barra de navegación.
+        // Lucas pidió alinear el build de la demo con el de un cliente: una sola fuente de
+        // verdad, y lo que se agregue mañana a spa_build_env llega a la demo sin tocar esta clase.
+        //
+        // 🔴 El orden importa: el array fijo va PRIMERO, para que aporte defaults, y lo que se
+        // calcula en runtime para ESTA demo lo pisa abajo. (Hoy no hay colisión de claves —
+        // spa_build_env no trae ninguna de las cuatro de abajo—, pero si alguna vez la hubiera,
+        // la demo concreta tiene que ganar, no el default.)
+        $env_vars      = [];
+        $spa_build_env = config('services.deploy.spa_build_env', []);
+        if (is_array($spa_build_env)) {
+            foreach ($spa_build_env as $env_key => $env_value) {
+                $env_vars[(string) $env_key] = trim((string) $env_value);
+            }
+        }
+
+        // Específico de esta demo: pisa cualquier default homónimo del array de arriba.
+        $env_vars['VUE_APP_API_URL']        = $api_url;
+        $env_vars['VUE_APP_APP_URL']        = $spa_url;
+        $env_vars['VUE_APP_PUSHER_KEY']     = trim((string) config('services.deploy.spa_pusher_key', ''));
+        $env_vars['VUE_APP_PUSHER_CLUSTER'] = trim(
+            (string) config('services.deploy.spa_pusher_cluster', 'sa1')
+        );
 
         $lines = [];
         foreach ($env_vars as $env_key => $env_value) {
