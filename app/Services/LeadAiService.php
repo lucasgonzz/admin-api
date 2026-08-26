@@ -96,6 +96,20 @@ TXT;
     const DIAS_DISPONIBILIDAD = 7;
 
     /**
+     * Ventana en la que un horario que YA ARRANCÓ todavía se puede reagendar solo al próximo slot.
+     *
+     * Decisión del 25/8/2026: un lead que contesta "dale" a las 23:40 sobre un horario de las 17:05
+     * no está aceptando un turno, está contestando tarde. Agendarle a las 23:45 y mandarle el link
+     * quema una instancia para alguien que probablemente no entre. Pasada esta ventana va el
+     * correctivo, que ahora sí le dice el motivo real y lo deja decidir a él.
+     *
+     * 🔴 NO convertir esto en una setting: el grupo 330 prohíbe explícitamente agregar settings o
+     * banderas de instancia a este flujo (una bandera con estado se filtra a la próxima llamada del
+     * mismo request y convierte esto en un bug intermitente imposible de reproducir).
+     */
+    const REAGENDADO_VENTANA_MINUTOS = 60;
+
+    /**
      * Último minuto del día, en minutos desde medianoche (23:59). Es el techo duro de una ventana
      * extendida: no existe fecha de fin, así que la ventana no puede cruzar la medianoche.
      */
@@ -948,6 +962,21 @@ TXT;
         $fecha_en_ventana = ($demo_date !== '' && isset($fechas_enviadas[$demo_date]));
         $hora_disponible  = ($demo_start !== '' && in_array($demo_start, $slots_de_esa_demo_y_fecha, true));
 
+        /* ¿La instancia que pidió el modelo existe en la grilla que le mandamos? Se calcula acá
+         * porque es el único lugar que tiene la grilla entera, y lo consume el clasificador del
+         * motivo real: con un demo_id inventado, $slots_de_esa_demo_y_fecha queda vacío POR ESO, y
+         * sin este dato el clasificador afirmaría "no quedan horarios disponibles en esa fecha" —
+         * falso, hay slots de sobra en las otras instancias. */
+        $demo_id_invalido = true;
+        if ($demo_id > 0) {
+            foreach (array_keys($demos_json) as $demo_id_clave) {
+                if ((int) $demo_id_clave === $demo_id) {
+                    $demo_id_invalido = false;
+                    break;
+                }
+            }
+        }
+
         /* El margen mínimo de anticipación decide qué se puede OFRECER, no si lo ya ofrecido sigue
          * en pie. La oferta primaria es SIEMPRE el primer slot que sobrevive al margen, así que
          * nace pegada al borde: al turno siguiente, cuando el lead acepta, el reloj ya la sacó de
@@ -1011,6 +1040,66 @@ TXT;
             }
         }
 
+        /* 🔴 Reagendado automático al próximo slot (misión reagendado-al-proximo-slot, 25/8/2026).
+         *
+         * Cuando el horario que el lead ACEPTA ya arrancó, el rescate del margen de acá arriba no
+         * puede salvarlo: la grilla margen-0 sigue descartando lo que empezó
+         * (compute_day_slots_for_demo(): `$is_today && $slot_start < $now_minutes`). Hasta el
+         * 25/8/2026 acá se le devolvía la pelota al lead ("¿cuál te sirve?"), que es la peor
+         * respuesta posible para alguien que acaba de decir que sí. Ahora se le corre el turno al
+         * próximo slot del día y se le CONFIRMA, con el motivo real y el link.
+         *
+         * 🔴 Va acá, en GENERACIÓN, y NO en la aprobación: reagendar es cambiar la acción Y el texto
+         * a la vez, y eso sólo se puede hacer mientras el mensaje es un borrador que nadie firmó.
+         * Después de la aprobación, pisar el texto lo manda al lead con el nombre de un admin que
+         * nunca lo leyó (clase registrada el 25/8/2026).
+         *
+         * Va DESPUÉS de evaluar la ventana extendida porque necesita saber si el paquete la pidió
+         * (un paquete con ventana extendida no se reagenda: la franja ya se le prometió al lead con
+         * un inicio concreto), y ANTES del `if` de éxito de abajo para que ese `if` vea el paquete
+         * ya corregido y lo devuelva por el camino de éxito, sin tocar el bloque de descarte. */
+        if (! $hora_disponible) {
+            /* 🔴 Fail-safe, mismo criterio que el envoltorio rescate_del_margen_seguro() de acá
+             * arriba: el reagendado hace una consulta a base (la del permiso, la MISMA que
+             * oferta_vigente_sin_margen()) más dos llamadas HTTP al modelo. Si cualquiera de esas
+             * tira, la excepción se propagaría hasta el llamador y tumbaría la generación entera —
+             * y con ella el correctivo, que es la respuesta que el lead sí tiene que recibir. Un
+             * deadlock de MySQL no puede dejar al lead sin ninguna sugerencia. Se degrada a "no se
+             * reagenda" y queda constancia en el log. */
+            $reagendado = null;
+
+            try {
+                $reagendado = $this->reagendar_al_proximo_slot(
+                    $lead,
+                    $parsed,
+                    $availability_data,
+                    $demo_id,
+                    $demo_date,
+                    $demo_start,
+                    $fecha_en_ventana,
+                    $pidio_ventana
+                );
+            } catch (\Throwable $e) {
+                Log::channel('disponibilidad')->warning(
+                    '[DISPONIBILIDAD] Falló el reagendado al próximo slot; se sigue por el camino correctivo de siempre.',
+                    [
+                        'lead_id'    => $lead->id,
+                        'demo_id'    => $demo_id,
+                        'demo_date'  => $demo_date,
+                        'demo_start' => $demo_start,
+                        'error'      => $e->getMessage(),
+                    ]
+                );
+
+                $reagendado = null;
+            }
+
+            if ($reagendado !== null) {
+                $parsed          = $reagendado;
+                $hora_disponible = true;
+            }
+        }
+
         if ($demo_id > 0 && $fecha_en_ventana && $hora_disponible && $ventana_ofrecida && $ventana_hasta_valida) {
             /* Todo en orden: la fecha y la hora salen de los slots que le mandamos nosotros. */
             return $parsed;
@@ -1044,12 +1133,28 @@ TXT;
         $parsed['guardar_email'] = null;
 
         /* Mensaje correctivo con las alternativas reales (misma llamada aislada que ya se usa
-         * cuando el slot se ocupa entre la sugerencia y la aprobación). */
+         * cuando el slot se ocupa entre la sugerencia y la aprobación).
+         *
+         * El motivo real viaja SIEMPRE: sin él el modelo lo inventa (ver el comentario en
+         * call_corrective_availability_response()).
+         *
+         * La franja extendida se declara como causa SÓLO si la hora estaba bien ($hora_disponible):
+         * misma precedencia que el $motivo de acá arriba. Si lo que falló fue la hora, la causa que
+         * el lead tiene que escuchar es la de la hora, aunque de paso la franja tampoco entrara. */
         $mensaje_correctivo = $this->call_corrective_availability_response(
             $lead,
             $demo_start,
             $demo_date,
-            $slots_de_esa_demo_y_fecha
+            $slots_de_esa_demo_y_fecha,
+            $this->motivo_real_del_horario_descartado(
+                $lead,
+                $demo_date,
+                $demo_start,
+                $slots_de_esa_demo_y_fecha,
+                $fecha_en_ventana,
+                ($hora_disponible && (! $ventana_ofrecida || ! $ventana_hasta_valida)),
+                $demo_id_invalido
+            )
         );
 
         if ($mensaje_correctivo !== '') {
@@ -1066,6 +1171,503 @@ TXT;
             . '). Revisá el horario con el lead antes de enviar.';
 
         return $parsed;
+    }
+
+    /**
+     * Reagenda el paquete al próximo slot del día cuando el horario que el lead aceptó YA ARRANCÓ.
+     *
+     * Devuelve el paquete corregido si el reagendado prosperó, o null si no se reagenda (y entonces
+     * el llamador sigue por el camino de descarte de siempre, que ahora dice el motivo real).
+     *
+     * 🔴 El orden es PRIMERO EL TEXTO Y DESPUÉS LA MUTACIÓN, y no es un detalle de estilo: si la
+     * llamada al modelo falla, se sale sin haber tocado nada y no queda estado a medias que
+     * revertir. Tampoco se inventa un texto fijo de PHP en la voz del agente.
+     *
+     * Las seis condiciones van de barata a cara, igual que en oferta_vigente_sin_margen(): la
+     * consulta a base (la del permiso) va última.
+     *
+     * 🔴 Y después de las seis hay tres filtros más, que no son condiciones de entrada sino el
+     * blindaje de lo que el mensaje promete: (a) el slot elegido tiene que estar por encima de
+     * `ahora + margen` con el reloj leído en ese momento —la grilla se armó antes de una llamada al
+     * modelo con timeout de 90s, así que su primer slot puede estar ya a dos minutos vista—, (b) se
+     * vuelve a chequear lo mismo DESPUÉS de que el modelo redactó, porque ahí pasó otra llamada de
+     * hasta 90s, y (c) el texto tiene que nombrar el horario nuevo. Cualquiera de los tres que
+     * falle: no se reagenda y el paquete queda intacto.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $parsed            Paquete del modelo, ya con agendar_demo array.
+     * @param array<string, mixed> $availability_data Grilla de ESTA request (la que vio el modelo).
+     * @param int                  $demo_id           Instancia que pidió el modelo.
+     * @param string               $demo_date         Fecha pedida, en Y-m-d.
+     * @param string               $demo_start        Horario pedido y ya normalizado, en HH:MM.
+     * @param bool                 $fecha_en_ventana  Si la fecha estaba en la ventana consultada.
+     * @param bool                 $pidio_ventana     Si el paquete pidió ventana extendida.
+     *
+     * @return array<string, mixed>|null Paquete corregido, o null si no se reagenda.
+     */
+    protected function reagendar_al_proximo_slot(Lead $lead, array $parsed, array $availability_data, int $demo_id, string $demo_date, string $demo_start, bool $fecha_en_ventana, bool $pidio_ventana): ?array
+    {
+        /* 1. Dinámica nueva y nada más. En la actual el margen es 30 hardcodeado y el protocolo es
+         *    otro (ofrece listas, no un momento): reagendar ahí cambiaría un flujo que no pidió
+         *    nadie. Mismo gate que el rescate del margen. */
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return null;
+        }
+
+        /* 2. El descarte tiene que ser POR LA HORA: si falló la fecha o el demo_id, correr el turno
+         *    no arregla nada y taparía un error distinto. */
+        if ($demo_id <= 0 || ! $fecha_en_ventana || $demo_date === '' || $demo_start === '') {
+            return null;
+        }
+
+        /* 🔴 El reloj se lee UNA sola vez para todo el cálculo. Dos AppTime::now() separados pueden
+         * caer a los dos lados del borde de un minuto (y la hora sale corrida hasta 59 minutos si
+         * uno agarra la hora y el otro los minutos), y además en local cada llamada es una consulta
+         * a admin_settings. Más abajo hay una SEGUNDA lectura deliberada, después de la llamada al
+         * modelo: esa no es un descuido, es el punto 2 del blindaje de los cinco minutos. */
+        $ahora = AppTime::now();
+
+        /* 3. El reagendado es siempre DENTRO DE HOY. Correrle el turno a otro día es cambiarle el
+         *    día al lead, no correrle el horario. */
+        if ($demo_date !== $ahora->format('Y-m-d')) {
+            return null;
+        }
+
+        /* 4. Ya arrancó, y hace poco. Si todavía no arrancó, el caso es del RESCATE DEL MARGEN de
+         *    acá arriba y no se toca. Y pasada la ventana, un "dale" a las 23:40 sobre un horario
+         *    de las 17:05 no es aceptar un turno: es contestar tarde (ver
+         *    REAGENDADO_VENTANA_MINUTOS). */
+        $slot_min = $this->hhmm_a_minutos($demo_start);
+        if ($slot_min === null) {
+            return null;
+        }
+        $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
+        if ($now_min <= $slot_min || ($now_min - $slot_min) > self::REAGENDADO_VENTANA_MINUTOS) {
+            return null;
+        }
+
+        /* 5. Ventana extendida: NO se reagenda. La franja es un trato negociado con el lead ("te la
+         *    dejo de 20 a 23:59") y moverle el inicio cambia el trato que el mensaje ya describía;
+         *    el protocolo v2 prohíbe recortarla en silencio. Además es incompatible por
+         *    construcción: la ventana extendida es del lead que NO se compromete a un horario
+         *    concreto, o sea exactamente el que no cae en este caso. */
+        if ($pidio_ventana) {
+            return null;
+        }
+
+        /* 6. 🔴 El lead NO puede estar re-confirmando la demo que ya tiene agendada, y esto no es
+         *    defensa en profundidad: sin este corte el reagendado SE REALIMENTA y le mueve el turno
+         *    a alguien que está entrando a la demo. La secuencia, entera:
+         *      1) 17:10 — se reagenda de 17:05 a 17:15, y el paquete se lleva
+         *         horarios_ofrecidos = [{desde: 17:15, hasta: 17:15}] (obligatorio, ver más abajo).
+         *      2) 17:12 — el admin aprueba: el mensaje pasa a `enviado` CONSERVANDO ese
+         *         horarios_ofrecidos, y el lead queda con demo_start_time = 17:15.
+         *      3) 17:20 — el lead escribe "listo, ahí entro". El modelo re-emite agendar_demo con
+         *         17:15, que es lo que el lead ya tiene: no está aceptando nada nuevo.
+         *      4) 17:15 ya arrancó, así que no está en la grilla y el rescate del margen tampoco
+         *         lo salva.
+         *      5) La condición del permiso da TRUE —horario_figura_como_ofrecido() encuentra el
+         *         17:15 que dejó el propio mensaje del paso 2—: o sea que el reagendado se fabricó
+         *         a sí mismo el permiso para el próximo reagendado.
+         *      6) → se le corre el turno OTRA VEZ, a 17:35, con un texto que le dice "la de las
+         *         17:15 ya arrancó" a un lead que está entrando a esa demo.
+         *    Antes de esta misión el mismo turno producía el correctivo: molesto, pero no
+         *    destructivo (agendar_demo se nulea y la reserva no se toca). Reagendar acá REESCRIBE
+         *    una reserva ya confirmada. Se corta por los dos lados:
+         *
+         *    (a) El lead ya tiene exactamente esa demo agendada. Se comparan los valores
+         *        NORMALIZADOS con los helpers que ya usa el resto del archivo: demo_date viene
+         *        casteado a date (Carbon) y demo_start_time puede llegar como "17:15:00", así que
+         *        un === sobre el string crudo dejaría pasar el caso justo. */
+        $demo_date_lead = $lead->demo_date instanceof \DateTimeInterface
+            ? $lead->demo_date->format('Y-m-d')
+            : (is_scalar($lead->demo_date) ? $this->normalizar_ymd_tolerante((string) $lead->demo_date) : '');
+        $demo_start_lead = is_scalar($lead->demo_start_time)
+            ? $this->normalizar_hhmm_tolerante((string) $lead->demo_start_time)
+            : '';
+
+        if ($demo_date_lead !== '' && $demo_start_lead !== ''
+            && $demo_date_lead === $this->normalizar_ymd_tolerante($demo_date)
+            && $demo_start_lead === $this->normalizar_hhmm_tolerante($demo_start)) {
+            return null;
+        }
+
+        /*    (b) El lead está en un estado donde la demo ya arrancó o se la está esperando entrar.
+         *        Son los cuatro estados posteriores a `demo_agendada` del pipeline
+         *        (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO): demo_pendiente_de_ingreso lo pone
+         *        CheckDemoIngresoTimeout cuando pasó la hora y no confirmó, ingresando_demo y
+         *        demo_en_curso son la demo andando, y demo_pendiente_de_terminar es el tramo final.
+         *        En ninguno de los cuatro "correrle el turno" es una ayuda. */
+        if (in_array((string) $lead->status, [
+            'demo_pendiente_de_ingreso',
+            'ingresando_demo',
+            'demo_en_curso',
+            'demo_pendiente_de_terminar',
+        ], true)) {
+            return null;
+        }
+
+        /* 7. El permiso de siempre, y último porque es el único que toca la base: sólo se reagenda
+         *    un horario que le ofrecimos NOSOTROS en un mensaje realmente enviado. Un horario
+         *    pasado que el lead inventó se sigue descartando como hasta hoy. */
+        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $demo_start)) {
+            return null;
+        }
+
+        /* 🔴 Los cinco minutos de antelación que pidió Lucas ("tiene que agendarle SIEMPRE con cinco
+         * minutos de antelación") no los garantiza la grilla: $availability_data se armó ANTES de la
+         * llamada al modelo que trajo este paquete (timeout de 90s), así que su primer slot puede
+         * estar hoy a dos minutos vista — o directamente haber arrancado. Por eso el slot se filtra
+         * contra el reloj LEÍDO RECIÉN, exigiendo el mismo margen que aplica
+         * compute_day_slots_for_demo(): la setting, que es la que decide qué se puede ofrecer. */
+        $margen_minutos = (int) LeadDemoSettings::get_demo_minimo_minutos_desde_ahora();
+
+        $slot_nuevo = $this->proximo_slot_del_dia($availability_data, $demo_date, $slot_min, $demo_id, $now_min + $margen_minutos);
+        if ($slot_nuevo === null) {
+            /* No queda nada hoy con la antelación mínima: cae al correctivo, que dice el motivo real. */
+            return null;
+        }
+
+        /* 🔴 Primero el texto. Si el modelo no lo redacta, no se reagenda y el paquete queda
+         * intacto: no hay mutación que revertir. */
+        $texto = $this->call_reagendado_al_proximo_slot_response($lead, $demo_start, $slot_nuevo['hora'], $demo_date);
+        if ($texto === '') {
+            return null;
+        }
+
+        /* 🔴 Segunda lectura del reloj, y es deliberada: entre la grilla y esta línea pasaron DOS
+         * llamadas al modelo con timeout de 90s cada una (la que trajo el paquete y la que acaba de
+         * redactar el texto). El mensaje que estamos por escribir le promete al lead un horario
+         * concreto —"ya te la dejé lista para las 17:15"—, así que se vuelve a exigir el margen
+         * completo justo antes de mutar el paquete. Si ya no da, NO se reagenda: paquete intacto y
+         * cae al correctivo. Es barato y cierra la ventana de los 90 segundos.
+         *
+         * El cambio de fecha se contempla por el caso de la medianoche: si la segunda lectura ya es
+         * de otro día, comparar minutos del día daría un "sí" absurdo. */
+        $ahora_post     = AppTime::now();
+        $now_min_post   = (int) $ahora_post->format('H') * 60 + (int) $ahora_post->format('i');
+        $slot_nuevo_min = $this->hhmm_a_minutos((string) $slot_nuevo['hora']);
+
+        if ($slot_nuevo_min === null
+            || $ahora_post->format('Y-m-d') !== $demo_date
+            || $slot_nuevo_min < $now_min_post + $margen_minutos) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] El slot del reagendado dejó de cumplir la antelación mínima mientras el modelo redactaba: no se reagenda.',
+                [
+                    'lead_id'          => $lead->id,
+                    'demo_date'        => $demo_date,
+                    'slot_que_arranco' => $demo_start,
+                    'slot_nuevo'       => $slot_nuevo['hora'],
+                    'margen_minutos'   => $margen_minutos,
+                    'now_min_grilla'   => $now_min,
+                    'now_min_post'     => $now_min_post,
+                    'fecha_post'       => $ahora_post->format('Y-m-d'),
+                ]
+            );
+
+            return null;
+        }
+
+        /* 🔴 Post-validación del TEXTO contra el slot nuevo, misma clase que
+         * verificar_coherencia_dia_mensaje() hace con el día de la semana: acá el paquete se muta
+         * para agendar las 17:15, así que un texto que no nombra las 17:15 no confirma nada — o
+         * sigue confirmando el viejo, que es exactamente la falsificación que esta misión cierra.
+         * Si el texto no lo menciona, no se reagenda y el paquete queda intacto.
+         *
+         * El patrón es tolerante como los de verificar_coherencia_dia_mensaje(): acepta "17:15" y
+         * "17.15", con o sin espacios, y el cero inicial opcional para las horas de un dígito. */
+        if (! $this->mensaje_menciona_horario($texto, (string) $slot_nuevo['hora'])) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] El texto del reagendado no menciona el horario nuevo: se descarta y no se reagenda.',
+                [
+                    'lead_id'          => $lead->id,
+                    'demo_date'        => $demo_date,
+                    'slot_que_arranco' => $demo_start,
+                    'slot_nuevo'       => $slot_nuevo['hora'],
+                    'texto'            => $texto,
+                ]
+            );
+
+            return null;
+        }
+
+        $parsed['agendar_demo']['demo_start_time'] = $slot_nuevo['hora'];
+        $parsed['agendar_demo']['demo_id']         = $slot_nuevo['demo_id'];
+        /* demo_date NO se toca: el reagendado es siempre dentro de hoy. */
+
+        /* 🔴 `reagendado_desde`: el permiso que viaja hasta la aprobación. El permiso para saltar
+         * el margen es "este horario se lo ofrecimos nosotros" y vive en
+         * `lead_messages.horarios_ofrecidos` de un mensaje ENVIADO. El slot nuevo no está en
+         * ninguno: lo eligió PHP hace un minuto y el mensaje todavía es `sugerido`. Por eso lo que
+         * viaja no es un permiso, es el horario VIEJO: en la aprobación se consulta
+         * `horario_figura_como_ofrecido()` con ÉL, o sea el mismo criterio de siempre y contra la
+         * misma base.
+         *
+         * ⚠️ Qué garantiza exactamente eso, ni más ni menos: como `agendar_demo` lo escribe el
+         * MODELO, la clave se puede inventar, y por eso la aprobación la SANEA antes de usarla
+         * (marca_reagendado_coherente()). Con ese saneamiento puesto, un modelo que la invente no
+         * puede inventar un slot inexistente —la grilla margen-0 sigue exigiendo que el horario
+         * nuevo no haya arrancado y esté libre— NI una exención del margen fuera de la ventana del
+         * reagendado: la marca sólo se honra si el horario que declara es anterior al pedido, ya
+         * arrancó, y arrancó hace menos de REAGENDADO_VENTANA_MINUTOS. Sin ese saneamiento la clave
+         * SÍ es una llave que el modelo se firma solo, y esto era falso.
+         *
+         * Sin esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo — que
+         * es justo cuando el admin aprueba. */
+        $parsed['agendar_demo']['reagendado_desde'] = $demo_start;
+
+        /* El texto nuevo pisa al del modelo, que decía "te confirmo las 17:05". Dejarlo sería la
+         * misma falsificación que cerró la misión anterior, en versión nueva. */
+        $parsed['mensaje_sugerido'] = $texto;
+
+        /* 🔴 Esto NO es cosmético y no se puede sacar. LeadSuggestionSendService::send_suggestion()
+         * revalida `horarios_ofrecidos` con margen 0 ANTES de aplicar las acciones: si acá quedara
+         * el horario viejo (el que arrancó), ese bloque lo marcaría caducado y TUMBARÍA el mensaje
+         * reagendado antes de enviarlo, regenerando otra sugerencia. Reescribirlo hace además que
+         * esa revalidación proteja el horario que el texto realmente promete: si el slot nuevo se
+         * pasa mientras espera aprobación, lo agarra ahí y el lead recibe una oferta fresca. */
+        $parsed['horarios_ofrecidos'] = [
+            [
+                'fecha' => $demo_date,
+                'desde' => $slot_nuevo['hora'],
+                'hasta' => $slot_nuevo['hora'],
+            ],
+        ];
+
+        /* El razonamiento se ANEXA, no se pisa: el del modelo explica por qué aceptó, y sin esta
+         * línea el `ai_reasoning` del panel seguiría diciendo "confirmo las 17:05" arriba de un
+         * texto que dice 17:15. */
+        /* `is_scalar` antes del cast, misma clase ya registrada en
+         * LeadMessage::horarios_ofrecidos_cubren(): `razonamiento` lo escribe el modelo y llega
+         * crudo, así que un array acá sería "Array to string conversion" → ErrorException. */
+        $razonamiento_original = isset($parsed['razonamiento']) && is_scalar($parsed['razonamiento'])
+            ? trim((string) $parsed['razonamiento'])
+            : '';
+        $linea_sistema         = '[sistema] El horario ofrecido (' . $demo_start . ') ya había arrancado cuando el lead aceptó: '
+            . 'se reagendó automáticamente al próximo slot disponible (' . $slot_nuevo['hora'] . ') y el mensaje se reescribió para confirmarlo.';
+        $parsed['razonamiento'] = $razonamiento_original !== ''
+            ? $razonamiento_original . "\n" . $linea_sistema
+            : $linea_sistema;
+
+        /* El admin tiene que poder ver por qué el texto no es el que pidió el modelo. */
+        $parsed['nota_para_setter'] = 'El sistema reagendó solo: el horario que el lead aceptó ('
+            . $demo_start . ' del ' . $demo_date . ') ya había arrancado, así que se le corrió el turno a las '
+            . $slot_nuevo['hora'] . ' y el mensaje se reescribió para confirmárselo con el motivo real. Revisá el texto antes de enviar.';
+
+        /* estado_sugerido y guardar_email NO se tocan: el paquete no se cae, sigue siendo una demo
+         * agendada y la regla 4 del protocolo (email atado a agendar_demo) se cumple sola. */
+
+        Log::channel('disponibilidad')->info(
+            '[DISPONIBILIDAD] Horario ya arrancado: se reagendó automáticamente al próximo slot del día (generación).',
+            [
+                'lead_id'          => $lead->id,
+                'demo_date'        => $demo_date,
+                'slot_que_arranco' => $demo_start,
+                'slot_nuevo'       => $slot_nuevo['hora'],
+                'demo_id_anterior' => $demo_id,
+                'demo_id_nuevo'    => $slot_nuevo['demo_id'],
+                'minutos_tarde'    => $now_min - $slot_min,
+            ]
+        );
+
+        return $parsed;
+    }
+
+    /**
+     * Elige el próximo slot de HOY, estrictamente posterior al horario que arrancó.
+     *
+     * 🔴 Sale de $availability_data —la MISMA grilla que el modelo tuvo delante en esta request— y
+     * se elige con primer_slot_disponible(), que es el método que ya resuelve la oferta primaria.
+     * NO recalcular una grilla fresca acá: serían dos verdades sobre "cuál es el primer slot" en el
+     * mismo request (la clase registrada "el mismo invariante decidido con dos criterios
+     * distintos"), y además cuesta ~365 queries / ~475 ms por demo en el camino caliente, para
+     * obtener lo mismo. El desfasaje de los segundos que tardó la llamada al modelo lo cubre la
+     * revalidación de la aprobación.
+     *
+     * `exclude_lead_id` no hay que tocarlo: la grilla de origen ya se armó con $lead->id, así que
+     * el propio lead no se bloquea a sí mismo y los demás sí.
+     *
+     * 🔴 Lo que la grilla NO garantiza, y por eso existe $piso_minutos: se armó antes de la llamada
+     * al modelo (timeout 90s), así que su primer slot de hoy puede estar ya a dos minutos vista o
+     * directamente haber arrancado. "Estar en la grilla" no alcanza para prometerle un horario al
+     * lead: el piso lo pone el llamador con el reloj leído recién.
+     *
+     * @param array<string, mixed> $availability_data Grilla de esta request.
+     * @param string               $demo_date         Fecha, en Y-m-d (hoy).
+     * @param int                  $slot_min          Horario que arrancó, en minutos del día.
+     * @param int                  $demo_id_original  Instancia que traía el lead.
+     * @param int                  $piso_minutos      Mínimo aceptable en minutos del día (ahora +
+     *                                                margen). Un slot por debajo no se elige.
+     *
+     * @return array{fecha: string, dia_label: string, hora: string, demo_id: int}|null
+     */
+    private function proximo_slot_del_dia(array $availability_data, string $demo_date, int $slot_min, int $demo_id_original, int $piso_minutos): ?array
+    {
+        $demos_json = isset($availability_data['demos']) && is_array($availability_data['demos'])
+            ? $availability_data['demos']
+            : [];
+
+        /* Recorte: sólo la fecha $demo_date y sólo los slots ESTRICTAMENTE POSTERIORES al horario
+         * que arrancó. Después ese recorte se le entrega al mismo primer_slot_disponible() que
+         * resuelve la oferta primaria, sin lógica nueva de disponibilidad. */
+        $recorte_todas    = [];
+        $recorte_original = [];
+
+        foreach ($demos_json as $demo_id_json => $slots_por_fecha) {
+            if (! is_array($slots_por_fecha)) {
+                continue;
+            }
+
+            foreach ($slots_por_fecha as $date_label => $slots) {
+                if (! is_array($slots) || ! preg_match('/(\d{4}-\d{2}-\d{2})$/', (string) $date_label, $m_fecha) || $m_fecha[1] !== $demo_date) {
+                    continue;
+                }
+
+                $posteriores = [];
+                foreach ($slots as $slot) {
+                    $min = $this->hhmm_a_minutos((string) $slot);
+                    /* Dos condiciones, y las dos hacen falta: posterior al horario que arrancó (si
+                     * no, no es un corrimiento) y por encima del piso de antelación mínima (si no,
+                     * le prometemos al lead un horario que la aprobación va a rechazar, o que ya
+                     * arrancó). */
+                    if ($min !== null && $min > $slot_min && $min >= $piso_minutos) {
+                        $posteriores[] = (string) $slot;
+                    }
+                }
+
+                if (empty($posteriores)) {
+                    continue;
+                }
+
+                $recorte_todas[$demo_id_json][$date_label] = $posteriores;
+                if ((int) $demo_id_json === $demo_id_original) {
+                    $recorte_original[$demo_id_json][$date_label] = $posteriores;
+                }
+            }
+        }
+
+        $mejor_todas = $this->primer_slot_disponible($recorte_todas, null);
+        if ($mejor_todas === null) {
+            return null;
+        }
+
+        /* El demo_id PUEDE cambiar y no pasa nada: el link de la experiencia sale del `uuid` del
+         * LEAD (Lead::getDemoExperienciaUrlAttribute()), no de la instancia, y el lead nunca ve el
+         * demo_id — es una instancia física del pool, y el protocolo v2 dice explícito que "la
+         * instancia dejó de ser un recurso escaso". Se toma el más temprano, porque el objetivo es
+         * el corrimiento MÍNIMO: quedarse pegado a la instancia original cuando otra tiene un slot
+         * diez minutos antes le cuesta esos diez minutos al lead sin comprar nada. Y sólo ante
+         * EMPATE de horario se queda en la original, para no mover la instancia porque sí (ruido en
+         * los logs y en el panel). */
+        $mejor_original = $this->primer_slot_disponible($recorte_original, null);
+        if ($mejor_original !== null && $mejor_original['hora'] === $mejor_todas['hora']) {
+            return $mejor_original;
+        }
+
+        return $mejor_todas;
+    }
+
+    /**
+     * ¿El texto que devolvió el modelo menciona este horario?
+     *
+     * Post-validación del mismo tipo que verificar_coherencia_dia_mensaje() hace con el día de la
+     * semana: el paquete se muta para agendar un horario concreto, así que un texto que no lo nombra
+     * no lo confirma, y aceptar "cualquier cosa que no esté vacía" deja pasar justo el mensaje que
+     * sigue confirmando el horario viejo.
+     *
+     * Tolerancias, con el mismo criterio que los patrones de días (que aceptan "miercoles" sin
+     * tilde): separador `:` o `.`, espacios alrededor, y cero inicial opcional en las horas de un
+     * dígito ("9:15" es lo que escribe el modelo aunque el slot sea "09:15"). Los lookarounds evitan
+     * que "17:15" matchee dentro de "117:150".
+     *
+     * @param string $texto Mensaje redactado por el modelo.
+     * @param string $hora  Horario en HH:MM.
+     *
+     * @return bool
+     */
+    private function mensaje_menciona_horario(string $texto, string $hora): bool
+    {
+        if (! preg_match('/^\s*(\d{1,2}):(\d{2})\s*$/', $hora, $m)) {
+            return false;
+        }
+
+        $hh   = (int) $m[1];
+        $h_re = $hh < 10 ? '0?' . $hh : (string) $hh;
+
+        return (bool) preg_match('/(?<!\d)' . $h_re . '\s*[:.]\s*' . $m[2] . '(?!\d)/', $texto);
+    }
+
+    /**
+     * ¿La marca `reagendado_desde` que trae el paquete es coherente con un reagendado REAL del
+     * sistema, o la inventó el modelo?
+     *
+     * 🔴 Por qué existe este método. `agendar_demo` lo escribe el MODELO y viaja crudo hasta la
+     * aprobación (`pending_actions`). `reagendado_desde` cambia CON QUÉ HORARIO se consulta el
+     * permiso del rescate del margen, así que una clave inventada es una exención del margen que el
+     * modelo se firma solo: ofrecimos 17:30, el lead escribe 17:00, el modelo devuelve
+     * `{demo_start_time: 17:20, reagendado_desde: 17:30}` y el paquete sale por el camino de éxito
+     * sin que el bloque del reagendado se ejecute nunca (17:20 estaba en la grilla). Al aprobar
+     * 17:16, el permiso de 17:30 —que sí figura como ofrecido— rescataría un turno a 4 minutos
+     * vista, que es exactamente lo que la misión del margen mandó rechazar.
+     *
+     * Las tres condiciones son LAS MISMAS que aplica el camino de generación cuando decide
+     * reagendar (ver reagendar_al_proximo_slot(), condición 4): el horario del permiso es
+     * estrictamente anterior al que se está agendando, ya arrancó, y arrancó hace menos de
+     * REAGENDADO_VENTANA_MINUTOS. Si no se cumplen las tres, la marca se ignora y el permiso se
+     * consulta con el horario pedido, o sea el comportamiento de siempre: no hay regresión posible
+     * sobre el rescate del margen, sólo se le saca al modelo la llave que no le corresponde.
+     *
+     * El gate "la fecha es hoy" no se repite acá porque ya lo aplica oferta_vigente_sin_margen()
+     * antes de mirar el permiso: para cualquier otra fecha el rescate devuelve false igual, y la
+     * comparación en minutos del día no llega a decidir nada.
+     *
+     * @param Lead   $lead              Lead que está agendando (para el log).
+     * @param string $demo_date         Fecha pedida, en Y-m-d.
+     * @param string $demo_start        Horario que se está agendando, en HH:MM.
+     * @param string $reagendado_desde  Horario que la marca declara como origen, en HH:MM.
+     *
+     * @return bool true si la marca se honra.
+     */
+    private function marca_reagendado_coherente(Lead $lead, string $demo_date, string $demo_start, string $reagendado_desde): bool
+    {
+        $motivo = '';
+
+        $permiso_min = $this->hhmm_a_minutos($reagendado_desde);
+        $pedido_min  = $this->hhmm_a_minutos($demo_start);
+        /* Un solo AppTime::now() para todo el cálculo: dos lecturas separadas pueden caer a los dos
+         * lados del borde de un minuto, y en local cada llamada es una consulta a admin_settings. */
+        $ahora   = AppTime::now();
+        $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
+
+        if ($permiso_min === null || $pedido_min === null) {
+            $motivo = 'alguno de los dos horarios no es un HH:MM válido';
+        } elseif ($permiso_min >= $pedido_min) {
+            $motivo = 'el horario de la marca no es anterior al que se está agendando';
+        } elseif ($permiso_min >= $now_min) {
+            $motivo = 'el horario de la marca todavía no arrancó';
+        } elseif (($now_min - $permiso_min) > self::REAGENDADO_VENTANA_MINUTOS) {
+            $motivo = 'el horario de la marca arrancó hace más de ' . self::REAGENDADO_VENTANA_MINUTOS . ' minutos';
+        }
+
+        if ($motivo === '') {
+            return true;
+        }
+
+        /* Warning y no info a propósito: una marca incoherente no es un caso borde del flujo, es la
+         * señal de que el modelo está inventando la clave. Queremos poder verlo en el log en vez de
+         * deducirlo de que el rescate no disparó. */
+        Log::channel('disponibilidad')->warning(
+            '[DISPONIBILIDAD] Se ignoró una marca `reagendado_desde` incoherente: el permiso se consulta con el horario pedido.',
+            [
+                'lead_id'           => $lead->id,
+                'demo_date'         => $demo_date,
+                'demo_start'        => $demo_start,
+                'reagendado_desde'  => $reagendado_desde,
+                'motivo'            => $motivo,
+            ]
+        );
+
+        return false;
     }
 
     /**
@@ -1750,10 +2352,13 @@ TXT;
      *                                         MISMA grilla margen-0. Si el slot se rescata, su
      *                                         ventana tiene que salir de acá y no de la grilla con
      *                                         margen, donde ese slot ni existe.
+     * @param string|null $permiso_por_horario Horario VIEJO con el que se consulta el permiso, en
+     *                                         vez de $demo_start (misión reagendado-al-proximo-slot).
+     *                                         Default null = comportamiento de siempre.
      *
      * @return bool true si el horario se rescata del margen.
      */
-    protected function oferta_vigente_sin_margen(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null): bool
+    protected function oferta_vigente_sin_margen(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null, ?string $permiso_por_horario = null): bool
     {
         $ventanas_sin_margen = [];
 
@@ -1784,8 +2389,31 @@ TXT;
         }
 
         /* Primero la pregunta barata: ¿se lo ofrecimos nosotros? Una alucinación del modelo (un
-         * horario que el lead nunca recibió) muere acá, sin pagar el recálculo de la grilla. */
-        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $demo_start)) {
+         * horario que el lead nunca recibió) muere acá, sin pagar el recálculo de la grilla.
+         *
+         * 🔴 $permiso_por_horario (misión reagendado-al-proximo-slot): el permiso para saltar el
+         * margen es "este horario se lo ofrecimos nosotros" y vive en `lead_messages.horarios_ofrecidos`
+         * de un mensaje ENVIADO. Cuando el sistema le corre el turno al próximo slot, ese slot nuevo
+         * no está en ninguno: lo eligió PHP hace un minuto y el mensaje todavía es `sugerido`. Por
+         * eso lo que viaja en el paquete no es un permiso, es el horario VIEJO —el que sí se le
+         * ofreció— y acá se consulta con ÉL: mismo criterio de siempre, misma consulta a la misma
+         * base.
+         *
+         * ⚠️ Este método NO sanea ese parámetro y no puede hacerlo: le llega ya resuelto. Quien lo
+         * sanea es el llamador de la aprobación (apply_parsed_response() →
+         * marca_reagendado_coherente()), porque la clave la escribe el modelo y una marca inventada
+         * es una exención del margen. Con ese saneamiento, lo que el parámetro NO puede regalar es
+         * un slot inexistente (la grilla margen-0 de abajo sigue exigiendo que el horario pedido no
+         * haya arrancado y esté libre) ni una exención fuera de la ventana del reagendado. Si algún
+         * día aparece otro llamador que lo pase, tiene que sanearlo igual.
+         *
+         * Sin esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo, que es
+         * justo cuando el admin aprueba. */
+        $hora_del_permiso = ($permiso_por_horario !== null && $permiso_por_horario !== '')
+            ? $permiso_por_horario
+            : $demo_start;
+
+        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $hora_del_permiso)) {
             /* 🔴 Alerta a propósito, y en warning: este es el único camino por el que el rescate
              * NO dispara sin que haya pasado nada raro con el horario. Hay un guard conocido (ver
              * el bloque que exige `horarios_ofrecidos` en el paquete del agente) que existe
@@ -1796,10 +2424,11 @@ TXT;
             Log::channel('disponibilidad')->warning(
                 '[DISPONIBILIDAD] El horario no se rescató del margen: no figura como ofrecido a este lead en ningún mensaje enviado.',
                 [
-                    'lead_id'    => $lead->id,
-                    'demo_id'    => $demo_id,
-                    'demo_date'  => $demo_date,
-                    'demo_start' => $demo_start,
+                    'lead_id'          => $lead->id,
+                    'demo_id'          => $demo_id,
+                    'demo_date'        => $demo_date,
+                    'demo_start'       => $demo_start,
+                    'hora_del_permiso' => $hora_del_permiso,
                 ]
             );
 
@@ -1874,14 +2503,16 @@ TXT;
      * @param int        $demo_id
      * @param string     $demo_date
      * @param string     $demo_start
-     * @param array|null $ventanas_sin_margen Referencia de salida (ver oferta_vigente_sin_margen()).
+     * @param array|null  $ventanas_sin_margen Referencia de salida (ver oferta_vigente_sin_margen()).
+     * @param string|null $permiso_por_horario Horario VIEJO con el que se consulta el permiso (ver
+     *                                         oferta_vigente_sin_margen()). Default null = de siempre.
      *
      * @return bool true si el horario se rescata del margen; false también si el rescate falló.
      */
-    protected function rescate_del_margen_seguro(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null): bool
+    protected function rescate_del_margen_seguro(Lead $lead, int $demo_id, string $demo_date, string $demo_start, &$ventanas_sin_margen = null, ?string $permiso_por_horario = null): bool
     {
         try {
-            return $this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen);
+            return $this->oferta_vigente_sin_margen($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen, $permiso_por_horario);
         } catch (\Throwable $e) {
             Log::channel('disponibilidad')->warning(
                 '[DISPONIBILIDAD] Falló el rescate del margen de anticipación; se sigue por el camino normal (sin rescate).',
@@ -3942,6 +4573,50 @@ TXT;
                     $agendar_admin['ventana_hasta'] = $parsed['agendar_demo']['ventana_hasta'];
                 }
 
+                /* `reagendado_desde` (misión reagendado-al-proximo-slot): TERCERA clave de la serie
+                 * de `ventana_extendida` y `ventana_hasta`, por el mismo motivo — el panel
+                 * reconstruye agendar_demo clave por clave y lo que no conoce se pierde. Sin esto,
+                 * la marca se cae al aprobar y el turno que el sistema corrió se frena solo en los
+                 * 5 minutos previos al slot nuevo.
+                 *
+                 * 🔴 Con una salvaguarda propia: se preserva SÓLO si el horario efectivo es el
+                 * mismo que el que el sistema eligió. Si el admin movió la hora (o la fecha) a
+                 * mano, el reagendado del sistema ya no aplica y el permiso no puede viajar con una
+                 * hora que nadie eligió: ahí manda su `forzar_slot`, como con cualquier otra
+                 * edición manual. */
+                /* 🔴 La comparación va sobre los valores NORMALIZADOS, no con === sobre el string
+                 * crudo. El resto del archivo lee las horas con el regex tolerante
+                 * (\d{1,2}):(\d{2}) + cero a la izquierda, así que "17:15", "17:15:00" y "9:05" son
+                 * el mismo horario en todos lados menos acá. Con la comparación estricta, un panel
+                 * que mande "17:15:00" sin que el admin haya tocado nada tira la marca en silencio
+                 * y el reagendado se frena solo — que es EXACTAMENTE el modo de falla que la marca
+                 * existe para evitar. Normalizar no debilita la salvaguarda: una edición real
+                 * (17:20) sigue difiriendo de 17:15. Mismo criterio para la fecha. */
+                /* 🔴 `is_scalar` antes de los cuatro casts, misma clase ya registrada y comentada en
+                 * LeadMessage::horarios_ofrecidos_cubren(). Las dos puntas son datos que escribe el
+                 * modelo (`$parsed`) o el panel (`$final_actions`), sin validación de forma: un
+                 * {"demo_start_time": ["17:15"]} convierte el cast en "Array to string conversion",
+                 * que con error_reporting(-1) es una ErrorException y no una InvalidArgumentException.
+                 * Acá no hay lock de por medio, pero es el mismo descuido: se trata como "no
+                 * comparable" y la marca simplemente no se preserva. */
+                if (is_array($agendar_admin)
+                    && ! array_key_exists('reagendado_desde', $agendar_admin)
+                    && ! empty($parsed['agendar_demo']['reagendado_desde'])
+                    && isset($agendar_admin['demo_start_time'], $parsed['agendar_demo']['demo_start_time'])
+                    && isset($agendar_admin['demo_date'], $parsed['agendar_demo']['demo_date'])
+                    && is_scalar($agendar_admin['demo_start_time']) && is_scalar($parsed['agendar_demo']['demo_start_time'])
+                    && is_scalar($agendar_admin['demo_date']) && is_scalar($parsed['agendar_demo']['demo_date'])) {
+                    $hora_admin   = $this->normalizar_hhmm_tolerante((string) $agendar_admin['demo_start_time']);
+                    $hora_sistema = $this->normalizar_hhmm_tolerante((string) $parsed['agendar_demo']['demo_start_time']);
+                    $fecha_admin   = $this->normalizar_ymd_tolerante((string) $agendar_admin['demo_date']);
+                    $fecha_sistema = $this->normalizar_ymd_tolerante((string) $parsed['agendar_demo']['demo_date']);
+
+                    if ($hora_admin !== '' && $hora_admin === $hora_sistema
+                        && $fecha_admin !== '' && $fecha_admin === $fecha_sistema) {
+                        $agendar_admin['reagendado_desde'] = $parsed['agendar_demo']['reagendado_desde'];
+                    }
+                }
+
                 $parsed_efectivo['agendar_demo'] = $agendar_admin;
             }
 
@@ -4372,7 +5047,12 @@ TXT;
                         );
                     }
 
-                    $mensaje_correctivo = $this->call_corrective_availability_response($lead, $demo_start, $demo_date, []);
+                    /* Motivo fijo y deliberadamente opaco: esto es contención técnica (otra request
+                     * está asignando la misma instancia física en este instante), no un horario que
+                     * se cayó. El lead no tiene por qué enterarse de la concurrencia del pool, y el
+                     * prompt para este caso prohíbe explicar la causa — pero el motivo viaja igual,
+                     * porque el hueco vacío es justamente lo que hace inventar al modelo. */
+                    $mensaje_correctivo = $this->call_corrective_availability_response($lead, $demo_start, $demo_date, [], 'no pudimos confirmar ese horario en este momento');
                     $mensaje            = $mensaje_correctivo !== '' ? $mensaje_correctivo : 'Ese horario se acaba de ocupar. Decime otro día u horario y lo confirmamos.';
                     $estado_raw         = 'solicita_disponibilidad';
                     $agendar_descartado_por_slot_invalido = true;
@@ -4434,9 +5114,57 @@ TXT;
                  * grilla con margen ese slot no existe, y su ventana tampoco). Y no se toca la
                  * grilla de arriba: $slots_demo sigue alimentando las alternativas del mensaje
                  * correctivo, que con margen 0 le ofrecerían al lead horarios imposibles. */
+                /* 🔴 `reagendado_desde` (misión reagendado-al-proximo-slot): cuando el turno lo
+                 * corrió el SISTEMA en generación, el permiso se consulta con el horario VIEJO.
+                 * El permiso para saltar el margen es "este horario se lo ofrecimos nosotros" y
+                 * vive en `lead_messages.horarios_ofrecidos` de un mensaje ENVIADO; el slot nuevo
+                 * no está en ninguno (lo eligió PHP y el mensaje todavía era `sugerido`). Por eso
+                 * lo que viaja en el paquete no es un permiso, es el horario viejo: acá se llama a
+                 * `horario_figura_como_ofrecido()` con ÉL, o sea el mismo criterio de siempre y
+                 * contra la misma base, y la grilla margen-0 sigue exigiendo que el slot nuevo no
+                 * haya arrancado y esté libre.
+                 *
+                 * ⚠️ Eso sólo alcanza CON la marca saneada abajo: la clave la escribe el modelo, así
+                 * que sin sanearla puede inventarla y consultar el permiso con un horario que nunca
+                 * reagendó nadie. Con el saneamiento puesto, lo que no puede inventar es ni un slot
+                 * inexistente ni una exención del margen fuera de la ventana del reagendado. Sin
+                 * esta marca, el reagendado se frena solo en los 5 minutos previos al slot nuevo,
+                 * que es justo la ventana en que el admin aprueba. */
+                /* 🔴 `is_scalar` ANTES del cast, y no `(string)` a secas. Es exactamente la clase ya
+                 * registrada y comentada en LeadMessage::horarios_ofrecidos_cubren(): `agendar_demo`
+                 * lo escribe el modelo de lenguaje y se guarda CRUDO en `pending_actions`, sin
+                 * validar forma, así que un {"reagendado_desde": ["17:05"]} alcanza para que el cast
+                 * emita "Array to string conversion". Y en Laravel eso no es cosmético —
+                 * HandleExceptions corre con error_reporting(-1) y lo convierte en ErrorException,
+                 * que NO es InvalidArgumentException: se saltearía el catch que devuelve 422 y, peor,
+                 * el release() de este lock (que se libera con una sentencia suelta, sin try/finally).
+                 * El lock `demo_slot_hold_{demo_id}` quedaría tomado sus 8s de TTL y toda otra
+                 * aprobación sobre esa instancia caería en AprobacionEnCursoException, marcando leads
+                 * que no tenían nada. Un valor no escalar se trata como "sin marca". */
+                $permiso_reagendado = isset($agendar_demo['reagendado_desde']) && is_scalar($agendar_demo['reagendado_desde'])
+                    && trim((string) $agendar_demo['reagendado_desde']) !== ''
+                    ? trim((string) $agendar_demo['reagendado_desde'])
+                    : null;
+
+                /* 🔴 Saneamiento OBLIGATORIO de la marca, y no es defensa en profundidad: `agendar_demo`
+                 * lo escribe el MODELO, así que sin esto `reagendado_desde` es una clave que el modelo
+                 * puede inventar para exigir que el permiso se consulte con un horario distinto del que
+                 * pidió. El caso concreto que rompe: ofrecimos 17:30, el lead escribe a las 17:00, el
+                 * modelo devuelve {demo_start_time: 17:20, reagendado_desde: 17:30}; en generación 17:20
+                 * está en la grilla, así que el bloque del reagendado ni corre y la clave inventada
+                 * viaja intacta hasta acá — y el permiso de 17:30 (que sí figura como ofrecido)
+                 * habilitaría agendar a 4 minutos vista, justo lo que el rescate del margen prohíbe.
+                 * Por eso se honra sólo si es coherente con un reagendado REAL del sistema; si no, se
+                 * ignora y el permiso se consulta con el horario pedido, exactamente como si la clave
+                 * no viniera. */
+                if ($permiso_reagendado !== null
+                    && ! $this->marca_reagendado_coherente($lead, $demo_date, $demo_start, $permiso_reagendado)) {
+                    $permiso_reagendado = null;
+                }
+
                 if (! $slot_disponible) {
                     $ventanas_sin_margen = null;
-                    if ($this->rescate_del_margen_seguro($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen)) {
+                    if ($this->rescate_del_margen_seguro($lead, $demo_id, $demo_date, $demo_start, $ventanas_sin_margen, $permiso_reagendado)) {
                         $slot_disponible      = true;
                         $ventanas_revalidadas = is_array($ventanas_sin_margen) ? $ventanas_sin_margen : [];
 
@@ -4451,6 +5179,13 @@ TXT;
                         );
                     }
                 }
+
+                /* Foto de si la HORA estaba bien, tomada antes de que el bloque de ventana extendida
+                 * de abajo pueda poner $slot_disponible en false por su cuenta. La usa el
+                 * clasificador del motivo real: si lo que falló fue la hora, esa es la causa que el
+                 * lead tiene que escuchar, aunque de paso la franja tampoco entrara. Misma
+                 * precedencia que el $motivo de descartar_agendamiento_fuera_de_slots(). */
+                $hora_estaba_disponible = $slot_disponible;
 
                 /* Ventana extendida (misión 47). El "hasta" lo resuelve el servidor: el modelo solo
                  * pide la modalidad con un booleano. Si pidió ventana y en este instante ya no
@@ -4592,11 +5327,27 @@ TXT;
                      */
                     $agendar_descartado_por_slot_invalido = true;
 
+                    /* El motivo real viaja también acá (ver call_corrective_availability_response()).
+                     * `fecha_en_ventana` es true por construcción: la grilla de arriba se armó con
+                     * $demo_date como $specific_date, así que esa fecha siempre está adentro. Lo que
+                     * falla es la hora, o la franja extendida. */
                     $mensaje_correctivo = $this->call_corrective_availability_response(
                         $lead,
                         $demo_start,
                         $demo_date,
-                        $slots_demo
+                        $slots_demo,
+                        $this->motivo_real_del_horario_descartado(
+                            $lead,
+                            $demo_date,
+                            $demo_start,
+                            array_map('strval', is_array($slots_demo) ? $slots_demo : []),
+                            true,
+                            ($hora_estaba_disponible && ($ventana_hasta_invalida || ($quiere_ventana_extendida && $fin_ventana_extendida === null))),
+                            /* Misma señal que en generación: si la instancia que pidió el modelo no
+                             * está en la grilla, $slots_demo viene vacío POR ESO y las ramas
+                             * descriptivas del clasificador mentirían sobre la disponibilidad. */
+                            ! isset($availability['demos'][$demo_id])
+                        )
                     );
 
                     if ($mensaje_correctivo !== '') {
@@ -5675,6 +6426,292 @@ TXT;
     }
 
     /**
+     * Normaliza una hora suelta a "HH:MM", o '' si no es legible.
+     *
+     * Es la MISMA regex tolerante que usan descartar_agendamiento_fuera_de_slots(),
+     * revalidar_horarios_ofrecidos() y LeadMessage::horarios_ofrecidos_cubren(): tolera "9:05",
+     * " 09:05 " y "17:15:00". Existe para poder comparar dos horas sin repetir el patrón ni
+     * inventar una forma nueva de leerlas — comparar con === sobre el string crudo hace que
+     * "17:15" y "17:15:00" sean horarios distintos, que es un bug esperando.
+     *
+     * 🔴 Y VALIDA EL RANGO (00-23 / 00-59), igual que LeadMessage::normalizar_hora_ofrecida(), que
+     * es el método que este imita. No es cosmético allá y no puede faltar acá: "25:99" o "99:99"
+     * son "legibles" para el preg_match, y como todas las comparaciones de hora del archivo son
+     * lexicográficas sobre "HH:MM", una hora basura gana contra cualquier hora real. Allá eso
+     * ensanchaba el permiso para saltarse el margen (por eso se le agregó la validación); acá, hoy,
+     * los dos llamadores sólo comparan igualdad y no rompe — pero copiar el helper SIN el fix deja
+     * la variante vieja a mano para el próximo que lo reuse, que es cómo vuelve un agujero ya
+     * cerrado. Una hora fuera de rango es ilegible ('').
+     *
+     * @param string $hora
+     *
+     * @return string "HH:MM", o '' si no se pudo leer o está fuera de rango.
+     */
+    private function normalizar_hhmm_tolerante(string $hora): string
+    {
+        if (! preg_match('/(\d{1,2}):(\d{2})/', $hora, $m)) {
+            return '';
+        }
+
+        $h = (int) $m[1];
+        $i = (int) $m[2];
+        if ($h < 0 || $h > 23 || $i < 0 || $i > 59) {
+            return '';
+        }
+
+        return str_pad($m[1], 2, '0', STR_PAD_LEFT) . ':' . $m[2];
+    }
+
+    /**
+     * Extrae la fecha "Y-m-d" de un string, o '' si no la tiene.
+     *
+     * Mismo criterio de sufijo que ya usa el archivo para leer las claves de fecha del JSON de
+     * disponibilidad ("martes 2026-08-25"), y que tolera un "2026-08-25T00:00:00".
+     *
+     * @param string $fecha
+     *
+     * @return string "Y-m-d" o ''.
+     */
+    private function normalizar_ymd_tolerante(string $fecha): string
+    {
+        if (! preg_match('/(\d{4}-\d{2}-\d{2})/', $fecha, $m)) {
+            return '';
+        }
+
+        return $m[1];
+    }
+
+    /**
+     * Convierte "HH:MM" (o "H:MM") a minutos desde medianoche, o null si no es una hora legible.
+     *
+     * Contraparte de format_minutes_to_hhmm(). Existe para que el clasificador del motivo y el
+     * reagendado no repitan la misma regex tolerante que ya usa el resto del archivo.
+     *
+     * @param string $hora
+     *
+     * @return int|null
+     */
+    private function hhmm_a_minutos(string $hora): ?int
+    {
+        if (! preg_match('/^\s*(\d{1,2}):(\d{2})\s*$/', $hora, $m)) {
+            return null;
+        }
+
+        $minutos = (int) $m[1] * 60 + (int) $m[2];
+
+        return ($minutos < 0 || $minutos > self::FIN_DEL_DIA_MINUTOS) ? null : $minutos;
+    }
+
+    /**
+     * Traduce a una frase en castellano llano POR QUÉ se descartó un horario, para que el prompt
+     * correctivo pueda dárselo al modelo en vez de dejarlo inventar la causa.
+     *
+     * 🔴 Nunca devuelve "se ocupó". El sistema no puede distinguir hoy "lo tomó otro lead" de
+     * "nunca fue un slot de la grilla" sin recalcular, y afirmarlo es exactamente el bug que Lucas
+     * reportó el 25/8/2026 (lead Brisa: el horario había caído por el margen y el modelo escribió
+     * "uh, justo se ocupó el de las 17:05"). Cuando no se sabe, la frase es descriptiva ("no figura
+     * entre los disponibles") y el prompt le prohíbe explicar.
+     *
+     * El orden de evaluación va de la causa más específica a la más genérica: primero la fecha
+     * pasada, después la fecha fuera de ventana, después la franja extendida, después el reloj (ya
+     * arrancó / está demasiado cerca), después la instancia inválida, y recién al final las dos
+     * descriptivas.
+     *
+     * @param Lead     $lead                Lead que está aceptando el horario (decide el margen).
+     * @param string   $demo_date           Fecha pedida, en Y-m-d.
+     * @param string   $demo_start          Horario pedido, en HH:MM.
+     * @param string[] $slots_de_esa_fecha  Slots realmente disponibles para esa demo y fecha.
+     * @param bool     $fecha_en_ventana    Si la fecha estaba dentro de la ventana consultada.
+     * @param bool     $ventana_invalida    Si lo que falló fue la franja extendida, no la hora.
+     * @param bool     $demo_id_invalido    Si la instancia pedida no existe en la grilla. La lista
+     *                                      de slots viene vacía POR ESO, no porque no queden
+     *                                      horarios: sin este dato las dos ramas descriptivas
+     *                                      mienten.
+     *
+     * @return string Frase llana, sin punto final, lista para inyectar en el prompt.
+     */
+    private function motivo_real_del_horario_descartado(Lead $lead, string $demo_date, string $demo_start, array $slots_de_esa_fecha, bool $fecha_en_ventana, bool $ventana_invalida, bool $demo_id_invalido = false): string
+    {
+        $slot_min = $this->hhmm_a_minutos($demo_start);
+        /* Un solo AppTime::now() para la fecha y para la hora: dos lecturas separadas pueden caer a
+         * los dos lados del borde de un minuto (y con la hora y los minutos leídos por separado, la
+         * hora sale corrida hasta 59 minutos), y en local cada llamada es una consulta a
+         * admin_settings. */
+        $ahora  = AppTime::now();
+        $hoy    = $ahora->format('Y-m-d');
+        $es_hoy = ($demo_date !== '' && $demo_date === $hoy);
+
+        /* 🔴 La fecha PASADA va primero, antes que la ventana, y es el cruce de medianoche: le
+         * ofrecimos las 23:55, el lead contesta "dale" a las 00:03. La fecha de ayer no está en la
+         * ventana consultada (arranca hoy), así que sin esta rama el motivo salía "la fecha que
+         * pidió no está dentro de la ventana de disponibilidad" — y el lead NO pidió ninguna fecha:
+         * aceptó la nuestra. Afirmarle eso es tan falso como el "se ocupó" que esta misión cerró.
+         * La verdad, y la única que se puede afirmar sin saber quién propuso qué, es que ese
+         * horario era de un día que ya pasó. */
+        $fecha_pedida = $this->normalizar_ymd_tolerante($demo_date);
+        if ($fecha_pedida !== '' && $fecha_pedida < $hoy) {
+            return 'ese horario era de un día que ya pasó';
+        }
+
+        if (! $fecha_en_ventana) {
+            return 'la fecha que pidió no está dentro de la ventana de disponibilidad que consultamos';
+        }
+
+        if ($ventana_invalida) {
+            return 'la franja extendida que se le había prometido ya no entra completa';
+        }
+
+        if ($es_hoy && $slot_min !== null) {
+            $now_min = (int) $ahora->format('H') * 60 + (int) $ahora->format('i');
+
+            if ($slot_min < $now_min) {
+                /* El caso central de esta misión: el horario ya arrancó. */
+                return 'ese horario ya arrancó';
+            }
+
+            /* Mismo margen que aplica compute_day_slots_for_demo(): la setting en la dinámica
+             * nueva, los 30 minutos fijos en la actual. */
+            $margen = $lead->usa_experiencia_demo_nueva()
+                ? LeadDemoSettings::get_demo_minimo_minutos_desde_ahora()
+                : 30;
+
+            if ($slot_min < $now_min + $margen) {
+                return 'ese horario queda demasiado cerca: la demo necesita unos minutos de anticipación para prepararse';
+            }
+        }
+
+        /* 🔴 Instancia inválida: va acá, justo ANTES de las dos ramas descriptivas, y no es un
+         * detalle de orden. Las dos de abajo se calculan sobre $slots_de_esa_fecha, y cuando el
+         * modelo pide un demo_id que no existe esa lista viene vacía POR ESO — no porque no queden
+         * horarios. Sin esta rama el clasificador devolvía "no quedan horarios disponibles en esa
+         * fecha" y el lead escuchaba "hoy no queda nada" con la agenda de las otras instancias
+         * llena de slots libres: una mentira nueva, de la misma familia que el "se ocupó".
+         *
+         * Va DESPUÉS de las ramas del reloj a propósito: "ya arrancó" y "queda demasiado cerca" son
+         * afirmaciones sobre el reloj, ciertas sea cual sea la instancia, y son la causa más útil
+         * para el lead. Esta rama, en cambio, no afirma NADA sobre la disponibilidad general — es
+         * lo único honesto que se puede decir sin recalcular la grilla, que acá no se hace.
+         *
+         * Es la misma rama que el $motivo del log de descartar_agendamiento_fuera_de_slots() ya
+         * tenía ('demo_id inválido') y que este clasificador no modelaba. */
+        if ($demo_id_invalido) {
+            return 'no pudimos confirmar ese horario en este momento';
+        }
+
+        if (! empty($slots_de_esa_fecha)) {
+            return 'ese horario no figura entre los disponibles de esa fecha';
+        }
+
+        return 'no quedan horarios disponibles en esa fecha';
+    }
+
+    /**
+     * Llamada aislada que redacta el mensaje del REAGENDADO: el horario que el lead aceptó ya
+     * arrancó, el sistema le corrió el turno al próximo slot y este texto se lo CONFIRMA.
+     *
+     * Es hermana de call_corrective_availability_response() —misma estructura, mismo aislamiento
+     * del historial, mismo rechazo de respuesta estructurada, mismo `''` como señal de fallo— pero
+     * con un prompt propio, y no se pueden unificar: el correctivo OFRECE y pide disculpas, este
+     * CONFIRMA un hecho consumado; y este lleva el link de la experiencia, que allá no va nunca.
+     *
+     * 🔴 El prompt dice el motivo REAL y prohíbe explícitamente los inventados ("se ocupó", "se
+     * llenó"). Es la misma lección del correctivo: un prompt que afirma un hecho negativo sin su
+     * causa obliga al modelo a inventarla.
+     *
+     * Si devuelve `''` el llamador NO reagenda y no toca el paquete. Ese es el motivo por el que
+     * esta llamada va ANTES de cualquier mutación: no hay estado a medias que revertir. Y no se
+     * inventa un texto fijo de PHP en la voz del agente.
+     *
+     * @param Lead   $lead              Lead al que se le confirma el turno nuevo.
+     * @param string $slot_que_arranco  Horario que el lead aceptó y que ya arrancó (HH:MM).
+     * @param string $slot_nuevo        Horario que el sistema le dejó agendado (HH:MM).
+     * @param string $demo_date         Fecha, en Y-m-d. Siempre hoy.
+     *
+     * @return string Texto del mensaje al lead, o string vacío si falló.
+     */
+    private function call_reagendado_al_proximo_slot_response(Lead $lead, string $slot_que_arranco, string $slot_nuevo, string $demo_date): string
+    {
+        try {
+            $hora_actual = AppTime::now()->format('H:i');
+
+            /*
+             * Igual que en el correctivo: NO se usa build_user_content() a propósito. Ese arma el
+             * prompt completo con el historial de la conversación, que es justo lo que hace que el
+             * modelo vuelva a confirmar el horario viejo.
+             */
+            $user_content  = "El lead aceptó la demo para hoy {$demo_date} a las {$slot_que_arranco}, pero ese horario YA ARRANCÓ (ahora son las {$hora_actual}) y la demo necesita unos minutos de anticipación para prepararse.\n\n";
+            $user_content .= "YA LE DEJAMOS AGENDADA la demo para HOY a las {$slot_nuevo}. Está hecho: no es una propuesta.\n\n";
+            $user_content .= "Redactá el mensaje que le confirma eso, en este orden:\n";
+            $user_content .= "1. Que la de las {$slot_que_arranco} ya arrancó y que necesitamos unos minutos de antelación.\n";
+            $user_content .= "   🔴 Ese es el motivo REAL y es el único que podés dar. PROHIBIDO decir que \"se ocupó\", que \"se llenó\", que \"lo tomó otro\" o cualquier otra causa: es falso.\n";
+            $user_content .= "2. Que se la dejaste lista para las {$slot_nuevo} de hoy. UN SOLO HORARIO. Prohibido enumerar alternativas, prohibido preguntarle si le sirve, prohibido pedirle que confirme.\n";
+
+            /* 🔴 La instrucción del link SÓLO si el bloque del link existe. build_demo_experiencia_context()
+             * devuelve '' cuando el lead no tiene URL de experiencia (uuid sin backfillear), y pedirle
+             * al modelo "copiá TEXTUAL el link de acá abajo" cuando abajo no hay ningún link es una
+             * invitación a que lo invente: es la misma clase de esta misión —el prompt que afirma
+             * algo y no da el dato— en versión link. */
+            $bloque_link = $this->build_demo_experiencia_context($lead);
+            if ($bloque_link !== '') {
+                $user_content .= "3. El link, copiado TEXTUAL de acá abajo.\n";
+                $user_content .= $bloque_link;
+            }
+            $user_content .= "\n\nNunca menciones un horario que no sea {$slot_que_arranco} o {$slot_nuevo}. No devuelvas JSON ni bloques de código: sólo el texto del mensaje al lead.";
+
+            /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
+            $system = $this->build_system_prompt();
+            $model  = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
+            $http   = $this->build_http_client();
+
+            $response = $http->post('https://api.anthropic.com/v1/messages', [
+                'model'      => $model,
+                'max_tokens' => 400,
+                'system'     => [
+                    [
+                        'type'          => 'text',
+                        'text'          => $system,
+                        'cache_control' => ['type' => 'ephemeral'],
+                    ],
+                ],
+                'messages'   => [
+                    ['role' => 'user', 'content' => $user_content],
+                ],
+            ]);
+
+            if ($response->failed()) {
+                Log::error('LeadAiService: fallo HTTP en la llamada del reagendado al próximo slot.', [
+                    'lead_id' => $lead->id,
+                    'status'  => $response->status(),
+                    'body'    => $response->body(),
+                ]);
+                return '';
+            }
+
+            $texto = trim($this->extract_response_text($response->json()));
+
+            /*
+             * Si la respuesta empieza con bloque de código o JSON, el modelo ignoró la restricción
+             * (intentó devolver estructura). Se trata como fallo: el llamador no reagenda.
+             */
+            if ($texto === '' || strncmp($texto, '```', 3) === 0 || strncmp($texto, '{', 1) === 0) {
+                Log::error('LeadAiService: la llamada del reagendado devolvió contenido estructurado o vacío. No se reagenda.', [
+                    'lead_id'  => $lead->id,
+                    'response' => $texto,
+                ]);
+                return '';
+            }
+
+            return $texto;
+        } catch (\Throwable $e) {
+            Log::error('LeadAiService: excepción en la llamada del reagendado al próximo slot.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+            return '';
+        }
+    }
+
+    /**
      * Tercera llamada correctiva a Claude cuando el servidor descartó un agendar_demo
      * por slot inválido (camino "slot inválido detectado por servidor").
      *
@@ -5701,10 +6738,13 @@ TXT;
      * @param string   $slot_invalido       Horario alucinado que el servidor descartó (HH:MM).
      * @param string   $demo_date           Fecha de la demo propuesta (Y-m-d).
      * @param string[] $slots_disponibles   Slots realmente disponibles para esa demo y fecha.
+     * @param string   $motivo_real         Frase llana con el motivo del descarte (ver
+     *                                      motivo_real_del_horario_descartado()). Vacío = no se
+     *                                      sabe, y entonces el prompt le prohíbe explicar.
      *
      * @return string Mensaje natural al lead, o string vacío si falló (activa fallback).
      */
-    private function call_corrective_availability_response(Lead $lead, string $slot_invalido, string $demo_date, array $slots_disponibles): string
+    private function call_corrective_availability_response(Lead $lead, string $slot_invalido, string $demo_date, array $slots_disponibles, string $motivo_real = ''): string
     {
         try {
             /* Lista legible de alternativas para inyectar en el prompt (ej: "18:00, 19:00, 20:00"). */
@@ -5715,11 +6755,53 @@ TXT;
              * ese arma el prompt completo con historial, que es lo que hace alucinar al modelo.
              * Esta llamada debe estar completamente aislada de la conversación.
              */
-            $user_content = "El lead propuso agendar a las {$slot_invalido} para el {$demo_date}, pero ese horario ya no está disponible.\n";
-            $user_content .= $alternativas_legibles !== ''
-                ? "Los próximos horarios disponibles son: {$alternativas_legibles}.\n"
-                : "No tenés horarios reales para ofrecer en este momento. NO inventes fechas ni horarios bajo ningún motivo — pedile al lead que te confirme qué día prefiere, para volver a consultar la disponibilidad real antes de ofrecerle algo.\n";
-            $user_content .= "Redactá un mensaje natural y breve para el lead disculpándote y ofreciéndole esas alternativas (o pidiéndole que confirme otro día, si no tenés alternativas reales).\n";
+            /* 🔴 El motivo real, y por qué es obligatorio que viaje. Hasta el 25/8/2026 este prompt
+             * le decía al modelo "ese horario ya no está disponible" SIN DECIRLE POR QUÉ, y el
+             * modelo rellenaba el hueco con la causa más plausible: le escribió a la lead Brisa
+             * "Uh, justo se ocupó el de las 17:05" — y era falso, el horario estaba libre y había
+             * caído por el margen de anticipación. Un prompt que afirma un hecho negativo sin su
+             * causa NO deja un hueco: obliga a inventarla, y la invención sale firmada por el
+             * sistema y le llega al lead como un hecho. El motivo viaja siempre, y cuando no se
+             * sabe, la instrucción explícita es NO explicar. */
+            /* 🔴 La frase es NEUTRA: "el horario de las X", no "el lead propuso las X". Este método
+             * lo llaman los dos caminos y en el más común el lead NO propuso nada — aceptó un
+             * horario que le ofrecimos NOSOTROS (es el caso entero de la misión del reagendado:
+             * ofrecemos 17:05, contesta "dale" a las 17:10). Atribuirle una propuesta que no hizo
+             * es de la misma familia que el "se ocupó": una afirmación falsa que el modelo repite
+             * como un hecho ("como me pediste las 17:05..."). Distinguir los dos casos acá exige
+             * otra consulta a `lead_messages.horarios_ofrecidos`, que no se justifica: neutro es
+             * verdadero en los dos. */
+            $user_content = "El horario de las {$slot_invalido} para el {$demo_date} no se pudo confirmar.\n";
+
+            if ($motivo_real !== '') {
+                $user_content .= "MOTIVO REAL, y es el único que podés dar: {$motivo_real}.\n";
+                $user_content .= "🔴 PROHIBIDO inventar otra causa. Si acá no dice que se ocupó, NO digas que se ocupó ni que se llenó la agenda: es falso y ya pasó (lead Brisa, 25/8/2026).\n";
+            } else {
+                $user_content .= "No tenés el motivo. NO lo inventes: no expliques por qué, simplemente ofrecé el horario nuevo.\n";
+            }
+
+            /* 🔴 Los dos textos NO se unifican, y la bifurcación no es cosmética. El protocolo v2
+             * de la dinámica nueva dice textual "el mensaje ofrece UN momento, no una lista"
+             * ("enumerar rangos por turno era la forma vieja: alarga el mensaje, suena a robot y le
+             * da al lead una decisión que no pidió tomar"); la dinámica actual, en cambio, ofrece
+             * la lista. Es el mismo par que ya obligó a bifurcar el encabezado de RANGOS DEL DÍA
+             * más arriba en este archivo — unificarlos rompe uno de los dos. Y lo que está en el
+             * prompt se usa: pasarle la lista entera al modelo de la dinámica nueva es garantizar
+             * que la enumere. */
+            if ($lead->usa_experiencia_demo_nueva()) {
+                $primero = ! empty($slots_disponibles) ? trim((string) reset($slots_disponibles)) : '';
+
+                $user_content .= $primero !== ''
+                    ? "El próximo horario disponible es: {$primero}. Ofrecele ESE, uno solo. PROHIBIDO enumerar alternativas ni mencionar ningún otro horario.\n"
+                    : "No tenés horarios reales para ofrecer en este momento. NO inventes fechas ni horarios bajo ningún motivo — pedile al lead que te confirme qué día prefiere, para volver a consultar la disponibilidad real antes de ofrecerle algo.\n";
+                $user_content .= "Redactá un mensaje natural y breve para el lead: el motivo de arriba y el horario nuevo (o el pedido de que confirme otro día, si no tenés horario real).\n";
+            } else {
+                $user_content .= $alternativas_legibles !== ''
+                    ? "Los próximos horarios disponibles son: {$alternativas_legibles}.\n"
+                    : "No tenés horarios reales para ofrecer en este momento. NO inventes fechas ni horarios bajo ningún motivo — pedile al lead que te confirme qué día prefiere, para volver a consultar la disponibilidad real antes de ofrecerle algo.\n";
+                $user_content .= "Redactá un mensaje natural y breve para el lead disculpándote y ofreciéndole esas alternativas (o pidiéndole que confirme otro día, si no tenés alternativas reales).\n";
+            }
+
             $user_content .= "No uses `agendar_demo`. Solo devolvé el texto del mensaje, sin JSON, sin estructura, solo el mensaje al lead. Nunca menciones un horario o fecha que no te haya sido dado explícitamente arriba.";
 
             /* Mismo system prompt que el flujo normal; max_tokens acotado a un mensaje corto. */
@@ -6278,6 +7360,18 @@ TXT;
         foreach ($lead->messages as $msg) {
             /* Saltar mensajes que el operador marcó como eliminados del contexto de IA. */
             if ($msg->deleted_from_context) {
+                continue;
+            }
+
+            /* 🔴 Bloques rojos de error interno (is_error, siempre junto con is_status_event): NUNCA
+             * se enviaron al lead. Son diagnóstico para el admin en el hilo, no turnos de la
+             * conversación, y meterlos acá los convierte en algo que el modelo lee como si el lead
+             * lo hubiera recibido. El caso concreto (25/8/2026): cuando una sugerencia caduca
+             * esperando aprobación, LeadConversationErrorLogger escribe "el horario que este mensaje
+             * ofrecía dejó de estar disponible"; el modelo leía esa línea y le repetía al lead una
+             * causa que nadie le dijo —el bug de la causa inventada, entrando por la única puerta
+             * que los prompts aislados no cubren, porque este es el único que lleva historial. */
+            if ((bool) $msg->is_error) {
                 continue;
             }
 
