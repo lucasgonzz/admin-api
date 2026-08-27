@@ -15,6 +15,7 @@ use App\Services\LeadDemoFormMapper;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -143,6 +144,30 @@ class RespuestasFormularioDemoPanelTest extends TestCase
         }
 
         $synced->content = json_encode($catalogo);
+        $synced->save();
+    }
+
+    /**
+     * Deja el catálogo sincronizado VACÍO, que es lo que `DemoCatalogoService::get()` devuelve
+     * también cuando el JSON es inválido o el archivo nunca se sincronizó. A partir de ahí
+     * `DemoPlanResolver::resolver()` devuelve `null` y no hay plan que se pueda armar.
+     *
+     * Se rompe DESPUÉS de haber congelado el plan a propósito: el caso que interesa es el lead
+     * que YA tiene roadmap y el catálogo que se rompe (o se deja de sincronizar) más tarde.
+     *
+     * @return void
+     */
+    private function romper_catalogo(): void
+    {
+        $synced = SyncedGithubFile::obtener_por_key(DemoCatalogoService::SYNCED_FILE_KEY);
+
+        if ($synced === null) {
+            $synced            = new SyncedGithubFile();
+            $synced->key       = DemoCatalogoService::SYNCED_FILE_KEY;
+            $synced->repo_path = 'contexto/demo_catalogo.json';
+        }
+
+        $synced->content = '';
         $synced->save();
     }
 
@@ -405,11 +430,12 @@ class RespuestasFormularioDemoPanelTest extends TestCase
 
         $this->assertNotNull($lead->demo_form_editado_admin_at);
 
-        /* Las dos marcas conviven y la más reciente manda: la tarjeta tiene que decir que lo último
-           que se guardó lo puso el admin, sin perder la fecha en que el lead contestó. */
-        $this->assertSame('admin', $respuesta->json('model.demo_form_panel.origen'));
+        /* Las dos marcas conviven, y la tarjeta lo declara SIN elegir un ganador: escribieron las
+           dos puntas. Que el lead completó el formulario se sigue afirmando, con su fecha. */
+        $this->assertSame('ambos', $respuesta->json('model.demo_form_panel.origen'));
         $this->assertTrue($respuesta->json('model.demo_form_panel.completado_por_lead'));
         $this->assertSame('2026-08-20 15:30:00', $respuesta->json('model.demo_form_panel.completado_at'));
+        $this->assertNotNull($respuesta->json('model.demo_form_panel.editado_admin_at'));
     }
 
     /**
@@ -534,5 +560,251 @@ class RespuestasFormularioDemoPanelTest extends TestCase
         $detalle = $this->getJson('/api/admin/lead/' . $lead->id);
         $detalle->assertStatus(200);
         $this->assertFalse($detalle->json('model.demo_form_panel.editable'));
+    }
+
+    /**
+     * 8. 🔴 CON EL CATÁLOGO SIN SINCRONIZAR, GUARDAR NO SE LLEVA PUESTO EL ROADMAP.
+     *
+     * El defecto que cubre: el endpoint borraba y PERSISTÍA el plan y los hitos antes de
+     * re-congelar, y `DemoPlanResolver::congelar_en_memoria()` devuelve `false` en dos casos
+     * distintos —el plan ya estaba congelado, o el catálogo vino vacío y `resolver()` dio `null`—.
+     * En el segundo, la regeneración se salteaba y la transacción commiteaba igual, sin una sola
+     * excepción: el lead quedaba con `demo_plan = NULL`, `demo_plan_congelado_at = NULL` y cero
+     * hitos, y como el plan se congela una sola vez, no volvía a armarse nunca.
+     *
+     * Sin el arreglo este test falla en las tres aserciones del plan y los hitos.
+     *
+     * @return void
+     */
+    public function test_con_el_catalogo_sin_sincronizar_el_put_deja_el_plan_y_los_hitos_intactos(): void
+    {
+        $this->autenticar_admin();
+        $this->sembrar_catalogo();
+
+        $lead                    = $this->crear_lead();
+        $lead->demo_setup_status = 'pendiente';
+        $lead->save();
+
+        $this->congelar_plan_previo($lead);
+        $lead = $lead->fresh();
+
+        $plan_viejo   = $lead->demo_plan;
+        $hitos_viejos = LeadDemoHito::where('lead_id', $lead->id)->orderBy('id')->pluck('id')->all();
+        $this->assertNotEmpty($plan_viejo, 'El plan previo no se congeló: el caso no se está reproduciendo.');
+        $this->assertNotEmpty($hitos_viejos, 'El plan previo no generó hitos: el caso no se está reproduciendo.');
+
+        // El catálogo se deja de sincronizar DESPUÉS de que el lead ya tenía su roadmap.
+        $this->romper_catalogo();
+
+        $respuesta = $this->guardar_desde_el_panel($lead, ['tipo_precios' => 'listas']);
+        $respuesta->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        $this->assertSame($plan_viejo, $lead->demo_plan, 'Guardar con el catálogo roto se llevó puesto el plan del lead.');
+        $this->assertNotNull($lead->demo_plan_congelado_at, 'El lead quedó sin fecha de congelamiento: el plan no se puede volver a armar nunca.');
+        $this->assertSame(
+            '2026-08-01 10:00:00',
+            $lead->demo_plan_congelado_at->format('Y-m-d H:i:s'),
+            'La fecha de congelamiento se movió sin que hubiera un plan nuevo.'
+        );
+        $this->assertSame(
+            $hitos_viejos,
+            LeadDemoHito::where('lead_id', $lead->id)->orderBy('id')->pluck('id')->all(),
+            'Los hitos se borraron y no se regeneraron: el lead quedó sin roadmap.'
+        );
+
+        /* Y las respuestas sí se guardaron. Es lo único que Lucas pidió de este endpoint y no
+           puede fallar porque el catálogo no esté sincronizado. */
+        $this->assertTrue((bool) $lead->use_price_lists, 'La respuesta editada no se guardó.');
+        $this->assertNotNull($lead->demo_form_editado_admin_at, 'No quedó la marca de edición manual.');
+    }
+
+    /**
+     * 9. 🔴 EL PANEL NO CONGELA EL ROADMAP DE UN LEAD QUE TODAVÍA NO LO TIENE, Y POR ESO EL LEAD
+     *    PUEDE ARMARLO DESPUÉS CON SUS PROPIAS RESPUESTAS.
+     *
+     * El defecto que cubre: el endpoint congelaba el plan por primera vez con las respuestas del
+     * admin. Como `congelar_en_memoria()` no re-resuelve un plan ya congelado y el endpoint público
+     * no puede hacerlo por diseño, el lead que después contestaba lo contrario pisaba las columnas
+     * —el merge del formulario público lo deja ganar— pero se quedaba con el roadmap del admin para
+     * siempre. El payload salía contradiciéndose: `respuestas_formulario.registra_compras = true`
+     * con un `demo_plan` armado con `false`.
+     *
+     * Sin el arreglo este test falla en la primera aserción (el plan queda congelado) y, aunque se
+     * la saltee, en la del clip de compras (el plan del lead nunca llega a existir).
+     *
+     * @return void
+     */
+    public function test_el_panel_no_congela_el_roadmap_y_el_lead_lo_arma_despues_con_sus_respuestas(): void
+    {
+        Queue::fake();
+
+        $this->autenticar_admin();
+        $this->sembrar_catalogo();
+
+        $lead                    = $this->crear_lead();
+        $lead->demo_setup_status = 'pendiente';
+        $lead->save();
+
+        // El admin contesta desde la tarjeta que el lead NO registra compras.
+        $this->guardar_desde_el_panel($lead, ['registra_compras' => false])->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        $this->assertNull(
+            $lead->demo_plan_congelado_at,
+            'El panel congeló el roadmap: el formulario del lead ya no va a poder armarlo con sus respuestas.'
+        );
+        $this->assertNull($lead->demo_plan, 'El panel dejó un plan congelado con las respuestas del admin.');
+        $this->assertSame(0, LeadDemoHito::where('lead_id', $lead->id)->count(), 'El panel generó hitos de un roadmap que no le corresponde congelar.');
+
+        // Pero la respuesta del admin sí quedó guardada y es la que vale hasta que el lead conteste.
+        $this->assertFalse((bool) $lead->registra_compras, 'La respuesta del admin no se guardó.');
+
+        // Ahora entra el lead a la página inmersiva y contesta lo contrario: SÍ registra compras.
+        $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/formulario', [
+            'registra_compras' => true,
+        ])->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        // Gana el lead, y gana también en el roadmap: es el punto entero de la corrección.
+        $this->assertTrue((bool) $lead->registra_compras, 'El formulario del lead no pisó la respuesta del admin.');
+        $this->assertNotNull($lead->demo_plan_congelado_at, 'El formulario del lead no congeló el plan.');
+        $this->assertContains(
+            '4.1',
+            $this->clips_del_plan($lead),
+            'El roadmap del lead se armó sin la sección de Compras, que es justo lo que el lead pidió.'
+        );
+
+        $titulos = LeadDemoHito::where('lead_id', $lead->id)->pluck('titulo')->all();
+        $this->assertContains('Cargar una compra', $titulos, 'Los hitos no reflejan las respuestas del lead.');
+
+        /* Y el plan congelado guarda las respuestas con las que se resolvió: es lo que después
+           viaja en el payload junto a `respuestas_formulario`, y las dos tienen que decir lo
+           mismo. Con el plan congelado por el panel, acá decía `false` y el payload salía
+           contradiciéndose. */
+        $plan = $lead->demo_plan;
+        $this->assertTrue(
+            $plan['respuestas']['registra_compras'],
+            'El plan quedó congelado con la respuesta del admin y no con la del lead.'
+        );
+    }
+
+    /**
+     * 10. 🔴 EL AVISO NO LE ATRIBUYE AL ADMIN LAS RESPUESTAS QUE EL LEAD ESCRIBIÓ DESPUÉS.
+     *
+     * El defecto que cubre: `origen` se desempataba comparando `demo_form_completado_at` contra
+     * `demo_form_editado_admin_at`, pero la primera se sella en el PRIMER envío del lead y no se
+     * mueve en los reenvíos. La secuencia lead 10:00 → admin 11:00 → lead 12:00 devolvía `admin`,
+     * y la tarjeta mostraba "Modificado por vos el 11:00" arriba de respuestas que el lead acababa
+     * de escribir a las 12:00 y que decían lo contrario de las del admin.
+     *
+     * Lo que sí se puede afirmar siempre —y es lo que Lucas pidió que el aviso diga— es que el lead
+     * completó el formulario. Eso se verifica acá también.
+     *
+     * Sin el arreglo este test falla en `assertNotSame('admin', ...)`.
+     *
+     * @return void
+     */
+    public function test_el_aviso_no_le_atribuye_al_admin_lo_que_el_lead_escribio_despues(): void
+    {
+        Queue::fake();
+
+        $this->autenticar_admin();
+        $this->sembrar_catalogo();
+
+        $lead = $this->crear_lead();
+
+        // 10:00 — el lead contesta que NO registra compras.
+        Carbon::setTestNow(Carbon::parse('2026-08-20 10:00:00'));
+        $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/formulario', [
+            'registra_compras' => false,
+        ])->assertStatus(200);
+
+        // 11:00 — el admin lo corrige desde la tarjeta: SÍ registra compras.
+        Carbon::setTestNow(Carbon::parse('2026-08-20 11:00:00'));
+        $this->guardar_desde_el_panel($lead, ['registra_compras' => true])->assertStatus(200);
+
+        // 12:00 — el lead vuelve a la página y reafirma que NO. Su reenvío pisa las columnas, pero
+        // `demo_form_completado_at` NO se mueve: sigue marcando las 10:00.
+        Carbon::setTestNow(Carbon::parse('2026-08-20 12:00:00'));
+        $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/formulario', [
+            'registra_compras' => false,
+        ])->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        // Precondiciones del caso: las columnas son las del lead y la fecha quedó vieja.
+        $this->assertFalse((bool) $lead->registra_compras, 'El reenvío del lead no pisó la respuesta del admin: el caso no se está reproduciendo.');
+        $this->assertSame('2026-08-20 10:00:00', $lead->demo_form_completado_at->format('Y-m-d H:i:s'), 'La fecha de completado se movió en el reenvío: el caso no se está reproduciendo.');
+        $this->assertSame('2026-08-20 11:00:00', $lead->demo_form_editado_admin_at->format('Y-m-d H:i:s'));
+
+        $detalle = $this->getJson('/api/admin/lead/' . $lead->id);
+        $detalle->assertStatus(200);
+
+        $panel = $detalle->json('model.demo_form_panel');
+
+        $this->assertNotSame(
+            'admin',
+            $panel['origen'],
+            'La tarjeta le atribuye al admin respuestas que el lead escribió después: la fecha de completado marca su primer envío, no el último.'
+        );
+        $this->assertSame('ambos', $panel['origen'], 'Escribieron las dos puntas y el aviso tiene que declararlo sin elegir un ganador.');
+
+        // Las dos fechas viajan para que la tarjeta las muestre juntas.
+        $this->assertSame('2026-08-20 10:00:00', $panel['completado_at']);
+        $this->assertSame('2026-08-20 11:00:00', $panel['editado_admin_at']);
+
+        // Y lo que sí se afirma siempre: el lead completó el formulario.
+        $this->assertTrue($panel['completado_por_lead'], 'Se perdió el dato que Lucas pidió: si el lead completó el formulario o no.');
+        $this->assertTrue($panel['editado_por_admin']);
+
+        // Lo que se muestra es lo que está guardado hoy, que es lo último que escribió el lead.
+        $this->assertFalse($panel['respuestas']['registra_compras'], 'La tarjeta no muestra las respuestas que están realmente persistidas.');
+    }
+
+    /**
+     * 11. El update genérico del modal ya no puede escribir `use_deposits` ni `use_price_lists`:
+     *     la tarjeta es la única puerta a esas dos columnas.
+     *
+     * El defecto que cubre: el grupo Demo del meta tenía dos checkboxes editables sobre las mismas
+     * columnas que escribe la tarjeta. Tocarlos y apretar el "Guardar" general del modal escribía
+     * las columnas SIN marcar `demo_form_editado_admin_at`, así que `respuestas_efectivas()` seguía
+     * devolviendo los defaults, el demo setup ignoraba el cambio y la tarjeta de al lado mostraba
+     * el valor viejo. Dos controles para el mismo dato y sólo uno contaba.
+     *
+     * `ModelPropertiesHelper::set_from_request()` es una lista blanca sobre `properties()`: sacar
+     * los dos campos del meta es lo que cierra el camino de escritura.
+     *
+     * @return void
+     */
+    public function test_el_update_generico_del_modal_ya_no_escribe_las_columnas_del_formulario(): void
+    {
+        $this->autenticar_admin();
+
+        $lead                  = $this->crear_lead();
+        $lead->use_deposits    = false;
+        $lead->use_price_lists = false;
+        $lead->price_type_1    = 'Mayorista';
+        $lead->save();
+
+        $respuesta = $this->putJson('/api/admin/lead/' . $lead->id, [
+            'use_deposits'    => true,
+            'use_price_lists' => true,
+            'price_type_1'    => 'Minorista',
+        ]);
+        $respuesta->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        $this->assertFalse((bool) $lead->use_deposits, 'El update genérico del modal sigue escribiendo use_deposits por fuera de la tarjeta.');
+        $this->assertFalse((bool) $lead->use_price_lists, 'El update genérico del modal sigue escribiendo use_price_lists por fuera de la tarjeta.');
+        $this->assertNull($lead->demo_form_editado_admin_at, 'El update genérico marcó la edición manual del formulario.');
+
+        /* Y los nombres de las listas de precios SÍ se siguen editando ahí: son otro dato, no
+           salen del formulario de la demo y nadie pidió sacarlos. */
+        $this->assertSame('Minorista', $lead->price_type_1, 'Se rompió la edición de los nombres de las listas de precios.');
     }
 }
