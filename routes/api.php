@@ -32,6 +32,7 @@ use App\Http\Controllers\RecallWebhookController;
 use App\Http\Controllers\FollowupRuleController;
 use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadCallController;
+use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\ProtocolEntryController;
 use App\Http\Controllers\SharedDatabaseGroupController;
@@ -49,6 +50,15 @@ use Illuminate\Support\Facades\Route;
 | Webhook Kapso / WhatsApp (público, verificación por firma HMAC)
 */
 Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
+    ->middleware('throttle:api');
+
+/*
+| Webhook CRUDO de Meta (modalidad `kind: meta` de Kapso), SOLO atribución Click-to-WhatsApp.
+| Convive con el de arriba: los dos reciben el mismo mensaje, cada uno en su formato. Este no
+| procesa mensajes ni crea leads — el bloque `referral` con el ctwa_clid solo viaja en el formato
+| crudo, y es lo único que se persiste acá. Misma firma HMAC y mismo webhook_secret.
+*/
+Route::post('webhook/meta-raw', [MetaRawWebhookController::class, 'receive'])
     ->middleware('throttle:api');
 
 /*

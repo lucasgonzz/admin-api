@@ -729,6 +729,24 @@ class Lead extends Model
     }
 
     /**
+     * Anuncios Click-to-WhatsApp que trajeron a este teléfono, si los hubo.
+     *
+     * 🔴 Se ata por TELÉFONO y no por id, a propósito: el bloque `referral` de Meta llega en el
+     * primer mensaje de la persona, cuando el lead todavía no existe. La fila de atribución se
+     * crea antes que el lead, por un camino aparte
+     * ({@see \App\Http\Controllers\MetaRawWebhookController}) que tiene prohibido crear leads.
+     *
+     * Es solo lectura y no participa de ningún flujo: nada del pipeline de leads depende de esta
+     * relación. Si no hay webhook `kind: meta` configurado en Kapso, devuelve vacío y listo.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function whatsapp_ad_referrals()
+    {
+        return $this->hasMany(WhatsappAdReferral::class, 'phone', 'phone');
+    }
+
+    /**
      * Mensajes de la conversación WhatsApp (lead, setter, sugerencias de Claude).
      *
      * @return \Illuminate\Database\Eloquent\Relations\HasMany
