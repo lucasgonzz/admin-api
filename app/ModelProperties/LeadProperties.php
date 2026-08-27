@@ -295,12 +295,12 @@ class LeadProperties
             //     'type' => 'text',
             //     'value' => '',
             // ],
-            [
-                'key' => 'use_deposits',
-                'text' => 'Usa depósitos',
-                'type' => 'checkbox',
-                'value' => false,
-            ],
+            /*
+             * Acá vivía el checkbox `use_deposits` ("Usa depósitos"). Se sacó el 27/8/2026 junto
+             * con `use_price_lists`: los dos son ahora respuestas del formulario de la demo y su
+             * única puerta de escritura es la tarjeta `demo_form_panel`, más abajo en este mismo
+             * grupo. El motivo completo está escrito ahí, donde estaba `use_price_lists`.
+             */
             [
                 'key' => 'address_1',
                 'text' => 'Sucursal 1',
@@ -319,12 +319,26 @@ class LeadProperties
                 'type' => 'text',
                 'value' => '',
             ],
-            [
-                'key' => 'use_price_lists',
-                'text' => 'Usa listas de precios',
-                'type' => 'checkbox',
-                'value' => false,
-            ],
+            /*
+             * 🔴 POR QUÉ NO ESTÁN MÁS `use_price_lists` NI `use_deposits` (27/8/2026)
+             * ----------------------------------------------------------------------
+             * Eran dos checkboxes editables que escribían las MISMAS DOS COLUMNAS que la tarjeta
+             * `demo_form_panel` de más abajo (`tipo_precios` → `use_price_lists`, `usa_depositos`
+             * → `use_deposits`, ver `LeadDemoFormMapper`). Dos controles para el mismo dato, uno
+             * al lado del otro en la misma pantalla, y sólo uno contaba: tocarlos acá y apretar el
+             * "Guardar" general del modal escribía las columnas SIN marcar
+             * `demo_form_editado_admin_at`, así que `LeadDemoFormMapper::respuestas_efectivas()`
+             * seguía devolviendo los defaults del catálogo, el demo setup ignoraba el cambio y la
+             * tarjeta de al lado mostraba el valor viejo.
+             *
+             * Se sacan del meta y no se dejan en `only_show`, porque `ModelPropertiesHelper` es
+             * una lista blanca: lo que no está acá no se escribe, y de paso no quedan dos lugares
+             * mostrando la misma respuesta. La tarjeta las muestra con el texto de la pregunta que
+             * el lead efectivamente lee, que es mejor que un checkbox suelto. Decisión de Lucas.
+             *
+             * ⚠️ `price_type_1/2/3` NO se tocaron: son los NOMBRES de las listas de precios, un
+             * dato distinto que no sale del formulario de la demo, y siguen editables acá abajo.
+             */
             [
                 'key' => 'price_type_1',
                 'text' => 'Lista de precio 1',
