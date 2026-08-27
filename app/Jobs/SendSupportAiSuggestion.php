@@ -164,8 +164,13 @@ class SendSupportAiSuggestion implements ShouldQueue
             /* El mensaje de espera del protocolo, no lo que había redactado el agente. Si el
              * agente ya venía escalando por su cuenta, su texto YA es el mensaje de espera y se
              * respeta; si venía a afirmar algo sin respaldo, ese texto es exactamente lo que no
-             * puede salir. */
-            $mensaje_de_espera = ! empty($result['should_escalate'])
+             * puede salir.
+             *
+             * El chequeo de vacío no es defensivo de más: es el camino del repositorio caído, que
+             * escala sin llegar a consultar a Claude y por lo tanto no tiene ningún texto que
+             * respetar. Sin esto el cliente se quedaría en silencio justo cuando el sistema no
+             * puede contestarle. */
+            $mensaje_de_espera = (! empty($result['should_escalate']) && $suggested_message !== '')
                 ? $suggested_message
                 : self::MENSAJE_DE_ESPERA;
 

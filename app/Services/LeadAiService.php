@@ -184,6 +184,73 @@ TXT;
     }
 
     /**
+     * Frena el paquete del agente cuando afirma algo del sistema que no puede respaldar.
+     *
+     * RED DE SEGURIDAD — respaldo documental (27/8/2026, decisión de Lucas). El agente declara de
+     * qué tipo es su respuesta y qué recursos del protocolo la respaldan; el gate lo cruza contra
+     * los que de verdad se le sirvieron en esa llamada. Si afirma sin respaldo verificable, el
+     * paquete no sale: se deriva a intervención humana, como cualquier otro caso en que no se
+     * confía en la respuesta.
+     *
+     * Mismo tratamiento que el hueco #2 (guardar_email sin agendar_demo): se marca intervención
+     * humana Y se fuerza la verificación del mensaje de este turno. Marcar solo lo primero apaga
+     * las respuestas FUTURAS pero deja salir la de ahora, que es justamente la que no queremos
+     * que llegue al lead.
+     *
+     * @param Lead                 $lead            Lead en curso.
+     * @param array<string, mixed> $parsed          Paquete que devolvió el agente.
+     * @param string               $system          System prompt de esa llamada, para saber si el
+     *                                              contrato de fuentes ya está sincronizado.
+     * @param array<int, string>   $recursos_leidos Recursos servidos con éxito en esa llamada.
+     * @param bool                 $rechazo         Queda en true si el gate frenó el paquete.
+     *
+     * @return array<string, mixed> El paquete, frenado o intacto.
+     */
+    private function aplicar_gate_de_respaldo(Lead $lead, array $parsed, string $system, array $recursos_leidos, bool &$rechazo = false): array
+    {
+        $gate = app(KnowledgeGroundingGate::class);
+
+        $veredicto = $gate->evaluar(
+            $gate->esta_activo($system),
+            isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
+            isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
+            $recursos_leidos
+        );
+
+        if ($veredicto['permitido']) {
+            return $parsed;
+        }
+
+        Log::channel('daily')->warning('LeadAiService: respuesta sin respaldo documental, deriva a intervención humana.', [
+            'lead_id'         => $lead->id,
+            'motivo'          => $veredicto['motivo'],
+            'tipo_respuesta'  => isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
+            'fuentes_kb'      => isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
+            'recursos_leidos' => $recursos_leidos,
+        ]);
+
+        $parsed['requiere_intervencion_humana'] = true;
+        $parsed['motivo_intervencion']          = $this->motivo_con_la_consulta($lead, $veredicto['motivo']);
+        $parsed['requiere_verificacion']        = true;
+
+        /* 🔴 Y se le PISA el texto. Dejar el mensaje que había redactado sería dejar en la
+         * pantalla, listo para aprobar de un click, exactamente la afirmación sin respaldo que
+         * este bloque acaba de frenar — y la verificación humana se aprueba de apuro. Va el
+         * mensaje neutro que la REGLA 17 del protocolo ya define para cuando falta un dato: no
+         * promete nada concreto y le da tiempo a la persona a contestar bien. */
+        $parsed['mensaje_sugerido'] = self::MENSAJE_DE_ESPERA_SIN_RESPALDO;
+
+        /* Neutralizar el agendamiento que venía en el mismo paquete: si no confiamos en la
+         * respuesta, tampoco confiamos en la acción que trae adentro. Mismo criterio que el
+         * hueco #2 con guardar_email. */
+        $parsed['agendar_demo'] = null;
+
+        $rechazo = true;
+
+        return $parsed;
+    }
+
+    /**
      * Le pega al motivo del gate la consulta que el lead no pudo ver respondida.
      *
      * Cumple dos funciones: es lo que hace falta leer para completar el protocolo, y es lo que
@@ -264,63 +331,11 @@ TXT;
 
         $parsed = $this->parse_json_response($text);
 
-        /*
-         * RED DE SEGURIDAD — respaldo documental (27/8/2026, decisión de Lucas).
-         *
-         * El agente declara de qué tipo es su respuesta y qué recursos del protocolo la
-         * respaldan; el gate lo cruza contra los que de verdad se le sirvieron en esta llamada.
-         * Si afirma algo sobre el sistema sin respaldo verificable, el paquete no sale: se deriva
-         * a intervención humana, como cualquier otro caso en que no se confía en la respuesta.
-         *
-         * Mismo tratamiento que el hueco #2 de más abajo (guardar_email sin agendar_demo): se
-         * marca intervención humana Y se fuerza la verificación del mensaje de este turno. Marcar
-         * solo lo primero apaga las respuestas FUTURAS pero deja salir la de ahora, que es
-         * justamente la que no queremos que llegue al lead.
-         */
-        $gate = app(KnowledgeGroundingGate::class);
-
-        /* Se declara antes del if para que exista siempre: se consulta más abajo, al decidir si
-         * corresponde la segunda llamada de disponibilidad. */
+        /* Respaldo documental: si el agente afirmó algo del sistema que no puede citar, el
+         * paquete no sale y se deriva a una persona. Ver aplicar_gate_de_respaldo(). */
         $gate_rechazo = false;
 
-        $veredicto_gate = $gate->evaluar(
-            $gate->esta_activo($system),
-            isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
-            isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
-            $recursos_leidos
-        );
-
-        if (! $veredicto_gate['permitido']) {
-            Log::channel('daily')->warning('LeadAiService: respuesta sin respaldo documental, deriva a intervención humana.', [
-                'lead_id'         => $lead->id,
-                'motivo'          => $veredicto_gate['motivo'],
-                'tipo_respuesta'  => isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
-                'fuentes_kb'      => isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
-                'recursos_leidos' => $recursos_leidos,
-            ]);
-
-            $parsed['requiere_intervencion_humana'] = true;
-            $parsed['motivo_intervencion']          = $this->motivo_con_la_consulta($lead, $veredicto_gate['motivo']);
-            $parsed['requiere_verificacion']        = true;
-
-            /* 🔴 Y se le PISA el texto. Dejar el mensaje que había redactado sería dejar en la
-             * pantalla, listo para aprobar de un click, exactamente la afirmación sin respaldo
-             * que este bloque acaba de frenar — y la verificación humana se aprueba de apuro.
-             * Va el mensaje neutro que la REGLA 17 del protocolo ya define para cuando falta un
-             * dato: no promete nada concreto y le da tiempo a la persona a contestar bien. */
-            $parsed['mensaje_sugerido'] = self::MENSAJE_DE_ESPERA_SIN_RESPALDO;
-
-            /* Neutralizar el agendamiento que venía en el mismo paquete: si no confiamos en la
-             * respuesta, tampoco confiamos en la acción que trae adentro. Mismo criterio que el
-             * hueco #2 de más abajo con guardar_email. */
-            $parsed['agendar_demo'] = null;
-
-            /* Y se corta la segunda llamada de disponibilidad, más abajo. Sin esto el gate no
-             * protegería el camino de agendamiento: generate_suggestion_with_availability() arma
-             * un $parsed NUEVO desde cero y estos flags se perderían enteros, así que un paquete
-             * con solicita_disponibilidad o demo_agendada saldría igual. */
-            $gate_rechazo = true;
-        }
+        $parsed = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos, $gate_rechazo);
 
         /*
          * Determinar si hay que hacer la segunda llamada con slots disponibles.
@@ -768,7 +783,12 @@ TXT;
             ],
         ];
 
-        $text = $this->run_with_tools($system_payload, $user_content, 3000, $http, $model, $lead);
+        /* Recursos consultados con éxito en ESTA llamada. Arranca vacío a propósito: lo que el
+         * agente haya leído en la primera no está en su contexto ahora, así que tampoco puede
+         * usarlo como respaldo acá. */
+        $recursos_leidos = [];
+
+        $text = $this->run_with_tools($system_payload, $user_content, 3000, $http, $model, $lead, $recursos_leidos);
 
         /* Log de diagnóstico: respuesta cruda de Claude en la segunda llamada. */
         Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - respuesta Claude', [
@@ -777,6 +797,14 @@ TXT;
         ]);
 
         $parsed = $this->parse_json_response($text);
+
+        /* Mismo gate que en la primera llamada. Este tramo ya fuerza revisión humana por estado
+         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), pero eso protege el AGENDAMIENTO, no lo
+         * que el mensaje afirma: un lead que acepta un horario y de paso pregunta algo del
+         * sistema se lleva las dos cosas en la misma respuesta, y sin esto la segunda mitad
+         * saldría sin respaldo. Coordinar la agenda es `conversacional` y no exige fuentes, así
+         * que el camino normal no se toca. */
+        $parsed = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos);
 
         /*
          * GUARD DURO (lead #12, 13/7/2026): el payload de Claude no es autoritativo sobre el

@@ -526,6 +526,50 @@ class AgentesSoloLoExplicitoTest extends TestCase
         );
     }
 
+    /**
+     * Con el repositorio caído el cliente igual recibe el mensaje de espera.
+     *
+     * Ese camino escala sin llegar a consultar a Claude, así que no hay ningún texto del agente
+     * que respetar. Sin el mensaje del protocolo el cliente se quedaría en silencio justo cuando
+     * el sistema no puede contestarle, que es el peor momento para no decir nada.
+     *
+     * @return void
+     */
+    public function test_con_el_repositorio_caido_el_cliente_igual_recibe_la_espera()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+        $this->espiar_sender();
+
+        /* Lo que devuelve generate() cuando no pudo cargar el manual: escalado, sin texto. */
+        $this->espiar_claude([
+            'suggested_message' => '',
+            'reasoning'         => 'No se pudo consultar el repositorio de conocimiento.',
+            'should_close'      => false,
+            'should_escalate'   => true,
+            'escalation_reason' => 'No se pudo consultar el repositorio de conocimiento.',
+            'tipo_respuesta'    => KnowledgeGroundingGate::TIPO_ESCALADO,
+            'fuentes_kb'        => [],
+            'gate_permitido'    => false,
+            'gate_motivo'       => 'No se pudo consultar el repositorio de conocimiento.',
+        ]);
+
+        $this->correr_agente($ticket);
+
+        $borrador = SupportMessage::where('support_ticket_id', $ticket->id)
+            ->where('is_ai_suggestion_draft', true)
+            ->orderBy('id', 'desc')
+            ->first();
+
+        $this->assertNotNull($borrador, 'El cliente se quedó sin ningún mensaje de espera.');
+        $this->assertStringContainsString('Dame un momento', (string) $borrador->body);
+
+        $this->assertNotNull(
+            SupportTicket::find($ticket->id)->escalated_at,
+            'El ticket no quedó escalado.'
+        );
+    }
+
     /* ==================================================================================
      * El aviso: push primero, WhatsApp como red de seguridad
      * ================================================================================== */
