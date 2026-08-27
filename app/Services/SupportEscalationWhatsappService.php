@@ -56,17 +56,35 @@ class SupportEscalationWhatsappService
      * `phone_number` cargado. Un fallo con un destinatario no corta el envío a los demás: perder
      * los tres avisos porque uno tiene el teléfono mal cargado sería peor que el problema.
      *
-     * @param SupportTicket $ticket Ticket que el agente no pudo resolver.
-     * @param string        $motivo Motivo breve que redactó el agente.
+     * @param SupportTicket   $ticket          Ticket que el agente no pudo resolver.
+     * @param string          $motivo          Motivo breve que redactó el agente.
+     * @param array<int, int> $solo_admin_ids  Restringe el envío a estos operadores. Por defecto
+     *                                         null: van todos los suscritos, que es el
+     *                                         comportamiento histórico. Desde el 27/8/2026 el
+     *                                         escalado avisa por Web Push y usa este parámetro
+     *                                         para dejar el WhatsApp solo para los operadores sin
+     *                                         ningún device registrado
+     *                                         ({@see EscalationPushNotificationService}).
      *
      * @return array<int, string> Nombres de los operadores efectivamente notificados.
      */
-    public function notify(SupportTicket $ticket, string $motivo): array
+    public function notify(SupportTicket $ticket, string $motivo, ?array $solo_admin_ids = null): array
     {
-        $admins = Admin::where('notify_support_escalation_whatsapp', true)
+        $query = Admin::where('notify_support_escalation_whatsapp', true)
             ->whereNotNull('phone_number')
-            ->where('phone_number', '!=', '')
-            ->get();
+            ->where('phone_number', '!=', '');
+
+        /* Lista explícita vacía: todos los suscritos ya recibieron el push, no queda nadie a
+         * quien mandarle la plantilla. Se distingue de null, que significa "sin restricción". */
+        if ($solo_admin_ids !== null) {
+            if (empty($solo_admin_ids)) {
+                return [];
+            }
+
+            $query->whereIn('id', $solo_admin_ids);
+        }
+
+        $admins = $query->get();
 
         if ($admins->isEmpty()) {
             Log::channel('daily')->info('SupportEscalationWhatsappService: sin operadores suscritos con teléfono cargado.', [

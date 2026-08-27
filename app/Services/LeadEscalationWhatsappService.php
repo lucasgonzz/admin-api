@@ -46,18 +46,39 @@ class LeadEscalationWhatsappService
      * Si algún envío falla, se loguea el error y se continúa con los demás admins
      * para no perder notificaciones por un único destinatario con problemas.
      *
-     * @param Lead   $lead   Lead cuya conversación no pudo resolver el agente.
-     * @param string $motivo Motivo breve provisto por Claude (campo motivo_intervencion).
+     * @param Lead            $lead            Lead cuya conversación no pudo resolver el agente.
+     * @param string          $motivo          Motivo breve provisto por Claude (campo motivo_intervencion).
+     * @param array<int, int> $solo_admin_ids  Restringe el envío a estos admins. Por defecto null:
+     *                                         van todos los suscritos, que es el comportamiento
+     *                                         histórico y el que usan los llamadores viejos. Desde
+     *                                         el 27/8/2026 el escalado avisa por Web Push y usa
+     *                                         este parámetro para dejar el WhatsApp solo para los
+     *                                         admins sin ningún device registrado
+     *                                         ({@see EscalationPushNotificationService}); mandar
+     *                                         los dos canales a todos sería pagar una plantilla
+     *                                         por un aviso que ya llegó al teléfono.
      *
      * @return array<int, string> Nombres de los admins efectivamente notificados.
      */
-    public function notify(Lead $lead, string $motivo): array
+    public function notify(Lead $lead, string $motivo, ?array $solo_admin_ids = null): array
     {
         /* Obtener admins con flag activo y teléfono cargado. */
-        $admins = Admin::where('notify_lead_escalation_whatsapp', true)
+        $query = Admin::where('notify_lead_escalation_whatsapp', true)
             ->whereNotNull('phone_number')
-            ->where('phone_number', '!=', '')
-            ->get();
+            ->where('phone_number', '!=', '');
+
+        /* Lista explícita vacía: no hay a quién avisar. Se distingue de null —que significa "sin
+         * restricción"— porque un whereIn con array vacío no devuelve filas, pero llegar hasta la
+         * consulta para eso es trabajo al pedo en un camino que corre dentro del webhook. */
+        if ($solo_admin_ids !== null) {
+            if (empty($solo_admin_ids)) {
+                return [];
+            }
+
+            $query->whereIn('id', $solo_admin_ids);
+        }
+
+        $admins = $query->get();
 
         if ($admins->isEmpty()) {
             Log::info('LeadEscalationWhatsappService: sin admins suscritos con teléfono cargado.', [
