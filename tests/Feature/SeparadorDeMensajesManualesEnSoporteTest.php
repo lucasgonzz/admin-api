@@ -416,4 +416,147 @@ class SeparadorDeMensajesManualesEnSoporteTest extends TestCase
         $this->assertSame('Uno', $espia->textos[0]);
         $this->assertSame("Cinco\n\nSeis\n\nSiete", $espia->textos[4], 'Los bloques que sobraban no se pegaron a la última parte.');
     }
+
+    /**
+     * Deja la ventana de 24hs abierta para un teléfono sin dejar un ticket reusable.
+     *
+     * El ticket va CERRADO a propósito: la ventana se resuelve por teléfono y un entrante
+     * reciente alcanza para abrirla, pero find_reusable_ticket() solo reusa tickets abiertos.
+     * Así el alta crea un hilo nuevo, que es lo que estos tests quieren ejercitar.
+     *
+     * @param Client $client Cliente dueño.
+     * @param string $phone  Teléfono del contacto.
+     *
+     * @return void
+     */
+    private function abrir_ventana_sin_dejar_ticket_reusable(Client $client, string $phone): void
+    {
+        $anterior = SupportTicket::create([
+            'client_id'      => $client->id,
+            'client_user_id' => 0,
+            'status'         => 'closed',
+            'source'         => 'whatsapp',
+            'whatsapp_phone' => $phone,
+            'opened_at'      => now()->subDay(),
+            'closed_at'      => now()->subHours(2),
+        ]);
+
+        SupportMessage::create([
+            'support_ticket_id' => $anterior->id,
+            'sender_type'       => 'user',
+            'kind'              => 'text',
+            'body'              => 'Hola, tengo una duda',
+            'delivered_at'      => now()->subHour(),
+        ]);
+    }
+
+    /**
+     * El PRIMER mensaje, el que abre el ticket, también se parte con el separador.
+     *
+     * Lucas lo pidió expresamente el 27/8/2026, después de ver que la regla valía de la segunda
+     * respuesta en adelante pero no en la apertura. Para quien escribe es el mismo cuadro de
+     * texto y la misma conversación: que el separador funcione en uno y en el otro no sería una
+     * distinción que se entiende sin mirar el código.
+     *
+     * @return void
+     */
+    public function test_el_primer_mensaje_del_ticket_nuevo_se_parte_con_la_ventana_abierta()
+    {
+        $admin  = $this->crear_admin('apertura-partida@test.local');
+        $client = $this->crear_cliente('+5493417780010');
+        $this->abrir_ventana_sin_dejar_ticket_reusable($client, '+5493417780010');
+
+        $espia = $this->espiar_sender();
+        $this->opener_sin_pausas();
+
+        $response = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'source'         => 'whatsapp',
+            'client_id'      => $client->id,
+            'whatsapp_phone' => '+5493417780010',
+            'body'           => "Te escribo por el error que reportaste.\n\n---\n\nYa lo estamos mirando.",
+        ]);
+
+        $response->assertStatus(201);
+
+        $this->assertCount(2, $espia->textos, 'El mensaje de apertura no salió partido.');
+        $this->assertSame('Te escribo por el error que reportaste.', $espia->textos[0]);
+        $this->assertSame('Ya lo estamos mirando.', $espia->textos[1]);
+        $this->assertCount(0, $espia->plantillas, 'Con la ventana abierta no tenía que usar plantilla.');
+
+        $ticket = SupportTicket::where('whatsapp_phone', '+5493417780010')
+            ->where('status', 'open')
+            ->orderByDesc('id')
+            ->first();
+
+        $this->assertNotNull($ticket, 'No se creó el ticket nuevo.');
+
+        $mensajes = $this->mensajes_del_operador($ticket);
+
+        $this->assertCount(2, $mensajes, 'Cada parte tiene que quedar como un mensaje propio del hilo.');
+        $this->assertSame('Te escribo por el error que reportaste.', $mensajes[0]->body);
+        $this->assertSame('Ya lo estamos mirando.', $mensajes[1]->body);
+        $this->assertNotNull($mensajes[1]->whatsapp_message_id, 'La segunda parte quedó sin el id de Meta.');
+    }
+
+    /**
+     * Un guión suelto en el mensaje de apertura NO lo parte.
+     *
+     * Mismo criterio que en el resto de la conversación: solo parte el separador completo.
+     *
+     * @return void
+     */
+    public function test_un_guion_suelto_en_el_primer_mensaje_no_lo_parte()
+    {
+        $admin  = $this->crear_admin('apertura-guion-suelto@test.local');
+        $client = $this->crear_cliente('+5493417780011');
+        $this->abrir_ventana_sin_dejar_ticket_reusable($client, '+5493417780011');
+
+        $espia = $this->espiar_sender();
+        $this->opener_sin_pausas();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'source'         => 'whatsapp',
+            'client_id'      => $client->id,
+            'whatsapp_phone' => '+5493417780011',
+            'body'           => "Presupuesto\n---\nte lo mando mañana",
+        ])->assertStatus(201);
+
+        $this->assertCount(1, $espia->textos, 'Un guión suelto no tenía que partir la apertura.');
+        $this->assertSame("Presupuesto\n---\nte lo mando mañana", $espia->textos[0]);
+    }
+
+    /**
+     * Con la ventana cerrada, la apertura va por plantilla y sin los guiones del separador.
+     *
+     * Una plantilla es un solo mensaje: no hay forma de partirla. Y los tres guiones no pueden
+     * viajar literales adentro de la variable, porque sanitize_template_variable() aplana los
+     * saltos de línea y al cliente le llegarían sueltos en medio de la frase, separando nada.
+     *
+     * @return void
+     */
+    public function test_el_primer_mensaje_con_la_ventana_cerrada_va_por_plantilla_sin_los_guiones()
+    {
+        $admin  = $this->crear_admin('apertura-sin-ventana@test.local');
+        $client = $this->crear_cliente('+5493417780012');
+
+        $espia = $this->espiar_sender();
+        $this->opener_sin_pausas();
+
+        $this->actingAs($admin, 'sanctum')->postJson('/api/admin/support-ticket', [
+            'source'         => 'whatsapp',
+            'client_id'      => $client->id,
+            'whatsapp_phone' => '+5493417780012',
+            'body'           => "Te escribo por el error.\n\n---\n\nYa lo estamos mirando.",
+        ])->assertStatus(201);
+
+        $this->assertCount(0, $espia->textos, 'Con la ventana cerrada no puede salir texto libre.');
+        $this->assertCount(1, $espia->plantillas, 'Tenía que salir una sola plantilla.');
+
+        $variables = $espia->plantillas[0]['variables'];
+        $texto_del_operador = (string) $variables[2];
+
+        $this->assertStringNotContainsString('---', $texto_del_operador, 'Los guiones del separador llegaron al cliente.');
+        $this->assertStringContainsString('Te escribo por el error.', $texto_del_operador);
+        $this->assertStringContainsString('Ya lo estamos mirando.', $texto_del_operador);
+    }
 }

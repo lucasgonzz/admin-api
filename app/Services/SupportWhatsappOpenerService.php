@@ -188,7 +188,28 @@ class SupportWhatsappOpenerService
             ]);
         });
 
-        $delivery = $this->deliver($normalized_phone, $message, $use_template, $contact_name, $admin_name, $operator_text);
+        // El mensaje de apertura también se parte si el operador escribió el separador. La regla
+        // vale desde el primer mensaje y no recién desde la segunda respuesta: para quien escribe
+        // es el mismo cuadro de texto y la misma conversación, y que el separador funcione en uno
+        // y en el otro no sería una distinción que solo se entiende mirando el código.
+        //
+        // Con la ventana CERRADA no se puede partir, y no es una decisión de diseño: el texto
+        // viaja adentro de una variable de la plantilla aprobada, y una plantilla es un solo
+        // mensaje. En ese caso se pegan las partes y se descartan los guiones, porque dejarlos
+        // le mostraría al cliente un separador que no separa nada -sanitize_template_variable()
+        // aplana los saltos de línea, así que los tres guiones le quedarían sueltos en medio de
+        // la frase-.
+        $partes_de_apertura = (new SeparadorDeMensajesManuales())->partir($operator_text);
+
+        if (! $use_template && count($partes_de_apertura) > 1) {
+            $delivery = $this->deliver_en_partes($ticket, $message, $partes_de_apertura);
+        } else {
+            $texto_de_apertura = count($partes_de_apertura) > 1
+                ? implode("\n\n", $partes_de_apertura)
+                : $operator_text;
+
+            $delivery = $this->deliver($normalized_phone, $message, $use_template, $contact_name, $admin_name, $texto_de_apertura);
+        }
 
         $message = SupportMessage::where('id', $message->id)->withAll()->first();
         event(new SupportMessageReceived((int) $message->id));
