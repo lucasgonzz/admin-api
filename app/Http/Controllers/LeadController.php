@@ -644,6 +644,10 @@ class LeadController extends Controller
      * Si la fecha de demo cambia, resetea `recordatorio_demo_enviado` para que el nuevo
      * horario también reciba su recordatorio automático pre-demo.
      *
+     * Y si cambian los checkboxes `use_deposits` / `use_price_lists` —las dos únicas respuestas
+     * del formulario de la demo que este endpoint genérico puede escribir—, deja la edición
+     * marcada como manual: ver {@see self::marcar_edicion_manual_del_formulario()}.
+     *
      * @param Request $request
      * @param int|string $id
      *
@@ -656,6 +660,18 @@ class LeadController extends Controller
 
         // Capturar demo_date original (raw string) antes de persistir para detectar cambio.
         $original_demo_date = $lead->getRawOriginal('demo_date');
+
+        /* Foto de las dos respuestas del formulario que este endpoint puede escribir, tomada
+           ANTES de aplicar el request. Se comparan las COLUMNAS y no las respuestas efectivas:
+           `Lead::booted()` fuerza `use_deposits = true` al crear el lead mientras que el default
+           del catálogo es `usa_depositos => false`, así que un lead sin formulario tiene la
+           columna y la respuesta efectiva en desacuerdo desde que nace — comparar contra la
+           efectiva marcaría edición manual en cada guardado del modal, sin que nadie toque nada.
+           Ver `marcar_edicion_manual_del_formulario()`. */
+        $formulario_previo = [
+            'use_deposits'    => (bool) $lead->use_deposits,
+            'use_price_lists' => (bool) $lead->use_price_lists,
+        ];
 
         // Política funcional: user_id ya no se define en alta/edición de lead.
         // Se asigna recién en la promoción a Client.
@@ -681,7 +697,106 @@ class LeadController extends Controller
             ]);
         }
 
+        $this->marcar_edicion_manual_del_formulario($lead, $formulario_previo);
+
         return response()->json(['model' => $this->fullModel('lead', $id)], 200);
+    }
+
+    /**
+     * Deja constancia de que el "Guardar" general del modal tocó una respuesta del formulario de
+     * la demo, para que el demo setup la respete (27/8/2026).
+     *
+     * 🔴 POR QUÉ EXISTE
+     * -----------------
+     * `use_deposits` y `use_price_lists` son a la vez dos checkboxes del grupo Demo del meta
+     * (`LeadProperties`) y dos de las nueve respuestas del formulario de la demo (`usa_depositos`
+     * y `tipo_precios`, ver `LeadDemoFormMapper`). Sin esta marca, tocar el checkbox escribía la
+     * columna y no pasaba nada más: `LeadDemoFormMapper::respuestas_efectivas()` decide con
+     * `demo_form_completado_at` / `demo_form_editado_admin_at`, así que seguía devolviendo los
+     * defaults del catálogo, el demo setup armaba la instancia ignorando el cambio y la tarjeta de
+     * al lado mostraba el valor viejo. Dos controles sobre el mismo dato y sólo uno contaba.
+     *
+     * Se intentó cerrarlo sacando los dos checkboxes del meta; se revirtió el mismo día porque la
+     * tarjeta no los reemplaza (el porqué completo está en `LeadProperties`, arriba de
+     * `use_deposits`). Ésta es la otra forma de cerrarlo: que el guardado general también cuente.
+     *
+     * 🔴 POR QUÉ MARCA Y NADA MÁS, SIN EL MERGE QUE HACE `update_demo_form_json()`
+     * ----------------------------------------------------------------------------
+     * La pregunta es legítima y hay que contestarla, porque marcar tiene un efecto lateral:
+     * `respuestas_efectivas()` deja de devolver los defaults del catálogo y pasa a devolver
+     * `from_lead()`, o sea las nueve columnas crudas. Si las columnas no fueran las del catálogo,
+     * tildar un checkbox cambiaría de rebote respuestas que nadie tocó.
+     *
+     * No pasa, y no por casualidad: la migración `2026_07_31_160000_add_demo_form_fields_to_leads_table`
+     * creó las seis columnas nuevas con el default DOCUMENTADO EN EL CATÁLOGO y no con `false`
+     * (verificado contra el esquema el 27/8/2026: `descuentos_por_metodo_pago`,
+     * `usa_cuentas_corrientes_proveedores`, `registra_compras` y `usa_ecommerce` en 1;
+     * `costos_en_dolares` y `usa_presupuestos` en 0). Súmese `omitir_cuentas_corrientes` en 0
+     * —o sea `usa_cuentas_corrientes_clientes` en `true`, el default del catálogo— y
+     * `use_price_lists` en 0 (`tipo_precios => unico`, ídem).
+     *
+     * La ÚNICA respuesta en la que un lead sin formulario tiene la columna en desacuerdo con el
+     * catálogo es `usa_depositos`: `Lead::booted()` fuerza `use_deposits = true` al crear el lead
+     * y el catálogo dice `false`. Y ésa es justamente la que el checkbox de al lado le está
+     * mostrando a Lucas TILDADA. Hacer el merge sobre `respuestas_efectivas()` —como sí hace
+     * `update_demo_form_json()`, que no tiene ningún checkbox al lado— destildaría ese checkbox
+     * solo al guardar, y encima sobre una columna que `RunUserSetupService::build_payload()` manda
+     * al setup del cliente real. Marcar y nada más deja el modal coherente consigo mismo: después
+     * de guardar, la tarjeta dice lo mismo que el checkbox que Lucas estaba mirando.
+     *
+     * ⚠️ Esa igualdad columnas/catálogo se sostiene a mano, no por construcción: si algún día se
+     * cambia un default en `demo_catalogo.md` §2 sin una migración que acompañe (o al revés),
+     * este método pasa a poder mover respuestas que nadie tocó y hay que revisarlo.
+     *
+     * 🔴 POR QUÉ SÓLO PARA LA DINÁMICA NUEVA
+     * ---------------------------------------
+     * Para un lead de la dinámica ACTUAL la marca no la mira nadie: los tres consumidores de
+     * `respuestas_efectivas()` se cortan antes con su propia guardia de dinámica
+     * (`RunDemoSetupService::respuestas_para_payload()` devuelve `[]`,
+     * `DemoPlanResolver::congelar_en_memoria()` y `DemoHitosService::generar()` devuelven en la
+     * primera línea), y la tarjeta del modal muestra sólo el cartel. Escribirla igual no sería
+     * inocuo: el interruptor por lead (`set_demo_experiencia_json`) permite pasar un lead de
+     * `actual` a `nueva`, y ese lead llegaría a la dinámica nueva con las nueve respuestas dadas
+     * por buenas cuando en realidad nunca hubo formulario — que es justo lo que la distinción
+     * entre "contestó que no" y "no contestó" existe para evitar.
+     *
+     * NO re-congela el roadmap ni escribe en el hilo del lead, a diferencia de
+     * `update_demo_form_json()`: éste es el guardado genérico del modal y no puede convertirse en
+     * una acción de demo. El plan lo congela quien corresponde —el formulario del lead, o
+     * `RunDemoSetupService::congelar_plan_si_falta()`, que resuelve con `respuestas_efectivas()` y
+     * por lo tanto ya respeta esta edición—.
+     *
+     * @param Lead                $lead              Lead ya persistido por `set_from_request()`.
+     * @param array<string, bool> $formulario_previo Valor de las dos columnas antes del request.
+     *
+     * @return void
+     */
+    protected function marcar_edicion_manual_del_formulario(Lead $lead, array $formulario_previo)
+    {
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
+        /* Comparación de columna contra columna, que es lo único que distingue "Lucas tocó el
+           checkbox" de "Lucas guardó el modal con el checkbox como estaba". El SPA manda el
+           borrador entero en cada guardado, así que las dos claves llegan SIEMPRE. */
+        $use_deposits    = (bool) $lead->use_deposits;
+        $use_price_lists = (bool) $lead->use_price_lists;
+
+        if ($use_deposits === $formulario_previo['use_deposits']
+            && $use_price_lists === $formulario_previo['use_price_lists']
+        ) {
+            return;
+        }
+
+        $lead->demo_form_editado_admin_at = now();
+        $lead->save();
+
+        Log::info('Se editaron respuestas del formulario de la demo desde el "Guardar" general del modal del lead.', [
+            'lead_id'         => $lead->id,
+            'use_deposits'    => $use_deposits,
+            'use_price_lists' => $use_price_lists,
+        ]);
     }
 
     /**
@@ -1061,21 +1176,36 @@ class LeadController extends Controller
                 return;
             }
 
-            /* 🔴 Se verifica que el catálogo RESUELVA antes de destruir nada. `congelar_en_memoria()`
-               devuelve `false` en dos casos distintos —el plan ya estaba congelado, o
-               `DemoCatalogoService::get()` vino vacío y `resolver()` dio `null`— y hasta hoy el
-               segundo dejaba al lead sin roadmap: el plan y los hitos ya estaban borrados y
-               persistidos, la regeneración se salteaba, y la transacción commiteaba igual sin una
-               sola excepción. Un catálogo sin sincronizar no puede costarle el plan a un lead que
-               ya lo tenía; y guardar las respuestas —lo único que Lucas pidió— tampoco puede
-               fallar por eso. Así que se deja el plan viejo intacto y se sigue guardando.
+            /* 🔴 Se verifica que el plan nuevo SIRVA antes de destruir el que el lead ya tiene.
+               `congelar_en_memoria()` devuelve `false` en dos casos distintos —el plan ya estaba
+               congelado, o `resolver()` dio `null`— y hasta hoy el segundo dejaba al lead sin
+               roadmap: el plan y los hitos ya estaban borrados y persistidos, la regeneración se
+               salteaba, y la transacción commiteaba igual sin una sola excepción.
+
+               Y no alcanza con preguntar por `null`, que era el chequeo anterior: `resolver()`
+               devuelve `null` SÓLO cuando `DemoCatalogoService::get()` da `[]` (archivo sin
+               sincronizar o JSON inválido). Un catálogo que es JSON VÁLIDO pero que no produce
+               nada utilizable —`orden_secciones: []`, o las secciones renombradas por un typo, que
+               dejan de cruzar con `clips[].seccion`— devuelve un plan perfectamente formado con
+               `secciones: []`. Ese plan pasaba el `!== null`, se llevaba puesto el roadmap de 12
+               hitos del lead y lo dejaba con uno solo (el de ingreso), con HTTP 200 y sin una línea
+               de error. Ni el catálogo sin sincronizar ni el catálogo mal editado pueden costarle
+               el plan a un lead que ya lo tenía; y guardar las respuestas —lo único que Lucas
+               pidió— tampoco puede fallar por eso. Así que se deja el plan viejo intacto, se
+               loguea y se sigue guardando.
 
                Cuesta una resolución de más (la definitiva la hace `congelar_en_memoria()`), y se
                paga a propósito: preguntarle al mismo resolver es lo único que no se desincroniza
                el día que `resolver()` aprenda a devolver `null` por otro motivo. */
-            if (DemoPlanResolver::resolver($lead) === null) {
-                Log::error('No se re-congeló el plan de demo desde el panel: el catálogo no está sincronizado. El plan anterior queda intacto.', [
-                    'lead_id' => $lead->id,
+            $plan_nuevo = DemoPlanResolver::resolver($lead);
+
+            if (! $this->plan_de_demo_utilizable($plan_nuevo)) {
+                Log::error('No se re-congeló el plan de demo desde el panel: el catálogo no produce un plan utilizable para este lead. El plan anterior queda intacto.', [
+                    'lead_id'           => $lead->id,
+                    'catalogo_resolvio' => $plan_nuevo !== null,
+                    'secciones_nuevas'  => is_array($plan_nuevo) && isset($plan_nuevo['secciones'])
+                        ? count($plan_nuevo['secciones'])
+                        : 0,
                 ]);
 
                 $lead->save();
@@ -1144,6 +1274,54 @@ class LeadController extends Controller
         }
 
         return response()->json(['model' => $model], 200);
+    }
+
+    /**
+     * Si un plan recién resuelto sirve para reemplazar al que el lead ya tiene congelado.
+     *
+     * 🔴 EL CRITERIO, Y DE DÓNDE SALE
+     * -------------------------------
+     * Un plan es UTILIZABLE si tiene al menos un clip de NÚCLEO entre sus secciones. No es una
+     * definición inventada acá: es exactamente lo que `DemoHitosService::generar()` recorre para
+     * armar el roadmap — itera `plan['secciones'][]['clips'][]` y crea un hito por cada clip con
+     * `tipo === 'nucleo'`, salteando los de biblioteca. Un plan que no tenga ninguno produce un
+     * roadmap de un solo hito, el de "Entrar a la demo", que `generar()` crea siempre y para todos
+     * los leads por igual. O sea: un roadmap vacío disfrazado de roadmap.
+     *
+     * Preguntar por `resolver() !== null` NO alcanza, y ése era el agujero. `resolver()` devuelve
+     * `null` sólo si `DemoCatalogoService::get()` da `[]` — contenido vacío o JSON inválido. Un
+     * catálogo que es JSON válido pero que no produce nada (`orden_secciones: []`, o las secciones
+     * renombradas por un typo, que dejan de cruzar con `clips[].seccion`) devuelve un plan legítimo
+     * con `secciones: []`: pasaba el chequeo de `null`, reemplazaba el plan del lead y le dejaba
+     * un solo hito donde tenía doce, con HTTP 200 y sin un log de error.
+     *
+     * Se recorren los clips en vez de mirar `totales.clips_nucleo` a propósito: `totales` es un
+     * resumen que `resolver()` calcula aparte, y este chequeo tiene que decidir con lo mismo que
+     * `generar()` va a leer, no con un contador paralelo que puede desincronizarse.
+     *
+     * @param array<string, mixed>|null $plan Plan tal como lo devuelve `DemoPlanResolver::resolver()`.
+     *
+     * @return bool
+     */
+    protected function plan_de_demo_utilizable($plan)
+    {
+        if (! is_array($plan) || empty($plan)) {
+            return false;
+        }
+
+        $secciones = isset($plan['secciones']) && is_array($plan['secciones']) ? $plan['secciones'] : [];
+
+        foreach ($secciones as $seccion) {
+            $clips = isset($seccion['clips']) && is_array($seccion['clips']) ? $seccion['clips'] : [];
+
+            foreach ($clips as $clip) {
+                if (isset($clip['tipo']) && $clip['tipo'] === 'nucleo') {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

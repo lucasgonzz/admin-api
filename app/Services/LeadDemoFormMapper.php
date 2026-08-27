@@ -130,13 +130,27 @@ class LeadDemoFormMapper
      * Las nueve respuestas que hay que usar para configurar la instancia de demo de este lead.
      *
      * No es lo mismo que `from_lead()` y no se puede "simplificar" a `from_lead()`:
-     * `from_lead()` refleja el estado de las columnas, y las columnas apagadas de un lead que no
-     * contestó el formulario NO significan "contestó que no", significan "no contestó". Las seis
-     * columnas nuevas nacieron con `->default(false)` (migración
-     * `2026_07_31_160000_add_demo_form_fields_to_leads_table.php`), mientras que los defaults reales
-     * del catálogo están en su mayoría encendidos. Si se confundieran las dos cosas, a un lead que
-     * todavía no abrió la página se le armaría la instancia mutilada — caso alcanzable, porque el
-     * botón "Disparar setup demo" del panel de Operaciones se puede pulsar en cualquier momento.
+     * `from_lead()` refleja el estado de las columnas, y las columnas de un lead que no contestó
+     * el formulario NO significan "contestó esto", significan "no contestó". Que hoy casi todas
+     * coincidan con el catálogo no las vuelve una respuesta.
+     *
+     * ⚠️ Este docblock decía hasta el 27/8/2026 que "las seis columnas nuevas nacieron con
+     * `->default(false)` mientras que los defaults del catálogo están en su mayoría encendidos", y
+     * era FALSO — verificado contra la migración `2026_07_31_160000_add_demo_form_fields_to_leads_table.php`
+     * y contra el esquema: esa migración copió a mano el default DOCUMENTADO EN EL CATÁLOGO para
+     * cada una de las seis (`descuentos_por_metodo_pago`, `usa_cuentas_corrientes_proveedores`,
+     * `registra_compras` y `usa_ecommerce` en `true`; `costos_en_dolares` y `usa_presupuestos` en
+     * `false`), justamente para que un lead que nunca completa el formulario quede configurado
+     * como dice el catálogo. La única respuesta en la que las dos fuentes discrepan hoy es
+     * `usa_depositos`: el catálogo dice `false` y `Lead::booted()` fuerza `use_deposits = true` al
+     * crear el lead.
+     *
+     * O sea que el riesgo real de confundirlas es más chico de lo que decía ese texto, pero el
+     * método sigue haciendo falta y no se puede borrar: esa coincidencia se sostiene A MANO —el
+     * catálogo se edita en `demo_catalogo.md` §2 y se sincroniza sin deploy, la columna sólo cambia
+     * con una migración—, y basta que se muevan de a uno para que a un lead que todavía no abrió la
+     * página se le arme la instancia con algo que nadie eligió. Caso alcanzable, porque el botón
+     * "Disparar setup demo" del panel de Operaciones se puede pulsar en cualquier momento.
      *
      * No escribe, no persiste, no toca el lead.
      *
@@ -152,6 +166,12 @@ class LeadDemoFormMapper
          * (`demo_form_completado_at`) o un admin las editó a mano desde el modal del lead
          * (`demo_form_editado_admin_at`, misión del 27/8/2026). Sin ninguna de las dos marcas no
          * hay respuestas de nadie y valen los defaults del catálogo.
+         *
+         * La segunda marca la ponen los DOS caminos de escritura del modal, y tiene que ser así:
+         * `LeadController::update_demo_form_json()` cuando se guarda la tarjeta, y
+         * `LeadController::update_json()` cuando el "Guardar" general del modal cambia alguno de
+         * los dos checkboxes del grupo Demo (`use_deposits` / `use_price_lists`) que escriben dos
+         * de estas mismas nueve respuestas.
          *
          * 🔴 La segunda marca es el motivo entero por el que existe esa columna. Mientras la
          * condición miraba sólo `demo_form_completado_at`, una edición desde el panel se guardaba
@@ -267,8 +287,11 @@ class LeadDemoFormMapper
      * Normaliza a Carbon un valor que el modelo castea a `datetime`.
      *
      * Existe por defensa y no por capricho: los tres atributos que lee `estado_para_panel()` están
-     * casteados en el modelo, pero un Lead armado a mano en un test (o hidratado sin casts) puede
-     * traer el string crudo de MySQL, y comparar dos strings con `greaterThan()` revienta.
+     * casteados a `datetime` en el modelo, pero un Lead armado a mano en un test (o hidratado sin
+     * casts, o traído por un `DB::table()`) puede traer el string crudo de MySQL — y sobre un
+     * string, el `->format()` de `formatear()` es un error fatal, no un valor raro. De paso
+     * normaliza la cadena vacía a `null`, que es lo que `origen()` necesita para no contar como
+     * escrita una fecha que no está.
      *
      * @param mixed $valor
      *

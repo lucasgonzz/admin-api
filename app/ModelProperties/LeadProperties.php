@@ -296,11 +296,53 @@ class LeadProperties
             //     'value' => '',
             // ],
             /*
-             * Acá vivía el checkbox `use_deposits` ("Usa depósitos"). Se sacó el 27/8/2026 junto
-             * con `use_price_lists`: los dos son ahora respuestas del formulario de la demo y su
-             * única puerta de escritura es la tarjeta `demo_form_panel`, más abajo en este mismo
-             * grupo. El motivo completo está escrito ahí, donde estaba `use_price_lists`.
+             * 🔴 `use_deposits` Y `use_price_lists` SON, ADEMÁS, DOS DE LAS NUEVE RESPUESTAS DEL
+             *    FORMULARIO DE LA DEMO — Y AUN ASÍ SIGUEN ACÁ (27/8/2026)
+             * ---------------------------------------------------------------------------------
+             * Estos dos checkboxes escriben las MISMAS DOS COLUMNAS que la tarjeta
+             * `demo_form_panel` de más abajo (`usa_depositos` → `use_deposits`, `tipo_precios` →
+             * `use_price_lists`; la traducción entera está en `LeadDemoFormMapper`). Por esa
+             * duplicación se los sacó del meta el 27/8/2026 y se los volvió a poner el mismo día:
+             * la tarjeta NO los reemplaza, por dos motivos independientes.
+             *
+             *  1. **La tarjeta sólo es editable para la dinámica NUEVA.**
+             *     `LeadDemoFormMapper::estado_para_panel()` devuelve `editable` con
+             *     `usa_experiencia_demo_nueva()`, y `LeadController::update_demo_form_json()`
+             *     responde 422 a cualquier otro lead. Pero el default de todo lead es la dinámica
+             *     ACTUAL (`LeadDemoSettings::DEFAULT_EXPERIENCIA`, y `demo_experiencia_efectiva()`
+             *     cae a `actual` ante `null`), o sea todos los leads viejos: para ésos, estos dos
+             *     checkboxes eran la única puerta desde el SPA y sacarlos los dejaba sin ninguna.
+             *
+             *  2. **Las dos columnas no son sólo de la demo.**
+             *     `RunUserSetupService::build_payload()` las manda tal cual al setup del CLIENTE
+             *     REAL después de la promoción. Y `Lead::booted()` fuerza `use_deposits = true` al
+             *     crear el lead, así que sin este checkbox no había forma de apagar depósitos en
+             *     ningún cliente, nunca.
+             *
+             * El defecto que había detrás de la duplicación —el que motivó sacarlos— sí se
+             * arregló, pero del otro lado: `LeadController::update_json()` marca ahora
+             * `demo_form_editado_admin_at` cuando alguna de las dos cambia de verdad, y persiste
+             * las nueve respuestas efectivas. Antes de eso, tocar el checkbox escribía la columna
+             * pero `LeadDemoFormMapper::respuestas_efectivas()` seguía devolviendo los defaults del
+             * catálogo: el demo setup ignoraba el cambio y la tarjeta de al lado mostraba el valor
+             * viejo.
+             *
+             * ⚠️ Este meta NO es la única puerta de escritura de estas dos columnas, y el
+             * comentario que llegó a afirmarlo estaba mal: `LeadController::extract_data()` también
+             * las escribe, desde `store_json()` (POST `/api/admin/lead`) y desde el ABM Blade
+             * legado (`routes/web.php` → `Route::resource('leads')` → `LeadController::update()`).
+             * Lo que sí es cierto es que el meta es la única puerta del "Guardar" general del
+             * modal, porque `ModelPropertiesHelper` es una lista blanca sobre `properties()`.
+             *
+             * ⚠️ `price_type_1/2/3` son otra cosa y nunca estuvieron en discusión: son los NOMBRES
+             * de las listas de precios, un dato que no sale del formulario de la demo.
              */
+            [
+                'key' => 'use_deposits',
+                'text' => 'Usa depósitos',
+                'type' => 'checkbox',
+                'value' => false,
+            ],
             [
                 'key' => 'address_1',
                 'text' => 'Sucursal 1',
@@ -320,25 +362,16 @@ class LeadProperties
                 'value' => '',
             ],
             /*
-             * 🔴 POR QUÉ NO ESTÁN MÁS `use_price_lists` NI `use_deposits` (27/8/2026)
-             * ----------------------------------------------------------------------
-             * Eran dos checkboxes editables que escribían las MISMAS DOS COLUMNAS que la tarjeta
-             * `demo_form_panel` de más abajo (`tipo_precios` → `use_price_lists`, `usa_depositos`
-             * → `use_deposits`, ver `LeadDemoFormMapper`). Dos controles para el mismo dato, uno
-             * al lado del otro en la misma pantalla, y sólo uno contaba: tocarlos acá y apretar el
-             * "Guardar" general del modal escribía las columnas SIN marcar
-             * `demo_form_editado_admin_at`, así que `LeadDemoFormMapper::respuestas_efectivas()`
-             * seguía devolviendo los defaults del catálogo, el demo setup ignoraba el cambio y la
-             * tarjeta de al lado mostraba el valor viejo.
-             *
-             * Se sacan del meta y no se dejan en `only_show`, porque `ModelPropertiesHelper` es
-             * una lista blanca: lo que no está acá no se escribe, y de paso no quedan dos lugares
-             * mostrando la misma respuesta. La tarjeta las muestra con el texto de la pregunta que
-             * el lead efectivamente lee, que es mejor que un checkbox suelto. Decisión de Lucas.
-             *
-             * ⚠️ `price_type_1/2/3` NO se tocaron: son los NOMBRES de las listas de precios, un
-             * dato distinto que no sale del formulario de la demo, y siguen editables acá abajo.
+             * La otra mitad del par: acá se guarda `tipo_precios` del formulario de la demo
+             * (`listas` → true, cualquier otra cosa → false). Por qué sigue en el meta a pesar de
+             * duplicar la tarjeta, está escrito arriba, donde `use_deposits`.
              */
+            [
+                'key' => 'use_price_lists',
+                'text' => 'Usa listas de precios',
+                'type' => 'checkbox',
+                'value' => false,
+            ],
             [
                 'key' => 'price_type_1',
                 'text' => 'Lista de precio 1',
