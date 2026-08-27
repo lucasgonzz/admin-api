@@ -291,6 +291,10 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/send-presentation-mail', [LeadController::class, 'send_presentation_mail_json']);
         Route::post('lead/{id}/send-followup-mail', [LeadController::class, 'send_followup_mail_json']);
         Route::post('lead/{id}/run-demo-setup', [LeadController::class, 'run_demo_setup_json']);
+        // Edición manual de las respuestas del formulario de la demo desde el modal del lead
+        // (misión del 27/8/2026). PUT y no POST: es una actualización idempotente del mismo
+        // recurso —las nueve respuestas del lead—, no una acción que dispare un proceso.
+        Route::put('lead/{id}/demo-form', [LeadController::class, 'update_demo_form_json']);
         // Disponibilidad de demos/horarios para el panel de verificación (prompt 321).
         Route::get('lead/{id}/panel-availability', [LeadController::class, 'panel_availability_json']);
         // Persistencia de toggles de automatización por lead desde el modal de operaciones (prompt 321).

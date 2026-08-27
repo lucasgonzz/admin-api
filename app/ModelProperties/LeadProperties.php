@@ -396,6 +396,35 @@ class LeadProperties
             ],
             [
                 /*
+                 * Tarjeta con las respuestas del formulario de configuración de la demo, editables
+                 * a mano desde el modal (misión del 27/8/2026). Va DESPUÉS de los dos links de
+                 * ingreso porque es donde Lucas la pidió: "debajo de los links de ingreso a la
+                 * demo".
+                 *
+                 * `not_persisted_on_model`: no es una columna, es el accesor
+                 * `Lead::getDemoFormPanelAttribute()` que
+                 * `LeadController::prepare_lead_for_detail_json()` inyecta en el detalle. Y
+                 * `exclude_on_update` porque las respuestas NO se guardan con el update genérico
+                 * del formulario: van por `PUT lead/{id}/demo-form`, que además de las columnas
+                 * marca la edición manual y re-congela el roadmap. Un update genérico que las
+                 * escribiera por su cuenta dejaría las respuestas nuevas con el plan viejo.
+                 *
+                 * `full_width` no es opcional acá: son nueve preguntas con texto largo, y la
+                 * `col-lg-3` del formulario genérico es exactamente el bug de layout que ya
+                 * documenta el comentario de arriba para el token.
+                 */
+                'key' => 'demo_form_panel',
+                'text' => 'Respuestas del formulario de la demo',
+                'type' => 'custom',
+                'custom_component' => 'lead_demo_form_respuestas',
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+                'exclude_on_update' => true,
+                'full_width' => true,
+                'value' => '',
+            ],
+            [
+                /*
                  * Token de ingreso directo a la demo (grupo 233, prompt 01). Solo lectura:
                  * se emite por código en RunDemoSetupService, nunca editable a mano.
                  *

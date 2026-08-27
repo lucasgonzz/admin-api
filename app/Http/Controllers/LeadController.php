@@ -37,7 +37,10 @@ use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
 use App\Services\BatchLeadAiRecoveryService;
 use App\Services\LeadPendingReviewService;
+use App\Services\DemoHitosService;
 use App\Services\DemoIngresoTokenService;
+use App\Services\DemoPlanResolver;
+use App\Services\LeadDemoFormMapper;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
 use App\Services\CloserGoogleCalendarEventService;
@@ -584,6 +587,13 @@ class LeadController extends Controller
            broadcast, donde nadie lo consume, sin que nada lo pida. */
         $lead->append('demo_experiencia_url');
 
+        /* Estado de la tarjeta "Respuestas del formulario de la demo" (misión del 27/8/2026). Va
+           acá por el mismo criterio que la línea de arriba —el detalle es el único lugar donde el
+           modal lo consume— y en `append()` y no en una asignación: `demo_form_panel` no es una
+           columna, así que asignarlo lo metería en `$attributes` y el próximo `save()` sobre este
+           lead saldría con un `Unknown column` en el UPDATE. */
+        $lead->append('demo_form_panel');
+
         return $lead;
     }
 
@@ -915,6 +925,211 @@ class LeadController extends Controller
             'message' => 'No se pudo crear la demo: ' . $lead->demo_setup_last_error,
             'model' => $this->full_lead_with_demo_link($lead->id),
         ], 422);
+    }
+
+    /**
+     * PUT /api/admin/lead/{id}/demo-form — guarda a mano las respuestas del formulario de
+     * configuración de la demo, desde la tarjeta del modal del lead (misión del 27/8/2026).
+     *
+     * Pedido de Lucas: *"yo quiero también desde ahí poder modificar las respuestas de ese
+     * formulario, ya sea que el lead le haya contestado o que estén por defecto (...) para que
+     * cuando ejecute correr demo setup de forma manual, utilice esos datos"*.
+     *
+     * Es el espejo administrativo de `DemoExperienciaController::store_formulario_json()`, y lo es
+     * a propósito hasta en las reglas de validación: son dos puertas al MISMO estado (las columnas
+     * del lead más el plan congelado), y si aceptaran cosas distintas el panel podría dejar el lead
+     * en un estado que la página pública nunca produce. Las tres diferencias, todas deliberadas:
+     *
+     *  1. Marca `demo_form_editado_admin_at` y NO `demo_form_completado_at`. Aquella fecha
+     *     significa "contestó el lead" y además mueve el disparo automático del setup
+     *     (`RunDemoSetupService::evaluar_disparo()` cambia de rama según ella).
+     *  2. El merge va sobre `respuestas_efectivas()` y no sobre `from_lead()`. Para un lead sin
+     *     formulario la tarjeta le mostró a Lucas los DEFAULTS del catálogo; al guardar tienen que
+     *     persistirse esos defaults más lo que él haya cambiado. Con `from_lead()` se guardarían
+     *     las columnas crudas —casi todas apagadas—, que no es lo que vio en pantalla: cambiaría
+     *     una sola respuesta y se llevaría puestas otras cuatro sin tocarlas.
+     *  3. Re-congela el roadmap en vez de sólo dejar constancia de la divergencia, pero SÓLO con el
+     *     setup en `pendiente` (ver abajo).
+     *
+     * No pisa nada del lead: si después de esta edición el lead completa el formulario en la
+     * página, sus respuestas ganan, igual que hoy. La tarjeta muestra las dos fechas para que se
+     * vea qué pasó.
+     *
+     * @param int|string $id      Identificador del lead.
+     * @param Request    $request Body: cualquier subconjunto de las nueve respuestas.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function update_demo_form_json($id, Request $request)
+    {
+        /* Lead al que se le editan las respuestas. */
+        $lead = Lead::findOrFail($id);
+
+        /* Un lead de la dinámica ACTUAL no tiene página inmersiva ni formulario: no hay respuestas
+           que editar, y dejarlo escribir las columnas armaría un estado que ningún otro camino
+           produce. Es la misma guardia que ya se defienden solas DemoPlanResolver y
+           DemoHitosService, acá con un mensaje que el modal pueda mostrar. */
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return response()->json([
+                'message' => 'Este lead usa la dinámica de demo actual, que no tiene formulario de configuración.',
+            ], 422);
+        }
+
+        /* Mismas reglas que el endpoint público, incluido el `sometimes` de las nueve: la tarjeta
+           manda sólo lo que cambió, y una clave ausente significa "dejala como está", no "apagala". */
+        $validated = $request->validate([
+            'tipo_precios'                       => 'sometimes|string|in:unico,listas',
+            'usa_depositos'                      => 'sometimes|boolean',
+            'usa_cuentas_corrientes_clientes'    => 'sometimes|boolean',
+            'costos_en_dolares'                  => 'sometimes|boolean',
+            'descuentos_por_metodo_pago'         => 'sometimes|boolean',
+            'usa_cuentas_corrientes_proveedores' => 'sometimes|boolean',
+            'usa_presupuestos'                   => 'sometimes|boolean',
+            'registra_compras'                   => 'sometimes|boolean',
+            'usa_ecommerce'                      => 'sometimes|boolean',
+        ]);
+
+        /* La foto del estado ANTES de tocar nada, y se saca de una sola llamada porque después de
+           `to_lead()` ya no hay forma de reconstruirla: las respuestas previas se necesitan para el
+           merge Y para contar en el hilo qué cambió, y `setup_estado` / `plan_congelado` deciden
+           qué hacer con el roadmap. Es además la misma foto que la tarjeta le mostró a Lucas. */
+        $estado_previo      = LeadDemoFormMapper::estado_para_panel($lead);
+        $respuestas_previas = $estado_previo['respuestas'];
+
+        $respuestas = array_merge($respuestas_previas, $validated);
+
+        LeadDemoFormMapper::to_lead($lead, $respuestas);
+
+        $lead->demo_form_editado_admin_at = now();
+
+        /* El roadmap se re-congela sólo si el setup todavía no corrió. Con el setup ya corrido el
+           lead puede tener hitos marcados y clips vistos: rehacer el plan los dejaría apuntando a
+           clips que salieron del recorrido, que es justo lo que la regla de "nunca retroceder" de
+           la misión 48 prohíbe. La tarjeta avisa en ese caso que el recorrido quedó armado con las
+           respuestas viejas. */
+        $setup_pendiente       = ($estado_previo['setup_estado'] === 'pendiente');
+        $plan_estaba_congelado = $estado_previo['plan_congelado'];
+
+        \Illuminate\Support\Facades\DB::transaction(function () use ($lead, $setup_pendiente, $plan_estaba_congelado) {
+            if ($setup_pendiente && $plan_estaba_congelado) {
+                /* 🔴 El borrado del plan se PERSISTE antes de re-congelar, y no alcanza con
+                   limpiarlo en memoria: `DemoPlanResolver::congelar_en_memoria()` decide con un
+                   segundo chequeo contra la fila bloqueada (`lockForUpdate()` sobre
+                   `demo_plan_congelado_at`), no con el atributo del modelo. Sin este `save()`
+                   previo, ese chequeo seguiría viendo la fecha vieja y la re-congelación se iría
+                   sin hacer nada, en silencio. */
+                $lead->demo_plan              = null;
+                $lead->demo_plan_congelado_at = null;
+                $lead->save();
+
+                /* Y los hitos se borran porque `DemoHitosService::generar()` es idempotente: con
+                   hitos existentes no crea ninguno y el roadmap quedaría con los del plan viejo.
+                   Sólo se llega acá con el setup en `pendiente`, o sea antes de que el lead haya
+                   podido entrar a la demo y marcar nada. */
+                LeadDemoHito::where('lead_id', $lead->id)->delete();
+            }
+
+            if (! $setup_pendiente) {
+                $lead->save();
+
+                return;
+            }
+
+            /* Mismo orden que el endpoint público: congelar en memoria, un solo `save()` con las
+               respuestas y el plan juntos, y los hitos adentro de la misma transacción. Si el plan
+               no estaba congelado, esta llamada lo congela por primera vez. */
+            $congelo = DemoPlanResolver::congelar_en_memoria($lead);
+
+            $lead->save();
+
+            if ($congelo) {
+                DemoHitosService::generar($lead);
+            }
+        });
+
+        /* Trazabilidad en el hilo del lead, con el mismo patrón de evento de sistema que usa el
+           endpoint público: `sender` sistema, `is_status_event` para que no cuente como actividad
+           real del hilo, y sin `sent_by_admin_id` — el hilo es la conversación con el lead y este
+           mensaje no se le manda a nadie. Quién lo hizo queda igual en el timestamp de la columna. */
+        LeadMessage::create([
+            'lead_id'         => $lead->id,
+            'sender'          => 'sistema',
+            'content'         => $this->describir_edicion_de_formulario($respuestas_previas, $respuestas),
+            'status'          => 'enviado',
+            'is_followup'     => false,
+            'is_status_event' => true,
+        ]);
+
+        /* 🔴 Al modelo de la respuesta se le appendea `demo_form_panel` además del link de ingreso.
+           No es decorativo: el SPA fusiona la respuesta con `Object.assign()`, que deja intactas
+           las claves ausentes, así que sin este append la tarjeta se quedaría mostrando el origen y
+           las fechas de antes de guardar —"todavía no completó el formulario"— sobre respuestas que
+           acaban de persistirse. Es el mismo modo de falla que documenta
+           `full_lead_with_demo_link()` para el link de ingreso, y va acá y no adentro de ese helper
+           porque los endpoints que rotan el token no tienen por qué recalcular este bloque. */
+        $model = $this->full_lead_with_demo_link($lead->id);
+        if ($model) {
+            $model->append('demo_form_panel');
+        }
+
+        return response()->json(['model' => $model], 200);
+    }
+
+    /**
+     * Arma el texto del evento de sistema que queda en el hilo del lead cuando se editan las
+     * respuestas del formulario desde el panel.
+     *
+     * Lista sólo lo que cambió, con las CLAVES del formulario y no con el texto de cada pregunta.
+     * Es a propósito: el texto de las nueve preguntas vive en un solo lugar (el módulo del SPA que
+     * comparten la página inmersiva y la tarjeta del modal), y copiarlo acá crearía una segunda
+     * versión que coincidiría por casualidad y no por construcción. Este mensaje es traza interna,
+     * no algo que el lead lea.
+     *
+     * @param array<string, mixed> $previas Respuestas efectivas antes de la edición.
+     * @param array<string, mixed> $nuevas  Respuestas efectivas después de la edición.
+     *
+     * @return string
+     */
+    protected function describir_edicion_de_formulario(array $previas, array $nuevas)
+    {
+        $cambios = [];
+
+        foreach ($nuevas as $clave => $valor) {
+            $anterior = array_key_exists($clave, $previas) ? $previas[$clave] : null;
+
+            if ($anterior === $valor) {
+                continue;
+            }
+
+            $cambios[] = $clave . ': de ' . $this->valor_de_respuesta_legible($anterior)
+                . ' a ' . $this->valor_de_respuesta_legible($valor);
+        }
+
+        if (empty($cambios)) {
+            /* Guardar sin cambiar nada NO es un no-op y por eso también deja mensaje: fija las
+               respuestas que estaban a la vista (los defaults del catálogo, para un lead que no
+               completó el formulario) como elección explícita, y a partir de ahí el demo setup las
+               usa en vez de resolverlas de nuevo. */
+            return 'Se confirmaron desde el panel las respuestas del formulario de la demo, sin cambios.';
+        }
+
+        return 'Respuestas del formulario de la demo editadas desde el panel — ' . implode('; ', $cambios) . '.';
+    }
+
+    /**
+     * Traduce a texto un valor de respuesta del formulario para el mensaje del hilo.
+     *
+     * @param mixed $valor
+     *
+     * @return string
+     */
+    protected function valor_de_respuesta_legible($valor)
+    {
+        if (is_bool($valor)) {
+            return $valor ? 'sí' : 'no';
+        }
+
+        return (string) $valor;
     }
 
     /**
