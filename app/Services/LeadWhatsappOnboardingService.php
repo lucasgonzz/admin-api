@@ -49,6 +49,21 @@ class LeadWhatsappOnboardingService
      */
     public function extract_profile_name_from_payload(array $payload, string $normalized_phone): ?string
     {
+        /*
+         * 🔴 ESTE MÉTODO PARECE MUERTO Y NO LO ESTÁ. No lo borres.
+         *
+         * La forma `contacts[].profile.name` que busca acá es la del payload CRUDO de Meta Cloud
+         * API, no la del payload procesado de Kapso. Con los payloads que entran hoy por
+         * `webhook/whatsapp` (formato Kapso) la clave `contacts` no existe en la raíz, así que
+         * este método devuelve null SIEMPRE — y eso llevó a creer, durante meses, que Meta no
+         * mandaba el nombre. No era eso: el nombre de Kapso viaja en `conversation.contact_name`
+         * y se lee en WhatsappWebhookController::parse_inbound_message() (arreglado el 27/8/2026).
+         *
+         * Se conserva porque es EXACTAMENTE la forma que entra por `webhook/meta-raw`
+         * (MetaRawWebhookController, webhook `kind: meta` de Kapso), donde el payload sí es el
+         * crudo de Meta con `entry[].changes[].value.contacts[].profile.name`. Borrarlo hoy sería
+         * tener que reescribirlo idéntico mañana.
+         */
         $contacts = $payload['contacts'] ?? null;
         if (! is_array($contacts)) {
             return null;

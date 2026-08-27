@@ -458,9 +458,42 @@ class WhatsappWebhookController extends Controller
 
         $timestamp = $message['timestamp'] ?? null;
 
+        /*
+         * 🔴 EL NOMBRE VIENE EN `conversation.contact_name`, NO EN `conversation.kapso.contact_name`.
+         *
+         * No "simplifiques" esto de vuelta a leer solo la ruta anidada. La doc de Kapso dice
+         * textual sobre el bloque `conversation.kapso`: «contains summary metrics only … it never
+         * contains contact_name». O sea: la ruta que este método leía hasta el 27/8/2026 NO EXISTE
+         * en ningún payload. El nombre llegaba en cada mensaje entrante y se tiraba acá.
+         *
+         * Lo que costó: el 61% de los leads de un año entero quedó con `contact_name` null. De ahí
+         * salió la cadena que rompió los seguimientos — nombre vacío → `{{1}}` vacío → Meta
+         * responde `(#131008) Required parameter is missing` → 2.933 seguimientos perdidos sobre
+         * 159 leads entre julio y agosto de 2026. Los nombres de esos leads no se recuperan: los
+         * payloads no se guardan en ningún lado.
+         *
+         * La ruta vieja se conserva como ÚLTIMO RECURSO a propósito: el arreglo es aditivo, así que
+         * si algún payload la trajera se sigue leyendo. Sacarla no gana nada y puede perder algo.
+         */
         $contact_name = null;
-        if (isset($payload['conversation']['kapso']['contact_name'])) {
-            $contact_name = (string) $payload['conversation']['kapso']['contact_name'];
+        $contact_name_candidates = [
+            /* Ruta real de Kapso: va primero. */
+            isset($payload['conversation']['contact_name']) ? $payload['conversation']['contact_name'] : null,
+            /* Ruta histórica: nunca se la vio poblada, pero no se saca. */
+            isset($payload['conversation']['kapso']['contact_name']) ? $payload['conversation']['kapso']['contact_name'] : null,
+        ];
+        foreach ($contact_name_candidates as $candidate) {
+            if ($candidate === null || is_array($candidate)) {
+                continue;
+            }
+
+            /* Un string vacío o de puros espacios es AUSENCIA de nombre, no un nombre vacío:
+               se normaliza a null y se sigue buscando en la ruta siguiente. */
+            $candidate = trim((string) $candidate);
+            if ($candidate !== '') {
+                $contact_name = $candidate;
+                break;
+            }
         }
 
         $kapso_content = null;
