@@ -182,7 +182,7 @@ class Lead extends Model
      *
      * A propósito NO se agrega `demo_ingreso_token` acá, aunque también sea un secreto: el admin
      * lo necesita en claro para reconstruir el link que reenvía por WhatsApp (ver el docblock de
-     * `RunDemoSetupService::emitir_token_de_ingreso()`), así que ocultarlo puede romper el panel.
+     * `RunDemoSetupService::asegurar_token_de_ingreso()`), así que ocultarlo puede romper el panel.
      * Queda como hallazgo aparte, no como cambio al pasar de esta misión.
      *
      * @var array<int, string>

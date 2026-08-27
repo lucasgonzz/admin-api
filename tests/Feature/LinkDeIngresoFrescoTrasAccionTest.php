@@ -103,9 +103,23 @@ class LinkDeIngresoFrescoTrasAccionTest extends TestCase
      * Lucas aprieta los botones del modal. El token previo es lo que el link tiene que dejar de
      * mostrar después de cada acción.
      *
+     * 🔴 `$token_revocado` existe desde el 27/8/2026, y es una precondición, no una variante.
+     *
+     * Desde esa fecha el demo setup **reutiliza** el token vigente en vez de emitir uno nuevo en
+     * cada corrida (`RunDemoSetupService::asegurar_token_de_ingreso()`): rotarlo antes del POST era
+     * lo que dejaba al panel mostrando un link que la instancia no conocía cuando el POST rebotaba
+     * con 409. Los dos tests que ejercen `run-demo-setup` necesitan que el setup SI emita un token
+     * nuevo para que haya un "link viejo" del que despegarse — y el único caso que lo hace es el
+     * token revocado.
+     *
+     * O sea: lo que cambió es el escenario que hay que armar para reproducir el bug de ayer, no lo
+     * que ese bug era. Las aserciones de esos tests quedaron intactas a propósito.
+     *
+     * @param bool $token_revocado true = el token arranca revocado, así el setup emite uno nuevo.
+     *
      * @return Lead
      */
-    private function crear_lead_con_token(): Lead
+    private function crear_lead_con_token(bool $token_revocado = false): Lead
     {
         $demo = $this->crear_demo();
 
@@ -124,6 +138,11 @@ class LinkDeIngresoFrescoTrasAccionTest extends TestCase
         $lead->demo_setup_status            = 'pendiente';
         $lead->demo_ingreso_token           = 'token-viejo-' . Str::random(40);
         $lead->demo_ingreso_token_expira_at = Carbon::parse('2026-08-26 23:10:00', 'America/Argentina/Buenos_Aires');
+
+        if ($token_revocado) {
+            $lead->demo_ingreso_token_revocado_at = Carbon::parse('2026-08-26 12:00:00', 'America/Argentina/Buenos_Aires');
+        }
+
         $lead->save();
 
         return $lead->refresh();
@@ -175,7 +194,8 @@ class LinkDeIngresoFrescoTrasAccionTest extends TestCase
         $this->fakear_instancia();
         $this->autenticar_admin();
 
-        $lead           = $this->crear_lead_con_token();
+        // Revocado: es el caso en el que el setup emite un token nuevo (ver crear_lead_con_token()).
+        $lead           = $this->crear_lead_con_token(true);
         $token_anterior = $lead->demo_ingreso_token;
 
         $respuesta = $this->postJson('/api/admin/lead/' . $lead->id . '/run-demo-setup');
@@ -250,7 +270,8 @@ class LinkDeIngresoFrescoTrasAccionTest extends TestCase
             '*/api/admin-sync/demo-setup' => Http::response(['message' => 'explotó'], 500),
         ]);
 
-        $lead           = $this->crear_lead_con_token();
+        // Revocado: es el caso en el que el setup emite un token nuevo (ver crear_lead_con_token()).
+        $lead           = $this->crear_lead_con_token(true);
         $token_anterior = $lead->demo_ingreso_token;
 
         $respuesta = $this->postJson('/api/admin/lead/' . $lead->id . '/run-demo-setup');

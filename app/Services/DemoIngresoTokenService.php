@@ -14,7 +14,7 @@ use Illuminate\Support\Str;
  * admin-sync/demo-token para que quede en sincronia con lo que admin-api guarda en el Lead.
  *
  * Tambien centraliza el calculo de vencimiento del token, extraido de
- * RunDemoSetupService::emitir_token_de_ingreso() (que antes lo duplicaba) para que el setup
+ * RunDemoSetupService::asegurar_token_de_ingreso() (que antes lo duplicaba) para que el setup
  * inicial y la reemision manual usen exactamente la misma logica y no se desincronicen
  * (grupo 233, prompt 05).
  */

@@ -154,9 +154,11 @@ class RunDemoSetupService
             ]);
         }
 
-        // Emitimos el token de ingreso ANTES de armar el payload: viaja dentro de él y así
-        // el retry de la llamada HTTP de más abajo manda siempre el mismo valor (idempotente).
-        $this->emitir_token_de_ingreso($lead);
+        /* El token de ingreso se asegura ANTES de armar el payload porque viaja adentro de él.
+         * REUTILIZA el que el lead ya tenga: rotarlo acá y que después el POST no llegue a correr
+         * (409 de la instancia, timeout) es lo que dejaba al panel mostrando un link que la demo
+         * no conoce. El porqué completo está en el docblock del método. */
+        $this->asegurar_token_de_ingreso($lead);
 
         // Último momento en que se puede congelar el plan: el lead que nunca completó el
         // formulario lo congela acá, con los defaults del catálogo, para que ninguno entre a la
@@ -205,10 +207,25 @@ class RunDemoSetupService
                 ->post($erp_api_url . '/api/admin-sync/demo-setup', $payload);
 
             if ($response->successful()) {
-                $lead->update([
-                    'demo_setup_status' => 'exitoso',
-                    'demo_setup_last_error' => null,
-                ]);
+                /* 🔴 Query builder y NO `$lead->update()`, por la misma razón por la que ya escriben
+                 * así `mark_sin_confirmar()` y `mark_failed()`.
+                 *
+                 * Con Eloquent, `demo_setup_last_error => null` NO llegaba a la base: el modelo en
+                 * memoria ya tenía esa columna en `null` desde el claim de arriba, así que asignarle
+                 * `null` no lo ensucia y `save()` la deja afuera del UPDATE. El error que otro
+                 * proceso hubiera escrito MIENTRAS esta corrida estaba en vuelo —típicamente el 409
+                 * de un segundo disparo— sobrevivía intacto, y el panel terminaba mostrando
+                 * "Estado: exitoso" con un mensaje de error colgado abajo. Medido en producción el
+                 * 27/8/2026.
+                 *
+                 * `updated_at` a mano porque el query builder no estampa timestamps y el panel
+                 * ordena por esa columna. Mismo criterio que los otros dos métodos. */
+                Lead::where('id', $lead->id)
+                    ->update([
+                        'demo_setup_status'     => 'exitoso',
+                        'demo_setup_last_error' => null,
+                        'updated_at'            => now(),
+                    ]);
 
                 return $lead->refresh();
             }
@@ -440,7 +457,7 @@ class RunDemoSetupService
             'google_cuota'                 => ImplementationSettings::get_google_cuota_demo(),
 
             // Token de ingreso directo a la demo (sesión ya iniciada) y su vencimiento.
-            // Se emite una única vez en emitir_token_de_ingreso(), antes de armar este payload.
+            // Lo deja listo asegurar_token_de_ingreso(), antes de armar este payload.
             'demo_ingreso_token'            => $lead->demo_ingreso_token,
             'demo_ingreso_token_expira_at'  => $lead->demo_ingreso_token_expira_at
                 ? $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s')
@@ -607,58 +624,96 @@ class RunDemoSetupService
     }
 
     /**
-     * Genera y persiste el token de ingreso directo a la demo para el Lead dado.
+     * Deja al Lead con un token de ingreso utilizable, REUTILIZANDO el que ya tenga.
      *
-     * Se llama una sola vez por corrida de run(), antes de armar el payload: como la llamada
-     * HTTP tiene retry automático, generar el token en la respuesta de empresa-api produciría
-     * un valor distinto en cada reintento. Generándolo acá, en admin-api, y mandándolo dentro
-     * del payload, el reintento manda siempre el mismo valor (operación idempotente).
+     * Se llama una sola vez por corrida de run(), antes de armar el payload: el token viaja
+     * adentro del POST, así que no se puede emitir después de saber cómo salió la llamada.
+     *
+     * 🔴 POR QUE REUTILIZA Y NO EMITE UNO NUEVO EN CADA CORRIDA (27/8/2026)
+     * --------------------------------------------------------------------
+     * Hasta hoy este método hacía `Str::random(64)` siempre. Eso tiene un problema que no se ve
+     * hasta que muerde, y mordió en producción el 27/8/2026:
+     *
+     * **El token se rota ACA, antes del POST, pero la instancia recién lo guarda si el POST llega
+     * a correr.** Si `empresa-api` rebota con 409 —ya hay un demo setup corriendo, candado
+     * `flock` de `DemoSetupLockHelper`— la instancia NO tocó nada y se queda con el token de la
+     * corrida que está viva, mientras acá quedó escrito uno nuevo. A partir de ese instante el
+     * link que muestra el panel apunta a un token que la demo no conoce: `resolver()` devuelve
+     * null, el ingreso contesta 401 y el lead ve "Este acceso a la demo ya no está disponible".
+     * Y como el botón se puede volver a apretar, **cada click empeora la desincronización**.
+     *
+     * Reutilizar el token vigente corta esa cadena de raíz: si no hay nada que rotar, no hay nada
+     * que pueda quedar desincronizado. Es preferible a "restaurar el token viejo cuando rebota"
+     * —que era la otra opción— porque no depende de acertar en qué ramas de error hay que
+     * revertir: el timeout, por ejemplo, NO se puede revertir (la corrida puede seguir viva del
+     * otro lado y quedarse con el valor nuevo).
+     *
+     * Y arregla de paso el hallazgo #1 del informe `20260826-link-demo-fresco-tras-setup.md`, que
+     * es el caso más caro de los dos: **un lead que ya recibió su link por WhatsApp quedaba afuera
+     * si alguien volvía a correr el setup**, porque `DemoIngresoTokenHelper::guardar()` de
+     * `empresa-api` borra los tokens anteriores del usuario. Nadie se enteraba: no falla nada.
+     *
+     * Lo que SI sigue emitiendo un token nuevo, y son los dos únicos casos:
+     *
+     *  - **No hay token.** El lead nunca corrió un setup.
+     *  - **El token está revocado.** Revocar es un acto explícito de "ese link no vale más"
+     *    (`revocar_demo_token_json` del panel), y reutilizarlo lo resucitaría.
+     *
+     * 🔴 El VENCIMIENTO se recalcula siempre, se reutilice el token o no. No es lo mismo que el
+     * valor: el vencimiento es el control de tiempo del link y tiene que seguir al turno, así que
+     * si la demo se reagendó, el lead que ya tiene el link entra igual. Es exactamente lo que se
+     * quiere — y es también el único control de seguridad real de este link, que viaja por
+     * WhatsApp y es inherentemente compartible.
      *
      * Asimetría intencional de almacenamiento: acá en admin-api se guarda el token EN CLARO
      * (demo_ingreso_token), porque el admin necesita poder reconstruir el link para reenviarlo
-     * por WhatsApp. Del lado de empresa-api (prompt 02 de este grupo) solo se guarda el hash.
+     * por WhatsApp. Del lado de empresa-api solo se guarda el hash.
      *
-     * El vencimiento sale de demo_date + demo_end_time + gracia_minutos_post. Como
-     * demo_end_time es un string libre de 32 caracteres (puede venir vacío o con formato raro),
-     * el cálculo va envuelto en try/catch con un fallback fijo de 4 horas: la expiración nunca
-     * puede quedar en null, porque es el único control de seguridad real de este link (viaja
-     * por WhatsApp y es inherentemente compartible).
+     * @param Lead $lead Lead al que se le asegura el token
      *
-     * @param Lead $lead Lead al que se le emite el token
-     *
-     * @return string El token en claro recién generado
+     * @return string El token en claro que quedó vigente (el reutilizado, o el recién generado)
      */
-    protected function emitir_token_de_ingreso(Lead $lead)
+    protected function asegurar_token_de_ingreso(Lead $lead)
     {
-        // Token de 64 caracteres, no es de un solo uso: vale durante toda la ventana de vigencia.
-        $token = Str::random(64);
-
         // Cálculo de vencimiento delegado a DemoIngresoTokenService::calcular_expiracion()
         // (extraído de acá, grupo 233 prompt 05) para que el setup inicial y la reemisión
         // manual desde el panel usen exactamente la misma lógica y no se desincronicen.
-        $expira_at = $this->demo_ingreso_token_service->calcular_expiracion($lead);
-
+        //
+        // Va afuera del `if`: se recalcula siempre, por el motivo del docblock.
         $campos = [
-            'demo_ingreso_token' => $token,
-            'demo_ingreso_token_expira_at' => $expira_at,
-            'demo_ingreso_token_revocado_at' => null,
+            'demo_ingreso_token_expira_at' => $this->demo_ingreso_token_service->calcular_expiracion($lead),
         ];
 
-        // Secreto del canal de eventos (misión 48). Se emite acá, en el mismo método y por el
-        // mismo motivo que el de ingreso: la llamada HTTP de run() tiene retry, y un token
-        // generado adentro del reintento daría un valor distinto por corrida. No tiene
-        // vencimiento propio: vive lo que viva la instancia, que se reescribe en cada setup.
-        //
-        // Sólo para la dinámica nueva. Un lead de la dinámica actual no emite nada por este canal
-        // —no tiene página inmersiva ni instancia que reporte—, así que ni siquiera se le escribe
-        // la columna: el alcance de la misión 48 termina en Lead::usa_experiencia_demo_nueva().
-        if ($lead->usa_experiencia_demo_nueva()) {
+        /* Los dos únicos casos que emiten uno nuevo. Ojo con el orden de la condición: un lead sin
+         * token nunca tuvo nada que revocar, así que `empty()` va primero y la segunda rama sólo
+         * mira leads que sí tienen uno. */
+        if (empty($lead->demo_ingreso_token) || !is_null($lead->demo_ingreso_token_revocado_at)) {
+            // Token de 64 caracteres, no es de un solo uso: vale durante toda la ventana de vigencia.
+            $campos['demo_ingreso_token'] = Str::random(64);
+
+            /* Sólo se limpia acá. Antes se escribía `null` en TODAS las corridas, lo que convertía
+             * cualquier re-corrida del setup en una des-revocación silenciosa. */
+            $campos['demo_ingreso_token_revocado_at'] = null;
+        }
+
+        /* Secreto del canal de eventos (misión 48), con el MISMO criterio y por el mismo motivo:
+         * si se rota y el POST no llega a correr, la instancia sigue emitiendo con el token viejo
+         * y `DemoEventosKey` —que resuelve por `Lead::where('demo_eventos_token', ...)`— los
+         * rechaza. Es un 401 permanente, y está descrito como tal en `RunDemoSetup.php:246`, donde
+         * justamente se agregó una señal local para no depender de este canal.
+         *
+         * No tiene vencimiento ni revocación, así que la única condición es "no hay".
+         *
+         * Sólo para la dinámica nueva. Un lead de la dinámica actual no emite nada por este canal
+         * —no tiene página inmersiva ni instancia que reporte—, así que ni siquiera se le escribe
+         * la columna: el alcance de la misión 48 termina en Lead::usa_experiencia_demo_nueva(). */
+        if ($lead->usa_experiencia_demo_nueva() && empty($lead->demo_eventos_token)) {
             $campos['demo_eventos_token'] = Str::random(64);
         }
 
         $lead->update($campos);
 
-        return $token;
+        return $lead->demo_ingreso_token;
     }
 
     /**
@@ -742,7 +797,7 @@ class RunDemoSetupService
          * general: `run()` y este método son COMPARTIDOS —los llaman el comando
          * `leads:run-demo-setup`, el `RunDemoSetupJob` y el botón "Correr demo setup ahora" del
          * panel, ninguno mirando la dinámica del lead—. Un lead de la dinámica actual no tiene
-         * canal de eventos (`emitir_token_de_ingreso()` ni le escribe `demo_eventos_token`), así
+         * canal de eventos (`asegurar_token_de_ingreso()` ni le escribe `demo_eventos_token`), así
          * que nunca puede llegarle un `exitoso` desde afuera: el único `exitoso` que puede tener es
          * el de un POST anterior, y ahí el botón del panel, que se pulsa para re-correr el setup a
          * propósito, TIENE que poder dejarlo en `fallido` si esta vez falló de verdad. Extenderle
