@@ -665,6 +665,10 @@ class RunDemoSetupService
      * quiere — y es también el único control de seguridad real de este link, que viaja por
      * WhatsApp y es inherentemente compartible.
      *
+     * El cálculo vive en `DemoIngresoTokenService::calcular_expiracion()`, y ahí está también el
+     * porqué de su fallback fijo de 4 horas: `demo_end_time` es un string libre que puede venir
+     * vacío o con formato raro, y la expiración no puede quedar en null nunca.
+     *
      * Asimetría intencional de almacenamiento: acá en admin-api se guarda el token EN CLARO
      * (demo_ingreso_token), porque el admin necesita poder reconstruir el link para reenviarlo
      * por WhatsApp. Del lado de empresa-api solo se guarda el hash.
@@ -691,8 +695,13 @@ class RunDemoSetupService
             // Token de 64 caracteres, no es de un solo uso: vale durante toda la ventana de vigencia.
             $campos['demo_ingreso_token'] = Str::random(64);
 
-            /* Sólo se limpia acá. Antes se escribía `null` en TODAS las corridas, lo que convertía
-             * cualquier re-corrida del setup en una des-revocación silenciosa. */
+            /* La limpieza se movió acá adentro, pero OJO: el comportamiento observable es el mismo
+             * que antes y no hay que leerlo como un arreglo. Si `revocado_at` estaba seteado, la
+             * condición de este `if` se cumple sí o sí, así que se limpia igual; y si era `null`,
+             * escribirlo era un no-op. O sea: re-correr el setup sobre un lead revocado lo
+             * des-revoca hoy exactamente como lo des-revocaba ayer. Queda adentro sólo porque es
+             * donde pertenece —se emite un token nuevo, se limpia su revocación—, no porque cierre
+             * ningún agujero. */
             $campos['demo_ingreso_token_revocado_at'] = null;
         }
 
