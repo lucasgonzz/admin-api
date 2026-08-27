@@ -180,6 +180,13 @@ Route::middleware('claude.task.key')
         Route::post('upgrades/{id}/mark-crons', 'Api\ClaudeUpgradeOpsController@mark_crons_json');
         Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
         Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
+
+        /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
+           plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron
+           en el payload. No tienen nada que ver con las de lead (`followup_templates`), que las
+           levanta el motor de seguimiento automático y se le mandan a un lead. */
+        Route::get('client-templates', 'Api\ClaudeClientTemplatesController@index_json');
+        Route::post('client-templates', 'Api\ClaudeClientTemplatesController@store_json');
     });
 
 /*
@@ -500,6 +507,13 @@ Route::prefix('admin')->group(function () {
         Route::post('support-ticket/{id}/toggle-claude-auto-reply', [\App\Http\Controllers\Api\SupportTicketController::class, 'toggle_claude_auto_reply']);
         Route::post('support-ticket/{id}/toggle-requiere-verificacion', [\App\Http\Controllers\Api\SupportTicketController::class, 'toggle_requiere_verificacion']);
         Route::post('support-ticket/{ticket_id}/typing', [\App\Http\Controllers\Api\SupportMessageController::class, 'typing']);
+
+        // Plantillas de cliente para la bandeja. `client-template` es un prefijo propio y
+        // `send-client-template` cuelga de {id} con sufijo, así que ninguna se pisa con
+        // support-ticket/{id}. El alta de estas plantillas NO está acá: la hace Claude desde
+        // afuera, por el bloque claude/*.
+        Route::get('client-template', [\App\Http\Controllers\Api\ClientTemplateController::class, 'index_json']);
+        Route::post('support-ticket/{id}/send-client-template', [\App\Http\Controllers\Api\ClientTemplateController::class, 'send_to_ticket_json']);
 
         Route::get('support-knowledge-base', [\App\Http\Controllers\Api\SupportKnowledgeBaseController::class, 'index']);
         Route::post('support-knowledge-base', [\App\Http\Controllers\Api\SupportKnowledgeBaseController::class, 'store']);
