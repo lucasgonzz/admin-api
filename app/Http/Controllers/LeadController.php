@@ -31,6 +31,7 @@ use App\Services\LeadConversationAiState;
 use App\Services\LeadSuggestionSendService;
 use App\Services\LeadWhatsappOnboardingService;
 use App\Services\LeadWhatsAppPasteCleaner;
+use App\Services\SeparadorDeMensajesManuales;
 use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
@@ -1627,13 +1628,22 @@ class LeadController extends Controller
      *
      * El mensaje se crea como `setter` y se envía sin pasar por Claude.
      *
-     * @param Request              $request  Debe incluir `content` (texto del mensaje).
-     * @param int|string           $lead_id
-     * @param WhatsappSendService  $whatsapp_send_service
+     * Si el operador escribió el separador completo -renglón en blanco, línea con tres guiones,
+     * renglón en blanco-, el texto sale partido en varios WhatsApp por el mismo camino que las
+     * sugerencias de Claude (`LeadSuggestionSendService::enviar_partes()`): con sus pausas de
+     * 1200ms, sus reintentos y su corte al primer fallo. En la base queda UN SOLO LeadMessage con
+     * el texto completo, separadores incluidos, más los contadores de partes: el hilo de leads ya
+     * sabe leer esas tres columnas y mostrar el envío parcial, así que no hace falta una fila por
+     * parte (que sí obligaría a cambiar el SPA).
+     *
+     * @param Request                   $request               Debe incluir `content` (texto del mensaje).
+     * @param int|string                $lead_id
+     * @param WhatsappSendService       $whatsapp_send_service Envío de una sola parte, el de siempre.
+     * @param LeadSuggestionSendService $send_service          Envío partido, compartido con las sugerencias.
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function send_direct_message_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service)
+    public function send_direct_message_json(Request $request, $lead_id, WhatsappSendService $whatsapp_send_service, LeadSuggestionSendService $send_service)
     {
         $text = trim((string) $request->input('content', ''));
         if ($text === '') {
@@ -1644,10 +1654,61 @@ class LeadController extends Controller
 
         $phone = trim((string) ($lead->phone ?? ''));
 
-        $whatsapp_message_id = null;
+        /* El criterio de partido es el mismo que en soporte y vive en una sola clase a propósito:
+           lo que escribe una persona se parte solo si pidió partirlo con el separador completo.
+           Un "---" suelto, un subrayado de markdown o unos guiones adentro de un párrafo no
+           parten nada, porque cambiarle el mensaje a alguien sin que lo haya pedido es peor que
+           no partirlo. */
+        $partes = (new SeparadorDeMensajesManuales())->partir($text);
+
+        /* Los tres contadores quedan en null cuando el mensaje salió entero. La burbuja de leads
+           decide si muestra "Enviado parcialmente" mirando sent_parts_count/total_parts_count, así
+           que llenarlos en un mensaje que nunca se partió le pondría un distintivo de más. */
+        $whatsapp_message_id  = null;
+        $sent_parts_count     = null;
+        $total_parts_count    = null;
+        $partial_send_pending = null;
+
         if ($phone !== '') {
             try {
-                $whatsapp_message_id = $whatsapp_send_service->send_text($phone, $text);
+                if (count($partes) > 1) {
+                    /* Se reusa el envío partido de las sugerencias en vez de escribir uno nuevo:
+                       las pausas de 1200ms, los tres intentos con backoff y el corte apenas una
+                       parte no sale son la solución al incidente del lead #440 (22/7/2026), y una
+                       copia de eso se desincroniza sola. */
+                    $resultado = $send_service->enviar_partes(
+                        $phone,
+                        $partes,
+                        'Mensaje directo del panel - Lead #' . $lead->id
+                            . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : ''),
+                        SeparadorDeMensajesManuales::SEPARADOR
+                    );
+
+                    $whatsapp_message_id = $resultado['last_message_id'];
+                    $sent_parts_count    = $resultado['sent_parts'];
+                    $total_parts_count   = $resultado['total_parts'];
+
+                    /* Lo pendiente se guarda solo cuando algo salió y algo no: si no salió ninguna
+                       parte, el texto entero sigue en `content` y duplicarlo no le sirve a nadie. */
+                    if ($resultado['sent_parts'] > 0 && $resultado['sent_parts'] < $resultado['total_parts']) {
+                        $partial_send_pending = $resultado['pending_text'];
+                    }
+
+                    if ($resultado['sent_parts'] === 0) {
+                        /* Nada llegó al lead. Se deja asentado en el hilo igual que cuando el envío
+                           tira excepción, para que el operador vea por qué no salió. El mensaje se
+                           crea igual unas líneas más abajo, como ya pasaba con el envío de una sola
+                           parte que WhatsApp rechaza: acá se agrega el partido, no se rediseña el
+                           manejo de fallos. */
+                        (new LeadConversationErrorLogger())->log(
+                            (int) $lead->id,
+                            'No se pudo enviar el mensaje por WhatsApp',
+                            (string) ($resultado['error'] ?? '')
+                        );
+                    }
+                } else {
+                    $whatsapp_message_id = $whatsapp_send_service->send_text($phone, $text);
+                }
             } catch (\Throwable $e) {
                 Log::error('LeadController@send_direct_message_json: error WhatsApp.', [
                     'lead_id' => $lead_id,
@@ -1668,6 +1729,8 @@ class LeadController extends Controller
         $message = LeadMessage::create([
             'lead_id'               => $lead->id,
             'sender'                => 'setter',
+            // El texto completo, separadores incluidos: es lo que el operador escribió y lo que
+            // tiene que poder releer y volver a copiar desde el hilo.
             'content'               => $text,
             'status'                => 'enviado',
             'whatsapp_message_id'   => $whatsapp_message_id,
@@ -1676,6 +1739,9 @@ class LeadController extends Controller
             'requiere_verificacion' => false,
             // Admin autor del mensaje directo (prompt 403).
             'sent_by_admin_id'      => (int) $request->user()->id,
+            'sent_parts_count'      => $sent_parts_count,
+            'total_parts_count'     => $total_parts_count,
+            'partial_send_pending'  => $partial_send_pending,
         ]);
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);

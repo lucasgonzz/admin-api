@@ -22,8 +22,13 @@ use Illuminate\Support\Facades\Log;
  * (0 < partes enviadas < partes totales): se registra `status = 'enviado'` con
  * `sent_parts_count`/`total_parts_count`/`partial_send_pending`, se aplica igual el pipeline
  * sugerido y se deja constancia clara en el hilo de cuántos mensajes llegaron. Además,
- * `send_body()` ahora espacia el envío de cada parte y reintenta con backoff ante fallos
+ * `enviar_partes()` espacia el envío de cada parte y reintenta con backoff ante fallos
  * transitorios (409/429/5xx), para que el 409 de Kapso deje de ser la causa habitual del caso C.
+ *
+ * `enviar_partes()` es público y con firma genérica porque el mensaje directo que el operador
+ * escribe en el panel del lead (LeadController@send_direct_message_json) manda por ahí también:
+ * duplicar las pausas y los reintentos en otro archivo garantizaba que los dos caminos se
+ * separaran con el tiempo y que el arreglo del #440 valiera solo para uno de los dos.
  */
 class LeadSuggestionSendService
 {
@@ -406,43 +411,48 @@ class LeadSuggestionSendService
     }
 
     /**
-     * Envía el cuerpo al número dado, partiéndolo en mensajes separados si contiene "---".
+     * Manda un texto YA partido, parte por parte, con las pausas y los reintentos de siempre.
      *
-     * El separador reconocido es "\n---\n" (línea con solo tres guiones).
+     * Es literalmente el cuerpo que hasta ahora vivía adentro de `send_body()`. Se sacó afuera,
+     * sin cambiarle una coma al comportamiento, para que el mensaje DIRECTO que un operador
+     * escribe en el panel del lead use exactamente este camino en vez de una copia. Lo que se
+     * copia se desincroniza, y acá lo que está en juego es la solución a un incidente real
+     * (lead #440, 22/7/2026): sin las pausas y los reintentos, un 409 de Kapso corta el envío a
+     * mitad de camino y el hilo miente sobre lo que le llegó a la persona.
      *
-     * FIX (prompt 366, lead #440, 22/7/2026): antes este método enviaba las partes en un foreach
-     * sin ninguna pausa entre una y otra, y devolvía solo el id de la última parte — si la última
-     * fallaba (típicamente 409 de Kapso por "otro mensaje en vuelo"), el llamador interpretaba el
-     * null como "no se envió nada" aunque las anteriores hubieran salido bien. Ahora:
+     * Entre los dos llamadores lo único que cambia son dos cosas, y las dos entran por parámetro:
+     * cómo se decidió partir el texto (el separador laxo de las sugerencias de Claude contra el
+     * estricto de lo que escribe una persona, ver SeparadorDeMensajesManuales) y con qué separador
+     * se vuelven a unir las partes que no salieron, que es lo que después se copia y se remanda.
+     *
+     * FIX (prompt 366, lead #440, 22/7/2026): antes las partes salían en un foreach sin ninguna
+     * pausa entre una y otra, y solo se devolvía el id de la última — si la última fallaba
+     * (típicamente 409 de Kapso por "otro mensaje en vuelo"), el llamador interpretaba el null
+     * como "no se envió nada" aunque las anteriores hubieran salido bien. Ahora:
      *   - se espera 1200ms entre parte y parte exitosa (le da tiempo a Kapso a liberar el
      *     bloqueo de "in-flight" de la conversación, que es la causa de raíz del 409);
      *   - cada parte se reintenta hasta 3 veces con backoff (1500ms / 3500ms) cuando el fallo es
      *     transitorio (409/429/5xx, ver WhatsappSendService::last_send_was_transient());
      *   - si una parte no sale tras los 3 intentos, se corta el envío ahí (no tiene sentido mandar
      *     la parte 5 si la 4 nunca llegó) y se devuelve el detalle exacto de qué salió y qué no,
-     *     para que send_suggestion() pueda registrar un envío parcial en vez de mentir con
-     *     "rechazado" o "enviado" a secas.
+     *     para que el llamador pueda registrar un envío parcial en vez de mentir con "rechazado"
+     *     o "enviado" a secas.
      *
-     * @param string      $phone
-     * @param string      $body
-     * @param Lead        $lead    Para armar el contexto de la notificación de fallo a admins.
-     * @param LeadMessage $message Para armar el contexto de la notificación de fallo a admins.
+     * @param string             $phone                       Destino en el formato que ya usa el envío.
+     * @param array<int, string> $partes                      Partes ya limpias y en orden. Tiene que
+     *                                                        ser una lista indexada desde 0: el texto
+     *                                                        pendiente se arma con array_slice() sobre
+     *                                                        la posición de la parte que falló.
+     * @param string             $context                     Contexto legible para la notificación de
+     *                                                        fallo a admins.
+     * @param string             $partes_pendientes_separador Con qué se vuelven a unir las partes que
+     *                                                        no salieron.
      *
      * @return array{sent_parts:int, total_parts:int, last_message_id:string|null, pending_text:string|null, error:string|null}
      */
-    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message): array
+    public function enviar_partes(string $phone, array $partes, string $context, string $partes_pendientes_separador = "\n---\n"): array
     {
-        // Split idéntico al comportamiento anterior: separador "\n---\n", trim y descarte de partes vacías.
-        $parts = array_values(array_filter(
-            array_map('trim', preg_split('/\n---\n/', $body)),
-            fn($p) => $p !== ''
-        ));
-
-        $total_parts = count($parts);
-
-        $context = 'Sugerencia de Claude - Lead #' . $lead->id
-            . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
-            . " (mensaje #{$message->id})";
+        $total_parts = count($partes);
 
         // Id de la última parte enviada con éxito hasta el momento.
         $last_message_id = null;
@@ -451,7 +461,7 @@ class LeadSuggestionSendService
         // Motivo del corte, solo se completa si alguna parte falla tras agotar los reintentos.
         $error = null;
 
-        foreach ($parts as $index => $part) {
+        foreach ($partes as $index => $part) {
             $part_sent = false;
 
             // Hasta 3 intentos por parte. Los intermedios pasan skip_failure_notification=true
@@ -486,7 +496,7 @@ class LeadSuggestionSendService
                 // pendiente incluye esta parte (la que falló) más todas las que quedaron sin
                 // intentar, para que el setter las pueda mandar a mano.
                 $error = $this->whatsapp_send_service->last_send_error;
-                $pending_text = implode("\n---\n", array_slice($parts, $index));
+                $pending_text = implode($partes_pendientes_separador, array_slice($partes, $index));
 
                 return [
                     'sent_parts'       => $sent_parts,
@@ -513,6 +523,36 @@ class LeadSuggestionSendService
             'pending_text'    => null,
             'error'           => null,
         ];
+    }
+
+    /**
+     * Envía la sugerencia de Claude al número dado, partiéndola en mensajes separados si trae "---".
+     *
+     * Lo único propio que le queda a este método es lo que distingue a una sugerencia de cualquier
+     * otro texto: el separador laxo del agente ("\n---\n", una línea con tres guiones a secas, que
+     * es lo único que le pide el prompt) y el contexto con el que se identifica el fallo. El envío
+     * en sí vive en `enviar_partes()`, compartido con el mensaje directo del panel.
+     *
+     * @param string      $phone
+     * @param string      $body
+     * @param Lead        $lead    Para armar el contexto de la notificación de fallo a admins.
+     * @param LeadMessage $message Para armar el contexto de la notificación de fallo a admins.
+     *
+     * @return array{sent_parts:int, total_parts:int, last_message_id:string|null, pending_text:string|null, error:string|null}
+     */
+    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message): array
+    {
+        // Split idéntico al comportamiento anterior: separador "\n---\n", trim y descarte de partes vacías.
+        $parts = array_values(array_filter(
+            array_map('trim', preg_split('/\n---\n/', $body)),
+            fn($p) => $p !== ''
+        ));
+
+        $context = 'Sugerencia de Claude - Lead #' . $lead->id
+            . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
+            . " (mensaje #{$message->id})";
+
+        return $this->enviar_partes($phone, $parts, $context);
     }
 
     /**
