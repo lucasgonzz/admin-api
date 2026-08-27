@@ -511,16 +511,33 @@ class RunDemoSetupService
         }
 
         $formulario_completado = $lead->demo_form_completado_at !== null;
+        $editado_por_admin     = $lead->demo_form_editado_admin_at !== null;
 
-        if (! $formulario_completado) {
-            // No es un error: el botón "Disparar setup demo" del panel de Operaciones se puede
-            // pulsar antes de que el lead abra la página, a propósito. Queda registrado porque
-            // cuando después la demo aparezca sin ecommerce o sin compras, esta línea explica
-            // por qué se armó así.
-            Log::info('Demo setup con los defaults del catálogo: el lead todavía no completó el formulario de la página inmersiva.', [
-                'lead_id' => $lead->id,
-            ]);
+        /* Esta línea existe para que, cuando después la demo aparezca sin ecommerce o sin compras,
+         * quede escrito por qué se armó así. Tiene que decir la verdad en los tres casos, y desde
+         * la misión del 27/8/2026 son tres y no dos: `respuestas_efectivas()` también toma las
+         * columnas cuando el admin las editó a mano desde el panel (`demo_form_editado_admin_at`).
+         * Mientras esta condición miraba sólo `demo_form_completado_at`, un lead con respuestas
+         * cargadas a mano se logueaba como "armado con los defaults del catálogo", que era
+         * exactamente lo contrario de lo que estaba pasando.
+         *
+         * Ninguno de los casos es un error: el botón "Disparar setup demo" del panel de
+         * Operaciones se puede pulsar en cualquier momento, a propósito. */
+        if ($formulario_completado) {
+            $texto_origen = $editado_por_admin
+                ? 'Demo setup con las respuestas del formulario: las completó el lead y además se editaron a mano desde el panel.'
+                : 'Demo setup con las respuestas que completó el lead en la página inmersiva.';
+        } elseif ($editado_por_admin) {
+            $texto_origen = 'Demo setup con las respuestas cargadas a mano desde el panel: el lead todavía no completó el formulario de la página inmersiva.';
+        } else {
+            $texto_origen = 'Demo setup con los defaults del catálogo: nadie escribió las respuestas del formulario todavía.';
         }
+
+        Log::info($texto_origen, [
+            'lead_id'               => $lead->id,
+            'formulario_completado' => $formulario_completado,
+            'editado_por_admin'     => $editado_por_admin,
+        ]);
 
         $respuestas = LeadDemoFormMapper::respuestas_efectivas($lead);
 
@@ -592,8 +609,17 @@ class RunDemoSetupService
      *
      * Es la red de contención del lead que nunca abrió la página inmersiva: el formulario es el
      * lugar natural del congelamiento, pero el botón "Disparar setup demo" del panel se puede
-     * pulsar antes. `respuestas_efectivas()` devuelve en ese caso los defaults del catálogo, así
-     * que el plan queda armado con lo que la página le habría mostrado preseleccionado.
+     * pulsar antes. El plan queda armado con `respuestas_efectivas()`, que desde la misión del
+     * 27/8/2026 son DOS cosas distintas según el caso: las respuestas que un admin cargó a mano
+     * desde la tarjeta del modal si las cargó, y los defaults del catálogo —lo que la página le
+     * habría mostrado preseleccionado— sólo si no las escribió nadie.
+     *
+     * Esa distinción no es un detalle: es lo que hace que el panel NO tenga que congelar el plan
+     * él mismo al guardar las respuestas. Si lo congelara, el lead que después completa el
+     * formulario pisaría las columnas pero se quedaría con el roadmap del admin
+     * ({@see \App\Http\Controllers\LeadController::update_demo_form_json()}, donde está escrito
+     * el caso completo). Congelando acá, el roadmap sale con las respuestas efectivas del momento
+     * en que se arma la instancia, que son las últimas que escribió alguien.
      *
      * Sólo aplica a la dinámica nueva: un lead de la dinámica actual no tiene página inmersiva,
      * ni roadmap, ni nada que congelar.

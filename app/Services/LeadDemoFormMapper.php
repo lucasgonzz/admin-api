@@ -175,8 +175,9 @@ class LeadDemoFormMapper
      * query.
      *
      * Por qué el estado va armado desde acá y no lo compone el SPA con las columnas sueltas: el
-     * aviso de la tarjeta ("lo completó el lead" / "lo editaste vos" / "son los valores por
-     * defecto") es la misma decisión que toma `respuestas_efectivas()` para armar la instancia. Si
+     * aviso de la tarjeta ("lo completó el lead" / "lo editaste vos" / "pasaron las dos cosas" /
+     * "son los valores por defecto") es la misma decisión que toma `respuestas_efectivas()` para
+     * armar la instancia. Si
      * el front la volviera a deducir por su cuenta, el día que esa regla cambie —ya cambió una vez,
      * con la marca de edición manual— la tarjeta le estaría diciendo a Lucas algo distinto de lo
      * que el demo setup va a hacer.
@@ -215,21 +216,35 @@ class LeadDemoFormMapper
     }
 
     /**
-     * De dónde salen las respuestas que hoy tienen las columnas: `defaults` si nadie las escribió,
-     * `lead` si la última palabra la tuvo el formulario público, `admin` si la tuvo el panel.
+     * Quién escribió las respuestas que hoy tienen las columnas — sólo lo que se puede AFIRMAR.
      *
-     * Se decide por fecha y no por precedencia fija porque las dos puntas pueden escribir en
-     * cualquier orden: el endpoint público no mira la marca de edición manual (a propósito, el lead
-     * siempre puede pisar lo que se haya cargado a mano) y el panel tampoco mira la del lead.
+     * Cuatro valores, ninguno deducido: `defaults` si no las escribió nadie, `lead` si la única
+     * marca es la del formulario público, `admin` si la única es la del panel, y `ambos` si las dos
+     * puntas escribieron alguna vez.
      *
-     * Empate: gana `lead`. Sólo pasa si las dos escrituras caen en el mismo segundo, y en ese caso
-     * ninguna de las dos etiquetas es demostrablemente cierta — la tarjeta muestra igual las dos
-     * fechas, así que la ambigüedad queda a la vista.
+     * 🔴 POR QUÉ `ambos` Y NO "LA MÁS RECIENTE GANA" (corregido el 27/8/2026)
+     * ----------------------------------------------------------------------
+     * Hasta esta corrección el empate se resolvía comparando las dos fechas. Esa comparación es
+     * inválida: `demo_form_completado_at` se sella en el PRIMER envío del lead y no se mueve nunca
+     * más (`DemoExperienciaController::store_formulario_json()` la escribe sólo si estaba en
+     * `null`, porque además dispara el setup automático), así que NO representa "la última vez que
+     * el lead escribió".
+     *
+     * El caso medido: el lead contesta a las 10:00, el admin edita a las 11:00, el lead reenvía a
+     * las 12:00 pisando todo. La comparación devolvía `admin` y la tarjeta mostraba "Modificado por
+     * vos el 11:00" arriba de respuestas que el lead acababa de escribir a las 12:00 y que decían
+     * lo contrario de lo que había puesto el admin.
+     *
+     * Con las columnas que hay hoy no existe forma de saber quién escribió último, así que no se
+     * inventa un ganador: se declara que pasaron las dos cosas y la tarjeta muestra las dos fechas
+     * sin afirmar cuál mandó. Lo que sí se puede afirmar SIEMPRE —y es lo que Lucas pidió que el
+     * aviso diga— es si el lead completó el formulario o no; eso viaja aparte y entero en
+     * `completado_por_lead`, que ningún caso de esta función puede perder.
      *
      * @param Carbon|null $completado_at
      * @param Carbon|null $editado_at
      *
-     * @return string `defaults` | `lead` | `admin`
+     * @return string `defaults` | `lead` | `admin` | `ambos`
      */
     private static function origen(?Carbon $completado_at, ?Carbon $editado_at): string
     {
@@ -245,7 +260,7 @@ class LeadDemoFormMapper
             return 'admin';
         }
 
-        return $editado_at->greaterThan($completado_at) ? 'admin' : 'lead';
+        return 'ambos';
     }
 
     /**

@@ -948,8 +948,10 @@ class LeadController extends Controller
      *     persistirse esos defaults más lo que él haya cambiado. Con `from_lead()` se guardarían
      *     las columnas crudas —casi todas apagadas—, que no es lo que vio en pantalla: cambiaría
      *     una sola respuesta y se llevaría puestas otras cuatro sin tocarlas.
-     *  3. Re-congela el roadmap en vez de sólo dejar constancia de la divergencia, pero SÓLO con el
-     *     setup en `pendiente` (ver abajo).
+     *  3. Re-congela el roadmap en vez de sólo dejar constancia de la divergencia, pero SÓLO si el
+     *     plan YA estaba congelado y el setup sigue en `pendiente`. Nunca lo congela por primera
+     *     vez: eso le corresponde al formulario del lead, o al demo setup si el lead no contesta
+     *     nunca (ver el bloque grande arriba de la transacción, que explica por qué).
      *
      * No pisa nada del lead: si después de esta edición el lead completa el formulario en la
      * página, sus respuestas ganan, igual que hoy. La tarjeta muestra las dos fechas para que se
@@ -989,12 +991,13 @@ class LeadController extends Controller
             'usa_ecommerce'                      => 'sometimes|boolean',
         ]);
 
-        /* La foto del estado ANTES de tocar nada, y se saca de una sola llamada porque después de
-           `to_lead()` ya no hay forma de reconstruirla: las respuestas previas se necesitan para el
-           merge Y para contar en el hilo qué cambió, y `setup_estado` / `plan_congelado` deciden
-           qué hacer con el roadmap. Es además la misma foto que la tarjeta le mostró a Lucas. */
-        $estado_previo      = LeadDemoFormMapper::estado_para_panel($lead);
-        $respuestas_previas = $estado_previo['respuestas'];
+        /* Las respuestas de ANTES de tocar nada, y se sacan acá porque después de `to_lead()` ya
+           no hay forma de reconstruirlas: se necesitan para el merge Y para contar en el hilo qué
+           cambió. Es además la misma foto que la tarjeta le mostró a Lucas.
+
+           El estado del roadmap (`demo_setup_status`, `demo_plan_congelado_at`) NO se toma de acá:
+           se relee bajo lock dentro de la transacción, ver el bloque de más abajo. */
+        $respuestas_previas = LeadDemoFormMapper::respuestas_efectivas($lead);
 
         $respuestas = array_merge($respuestas_previas, $validated);
 
@@ -1002,49 +1005,117 @@ class LeadController extends Controller
 
         $lead->demo_form_editado_admin_at = now();
 
-        /* El roadmap se re-congela sólo si el setup todavía no corrió. Con el setup ya corrido el
-           lead puede tener hitos marcados y clips vistos: rehacer el plan los dejaría apuntando a
-           clips que salieron del recorrido, que es justo lo que la regla de "nunca retroceder" de
-           la misión 48 prohíbe. La tarjeta avisa en ese caso que el recorrido quedó armado con las
-           respuestas viejas. */
-        $setup_pendiente       = ($estado_previo['setup_estado'] === 'pendiente');
-        $plan_estaba_congelado = $estado_previo['plan_congelado'];
+        /* 🔴 LA REGLA DEL ROADMAP, Y POR QUÉ NO ES "CONGELAR SIEMPRE" (27/8/2026)
+           ----------------------------------------------------------------------------------
+           El panel re-congela el plan SÓLO si YA estaba congelado y el setup sigue en
+           `pendiente`. Nunca lo congela por primera vez. Son dos mitades con motivos distintos:
 
-        \Illuminate\Support\Facades\DB::transaction(function () use ($lead, $setup_pendiente, $plan_estaba_congelado) {
-            if ($setup_pendiente && $plan_estaba_congelado) {
-                /* 🔴 El borrado del plan se PERSISTE antes de re-congelar, y no alcanza con
-                   limpiarlo en memoria: `DemoPlanResolver::congelar_en_memoria()` decide con un
-                   segundo chequeo contra la fila bloqueada (`lockForUpdate()` sobre
-                   `demo_plan_congelado_at`), no con el atributo del modelo. Sin este `save()`
-                   previo, ese chequeo seguiría viendo la fecha vieja y la re-congelación se iría
-                   sin hacer nada, en silencio. */
-                $lead->demo_plan              = null;
-                $lead->demo_plan_congelado_at = null;
-                $lead->save();
+           1. **Re-congela si ya estaba congelado y el setup sigue pendiente.** Con el setup ya
+              corrido el lead puede tener hitos marcados y clips vistos: rehacer el plan los
+              dejaría apuntando a clips que salieron del recorrido, que es justo lo que la regla
+              de "nunca retroceder" de la misión 48 prohíbe. La tarjeta avisa en ese caso que el
+              recorrido quedó armado con las respuestas viejas.
 
-                /* Y los hitos se borran porque `DemoHitosService::generar()` es idempotente: con
-                   hitos existentes no crea ninguno y el roadmap quedaría con los del plan viejo.
-                   Sólo se llega acá con el setup en `pendiente`, o sea antes de que el lead haya
-                   podido entrar a la demo y marcar nada. */
-                LeadDemoHito::where('lead_id', $lead->id)->delete();
-            }
+           2. **NO lo congela por primera vez.** Y esto es lo que alguien va a querer "completar"
+              porque parece un agujero, así que va escrito: `DemoPlanResolver::congelar_en_memoria()`
+              congela UNA sola vez y después no re-resuelve nunca (con `demo_plan_congelado_at`
+              seteada se va sin hacer nada). Si el panel congelara el plan de un lead que todavía
+              no completó el formulario, el lead que entra después y contesta distinto pisaría las
+              columnas —el endpoint público hace merge y el lead siempre gana— pero se quedaría
+              con el roadmap del admin para siempre. Caso medido: el admin contesta "No" a
+              compras, el lead contesta "Sí", y el payload sale contradiciéndose
+              (`respuestas_formulario.registra_compras = true` con un `demo_plan` armado con
+              `false`), mientras el lead nunca ve en su recorrido lo que pidió.
 
-            if (! $setup_pendiente) {
+              No congelar no pierde nada: si el lead contesta, lo congela su propio formulario
+              (camino normal); si no contesta nunca, lo congela
+              `RunDemoSetupService::congelar_plan_si_falta()` al armar la instancia — y ése
+              resuelve con `respuestas_efectivas()`, o sea que YA respeta esta edición manual.
+              Así "gana el lead" vale también para el roadmap. */
+        \Illuminate\Support\Facades\DB::transaction(function () use ($lead) {
+            /* El estado del roadmap se relee ACÁ, bajo `lockForUpdate()` y adentro de la
+               transacción, y no se toma de la foto de arriba. El comando `leads:run-demo-setup`
+               corre cada minuto y reclama leads en `pendiente`: sin lock, el tick puede reclamar
+               el lead y armar el payload con el plan viejo mientras esta transacción lo borra y
+               congela otro — y la instancia queda con un roadmap que ya no existe. El lock
+               serializa las dos y la que llega segunda decide con el estado real. Es el mismo
+               patrón, y por el mismo motivo, que ya documenta
+               `DemoPlanResolver::congelar_en_memoria()` para `demo_plan_congelado_at`. */
+            $fila = \Illuminate\Support\Facades\DB::table('leads')
+                ->where('id', $lead->id)
+                ->lockForUpdate()
+                ->first(['demo_setup_status', 'demo_plan_congelado_at']);
+
+            $setup_estado = ($fila !== null && $fila->demo_setup_status !== null)
+                ? $fila->demo_setup_status
+                : 'pendiente';
+
+            $plan_estaba_congelado = ($fila !== null && $fila->demo_plan_congelado_at !== null);
+
+            if ($setup_estado !== 'pendiente' || ! $plan_estaba_congelado) {
+                /* Los dos caminos que sólo guardan las respuestas: el setup ya corrió (el plan no
+                   se toca) o el plan todavía no está congelado (no lo congela el panel, punto 2
+                   de arriba). */
                 $lead->save();
 
                 return;
             }
 
+            /* 🔴 Se verifica que el catálogo RESUELVA antes de destruir nada. `congelar_en_memoria()`
+               devuelve `false` en dos casos distintos —el plan ya estaba congelado, o
+               `DemoCatalogoService::get()` vino vacío y `resolver()` dio `null`— y hasta hoy el
+               segundo dejaba al lead sin roadmap: el plan y los hitos ya estaban borrados y
+               persistidos, la regeneración se salteaba, y la transacción commiteaba igual sin una
+               sola excepción. Un catálogo sin sincronizar no puede costarle el plan a un lead que
+               ya lo tenía; y guardar las respuestas —lo único que Lucas pidió— tampoco puede
+               fallar por eso. Así que se deja el plan viejo intacto y se sigue guardando.
+
+               Cuesta una resolución de más (la definitiva la hace `congelar_en_memoria()`), y se
+               paga a propósito: preguntarle al mismo resolver es lo único que no se desincroniza
+               el día que `resolver()` aprenda a devolver `null` por otro motivo. */
+            if (DemoPlanResolver::resolver($lead) === null) {
+                Log::error('No se re-congeló el plan de demo desde el panel: el catálogo no está sincronizado. El plan anterior queda intacto.', [
+                    'lead_id' => $lead->id,
+                ]);
+
+                $lead->save();
+
+                return;
+            }
+
+            /* 🔴 El borrado del plan se PERSISTE antes de re-congelar, y no alcanza con
+               limpiarlo en memoria: `DemoPlanResolver::congelar_en_memoria()` decide con un
+               segundo chequeo contra la fila bloqueada (`lockForUpdate()` sobre
+               `demo_plan_congelado_at`), no con el atributo del modelo. Sin este `save()`
+               previo, ese chequeo seguiría viendo la fecha vieja y la re-congelación se iría
+               sin hacer nada, en silencio. */
+            $lead->demo_plan              = null;
+            $lead->demo_plan_congelado_at = null;
+            $lead->save();
+
+            /* Y los hitos se borran porque `DemoHitosService::generar()` es idempotente: con
+               hitos existentes no crea ninguno y el roadmap quedaría con los del plan viejo.
+               Sólo se llega acá con el setup en `pendiente`, o sea antes de que el lead haya
+               podido entrar a la demo y marcar nada. */
+            LeadDemoHito::where('lead_id', $lead->id)->delete();
+
             /* Mismo orden que el endpoint público: congelar en memoria, un solo `save()` con las
-               respuestas y el plan juntos, y los hitos adentro de la misma transacción. Si el plan
-               no estaba congelado, esta llamada lo congela por primera vez. */
-            $congelo = DemoPlanResolver::congelar_en_memoria($lead);
+               respuestas y el plan juntos, y los hitos adentro de la misma transacción. */
+            if (! DemoPlanResolver::congelar_en_memoria($lead)) {
+                /* Inalcanzable por construcción: el catálogo se acaba de verificar y las dos
+                   guardias de "ya estaba congelado" ven el `null` que se persistió recién en esta
+                   misma transacción. Si aun así devolviera `false`, la excepción tira la
+                   transacción entera atrás y el lead se queda con el plan y los hitos que tenía.
+                   Que el guardado falle y se vea es preferible a borrarle el roadmap en silencio:
+                   de acá no puede salir un lead sin plan. */
+                throw new \RuntimeException(
+                    'No se pudo re-congelar el plan de demo del lead ' . $lead->id . ' después de borrarlo.'
+                );
+            }
 
             $lead->save();
 
-            if ($congelo) {
-                DemoHitosService::generar($lead);
-            }
+            DemoHitosService::generar($lead);
         });
 
         /* Trazabilidad en el hilo del lead, con el mismo patrón de evento de sistema que usa el
