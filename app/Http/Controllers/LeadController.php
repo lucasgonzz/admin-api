@@ -575,6 +575,14 @@ class LeadController extends Controller
            llama y nada más, para que el detalle y los endpoints de acción no se desincronicen. */
         $this->append_demo_ingreso_url($lead);
 
+        /* Link público de la página de experiencia (`/experiencia/{uuid}` de admin-spa). Va
+           appendeado ACÁ y no adentro de append_demo_ingreso_url(): ese helper lo comparten los
+           endpoints que rotan el token, y este link no depende del token —sale del uuid, que no
+           cambia nunca—, así que no tiene por qué viajar en esas respuestas. Y tampoco va en un
+           `$appends` del modelo, por el mismo motivo que el otro: correría en el listado y en el
+           broadcast, donde nadie lo consume, sin que nada lo pida. */
+        $lead->append('demo_experiencia_url');
+
         return $lead;
     }
 
