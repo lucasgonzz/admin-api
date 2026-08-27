@@ -70,8 +70,41 @@ class SupportAiSuggestionService
                 ];
             }
 
-            $system_prompt = $this->build_system_prompt();
+            /* Qué partes del repositorio de conocimiento no se pudieron cargar. Antes las dos
+             * fallaban en silencio y el agente quedaba sin índice y sin protocolo de escalado,
+             * sin enterarse de que le faltaban — justo el escenario donde más improvisa. Es el
+             * hallazgo fuera de alcance #1 del informe del 25/8/2026. */
+            $fallos_repositorio = [];
+
+            $system_prompt = $this->build_system_prompt($fallos_repositorio);
             $user_content  = $this->build_user_content($ticket);
+
+            /* Sin manual no hay respuesta posible: se escala sin consultar a Claude. Consultarlo
+             * sería pagar una llamada para después no poder verificar nada de lo que conteste.
+             * Vale con protocolo viejo o nuevo: el agente no puede afirmar nada del sistema si no
+             * pudo abrir el sistema. */
+            if (! empty($fallos_repositorio)) {
+                $detalle = implode(' y ', $fallos_repositorio);
+
+                Log::channel('daily')->error('SupportAiSuggestionService: el repositorio de conocimiento no cargó, se escala sin consultar a Claude.', [
+                    'ticket_id' => $ticket->id,
+                    'fallos'    => $fallos_repositorio,
+                ]);
+
+                $veredicto = app(KnowledgeGroundingGate::class)->escalar_por_repositorio_caido($detalle);
+
+                return [
+                    'suggested_message' => '',
+                    'reasoning'         => $veredicto['motivo'],
+                    'should_close'      => false,
+                    'should_escalate'   => true,
+                    'escalation_reason' => $veredicto['motivo'],
+                    'tipo_respuesta'    => KnowledgeGroundingGate::TIPO_ESCALADO,
+                    'fuentes_kb'        => [],
+                    'gate_permitido'    => false,
+                    'gate_motivo'       => $veredicto['motivo'],
+                ];
+            }
 
             if ($ticket_needs_title) {
                 $user_content = $this->append_title_suggestion_to_user_content($user_content);
@@ -87,6 +120,16 @@ class SupportAiSuggestionService
             // Agentic loop: repite hasta end_turn o hasta el límite de iteraciones.
             $iterations = 0;
             $final_text = '';
+
+            /* Archivos del manual que el agente leyó CON ÉXITO en esta consulta. Es contra esta
+             * lista —armada por el código que ejecuta las tools, nunca por lo que declare el
+             * modelo— que el gate verifica las citas.
+             *
+             * 🔴 Variable local del método, jamás propiedad de instancia: el servicio se resuelve
+             * del contenedor y una propiedad sobreviviría de un ticket al siguiente dentro del
+             * mismo worker de cola, dejando que un ticket cite lo que leyó otro. El mismo riesgo
+             * ya está documentado en LeadAiService::execute_tool(). */
+            $leidas = [];
 
             while ($iterations < self::MAX_TOOL_ITERATIONS) {
                 $iterations++;
@@ -144,7 +187,7 @@ class SupportAiSuggestionService
                     ];
 
                     // Procesar cada tool_use y construir los tool_result.
-                    $tool_results = $this->execute_tool_calls($content_blocks, $ticket->id);
+                    $tool_results = $this->execute_tool_calls($content_blocks, $ticket->id, $leidas);
 
                     // Agregar los resultados como mensaje de user.
                     $messages[] = [
@@ -191,12 +234,40 @@ class SupportAiSuggestionService
                 ? trim((string) ($parsed['escalation_reason'] ?? ''))
                 : null;
 
+            /* --- Gate de respaldo documental ---
+             *
+             * Cruza lo que el agente dice que leyó contra lo que de verdad leyó. Si afirma algo
+             * sobre el sistema sin un archivo del manual que lo respalde, el veredicto es escalar
+             * y el texto no sale. Ver KnowledgeGroundingGate. */
+            $gate = app(KnowledgeGroundingGate::class);
+
+            $veredicto = $gate->evaluar(
+                $gate->esta_activo($system_prompt),
+                isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
+                isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
+                $leidas
+            );
+
+            if (! $veredicto['permitido']) {
+                Log::channel('daily')->warning('SupportAiSuggestionService: el gate frenó la respuesta por falta de respaldo.', [
+                    'ticket_id'      => $ticket->id,
+                    'motivo'         => $veredicto['motivo'],
+                    'tipo_respuesta' => isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
+                    'fuentes_kb'     => isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
+                    'leidas'         => $leidas,
+                ]);
+            }
+
             $result = [
                 'suggested_message' => trim((string) ($parsed['suggested_message'] ?? '')),
                 'reasoning'         => trim((string) ($parsed['reasoning'] ?? '')),
                 'should_close'      => $should_close,
                 'should_escalate'   => $should_escalate,
                 'escalation_reason' => $escalation_reason,
+                'tipo_respuesta'    => isset($parsed['tipo_respuesta']) ? (string) $parsed['tipo_respuesta'] : '',
+                'fuentes_kb'        => isset($parsed['fuentes_kb']) && is_array($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : [],
+                'gate_permitido'    => $veredicto['permitido'],
+                'gate_motivo'       => $veredicto['motivo'],
             ];
 
             if ($ticket_needs_title) {
@@ -233,10 +304,16 @@ class SupportAiSuggestionService
      */
     protected function append_title_suggestion_to_user_content(string $user_content): string
     {
+        /* 🔴 Este bloque tiene que coincidir CARÁCTER POR CARÁCTER con el de build_user_content():
+         * si los dos se desincronizan, el str_replace de abajo no encuentra nada, no falla, y el
+         * ticket sin nombre deja de pedir suggested_title para siempre y sin ruido. Al tocar el
+         * formato de salida, se tocan los dos juntos. */
         $standard_json_block = 'Generá una respuesta sugerida para el operador y explicá brevemente tu razonamiento. Respondé SOLO en JSON con este formato exacto:
 {
   "suggested_message": "...",
   "reasoning": "...",
+  "tipo_respuesta": "afirmacion_del_sistema|aclaracion|conversacional|escalado",
+  "fuentes_kb": [],
   "should_close": false,
   "should_escalate": false,
   "escalation_reason": null
@@ -251,6 +328,8 @@ Respondé SOLO en JSON con este formato exacto:
   "suggested_message": "...",
   "suggested_title": "...",
   "reasoning": "...",
+  "tipo_respuesta": "afirmacion_del_sistema|aclaracion|conversacional|escalado",
+  "fuentes_kb": [],
   "should_close": false,
   "should_escalate": false,
   "escalation_reason": null
@@ -263,15 +342,33 @@ Respondé SOLO en JSON con este formato exacto:
      * Arma el system prompt indicando a Claude cómo usar las tools del repositorio.
      * Incluye la lista de archivos .md obtenida de GitHub en cada request.
      *
+     * @param array<int, string> $fallos_repositorio Se llena con las partes del repositorio que
+     *                                               no se pudieron cargar. El llamador escala en
+     *                                               vez de responder: un agente sin índice ni
+     *                                               protocolo de escalado no puede afirmar nada
+     *                                               del sistema, y hasta ahora eso pasaba en
+     *                                               silencio.
+     *
      * @return string
      */
-    protected function build_system_prompt(): string
+    protected function build_system_prompt(array &$fallos_repositorio = []): string
     {
         // Lista de archivos del manual inyectada en el prompt (no como tool).
         $file_list = $this->fetch_manual_file_list();
 
+        if (trim($file_list) === '' || strpos($file_list, '(') === 0) {
+            /* fetch_manual_file_list() devuelve su fallback entre paréntesis cuando la API falla
+             * o el repositorio no tiene archivos. En los dos casos el agente se queda sin saber
+             * qué puede consultar. */
+            $fallos_repositorio[] = 'no se pudo leer el índice de archivos del manual';
+        }
+
         // Protocolo de escalado y cierre leído directamente desde el repositorio.
         $escalation_rules = $this->fetch_escalation_rules();
+
+        if (trim($escalation_rules) === '') {
+            $fallos_repositorio[] = 'no se pudo leer el protocolo de escalado';
+        }
 
         // Identidad compartida con el agente de leads: es la MISMA persona para el cliente,
         // antes y después de comprar. Se comparte solo quién es, no cómo trabaja: las
@@ -538,10 +635,25 @@ Generá una respuesta sugerida para el operador y explicá brevemente tu razonam
 {
   "suggested_message": "...",
   "reasoning": "...",
+  "tipo_respuesta": "afirmacion_del_sistema|aclaracion|conversacional|escalado",
+  "fuentes_kb": [],
   "should_close": false,
   "should_escalate": false,
   "escalation_reason": null
 }
+
+Reglas para tipo_respuesta y fuentes_kb:
+- tipo_respuesta describe qué clase de respuesta estás dando:
+  - "afirmacion_del_sistema": decís qué hace, qué no hace o cómo se usa ComercioCity.
+  - "aclaracion": le preguntás al cliente un dato SUYO que te falta para poder responder.
+  - "conversacional": saludo, agradecimiento o cortesía, sin afirmar nada del sistema.
+  - "escalado": no podés resolverlo y pedís revisión humana.
+- fuentes_kb lleva las rutas EXACTAS de los archivos que leíste con get_manual_file en esta misma
+  consulta y que respaldan lo que afirmás. Ejemplo: ["listado/precios.md"].
+- Si tipo_respuesta es "afirmacion_del_sistema", fuentes_kb no puede estar vacío, y cada ruta tiene
+  que ser una que hayas leído recién acá. El sistema lo verifica: si citás algo que no leíste, o no
+  citás nada, tu respuesta NO se le manda al cliente y el caso se escala igual.
+- No cites de memoria ni por el nombre del archivo en el índice: leelo primero con get_manual_file.
 
 Reglas para should_close y should_escalate:
 - should_close y should_escalate son mutuamente excluyentes: nunca ambos en true al mismo tiempo.
@@ -628,12 +740,16 @@ USER;
     /**
      * Ejecuta las tool calls de un bloque de contenido del asistente y retorna los tool_result.
      *
-     * @param array<int, mixed> $content_blocks Bloques content devueltos por Claude.
-     * @param int|string        $ticket_id      Para logging.
+     * @param array<int, mixed>  $content_blocks Bloques content devueltos por Claude.
+     * @param int|string         $ticket_id      Para logging.
+     * @param array<int, string> $leidas         Se le agregan los paths leídos CON ÉXITO. Es la
+     *                                           evidencia contra la que el gate verifica las
+     *                                           citas del agente: un path cuya lectura falló no
+     *                                           entra acá, aunque el agente después lo cite.
      *
      * @return array<int, array<string, mixed>>
      */
-    protected function execute_tool_calls(array $content_blocks, $ticket_id): array
+    protected function execute_tool_calls(array $content_blocks, $ticket_id, array &$leidas = []): array
     {
         $tool_results = [];
 
@@ -650,6 +766,11 @@ USER;
                 if ($tool_name === 'get_manual_file') {
                     $path = (string) ($tool_input['path'] ?? '');
                     $content = $this->github_get_file($path);
+
+                    /* Lectura efectiva: se anota recién acá, después de que github_get_file()
+                     * devolvió sin lanzar. Si tira, la ejecución salta al catch y este path no
+                     * queda registrado — que es justamente lo que hace verificable la cita. */
+                    $leidas[] = $path;
                 } else {
                     $content = 'Tool desconocida: '.$tool_name;
                 }
