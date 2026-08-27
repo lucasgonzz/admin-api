@@ -38,14 +38,22 @@ class CreateWhatsappAdReferralsTable extends Migration
             // evento de conversión por CAPI. Nullable porque Meta no lo manda en todos los
             // formatos de referral, y una fila sin clid igual sirve para saber qué aviso trajo
             // a la persona. Indexado para poder buscar por clid al armar el evento.
-            $table->string('ctwa_clid', 191)->nullable()->index();
+            //
+            // 🔴 500 y no 191: Meta NO documenta un máximo para el ctwa_clid. Los reales rondan los
+            // 110 caracteres, pero eso es observación, no garantía — y con `strict` en true un
+            // valor más largo no se trunca, TIRA. 500 deja margen de sobra y sigue entrando cómodo
+            // en el límite de 3072 bytes del índice de InnoDB (500 × 4 = 2000 con utf8mb4).
+            $table->string('ctwa_clid', 500)->nullable()->index();
 
             // Datos del anuncio, tal como los manda Meta. Todos nullable: el bloque `referral`
             // cambia de forma según el tipo de creatividad y no hay ninguno garantizado.
             $table->string('source_id', 191)->nullable();
             $table->string('source_type', 40)->nullable();
             $table->text('source_url')->nullable();
-            $table->string('headline', 500)->nullable();
+            // `headline` y `body` van a TEXT y no a varchar: son el título y el copy del aviso,
+            // los escribe quien arma la campaña y no hay tope publicado. Un varchar corto acá era
+            // pérdida de la fila entera, no truncado.
+            $table->text('headline')->nullable();
             $table->text('body')->nullable();
             $table->string('media_type', 40)->nullable();
             $table->text('thumbnail_url')->nullable();

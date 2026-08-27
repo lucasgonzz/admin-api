@@ -32,8 +32,8 @@ use App\Http\Controllers\RecallWebhookController;
 use App\Http\Controllers\FollowupRuleController;
 use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadCallController;
-use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\LeadController;
+use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\ProtocolEntryController;
 use App\Http\Controllers\SharedDatabaseGroupController;
 use App\Http\Controllers\UpdateCommandController;
@@ -56,10 +56,20 @@ Route::post('webhook/whatsapp', [WhatsappWebhookController::class, 'receive'])
 | Webhook CRUDO de Meta (modalidad `kind: meta` de Kapso), SOLO atribución Click-to-WhatsApp.
 | Convive con el de arriba: los dos reciben el mismo mensaje, cada uno en su formato. Este no
 | procesa mensajes ni crea leads — el bloque `referral` con el ctwa_clid solo viaja en el formato
-| crudo, y es lo único que se persiste acá. Misma firma HMAC y mismo webhook_secret.
+| crudo, y es lo único que se persiste acá.
+|
+| 🔴 Autenticación por TOKEN en el path (o cabecera X-CC-Webhook-Token), no por firma: un webhook
+| `kind: meta` no manda ninguna cabecera de firma. Ver MetaRawWebhookController.
+|
+| 🔴 Y limitador PROPIO, no `throttle:api`. El limitador `api` arma UNA sola cubeta por IP para
+| todo /api, así que dejar este webhook ahí adentro le parte al medio la capacidad al webhook de
+| Kapso —que sí crea leads y mensajes— porque Kapso ahora pega dos veces por cada mensaje entrante
+| desde la misma IP. En una ráfaga el 429 le tocaría al que no puede perderlo. Por eso el
+| withoutMiddleware(): el grupo `api` del Kernel ya trae `throttle:api` puesto.
 */
-Route::post('webhook/meta-raw', [MetaRawWebhookController::class, 'receive'])
-    ->middleware('throttle:api');
+Route::post('webhook/meta-raw/{token?}', [MetaRawWebhookController::class, 'receive'])
+    ->withoutMiddleware('throttle:api')
+    ->middleware('throttle:meta-raw-webhook');
 
 /*
 | Webhook Recall.ai (público, verificación por firma HMAC opcional)

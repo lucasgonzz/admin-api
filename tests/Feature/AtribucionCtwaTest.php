@@ -17,19 +17,26 @@ use Tests\TestCase;
  * fijos—, así que la atribución entra por el webhook CRUDO de Meta, que Kapso reenvía como
  * modalidad aparte (`kind: meta`) y que convive con el que ya está funcionando.
  *
- * 🔴 Lo que más importa verificar acá no es lo que el endpoint hace, sino lo que NO hace: no crea
+ * 🔴 LOS PEDIDOS DE ESTA SUITE NO MANDAN NINGUNA CABECERA DE FIRMA, Y ESO ES EL CONTRATO REAL, NO
+ * UNA SIMPLIFICACIÓN. Un webhook `kind: meta` reenvía el payload exacto que Kapso recibió de Meta y
+ * agrega solo `Content-Type` y `X-Idempotency-Key`. La primera versión de estos tests se fabricaba
+ * una cabecera `X-Kapso-Signature` que Kapso nunca manda: verificaba la suposición del código en
+ * vez del contrato, y por eso daba verde sobre un endpoint que en producción habría contestado 401
+ * al 100% de las entregas. La credencial es el token secreto de la URL.
+ *
+ * 🔴 Lo otro que importa verificar no es lo que el endpoint hace, sino lo que NO hace: no crea
  * leads. Los dos webhooks reciben el mismo mensaje; si este camino también diera de alta al lead,
- * cada conversación que entra por un anuncio quedaría duplicada y nada lo denunciaría hasta que
- * el lead conteste dos veces.
+ * cada conversación que entra por un anuncio quedaría duplicada y nada lo denunciaría hasta que el
+ * lead conteste dos veces.
  */
 class AtribucionCtwaTest extends TestCase
 {
     use DatabaseTransactions;
 
     /**
-     * Secreto del webhook con el que se firman los payloads de las pruebas.
+     * Token secreto configurado para las pruebas (el que iría en la URL cargada en Kapso).
      */
-    private const SECRETO = 'secreto-de-prueba-del-webhook';
+    private const TOKEN = 'token-de-prueba-largo-y-secreto-1234567890';
 
     /**
      * Teléfono de quien tocó el anuncio, tal como lo manda Meta (sin `+`).
@@ -37,7 +44,7 @@ class AtribucionCtwaTest extends TestCase
     private const TELEFONO_META = '5493414443322';
 
     /**
-     * Deja el entorno sin red y con una configuración de WhatsApp activa.
+     * Deja el entorno sin red y con una configuración de WhatsApp activa y con token cargado.
      *
      * @return void
      */
@@ -49,30 +56,53 @@ class AtribucionCtwaTest extends TestCase
 
         WhatsappConfig::query()->update(['is_active' => false]);
 
-        $config                  = new WhatsappConfig();
-        $config->kapso_api_key   = 'clave-de-prueba';
-        $config->phone_number_id = '1234567890';
-        $config->webhook_secret  = self::SECRETO;
-        $config->is_active       = true;
-        $config->test_mode       = true;
+        $config                     = new WhatsappConfig();
+        $config->kapso_api_key      = 'clave-de-prueba';
+        $config->phone_number_id    = '1234567890';
+        $config->webhook_secret     = 'secreto-del-webhook-de-kapso';
+        $config->meta_webhook_token = self::TOKEN;
+        $config->is_active          = true;
+        $config->test_mode          = true;
         $config->save();
     }
 
     /**
-     * Pega al endpoint real con el body crudo firmado.
+     * Pega al endpoint real con el token en el path y SIN ninguna cabecera de firma.
+     *
+     * Se manda `X-Idempotency-Key` porque Kapso la manda; el endpoint no la usa como credencial
+     * (es el SHA256 del propio payload, lo calcula cualquiera) y el test lo deja explícito.
      *
      * @param array<string, mixed> $payload Cuerpo del webhook.
-     * @param string|null          $firma   Firma a mandar; null usa la correcta.
+     * @param string|null          $token   Token a poner en el path; null pega a la URL sin token.
      *
      * @return \Illuminate\Testing\TestResponse
      */
-    private function postear_meta_raw(array $payload, ?string $firma = null)
+    private function postear_meta_raw(array $payload, ?string $token = self::TOKEN)
+    {
+        $body = json_encode($payload);
+        $url  = '/api/webhook/meta-raw' . ($token !== null ? '/' . $token : '');
+
+        return $this->call('POST', $url, [], [], [], [
+            'CONTENT_TYPE'            => 'application/json',
+            'HTTP_X_IDEMPOTENCY_KEY'  => hash('sha256', $body),
+        ], $body);
+    }
+
+    /**
+     * Pega al endpoint mandando el token por la cabecera alternativa, sin token en el path.
+     *
+     * @param array<string, mixed> $payload Cuerpo del webhook.
+     * @param string               $token   Token a mandar en X-CC-Webhook-Token.
+     *
+     * @return \Illuminate\Testing\TestResponse
+     */
+    private function postear_con_cabecera(array $payload, string $token)
     {
         $body = json_encode($payload);
 
         return $this->call('POST', '/api/webhook/meta-raw', [], [], [], [
-            'CONTENT_TYPE'           => 'application/json',
-            'HTTP_X_KAPSO_SIGNATURE' => $firma !== null ? $firma : hash_hmac('sha256', $body, self::SECRETO),
+            'CONTENT_TYPE'              => 'application/json',
+            'HTTP_X_CC_WEBHOOK_TOKEN'   => $token,
         ], $body);
     }
 
@@ -134,7 +164,7 @@ class AtribucionCtwaTest extends TestCase
     }
 
     /**
-     * Un referral válido se persiste con todos sus campos.
+     * Un referral válido se persiste con todos sus campos, sin ninguna cabecera de firma de por medio.
      *
      * @return void
      */
@@ -161,35 +191,69 @@ class AtribucionCtwaTest extends TestCase
     }
 
     /**
-     * Firma inválida: 401 y ni una fila escrita.
+     * El mismo token por la cabecera alternativa también entra.
      *
      * @return void
      */
-    public function test_una_firma_invalida_devuelve_401_y_no_escribe_nada()
+    public function test_el_token_por_cabecera_tambien_autentica()
+    {
+        $response = $this->postear_con_cabecera($this->payload_con_referral('wamid.CABECERA'), self::TOKEN);
+
+        $response->assertStatus(200);
+        $this->assertSame(1, WhatsappAdReferral::query()->where('wamid', 'wamid.CABECERA')->count());
+    }
+
+    /**
+     * Token equivocado: 401 y ni una fila escrita.
+     *
+     * @return void
+     */
+    public function test_un_token_invalido_devuelve_401_y_no_escribe_nada()
     {
         $antes = WhatsappAdReferral::query()->count();
 
-        $response = $this->postear_meta_raw($this->payload_con_referral(), 'firma-que-no-es');
+        $response = $this->postear_meta_raw($this->payload_con_referral(), 'token-que-no-es');
 
         $response->assertStatus(401);
         $this->assertSame($antes, WhatsappAdReferral::query()->count());
     }
 
     /**
-     * Sin ningún header de firma tampoco entra: falla cerrado.
+     * Sin token en el path ni en la cabecera tampoco entra: falla cerrado.
      *
      * @return void
      */
-    public function test_sin_firma_devuelve_401()
+    public function test_sin_token_devuelve_401()
     {
         $antes = WhatsappAdReferral::query()->count();
-        $body  = json_encode($this->payload_con_referral());
 
-        $response = $this->call('POST', '/api/webhook/meta-raw', [], [], [], [
-            'CONTENT_TYPE' => 'application/json',
-        ], $body);
+        $response = $this->postear_meta_raw($this->payload_con_referral(), null);
 
         $response->assertStatus(401);
+        $this->assertSame($antes, WhatsappAdReferral::query()->count());
+    }
+
+    /**
+     * 🔴 Token NO configurado: el endpoint rechaza TODO, incluso un pedido que trae "algún" token.
+     *
+     * Es la guarda que impide que una columna vacía deje el endpoint abierto de par en par — el
+     * mismo agujero que tenía la verificación HMAC anterior, donde `hash_hmac(..., '')` lo podía
+     * calcular cualquiera.
+     *
+     * @return void
+     */
+    public function test_con_el_token_sin_configurar_rechaza_todo()
+    {
+        $config                     = WhatsappConfig::getActive();
+        $config->meta_webhook_token = null;
+        $config->save();
+
+        $antes = WhatsappAdReferral::query()->count();
+
+        $this->postear_meta_raw($this->payload_con_referral(), self::TOKEN)->assertStatus(401);
+        $this->postear_meta_raw($this->payload_con_referral(), '')->assertStatus(401);
+        $this->postear_meta_raw($this->payload_con_referral(), null)->assertStatus(401);
+
         $this->assertSame($antes, WhatsappAdReferral::query()->count());
     }
 
@@ -246,6 +310,48 @@ class AtribucionCtwaTest extends TestCase
     }
 
     /**
+     * Un referral con valores largos se guarda entero, no se pierde.
+     *
+     * Meta no documenta máximos para `ctwa_clid`, `headline` ni `body`, y con `strict` en true un
+     * valor que no entra en la columna TIRA en vez de truncar: la fila se perdía completa, incluido
+     * el `raw` que está justamente para no perder nada.
+     *
+     * @return void
+     */
+    public function test_un_referral_con_valores_largos_entra_igual()
+    {
+        $clid     = str_repeat('A', 200);
+        $headline = str_repeat('t', 600);
+        $cuerpo   = str_repeat('c', 2000);
+
+        $payload = $this->payload_crudo([
+            'from'      => self::TELEFONO_META,
+            'id'        => 'wamid.LARGO',
+            'timestamp' => '1756300000',
+            'type'      => 'text',
+            'text'      => ['body' => 'Hola'],
+            'referral'  => [
+                'source_type' => 'ad',
+                'ctwa_clid'   => $clid,
+                'headline'    => $headline,
+                'body'        => $cuerpo,
+            ],
+        ]);
+
+        $response = $this->postear_meta_raw($payload);
+
+        $response->assertStatus(200);
+        $response->assertJson(['referrals' => 1]);
+
+        $referral = WhatsappAdReferral::query()->where('wamid', 'wamid.LARGO')->first();
+
+        $this->assertNotNull($referral, 'Un referral con valores largos no puede perderse.');
+        $this->assertSame($clid, $referral->ctwa_clid);
+        $this->assertSame($headline, $referral->headline);
+        $this->assertSame($cuerpo, $referral->body);
+    }
+
+    /**
      * 🔴 El endpoint NO crea leads, en ningún caso.
      *
      * @return void
@@ -256,7 +362,7 @@ class AtribucionCtwaTest extends TestCase
 
         $this->postear_meta_raw($this->payload_con_referral())->assertStatus(200);
         $this->postear_meta_raw($this->payload_con_referral('wamid.CTWA2'))->assertStatus(200);
-        $this->postear_meta_raw($this->payload_con_referral(), 'firma-que-no-es')->assertStatus(401);
+        $this->postear_meta_raw($this->payload_con_referral(), 'token-que-no-es')->assertStatus(401);
 
         $this->assertSame($leads_antes, Lead::query()->count(), 'El webhook de atribución no puede dar de alta leads.');
     }

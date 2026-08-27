@@ -26,6 +26,7 @@ class WhatsappConfig extends Model
         'kapso_api_key',
         'phone_number_id',
         'webhook_secret',
+        'meta_webhook_token',
         'is_active',
         'test_mode',
     ];
