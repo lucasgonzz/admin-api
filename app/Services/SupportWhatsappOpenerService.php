@@ -237,11 +237,25 @@ class SupportWhatsappOpenerService
         $message->loadMissing('attachments');
         $has_attachments = $message->attachments !== null && count($message->attachments) > 0;
 
-        // Ventana abierta, texto del agente y separadores: sale partido en varios mensajes.
-        // Solo acá: una plantilla no puede llevar tres mensajes, y partir el texto de una
-        // persona sería cambiarle lo que escribió sin que lo haya pedido.
-        if ($window['open'] && ! $has_attachments && $message->ai_generated_at !== null) {
-            $partes = $this->split_en_partes((string) ($message->body ?? ''));
+        // Ventana abierta y sin adjuntos: el texto puede salir partido en varios mensajes.
+        //
+        // Son DOS criterios distintos a propósito, no un descuido. El AGENTE separa con una
+        // línea de tres guiones a secas, que es lo único que le pide el prompt (bloque "VARIOS
+        // MENSAJES" de SupportAiSuggestionService): ese criterio ya está probado y no se toca.
+        // Una PERSONA parte solo si escribió el separador completo -renglón en blanco, tres
+        // guiones, renglón en blanco-. El argumento viejo ("partirle el texto a alguien sería
+        // cambiárselo sin que lo haya pedido") sigue en pie: lo que cambió es que ahora existe
+        // una forma explícita de pedirlo, y un "---" suelto o un subrayado de markdown sigue
+        // sin partir nada. Unificar los dos criterios rompería uno de los dos lados.
+        //
+        // Con la ventana cerrada no se parte nunca: una plantilla no puede llevar tres mensajes.
+        // Con adjunto tampoco: el adjunto viaja en un mensaje solo.
+        if ($window['open'] && ! $has_attachments) {
+            $cuerpo = (string) ($message->body ?? '');
+
+            $partes = $message->ai_generated_at !== null
+                ? $this->split_en_partes($cuerpo)
+                : (new SeparadorDeMensajesManuales())->partir($cuerpo);
 
             if (count($partes) > 1) {
                 return $this->deliver_en_partes($ticket, $message, $partes);

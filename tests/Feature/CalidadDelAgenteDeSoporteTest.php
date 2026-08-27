@@ -417,13 +417,16 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
     }
 
     /**
-     * Un mensaje del operador NO se parte, aunque tenga tres guiones.
+     * Tres guiones sueltos en el mensaje de una persona NO lo parten.
      *
-     * Partir lo que escribió una persona sería cambiarle el mensaje sin que lo haya pedido.
+     * Desde la misión del separador estandarizado una persona SÍ puede partir su mensaje, pero
+     * solo con el separador completo: renglón en blanco, línea con tres guiones, renglón en
+     * blanco. Este caso -tres guiones entre dos renglones normales- es justamente el que
+     * escribe alguien que no quiso partir nada, y partírselo sería cambiarle el mensaje.
      *
      * @return void
      */
-    public function test_el_mensaje_de_una_persona_no_se_parte()
+    public function test_un_guion_suelto_en_el_mensaje_de_una_persona_no_lo_parte()
     {
         $client = $this->crear_cliente();
         $ticket = $this->crear_ticket($client);
