@@ -354,6 +354,28 @@ class LeadProperties
              */
             [
                 /*
+                 * Link público de la página inmersiva de experiencia del lead
+                 * (`/experiencia/{uuid}` de admin-spa, grupo 300). Es la página que el lead
+                 * recorre ANTES de entrar a la demo, y es la puerta de entrada que se le manda.
+                 *
+                 * `not_persisted_on_model`: no es una columna, es el accesor
+                 * `Lead::getDemoExperienciaUrlAttribute()`, que
+                 * `LeadController::prepare_lead_for_detail_json()` inyecta en la respuesta del
+                 * detalle. Comparte renderizador con `demo_ingreso_url` a propósito: el bloque de
+                 * copiar/abrir es el mismo y el componente resuelve el texto por `key`.
+                 */
+                'key' => 'demo_experiencia_url',
+                'text' => 'Link de ingreso a la página de experiencia',
+                'type' => 'custom',
+                'custom_component' => 'lead_demo_ingreso_link',
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+                'exclude_on_update' => true,
+                'full_width' => true,
+                'value' => '',
+            ],
+            [
+                /*
                  * Link completo de ingreso a la demo, con el token ya puesto: es el que abre la
                  * demo con la sesión iniciada y con el panel de tutoriales a la vista.
                  *

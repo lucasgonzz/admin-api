@@ -303,4 +303,31 @@ class LinkDeIngresoFrescoTrasAccionTest extends TestCase
             $respuesta->json('model.demo_ingreso_url')
         );
     }
+
+    /**
+     * 6. El detalle también trae el link de la página de experiencia (`/experiencia/{uuid}` de
+     *    admin-spa), que es el otro bloque del grupo Demo del modal. Va por el REQUEST y no por el
+     *    accesor, mismo criterio que el resto del archivo: el accesor anda desde el grupo 300, lo
+     *    que puede faltar es el append en el detalle, y eso solo se ve entrando por HTTP.
+     *
+     * @return void
+     */
+    public function test_el_detalle_del_lead_trae_el_link_de_la_pagina_de_experiencia(): void
+    {
+        $this->fakear_instancia();
+        $this->autenticar_admin();
+
+        $lead = $this->crear_lead_con_token();
+
+        config(['services.admin_spa.url' => 'https://admin.test/']);
+
+        $respuesta = $this->getJson('/api/admin/lead/' . $lead->id);
+        $respuesta->assertStatus(200);
+
+        $this->assertSame(
+            'https://admin.test/experiencia/' . $lead->uuid,
+            $respuesta->json('model.demo_experiencia_url'),
+            'El detalle no trae `model.demo_experiencia_url`: el bloque del modal queda vacío.'
+        );
+    }
 }
