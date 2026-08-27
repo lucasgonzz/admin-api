@@ -44,6 +44,15 @@ class LeadAiService
     private const MAX_TOOL_ITERATIONS = 3;
 
     /**
+     * Texto que reemplaza al mensaje del agente cuando no pudo respaldarlo con el protocolo.
+     *
+     * Sigue el criterio que la REGLA 17 del protocolo ya fija para cuando falta un dato: neutro,
+     * sin prometer nada concreto y sin dar por sabido nada del sistema. Lo escribe el sistema, no
+     * el agente, porque se usa justamente cuando lo que escribió el agente no se puede confiar.
+     */
+    const MENSAJE_DE_ESPERA_SIN_RESPALDO = 'Dame un momento que lo verifico bien y te contesto.';
+
+    /**
      * Bloque de instrucciones para la IA sobre un WhatsApp Flow (formulario nativo de Meta,
      * externo a ComercioCity). Es la contraparte del texto que hasta el grupo 186 (prompt 02,
      * 22/7/2026) se guardaba tal cual en `lead_messages.content` (ver prompt 252, 3/7/2026) y
@@ -175,6 +184,37 @@ TXT;
     }
 
     /**
+     * Le pega al motivo del gate la consulta que el lead no pudo ver respondida.
+     *
+     * Cumple dos funciones: es lo que hace falta leer para completar el protocolo, y es lo que
+     * distingue un escalado de otro. Los motivos que redacta el gate son genéricos por
+     * naturaleza, y `crear_tarea_de_intervencion_humana()` más el aviso comparan el motivo para
+     * no repetirse: sin la consulta adentro, tres preguntas distintas sin respuesta producirían
+     * el mismo texto.
+     *
+     * @param Lead   $lead   Lead en curso.
+     * @param string $motivo Motivo que redactó el gate.
+     *
+     * @return string
+     */
+    private function motivo_con_la_consulta(Lead $lead, string $motivo): string
+    {
+        $ultimo = LeadMessage::where('lead_id', $lead->id)
+            ->where('sender', 'lead')
+            ->orderBy('id', 'desc')
+            ->first();
+
+        $consulta = $ultimo !== null ? trim((string) $ultimo->content) : '';
+
+        if ($consulta === '') {
+            return $motivo;
+        }
+
+        /* Acotado: viaja como variable de plantilla de Meta y como cuerpo de un push. */
+        return $motivo . ' Preguntó: "' . mb_strimwidth($consulta, 0, 180, '…') . '".';
+    }
+
+    /**
      * Genera un mensaje sugerido por IA y actualiza el estado sugerido del lead.
      *
      * Si Claude devuelve `solicita_disponibilidad: true`, se realiza una segunda
@@ -210,7 +250,11 @@ TXT;
             ],
         ];
 
-        $text = $this->run_with_tools($system_payload, $user_content, 1000, $http, $model, $lead);
+        /* Recursos del protocolo que el agente consultó con éxito en esta llamada. Lo llena el
+         * ejecutor de tools; es la evidencia contra la que el gate verifica sus citas. */
+        $recursos_leidos = [];
+
+        $text = $this->run_with_tools($system_payload, $user_content, 1000, $http, $model, $lead, $recursos_leidos);
 
         /* Log de diagnóstico: respuesta cruda de Claude en la primera llamada. */
         Log::debug('LeadAiService [PRIMERA LLAMADA] - respuesta Claude', [
@@ -219,6 +263,64 @@ TXT;
         ]);
 
         $parsed = $this->parse_json_response($text);
+
+        /*
+         * RED DE SEGURIDAD — respaldo documental (27/8/2026, decisión de Lucas).
+         *
+         * El agente declara de qué tipo es su respuesta y qué recursos del protocolo la
+         * respaldan; el gate lo cruza contra los que de verdad se le sirvieron en esta llamada.
+         * Si afirma algo sobre el sistema sin respaldo verificable, el paquete no sale: se deriva
+         * a intervención humana, como cualquier otro caso en que no se confía en la respuesta.
+         *
+         * Mismo tratamiento que el hueco #2 de más abajo (guardar_email sin agendar_demo): se
+         * marca intervención humana Y se fuerza la verificación del mensaje de este turno. Marcar
+         * solo lo primero apaga las respuestas FUTURAS pero deja salir la de ahora, que es
+         * justamente la que no queremos que llegue al lead.
+         */
+        $gate = app(KnowledgeGroundingGate::class);
+
+        /* Se declara antes del if para que exista siempre: se consulta más abajo, al decidir si
+         * corresponde la segunda llamada de disponibilidad. */
+        $gate_rechazo = false;
+
+        $veredicto_gate = $gate->evaluar(
+            $gate->esta_activo($system),
+            isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
+            isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
+            $recursos_leidos
+        );
+
+        if (! $veredicto_gate['permitido']) {
+            Log::channel('daily')->warning('LeadAiService: respuesta sin respaldo documental, deriva a intervención humana.', [
+                'lead_id'         => $lead->id,
+                'motivo'          => $veredicto_gate['motivo'],
+                'tipo_respuesta'  => isset($parsed['tipo_respuesta']) ? $parsed['tipo_respuesta'] : null,
+                'fuentes_kb'      => isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null,
+                'recursos_leidos' => $recursos_leidos,
+            ]);
+
+            $parsed['requiere_intervencion_humana'] = true;
+            $parsed['motivo_intervencion']          = $this->motivo_con_la_consulta($lead, $veredicto_gate['motivo']);
+            $parsed['requiere_verificacion']        = true;
+
+            /* 🔴 Y se le PISA el texto. Dejar el mensaje que había redactado sería dejar en la
+             * pantalla, listo para aprobar de un click, exactamente la afirmación sin respaldo
+             * que este bloque acaba de frenar — y la verificación humana se aprueba de apuro.
+             * Va el mensaje neutro que la REGLA 17 del protocolo ya define para cuando falta un
+             * dato: no promete nada concreto y le da tiempo a la persona a contestar bien. */
+            $parsed['mensaje_sugerido'] = self::MENSAJE_DE_ESPERA_SIN_RESPALDO;
+
+            /* Neutralizar el agendamiento que venía en el mismo paquete: si no confiamos en la
+             * respuesta, tampoco confiamos en la acción que trae adentro. Mismo criterio que el
+             * hueco #2 de más abajo con guardar_email. */
+            $parsed['agendar_demo'] = null;
+
+            /* Y se corta la segunda llamada de disponibilidad, más abajo. Sin esto el gate no
+             * protegería el camino de agendamiento: generate_suggestion_with_availability() arma
+             * un $parsed NUEVO desde cero y estos flags se perderían enteros, así que un paquete
+             * con solicita_disponibilidad o demo_agendada saldría igual. */
+            $gate_rechazo = true;
+        }
 
         /*
          * Determinar si hay que hacer la segunda llamada con slots disponibles.
@@ -237,6 +339,13 @@ TXT;
 
         /* true cuando cualquiera de las tres condiciones aplica */
         $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada' || $cancelar_demo_flag;
+
+        /* El gate ya decidió que esta respuesta no se puede confiar: no se gasta una segunda
+         * llamada para agendar sobre una base que no se sostiene, y —lo importante— el paquete
+         * sigue siendo el que este método armó, con la intervención humana marcada. */
+        if ($gate_rechazo) {
+            $needs_availability_check = false;
+        }
 
         /*
          * PHP resuelve la fecha (prompt 350, lead #12, 13/7/2026). Claude devuelve
@@ -5830,10 +5939,16 @@ TXT;
              * Se ejecuta en bloque separado para que un fallo en WhatsApp no afecte
              * el AdminTask ya creado ni el flujo principal del mensaje. */
             try {
+                /* Web Push primero: llega al teléfono con el admin cerrado y no gasta plantilla.
+                 * El WhatsApp queda como red de seguridad, solo para los admins que no tienen
+                 * ningún device registrado. Ver EscalationPushNotificationService. */
+                $reparto_escalado = app(\App\Services\EscalationPushNotificationService::class)
+                    ->notificar_lead($lead, $motivo_intervencion);
+
                 $escalation_service = new \App\Services\LeadEscalationWhatsappService(
                     new \App\Services\WhatsappSendService()
                 );
-                $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion);
+                $escalation_notified = $escalation_service->notify($lead, $motivo_intervencion, $reparto_escalado['sin_device']);
                 if (! empty($escalation_notified)) {
                     $admin_notifications_log[] = ['evento' => 'Escalación a humano requerida', 'admins' => $escalation_notified];
                 }
@@ -6899,9 +7014,14 @@ TXT;
      *                                         el servicio se resuelve del contenedor y una
      *                                         propiedad podría sobrevivir entre leads distintos
      *                                         dentro de un mismo worker de cola.
+     * @param array<int, string>   $leidas     Se le agrega el nombre del recurso solo si se pudo
+     *                                         servir con contenido. Es la evidencia contra la que
+     *                                         KnowledgeGroundingGate verifica lo que el agente
+     *                                         dice haber consultado; por el mismo motivo que
+     *                                         $lead, viaja por parámetro y no como propiedad.
      * @return string Contenido del recurso, o mensaje de error si el recurso es desconocido.
      */
-    private function execute_tool(string $tool_name, array $tool_input, ?Lead $lead = null): string
+    private function execute_tool(string $tool_name, array $tool_input, ?Lead $lead = null, array &$leidas = []): string
     {
         if ($tool_name !== 'get_protocolo_recurso') {
             return 'Error: tool desconocida.';
@@ -6919,8 +7039,18 @@ TXT;
         $contenido = app(WhatsappProtocolService::class)->getRecurso($nombre, $variante);
 
         if ($contenido === '') {
-            return "El recurso '{$nombre}' no está disponible todavía. Intentá responder con la información que tenés o marcá requiere_verificacion: true.";
+            /* 🔴 Hasta el 27/8/2026 esto decía "Intentá responder con la información que tenés",
+             * que es exactamente lo contrario de lo que se le pide al agente: un recurso que no
+             * sincronizó no vuelve opcional el protocolo, lo deja sin fundamento. Si el archivo
+             * que respalda la respuesta no está, no hay respuesta: hay escalado. */
+            return "El recurso '{$nombre}' no está disponible en este momento, así que no podés "
+                . "usarlo como respaldo ni dar por sabido su contenido. Si tu respuesta dependía de "
+                . "él, devolvé requiere_intervencion_humana: true con motivo_intervencion "
+                . "explicando qué información falta. NO improvises ni contestes de memoria.";
         }
+
+        /* Recurso servido de verdad: recién acá cuenta como leído. */
+        $leidas[] = $nombre;
 
         return $contenido;
     }
@@ -6943,6 +7073,11 @@ TXT;
      *                                                          que le corresponde. Ver docblock de
      *                                                          execute_tool() sobre por qué NO se
      *                                                          guarda como propiedad de instancia.
+     * @param array<int, string>               $leidas         Se llena con los recursos que el
+     *                                                          agente consultó CON ÉXITO en esta
+     *                                                          llamada. Lo arma el ejecutor de
+     *                                                          tools, nunca el modelo: es contra
+     *                                                          esto que el gate verifica sus citas.
      *
      * @throws \RuntimeException Si falla HTTP o se superan las iteraciones sin respuesta final.
      *
@@ -6954,7 +7089,8 @@ TXT;
         int $max_tokens,
         PendingRequest $http,
         string $model,
-        ?Lead $lead = null
+        ?Lead $lead = null,
+        array &$leidas = []
     ): string {
         /* Historial de mensajes del loop: arranca con el mensaje inicial del usuario. */
         $messages   = [['role' => 'user', 'content' => $user_content]];
@@ -7025,7 +7161,7 @@ TXT;
                         'variante' => $variante_log,
                     ]);
 
-                    $tool_result  = $this->execute_tool($tool_name, $tool_input, $lead);
+                    $tool_result  = $this->execute_tool($tool_name, $tool_input, $lead, $leidas);
                     $tool_results[] = [
                         'type'        => 'tool_result',
                         'tool_use_id' => $tool_id,
