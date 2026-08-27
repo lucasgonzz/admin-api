@@ -295,6 +295,48 @@ class LeadProperties
             //     'type' => 'text',
             //     'value' => '',
             // ],
+            /*
+             * 🔴 `use_deposits` Y `use_price_lists` SON, ADEMÁS, DOS DE LAS NUEVE RESPUESTAS DEL
+             *    FORMULARIO DE LA DEMO — Y AUN ASÍ SIGUEN ACÁ (27/8/2026)
+             * ---------------------------------------------------------------------------------
+             * Estos dos checkboxes escriben las MISMAS DOS COLUMNAS que la tarjeta
+             * `demo_form_panel` de más abajo (`usa_depositos` → `use_deposits`, `tipo_precios` →
+             * `use_price_lists`; la traducción entera está en `LeadDemoFormMapper`). Por esa
+             * duplicación se los sacó del meta el 27/8/2026 y se los volvió a poner el mismo día:
+             * la tarjeta NO los reemplaza, por dos motivos independientes.
+             *
+             *  1. **La tarjeta sólo es editable para la dinámica NUEVA.**
+             *     `LeadDemoFormMapper::estado_para_panel()` devuelve `editable` con
+             *     `usa_experiencia_demo_nueva()`, y `LeadController::update_demo_form_json()`
+             *     responde 422 a cualquier otro lead. Pero el default de todo lead es la dinámica
+             *     ACTUAL (`LeadDemoSettings::DEFAULT_EXPERIENCIA`, y `demo_experiencia_efectiva()`
+             *     cae a `actual` ante `null`), o sea todos los leads viejos: para ésos, estos dos
+             *     checkboxes eran la única puerta desde el SPA y sacarlos los dejaba sin ninguna.
+             *
+             *  2. **Las dos columnas no son sólo de la demo.**
+             *     `RunUserSetupService::build_payload()` las manda tal cual al setup del CLIENTE
+             *     REAL después de la promoción. Y `Lead::booted()` fuerza `use_deposits = true` al
+             *     crear el lead, así que sin este checkbox no había forma de apagar depósitos en
+             *     ningún cliente, nunca.
+             *
+             * El defecto que había detrás de la duplicación —el que motivó sacarlos— sí se
+             * arregló, pero del otro lado: `LeadController::update_json()` marca ahora
+             * `demo_form_editado_admin_at` cuando alguna de las dos cambia de verdad, y persiste
+             * las nueve respuestas efectivas. Antes de eso, tocar el checkbox escribía la columna
+             * pero `LeadDemoFormMapper::respuestas_efectivas()` seguía devolviendo los defaults del
+             * catálogo: el demo setup ignoraba el cambio y la tarjeta de al lado mostraba el valor
+             * viejo.
+             *
+             * ⚠️ Este meta NO es la única puerta de escritura de estas dos columnas, y el
+             * comentario que llegó a afirmarlo estaba mal: `LeadController::extract_data()` también
+             * las escribe, desde `store_json()` (POST `/api/admin/lead`) y desde el ABM Blade
+             * legado (`routes/web.php` → `Route::resource('leads')` → `LeadController::update()`).
+             * Lo que sí es cierto es que el meta es la única puerta del "Guardar" general del
+             * modal, porque `ModelPropertiesHelper` es una lista blanca sobre `properties()`.
+             *
+             * ⚠️ `price_type_1/2/3` son otra cosa y nunca estuvieron en discusión: son los NOMBRES
+             * de las listas de precios, un dato que no sale del formulario de la demo.
+             */
             [
                 'key' => 'use_deposits',
                 'text' => 'Usa depósitos',
@@ -319,6 +361,11 @@ class LeadProperties
                 'type' => 'text',
                 'value' => '',
             ],
+            /*
+             * La otra mitad del par: acá se guarda `tipo_precios` del formulario de la demo
+             * (`listas` → true, cualquier otra cosa → false). Por qué sigue en el meta a pesar de
+             * duplicar la tarjeta, está escrito arriba, donde `use_deposits`.
+             */
             [
                 'key' => 'use_price_lists',
                 'text' => 'Usa listas de precios',
@@ -388,6 +435,35 @@ class LeadProperties
                 'text' => 'Link de ingreso a la demo',
                 'type' => 'custom',
                 'custom_component' => 'lead_demo_ingreso_link',
+                'not_persisted_on_model' => true,
+                'not_show_on_table' => true,
+                'exclude_on_update' => true,
+                'full_width' => true,
+                'value' => '',
+            ],
+            [
+                /*
+                 * Tarjeta con las respuestas del formulario de configuración de la demo, editables
+                 * a mano desde el modal (misión del 27/8/2026). Va DESPUÉS de los dos links de
+                 * ingreso porque es donde Lucas la pidió: "debajo de los links de ingreso a la
+                 * demo".
+                 *
+                 * `not_persisted_on_model`: no es una columna, es el accesor
+                 * `Lead::getDemoFormPanelAttribute()` que
+                 * `LeadController::prepare_lead_for_detail_json()` inyecta en el detalle. Y
+                 * `exclude_on_update` porque las respuestas NO se guardan con el update genérico
+                 * del formulario: van por `PUT lead/{id}/demo-form`, que además de las columnas
+                 * marca la edición manual y re-congela el roadmap. Un update genérico que las
+                 * escribiera por su cuenta dejaría las respuestas nuevas con el plan viejo.
+                 *
+                 * `full_width` no es opcional acá: son nueve preguntas con texto largo, y la
+                 * `col-lg-3` del formulario genérico es exactamente el bug de layout que ya
+                 * documenta el comentario de arriba para el token.
+                 */
+                'key' => 'demo_form_panel',
+                'text' => 'Respuestas del formulario de la demo',
+                'type' => 'custom',
+                'custom_component' => 'lead_demo_form_respuestas',
                 'not_persisted_on_model' => true,
                 'not_show_on_table' => true,
                 'exclude_on_update' => true,
