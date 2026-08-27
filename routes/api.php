@@ -207,6 +207,14 @@ Route::middleware('claude.task.key')
            levanta el motor de seguimiento automático y se le mandan a un lead. */
         Route::get('client-templates', 'Api\ClaudeClientTemplatesController@index_json');
         Route::post('client-templates', 'Api\ClaudeClientTemplatesController@store_json');
+
+        /* Multimedia de la demo: el mismo GET/PUT que la pantalla /multimedia-demo del admin,
+           pero para la sesion de Claude que produce los clips. Es el ultimo paso del pipeline de
+           `/filmar` — sin esto, un clip publicado en R2 queda invisible para el lead porque nadie
+           apunto su URL. La validacion y el guardado se delegan en Api\DemoMediaController: no
+           hay dos definiciones de "slot valido". */
+        Route::get('demo-media', 'Api\ClaudeDemoMediaController@index_json');
+        Route::put('demo-media', 'Api\ClaudeDemoMediaController@update_json');
     });
 
 /*
