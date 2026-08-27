@@ -185,10 +185,15 @@ class ClaudeLeadQueryService
      *    contacto infla el denominador de cualquier tasa de respuesta.
      *  - `is_status_event = 1` → evento interno, no actividad real del hilo (el propio
      *    `LeadMessage::booted()` los excluye de `last_message_at`).
-     *  - `whatsapp_message_id IS NULL` → Kapso nunca confirmó el envío; es exactamente la
-     *    firma del problema de pago de Meta. Sin este filtro la tasa de respuesta cae
-     *    durante esa ventana como si los leads hubieran dejado de contestar, cuando lo
-     *    que pasó es que no les llegó nada.
+     *  - `whatsapp_message_id IS NULL` → Kapso nunca confirmó el envío. Sin este filtro la
+     *    tasa de respuesta cae durante esa ventana como si los leads hubieran dejado de
+     *    contestar, cuando lo que pasó es que no les llegó nada.
+     *    🔴 Este null NO identifica una causa, solo dice que el envío no se confirmó. Hasta el
+     *    27/8/2026 acá decía que era "la firma del problema de pago de Meta": era falso y
+     *    desvió el diagnóstico durante seis semanas. La causa real de los 2.933 seguimientos
+     *    caídos entre julio y agosto de 2026 fue una variable de plantilla vacía (error 131008
+     *    de Meta), que a su vez venía de que el nombre del lead se descartaba al entrar por el
+     *    webhook. Ante un pico de nulls, medir antes de atribuirlo a algo.
      *
      * @param  string $alias Alias o nombre de tabla de lead_messages.
      * @return string

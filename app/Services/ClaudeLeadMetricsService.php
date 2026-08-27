@@ -331,9 +331,11 @@ class ClaudeLeadMetricsService
                 $den_entregado,
                 'Igual que respondio_alguna_vez pero exigiendo además confirmación de ENTREGA de Meta '
                     . "(whatsapp_delivery_status en 'entregado' o 'leido'). "
-                    . '🔴 La diferencia entre esta tasa y respondio_alguna_vez es el daño del problema de pago de Meta, '
-                    . 'aislado: mensajes que Kapso aceptó pero que Meta nunca entregó. Si el denominador de esta es '
-                    . 'mucho más chico que el de la otra, ahí está la ventana rota.'
+                    . '🔴 La diferencia entre esta tasa y respondio_alguna_vez aísla los mensajes que Kapso aceptó '
+                    . 'pero que Meta nunca entregó. Si el denominador de esta es mucho más chico que el de la otra, '
+                    . 'ahí está la ventana rota — pero la brecha NO dice por qué. Hasta el 27/8/2026 acá se la '
+                    . 'atribuía al "problema de pago de Meta"; era falso y desvió el diagnóstico seis semanas. '
+                    . 'La causa medida en julio-agosto de 2026 fue una variable de plantilla vacía (error 131008).'
             ),
             'respondio_al_primer_contacto' => static::definicion(
                 $num_primer,

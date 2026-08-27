@@ -11,7 +11,9 @@ use Tests\TestCase;
  * Los endpoints de lectura de `claude/*`: leads, mensajes y métricas.
  *
  * El caso que originó todo esto y que este test protege puntualmente: encontrar los seguimientos
- * automáticos que NO se pudieron entregar durante el problema de pago de Meta. Esos mensajes
+ * automáticos que NO se pudieron entregar. (Hasta el 27/8/2026 acá decía "durante el problema de
+ * pago de Meta": ese diagnóstico era falso. La causa medida fue una variable de plantilla vacía,
+ * error 131008, arrastrada desde el nombre del lead que se descartaba en el webhook.) Esos mensajes
  * quedan en la base con una firma precisa —`is_followup=1`, `followup_template_id` cargado,
  * `whatsapp_message_id` en null y el motivo en `whatsapp_send_error`— y el endpoint tiene que
  * devolver exactamente esos y ninguno más. Un filtro que se lleve puesto un seguimiento que SÍ
