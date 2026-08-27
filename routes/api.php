@@ -495,7 +495,11 @@ Route::prefix('admin')->group(function () {
         Route::get('support-ticket/unread-badges', [\App\Http\Controllers\Api\SupportTicketController::class, 'unread_badges']);
         // Va antes de support-ticket/{id}: si no, {id} se come "whatsapp-contacts".
         Route::get('support-ticket/whatsapp-contacts', [\App\Http\Controllers\Api\SupportTicketController::class, 'whatsapp_contacts']);
+        // Igual que la de arriba: si quedara después de support-ticket/{id}, el {id} se comería
+        // "contact-search" y el buscador del modal de alta contestaría 404.
+        Route::get('support-ticket/contact-search', [\App\Http\Controllers\Api\SupportTicketController::class, 'contact_search']);
         Route::get('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'show']);
+        Route::get('support-ticket/{id}/whatsapp-window', [\App\Http\Controllers\Api\SupportTicketController::class, 'whatsapp_window']);
         Route::post('support-ticket', [\App\Http\Controllers\Api\SupportTicketController::class, 'store']);
         Route::put('support-ticket/{id}', [\App\Http\Controllers\Api\SupportTicketController::class, 'update']);
         Route::post('support-ticket/{ticket_id}/message', [\App\Http\Controllers\Api\SupportMessageController::class, 'store']);
