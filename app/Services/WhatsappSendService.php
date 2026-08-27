@@ -261,6 +261,36 @@ class WhatsappSendService
 
         $notify_context = $context !== null ? $context : "Envío de plantilla '{$template_name}' a {$to}";
 
+        /*
+         * 🔴 GUARD DE VARIABLE VACÍA. No lo saques "porque más abajo ya está el `! empty($variables)`".
+         *
+         * Ese `! empty()` NO cubre este caso y por eso está esta guarda separada: `['']` no está
+         * vacío —tiene un elemento— así que pasa el chequeo, se arma el componente `body` y sale a
+         * la red un parámetro de texto vacío. Y para Meta un parámetro de texto vacío ES un
+         * parámetro que falta: responde `(#131008) Required parameter is missing` y descarta el
+         * mensaje. El aguas arriba es igual de engañoso: `$lead->contact_name ?? ''` parece un
+         * fallback y no lo es, porque `??` solo atrapa null y el campo puede venir `''`.
+         *
+         * Dos guardas que parecían cubrir el caso y ninguna lo cubría: 2.933 seguimientos perdidos
+         * sobre 159 leads entre julio y agosto de 2026, todos con `whatsapp_message_id` null. Se
+         * corta acá, antes de salir a la red, porque un envío rechazado por Meta consume ventana de
+         * conversación y no deja rastro legible de por qué.
+         *
+         * Va antes de resolve_send_context() a propósito: un payload inválido es inválido tenga o
+         * no configuración activa, y así el motivo del fallo queda escrito igual.
+         */
+        $empty_variable_error = $this->find_empty_template_variable($template_name, $variables);
+        if ($empty_variable_error !== null) {
+            Log::channel('daily')->warning('WhatsappSendService: plantilla con variable vacía, envío cortado antes de salir.', [
+                'to'       => $to,
+                'template' => $template_name,
+                'error'    => $empty_variable_error,
+            ]);
+            $this->notify_admins_of_failure($notify_context, $empty_variable_error, false);
+
+            return null;
+        }
+
         $send_context = $this->resolve_send_context();
         if ($send_context === null) {
             return null;
@@ -320,6 +350,40 @@ class WhatsappSendService
                 'error'    => $exception->getMessage(),
             ]);
             $this->notify_admins_of_failure($notify_context, $exception->getMessage(), false);
+        }
+
+        return null;
+    }
+
+    /**
+     * Busca la primera variable de plantilla que llegó vacía y devuelve el motivo legible.
+     *
+     * Se compara con `trim()` y no con `empty()`: `'   '` no está vacío para PHP y sí lo está para
+     * Meta. `'0'` sí es un valor válido, y por eso tampoco sirve `empty()` acá.
+     *
+     * @param string            $template_name Nombre de la plantilla, para que el motivo diga cuál.
+     * @param array<int, mixed> $variables     Valores posicionales del body ({{1}}, {{2}}…).
+     *
+     * @return string|null Motivo en castellano, o null si todas las variables tienen contenido.
+     */
+    private function find_empty_template_variable(string $template_name, array $variables): ?string
+    {
+        /* Posición 1-based, que es como Meta numera los placeholders. */
+        $posicion = 0;
+
+        foreach ($variables as $value) {
+            $posicion++;
+            $placeholder = '{{' . $posicion . '}}';
+
+            if (is_array($value) || is_object($value)) {
+                return "La plantilla '{$template_name}' no se envió: la variable {$placeholder} llegó con un valor no textual.";
+            }
+
+            if (trim((string) $value) === '') {
+                return "La plantilla '{$template_name}' no se envió porque la variable {$placeholder} llegó vacía. "
+                    . 'Para Meta un parámetro de texto vacío es un parámetro que falta '
+                    . '(error 131008: Required parameter is missing), así que el mensaje se habría rechazado igual.';
+            }
         }
 
         return null;

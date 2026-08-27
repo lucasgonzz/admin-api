@@ -68,7 +68,13 @@ class ClaudeLeadsAnalyticsController extends Controller
             'message_statuses'  => ClaudeLeadQueryService::MESSAGE_STATUSES,
             'delivery'          => [
                 'confirmado'    => 'whatsapp_message_id IS NOT NULL — Kapso aceptó el envío.',
-                'no_confirmado' => 'whatsapp_message_id IS NULL — el envío NO salió. Es la firma del problema de pago de Meta.',
+                'no_confirmado' => 'whatsapp_message_id IS NULL — Kapso nunca confirmó el envío: el mensaje NO salió. '
+                    . 'Es un envío no confirmado y nada más; NO asumas una causa a partir de este campo. '
+                    . 'La causa medida para el pico de julio-agosto de 2026 (2.933 seguimientos sobre 159 leads) fue una '
+                    . 'variable de plantilla vacía: {{1}} viajaba como string vacío y Meta lo rechazó con el error 131008 '
+                    . '(Required parameter is missing). NO fue un impago de Meta — ese diagnóstico estuvo escrito acá '
+                    . 'hasta el 27/8/2026 y desvió el análisis durante semanas. Para el motivo real de cada fila mirá '
+                    . 'lead_messages.whatsapp_send_error.',
                 'entregado'     => "whatsapp_delivery_status = 'entregado'.",
                 'leido'         => "whatsapp_delivery_status = 'leido'.",
                 'fallido'       => "whatsapp_delivery_status = 'fallido'.",
@@ -418,7 +424,12 @@ class ClaudeLeadsAnalyticsController extends Controller
 
     /**
      * Consulta de mensajes CRUZADA entre leads. Es la que resuelve el caso de los
-     * seguimientos que no se pudieron entregar por el problema de pago de Meta.
+     * seguimientos que no se pudieron entregar.
+     *
+     * 🔴 Hasta el 27/8/2026 este comentario decía «por el problema de pago de Meta». Era falso y
+     * costó semanas de análisis en la dirección equivocada: la causa medida fue una variable de
+     * plantilla vacía ({{1}} sin nombre del lead → Meta 131008), no un impago. Un
+     * `whatsapp_message_id` null significa envío no confirmado y nada más.
      *
      * Tres modos, de menos a más pesado:
      *   - `count_only=true` → solo {count, leads_distintos}. Ninguna fila.

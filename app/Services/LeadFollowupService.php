@@ -29,6 +29,19 @@ class LeadFollowupService
     protected const ESTADOS_CLOSER = ['demo_realizada', 'mail2_enviado'];
 
     /**
+     * Saludo de reemplazo cuando el lead no tiene un nombre utilizable para `{{1}}`.
+     *
+     * 🔴 No lo cambies por `''` ni por `null` "porque queda más prolijo sin nombre". Para Meta un
+     * parámetro de texto vacío ES un parámetro que falta: responde `(#131008) Required parameter
+     * is missing` y el mensaje no sale. Ese fue el fallo que costó 2.933 seguimientos entre julio
+     * y agosto de 2026.
+     *
+     * El texto lo eligió Lucas el 27/8/2026: `Hola qué tal!` se lee natural en rioplatense, que es
+     * lo que ve el lead cuando no sabemos cómo se llama.
+     */
+    public const NOMBRE_GENERICO = 'qué tal';
+
+    /**
      * Procesa todos los leads que no están cerrados / en pausa final.
      *
      * @return array{processed:int,suggestions:int,paused:int,errors:int}
@@ -453,8 +466,8 @@ class LeadFollowupService
      */
     public function send_followup_via_template(Lead $lead, FollowupTemplate $template, int $followup_number): void
     {
-        // Nombre del contacto como variable {{1}} de la plantilla (vacío si no hay).
-        $contact_name = $lead->contact_name ?? '';
+        // Variables del body armadas desde los placeholders REALES de esta plantilla.
+        $variables = $this->build_template_variables($template, $lead);
 
         // Envío directo del template aprobado a través de Kapso/Meta.
         // El contexto se pasa directo para que, si falla, WhatsappSendService notifique a
@@ -464,7 +477,7 @@ class LeadFollowupService
         $whatsapp_message_id = $sender->send_template(
             $lead->phone,
             $template->template_name,
-            [$contact_name],
+            $variables,
             $template->language_code,
             "Seguimiento automático - Lead #{$lead->id} ({$lead->contact_name})"
         );
@@ -569,10 +582,86 @@ class LeadFollowupService
     }
 
     /**
+     * Arma los valores de las variables del body de la plantilla, en el orden en que Meta los
+     * espera ({{1}}, {{2}}…).
+     *
+     * 🔴 SE ARMA DESDE LOS PLACEHOLDERS REALES DE LA PLANTILLA, NO A CIEGAS. No lo vuelvas a
+     * reducir a `[$lead->contact_name]`: así estaba hasta el 27/8/2026 y rompía por los dos lados.
+     *
+     *   - Plantilla SIN `{{1}}`: se mandaba igual un parámetro, o sea que se armaba el componente
+     *     `body` con un valor de más para una plantilla que no lo pide. Meta rechaza el envío.
+     *   - Lead sin nombre: viajaba `''`. Para Meta un parámetro de texto vacío ES un parámetro que
+     *     falta — `(#131008) Required parameter is missing`. 2.933 seguimientos perdidos sobre 159
+     *     leads entre julio y agosto de 2026.
+     *
+     * El parseo de los `{{n}}` NO se reimplementa acá: lo hace el accessor `variables` de
+     * {@see FollowupTemplate}, que es el único lugar donde se sabe qué significa cada placeholder
+     * de cada plantilla (el `{{2}}` es la hora de la demo en los recordatorios y el motivo de la
+     * demora en `cc_recuperacion_motivo`). Dos parseos separados se desincronizan solos.
+     *
+     * @param FollowupTemplate $template Plantilla a enviar.
+     * @param Lead             $lead     Lead destinatario.
+     *
+     * @return array<int, string> Valores posicionales; array vacío si la plantilla no tiene {{n}}.
+     */
+    private function build_template_variables(FollowupTemplate $template, Lead $lead): array
+    {
+        /* Placeholders realmente presentes en body_template, ya parseados por el modelo. */
+        $placeholders = $template->variables;
+        if (! is_array($placeholders) || count($placeholders) === 0) {
+            /* Sin {{n}}: array vacío para que send_template() no arme el componente `body`. */
+            return [];
+        }
+
+        $variables = [];
+        foreach ($placeholders as $placeholder) {
+            $nombre = isset($placeholder['placeholder']) ? (string) $placeholder['placeholder'] : '';
+
+            if ($nombre === '{{1}}') {
+                $variables[] = $this->resolve_contact_name_variable($lead);
+                continue;
+            }
+
+            /* Cualquier otro {{n}} sale del campo del lead que declara el accessor. Si no hay campo
+               declarado, o el lead lo tiene vacío, el valor queda vacío A PROPÓSITO: el guard de
+               WhatsappSendService::send_template() corta antes de salir a la red y deja dicho en
+               last_send_error qué placeholder faltó. Es preferible un seguimiento que no sale y
+               queda registrado como fallido, a uno que sale con un hueco adentro. */
+            $campo = isset($placeholder['field']) ? (string) $placeholder['field'] : '';
+            $variables[] = $campo !== '' ? trim((string) ($lead->{$campo} ?? '')) : '';
+        }
+
+        return $variables;
+    }
+
+    /**
+     * Valor de `{{1}}` (nombre del contacto), con el reemplazo genérico si el lead no tiene uno
+     * utilizable.
+     *
+     * 🔴 `trim()` y no `??`: el lead puede tener `contact_name = ''` o `'   '` en base, y `??` solo
+     * atrapa null. Es exactamente el agujero que dejó pasar el string vacío hasta Meta.
+     *
+     * Lo usan los DOS caminos —el envío y el texto que se guarda en el hilo— a propósito: si cada
+     * uno resolviera el nombre por su cuenta, la conversación mostraría un texto distinto del que
+     * de verdad recibió el lead.
+     *
+     * @param Lead $lead Lead destinatario.
+     *
+     * @return string Nombre del contacto, o {@see self::NOMBRE_GENERICO}.
+     */
+    private function resolve_contact_name_variable(Lead $lead): string
+    {
+        $contact_name = trim((string) ($lead->contact_name ?? ''));
+
+        return $contact_name !== '' ? $contact_name : self::NOMBRE_GENERICO;
+    }
+
+    /**
      * Devuelve el texto del mensaje a mostrar en la conversación del lead.
      *
      * Si la plantilla tiene `body_template` cargado, reemplaza {{1}} con el nombre
-     * del contacto y devuelve el texto real enviado al lead.
+     * del contacto (o con {@see self::NOMBRE_GENERICO} si no hay uno utilizable, igual que el
+     * envío) y devuelve el texto real enviado al lead.
      * Si no tiene body_template (ej: estados gestionados por el closer), usa el
      * placeholder clásico para mantener trazabilidad del nombre de plantilla.
      *
@@ -591,8 +680,11 @@ class LeadFollowupService
             return "[Seguimiento automático — plantilla: {$template->template_name}]";
         }
 
-        /* Nombre del contacto para sustituir {{1}} (variable de Meta). */
-        $contact_name = trim((string) ($lead->contact_name ?? ''));
+        /* Nombre del contacto para sustituir {{1}}, resuelto por el MISMO camino que la variable
+           que se le manda a Meta. No lo sustituyas por el nombre crudo del lead: con un lead sin
+           nombre esto producía `Hola !` en el hilo mientras el envío mandaba `''`, o sea que la
+           conversación mostraba un texto que nadie recibió nunca. */
+        $contact_name = $this->resolve_contact_name_variable($lead);
 
         return str_replace('{{1}}', $contact_name, $body);
     }
