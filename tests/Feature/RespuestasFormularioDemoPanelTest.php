@@ -172,6 +172,42 @@ class RespuestasFormularioDemoPanelTest extends TestCase
     }
 
     /**
+     * Deja un catálogo que es JSON VÁLIDO y no está vacío, pero del que no sale ni una sección
+     * utilizable: los nombres de `orden_secciones` no cruzan con ningún `clips[].seccion`.
+     *
+     * Es el caso del typo al editar `demo_catalogo.json` —el archivo se sincroniza a producción sin
+     * deploy—, y es distinto del catálogo sin sincronizar de `romper_catalogo()`: acá
+     * `DemoCatalogoService::get()` devuelve contenido, así que `DemoPlanResolver::resolver()` NO
+     * devuelve `null`. Devuelve un plan perfectamente formado con `secciones: []`, que es lo que
+     * hace que preguntar sólo por `null` no alcance para proteger el roadmap del lead.
+     *
+     * @return void
+     */
+    private function sembrar_catalogo_sin_secciones_utilizables(): void
+    {
+        $catalogo = [
+            'version' => 2,
+            // El typo: las dos secciones existen en el catálogo con OTRO nombre.
+            'orden_secciones' => ['S1 – Listado', 'S4 – Compras'],
+            'clips'           => [
+                ['id' => '1.1', 'seccion' => 'S1 - Listado', 'titulo' => 'Crear un articulo', 'tipo' => 'nucleo', 'practica' => true, 'condicion' => null, 'evento_esperado' => 'articulo.creado'],
+                ['id' => '4.1', 'seccion' => 'S4 - Compras', 'titulo' => 'Cargar una compra', 'tipo' => 'nucleo', 'practica' => true, 'condicion' => null, 'evento_esperado' => 'compra.creada'],
+            ],
+            'condiciones_secciones' => [],
+        ];
+
+        $synced = SyncedGithubFile::obtener_por_key(DemoCatalogoService::SYNCED_FILE_KEY);
+        if ($synced === null) {
+            $synced            = new SyncedGithubFile();
+            $synced->key       = DemoCatalogoService::SYNCED_FILE_KEY;
+            $synced->repo_path = 'contexto/demo_catalogo.json';
+        }
+
+        $synced->content = json_encode($catalogo);
+        $synced->save();
+    }
+
+    /**
      * Congela el plan del lead y le genera los hitos, tal como habría quedado si el formulario se
      * hubiese enviado antes de la edición manual.
      *
@@ -572,6 +608,10 @@ class RespuestasFormularioDemoPanelTest extends TestCase
      * excepción: el lead quedaba con `demo_plan = NULL`, `demo_plan_congelado_at = NULL` y cero
      * hitos, y como el plan se congela una sola vez, no volvía a armarse nunca.
      *
+     * Éste es el caso del catálogo que NO resuelve. El hermano —catálogo que resuelve pero no
+     * produce ninguna sección utilizable, que es el que se colaba por el chequeo de `null`— es el
+     * caso 13.
+     *
      * Sin el arreglo este test falla en las tres aserciones del plan y los hitos.
      *
      * @return void
@@ -766,30 +806,46 @@ class RespuestasFormularioDemoPanelTest extends TestCase
     }
 
     /**
-     * 11. El update genérico del modal ya no puede escribir `use_deposits` ni `use_price_lists`:
-     *     la tarjeta es la única puerta a esas dos columnas.
+     * 11. 🔴 EL "GUARDAR" GENERAL DEL MODAL TAMBIÉN CUENTA: escribe `use_deposits` /
+     *     `use_price_lists` Y MARCA la edición manual.
      *
-     * El defecto que cubre: el grupo Demo del meta tenía dos checkboxes editables sobre las mismas
-     * columnas que escribe la tarjeta. Tocarlos y apretar el "Guardar" general del modal escribía
-     * las columnas SIN marcar `demo_form_editado_admin_at`, así que `respuestas_efectivas()` seguía
-     * devolviendo los defaults, el demo setup ignoraba el cambio y la tarjeta de al lado mostraba
+     * El defecto que cubre: el grupo Demo del meta tiene dos checkboxes editables sobre las mismas
+     * columnas que escribe la tarjeta (`usa_depositos` → `use_deposits`, `tipo_precios` →
+     * `use_price_lists`). Tocarlos y apretar el "Guardar" general del modal escribía las columnas
+     * SIN marcar `demo_form_editado_admin_at`, así que `respuestas_efectivas()` seguía devolviendo
+     * los defaults del catálogo, el demo setup ignoraba el cambio y la tarjeta de al lado mostraba
      * el valor viejo. Dos controles para el mismo dato y sólo uno contaba.
      *
-     * `ModelPropertiesHelper::set_from_request()` es una lista blanca sobre `properties()`: sacar
-     * los dos campos del meta es lo que cierra el camino de escritura.
+     * Se probó cerrarlo sacando los dos campos del meta —`ModelPropertiesHelper::set_from_request()`
+     * es una lista blanca sobre `properties()`— y se revirtió el mismo día: la tarjeta sólo es
+     * editable para la dinámica NUEVA y el default de todo lead es la ACTUAL, así que esos dos
+     * checkboxes eran la única puerta desde el SPA para la mayoría de los leads; y las dos columnas
+     * alimentan además `RunUserSetupService::build_payload()`, o sea el setup del cliente real.
+     * Se cierra del otro lado: el guardado genérico marca la edición.
+     *
+     * La segunda mitad del test cubre el efecto lateral de marcar: `respuestas_efectivas()` deja de
+     * devolver los defaults del catálogo y pasa a leer las nueve columnas. Eso es inofensivo hoy
+     * porque la migración de las seis columnas nuevas copió el default del catálogo en cada una, y
+     * la única que discrepa —`usa_depositos`, que `Lead::booted()` fuerza a `true`— es justo la que
+     * el checkbox le está mostrando tildada a Lucas. La aserción final es el canario de esa
+     * igualdad: si alguien cambia un default del catálogo sin migración (o al revés), rompe acá y
+     * no en la demo de un lead.
      *
      * @return void
      */
-    public function test_el_update_generico_del_modal_ya_no_escribe_las_columnas_del_formulario(): void
+    public function test_el_update_generico_del_modal_escribe_las_columnas_y_marca_la_edicion_manual(): void
     {
         $this->autenticar_admin();
 
-        $lead                  = $this->crear_lead();
-        $lead->use_deposits    = false;
-        $lead->use_price_lists = false;
-        $lead->price_type_1    = 'Mayorista';
+        $lead               = $this->crear_lead();
+        $lead->price_type_1 = 'Mayorista';
         $lead->save();
 
+        $this->assertNull($lead->fresh()->demo_form_editado_admin_at, 'El lead ya venía marcado: el caso no se está reproduciendo.');
+        $this->assertFalse((bool) $lead->fresh()->use_price_lists, 'El lead ya venía con listas de precios: el caso no se está reproduciendo.');
+
+        /* El modal manda el borrador entero: `use_deposits` viaja con el valor que ya tenía y
+           `use_price_lists` es lo único que Lucas tildó. */
         $respuesta = $this->putJson('/api/admin/lead/' . $lead->id, [
             'use_deposits'    => true,
             'use_price_lists' => true,
@@ -799,12 +855,153 @@ class RespuestasFormularioDemoPanelTest extends TestCase
 
         $lead = $lead->fresh();
 
-        $this->assertFalse((bool) $lead->use_deposits, 'El update genérico del modal sigue escribiendo use_deposits por fuera de la tarjeta.');
-        $this->assertFalse((bool) $lead->use_price_lists, 'El update genérico del modal sigue escribiendo use_price_lists por fuera de la tarjeta.');
-        $this->assertNull($lead->demo_form_editado_admin_at, 'El update genérico marcó la edición manual del formulario.');
+        $this->assertTrue((bool) $lead->use_price_lists, 'El update genérico del modal dejó de escribir use_price_lists.');
+        $this->assertNotNull(
+            $lead->demo_form_editado_admin_at,
+            'El update genérico escribió la columna sin marcar la edición manual: el demo setup la va a ignorar igual.'
+        );
 
-        /* Y los nombres de las listas de precios SÍ se siguen editando ahí: son otro dato, no
-           salen del formulario de la demo y nadie pidió sacarlos. */
+        /* Y los nombres de las listas de precios se siguen editando ahí, como siempre: son otro
+           dato y no salen del formulario de la demo. */
         $this->assertSame('Minorista', $lead->price_type_1, 'Se rompió la edición de los nombres de las listas de precios.');
+
+        /* 🔴 Lo que el demo setup va a usar de acá en adelante: la respuesta que Lucas cambió, y
+           las otras ocho tal como estaban a la vista. `usa_depositos` sale `true` porque es lo que
+           decía el checkbox de al lado, y no `false` como el catálogo: después de guardar, la
+           tarjeta y el checkbox dicen lo mismo. */
+        $esperadas = array_merge(LeadDemoFormMapper::RESPUESTAS_POR_DEFECTO, [
+            'tipo_precios'  => 'listas',
+            'usa_depositos' => true,
+        ]);
+        $efectivas = LeadDemoFormMapper::respuestas_efectivas($lead);
+        ksort($esperadas);
+        ksort($efectivas);
+
+        $this->assertSame(
+            $esperadas,
+            $efectivas,
+            'Marcar la edición manual movió respuestas que nadie tocó: las columnas dejaron de coincidir con los defaults del catálogo.'
+        );
+    }
+
+    /**
+     * 12. Guardar el modal SIN tocar los dos checkboxes no marca ninguna edición manual.
+     *
+     * Es la otra mitad del caso 11 y la razón por la que la comparación se hace entre COLUMNAS y no
+     * entre respuestas efectivas. `Lead::booted()` fuerza `use_deposits = true` al crear el lead,
+     * mientras que el default del catálogo es `usa_depositos => false`: un lead recién creado tiene
+     * la columna y la respuesta efectiva en desacuerdo desde que nace. Comparando contra la
+     * efectiva, cualquier guardado del modal —cambiar el teléfono, corregir el nombre— marcaría
+     * edición manual del formulario y congelaría para siempre las nueve columnas crudas del lead.
+     *
+     * El PUT manda las dos claves porque el modal manda el borrador entero en cada guardado; lo que
+     * define que no hubo edición es que llegan con el MISMO valor que ya tenían.
+     *
+     * @return void
+     */
+    public function test_guardar_el_modal_sin_tocar_los_checkboxes_no_marca_edicion_manual(): void
+    {
+        $this->autenticar_admin();
+
+        $lead = $this->crear_lead();
+
+        // La precondición del caso: la columna dice `true` y el default del catálogo dice `false`.
+        $this->assertTrue((bool) $lead->fresh()->use_deposits, 'El lead nuevo no nació con use_deposits en true: el caso no se está reproduciendo.');
+        $this->assertFalse(LeadDemoFormMapper::RESPUESTAS_POR_DEFECTO['usa_depositos'], 'El default del catálogo cambió: el caso ya no distingue columnas de defaults.');
+
+        $respuesta = $this->putJson('/api/admin/lead/' . $lead->id, [
+            // El borrador entero, con los dos checkboxes tal como los trajo el modal.
+            'use_deposits'    => true,
+            'use_price_lists' => false,
+            // Lo único que Lucas cambió es un campo que no tiene nada que ver con el formulario.
+            'contact_name'    => 'Juana Pérez Gómez',
+        ]);
+        $respuesta->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        $this->assertSame('Juana Pérez Gómez', $lead->contact_name, 'El guardado genérico del modal dejó de funcionar.');
+        $this->assertNull(
+            $lead->demo_form_editado_admin_at,
+            'Guardar el modal sin tocar los checkboxes marcó una edición manual del formulario que nadie hizo.'
+        );
+
+        /* Y la consecuencia de esa marca fantasma, que es lo que realmente duele: las respuestas
+           efectivas tienen que seguir siendo los defaults del catálogo. */
+        $this->assertSame(
+            LeadDemoFormMapper::RESPUESTAS_POR_DEFECTO,
+            LeadDemoFormMapper::respuestas_efectivas($lead),
+            'El guardado genérico congeló las columnas crudas del lead como si alguien hubiera contestado el formulario.'
+        );
+    }
+
+    /**
+     * 13. 🔴 UN CATÁLOGO QUE ES JSON VÁLIDO PERO NO PRODUCE NINGUNA SECCIÓN TAMPOCO PUEDE
+     *     LLEVARSE PUESTO EL ROADMAP DEL LEAD.
+     *
+     * El defecto que cubre, y es el hermano angosto del caso 8: la protección de la re-congelación
+     * preguntaba `DemoPlanResolver::resolver($lead) === null`, y `resolver()` devuelve `null` SÓLO
+     * cuando `DemoCatalogoService::get()` da `[]` (archivo sin sincronizar o JSON inválido). Un
+     * catálogo bien formado pero inservible —`orden_secciones: []`, o los nombres de las secciones
+     * cambiados por un typo, que dejan de cruzar con `clips[].seccion`— devuelve un plan legítimo
+     * con `secciones: []`. Ese plan pasaba el `!== null`, reemplazaba el plan congelado del lead y
+     * dejaba su roadmap en un solo hito (el de ingreso, que `DemoHitosService::generar()` crea
+     * siempre). HTTP 200, y ni una línea de error.
+     *
+     * El criterio nuevo mira si el plan SIRVE: al menos un clip de núcleo entre sus secciones, que
+     * es exactamente lo que `generar()` recorre para armar el roadmap.
+     *
+     * Sin el arreglo este test falla en las tres aserciones del plan y los hitos.
+     *
+     * @return void
+     */
+    public function test_con_un_catalogo_valido_pero_sin_secciones_el_put_deja_el_plan_y_los_hitos_intactos(): void
+    {
+        $this->autenticar_admin();
+        $this->sembrar_catalogo();
+
+        $lead                    = $this->crear_lead();
+        $lead->demo_setup_status = 'pendiente';
+        $lead->save();
+
+        $this->congelar_plan_previo($lead);
+        $lead = $lead->fresh();
+
+        $plan_viejo   = $lead->demo_plan;
+        $hitos_viejos = LeadDemoHito::where('lead_id', $lead->id)->orderBy('id')->pluck('id')->all();
+        $this->assertNotEmpty($plan_viejo, 'El plan previo no se congeló: el caso no se está reproduciendo.');
+        $this->assertGreaterThan(1, count($hitos_viejos), 'El roadmap previo tiene un solo hito: el caso no distingue un plan bueno de uno vacío.');
+
+        /* El typo entra DESPUÉS de que el lead ya tenía su roadmap, que es como pasa de verdad: el
+           catálogo se edita en el repo y se sincroniza a producción sin deploy. */
+        $this->sembrar_catalogo_sin_secciones_utilizables();
+
+        /* Y el plan que sale de ese catálogo es válido y vacío a la vez: no es `null`, que es
+           justamente lo que hacía que el chequeo viejo lo diera por bueno. */
+        $plan_nuevo = DemoPlanResolver::resolver($lead);
+        $this->assertNotNull($plan_nuevo, 'El catálogo del caso no está resolviendo: se está probando el caso 8, no éste.');
+        $this->assertSame([], $plan_nuevo['secciones'], 'El catálogo del caso produjo secciones: no reproduce el plan vacío.');
+
+        $respuesta = $this->guardar_desde_el_panel($lead, ['tipo_precios' => 'listas']);
+        $respuesta->assertStatus(200);
+
+        $lead = $lead->fresh();
+
+        $this->assertSame($plan_viejo, $lead->demo_plan, 'Un catálogo sin secciones utilizables se llevó puesto el plan del lead.');
+        $this->assertSame(
+            '2026-08-01 10:00:00',
+            $lead->demo_plan_congelado_at->format('Y-m-d H:i:s'),
+            'La fecha de congelamiento se movió por un plan que no sirve.'
+        );
+        $this->assertSame(
+            $hitos_viejos,
+            LeadDemoHito::where('lead_id', $lead->id)->orderBy('id')->pluck('id')->all(),
+            'Los hitos se rehicieron con un plan vacío: el lead quedó con un roadmap de un solo punto.'
+        );
+
+        /* Y las respuestas sí se guardaron: es lo único que Lucas pidió de este endpoint y no puede
+           fallar porque el catálogo esté mal editado. */
+        $this->assertTrue((bool) $lead->use_price_lists, 'La respuesta editada no se guardó.');
+        $this->assertNotNull($lead->demo_form_editado_admin_at, 'No quedó la marca de edición manual.');
     }
 }
