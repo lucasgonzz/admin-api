@@ -105,7 +105,19 @@ class ClaudeClientTemplatesController extends Controller
                     continue;
                 }
 
-                $existente = ClientTemplate::query()->where('template_name', $template_name)->first();
+                // El lock es lo que hace que la idempotencia aguante dos corridas encimadas.
+                //
+                // Sin él esto es un SELECT y después un INSERT: dos requests con el mismo nombre
+                // nuevo pueden pasar las dos por el SELECT antes de que cualquiera inserte, y el
+                // índice único hace que la segunda tire una QueryException. Como el lote entero
+                // va en una transacción, esa excepción voltea las cincuenta plantillas de esa
+                // corrida, no solo la que chocó, y Claude recibe un 500 sin haber guardado nada.
+                // No es hipotético: el docblock de este endpoint dice que Claude reenvía el lote
+                // completo cada vez, y un timeout con reintento alcanza para encimar dos.
+                $existente = ClientTemplate::query()
+                    ->where('template_name', $template_name)
+                    ->lockForUpdate()
+                    ->first();
 
                 $datos = $this->fila_de_datos($fila, $template_name, $existente);
 
