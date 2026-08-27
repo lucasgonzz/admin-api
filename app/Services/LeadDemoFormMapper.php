@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Lead;
+use Carbon\Carbon;
 
 /**
  * Traduce las nueve respuestas del formulario de configuración de la página inmersiva de demo
@@ -146,11 +147,139 @@ class LeadDemoFormMapper
      */
     public static function respuestas_efectivas(Lead $lead): array
     {
-        // Sin fecha de completado no hay respuestas del lead: valen los defaults del catálogo.
-        if ($lead->demo_form_completado_at === null) {
+        /* Las columnas valen si ALGUIEN las escribió a conciencia, y hay dos maneras de que eso
+         * haya pasado: el lead completó el formulario en la página inmersiva
+         * (`demo_form_completado_at`) o un admin las editó a mano desde el modal del lead
+         * (`demo_form_editado_admin_at`, misión del 27/8/2026). Sin ninguna de las dos marcas no
+         * hay respuestas de nadie y valen los defaults del catálogo.
+         *
+         * 🔴 La segunda marca es el motivo entero por el que existe esa columna. Mientras la
+         * condición miraba sólo `demo_form_completado_at`, una edición desde el panel se guardaba
+         * en las columnas y el demo setup la ignoraba igual: Lucas cambiaba una respuesta, la
+         * tarjeta se lo mostraba guardado, y la instancia se armaba con los defaults. */
+        if ($lead->demo_form_completado_at === null && $lead->demo_form_editado_admin_at === null) {
             return self::RESPUESTAS_POR_DEFECTO;
         }
 
         return self::from_lead($lead);
+    }
+
+    /**
+     * Todo lo que la tarjeta "Respuestas del formulario de la demo" del modal del lead necesita
+     * para pintarse: las nueve respuestas efectivas más el contexto de dónde salieron y de qué
+     * pasa si se cambian ahora.
+     *
+     * Puro, igual que `respuestas_efectivas()`: no toca la base, no sale a la red y no modifica el
+     * lead. Lo llama el accesor `Lead::getDemoFormPanelAttribute()`, que a su vez viaja en el
+     * detalle del lead — o sea que corre en cada apertura del modal y no puede permitirse una
+     * query.
+     *
+     * Por qué el estado va armado desde acá y no lo compone el SPA con las columnas sueltas: el
+     * aviso de la tarjeta ("lo completó el lead" / "lo editaste vos" / "son los valores por
+     * defecto") es la misma decisión que toma `respuestas_efectivas()` para armar la instancia. Si
+     * el front la volviera a deducir por su cuenta, el día que esa regla cambie —ya cambió una vez,
+     * con la marca de edición manual— la tarjeta le estaría diciendo a Lucas algo distinto de lo
+     * que el demo setup va a hacer.
+     *
+     * @param Lead $lead
+     *
+     * @return array<string, mixed>
+     */
+    public static function estado_para_panel(Lead $lead): array
+    {
+        $completado_at = self::a_carbon($lead->demo_form_completado_at);
+        $editado_at    = self::a_carbon($lead->demo_form_editado_admin_at);
+
+        return [
+            'respuestas'          => self::respuestas_efectivas($lead),
+            'completado_por_lead' => $completado_at !== null,
+            'completado_at'       => self::formatear($completado_at),
+            'editado_por_admin'   => $editado_at !== null,
+            'editado_admin_at'    => self::formatear($editado_at),
+            'origen'              => self::origen($completado_at, $editado_at),
+
+            /* El estado del roadmap va en el mismo bloque porque la tarjeta tiene que avisar
+             * cuándo editar las respuestas ya no lo cambia: con el plan congelado y el setup fuera
+             * de `pendiente`, el recorrido quedó armado con las respuestas viejas y los hitos
+             * pueden estar marcados. */
+            'plan_congelado'    => $lead->demo_plan_congelado_at !== null,
+            'plan_congelado_at' => self::formatear(self::a_carbon($lead->demo_plan_congelado_at)),
+            'setup_estado'      => $lead->demo_setup_status ?? 'pendiente',
+
+            /* Un lead de la dinámica ACTUAL no tiene página inmersiva ni formulario: no hay nada
+             * que editar y la tarjeta muestra sólo el cartel. Es la misma guardia que aplica el
+             * endpoint que guarda (`LeadController::update_demo_form_json()`), expuesta acá para
+             * que el front no tenga que deducirla de `demo_experiencia`. */
+            'editable' => $lead->usa_experiencia_demo_nueva(),
+        ];
+    }
+
+    /**
+     * De dónde salen las respuestas que hoy tienen las columnas: `defaults` si nadie las escribió,
+     * `lead` si la última palabra la tuvo el formulario público, `admin` si la tuvo el panel.
+     *
+     * Se decide por fecha y no por precedencia fija porque las dos puntas pueden escribir en
+     * cualquier orden: el endpoint público no mira la marca de edición manual (a propósito, el lead
+     * siempre puede pisar lo que se haya cargado a mano) y el panel tampoco mira la del lead.
+     *
+     * Empate: gana `lead`. Sólo pasa si las dos escrituras caen en el mismo segundo, y en ese caso
+     * ninguna de las dos etiquetas es demostrablemente cierta — la tarjeta muestra igual las dos
+     * fechas, así que la ambigüedad queda a la vista.
+     *
+     * @param Carbon|null $completado_at
+     * @param Carbon|null $editado_at
+     *
+     * @return string `defaults` | `lead` | `admin`
+     */
+    private static function origen(?Carbon $completado_at, ?Carbon $editado_at): string
+    {
+        if ($completado_at === null && $editado_at === null) {
+            return 'defaults';
+        }
+
+        if ($editado_at === null) {
+            return 'lead';
+        }
+
+        if ($completado_at === null) {
+            return 'admin';
+        }
+
+        return $editado_at->greaterThan($completado_at) ? 'admin' : 'lead';
+    }
+
+    /**
+     * Normaliza a Carbon un valor que el modelo castea a `datetime`.
+     *
+     * Existe por defensa y no por capricho: los tres atributos que lee `estado_para_panel()` están
+     * casteados en el modelo, pero un Lead armado a mano en un test (o hidratado sin casts) puede
+     * traer el string crudo de MySQL, y comparar dos strings con `greaterThan()` revienta.
+     *
+     * @param mixed $valor
+     *
+     * @return Carbon|null
+     */
+    private static function a_carbon($valor): ?Carbon
+    {
+        if ($valor === null || $valor === '') {
+            return null;
+        }
+
+        return Carbon::parse($valor);
+    }
+
+    /**
+     * Formatea una fecha para el panel, o null si no hay.
+     *
+     * Formato `Y-m-d H:i:s` y no ISO-8601: es el mismo que ya usa `DemoPlanResolver` para
+     * `resuelto_at` dentro del plan congelado, y el que el resto del panel sabe leer.
+     *
+     * @param Carbon|null $fecha
+     *
+     * @return string|null
+     */
+    private static function formatear(?Carbon $fecha): ?string
+    {
+        return $fecha === null ? null : $fecha->format('Y-m-d H:i:s');
     }
 }

@@ -8,6 +8,7 @@ use App\Models\Concerns\UsesVirtualTime;
 use App\Models\LeadAdminNotification;
 use App\Models\LeadPipelineStatus;
 use App\Services\DemoUrlNormalizer;
+use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
@@ -350,6 +351,13 @@ class Lead extends Model
 
         // Timestamp de envío del formulario de demo: null = todavía no lo completó (grupo 300, prompt 01).
         'demo_form_completado_at'            => 'datetime',
+
+        // Timestamp de la última edición manual de esas mismas respuestas desde el modal del lead
+        // (misión del 27/8/2026). Es una marca APARTE de la de arriba y no un reemplazo: aquella
+        // dice "contestó el lead" y esta "las puso el admin". Cualquiera de las dos alcanza para
+        // que LeadDemoFormMapper::respuestas_efectivas() deje de devolver los defaults del catálogo
+        // y pase a leer las columnas.
+        'demo_form_editado_admin_at'         => 'datetime',
 
         // Progreso del lead sobre el video de introducción (misión 46). El pct se castea a entero
         // para que el payload público no lo devuelva como string y el front tenga que compararlo
@@ -869,6 +877,27 @@ class Lead extends Model
         }
 
         return $base . '/experiencia/' . $this->uuid;
+    }
+
+    /**
+     * Estado completo de la tarjeta "Respuestas del formulario de la demo" del modal del lead
+     * (misión del 27/8/2026): las nueve respuestas efectivas más de dónde salieron.
+     *
+     * Toda la lógica vive en `LeadDemoFormMapper::estado_para_panel()`, no acá. El mapper ya es
+     * el único lugar del sistema que sabe traducir respuestas ↔ columnas y el único que sabe
+     * cuándo valen los defaults del catálogo; partir esa decisión en dos archivos es la forma de
+     * que el panel y el demo setup terminen mostrando cosas distintas.
+     *
+     * 🔴 Igual que `demo_ingreso_url` y `demo_experiencia_url`, este accesor NO va en un
+     * `$appends` del modelo: lo appendea a mano `LeadController::prepare_lead_for_detail_json()`
+     * para el detalle y nada más. En `$appends` viajaría también en el listado de leads y en los
+     * broadcasts, sumando trabajo en payloads donde nadie lo consume.
+     *
+     * @return array<string, mixed>
+     */
+    public function getDemoFormPanelAttribute()
+    {
+        return LeadDemoFormMapper::estado_para_panel($this);
     }
 
     /**
