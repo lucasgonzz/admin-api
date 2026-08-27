@@ -599,26 +599,88 @@ class LeadFollowupService
      * de cada plantilla (el `{{2}}` es la hora de la demo en los recordatorios y el motivo de la
      * demora en `cc_recuperacion_motivo`). Dos parseos separados se desincronizan solos.
      *
+     * 🔴 Es PÚBLICO porque hay dos caminos de envío de plantillas de seguimiento, no uno:
+     * `send_followup_via_template()` (seguimiento automático directo) y
+     * {@see LeadSuggestionSendService::send_followup_suggestion_via_template()} (los seis estados
+     * que pasan por supervisión de agendamiento, entre ellos `demo_agendada`, que tiene 6
+     * plantillas activas). Ese segundo camino armaba las variables a mano y por eso el arreglo del
+     * 27/8/2026 no lo cubría: seguía mandando `{{1}}` vacío. Que haya UNA sola definición de qué va
+     * en cada placeholder es el punto entero de que este método esté acá y sea público.
+     *
      * @param FollowupTemplate $template Plantilla a enviar.
      * @param Lead             $lead     Lead destinatario.
      *
      * @return array<int, string> Valores posicionales; array vacío si la plantilla no tiene {{n}}.
      */
-    private function build_template_variables(FollowupTemplate $template, Lead $lead): array
+    public function build_template_variables(FollowupTemplate $template, Lead $lead): array
     {
+        $pares = $this->build_template_variable_pairs($template, $lead);
+
+        $variables = [];
+        foreach ($pares as $par) {
+            $variables[] = $par['valor'];
+        }
+
+        return $variables;
+    }
+
+    /**
+     * Pares `placeholder => valor` de la plantilla, en el orden en que Meta los espera.
+     *
+     * Existe como método aparte para que el envío y el texto que se guarda en el hilo salgan de la
+     * MISMA lista. Si `render_template_body()` volviera a hacer su propio `str_replace('{{1}}')`,
+     * una plantilla con `{{2}}` mostraría el placeholder crudo en la conversación mientras el lead
+     * recibía el valor real: dos textos distintos para el mismo mensaje.
+     *
+     * @param FollowupTemplate $template Plantilla a enviar.
+     * @param Lead             $lead     Lead destinatario.
+     *
+     * @return array<int, array{placeholder: string, valor: string}>
+     */
+    private function build_template_variable_pairs(FollowupTemplate $template, Lead $lead): array
+    {
+        /* Espejo local del texto aprobado en Meta. Puede estar vacío o desactualizado. */
+        $body = trim((string) ($template->body_template ?? ''));
+
         /* Placeholders realmente presentes en body_template, ya parseados por el modelo. */
         $placeholders = $template->variables;
-        if (! is_array($placeholders) || count($placeholders) === 0) {
-            /* Sin {{n}}: array vacío para que send_template() no arme el componente `body`. */
+        if (! is_array($placeholders)) {
+            $placeholders = [];
+        }
+
+        if ($body === '') {
+            /*
+             * 🔴 SIN BODY NO SE MANDA CERO VARIABLES. `body_template` es un espejo local que se
+             * puede blanquear desde el panel (FollowupTemplateController::update_json permite
+             * guardar null o string vacío, sin mirar `activa`), así que su ausencia NO es evidencia
+             * de que la plantilla aprobada en Meta no tenga `{{1}}`. Si mandáramos el array vacío,
+             * una plantilla activa con `{{1}}` recibiría cero parámetros y Meta contestaría el
+             * mismo 131008 que vinimos a arreglar — y el guard de WhatsappSendService NO lo
+             * atraparía, porque recorre el array y un array vacío nunca entra al loop: fallo mudo,
+             * sin last_send_error, síntoma idéntico al bug original.
+             *
+             * Ante la duda se vuelve al comportamiento anterior —mandar el nombre—, que es la
+             * convención del proyecto y está escrita en el propio accessor del modelo: «{{1}} es
+             * siempre el nombre del contacto en todas las plantillas de ComercioCity». Nunca vacío.
+             */
+            return [[
+                'placeholder' => '{{1}}',
+                'valor'       => $this->resolve_contact_name_variable($lead),
+            ]];
+        }
+
+        if (count($placeholders) === 0) {
+            /* Body cargado y sin ningún {{n}}: acá sí sabemos que no lleva variables, así que va el
+               array vacío para que send_template() no arme el componente `body` de más. */
             return [];
         }
 
-        $variables = [];
+        $pares = [];
         foreach ($placeholders as $placeholder) {
             $nombre = isset($placeholder['placeholder']) ? (string) $placeholder['placeholder'] : '';
 
             if ($nombre === '{{1}}') {
-                $variables[] = $this->resolve_contact_name_variable($lead);
+                $pares[] = ['placeholder' => $nombre, 'valor' => $this->resolve_contact_name_variable($lead)];
                 continue;
             }
 
@@ -628,10 +690,13 @@ class LeadFollowupService
                last_send_error qué placeholder faltó. Es preferible un seguimiento que no sale y
                queda registrado como fallido, a uno que sale con un hueco adentro. */
             $campo = isset($placeholder['field']) ? (string) $placeholder['field'] : '';
-            $variables[] = $campo !== '' ? trim((string) ($lead->{$campo} ?? '')) : '';
+            $pares[] = [
+                'placeholder' => $nombre,
+                'valor'       => $campo !== '' ? trim((string) ($lead->{$campo} ?? '')) : '',
+            ];
         }
 
-        return $variables;
+        return $pares;
     }
 
     /**
@@ -641,15 +706,17 @@ class LeadFollowupService
      * 🔴 `trim()` y no `??`: el lead puede tener `contact_name = ''` o `'   '` en base, y `??` solo
      * atrapa null. Es exactamente el agujero que dejó pasar el string vacío hasta Meta.
      *
-     * Lo usan los DOS caminos —el envío y el texto que se guarda en el hilo— a propósito: si cada
-     * uno resolviera el nombre por su cuenta, la conversación mostraría un texto distinto del que
-     * de verdad recibió el lead.
+     * Público y en un método propio para que sea la ÚNICA definición de qué va en `{{1}}` cuando no
+     * hay nombre. La usan el envío automático, el envío tras supervisión de agendamiento
+     * ({@see LeadSuggestionSendService}) y el texto que se guarda en el hilo: si cada uno lo
+     * resolviera por su cuenta, la conversación mostraría un texto distinto del que recibió el lead
+     * y el arreglo valdría para un camino y no para el otro.
      *
      * @param Lead $lead Lead destinatario.
      *
      * @return string Nombre del contacto, o {@see self::NOMBRE_GENERICO}.
      */
-    private function resolve_contact_name_variable(Lead $lead): string
+    public function resolve_contact_name_variable(Lead $lead): string
     {
         $contact_name = trim((string) ($lead->contact_name ?? ''));
 
@@ -680,13 +747,22 @@ class LeadFollowupService
             return "[Seguimiento automático — plantilla: {$template->template_name}]";
         }
 
-        /* Nombre del contacto para sustituir {{1}}, resuelto por el MISMO camino que la variable
-           que se le manda a Meta. No lo sustituyas por el nombre crudo del lead: con un lead sin
-           nombre esto producía `Hola !` en el hilo mientras el envío mandaba `''`, o sea que la
-           conversación mostraba un texto que nadie recibió nunca. */
-        $contact_name = $this->resolve_contact_name_variable($lead);
+        /*
+         * 🔴 El hilo se arma desde la MISMA lista de placeholders y los MISMOS valores que se le
+         * mandan a Meta. No lo reduzcas de vuelta a `str_replace('{{1}}', ...)`:
+         *
+         *   - con el nombre crudo del lead, un lead sin nombre producía `Hola !` en el hilo
+         *     mientras el envío mandaba `''` — la conversación mostraba un texto que nadie recibió;
+         *   - sustituyendo solo `{{1}}`, una plantilla con `{{2}}` deja el `{{2}}` literal a la
+         *     vista del setter mientras el lead recibe el valor real.
+         *
+         * Mientras el texto salga de esta lista, los dos no pueden divergir por construcción.
+         */
+        foreach ($this->build_template_variable_pairs($template, $lead) as $par) {
+            $body = str_replace($par['placeholder'], $par['valor'], $body);
+        }
 
-        return str_replace('{{1}}', $contact_name, $body);
+        return $body;
     }
 }
 

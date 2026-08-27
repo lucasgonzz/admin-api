@@ -670,7 +670,22 @@ class LeadSuggestionSendService
             return $message->fresh();
         }
 
-        $contact_name = trim((string) ($lead->contact_name ?? ''));
+        /*
+         * 🔴 Las variables las arma LeadFollowupService, NO este archivo. Hasta el 27/8/2026 acá
+         * se hacía `[trim((string) ($lead->contact_name ?? ''))]`, o sea que un lead sin nombre
+         * mandaba `{{1}}` vacío y Meta contestaba `(#131008) Required parameter is missing`.
+         *
+         * Y este camino no es un caso de borde: para los seis estados de
+         * LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO —entre ellos `demo_agendada`,
+         * que tiene 6 plantillas activas— LeadFollowupService::process_lead() NO llama a
+         * send_followup_via_template(): deja el seguimiento pendiente de verificación y el envío
+         * real cae acá, al aprobarlo el setter o al vencer el timer de respaldo. Con el armado a
+         * mano, el arreglo del nombre genérico valía para un camino y no para el otro.
+         *
+         * Que la definición de qué va en cada placeholder viva en UN solo lugar es lo que evita que
+         * esto se vuelva a partir en dos.
+         */
+        $variables = app(LeadFollowupService::class)->build_template_variables($template, $lead);
 
         $context = 'Seguimiento aprobado - Lead #' . $lead->id
             . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '');
@@ -678,7 +693,7 @@ class LeadSuggestionSendService
         $whatsapp_message_id = $this->whatsapp_send_service->send_template(
             $phone,
             $template->template_name,
-            [$contact_name],
+            $variables,
             $template->language_code,
             $context
         );
