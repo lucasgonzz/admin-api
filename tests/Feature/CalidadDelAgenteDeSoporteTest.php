@@ -641,6 +641,35 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
     }
 
     /**
+     * Agente con el repositorio de conocimiento respondiendo.
+     *
+     * Desde el 27/8/2026 `generate()` escala sin consultar a Claude cuando no puede leer el
+     * índice del manual ni el protocolo de escalado: un agente sin manual no puede afirmar nada
+     * del sistema, y hasta ahora eso pasaba en silencio. Estos dos tests miran el cable que sale
+     * a Anthropic, así que necesitan esa precondición cumplida.
+     *
+     * Se simulan los dos métodos del repositorio y no la GitHub API, porque el `Http::fake()`
+     * sin argumentos del setUp() ya dejó un comodín registrado y los stubs que se agreguen
+     * después no le ganan: el índice llegaría vacío igual.
+     *
+     * @return SupportAiSuggestionService
+     */
+    private function agente_con_repositorio(): SupportAiSuggestionService
+    {
+        return new class extends SupportAiSuggestionService {
+            protected function fetch_manual_file_list(): string
+            {
+                return "- manual_sistema/README.md\n- manual_sistema/listado/precios.md";
+            }
+
+            protected function fetch_escalation_rules(): string
+            {
+                return "PROTOCOLO DE ESCALADO Y CIERRE:\nProtocolo de prueba.";
+            }
+        };
+    }
+
+    /**
      * El bloque de imagen llega armado en el request que sale a Anthropic.
      *
      * Los otros tests miran el juntador; este mira el cable: que el primer mensaje pase de ser
@@ -668,7 +697,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
         $ticket = $this->crear_ticket($client);
         $this->agregar_imagen($ticket, 'pantalla.png');
 
-        app(SupportAiSuggestionService::class)->generate($ticket);
+        $this->agente_con_repositorio()->generate($ticket);
 
         $esperado = base64_encode($this->png_de_verdad(64));
 
@@ -724,7 +753,7 @@ class CalidadDelAgenteDeSoporteTest extends TestCase
         $client = $this->crear_cliente();
         $ticket = $this->crear_ticket($client);
 
-        app(SupportAiSuggestionService::class)->generate($ticket);
+        $this->agente_con_repositorio()->generate($ticket);
 
         Http::assertSent(function ($request) {
             if (strpos($request->url(), 'api.anthropic.com') === false) {
