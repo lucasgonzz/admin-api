@@ -967,7 +967,7 @@ class LeadController extends Controller
 
         /* Un lead de la dinámica ACTUAL no tiene página inmersiva ni formulario: no hay respuestas
            que editar, y dejarlo escribir las columnas armaría un estado que ningún otro camino
-           produce. Es la misma guardia que ya se defienden solas DemoPlanResolver y
+           produce. Es la misma guardia con la que ya se defienden solos DemoPlanResolver y
            DemoHitosService, acá con un mensaje que el modal pueda mostrar. */
         if (! $lead->usa_experiencia_demo_nueva()) {
             return response()->json([
