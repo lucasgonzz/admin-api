@@ -43,9 +43,13 @@ class CertificadosAfipEnElUpdateDeDemoTest extends TestCase
      * 🔴 Hace falta y no es una comodidad. Los comentarios de esta misión NOMBRAN a propósito las
      * cosas que los candados prohíben —`sync_afip_certificates`, `connect_hosting_ssh`— porque
      * explican por qué NO van o por qué van en ese orden. Sin este filtro, los candados romperían
-     * contra la explicación de por qué existen. Se usa token_get_all() y no un regex sobre las
-     * líneas que arrancan con `*` (el patrón de ReinicioDelWorkerEnElUpdateDeDemoTest) porque es
-     * exacto: no depende de cómo esté formateado el comentario.
+     * contra la explicación de por qué existen.
+     *
+     * ReinicioDelWorkerEnElUpdateDeDemoTest, que es el antecedente de este archivo, trabaja sobre
+     * el fuente CRUDO: uno solo de sus tests descarta líneas de comentario, con un regex sobre las
+     * que arrancan con `*`, `//` o `/*`, y nada más que para una aserción puntual. Acá el filtro
+     * tiene que valer para el archivo entero, así que se hace con token_get_all(): es exacto y no
+     * depende de cómo esté formateado el comentario.
      *
      * @return string
      */

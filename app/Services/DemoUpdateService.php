@@ -466,10 +466,16 @@ class DemoUpdateService
         // Path del API de la demo en su servidor, con el mismo criterio que step_upload_api().
         $api_path = $this->demo_api_path();
 
-        /* Va acá y no en step_upload_api() por dos motivos. Primero, el `unzip -o` de esa etapa
-         * acaba de reescribir el árbol: reponer antes sería reponer sobre el código viejo.
-         * Segundo, es el mismo punto donde lo hace DeploymentService (línea 486), así que los dos
-         * pipelines se leen igual.
+        /* Va acá y no en step_upload_api() por dos motivos. Primero, porque de este punto en
+         * adelante NINGUNA etapa vuelve a escribir en el árbol de la API: las migraciones son
+         * artisan, step_restart_queue_workers() es un `queue:restart` y step_verify_demo() es HTTP.
+         * El único paso que borra archivos es el `find . -mindepth 1 -delete` del despliegue del
+         * SPA, que es otro directorio y ocurre dos etapas antes. O sea que lo que se reponga acá es
+         * lo que queda. (Lo que NO es motivo: que el `unzip -o` de step_upload_api() pisaría lo
+         * repuesto. No lo pisaría —el ZIP excluye `storage/*`, así que nunca toca
+         * storage/app/afip/—; el motivo es el estado final, no un riesgo de sobrescritura.)
+         * Segundo, es el mismo punto del pipeline donde lo hace DeploymentService, así que los dos
+         * se leen igual.
          *
          * 🔴 Y va ANTES del connect_hosting_ssh() de abajo a propósito: la reposición usa una
          * sesión SFTP aparte, y el connect que ya estaba hace de reconexión posterior sin que haya
