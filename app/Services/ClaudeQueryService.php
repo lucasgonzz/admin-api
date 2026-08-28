@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -47,6 +48,58 @@ class ClaudeQueryService
      * @var array<int, string>
      */
     const PARAMETROS_RESERVADOS = ['model', 'include', 'fields', 'after_id', 'limit', 'order', 'q', 'count_only'];
+
+    /**
+     * Lo único que este endpoint acepta como booleano en un filtro declarado.
+     *
+     * 🔴 ES MÁS ESTRICTO QUE `booleano_o_null()` A PROPÓSITO, Y SÓLO ACÁ. El helper del trait
+     * resuelve con `filter_var(..., FILTER_VALIDATE_BOOLEAN)`, que para CUALQUIER cosa que no
+     * reconozca devuelve `false` en vez de avisar. El caso que lo originó es
+     * `GET claude/query?model=client&is_active[]=1`: `filter_var` de un array devuelve `false`, así
+     * que el filtro se INVERTÍA en silencio y la respuesta traía los clientes INACTIVOS con
+     * `filtros_aplicados: {"is_active": false}` como si eso fuera lo que se pidió.
+     *
+     * No se endurece el helper porque `GET claude/clients` (`is_active`, `has_schedule`),
+     * `GET claude/versions` (`is_hotfix`) y `GET claude/upgrades` (`activos`) lo vienen usando desde
+     * el 24/8/2026 con la semántica tolerante: cambiarla allá sería cambiarle el contrato a
+     * endpoints que ya están en uso, para arreglar un agujero que es de acá.
+     *
+     * @var array<int, string>
+     */
+    const BOOLEANOS_ACEPTADOS = ['1', '0', 'true', 'false'];
+
+    /**
+     * Formatos con los que se lee un filtro `fecha_desde` / `fecha_hasta`, en orden de intento.
+     *
+     * 🔴 ES UNA LISTA CERRADA PORQUE `Carbon::parse()` NO FALLA CUANDO DEBERÍA. El caso que lo
+     * originó es `GET claude/query?model=client&creado_desde=x`: `Carbon::parse('x')` no lanza nada
+     * y devuelve la fecha y hora de AHORA, así que la consulta quedaba
+     * `where created_at >= <ahora>` —cero filas, siempre— y `filtros_aplicados` publicaba
+     * `{"creado_desde": "2026-08-28 13:56:53"}` como si el que consultó hubiera pedido eso.
+     * `next monday` y `0000-00-00` son de la misma familia: parsean, y en algo que nadie pidió.
+     *
+     * El `!` de adelante resetea los campos que el formato no nombra (sin él, `Y-m-d H:i` le
+     * completaría los segundos con los del reloj de la máquina). El último no lo lleva porque trae
+     * el offset y define el instante entero.
+     *
+     * @var array<int, string>
+     */
+    const FORMATOS_DE_FECHA = ['!Y-m-d', '!Y-m-d H:i', '!Y-m-d H:i:s', '!Y-m-d\TH:i', '!Y-m-d\TH:i:s', 'Y-m-d\TH:i:sP'];
+
+    /**
+     * Los mismos formatos escritos como ejemplo, que es lo que se publica en el 422.
+     *
+     * Un `!Y-m-d\TH:i:sP` no le sirve a nadie del otro lado del endpoint; una fecha de verdad, sí.
+     *
+     * @var array<int, string>
+     */
+    const EJEMPLOS_DE_FECHA = [
+        '2026-08-27',
+        '2026-08-27 18:02',
+        '2026-08-27 18:02:11',
+        '2026-08-27T18:02:11',
+        '2026-08-27T18:02:11-03:00',
+    ];
 
     /**
      * Claves de modelo disponibles, ordenadas alfabéticamente.
@@ -393,11 +446,41 @@ class ClaudeQueryService
         $tipo    = $filtro['tipo'];
         $crudo   = $request->input($nombre);
 
+        /*
+         * 🔴 UN ARRAY DONDE VA UN ESCALAR ES 422, Y NO PUEDE SER OTRA COSA. `lista_de_enteros` es el
+         * único tipo que espera una lista; en todos los demás, un `filtro[]=x` entraba y salía mal
+         * por tres caminos distintos, ninguno visible:
+         *   - `creado_desde[]=x` llegaba a `Carbon::parse(array)`, que tira TypeError. TypeError es
+         *     un `\Error`, NO un `\Exception`, así que el `catch (\Exception)` de `parsear_o_null()`
+         *     ni lo veía: 500 con stack trace y rutas del disco, en los 6 modelos con filtro de fecha.
+         *   - `is_active[]=1` llegaba a `filter_var(array, FILTER_VALIDATE_BOOLEAN)`, que devuelve
+         *     `false`: el filtro se INVERTÍA en silencio y devolvía los inactivos.
+         *   - `created_via[]=claude` llegaba a `texto_o_null(array)`, que devuelve `null`: el filtro
+         *     se ignoraba y la lista salía más larga que la pedida, que del otro lado parece un
+         *     problema de datos y no un parámetro mal armado.
+         * El bloque `claude/*` promete 422 legible para un parámetro mal formado. Los tres eran lo
+         * contrario: 500, o una respuesta plausible y equivocada.
+         */
+        if (is_array($crudo) && $tipo !== 'lista_de_enteros') {
+            return $this->error_422(
+                'El filtro "' . $nombre . '" del modelo "' . $modelo . '" espera un solo valor y llegó una lista.',
+                [
+                    'tipo_del_filtro' => $tipo,
+                    'ayuda'           => 'Mandalo como ' . $nombre . '=valor, sin corchetes. Los corchetes sólo los '
+                        . 'acepta un filtro de tipo lista_de_enteros (por ejemplo ids[]=1&ids[]=2, o ids=1,2).',
+                ]
+            );
+        }
+
         if ($tipo === 'booleano' || $tipo === 'nulo') {
-            $valor = $this->booleano_o_null($request, $nombre);
+            $valor = $this->booleano_de_filtro($crudo, $modelo, $nombre);
 
             if ($valor === null) {
                 return null;
+            }
+
+            if ($valor instanceof JsonResponse) {
+                return $valor;
             }
 
             if ($tipo === 'nulo') {
@@ -482,13 +565,24 @@ class ClaudeQueryService
         }
 
         if ($tipo === 'fecha_desde' || $tipo === 'fecha_hasta') {
-            if ($crudo === null || $crudo === '') {
+            $texto = $this->texto_o_null($crudo);
+
+            if ($texto === null) {
                 return null;
             }
 
-            $fecha = $this->parsear_o_null($crudo);
+            /* 🔴 `fecha_estricta()` y NO `parsear_o_null()`: ver el docblock de FORMATOS_DE_FECHA.
+               El helper del trait delega en `Carbon::parse()`, que para "x" devuelve AHORA en vez de
+               fallar, y el filtro terminaba siendo `created_at >= <ahora>` sin que nadie se enterara. */
+            $fecha = $this->fecha_estricta($texto);
             if ($fecha === null) {
-                return $this->error_422('El filtro "' . $nombre . '" del modelo "' . $modelo . '" no es una fecha válida.');
+                return $this->error_422('El filtro "' . $nombre . '" del modelo "' . $modelo . '" no es una fecha válida.', [
+                    'recibido'         => $texto,
+                    'formatos_validos' => self::EJEMPLOS_DE_FECHA,
+                    'ayuda'            => 'Se acepta sólo una fecha absoluta en alguno de esos formatos. Nada de '
+                        . 'expresiones relativas ("ayer", "next monday"): parsean a algo que no es lo que se pidió y el '
+                        . 'filtro saldría aplicado y mal.',
+                ]);
             }
 
             $query->where($columna, $tipo === 'fecha_desde' ? '>=' : '<=', $fecha);
@@ -498,6 +592,95 @@ class ClaudeQueryService
 
         /* Tipo desconocido en el config: fail-closed, igual que la columna prohibida. */
         return $this->error_422('El filtro "' . $nombre . '" del modelo "' . $modelo . '" declara un tipo desconocido ("' . $tipo . '"). No se devolvió nada.');
+    }
+
+    /**
+     * Lee un filtro booleano exigiendo que sea booleano de verdad.
+     *
+     * 🔴 NO USA `booleano_o_null()` DEL TRAIT, y esa es toda la razón por la que existe: el helper
+     * resuelve con `filter_var(..., FILTER_VALIDATE_BOOLEAN)`, que ante cualquier cosa que no
+     * entiende devuelve `false` en vez de avisar. Con `?is_active[]=1` eso terminaba filtrando por
+     * clientes INACTIVOS y publicando `filtros_aplicados: {"is_active": false}`, o sea una respuesta
+     * plausible que contesta lo contrario de lo que se preguntó. Un filtro declarado que llega mal
+     * es 422, igual que ya hacen los de tipo `en` con su `valores_validos`.
+     *
+     * El helper del trait NO se endurece porque lo comparten endpoints que ya están en uso desde el
+     * 24/8/2026 con la semántica tolerante (ver el docblock de BOOLEANOS_ACEPTADOS).
+     *
+     * @param mixed  $crudo  Valor crudo del parámetro.
+     * @param string $modelo Clave del modelo (para el mensaje).
+     * @param string $nombre Nombre del filtro (para el mensaje).
+     *
+     * @return bool|JsonResponse|null Null si llegó vacío y el filtro no se aplica.
+     */
+    private function booleano_de_filtro($crudo, $modelo, $nombre)
+    {
+        if (is_bool($crudo)) {
+            return $crudo;
+        }
+
+        $texto = $this->texto_o_null($crudo);
+
+        if ($texto === null) {
+            return null;
+        }
+
+        $normalizado = mb_strtolower($texto);
+
+        if (! in_array($normalizado, self::BOOLEANOS_ACEPTADOS, true)) {
+            return $this->error_422(
+                'El filtro "' . $nombre . '" del modelo "' . $modelo . '" tiene que ser booleano.',
+                [
+                    'recibido'        => $texto,
+                    'valores_validos' => self::BOOLEANOS_ACEPTADOS,
+                    'ayuda'           => 'Un valor que no es booleano no se interpreta como false: se rechaza. Si se '
+                        . 'interpretara, el filtro contestaría lo contrario de lo que se preguntó y la respuesta '
+                        . 'parecería correcta.',
+                ]
+            );
+        }
+
+        return $normalizado === '1' || $normalizado === 'true';
+    }
+
+    /**
+     * Parsea una fecha exigiendo uno de los formatos absolutos declarados, o null.
+     *
+     * 🔴 NO USA `parsear_o_null()` DEL TRAIT por dos motivos, y los dos están medidos:
+     *   1. Ese helper delega en `Carbon::parse()`, que para `'x'` NO lanza: devuelve la fecha y hora
+     *      de ahora. El filtro salía aplicado, con cero filas siempre, y `filtros_aplicados` publicaba
+     *      un instante que nadie pidió.
+     *   2. Su `catch` es de `\Exception` y `Carbon::parse(array)` tira `TypeError`, que es `\Error`:
+     *      eso era un 500. Acá ni llega, porque el guard de arrays de `aplicar_filtro()` corta antes,
+     *      y además `DateTime::createFromFormat()` sobre un string no tiene ese camino.
+     *
+     * El helper del trait tampoco se endurece por esto: lo usan `salud_del_deployment()` y la `salud`
+     * de las corridas de ecommerce sobre timestamps que salen de la base, y rechazar formatos ahí
+     * cambiaría cómo se calcula `deployment_stale` en endpoints que ya estaban.
+     *
+     * @param string $texto Valor ya recortado.
+     *
+     * @return Carbon|null
+     */
+    private function fecha_estricta($texto)
+    {
+        $zona = new \DateTimeZone((string) config('app.timezone'));
+
+        foreach (self::FORMATOS_DE_FECHA as $formato) {
+            $fecha   = \DateTime::createFromFormat($formato, $texto, $zona);
+            $errores = \DateTime::getLastErrors();
+
+            /* Un warning alcanza para rechazar: es lo que denuncia "2026-02-30" (día desbordado) y
+               "2026-08-01xxx" (basura pegada al final), que si no entrarían como fechas válidas. */
+            $limpio = $errores === false
+                || (is_array($errores) && (int) $errores['error_count'] === 0 && (int) $errores['warning_count'] === 0);
+
+            if ($fecha !== false && $limpio) {
+                return Carbon::instance($fecha);
+            }
+        }
+
+        return null;
     }
 
     /**

@@ -690,4 +690,169 @@ class EndpointsDeClientesYVersionesParaClaudeTest extends TestCase
 
         $this->assertSame([$quieto->id], array_column($inactivos['data'], 'id'));
     }
+
+    /* ==========================================================================================
+     | La máquina de estados conoce los dos endpoints nuevos
+     |
+     | `siguiente_accion` es el único lugar del que sale "qué hago ahora", así que un endpoint que
+     | no figura acá no existe para el que orquesta. Los dos que se agregaron el 28/8/2026 —
+     | expire-stuck y retry-commands — no estaban, y el consejo que quedaba en su lugar era el
+     | equivocado: "esperá" para un worker que ya no avanza, y `start` (que BORRA los logs) para un
+     | comando que falló.
+     |========================================================================================= */
+
+    /**
+     * 🔴 Con el deployment stale, la máquina de estados ofrece expire-stuck en vez de mandar a esperar.
+     *
+     * Y el texto tiene que aclarar que vencer exige el umbral DESTRUCTIVO (45 min por defecto) y no
+     * el de aviso (15 del `stale`): si no, propondría una llamada que contesta 422.
+     */
+    public function test_siguiente_accion_ofrece_expire_stuck_cuando_el_deployment_esta_stale()
+    {
+        $version = $this->crear_version('6.1.0');
+        $client  = $this->crear_cliente('Cliente con el worker colgado', $version->id);
+
+        $colgado = $this->crear_upgrade($client, $version, [
+            'deployment_status'        => 'running',
+            'deployment_started_at'    => now()->subHours(2),
+            'deployment_running_since' => now()->subHours(2),
+        ]);
+
+        $cuerpo = $this->getJson('/api/claude/upgrades/' . $colgado->id, $this->headers())
+            ->assertStatus(200)
+            ->json();
+
+        $this->assertTrue($cuerpo['salud']['deployment_stale'], 'El escenario tiene que dar stale para que el test mida algo.');
+
+        $this->assertSame(
+            'POST claude/upgrades/' . $colgado->id . '/deploy/expire-stuck',
+            $cuerpo['siguiente_accion']['endpoint']
+        );
+
+        /* Los dos umbrales, nombrados, para no proponer algo que va a dar 422. */
+        $motivo = $cuerpo['siguiente_accion']['motivo'];
+        $this->assertStringContainsString((string) $cuerpo['salud']['vencimiento_minutos'], $motivo);
+        $this->assertStringContainsString((string) $cuerpo['salud']['stale_minutos'], $motivo);
+        $this->assertStringContainsString('422', $motivo);
+
+        /* Y la nota de salud nombra a los DOS destrabadores, no sólo al comando del scheduler. */
+        $this->assertStringContainsString('expire-stuck', $cuerpo['salud']['nota']);
+        $this->assertStringContainsString('vencer-colgados', $cuerpo['salud']['nota']);
+    }
+
+    /**
+     * Con el worker avanzando de verdad NO se ofrece expire-stuck: sería proponer matar un pipeline
+     * vivo y dejar dos DeploymentService por SSH sobre el hosting del mismo cliente.
+     */
+    public function test_siguiente_accion_no_ofrece_expire_stuck_si_el_deployment_no_esta_stale()
+    {
+        $version = $this->crear_version('6.1.1');
+        $client  = $this->crear_cliente('Cliente con el worker sano', $version->id);
+
+        $corriendo = $this->crear_upgrade($client, $version, [
+            'deployment_status'        => 'running',
+            'deployment_started_at'    => now(),
+            'deployment_running_since' => now(),
+        ]);
+
+        $cuerpo = $this->getJson('/api/claude/upgrades/' . $corriendo->id, $this->headers())
+            ->assertStatus(200)
+            ->json();
+
+        $this->assertFalse($cuerpo['salud']['deployment_stale']);
+        $this->assertNull($cuerpo['siguiente_accion']['endpoint']);
+        $this->assertStringNotContainsString('expire-stuck', (string) json_encode($cuerpo['siguiente_accion']));
+    }
+
+    /**
+     * 🔴 `retry-commands` aparece en las dos ramas de `failed` y en `paused_post_tasks`.
+     *
+     * Es el camino barato —reintenta sólo los comandos y NO borra ningún log— y estaba invisible,
+     * así que la máquina de estados empujaba a `start`, que borra el motivo por el que falló justo
+     * antes de leerlo.
+     */
+    public function test_siguiente_accion_ofrece_retry_commands_en_failed_y_en_paused_post_tasks()
+    {
+        $version = $this->crear_version('6.2.0');
+        $client  = $this->crear_cliente('Cliente con comandos fallados', $version->id);
+
+        /* Falló ANTES de los comandos: el endpoint sigue siendo start (borra logs), pero la
+           alternativa barata tiene que estar a la vista. */
+        $antes  = $this->crear_upgrade($client, $version, ['deployment_status' => 'failed']);
+        $cuerpo = $this->getJson('/api/claude/upgrades/' . $antes->id, $this->headers())
+            ->assertStatus(200)
+            ->json('siguiente_accion');
+
+        $this->assertStringEndsWith('/deploy/start', $cuerpo['endpoint']);
+        $this->assertStringContainsString('/deploy/retry-commands', $cuerpo['alternativa']);
+
+        /* Falló DESPUÉS de los comandos: el endpoint es configure-system y retry-commands también
+           figura, junto con la advertencia de que start borra los logs. */
+        $despues = $this->crear_upgrade($client, $version, [
+            'deployment_status'      => 'failed',
+            'comandos_ejecutados_at' => now(),
+        ]);
+        $cuerpo = $this->getJson('/api/claude/upgrades/' . $despues->id, $this->headers())
+            ->assertStatus(200)
+            ->json('siguiente_accion');
+
+        $this->assertStringEndsWith('/deploy/configure-system', $cuerpo['endpoint']);
+        $this->assertStringContainsString('/deploy/retry-commands', $cuerpo['alternativa']);
+
+        /* Pausado post-tareas: el panel rechaza retry-commands sólo en `running`, así que acá es
+           legal y no aparecía. */
+        $post_tasks = $this->crear_upgrade($client, $version, ['deployment_status' => 'paused_post_tasks']);
+        $cuerpo     = $this->getJson('/api/claude/upgrades/' . $post_tasks->id, $this->headers())
+            ->assertStatus(200)
+            ->json('siguiente_accion');
+
+        $this->assertStringEndsWith('/deploy/configure-system', $cuerpo['endpoint']);
+        $this->assertStringContainsString('/deploy/retry-commands', $cuerpo['alternativa']);
+    }
+
+    /**
+     * `GET claude/upgrades` filtra por `ids` y por `created_via`.
+     *
+     * Es lo que hace poleable un lote entero de una sola vez, sin una llamada por upgrade. La
+     * cadena completa —el 201 del lote proponiendo la llamada y la llamada funcionando— la mide
+     * ActualizacionesEnLotePorClaudeTest; acá se verifican los dos filtros por separado.
+     */
+    public function test_el_listado_de_upgrades_filtra_por_ids_y_por_created_via()
+    {
+        $version = $this->crear_version('6.3.0');
+        $client  = $this->crear_cliente('Cliente del lote', $version->id);
+
+        $uno  = $this->crear_upgrade($client, $version, ['created_via' => 'claude']);
+        $dos  = $this->crear_upgrade($client, $version, ['created_via' => 'claude']);
+        $tres = $this->crear_upgrade($client, $version);
+
+        $por_ids = $this->getJson(
+            '/api/claude/upgrades?ids=' . $uno->id . ',' . $dos->id,
+            $this->headers()
+        )->assertStatus(200)->json();
+
+        $this->assertSame(2, $por_ids['count']);
+
+        $devueltos = [];
+        foreach ($por_ids['data'] as $fila) {
+            $devueltos[] = (int) $fila['id'];
+        }
+        sort($devueltos);
+
+        $esperados = [(int) $uno->id, (int) $dos->id];
+        sort($esperados);
+
+        $this->assertSame($esperados, $devueltos);
+
+        /* El tercero, sin origen marcado, no puede colarse por created_via. */
+        $por_origen = $this->getJson(
+            '/api/claude/upgrades?created_via=claude&client_id=' . $client->id,
+            $this->headers()
+        )->assertStatus(200)->json();
+
+        $this->assertSame(2, $por_origen['count']);
+        foreach ($por_origen['data'] as $fila) {
+            $this->assertNotSame((int) $tres->id, (int) $fila['id']);
+        }
+    }
 }

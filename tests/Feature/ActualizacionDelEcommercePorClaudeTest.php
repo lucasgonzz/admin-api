@@ -944,4 +944,94 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
 
         $post->assertStatus(422);
     }
+
+    /* ------------------------------------------------------------------------------------------
+     | 7. La ventana `pendiente`: el freno que no cubría el reintento
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Dos POST seguidos sobre la misma tienda: el segundo rebota sin crear nada.
+     *
+     * El caso que lo originó: se pide la actualización del cliente X, el HTTP da timeout del lado
+     * del que llama, y se reintenta dentro del minuto. La corrida nace en `pendiente` y el worker
+     * tarda hasta `LATENCIA_MAXIMA_SEGUNDOS` (60) en levantarla, así que un freno que mira sólo
+     * `instalando` no ve NADA y crea una SEGUNDA corrida con su segundo job sobre la misma tienda.
+     * Las dos pelean por el lock del clone de `tienda-spa` en el VPS de builds — la misma contención
+     * de la que `MAX_LOTE_ECOMMERCE = 5` deriva su número.
+     *
+     * `Queue::fake()` es justamente lo que reproduce la ventana: el job queda encolado y la corrida
+     * se queda en `pendiente`, que es el estado real durante el minuto de latencia.
+     *
+     * @return void
+     */
+    public function test_un_segundo_post_dentro_de_la_ventana_pendiente_rebota_sin_crear_nada(): void
+    {
+        Queue::fake();
+
+        $escenario = $this->escenario_listo('Tienda Reintentada');
+
+        $primero = $this->postJson('/api/claude/ecommerce/updates', [
+            'client_id'           => $escenario['cliente']->id,
+            'confirm_client_name' => 'Tienda Reintentada',
+        ], $this->headers());
+
+        $primero->assertStatus(202);
+        $primero->assertJsonPath('status', 'pendiente');
+
+        $despues_del_primero = $this->corridas_totales();
+
+        /* El reintento, con la primera corrida todavía en `pendiente` y sin worker que la haya
+           tomado. Antes de este arreglo devolvía 202 y creaba una segunda corrida. */
+        $segundo = $this->postJson('/api/claude/ecommerce/updates', [
+            'client_id'           => $escenario['cliente']->id,
+            'confirm_client_name' => 'Tienda Reintentada',
+        ], $this->headers());
+
+        $segundo->assertStatus(422);
+        $this->assertStringContainsString('ya hay una corrida en curso', $this->cuerpo($segundo));
+
+        $this->assertSame($despues_del_primero, $this->corridas_totales(), 'El reintento no puede crear una segunda corrida.');
+        Queue::assertPushed(RunEcommerceInstallationJob::class, 1);
+
+        /* Los tres caminos dicen lo mismo: el listado también la marca ocupada. */
+        $stores = $this->getJson(
+            '/api/claude/ecommerce/stores?client_id=' . $escenario['cliente']->id,
+            $this->headers()
+        )->assertStatus(200);
+
+        $stores->assertJsonPath('data.0.puede_actualizarse', false);
+        $this->assertStringContainsString('ya hay una corrida en curso', $stores->json('data.0.motivo'));
+
+        /* Y el lote, que es el tercero. */
+        $lote = $this->postJson('/api/claude/ecommerce/updates/batch', [
+            'client_ids' => [$escenario['cliente']->id],
+        ], $this->headers())->assertStatus(200);
+
+        $this->assertSame(0, $lote->json('actualizarian'));
+        $this->assertStringContainsString('ya hay una corrida en curso', $this->cuerpo($lote));
+    }
+
+    /**
+     * 🔴 El lote de ecommerce también contesta en español.
+     *
+     * `mensajes_de_validacion()` del trait no traía `array`, así que `client_ids: "x"` caía a
+     * `resources/lang/en` y devolvía "The client ids must be an array." Es el mismo defecto que el
+     * `exists` del lote de empresa: el trait era la lista incompleta.
+     *
+     * @return void
+     */
+    public function test_el_lote_de_ecommerce_contesta_en_espanol_cuando_client_ids_no_es_una_lista(): void
+    {
+        $antes = $this->corridas_totales();
+
+        $respuesta = $this->postJson('/api/claude/ecommerce/updates/batch', [
+            'client_ids' => 'x',
+        ], $this->headers())->assertStatus(422);
+
+        $texto = $this->cuerpo($respuesta);
+
+        $this->assertStringContainsString('tiene que ser una lista', $texto);
+        $this->assertStringNotContainsString('must be an array', $texto);
+        $this->assertSame($antes, $this->corridas_totales());
+    }
 }

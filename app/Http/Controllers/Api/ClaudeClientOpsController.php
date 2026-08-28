@@ -796,6 +796,14 @@ class ClaudeClientOpsController extends Controller
             'status'              => 'nullable|string|in:' . implode(',', array_keys(UpdateController::STATUS_LABELS)),
             'deployment_status'   => 'nullable|string|in:' . implode(',', self::DEPLOYMENT_STATUSES),
             'to_version_id'       => 'nullable|integer|min:1',
+            /* 🔴 `ids` y `created_via` existen para poder preguntar por un LOTE de una sola vez.
+               Sin ellos, después de `POST claude/upgrades/batch` con veinte clientes no había forma
+               de saber cómo iban esos veinte salvo veinte llamadas a GET claude/upgrades/{id} —y el
+               lote de ecommerce sí lo tenía resuelto (su 202 manda a
+               GET claude/ecommerce/installations?created_via=claude). Empresa quedó sin el equivalente.
+               `ids` no lleva regla de tipo porque acepta las dos formas de siempre del bloque
+               (`ids[]=1&ids[]=2` o `ids=1,2`) y lo normaliza `normalizar_lista_enteros()`. */
+            'created_via'         => 'nullable|string|max:30',
             'scheduled_date_from' => 'nullable|date_format:Y-m-d',
             'scheduled_date_to'   => 'nullable|date_format:Y-m-d',
             'activos'             => 'nullable|boolean',
@@ -819,6 +827,20 @@ class ClaudeClientOpsController extends Controller
         $client_id = $this->entero_o_null($request->input('client_id'));
         if ($client_id !== null) {
             $query->where('client_version_upgrades.client_id', $client_id);
+        }
+
+        /* El filtro que convierte "¿cómo van los 20 que creó el lote?" en UNA llamada. La respuesta
+           201 de POST claude/upgrades/batch devuelve esta misma lista de ids armada. */
+        $ids = $this->normalizar_lista_enteros($request->input('ids'));
+        if (count($ids) > 0) {
+            $query->whereIn('client_version_upgrades.id', $ids);
+        }
+
+        /* Contraparte de `created_via` del lote de ecommerce: sirve para pedir "todo lo que creó
+           Claude" cuando ya no se tienen los ids a mano. */
+        $created_via = $this->texto_o_null($request->input('created_via'));
+        if ($created_via !== null) {
+            $query->where('client_version_upgrades.created_via', $created_via);
         }
 
         $status = $this->texto_o_null($request->input('status'));
@@ -999,6 +1021,13 @@ class ClaudeClientOpsController extends Controller
             $horario['proximo_cierre_motivo'] = $detalle['motivo'];
         }
 
+        $salud = $this->salud_del_deployment(
+            $deployment_status,
+            $fila['deployment_started_at'],
+            $logs['ultimo_at'],
+            $fila['deployment_running_since']
+        );
+
         return response()->json([
             'upgrade' => [
                 'id'                          => (int) $fila['id'],
@@ -1033,18 +1062,20 @@ class ClaudeClientOpsController extends Controller
                 'ultimo_error'  => $logs['ultimo_error'],
                 'consultar_en'  => 'GET claude/upgrades/' . (int) $fila['id'] . '/logs',
             ],
-            'salud'            => $this->salud_del_deployment(
-                $deployment_status,
-                $fila['deployment_started_at'],
-                $logs['ultimo_at'],
-                $fila['deployment_running_since']
-            ),
+            'salud'            => $salud,
             'horario_cliente'  => $horario,
+            /* 🔴 La salud se calcula UNA vez y se le pasa: `siguiente_accion` necesita
+               `deployment_stale` para saber si ofrecer expire-stuck, y recalcularlo adentro serían
+               dos mediciones del mismo instante que pueden no coincidir (`jobs_en_cola` y el último
+               log se leen de la base). Lo que se publica y lo que se propone tienen que salir del
+               mismo número. */
             'siguiente_accion' => $this->siguiente_accion(
                 (int) $fila['id'],
                 $deployment_status,
                 $fila['crons_supervisor_at'],
-                $fila['comandos_ejecutados_at']
+                $fila['comandos_ejecutados_at'],
+                (bool) $salud['deployment_stale'],
+                (int) $salud['vencimiento_minutos']
             ),
             'generado_a_las' => Carbon::now($tz)->toIso8601String(),
         ], 200);
@@ -1550,11 +1581,19 @@ class ClaudeClientOpsController extends Controller
             'stale_minutos'             => self::STALE_MINUTOS,
             'deployment_running_since'  => $deployment_running_since,
             'vencimiento_minutos'       => VencerDeploymentsColgados::timeout_minutos_efectivo(),
+            /* ⚠️ Los destrabadores son DOS desde el 28/8/2026 y esta nota los nombra a los dos. Decir sólo el
+               del scheduler mandaba a esperar cinco minutos por algo que ya se puede pedir a mano, y ese es
+               justamente el caso para el que se construyó `deploy/expire-stuck`. Los dos llaman al MISMO
+               `VencerDeploymentsColgados::vencer_upgrade()`: no son dos definiciones de "vencer un deployment". */
             'nota'                      => '`deployment_stale` REPORTA que el worker no está avanzando; no lo arregla. '
-                . 'Quien lo destraba es `deployments:vencer-colgados`, que el scheduler corre cada cinco minutos y que '
-                . 'pasa el upgrade a `failed` con el motivo escrito como línea de log cuando no reporta actividad por '
-                . 'más de `vencimiento_minutos`. Un upgrade que quedó en `running` ANTES de que existiera '
-                . '`deployment_running_since` no se vence solo: ese sigue saliendo a mano.',
+                . 'Lo destraban DOS, y los dos corren el mismo vencimiento: `deployments:vencer-colgados`, que el '
+                . 'scheduler dispara cada cinco minutos, y `POST claude/upgrades/{id}/deploy/expire-stuck`, que lo pide '
+                . 'a mano. Los dos pasan el upgrade a `failed` con el motivo escrito como línea de log cuando no '
+                . 'reporta actividad por más de `vencimiento_minutos` — que NO son los `stale_minutos` de esta misma '
+                . 'respuesta: estar stale no alcanza para vencer, y expire-stuck contesta 422 si todavía no llegó al '
+                . 'umbral destructivo. Un upgrade que quedó en `running` ANTES de que existiera '
+                . '`deployment_running_since` no se vence solo ni por el comando ni por el endpoint: ese sigue '
+                . 'saliendo a mano, o con force.',
         ];
     }
 
@@ -1570,26 +1609,74 @@ class ClaudeClientOpsController extends Controller
      * la etapa final. En los dos casos se devuelve también la `alternativa`, para no esconder el
      * otro camino.
      *
+     * 🔴 CONOCE LOS DOS ENDPOINTS QUE SE AGREGARON EL 28/8/2026, PORQUE SI NO ESTE MÉTODO MIENTE.
+     * Es el único lugar del que sale "qué hago ahora", así que un endpoint que no figura acá no
+     * existe para el que orquesta:
+     *   - `expire-stuck` en `running` + `salud.deployment_stale`. Antes se devolvía `endpoint: null`
+     *     y "esperá", que es exactamente el consejo equivocado para un worker que ya no avanza: el
+     *     endpoint se construyó para este caso. ⚠️ Se ofrece SÓLO con `deployment_stale` en true, y
+     *     el texto aclara que vencer exige el umbral destructivo (`vencimiento_minutos`) y no el de
+     *     aviso (15), para no proponer una llamada que va a contestar 422.
+     *   - `retry-commands` en `failed` y en `paused_post_tasks`. Es el camino barato —reintenta sólo
+     *     los comandos y NO borra los logs— y estaba invisible, así que la máquina de estados
+     *     empujaba a `start`, que sí los borra: el motivo por el que falló se perdía justo antes de
+     *     leerlo. Va como `alternativa` y no como `endpoint` a propósito: exige seeders completos y
+     *     al menos un comando reintentable, y eso no se puede saber desde acá sin consultar.
+     *
+     * 🔴 La FORMA de la respuesta no cambió: siguen siendo `endpoint`, `motivo` y `alternativa`.
+     * Cambió qué proponen, no las claves.
+     *
      * @param int         $upgrade_id             Id del upgrade.
      * @param string|null $deployment_status      Estado del deployment.
      * @param string|null $crons_supervisor_at    Cuándo se marcaron los crons.
      * @param string|null $comandos_ejecutados_at Cuándo se ejecutaron los comandos.
+     * @param bool        $deployment_stale       `salud.deployment_stale` ya calculado.
+     * @param int|null    $vencimiento_minutos    Umbral destructivo, en minutos.
      *
      * @return array<string, mixed>
      */
-    private function siguiente_accion($upgrade_id, $deployment_status, $crons_supervisor_at, $comandos_ejecutados_at)
-    {
+    private function siguiente_accion(
+        $upgrade_id,
+        $deployment_status,
+        $crons_supervisor_at,
+        $comandos_ejecutados_at,
+        $deployment_stale = false,
+        $vencimiento_minutos = null
+    ) {
         $start            = 'POST claude/upgrades/' . $upgrade_id . '/deploy/start';
         $mark_crons       = 'POST claude/upgrades/' . $upgrade_id . '/mark-crons';
         $post_closure     = 'POST claude/upgrades/' . $upgrade_id . '/deploy/start-post-closure';
         $configure_system = 'POST claude/upgrades/' . $upgrade_id . '/deploy/configure-system';
+        $retry_commands   = 'POST claude/upgrades/' . $upgrade_id . '/deploy/retry-commands';
+        $expire_stuck     = 'POST claude/upgrades/' . $upgrade_id . '/deploy/expire-stuck';
+
+        $umbral = $vencimiento_minutos === null
+            ? VencerDeploymentsColgados::timeout_minutos_efectivo()
+            : (int) $vencimiento_minutos;
 
         if ($deployment_status === 'running') {
+            /* Con el worker avanzando no hay nada que hacer más que esperar: proponer expire-stuck
+               acá sería proponer matar un pipeline vivo, y quedarían dos DeploymentService por SSH
+               sobre el hosting del mismo cliente. */
+            if (! $deployment_stale) {
+                return [
+                    'endpoint' => null,
+                    'motivo'   => 'El deployment está corriendo en el worker. Esperá y volvé a consultar '
+                        . 'GET claude/upgrades/' . $upgrade_id . ' cada 30 o 60 segundos (rate limit por IP). '
+                        . 'Si `salud.deployment_stale` se pone en true, el worker no está avanzando.',
+                ];
+            }
+
             return [
-                'endpoint' => null,
-                'motivo'   => 'El deployment está corriendo en el worker. Esperá y volvé a consultar '
-                    . 'GET claude/upgrades/' . $upgrade_id . ' cada 30 o 60 segundos (rate limit por IP). '
-                    . 'Si `salud.deployment_stale` se pone en true, el worker no está avanzando.',
+                'endpoint'    => $expire_stuck,
+                'motivo'      => 'El deployment figura `running` pero `salud.deployment_stale` está en true: el worker '
+                    . 'no reporta actividad hace más de ' . self::STALE_MINUTOS . ' minutos. expire-stuck lo pasa a '
+                    . '`failed` con el motivo escrito como línea de log y recién ahí se puede arrancar de nuevo. '
+                    . '⚠️ Vencer exige el umbral DESTRUCTIVO, que son ' . $umbral . ' minutos sin actividad, no los '
+                    . self::STALE_MINUTOS . ' del aviso: si todavía no llegó, contesta 422 y no toca nada. Mirá '
+                    . '`salud.vencimiento_minutos` y `salud.segundos_desde_ultimo_log` antes de llamar.',
+                'alternativa' => 'Esperar. `deployments:vencer-colgados` corre solo cada cinco minutos y hace '
+                    . 'exactamente lo mismo cuando se cumple el umbral: expire-stuck sólo evita la espera.',
             ];
         }
 
@@ -1612,28 +1699,49 @@ class ClaudeClientOpsController extends Controller
         }
 
         if ($deployment_status === 'paused_post_tasks') {
+            /* `retry-commands` también es legal acá y no aparecía: el panel lo rechaza sólo en
+               `running`, así que `paused` y `paused_post_tasks` pasan. Es el camino para el caso en
+               que los seeders terminaron y quedó un comando fallado: reintentarlo no obliga a pasar
+               por configure-system con un comando pendiente adentro. */
             return [
-                'endpoint' => $configure_system,
-                'motivo'   => 'Las tareas post-cierre terminaron. Falta la etapa final de configuración del sistema.',
+                'endpoint'    => $configure_system,
+                'motivo'      => 'Las tareas post-cierre terminaron. Falta la etapa final de configuración del sistema.',
+                'alternativa' => $retry_commands . ' si quedó algún comando fallado o pendiente: reintenta SOLO los '
+                    . 'comandos, no borra ningún log y lleva el mismo gate de horario que el post-cierre (corre sobre el '
+                    . 'sistema en uso). Exige seeders completos y al menos un comando reintentable; si no los hay, 422 y '
+                    . 'no toca nada.',
             ];
         }
 
         if ($deployment_status === 'failed') {
+            /* 🔴 `retry-commands` entra en las DOS ramas de `failed`. Las dos proponían un endpoint
+               caro: `start` reintenta el pipeline entero Y BORRA LOS LOGS del intento fallido —o sea
+               el motivo por el que falló, justo antes de leerlo—, y `configure-system` se saltea los
+               comandos. Si lo que falló fue un comando, el camino barato es reintentar ese comando.
+               Va como alternativa y no como endpoint porque tiene precondiciones que desde acá no se
+               pueden mirar sin consultar. */
+            $alternativa_retry = $retry_commands . ' reintenta SOLO los comandos y 🔴 NO borra ningún log: si lo que '
+                . 'falló fue un comando, es el camino barato. Exige seeders completos y al menos un comando fallado o '
+                . 'pendiente; si no, 422 sin tocar nada.';
+
             if ($comandos_ejecutados_at !== null) {
                 return [
                     'endpoint'    => $configure_system,
                     'motivo'      => 'El deployment falló DESPUÉS de ejecutar seeders y comandos: lo único que falta es la '
                         . 'etapa final, y configure-system reintenta ese mismo paso.',
-                    'alternativa' => $start . ' reintenta el pipeline COMPLETO desde compile_spa. 🔴 Borra los logs de '
-                        . 'este intento: leelos antes.',
+                    'alternativa' => $alternativa_retry . ' | ' . $start . ' reintenta el pipeline COMPLETO desde '
+                        . 'compile_spa. 🔴 Borra los logs de este intento: leelos antes.',
                 ];
             }
 
             return [
                 'endpoint'    => $start,
                 'motivo'      => 'El deployment falló antes de terminar las tareas post-cierre: se reintenta el pipeline '
-                    . 'desde el principio. 🔴 start BORRA los logs de este intento fallido: leelos antes de reintentar.',
-                'alternativa' => $configure_system . ' solo si lo que falló fue la etapa final de configuración.',
+                    . 'desde el principio. 🔴 start BORRA los logs de este intento fallido: leelos antes de reintentar. '
+                    . 'Antes de pagar eso, mirá la alternativa: si lo que falló fue un comando, retry-commands lo '
+                    . 'reintenta solo y no borra nada.',
+                'alternativa' => $alternativa_retry . ' | ' . $configure_system . ' solo si lo que falló fue la etapa '
+                    . 'final de configuración.',
             ];
         }
 

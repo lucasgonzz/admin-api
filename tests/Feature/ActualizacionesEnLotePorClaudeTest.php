@@ -755,4 +755,116 @@ class ActualizacionesEnLotePorClaudeTest extends TestCase
         $this->assertStringContainsString('tiene que estar publicada', $this->cuerpo($respuesta));
         $this->assertSame($antes, ClientVersionUpgrade::count());
     }
+
+    /* ==========================================================================================
+     | Los mensajes de error, y cómo se poleá el lote después
+     |========================================================================================= */
+
+    /**
+     * 🔴 El lote contesta en español, igual que el alta de a uno.
+     *
+     * `mensajes_de_validacion()` del trait `RespuestasParaClaude` no traía `exists`, así que un
+     * `to_version_id` inexistente caía a `resources/lang/en` y devolvía
+     * "The selected to version id is invalid." — en un bloque donde todo lo demás está en
+     * castellano. El endpoint viejo `POST claude/upgrades` sí contestaba bien, porque
+     * `ClaudeUpgradeOpsController` conserva su propia copia de la lista: eran dos listas de lo
+     * mismo, y los endpoints nuevos usaban la incompleta.
+     *
+     * @return void
+     */
+    public function test_el_lote_contesta_en_espanol_cuando_la_version_destino_no_existe(): void
+    {
+        $e     = $this->armar_escenario();
+        $antes = ClientVersionUpgrade::count();
+
+        $respuesta = $this->postJson('/api/claude/upgrades/batch', [
+            'to_version_id' => 999999,
+            'client_ids'    => [$e['panaderia']->id],
+        ], $this->headers())->assertStatus(422);
+
+        $texto = $this->cuerpo($respuesta);
+
+        $this->assertStringContainsString('no existe', $texto);
+        $this->assertStringNotContainsString('is invalid', $texto);
+        $this->assertSame($antes, ClientVersionUpgrade::count());
+    }
+
+    /**
+     * Misma familia que el anterior, con la otra regla que faltaba: `array`.
+     *
+     * @return void
+     */
+    public function test_el_lote_contesta_en_espanol_cuando_client_ids_no_es_una_lista(): void
+    {
+        $e = $this->armar_escenario();
+
+        $respuesta = $this->postJson('/api/claude/upgrades/batch', [
+            'to_version_id' => $e['dos']->id,
+            'client_ids'    => 'x',
+        ], $this->headers())->assertStatus(422);
+
+        $texto = $this->cuerpo($respuesta);
+
+        $this->assertStringContainsString('tiene que ser una lista', $texto);
+        $this->assertStringNotContainsString('must be an array', $texto);
+    }
+
+    /**
+     * 🔴 Después del lote se puede preguntar por los N creados en UNA sola llamada.
+     *
+     * Sin esto, crear veinte upgrades obligaba a veinte `GET claude/upgrades/{id}` para saber cómo
+     * iban: el 201 devolvía los ids y `GET claude/upgrades` no sabía recibirlos juntos. El lote de
+     * ecommerce ya lo tenía resuelto con `created_via`; empresa había quedado sin el equivalente.
+     *
+     * Se verifica la cadena entera: que el 201 diga cómo verificar, y que la llamada que propone
+     * funcione de verdad y devuelva exactamente esos upgrades.
+     *
+     * @return void
+     */
+    public function test_el_lote_dice_como_polear_los_creados_y_esa_llamada_funciona(): void
+    {
+        Queue::fake();
+
+        $e     = $this->armar_escenario();
+        $token = $this->simular($this->cuerpo_del_lote($e))['confirm_token'];
+
+        $cuerpo = $this->postJson('/api/claude/upgrades/batch', $this->cuerpo_del_lote($e, [
+            'dry_run'              => false,
+            'confirm_client_count' => 2,
+            'confirm_token'        => $token,
+        ]), $this->headers())->assertStatus(201)->json();
+
+        $this->assertSame(2, $cuerpo['creados']);
+        $this->assertCount(2, $cuerpo['ids_creados']);
+        $this->assertStringContainsString('GET claude/upgrades?ids=', $cuerpo['como_verificar']);
+
+        /* La llamada que el 201 propone, corrida de verdad: los dos upgrades del lote y nada más. */
+        $listado = $this->getJson(
+            '/api/claude/upgrades?ids=' . implode(',', $cuerpo['ids_creados']),
+            $this->headers()
+        )->assertStatus(200)->json();
+
+        $this->assertSame(2, $listado['count']);
+
+        $devueltos = [];
+        foreach ($listado['data'] as $fila) {
+            $devueltos[] = (int) $fila['id'];
+        }
+        sort($devueltos);
+
+        $esperados = $cuerpo['ids_creados'];
+        sort($esperados);
+
+        $this->assertSame($esperados, $devueltos);
+
+        /* Y el otro filtro nuevo: todo lo que creó Claude, sin acordarse los ids. */
+        $por_origen = $this->getJson('/api/claude/upgrades?created_via=claude', $this->headers())
+            ->assertStatus(200)
+            ->json();
+
+        $this->assertGreaterThanOrEqual(2, $por_origen['count']);
+        foreach ($por_origen['data'] as $fila) {
+            $this->assertSame('claude', $fila['created_via']);
+        }
+    }
 }

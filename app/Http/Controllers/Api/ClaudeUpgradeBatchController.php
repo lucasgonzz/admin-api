@@ -390,6 +390,25 @@ class ClaudeUpgradeBatchController extends Controller
             $indice++;
         }
 
+        /* 🔴 Cómo se verifica el lote DESPUÉS, en una sola llamada. Sin esto, el que creó veinte
+           upgrades tenía que preguntar por los veinte de a uno con GET claude/upgrades/{id}: el 201
+           devolvía los ids y ningún endpoint sabía recibirlos juntos. El lote de ecommerce ya lo
+           tenía resuelto —su 202 manda a GET claude/ecommerce/installations?created_via=claude— y
+           empresa había quedado sin el equivalente. Los filtros `ids` y `created_via` de
+           `ClaudeClientOpsController::upgrades_json()` se agregaron para esto. */
+        $ids_creados = [];
+        foreach ($resultados as $resultado) {
+            $ids_creados[] = (int) $resultado['upgrade_id'];
+        }
+
+        $como_verificar = $ids_creados === []
+            ? 'No se creó ningún upgrade, así que no hay nada que polear.'
+            : 'GET claude/upgrades?ids=' . implode(',', $ids_creados) . ' devuelve el estado de los ' . $creados
+                . ' en UNA sola llamada (status, deployment_status y scheduled_date de cada uno). Para todo lo que '
+                . 'creó Claude sin acordarte los ids: GET claude/upgrades?created_via='
+                . ClientVersionUpgrade::CREATED_VIA_CLAUDE . '&activos=1. La ficha completa de uno solo, con salud y '
+                . '`siguiente_accion`, sigue siendo GET claude/upgrades/{id}.';
+
         return response()->json([
             'dry_run'               => false,
             'to_version'            => ['id' => (int) $to->id, 'version' => $to->version, 'title' => $to->title],
@@ -401,6 +420,8 @@ class ClaudeUpgradeBatchController extends Controller
             'abortado'              => $abortado,
             'motivo_corte'          => $motivo_corte,
             'created_via'           => ClientVersionUpgrade::CREATED_VIA_CLAUDE,
+            'ids_creados'           => $ids_creados,
+            'como_verificar'        => $como_verificar,
             'resultados'            => $resultados,
             /* Las mismas advertencias que la simulación: el que confirmó también las necesita
                DESPUÉS, porque son sobre lo que va a pasar recién en el deploy/start de cada uno. */

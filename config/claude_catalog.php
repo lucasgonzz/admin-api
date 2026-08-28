@@ -255,7 +255,9 @@ return [
             'frenos'       => [],
         ],
         'GET api/claude/upgrades' => [
-            'para_que'     => 'Listado de actualizaciones filtrable y paginado por cursor.',
+            /* `ids` y `created_via` son lo que hace poleable un lote de una sola vez: ver la
+               respuesta 201 de POST claude/upgrades/batch, que devuelve la llamada ya armada. */
+            'para_que'     => 'Listado de actualizaciones filtrable y paginado por cursor. Filtros: client_id, ids (lista, para polear un lote entero de una), created_via, status, deployment_status, to_version_id, scheduled_date_from/to, activos.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -441,6 +443,9 @@ return [
     'limitaciones_conocidas' => [
         '🔴 El panel del admin despacha RunEcommerceInstallationJob INLINE, sin onConnection("database") (Api\\EcommerceInstallationController, líneas 95, 154 y 212). Con QUEUE_CONNECTION=sync eso corre el pipeline SSH entero adentro del request del panel. Los claude/* encolan explícito. Mientras haya una corrida de Claude en curso, no toques el botón del panel: las dos compiten por el mismo lock de build.',
         '🔴 Una corrida de ecommerce colgada en status="instalando" NO la destraba nadie: no existe el equivalente de deployments:vencer-colgados para client_ecommerce_installations. La salud de la corrida la REPORTA, pero destrabarla es a mano. Y mientras esté colgada, esa tienda no acepta otra corrida.',
+        /* Asimetría deliberada, no un olvido: ver ClaudeEcommerceOpsController::ESTADOS_QUE_OCUPAN_LA_TIENDA.
+           El panel no se endurece porque cambiaría un botón que se usa a mano. */
+        '🔴 "Ya hay una corrida en curso para esta tienda" es MÁS DURO en claude/* que en el panel: acá cuentan también las corridas en status="pendiente" (encoladas y todavía sin worker), y en el panel sólo las "instalando". Es lo que evita que un reintento de POST claude/ecommerce/updates dentro del minuto —cuando el HTTP dio timeout— cree una segunda corrida sobre la misma tienda. Consecuencia: el panel puede arrancar una corrida que claude/* estaba frenando.',
         'El gate de horario usa config("app.timezone"), que es global. Un cliente en otra franja horaria se evalúa con la hora del servidor, no con la suya.',
         'deployment_stale (15 minutos) es un umbral de AVISO y el del vencimiento (45) es el DESTRUCTIVO. Que un deployment aparezca stale no significa que se pueda vencer: son dos números distintos a propósito.',
         'Ninguna ruta claude/* arranca un deployment en lote. El gate de horario y allow_deploy_to_active_api son por cliente, así que después de POST claude/upgrades/batch hay que llamar deploy/start uno por uno.',

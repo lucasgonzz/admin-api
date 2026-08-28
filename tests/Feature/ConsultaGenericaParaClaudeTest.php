@@ -650,4 +650,96 @@ class ConsultaGenericaParaClaudeTest extends TestCase
             }
         }
     }
+
+    /* ------------------------------------------------------------------------------------------
+     | 6. Un filtro mal formado es 422 legible, nunca 500 ni una respuesta plausible y equivocada
+     |
+     | Los tres tests que siguen cubren la misma promesa desde tres ángulos distintos, y los tres
+     | nacieron de defectos medidos, no de imaginar casos. Lo que se protege no es "que no explote":
+     | es que un parámetro mal armado NO pueda producir una respuesta 200 que parece correcta.
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un filtro de fecha pasado como array es 422, no 500.
+     *
+     * `?creado_desde[]=x` llegaba a `Carbon::parse(array)`, que tira `TypeError`. `TypeError` es un
+     * `\Error` y NO un `\Exception`, así que el `catch (\Exception)` de `parsear_o_null()` no lo
+     * veía: la respuesta era un 500 con stack trace y rutas del disco. Afectaba a los 6 modelos que
+     * declaran `fecha_desde` / `fecha_hasta`.
+     *
+     * @return void
+     */
+    public function test_un_filtro_de_fecha_como_array_devuelve_422_y_no_500(): void
+    {
+        $respuesta = $this->getJson('/api/claude/query?model=client&creado_desde[]=x', $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertArrayNotHasKey('data', $respuesta->json());
+        $this->assertStringContainsString('creado_desde', $this->cuerpo($respuesta));
+    }
+
+    /**
+     * 🔴 Un booleano pasado como array es 422, y sobre todo NO invierte el filtro.
+     *
+     * `?is_active[]=1` llegaba a `filter_var(array, FILTER_VALIDATE_BOOLEAN)`, que devuelve `false`:
+     * la consulta salía 200, filtrando por clientes INACTIVOS, y publicaba
+     * `filtros_aplicados: {"is_active": false}` como si eso fuera lo que se había pedido. Es el peor
+     * de los tres, porque es el único que devuelve una respuesta que parece buena.
+     *
+     * El test verifica las dos mitades: que rebota, y que el cliente ACTIVO sembrado no aparece en
+     * ninguna lista de inactivos.
+     *
+     * @return void
+     */
+    public function test_un_booleano_como_array_no_invierte_el_filtro_en_silencio(): void
+    {
+        $activo = $this->crear_cliente('Negocio Activo ' . Str::random(6), ['is_active' => true]);
+
+        $respuesta = $this->getJson('/api/claude/query?model=client&is_active[]=1', $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertArrayNotHasKey('data', $respuesta->json());
+        $this->assertStringContainsString('is_active', $this->cuerpo($respuesta));
+
+        /* La contraprueba: pedido bien, el cliente activo está. Si el 422 de arriba fuera un rechazo
+           de cualquier cosa, este assert sería el que lo delata. */
+        $bien = $this->consultar(['model' => 'client', 'is_active' => 1, 'ids' => (int) $activo->id]);
+        $bien->assertStatus(200);
+        $this->assertSame(1, $bien->json('count'));
+        $this->assertTrue($bien->json('filtros_aplicados.is_active'));
+    }
+
+    /**
+     * 🔴 Una fecha impajaritable es 422, no un filtro por "ahora".
+     *
+     * `Carbon::parse('x')` no lanza: devuelve la fecha y hora del momento. La consulta quedaba
+     * `where created_at >= <ahora>` —cero filas, siempre— y `filtros_aplicados` publicaba un
+     * instante que nadie había pedido. El 422 tiene que decir el nombre del filtro y qué se
+     * esperaba, igual que ya hacen los filtros de tipo `en` con su `valores_validos`.
+     *
+     * @return void
+     */
+    public function test_una_fecha_que_no_es_fecha_devuelve_422_con_los_formatos_validos(): void
+    {
+        $respuesta = $this->consultar(['model' => 'client', 'creado_desde' => 'x']);
+
+        $respuesta->assertStatus(422);
+        $this->assertArrayNotHasKey('data', $respuesta->json());
+        $this->assertArrayNotHasKey('filtros_aplicados', $respuesta->json());
+        $this->assertStringContainsString('creado_desde', (string) $respuesta->json('error'));
+        $this->assertNotEmpty($respuesta->json('formatos_validos'));
+
+        /* Las relativas son de la misma familia: parsean, y a algo que nadie pidió. */
+        $this->consultar(['model' => 'client', 'creado_desde' => 'next monday'])->assertStatus(422);
+        $this->consultar(['model' => 'client', 'creado_desde' => '0000-00-00'])->assertStatus(422);
+
+        /* Y una fecha de verdad sigue entrando, en los formatos que el 422 publica. */
+        $ok = $this->consultar(['model' => 'client', 'creado_desde' => '2020-01-01']);
+        $ok->assertStatus(200);
+        $this->assertSame('2020-01-01 00:00:00', $ok->json('filtros_aplicados.creado_desde'));
+
+        $con_hora = $this->consultar(['model' => 'client', 'creado_desde' => '2020-01-01 10:30:45']);
+        $con_hora->assertStatus(200);
+        $this->assertSame('2020-01-01 10:30:45', $con_hora->json('filtros_aplicados.creado_desde'));
+    }
 }

@@ -1766,11 +1766,12 @@ class ClaudeUpgradeOpsController extends Controller
      * Mensajes de validación en español. El proyecto solo tiene traducciones en inglés
      * (resources/lang/en), así que se pasan inline.
      *
-     * 🔴 SOBRESCRIBE la del trait `RespuestasParaClaude`, que tampoco es lo mismo: esta lista trae
-     * `exists` y `array` (que el trait no tiene, porque los endpoints de lectura no validan contra
-     * la base ni reciben listas) y NO trae `date` ni `in`. Devolver la del trait le cambiaría el
-     * mensaje a un `exists` fallado, que es el error más común de estos POST. Se unifican el día
-     * que las dos listas sean la misma; hoy no lo son.
+     * 🔴 SOBRESCRIBE la del trait `RespuestasParaClaude`. ⚠️ El motivo original ya no vale: el trait
+     * no tenía `exists` ni `array` y por eso los endpoints de lote contestaban en inglés, y desde el
+     * 28/8/2026 los tiene, con el MISMO texto que estas dos líneas. Lo único que queda distinto es
+     * que esta lista no trae `date` ni `in`, que este controlador no usa. Se borra el día que
+     * alguien verifique endpoint por endpoint que devolver la del trait no cambia ningún mensaje;
+     * mientras tanto queda, porque unificarla es un cambio de contrato y no un refactor.
      *
      * @return array<string, string>
      */

@@ -239,12 +239,31 @@ trait RespuestasParaClaude
      * Mensajes de validación en español. El proyecto solo tiene traducciones en inglés
      * (resources/lang/en), así que se pasan inline.
      *
+     * 🔴 UNA REGLA QUE NO ESTÁ ACÁ NO FALLA: CONTESTA EN INGLÉS. Ese es el único síntoma, y es
+     * silencioso. Los dos casos medidos, los dos en endpoints de lote de esta misma rama:
+     *   POST claude/upgrades/batch {to_version_id: 999999}
+     *     → "The selected to version id is invalid." (faltaba `exists`)
+     *   POST claude/ecommerce/updates/batch {client_ids: "x"}
+     *     → "The client ids must be an array." (faltaba `array`)
+     * El endpoint viejo `POST claude/upgrades` contestaba bien porque `ClaudeUpgradeOpsController`
+     * conserva su propia copia de esta lista, que sí los tenía: dos listas de lo mismo, y la que
+     * usaban los endpoints nuevos era la incompleta.
+     *
+     * ⚠️ Antes de agregar una regla a un controlador que usa este trait, fijate que esté en esta
+     * lista. Y al revés: esta lista cubre las reglas que hoy usa el bloque `claude/*` (`required`,
+     * `exists`, `array`, `date`, `date_format`, `integer`, `boolean`, `string`, `in`, `min`, `max`),
+     * no todas las de Laravel.
+     *
      * @return array<string, string>
      */
     protected function mensajes_de_validacion()
     {
         return [
             'required'    => 'El parámetro :attribute es obligatorio.',
+            /* Mismo texto que la copia de ClaudeUpgradeOpsController, para que el lote y el alta de
+               a uno contesten igual ante el mismo error. */
+            'exists'      => 'El :attribute que mandaste no existe.',
+            'array'       => 'El parámetro :attribute tiene que ser una lista.',
             'date'        => 'El parámetro :attribute tiene que ser una fecha válida.',
             'date_format' => 'El parámetro :attribute tiene que venir en formato :format.',
             'integer'     => 'El parámetro :attribute tiene que ser un número entero.',
@@ -365,7 +384,21 @@ trait RespuestasParaClaude
     /**
      * Parsea una fecha-hora sin lanzar.
      *
-     * @param string|null $valor Valor crudo.
+     * 🔴 `catch (\Throwable)` Y NO `catch (\Exception)`, Y NO ES DEFENSA GENÉRICA. `Carbon::parse()`
+     * tira `InvalidFormatException` (que es `\Exception`) cuando el string no parsea, pero tira
+     * `TypeError` —que es `\Error`, o sea que NO es `\Exception`— cuando lo que llega no es un
+     * string. El caso medido: `GET claude/query?model=client&creado_desde[]=x` pasaba un array por
+     * acá y el `catch` no lo veía, así que salía 500 con stack trace y rutas del disco en vez del
+     * 422 legible que todo `claude/*` promete. El método dice en su propio nombre que no lanza: esto
+     * es lo que hace que sea cierto.
+     *
+     * ⚠️ Esto sólo evita el 500. NO alcanza para validar: `Carbon::parse('x')` no lanza nada y
+     * devuelve AHORA. Un filtro que además necesita rechazar una fecha imposible se valida antes de
+     * llegar acá — los endpoints viejos lo hacen con reglas de Laravel (`date`, `date_format`) y
+     * `GET claude/query`, que recibe los filtros sin declararlos uno por uno, con
+     * `ClaudeQueryService::fecha_estricta()`.
+     *
+     * @param mixed $valor Valor crudo.
      *
      * @return Carbon|null
      */
@@ -377,7 +410,7 @@ trait RespuestasParaClaude
 
         try {
             return Carbon::parse($valor, config('app.timezone'));
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return null;
         }
     }

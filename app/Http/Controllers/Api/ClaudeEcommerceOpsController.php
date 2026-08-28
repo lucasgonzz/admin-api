@@ -124,6 +124,27 @@ class ClaudeEcommerceOpsController extends Controller
     /** Estado que significa "hay un pipeline SSH corriendo sobre esta tienda ahora mismo". */
     const ESTADO_EN_CURSO = 'instalando';
 
+    /**
+     * Estados en los que una corrida OCUPA la tienda y no se puede arrancar otra.
+     *
+     * 🔴 INCLUYE `pendiente` A PROPÓSITO, Y ACÁ SE ENDURECE RESPECTO DEL PANEL.
+     * `EcommerceInstallationController::assert_no_running_installation()` mira sólo `instalando`, y
+     * para el botón del panel alcanza: lo aprieta un humano que acaba de ver la pantalla. Del lado
+     * de Claude no.
+     *
+     * El caso concreto que lo originó: `POST claude/ecommerce/updates` para el cliente X, el HTTP da
+     * timeout del lado del que llama, y se reintenta dentro del minuto. La corrida nace en
+     * `pendiente` y el worker tarda hasta `LATENCIA_MAXIMA_SEGUNDOS` (60) en levantarla, así que
+     * mirando sólo `instalando` el freno no ve NADA y se crean una segunda corrida y un segundo job
+     * sobre la misma tienda. Las dos pelean por el lock del clone de `tienda-spa` en el VPS de
+     * builds — que es exactamente la contención de la que `MAX_LOTE_ECOMMERCE = 5` deriva su número:
+     * el lock espera hasta 1800 s y después tira `RuntimeException`.
+     *
+     * ⚠️ El panel NO se toca: cambiarlo cambiaría un botón que Lucas usa, y esa asimetría es
+     * deliberada. Está declarada en `limitaciones_conocidas` del catálogo.
+     */
+    const ESTADOS_QUE_OCUPAN_LA_TIENDA = [self::ESTADO_INICIAL, self::ESTADO_EN_CURSO];
+
     /** Valores válidos de `client_ecommerce_installations.mode`, para los filtros de lectura. */
     const MODES = ['install', 'update'];
 
@@ -993,10 +1014,13 @@ class ClaudeEcommerceOpsController extends Controller
             return $contexto;
         }
 
-        /* Espeja `EcommerceInstallationController::assert_no_running_installation()`. */
+        /* Espeja `EcommerceInstallationController::assert_no_running_installation()`, pero MÁS DURO:
+           el panel mira sólo `instalando` y acá cuentan también las `pendiente`, porque una corrida
+           recién encolada todavía no llegó al worker y un reintento del POST crearía una segunda
+           sobre la misma tienda. El motivo completo está en ESTADOS_QUE_OCUPAN_LA_TIENDA. */
         $contexto['corriendo'] = DB::table('client_ecommerce_installations')
             ->whereIn('client_ecommerce_id', $ecommerce_ids)
-            ->where('status', self::ESTADO_EN_CURSO)
+            ->whereIn('status', self::ESTADOS_QUE_OCUPAN_LA_TIENDA)
             ->distinct()
             ->pluck('client_ecommerce_id')
             ->map(function ($id) {
@@ -1037,6 +1061,11 @@ class ClaudeEcommerceOpsController extends Controller
      * ⚠️ NO se replican los dos chequeos que el panel hace sólo para `mode = 'install'` (plantilla de
      * `.env` de tienda y API de empresa activa del cliente): el pipeline de `update` no reescribe el
      * `.env`, así que exigirlos acá rechazaría actualizaciones perfectamente válidas.
+     *
+     * 🔴 Y hay UNA divergencia deliberada en la otra dirección: "ya hay una corrida en curso" cuenta
+     * también las `pendiente`, que el panel no cuenta. Es lo que evita que un reintento del POST
+     * dentro del minuto —el HTTP dio timeout, la corrida todavía no la levantó el worker— cree una
+     * segunda corrida sobre la misma tienda. Ver ESTADOS_QUE_OCUPAN_LA_TIENDA.
      *
      * ⚠️ El cooldown NO está acá a propósito: es del lote solamente. Ver `COOLDOWN_HORAS_ECOMMERCE`.
      *
