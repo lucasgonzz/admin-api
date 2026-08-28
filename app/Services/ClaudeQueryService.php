@@ -574,7 +574,7 @@ class ClaudeQueryService
             /* 🔴 `fecha_estricta()` y NO `parsear_o_null()`: ver el docblock de FORMATOS_DE_FECHA.
                El helper del trait delega en `Carbon::parse()`, que para "x" devuelve AHORA en vez de
                fallar, y el filtro terminaba siendo `created_at >= <ahora>` sin que nadie se enterara. */
-            $fecha = $this->fecha_estricta($texto);
+            $fecha = self::fecha_estricta($texto);
             if ($fecha === null) {
                 return $this->error_422('El filtro "' . $nombre . '" del modelo "' . $modelo . '" no es una fecha válida.', [
                     'recibido'         => $texto,
@@ -658,11 +658,18 @@ class ClaudeQueryService
      * de las corridas de ecommerce sobre timestamps que salen de la base, y rechazar formatos ahí
      * cambiaría cómo se calcula `deployment_stale` en endpoints que ya estaban.
      *
+     * 🔴 ES `public static` PORQUE TIENE UN SEGUNDO LLAMADOR, Y ESO ES EL PUNTO:
+     * `ClaudeEcommerceOpsController::installations_json()` valida ahí sus `desde` / `hasta` con
+     * ESTA función y no con una copia. Los dos endpoints tienen que responder lo mismo a la
+     * pregunta "¿qué es una fecha válida?": dos definiciones se desincronizan y la que se queda
+     * vieja es siempre la que nadie mira. Es una función pura sobre un string, así que no necesita
+     * instancia ni estado.
+     *
      * @param string $texto Valor ya recortado.
      *
      * @return Carbon|null
      */
-    private function fecha_estricta($texto)
+    public static function fecha_estricta($texto)
     {
         $zona = new \DateTimeZone((string) config('app.timezone'));
 

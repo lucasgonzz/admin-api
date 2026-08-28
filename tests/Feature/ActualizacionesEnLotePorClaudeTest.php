@@ -696,6 +696,70 @@ class ActualizacionesEnLotePorClaudeTest extends TestCase
         }
     }
 
+    /**
+     * 🔴 LAS DOS RESPUESTAS DICEN CUÁNTO FALTA, Y QUE UNO DE LOS PASOS ES MANUAL.
+     *
+     * El defecto que esto tapa es de TEXTO, y por eso hace falta un test: la respuesta decía "el
+     * arranque va uno por uno con el `siguiente_accion` de cada resultado", que se lee como "N
+     * llamadas más y listo". No es eso. Son cuatro llamadas HTTP por cliente, una intervención
+     * MANUAL de una persona en el panel de Hostinger (paso 2, que `mark-crons` sólo registra) y una
+     * ventana de cierre distinta por negocio. Un texto que promete de más es un defecto real: Claude
+     * lo lee EN VEZ de leer el código.
+     */
+    public function test_las_dos_respuestas_del_lote_dicen_los_cinco_pasos_y_que_el_segundo_es_manual(): void
+    {
+        $e = $this->armar_escenario();
+
+        $simulacion = $this->simular($this->cuerpo_del_lote($e));
+
+        $real = $this->postJson('/api/claude/upgrades/batch', $this->cuerpo_del_lote($e, [
+            'dry_run'              => false,
+            'confirm_client_count' => 2,
+            'confirm_token'        => $simulacion['confirm_token'],
+        ]), $this->headers())->assertStatus(201)->json();
+
+        foreach (['simulacion' => $simulacion, 'real' => $real] as $cual => $cuerpo) {
+            $pasos = $cuerpo['pasos_para_completar'];
+
+            $this->assertCount(5, $pasos, 'La respuesta ' . $cual . ' no publica los cinco pasos.');
+
+            /* El paso 2 es el que no tiene endpoint y el que hace que ninguna actualización de
+               empresa se complete sola. Si algún día alguien lo suaviza, este assert lo agarra. */
+            $this->assertStringContainsString('HUMANO', $pasos[1]['quien']);
+            $this->assertStringContainsString('Hostinger', $pasos[1]['accion']);
+            $this->assertStringContainsString('NO HAY ENDPOINT', $pasos[1]['que_hace']);
+
+            /* Y el paso 3 dice que marcar no mueve nada, que es la confusión concreta. */
+            $this->assertStringContainsString('NO', $pasos[2]['que_hace']);
+            $this->assertStringContainsString('mark-crons', $pasos[2]['accion']);
+
+            $nota = $cuerpo['nota_deployment'];
+            $this->assertStringContainsString('MANUAL', $nota);
+            $this->assertStringContainsString('8 llamadas HTTP', $nota, 'La nota ' . $cual . ' no cuenta 4 llamadas por cada uno de los 2 clientes.');
+        }
+
+        /* Y al lado de cada `siguiente_accion` queda dicho que es el primero de cinco: es donde se
+           leía "20 llamadas y listo". */
+        foreach ($real['resultados'] as $resultado) {
+            $this->assertStringContainsString('1 de 5', $resultado['siguiente_accion_paso']);
+        }
+    }
+
+    /**
+     * 🔴 El catálogo declara, en `limitaciones_conocidas`, que ninguna actualización de empresa se
+     * completa sin una persona. Vivía sólo en el `para_que` de `mark-crons`, que es donde menos se
+     * lo busca: quien pregunta "¿qué NO puede hacer esto?" lee las limitaciones, no el endpoint
+     * número once.
+     */
+    public function test_el_catalogo_declara_que_ninguna_actualizacion_se_completa_sin_un_humano(): void
+    {
+        $limitaciones = implode(' | ', (array) config('claude_catalog.limitaciones_conocidas'));
+
+        $this->assertStringContainsString('SIN INTERVENCIÓN HUMANA', $limitaciones);
+        $this->assertStringContainsString('HOSTINGER', mb_strtoupper($limitaciones));
+        $this->assertStringContainsString('CINCO pasos', $limitaciones);
+    }
+
     /** El alta real deja los upgrades marcados como creados por Claude, con sus seeders y comandos. */
     public function test_el_lote_real_marca_los_upgrades_como_creados_por_claude(): void
     {

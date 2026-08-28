@@ -285,6 +285,88 @@ class CatalogoDeEndpointsDeClaudeTest extends TestCase
     }
 
     /**
+     * 🔴 Toda ruta de escritura declara sus parámetros, y cada uno dice si es obligatorio.
+     *
+     * La reja del freno (`>= 1 freno`) no cubría esto: un endpoint podía declarar cinco frenos y
+     * cero parámetros, que es exactamente como estaba. Para `POST claude/upgrades/batch`,
+     * `to_version_id` —obligatorio— no aparecía en ninguna parte del catálogo, así que la única
+     * forma de enterarse de los parámetros de un POST que arranca SSH sobre el hosting de un negocio
+     * era mandar uno mal y leer el 422.
+     *
+     * Se verifica también que salga POR LA RESPUESTA y no sólo del config: el que consulta lee el
+     * JSON, no el archivo.
+     *
+     * @return void
+     */
+    public function test_toda_ruta_de_escritura_declara_sus_parametros(): void
+    {
+        $declaradas = (array) config('claude_catalog.endpoints');
+
+        $this->assertNotEmpty($declaradas);
+
+        $escrituras = 0;
+
+        foreach ($declaradas as $clave => $endpoint) {
+            if (empty($endpoint['escribe'])) {
+                continue;
+            }
+
+            $escrituras++;
+
+            $this->assertArrayHasKey(
+                'parametros',
+                $endpoint,
+                'La ruta de escritura "' . $clave . '" no declara `parametros`. Sin eso, la única forma de saber qué '
+                    . 'recibe es mandar una llamada mal y leer el 422.'
+            );
+
+            $this->assertNotEmpty(
+                $endpoint['parametros'],
+                'La ruta de escritura "' . $clave . '" declara `parametros` vacío. Toda escritura recibe algo: como '
+                    . 'mínimo el {id} de la ruta.'
+            );
+
+            foreach ((array) $endpoint['parametros'] as $indice => $parametro) {
+                $donde = 'El parámetro #' . $indice . ' de "' . $clave . '"';
+
+                $this->assertArrayHasKey('nombre', $parametro, $donde . ' no tiene nombre.');
+                $this->assertNotSame('', trim((string) $parametro['nombre']), $donde . ' tiene el nombre vacío.');
+
+                $this->assertArrayHasKey('obligatorio', $parametro, $donde . ' no dice si es obligatorio.');
+                $this->assertIsBool($parametro['obligatorio'], $donde . ' declara `obligatorio` con algo que no es booleano.');
+
+                $this->assertArrayHasKey('que_es', $parametro, $donde . ' no dice qué es.');
+                $this->assertNotSame('', trim((string) $parametro['que_es']), $donde . ' tiene el `que_es` vacío.');
+            }
+        }
+
+        $this->assertGreaterThan(0, $escrituras, 'No se encontró ninguna ruta de escritura declarada: el config quedó mal.');
+
+        /* Y que efectivamente salga por la respuesta, que es lo que se lee del otro lado. */
+        $respuesta = $this->getJson('/api/claude/catalog?seccion=endpoints', $this->headers());
+        $respuesta->assertStatus(200);
+
+        $vistos = 0;
+        foreach ((array) $respuesta->json('endpoints') as $endpoint) {
+            if (empty($endpoint['escribe'])) {
+                continue;
+            }
+
+            $vistos++;
+            $this->assertNotEmpty(
+                $endpoint['parametros'],
+                'La respuesta del catálogo no publica los parámetros de "' . $endpoint['metodo'] . ' ' . $endpoint['ruta'] . '".'
+            );
+        }
+
+        $this->assertSame($escrituras, $vistos, 'La cantidad de escrituras publicadas no coincide con la declarada.');
+
+        /* El caso concreto que originó esto: el único obligatorio del lote de upgrades. */
+        $cuerpo = $this->cuerpo($respuesta);
+        $this->assertStringContainsString('to_version_id', $cuerpo);
+    }
+
+    /**
      * Las limitaciones que hoy sólo viven en docblocks se publican en la respuesta.
      *
      * Las tres que no se pueden perder: que el panel despacha el pipeline de ecommerce INLINE, que

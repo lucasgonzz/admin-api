@@ -909,6 +909,70 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
     }
 
     /**
+     * 🔴 Una fecha que NO ES UNA FECHA se rechaza con 422, aunque `Carbon::parse()` la acepte.
+     *
+     * El agujero medido: `desde=x` no hacía saltar ningún error. `Carbon::parse('x')` no lanza nada
+     * y devuelve la fecha y hora de AHORA, así que el `if ($desde === null)` que promete el 422 nunca
+     * se cumplía y la consulta salía filtrada por `created_at >= <ahora>` — cero filas, siempre, sin
+     * que nadie se enterara de que había un filtro puesto. Es la misma familia que ya se arregló en
+     * el filtro `fecha_desde` de `GET claude/query`, y por eso este endpoint usa LA MISMA función
+     * (`ClaudeQueryService::fecha_estricta()`) y no una copia: dos definiciones de "qué es una fecha
+     * válida" se desincronizan y arreglar una deja la otra rota.
+     *
+     * Los cuatro casos de abajo son los cuatro que `Carbon::parse()` deja pasar: basura suelta, una
+     * expresión relativa, un día que no existe y la fecha cero de MySQL.
+     *
+     * @return void
+     */
+    public function test_una_fecha_invalida_en_el_listado_de_corridas_es_422_y_no_filtra_por_ahora(): void
+    {
+        $escenario = $this->escenario_listo('Tienda Con Historial');
+
+        $corrida = ClientEcommerceInstallation::create([
+            'client_ecommerce_id' => $escenario['tienda']->id,
+            'mode'                => 'update',
+            'status'              => 'completada',
+        ]);
+
+        /* Control: sin filtro, la corrida está. Si el 422 no llegara, el filtro por "ahora" la
+           escondería y la respuesta sería un 200 con cero filas — el desenlace silencioso. */
+        $this->getJson('/api/claude/ecommerce/installations', $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('count', 1)
+            ->assertJsonPath('data.0.id', $corrida->id);
+
+        $impares = ['x', 'next monday', '2026-02-30', '0000-00-00'];
+
+        foreach ($impares as $impar) {
+            foreach (['desde', 'hasta'] as $parametro) {
+                $respuesta = $this->getJson(
+                    '/api/claude/ecommerce/installations?' . $parametro . '=' . urlencode($impar),
+                    $this->headers()
+                );
+
+                $respuesta->assertStatus(422);
+                $this->assertStringContainsString(
+                    'no es una fecha válida',
+                    $this->cuerpo($respuesta),
+                    'El parámetro ' . $parametro . '=' . $impar . ' no fue rechazado.'
+                );
+
+                /* El 422 dice qué SÍ se acepta, con los mismos ejemplos que publica GET claude/query. */
+                $this->assertNotEmpty($respuesta->json('formatos_validos'));
+            }
+        }
+
+        /* Y una fecha bien escrita sigue filtrando como corresponde. */
+        $this->getJson('/api/claude/ecommerce/installations?desde=2000-01-01', $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('count', 1);
+
+        $this->getJson('/api/claude/ecommerce/installations?hasta=2000-01-01', $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('count', 0);
+    }
+
+    /**
      * `GET claude/ecommerce/stores` publica `puede_actualizarse` con el motivo, y lo calcula con el
      * MISMO método que después usa el POST: si fueran dos cálculos, el listado diría "sí" y el POST
      * contestaría 422.

@@ -33,8 +33,14 @@ use Illuminate\Support\Facades\Log;
  *    significaría "desplegá sobre producción de todos los que tengan una sola API", que es
  *    exactamente lo que ese freno existe para impedir.
  *
- * **Consecuencia práctica, y va escrita en la respuesta:** después del lote hay que llamar
- * `deploy/start` una vez por cliente. La respuesta devuelve la lista exacta de endpoints a llamar.
+ * 🔴 **CONSECUENCIA PRÁCTICA, Y VA ESCRITA EN LAS DOS RESPUESTAS: CREAR ES LA PRIMERA QUINTA PARTE
+ * DEL TRABAJO.** Después del lote, completar CADA actualización son cinco pasos por cliente
+ * (`pasos_para_completar()`): `deploy/start` → **mover los crons a mano en el panel de Hostinger** →
+ * `mark-crons` → `deploy/start-post-closure` (sólo con ESE negocio cerrado) → `deploy/configure-system`.
+ * Cuatro llamadas HTTP y **una intervención humana** por cliente. Para veinte clientes eso es ~80
+ * llamadas, veinte veces que Lucas entra a Hostinger y veinte horarios de cierre distintos que hay
+ * que esperar. Decir "después llamá deploy/start uno por uno" y nada más se lee como "veinte
+ * llamadas y listo", y no es eso: **ninguna actualización de empresa se completa sin un humano**.
  *
  * 🔴 `confirm_client_name` NO SE PUEDE ESPEJAR EN UN LOTE, Y SU EQUIVALENTE ES `confirm_token`. En
  * el alta de a uno el freno es el nombre del cliente; en un lote de veinte no hay *un* nombre. El
@@ -232,10 +238,8 @@ class ClaudeUpgradeBatchController extends Controller
                 'nota'                   => 'No se creó NADA. REVISÁ la lista de clientes y las versiones que le tocan a '
                     . 'cada uno antes de seguir. Para crear de verdad, repetí la misma llamada con dry_run=false, '
                     . 'confirm_client_count=' . $crearian . ' y confirm_token=' . $confirm_token . '.',
-                'nota_deployment'        => '🔴 Este endpoint NO arranca ningún deployment: sólo crea las '
-                    . 'actualizaciones. El gate de horario y allow_deploy_to_active_api son POR CLIENTE, así que después '
-                    . 'hay que llamar POST claude/upgrades/{id}/deploy/start uno por uno. La respuesta real devuelve la '
-                    . 'lista exacta de endpoints, en orden.',
+                'pasos_para_completar'   => $this->pasos_para_completar('{id}'),
+                'nota_deployment'        => $this->nota_de_lo_que_falta($crearian),
             ], 200);
         }
 
@@ -329,6 +333,10 @@ class ClaudeUpgradeBatchController extends Controller
         $resultados     = [];
         $fallidos       = [];
         $no_procesados  = [];
+        /* 🔴 Los candidatos a los que EFECTIVAMENTE se les creó el upgrade, que no son los mismos
+           que `$candidatos`: el presupuesto puede haber cortado y alguno puede haber fallado. Es lo
+           único sobre lo que puede contar `advertencias()` en la respuesta real — ver su docblock. */
+        $creados_ok     = [];
         $creados        = 0;
         $abortado       = false;
         $motivo_corte   = null;
@@ -362,6 +370,7 @@ class ClaudeUpgradeBatchController extends Controller
                 });
 
                 $creados++;
+                $creados_ok[] = $candidato;
                 $id_upgrade   = (int) $upgrade->id;
                 $resultados[] = [
                     'client_id'             => $candidato['client_id'],
@@ -370,6 +379,9 @@ class ClaudeUpgradeBatchController extends Controller
                     'upgrade_uuid'          => (string) $upgrade->uuid,
                     'cantidad_de_versiones' => count($ids),
                     'siguiente_accion'      => 'POST claude/upgrades/' . $id_upgrade . '/deploy/start',
+                    /* 🔴 Que quede dicho al lado del endpoint y no sólo en una nota al pie: esto es
+                       el primero de CINCO pasos por cliente, y el segundo no es un endpoint. */
+                    'siguiente_accion_paso' => '1 de 5 — ver `pasos_para_completar`',
                 ];
             } catch (\Throwable $e) {
                 /* Un cliente que explota no se lleva puesto el lote. El texto de la excepción va al
@@ -423,13 +435,16 @@ class ClaudeUpgradeBatchController extends Controller
             'ids_creados'           => $ids_creados,
             'como_verificar'        => $como_verificar,
             'resultados'            => $resultados,
-            /* Las mismas advertencias que la simulación: el que confirmó también las necesita
-               DESPUÉS, porque son sobre lo que va a pasar recién en el deploy/start de cada uno. */
-            'advertencias'          => $this->advertencias($candidatos),
-            'nota_deployment'       => '🔴 NO se arrancó ningún deployment y NO se encoló ningún job: este endpoint sólo '
-                . 'creó las actualizaciones. El gate de horario y allow_deploy_to_active_api son POR CLIENTE, así que el '
-                . 'arranque va uno por uno con el `siguiente_accion` de cada resultado, mirando el horario de ese '
-                . 'negocio en GET claude/clients/{id}/schedule.',
+            /* Las mismas advertencias que la simulación —el que confirmó también las necesita
+               DESPUÉS, porque son sobre lo que va a pasar recién en el deploy/start de cada uno—,
+               pero contadas sobre `$creados_ok` y NO sobre `$candidatos`. Contar los candidatos acá
+               metía en el "N cliente(s) tienen como API destino la API ACTIVA" a los `no_procesados`
+               (presupuesto agotado) y a los `fallidos`, o sea a clientes a los que no se les creó
+               nada y que no van a tener ningún deploy/start que frenar. El número tiene que
+               corresponder con `resultados`, que es la lista que se va a recorrer después. */
+            'advertencias'          => $this->advertencias($creados_ok),
+            'pasos_para_completar'  => $this->pasos_para_completar('{id}'),
+            'nota_deployment'       => $this->nota_de_lo_que_falta($creados),
         ], 201);
     }
 
@@ -782,9 +797,107 @@ class ClaudeUpgradeBatchController extends Controller
     }
 
     /**
+     * Los CINCO pasos que hay que dar POR CLIENTE para que una actualización creada acá termine.
+     *
+     * 🔴 POR QUÉ ESTO EXISTE, Y ES EL DATO MÁS CARO DE TODA LA RESPUESTA. Crear la actualización es
+     * la primera quinta parte del trabajo, y la respuesta decía sólo "llamá deploy/start uno por
+     * uno", que se lee como "N llamadas más y listo". No es eso. Son **cuatro llamadas HTTP por
+     * cliente**, una intervención **manual y humana** que ningún endpoint puede hacer, y una ventana
+     * horaria distinta por cada negocio (el paso 4 sólo corre con ESE local cerrado).
+     *
+     * Para veinte clientes eso son ~80 llamadas, 20 intervenciones a mano de Lucas en el panel de
+     * Hostinger y 20 horarios de cierre distintos que hay que esperar. Un lote de veinte
+     * actualizaciones NO es "actualizar veinte clientes": es dejar veinte actualizaciones creadas.
+     *
+     * 🔴 EL PASO 2 NO ES UN ENDPOINT. `mark-crons` sólo REGISTRA que alguien movió los crons; no los
+     * mueve. Moverlos es entrar al panel de Hostinger y hacerlo a mano. Es la razón por la que
+     * ninguna actualización de empresa se completa sin un humano, y por eso también está escrito en
+     * `limitaciones_conocidas` de `GET claude/catalog`: en el `para_que` de `mark-crons` es
+     * exactamente donde nadie lo busca.
+     *
+     * @param string $id Id del upgrade, o un placeholder para la simulación.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function pasos_para_completar($id)
+    {
+        return [
+            [
+                'paso'     => 1,
+                'quien'    => 'claude',
+                'accion'   => 'POST claude/upgrades/' . $id . '/deploy/start',
+                'que_hace' => 'Pipeline PRE-CIERRE: compila y sube la SPA, sube la API, corre las migraciones y frena '
+                    . 'esperando los crons. Se puede correr con el negocio abierto porque va contra la API destino, que '
+                    . 'no es la que atiende. Frenos: confirm_client_name, sin deployment activo, target_client_api_id '
+                    . 'cargado y allow_deploy_to_active_api si la destino es la que está en producción.',
+            ],
+            [
+                'paso'     => 2,
+                'quien'    => '🔴 UN HUMANO, a mano',
+                'accion'   => 'Mover los crons y el supervisor del cliente en el panel de Hostinger',
+                'que_hace' => '🔴 NO HAY ENDPOINT PARA ESTO Y NO LO VA A HABER EN ESTE FLUJO. Hay que entrar al panel '
+                    . 'de Hostinger del cliente y reapuntar los crons y el supervisor a la instancia nueva. Es el paso '
+                    . 'que hace que NINGUNA actualización de empresa se complete sin intervención humana.',
+            ],
+            [
+                'paso'     => 3,
+                'quien'    => 'claude',
+                'accion'   => 'POST claude/upgrades/' . $id . '/mark-crons',
+                'que_hace' => '⚠️ Sólo REGISTRA que el paso 2 ya se hizo (escribe crons_supervisor_at). Marcarlo NO '
+                    . 'mueve los crons: si se marca sin haberlos movido, el post-cierre arranca igual y el cliente '
+                    . 'queda con los crons apuntando a la instancia vieja.',
+            ],
+            [
+                'paso'     => 4,
+                'quien'    => 'claude, en la ventana horaria de ESE cliente',
+                'accion'   => 'POST claude/upgrades/' . $id . '/deploy/start-post-closure',
+                'que_hace' => '🔴 Corre seeders y comandos sobre el sistema EN USO del cliente: sólo con la jornada de '
+                    . 'hoy de ESE negocio terminada. El gate de horario lo rechaza si está abierto o si no tiene '
+                    . 'horarios cargados. Mirá GET claude/clients/{client_id}/schedule para saber cuándo. Veinte '
+                    . 'clientes son veinte momentos distintos: acá no hay lote posible.',
+            ],
+            [
+                'paso'     => 5,
+                'quien'    => 'claude',
+                'accion'   => 'POST claude/upgrades/' . $id . '/deploy/configure-system',
+                'que_hace' => 'Etapa final: actualiza la versión por defecto del cliente y completa el upgrade. Exige '
+                    . 'que el deployment esté en paused_post_tasks o failed.',
+            ],
+        ];
+    }
+
+    /**
+     * La nota que dice, sin adornos, cuánto trabajo queda después de este endpoint.
+     *
+     * @param int $clientes Cantidad de clientes involucrados (creados, o que se crearían).
+     *
+     * @return string
+     */
+    private function nota_de_lo_que_falta($clientes)
+    {
+        $llamadas = $clientes * 4;
+
+        return '🔴 Este endpoint NO arranca ningún deployment y no encola ningún job: sólo deja creadas las '
+            . 'actualizaciones, que es la PRIMERA QUINTA PARTE del trabajo. Completar cada una son CINCO pasos por '
+            . 'cliente (ver `pasos_para_completar`), y el paso 2 —mover los crons y el supervisor en el panel de '
+            . 'Hostinger— es MANUAL: lo hace una persona, no hay endpoint. `mark-crons` sólo registra que ya se hizo. '
+            . 'Para estos ' . $clientes . ' cliente(s) eso son ' . $llamadas . ' llamadas HTTP, ' . $clientes
+            . ' intervención(es) a mano y ' . $clientes . ' ventana(s) de cierre distintas, porque el paso 4 sólo corre '
+            . 'con ESE negocio cerrado. El gate de horario y allow_deploy_to_active_api son POR CLIENTE: por eso el '
+            . 'arranque va de a uno y no hay ningún lote que lo reemplace.';
+    }
+
+    /**
      * Advertencias que la simulación tiene que decir en voz alta antes de que alguien confirme.
      *
-     * @param array<int, array<string, mixed>> $candidatos Candidatos resueltos.
+     * 🔴 QUÉ SE LE PASA, QUE NO ES LO MISMO EN LOS DOS LLAMADORES. La simulación cuenta sobre los
+     * candidatos, porque todavía no se creó nada y todos son futuros deploy/start. La respuesta real
+     * cuenta sobre los que EFECTIVAMENTE se crearon: si el presupuesto cortó (`no_procesados`) o
+     * alguno falló (`fallidos`), esos clientes no tienen ningún upgrade que arrancar y sumarlos al
+     * "N cliente(s) tienen como API destino la API ACTIVA" da un número que no corresponde con
+     * `resultados`, que es la lista que el que llamó va a recorrer.
+     *
+     * @param array<int, array<string, mixed>> $candidatos Clientes sobre los que contar.
      *
      * @return array<int, string>
      */

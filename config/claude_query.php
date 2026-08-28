@@ -54,6 +54,21 @@ return [
      | "password|token" se pierde. `encrypted` cubre
      | `env_change_items.new_value_encrypted` y
      | `admin_calendar_connections.google_refresh_token_encrypted`.
+     |
+     | 🔴 ESTA REJA ES SOBRE CREDENCIALES, NO SOBRE "COLUMNA SENSIBLE". NO CUBRE PII
+     | Y NO PUEDE CUBRIRLA: los datos personales no tienen ninguna palabra en común
+     | en el nombre de la columna. Nada de esto matchea el patrón, y todo esto es
+     | PII: `leads.email`, `leads.phone`, `leads.doc_number`, `clients.afip_cuit`,
+     | `admins.email`, `client_employees.phone`, `support_tickets.client_user_email`.
+     | Un `nombre_del_titular` que alguien agregue mañana tampoco va a matchear.
+     |
+     | Contra PII la ÚNICA defensa de este endpoint es la lista blanca positiva de
+     | `columnas` (y `columnas_opt_in` para lo que viaja sólo si se pide): una
+     | columna de datos personales no sale porque nadie la escribió, no porque esta
+     | reja la ataje. Si agregás un modelo, la pregunta "¿alguna de estas columnas
+     | es un dato de una persona?" hay que hacerla A MANO, columna por columna: el
+     | test `test_ningun_modelo_declara_una_columna_prohibida()` no la hace por vos
+     | y va a pasar en verde con `leads.email` adentro.
      */
     'columnas_prohibidas' => '/(password|passwd|secret|token|credential|api_key$|^key$|p256dh|^auth$|encrypted)/i',
 
@@ -759,7 +774,24 @@ return [
 
         'SyncedGithubFile'                 => ['motivo' => 'volumen', 'columna' => 'synced_github_files.content (longText con archivos enteros)'],
         'DeploymentLog'                    => ['motivo' => 'volumen', 'columna' => 'deployment_logs.line', 'usar' => 'GET claude/upgrades/{id}/logs'],
-        'EcommerceDeploymentLog'           => ['motivo' => 'volumen', 'columna' => 'ecommerce_deployment_logs.line', 'usar' => 'GET claude/ecommerce/installations/{id}/logs'],
+        /* ⚠️ El motivo declarado sigue siendo el volumen, pero no es lo único que hay
+           que saber de esta tabla, y por eso va la `nota`: sus líneas traen los
+           comandos remotos CRUDOS, sin sanear. `EcommerceInstallationService`
+           loguea cada comando entero antes de correrlo (`$this->log($step, '$ ' .
+           $command)`, línea 2046), y uno de esos comandos es el `printf '%s'
+           '<contenido del .env del SPA>'` que escribe el `.env` de tienda-spa
+           (líneas 538-543). O sea: el contenido de ese archivo termina escrito en
+           `ecommerce_deployment_logs.line`, y `max_line_chars` del endpoint de logs
+           tiene piso pero no techo.
+           🔴 VERIFICADO QUE NO ES UNA FUGA, y por eso el comportamiento NO se cambia:
+           ese `.env` sólo lleva variables `VUE_APP_*`, que Vite compila DENTRO del
+           bundle público de la tienda — son claves de frontend, públicas por diseño.
+           El `.env` del servidor (`DB_PASSWORD`, `APP_KEY`) lo escribe
+           `EnvSshService::write_env_vars`, que no loguea nada.
+           La nota existe para que el próximo que lea estas líneas no asuma que
+           están filtradas, y para que el que agregue un `printf` de otro archivo al
+           pipeline sepa que lo está publicando en el log. */
+        'EcommerceDeploymentLog'           => ['motivo' => 'volumen', 'columna' => 'ecommerce_deployment_logs.line', 'usar' => 'GET claude/ecommerce/installations/{id}/logs', 'nota' => 'Además del volumen: estas líneas traen los comandos remotos CRUDOS, sin filtrar ni enmascarar (incluido el printf que escribe el .env del SPA). Hoy ese .env sólo tiene variables VUE_APP_*, que ya viajan dentro del bundle público de la tienda, así que no hay secreto expuesto; el .env del servidor lo escribe EnvSshService, que no loguea. Leelas sabiendo qué son: la salida cruda de una sesión SSH, no un log saneado.'],
 
         'LeadMessage'                      => ['motivo' => 'duplicado', 'usar' => 'GET claude/messages'],
         'AdminColumnPreference'            => ['motivo' => 'sin valor operativo (preferencias de columnas de la SPA)'],

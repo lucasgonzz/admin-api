@@ -9,6 +9,7 @@ use App\Models\Client;
 use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
+use App\Services\ClaudeQueryService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -39,7 +40,7 @@ use Illuminate\Support\Facades\DB;
  * estos endpoints devuelven **202** de inmediato y nunca esperan a que el pipeline termine.
  *
  * ⚠️ Y ACÁ ESTÁ LA CONVIVENCIA INCÓMODA, ESCRITA PARA QUE NADIE LA DESCUBRA DE NUEVO: el PANEL del
- * admin despacha el mismo job PELADO (`EcommerceInstallationController` líneas ~96, ~152 y ~205:
+ * admin despacha el mismo job PELADO (`EcommerceInstallationController` líneas 95, 154 y 212:
  * `RunEcommerceInstallationJob::dispatch($installation->uuid)` sin `onConnection`), así que sus tres
  * botones corren el pipeline dentro del request. 🔴 Esta misión NO lo arregla a propósito: cambiar
  * el despacho del panel cambia el comportamiento del botón que Lucas usa todos los días, y eso es
@@ -357,21 +358,35 @@ class ClaudeEcommerceOpsController extends Controller
         }
 
         /* Una fecha que no se pudo parsear se rechaza en vez de ignorarse: un filtro silenciosamente
-           descartado devuelve MÁS filas de las pedidas, que es el error caro acá. */
+           descartado devuelve MÁS filas de las pedidas, que es el error caro acá.
+
+           🔴 `ClaudeQueryService::fecha_estricta()` Y NO `parsear_o_null()`, y no es una preferencia
+           de estilo: el helper del trait delega en `Carbon::parse()`, que para `'x'` NO lanza nada y
+           devuelve AHORA. Con él, este `if` nunca se cumplía, el 422 que promete el comentario no
+           existía, y la consulta salía filtrada por `created_at >= <ahora>` — cero filas, siempre, y
+           en silencio. Es exactamente el mismo defecto que ya se arregló en el filtro `fecha_desde`
+           de `GET claude/query`, y por eso se usa LA MISMA función y no una copia: dos definiciones
+           de "qué es una fecha válida" se desincronizan y arreglar una deja la otra rota. */
         $desde_crudo = $this->texto_o_null($request->input('desde'));
         if ($desde_crudo !== null) {
-            $desde = $this->parsear_o_null($desde_crudo);
+            $desde = ClaudeQueryService::fecha_estricta($desde_crudo);
             if ($desde === null) {
-                return $this->error_422('El parámetro desde no es una fecha válida: "' . $desde_crudo . '".');
+                return $this->error_422(
+                    'El parámetro desde no es una fecha válida: "' . $desde_crudo . '".',
+                    $this->ayuda_de_fecha()
+                );
             }
             $query->where('cei.created_at', '>=', $desde);
         }
 
         $hasta_crudo = $this->texto_o_null($request->input('hasta'));
         if ($hasta_crudo !== null) {
-            $hasta = $this->parsear_o_null($hasta_crudo);
+            $hasta = ClaudeQueryService::fecha_estricta($hasta_crudo);
             if ($hasta === null) {
-                return $this->error_422('El parámetro hasta no es una fecha válida: "' . $hasta_crudo . '".');
+                return $this->error_422(
+                    'El parámetro hasta no es una fecha válida: "' . $hasta_crudo . '".',
+                    $this->ayuda_de_fecha()
+                );
             }
             $query->where('cei.created_at', '<=', $hasta);
         }
@@ -396,6 +411,24 @@ class ClaudeEcommerceOpsController extends Controller
             'nota'          => 'failure_reason viene recortado a ' . self::FAILURE_REASON_CHARS . ' caracteres en el '
                 . 'listado (trae la salida cruda del pipeline). Entero, en GET claude/ecommerce/installations/{id}.',
         ], 200);
+    }
+
+    /**
+     * Los extras del 422 de una fecha mal escrita: los formatos que sí se aceptan.
+     *
+     * Salen de `ClaudeQueryService::EJEMPLOS_DE_FECHA`, que es la misma lista que publica el 422 de
+     * `GET claude/query`. Un solo criterio de fecha y un solo mensaje de ayuda.
+     *
+     * @return array<string, mixed>
+     */
+    private function ayuda_de_fecha()
+    {
+        return [
+            'formatos_validos' => ClaudeQueryService::EJEMPLOS_DE_FECHA,
+            'ayuda'            => 'Se acepta sólo una fecha absoluta en alguno de esos formatos. Nada de expresiones '
+                . 'relativas ("ayer", "next monday"): parsean a algo que no es lo que se pidió y el filtro saldría '
+                . 'aplicado y mal.',
+        ];
     }
 
     /* ==============================================================================================
@@ -861,10 +894,20 @@ class ClaudeEcommerceOpsController extends Controller
         /*
          * --- Escritura real. ---
          *
-         * 🔴 Las N filas en UNA transacción y los N dispatch DESPUÉS, todos juntos. Encolar adentro
-         * del loop de creación dejaría, ante cualquier corte, corridas sin job (invisibles: nadie
-         * las va a correr nunca y bloquean su tienda por `assert_no_running_installation`) o jobs
-         * apuntando a filas que la transacción revirtió (el job las busca con firstOrFail y muere).
+         * 🔴 Las N filas en UNA transacción y los N dispatch DESPUÉS, todos juntos. Lo que ESTE
+         * orden garantiza, exacto: **ningún job apunta a una fila que no existe**. Encolando adentro
+         * de la transacción, un rollback dejaría jobs apuntando a filas revertidas y el job muere
+         * con `firstOrFail`.
+         *
+         * ⚠️ LO QUE NO GARANTIZA, Y NO SE PROMETE: que no quede ninguna corrida sin job. Un
+         * `dispatch()` es un INSERT en `jobs` y puede fallar; si falla el k-ésimo, las filas k..N ya
+         * están commiteadas y se quedan en `pendiente` sin nadie que las corra. El daño es acotado
+         * —una fila `pendiente` no bloquea la tienda para el panel, y `ESTADOS_QUE_OCUPAN_LA_TIENDA`
+         * la va a frenar en el próximo intento de claude/*, que es visible y se destraba borrándola—
+         * y la ventana es angosta, pero existe. Cerrarla del todo pide una outbox (encolar como
+         * parte de la misma transacción, con un despachador aparte que la vacía), que es otra misión
+         * y no una línea. Mientras tanto: el 202 devuelve las N corridas con su id, y
+         * `GET claude/ecommerce/installations?created_via=claude` muestra cuáles arrancaron.
          */
         $corridas = DB::transaction(function () use ($candidatas) {
             $creadas = [];

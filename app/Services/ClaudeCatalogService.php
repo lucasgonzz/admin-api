@@ -145,6 +145,14 @@ class ClaudeCatalogService
     /**
      * Los endpoints con lo derivado y lo declarado ya unidos.
      *
+     * 🔴 `parametros` se publica acá porque sin él este catálogo cumplía a medias su propia promesa
+     * ("un request y sé todo lo que puedo pedir"). Para `GET claude/query` los parámetros se DERIVAN
+     * del config de modelos; para las escrituras no se pueden derivar de ningún lado —las reglas
+     * viven adentro de un `validate()`— así que se declaran en `config/claude_catalog.php`. Antes de
+     * esto, `to_version_id` de `POST claude/upgrades/batch`, que es obligatorio, no aparecía en NINGUNA
+     * parte del catálogo: la única forma de enterarse de los parámetros de un POST que arranca SSH
+     * sobre el hosting de un negocio era mandar uno mal y leer el 422.
+     *
      * @return array<int, array<string, mixed>>
      */
     public function endpoints()
@@ -163,6 +171,14 @@ class ClaudeCatalogService
                 'escribe'      => $declarada === null ? null : (isset($declarada['escribe']) ? (bool) $declarada['escribe'] : null),
                 'peligrosidad' => $declarada === null ? null : (isset($declarada['peligrosidad']) ? $declarada['peligrosidad'] : null),
                 'frenos'       => $declarada === null ? [] : (array) (isset($declarada['frenos']) ? $declarada['frenos'] : []),
+                /* 🔴 `null` y NO `[]` cuando no está declarado, y la diferencia importa: `[]` se lee
+                   como "este endpoint no recibe nada", que sería mentira en las rutas de lectura
+                   —todas tienen filtros— y catastrófico si algún día una escritura se quedara sin
+                   declarar. `null` dice "no está escrito acá", que es la verdad. Las escrituras no
+                   pueden quedar en null: hay un test que lo afirma. */
+                'parametros'   => $declarada === null
+                    ? null
+                    : (isset($declarada['parametros']) ? (array) $declarada['parametros'] : null),
                 'aviso'        => $declarada === null
                     ? 'Esta ruta está registrada pero NADIE la describió en config/claude_catalog.php. Aparece también en salud_del_catalogo.sin_descripcion.'
                     : null,

@@ -203,8 +203,16 @@ class VencerDeploymentsColgados extends Command
      * esta extracción existirían dos definiciones de "vencer un deployment" —la del scheduler y la
      * del endpoint— y la que se quedaría vieja sería justo la que un humano invoca cuando algo ya
      * salió mal. La lógica y los tres números (`DEFAULT_TIMEOUT_MINUTOS`,
-     * `MARGEN_SOBRE_EL_JOB_MINUTOS`, `MAX_TIMEOUT_MINUTOS`) son exactamente los de antes: esto es
-     * refactor puro.
+     * `MARGEN_SOBRE_EL_JOB_MINUTOS`, `MAX_TIMEOUT_MINUTOS`) son exactamente los de antes.
+     *
+     * ⚠️ CON UNA DIFERENCIA MEDIBLE, Y SE ESCRIBE PARA NO LLAMARLO "REFACTOR PURO" CUANDO NO LO ES:
+     * el `$limite` (`Carbon::now()->subMinutes($timeout_minutos)`) antes se calculaba UNA vez, fuera
+     * del `foreach` de `handle()`, y ahora se recalcula adentro de cada llamada, o sea una vez por
+     * upgrade. El efecto es sub-segundo —el reloj corre unos milisegundos entre el primer candidato
+     * y el último, así que el umbral del último es marginalmente más exigente—, no cambia ningún
+     * desenlace real y no amerita volver atrás. Pero es un cambio de comportamiento, no cero, y
+     * decir "esto es refactor puro" sobre algo que sí movió una cuenta es exactamente cómo se pierde
+     * la confianza en los comentarios del resto del archivo.
      *
      * 🔴 El UPDATE es condicionado, y no un `save()` sobre el modelo que se leyó recién: entre la
      * lectura y este momento el worker puede haber terminado bien y haber escrito `success`,
