@@ -28,6 +28,9 @@ class SftpDeMentira extends SFTP
     /** @var int|null Fuerza el tamaño que devuelve el servidor, para simular una subida truncada. */
     public $tamano_forzado = null;
 
+    /** @var bool Deja constancia de que reponer_en_api() cerró la sesión. */
+    public $desconectado = false;
+
     /** @var array<string, int> Tamaño real de cada ruta subida. */
     private $tamanos = [];
 
@@ -78,6 +81,15 @@ class SftpDeMentira extends SFTP
     public function chmod($mode, $filename, $recursive = false)
     {
         return true;
+    }
+
+    /**
+     * El disconnect() real de SSH2 toca propiedades que este doble nunca inicializó (el
+     * constructor está vacío a propósito), así que se sobrescribe para dejar solo la marca.
+     */
+    public function disconnect()
+    {
+        $this->desconectado = true;
     }
 }
 
@@ -301,6 +313,131 @@ class AfipCertificateProvisionServiceTest extends TestCase
         $this->assertSame(['cert_testing', 'key_testing'], $auditoria['faltantes']);
         $this->assertSame([], $sftp->subidos);
         $this->assertSame([], $sftp->directorios);
+    }
+
+    /**
+     * Recolecta las líneas de log en un array, para los tests que verifican QUÉ se logueó.
+     *
+     * @param  array<int, array<string, string>>  $lineas  Se llena por referencia.
+     * @return callable
+     */
+    private function log_espia(array &$lineas): callable
+    {
+        return function (string $linea, string $nivel) use (&$lineas) {
+            $lineas[] = ['linea' => $linea, 'nivel' => $nivel];
+        };
+    }
+
+    /**
+     * ¿Alguna línea de ese nivel contiene ese texto?
+     *
+     * @param  array<int, array<string, string>>  $lineas
+     * @param  string  $nivel
+     * @param  string  $texto
+     * @return bool
+     */
+    private function hay_linea(array $lineas, string $nivel, string $texto): bool
+    {
+        foreach ($lineas as $registro) {
+            if ($registro['nivel'] === $nivel && strpos($registro['linea'], $texto) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * El envoltorio compartido hace lo mismo que hacía el cuerpo inline de DeploymentService —
+     * instalar lo que falte— y además cierra la sesión que abrió.
+     *
+     * Lo del cierre no es cosmético: los pipelines llaman a esto en el medio de una corrida larga y
+     * después siguen usando SSH. Una sesión SFTP colgada se paga más tarde y en otro lado.
+     */
+    public function test_reponer_en_api_instala_los_faltantes_y_cierra_la_sesion(): void
+    {
+        $this->sembrar_origenes();
+
+        $sftp = new SftpDeMentira();
+        $service = new AfipCertificateProvisionService($this->storage_base);
+
+        $service->reponer_en_api(
+            function () use ($sftp) {
+                return $sftp;
+            },
+            $this->api_path,
+            $this->log_mudo()
+        );
+
+        $this->assertSame(
+            [
+                $this->api_path . '/storage/app/afip/production/cert.crt',
+                $this->api_path . '/storage/app/afip/production/privada.key',
+                $this->api_path . '/storage/app/afip/testing/afip_cert.pem',
+                $this->api_path . '/storage/app/afip/testing/afip_private.key',
+            ],
+            $sftp->subidos
+        );
+
+        $this->assertTrue($sftp->desconectado, 'reponer_en_api() tiene que cerrar la sesion SFTP que abrio.');
+    }
+
+    /**
+     * 🔴 El candado de la política: esto NUNCA propaga.
+     *
+     * Los tres pipelines que lo llaman ya subieron el código y están a mitad de camino. Si alguien
+     * saca el try/catch, un SFTP caído o un admin sin certificados cargados pasa a cortar una
+     * actualización de producción por la mitad, que es bastante peor que el certificado faltante.
+     */
+    public function test_reponer_en_api_no_propaga_si_no_se_puede_abrir_la_sesion(): void
+    {
+        $this->sembrar_origenes();
+
+        $lineas = [];
+        $service = new AfipCertificateProvisionService($this->storage_base);
+
+        $service->reponer_en_api(
+            function () {
+                throw new \RuntimeException('SFTP caído');
+            },
+            $this->api_path,
+            $this->log_espia($lineas)
+        );
+
+        $this->assertTrue(
+            $this->hay_linea($lineas, 'warning', 'SFTP caído'),
+            'Tiene que quedar constancia del motivo, con nivel warning, en el log de la corrida.'
+        );
+    }
+
+    /**
+     * El envoltorio sigue llamando a loguear_resultado() y no solo a provision().
+     *
+     * La diferencia entre las dos cosas es invisible salvo que se mire el log — que es exactamente
+     * el caso de uso: si el admin no tiene los certificados cargados, la corrida termina bien igual
+     * y lo único que avisa es esta línea.
+     */
+    public function test_reponer_en_api_avisa_cuando_el_admin_no_tiene_los_certificados(): void
+    {
+        // Solo el par de producción: los de homologación no están cargados en el admin.
+        $this->sembrar_produccion();
+
+        $sftp = new SftpDeMentira();
+        $lineas = [];
+        $service = new AfipCertificateProvisionService($this->storage_base);
+
+        $service->reponer_en_api(
+            function () use ($sftp) {
+                return $sftp;
+            },
+            $this->api_path,
+            $this->log_espia($lineas)
+        );
+
+        $this->assertTrue(
+            $this->hay_linea($lineas, 'warning', 'cert_testing, key_testing'),
+            'La linea de warning tiene que nombrar los que faltan en el admin.'
+        );
     }
 
     public function test_faltantes_en_admin_lista_lo_que_no_esta_cargado(): void
