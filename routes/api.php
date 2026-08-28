@@ -201,6 +201,22 @@ Route::middleware('claude.task.key')
         Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
         Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
 
+        /* Tiendas (ecommerce) de los clientes: lectura y ACTUALIZACIÓN.
+           🔴 Las dos rutas de escritura arrancan pipelines SSH reales contra el hosting de un
+           negocio (compilan tienda-spa en el VPS de builds y suben SPA + API por SFTP). Los frenos
+           —confirm_client_name en el de a uno, y dry_run por defecto + confirm_client_count +
+           confirm_token + tope de 5 en el lote— están en ClaudeEcommerceOpsController.
+           🔴 NINGUNA de estas rutas hace la instalación inicial de una tienda: sólo actualización.
+           `ecommerce/updates/batch` se declara ANTES que cualquier ruta con {id}, por lo mismo que
+           `upgrades/preview`: para que ninguna la capture si mañana se agrega un
+           POST claude/ecommerce/updates/{id}. */
+        Route::get('ecommerce/stores', 'Api\ClaudeEcommerceOpsController@stores_json');
+        Route::get('ecommerce/installations', 'Api\ClaudeEcommerceOpsController@installations_json');
+        Route::get('ecommerce/installations/{id}', 'Api\ClaudeEcommerceOpsController@installation_json');
+        Route::get('ecommerce/installations/{id}/logs', 'Api\ClaudeEcommerceOpsController@installation_logs_json');
+        Route::post('ecommerce/updates/batch', 'Api\ClaudeEcommerceOpsController@update_batch_json');
+        Route::post('ecommerce/updates', 'Api\ClaudeEcommerceOpsController@update_json');
+
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron
            en el payload. No tienen nada que ver con las de lead (`followup_templates`), que las
