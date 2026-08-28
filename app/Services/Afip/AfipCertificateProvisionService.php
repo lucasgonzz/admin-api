@@ -246,7 +246,8 @@ class AfipCertificateProvisionService
             }
 
             if (! $sftp->put($destino, $origen, SFTP::SOURCE_LOCAL_FILE)) {
-                $resultado['errores'][] = $definicion['etiqueta'] . ': no se pudo subir por SFTP.';
+                $resultado['errores'][] = $definicion['etiqueta'] . ': no se pudo subir por SFTP.'
+                    . $this->descartar_subida_fallida($sftp, $destino);
                 continue;
             }
 
@@ -257,7 +258,8 @@ class AfipCertificateProvisionService
             if ($bytes_remoto === false || (int) $bytes_remoto !== $bytes_local) {
                 $resultado['errores'][] = $definicion['etiqueta']
                     . ': subido incompleto (' . var_export($bytes_remoto, true) . ' bytes en el cliente'
-                    . ' contra ' . $bytes_local . ' en el admin).';
+                    . ' contra ' . $bytes_local . ' en el admin).'
+                    . $this->descartar_subida_fallida($sftp, $destino);
                 continue;
             }
 
@@ -271,6 +273,46 @@ class AfipCertificateProvisionService
         }
 
         return $resultado;
+    }
+
+    /**
+     * Borra del servidor un archivo que quedó a medias, y devuelve lo que haya que sumarle al
+     * mensaje de error si tampoco se pudo borrar.
+     *
+     * 🔴 NO ALCANZA CON ANOTAR EL ERROR Y SEGUIR, y este es exactamente el lugar donde alguien lo
+     * va a "simplificar" de vuelta. El que lee el resultado de esta corrida no es un humano
+     * mirando el log: es el `is_file($destino)` de la corrida SIGUIENTE. Un archivo truncado que
+     * queda en el servidor entra por la rama `ya_estaban`, así que de ahí en adelante todas las
+     * corridas informan "ya los tenía todos, no se tocó ninguno" y no lo reponen nunca más.
+     *
+     * En el pipeline de demos eso es silencio permanente: nunca aborta por diseño y no tiene un
+     * verify_api_installation() atrás que lo ataje, así que la demo se queda tirando HTTP 500 al
+     * buscar un cliente por CUIT mientras el log de cada actualización dice que está todo bien.
+     * Borrarlo devuelve el servidor al estado en que estaba antes de intentar, que es lo único que
+     * hace que el próximo intento sirva de algo.
+     *
+     * @param  SFTP  $sftp
+     * @param  string  $destino  Ruta remota del archivo que quedó a medias
+     * @return string  Cadena vacía si no quedó nada o si se borró bien; si no, qué avisar.
+     */
+    private function descartar_subida_fallida(SFTP $sftp, string $destino): string
+    {
+        // Si no llegó a quedar nada escrito no hay qué descartar, y avisar de un borrado que no
+        // hacía falta sería ruido en el error que sí importa.
+        if (! $sftp->is_file($destino)) {
+            return '';
+        }
+
+        $aviso = ' Además no se pudo borrar del servidor lo que quedó a medias: hay que borrarlo a'
+            . ' mano, porque si no las próximas corridas lo van a dar por instalado.';
+
+        /* El borrado no puede tirar: ya estamos en el camino de error y una excepción acá se
+         * comería el error original, que es el que explica qué pasó de verdad. */
+        try {
+            return $sftp->delete($destino, false) ? '' : $aviso;
+        } catch (\Exception $e) {
+            return rtrim($aviso, '.') . ' (' . $e->getMessage() . ').';
+        }
     }
 
     /**
@@ -311,11 +353,18 @@ class AfipCertificateProvisionService
      * Repone en una API remota los certificados que le falten, abriendo la sesión SFTP con el
      * callable que le pasa el pipeline.
      *
-     * 🔴 NUNCA propaga una excepción. Los tres pipelines que la llaman ya subieron el código y
-     * están a mitad de camino cuando llegan acá: una corrida cortada porque el admin todavía no
-     * tiene los certificados cargados es peor que un certificado que ya venía faltando de antes.
-     * Cuando hace falta cortar, corta el verificador de esa etapa, no esto
-     * (ver InstallationService::verify_api_installation()).
+     * 🔴 NUNCA propaga una excepción. Los dos pipelines que la llaman —DeploymentService y
+     * DemoUpdateService— ya subieron el código y están a mitad de camino cuando llegan acá: una
+     * corrida cortada porque el admin todavía no tiene los certificados cargados es peor que un
+     * certificado que ya venía faltando de antes. Cuando hace falta cortar, corta el verificador
+     * de esa etapa, no esto (ver InstallationService::verify_api_installation()).
+     *
+     * InstallationService NO pasa por acá, y no es un refactor a medio terminar: su envoltorio
+     * loguea nivel 'error' y no 'warning' justamente porque verify_api_installation() corre
+     * enseguida y CORTA la instalación si faltan las rutas. Unificarlo sin pasarle el nivel del
+     * error por parámetro degradaría esa señal a warning, y una instalación se entregaría sin
+     * poder facturar. AfipCertificadosClientesCommand tampoco: reusa una sola sesión SFTP para
+     * todos los clientes del recorrido, así que abrir y cerrar por cliente sería peor.
      *
      * La sesión la abre un callable y no un SFTP ya construido porque cada pipeline resuelve su
      * credencial distinto (get_hosting_credential_type() en clientes, demo_credential_type() en

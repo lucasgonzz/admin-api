@@ -31,6 +31,9 @@ class SftpDeMentira extends SFTP
     /** @var bool Deja constancia de que reponer_en_api() cerró la sesión. */
     public $desconectado = false;
 
+    /** @var bool Simula un servidor donde no se puede borrar (permisos). */
+    public $delete_falla = false;
+
     /** @var array<string, int> Tamaño real de cada ruta subida. */
     private $tamanos = [];
 
@@ -80,6 +83,18 @@ class SftpDeMentira extends SFTP
 
     public function chmod($mode, $filename, $recursive = false)
     {
+        return true;
+    }
+
+    public function delete($path, $recursive = true)
+    {
+        if ($this->delete_falla) {
+            return false;
+        }
+
+        $this->subidos = array_values(array_diff($this->subidos, [$path]));
+        unset($this->tamanos[$path]);
+
         return true;
     }
 
@@ -298,6 +313,66 @@ class AfipCertificateProvisionServiceTest extends TestCase
         $this->assertEmpty($resultado['instalados']);
     }
 
+    /**
+     * 🔴 El defecto real: una subida truncada NO puede quedar en el servidor.
+     *
+     * El escenario es de DOS corridas a propósito, porque el bug vive en la segunda. Si el archivo
+     * a medias se queda, la corrida siguiente lo ve con is_file() y lo cuenta como `ya_estaban`:
+     * a partir de ahí el log dice "ya los tenía todos, no se tocó ninguno" para siempre y el
+     * certificado ilegible no se repone nunca. En demos eso es silencio permanente —el pipeline
+     * nunca aborta por diseño y no tiene un verify_api_installation() atrás—, así que la demo
+     * seguiría tirando HTTP 500 al facturar con todas las actualizaciones en verde.
+     */
+    public function test_una_subida_truncada_no_queda_en_el_servidor_y_la_corrida_siguiente_la_repone(): void
+    {
+        $this->sembrar_origenes();
+
+        $sftp = new SftpDeMentira();
+        $service = new AfipCertificateProvisionService($this->storage_base);
+
+        // Corrida 1: el servidor devuelve menos bytes de los que se mandaron.
+        $sftp->tamano_forzado = 3;
+        $primera = $service->provision($sftp, $this->api_path, $this->log_mudo());
+
+        $this->assertCount(4, $primera['errores']);
+        $this->assertSame([], $sftp->subidos, 'Lo que quedó a medias tiene que borrarse del servidor.');
+
+        // Corrida 2: el servidor ya anda bien. Tiene que REPONER, no dar los cuatro por instalados.
+        $sftp->tamano_forzado = null;
+        $segunda = $service->provision($sftp, $this->api_path, $this->log_mudo());
+
+        $this->assertCount(
+            4,
+            $segunda['instalados'],
+            'La corrida siguiente tiene que reponer lo truncado, no reportarlo como ya_estaban.'
+        );
+        $this->assertEmpty($segunda['ya_estaban']);
+        $this->assertEmpty($segunda['errores']);
+    }
+
+    /**
+     * Si tampoco se puede borrar lo que quedó a medias, no se tira: ya estamos en el camino de
+     * error y una excepción acá se comería el error original. Queda dicho en el mismo mensaje,
+     * porque es lo único que le avisa a un humano que hay que ir a borrarlo a mano.
+     */
+    public function test_si_tampoco_se_puede_borrar_lo_truncado_queda_dicho_en_el_error(): void
+    {
+        $this->sembrar_origenes();
+
+        $sftp = new SftpDeMentira();
+        $sftp->tamano_forzado = 3;
+        $sftp->delete_falla = true;
+
+        $service = new AfipCertificateProvisionService($this->storage_base);
+        $resultado = $service->provision($sftp, $this->api_path, $this->log_mudo());
+
+        $this->assertCount(4, $resultado['errores']);
+
+        foreach ($resultado['errores'] as $error) {
+            $this->assertStringContainsString('borrarlo a mano', $error);
+        }
+    }
+
     public function test_auditar_no_escribe_nada_y_separa_presentes_de_faltantes(): void
     {
         $sftp = new SftpDeMentira();
@@ -385,9 +460,10 @@ class AfipCertificateProvisionServiceTest extends TestCase
     /**
      * 🔴 El candado de la política: esto NUNCA propaga.
      *
-     * Los tres pipelines que lo llaman ya subieron el código y están a mitad de camino. Si alguien
-     * saca el try/catch, un SFTP caído o un admin sin certificados cargados pasa a cortar una
-     * actualización de producción por la mitad, que es bastante peor que el certificado faltante.
+     * Los dos pipelines que lo llaman —DeploymentService y DemoUpdateService— ya subieron el
+     * código y están a mitad de camino. Si alguien saca el try/catch, un SFTP caído o un admin sin
+     * certificados cargados pasa a cortar una actualización de producción por la mitad, que es
+     * bastante peor que el certificado que faltaba.
      */
     public function test_reponer_en_api_no_propaga_si_no_se_puede_abrir_la_sesion(): void
     {
