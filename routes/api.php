@@ -195,11 +195,22 @@ Route::middleware('claude.task.key')
            `upgrades/preview` se declara ANTES que cualquier ruta con {id}, para que ninguna la
            capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
         Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
+        /* Alta EN LOTE, pegada a `preview` y ANTES que cualquier ruta con {id}, por lo mismo que
+           aquélla. 🔴 Sólo CREA actualizaciones: no arranca ningún deployment, porque el gate de
+           horario y allow_deploy_to_active_api son por cliente. Los frenos (tope de 25, dry_run por
+           defecto, confirm_client_count y confirm_token) están en ClaudeUpgradeBatchController. */
+        Route::post('upgrades/batch', 'Api\ClaudeUpgradeBatchController@store_batch_json');
         Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');
         Route::post('upgrades/{id}/deploy/start', 'Api\ClaudeUpgradeOpsController@deploy_start_json');
         Route::post('upgrades/{id}/mark-crons', 'Api\ClaudeUpgradeOpsController@mark_crons_json');
         Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
         Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
+        /* Reintento de comandos: espejo del botón del panel MÁS el gate de horario, porque
+           `run_commands` corre sobre el sistema en uso del cliente. Destrabe de un deployment
+           colgado: no reimplementa el vencimiento, llama al mismo VencerDeploymentsColgados que
+           corre el scheduler, y exige el umbral DESTRUCTIVO (45 min), no el de reporte (15). */
+        Route::post('upgrades/{id}/deploy/retry-commands', 'Api\ClaudeUpgradeOpsController@deploy_retry_commands_json');
+        Route::post('upgrades/{id}/deploy/expire-stuck', 'Api\ClaudeUpgradeOpsController@deploy_expire_stuck_json');
 
         /* Tiendas (ecommerce) de los clientes: lectura y ACTUALIZACIÓN.
            🔴 Las dos rutas de escritura arrancan pipelines SSH reales contra el hosting de un

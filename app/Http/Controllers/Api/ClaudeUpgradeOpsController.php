@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Console\Commands\VencerDeploymentsColgados;
 use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Jobs\RunDeploymentJob;
@@ -47,8 +48,8 @@ use Illuminate\Validation\ValidationException;
  * 🔴 Todo freno que rechaza devuelve 422 y no escribe absolutamente nada: ni estado, ni log, ni
  * job encolado.
  *
- * 🔴 LOS TRES `dispatch()` DE ESTE CONTROLADOR (endpoints 11, 13 y 14) VAN CON
- * `->onConnection('database')` EXPLÍCITO, SIN EXCEPCIÓN.
+ * 🔴 LOS CUATRO `dispatch()` DE ESTE CONTROLADOR (endpoints 11, 13, 14 y el reintento de comandos)
+ * VAN CON `->onConnection('database')` EXPLÍCITO, SIN EXCEPCIÓN.
  * `QUEUE_CONNECTION` es `sync` en este proyecto: un `dispatch()` pelado corre el pipeline SSH
  * ENTERO (compile_spa con `npm ci` y `npm run build` en el VPS de builds, uploads, migraciones)
  * adentro del request HTTP, y lo mata `max_execution_time` a los 120 segundos con un fatal que no
@@ -65,6 +66,12 @@ use Illuminate\Validation\ValidationException;
  * ⚠️ Este controlador NO toca `DeploymentController`, `DeploymentService` ni `RunDeploymentJob`:
  * reusa el pipeline tal cual está. Espeja las reglas de estado del panel (mismas listas, mismas
  * precondiciones) y les suma los frenos, que son del lado de Claude solamente.
+ *
+ * 🔴 Y hay un endpoint más, `deploy/expire-stuck`, que NO arranca nada sino que DESTRABA: pasa a
+ * `failed` un deployment colgado en `running`. No reimplementa el vencimiento: llama al mismo
+ * `VencerDeploymentsColgados::vencer_upgrade()` que corre el scheduler cada cinco minutos. El
+ * detalle de por qué exige el umbral destructivo (45 min) y no el de reporte (15) está en su
+ * docblock.
  */
 class ClaudeUpgradeOpsController extends Controller
 {
@@ -96,10 +103,17 @@ class ClaudeUpgradeOpsController extends Controller
      */
     const LATENCIA_MAXIMA_SEGUNDOS = 60;
 
-    /** Etapa desde la que arranca cada uno de los tres reanudes del pipeline. */
+    /** Etapa desde la que arranca cada uno de los cuatro reanudes del pipeline. */
     const ETAPA_PRE_CIERRE       = 'compile_spa';
     const ETAPA_POST_CIERRE      = 'run_seeders';
     const ETAPA_CONFIGURACION    = 'update_default_version';
+
+    /**
+     * Etapa del reintento de comandos. Mismo string que despacha el botón del panel en
+     * `DeploymentController::retry_commands_json()`: es la segunda mitad del post-cierre, y por eso
+     * `deploy_retry_commands_json()` lleva el mismo gate de horario que aquél.
+     */
+    const ETAPA_REINTENTO_COMANDOS = 'run_commands';
 
     /** Mínimo de caracteres del motivo con el que se saltea el gate de horario. */
     const FORCE_REASON_MINIMO = 10;
@@ -149,12 +163,17 @@ class ClaudeUpgradeOpsController extends Controller
             $es_hotfix  = (bool) $candidata->is_hotfix;
 
             $payload[] = [
-                'id'              => (int) $candidata->id,
-                'version'         => $candidata->version,
-                'title'           => $candidata->title,
-                'description'     => $candidata->description,
-                'is_hotfix'       => $es_hotfix,
-                'default_checked' => (! $es_hotfix) || $es_destino,
+                'id'          => (int) $candidata->id,
+                'version'     => $candidata->version,
+                'title'       => $candidata->title,
+                'description' => $candidata->description,
+                'is_hotfix'   => $es_hotfix,
+                /* 🔴 La regla (troncal sí, hotfix no, destino siempre) NO se escribe acá: sale de
+                   `ClientVersionUpgradeCreationService::es_sugerida_por_defecto()`, que es la misma
+                   que usa `POST claude/upgrades/batch` para armar el conjunto de cada cliente con la
+                   política `sugeridas_del_panel`. Con dos copias, el lote crearía upgrades con un
+                   conjunto distinto del que este preview muestra tildado. */
+                'default_checked' => ClientVersionUpgradeCreationService::es_sugerida_por_defecto($candidata, $to),
                 'is_target'       => $es_destino,
             ];
         }
@@ -522,53 +541,12 @@ class ClaudeUpgradeOpsController extends Controller
             );
         }
 
-        /* Gate de horario. */
-        $tz       = $this->timezone();
-        $ahora    = Carbon::now($tz);
-        $resolver = app(ClientScheduleResolver::class);
-        $estado   = $resolver->estado_en($client, $ahora, $tz);
-
-        /*
-         * 🔴 La decisión NO es "¿está cerrado en este instante?" sino "¿ya terminó la jornada de
-         * hoy?". Un `estado_en()` de instante deja pasar el hueco del mediodía y el rato de antes
-         * de abrir, y en los dos casos el negocio reabre con el post-cierre a medio correr.
-         */
-        $rechazo_del_gate = $this->rechazo_del_gate_de_horario($resolver, $client, $ahora, $tz, $estado);
-
-        $forzado = $this->pidio_en_true($request, 'force');
-
-        if ($forzado) {
-            $motivo = $this->texto_o_null($request->input('force_reason'));
-
-            if ($motivo === null || mb_strlen($motivo) < self::FORCE_REASON_MINIMO) {
-                return $this->error_422(
-                    'force_reason es obligatorio cuando force es true, y tiene que tener al menos '
-                        . self::FORCE_REASON_MINIMO . ' caracteres. No se encoló nada.',
-                    [
-                        'ayuda' => 'El motivo queda registrado en el log del sistema junto con el estado de horario que '
-                            . 'se salteó. Un freno que se saltea sin dejar rastro no es un freno.',
-                    ]
-                );
-            }
-
-            /*
-             * 🔴 La constancia del salteo se escribe SIEMPRE que el gate hubiera rechazado, no solo
-             * cuando el estado del instante no era `cerrado`. Un negocio "cerrado a las 14:00 pero
-             * que reabre a las 16" forzado tiene que dejar rastro igual que uno abierto.
-             */
-            if ($rechazo_del_gate !== null) {
-                Log::channel('daily')->warning('[claude/upgrades] Gate de horario SALTEADO con force en el post-cierre.', [
-                    'client_id'          => (int) $client->id,
-                    'upgrade_id'         => (int) $upgrade->id,
-                    'estado_ahora'       => $estado,
-                    'motivo_del_gate'    => $rechazo_del_gate['motivo_del_gate'],
-                    'force_reason'       => $motivo,
-                    'timezone'           => $tz,
-                    'momento_evaluado'   => $ahora->toIso8601String(),
-                ]);
-            }
-        } elseif ($rechazo_del_gate !== null) {
-            return $this->error_422($rechazo_del_gate['mensaje'], $rechazo_del_gate['detalle']);
+        /* Gate de horario. La regla y el `force` viven en aplicar_gate_de_horario(), que comparten
+           este endpoint y el reintento de comandos: son la misma pregunta sobre el mismo sistema en
+           uso, y dos copias de un freno se desincronizan. */
+        $gate = $this->aplicar_gate_de_horario($request, $client, $upgrade, 'el post-cierre');
+        if ($gate['rechazo'] !== null) {
+            return $gate['rechazo'];
         }
 
         /* Sello del tramo: sin esto, un upgrade que estuvo días en `paused` entraría a `running`
@@ -584,16 +562,345 @@ class ClaudeUpgradeOpsController extends Controller
         $respuesta = $this->respuesta_de_encolado($upgrade, self::ETAPA_POST_CIERRE);
         $respuesta['horario_cliente'] = $this->horario_del_cliente($client);
 
-        if ($forzado && $rechazo_del_gate !== null) {
-            $respuesta['gate_de_horario_salteado'] = [
-                'estado_ahora'    => $estado,
-                'motivo_del_gate' => $rechazo_del_gate['motivo_del_gate'],
-                'motivo'          => $this->texto_o_null($request->input('force_reason')),
-                'registrado'      => true,
-            ];
+        if ($gate['salteado'] !== null) {
+            $respuesta['gate_de_horario_salteado'] = $gate['salteado'];
         }
 
         return response()->json($respuesta, 202);
+    }
+
+    /* ==============================================================================================
+     | 15) POST claude/upgrades/{id}/deploy/retry-commands — reintento de comandos, CON gate.
+     |============================================================================================= */
+
+    /**
+     * Reintenta los comandos automatizados desde el primero fallido o pendiente.
+     *
+     * 🔴 ESPEJA `DeploymentController::retry_commands_json()` (el botón del panel) en todo lo que es
+     * estado, y le SUMA un freno que el panel no tiene. Lo que se espeja, exacto:
+     *
+     *  - Se rechaza SOLO `running`. `paused` y `paused_post_tasks` **sí** pasan: espejar significa
+     *    espejar, y desde `paused_post_tasks` es justamente donde se reintenta un comando que falló.
+     *  - Seeders completos: ningún `UpdateSeeder` con `skipped = false` y `status !== 'exitoso'`. Un
+     *    seeder `skipped` cuenta como completo (lo marca `SharedDatabaseAutoSkipService` cuando ya
+     *    corrió en un cliente hermano de la misma base).
+     *  - Al menos un `UpdateCommand` retriable: con `version_command` cargado, `run_manually = false`,
+     *    `skipped = false` y `status` en `fallido` o `pendiente`.
+     *  - Se despacha `RunDeploymentJob` desde la etapa `run_commands`.
+     *
+     * 🔴 LA ÚNICA DIVERGENCIA DELIBERADA CON EL PANEL ES EL GATE DE HORARIO, y va escrita acá para
+     * que nadie la lea como un olvido ni la "corrija". `run_commands` corre comandos de artisan sobre
+     * el sistema EN USO del cliente: es la segunda mitad exacta del post-cierre. Si el post-cierre no
+     * arranca con el negocio abierto, un reintento de esos mismos comandos tampoco puede. El panel se
+     * lo puede permitir porque lo aprieta un humano que sabe si el local está lleno de gente;
+     * `claude/*` no tiene esa información salvo que la mire, y por eso la mira. Se saltea igual que
+     * en el post-cierre: `force=true` + `force_reason` de al menos FORCE_REASON_MINIMO caracteres, y
+     * queda registrado en el log diario.
+     *
+     * ⚠️ A diferencia de `start`, este endpoint **NO borra los logs** del intento anterior: el
+     * motivo por el que un comando falló es justo lo que hace falta para decidir si reintentar. Se
+     * declara en la respuesta.
+     *
+     * @param Request    $request Request entrante.
+     * @param int|string $id      Id numérico o uuid del upgrade.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function deploy_retry_commands_json(Request $request, $id)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'confirm_client_name' => 'required|string|max:190',
+            'force'               => 'nullable|boolean',
+            'force_reason'        => 'nullable|string|max:500',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $upgrade = $this->buscar_upgrade($id);
+        if ($upgrade === null) {
+            return $this->error_404('no existe el upgrade ' . $id);
+        }
+
+        $client = $this->cliente_del_upgrade($upgrade);
+        if ($client === null) {
+            return $this->error_422('El upgrade no tiene cliente asociado.');
+        }
+
+        $rechazo = $this->rechazar_si_el_nombre_no_confirma($request, $client, $upgrade);
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        /* Espejo exacto del panel: SOLO `running` rechaza. */
+        if ($upgrade->deployment_status === 'running') {
+            return $this->error_422(
+                'Ya hay un deployment en curso para este upgrade. No se encoló nada.',
+                [
+                    'deployment_status' => $upgrade->deployment_status,
+                    'ayuda'             => 'Consultá GET claude/upgrades/' . (int) $upgrade->id . ' y mirá '
+                        . '`salud.deployment_stale`. Si el worker se murió, POST claude/upgrades/'
+                        . (int) $upgrade->id . '/deploy/expire-stuck lo destraba pasado el umbral de vencimiento.',
+                ]
+            );
+        }
+
+        $upgrade->loadMissing('update_commands.version_command', 'update_seeders');
+
+        /* Espejo: un seeder `skipped` cuenta como completo. */
+        $seeders_incompletos = $upgrade->update_seeders->filter(function ($update_seeder) {
+            if ((bool) $update_seeder->skipped) {
+                return false;
+            }
+
+            return $update_seeder->status !== 'exitoso';
+        });
+
+        if ($seeders_incompletos->isNotEmpty()) {
+            return $this->error_422(
+                'Faltan seeders por completar: los comandos no se reintentan con seeders a medias. No se encoló nada.',
+                [
+                    'seeders_incompletos' => $seeders_incompletos->count(),
+                    'ayuda'               => 'Un seeder saltado (skipped) cuenta como completo; los que faltan están en '
+                        . 'estado distinto de `exitoso`. Mirá GET claude/upgrades/' . (int) $upgrade->id
+                        . ' (bloque `seeders`) y arrancá las tareas post-cierre antes de reintentar los comandos.',
+                ]
+            );
+        }
+
+        /* Espejo: `run_manually` y `skipped` no son retriables. */
+        $retriables = $upgrade->update_commands->filter(function ($update_command) {
+            $version_command = $update_command->version_command;
+            if ($version_command === null) {
+                return false;
+            }
+            if ((bool) $version_command->run_manually) {
+                return false;
+            }
+            if ((bool) $update_command->skipped) {
+                return false;
+            }
+
+            return in_array($update_command->status, ['fallido', 'pendiente'], true);
+        });
+
+        if ($retriables->isEmpty()) {
+            return $this->error_422(
+                'No hay ningún comando automatizado pendiente ni fallido para reintentar. No se encoló nada.',
+                [
+                    'ayuda' => 'Los comandos marcados para ejecución manual (`run_manually`) y los saltados (`skipped`) '
+                        . 'no se reintentan. Mirá GET claude/upgrades/' . (int) $upgrade->id . ' (bloque `comandos`).',
+                ]
+            );
+        }
+
+        /* 🔴 El freno que el panel NO tiene. Ver el docblock de este método. */
+        $gate = $this->aplicar_gate_de_horario($request, $client, $upgrade, 'el reintento de comandos');
+        if ($gate['rechazo'] !== null) {
+            return $gate['rechazo'];
+        }
+
+        /* Sello del tramo, igual que en las otras entradas a `running`. */
+        $upgrade->update([
+            'deployment_status'        => 'running',
+            'deployment_running_since' => now(),
+        ]);
+
+        /* 🔴 onConnection('database') explícito. */
+        RunDeploymentJob::dispatch($upgrade, self::ETAPA_REINTENTO_COMANDOS)->onConnection(self::CONEXION_DE_COLA);
+
+        $respuesta = $this->respuesta_de_encolado($upgrade, self::ETAPA_REINTENTO_COMANDOS);
+        $respuesta['horario_cliente']       = $this->horario_del_cliente($client);
+        $respuesta['comandos_a_reintentar'] = $this->detalle_de_comandos($retriables);
+        $respuesta['nota_logs']             = 'A diferencia de `deploy/start`, este endpoint NO borra los logs del '
+            . 'intento anterior: el motivo por el que el comando falló sigue disponible en GET claude/upgrades/'
+            . (int) $upgrade->id . '/logs.';
+
+        if ($gate['salteado'] !== null) {
+            $respuesta['gate_de_horario_salteado'] = $gate['salteado'];
+        }
+
+        return response()->json($respuesta, 202);
+    }
+
+    /* ==============================================================================================
+     | 16) POST claude/upgrades/{id}/deploy/expire-stuck — destrabar un deployment colgado.
+     |============================================================================================= */
+
+    /**
+     * Vence un deployment que quedó colgado en `running` y lo deja en `failed`, con el motivo escrito
+     * como línea de log.
+     *
+     * 🔴 NO REIMPLEMENTA EL VENCIMIENTO: llama a `VencerDeploymentsColgados::vencer_upgrade()`, que es
+     * exactamente el cuerpo que corre el comando `deployments:vencer-colgados` cada cinco minutos —la
+     * medición de la última actividad, el claim atómico condicionado por `id` + `deployment_status` +
+     * `deployment_running_since`, la línea `step = 'vencimiento'` y el `Log::warning`—. Dos
+     * definiciones de "qué significa vencer un deployment" se desincronizan, y la que se quedaría
+     * vieja es justo la que un humano invoca a mano cuando algo ya salió mal.
+     *
+     * 🔴 EL UMBRAL QUE HABILITA ESTA ESCRITURA ES EL DESTRUCTIVO (45 min por defecto), NO EL DE
+     * REPORTE (15). `salud.deployment_stale` de `GET claude/upgrades/{id}` avisa a los 15 minutos
+     * porque reportar de más no cuesta nada; vencer marca `failed`, y `failed` es un estado del que
+     * las dos puertas dejan arrancar de nuevo. Si el pipeline seguía vivo —un `compile_spa` puede
+     * pasar varios minutos sin escribir una línea— quedarían dos `DeploymentService` por SSH sobre el
+     * hosting del mismo cliente, uno descomprimiendo la API mientras el otro corre migraciones. Por
+     * eso el 422 devuelve LOS DOS números y explica la diferencia en vez de mostrar uno solo.
+     *
+     * 🔴 Y si el claim afecta 0 filas —el worker terminó entre la medición y el UPDATE— se devuelve
+     * 409 sin tocar nada: sin ese caso, este endpoint mataría un tramo recién nacido.
+     *
+     * @param Request    $request Request entrante.
+     * @param int|string $id      Id numérico o uuid del upgrade.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function deploy_expire_stuck_json(Request $request, $id)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'confirm_client_name' => 'required|string|max:190',
+            'force'               => 'nullable|boolean',
+            'force_reason'        => 'nullable|string|max:500',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $upgrade = $this->buscar_upgrade($id);
+        if ($upgrade === null) {
+            return $this->error_404('no existe el upgrade ' . $id);
+        }
+
+        $client = $this->cliente_del_upgrade($upgrade);
+        if ($client === null) {
+            return $this->error_422('El upgrade no tiene cliente asociado.');
+        }
+
+        $rechazo = $this->rechazar_si_el_nombre_no_confirma($request, $client, $upgrade);
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        if ($upgrade->deployment_status !== 'running') {
+            return $this->error_422(
+                'Este deployment no está en `running`: no hay nada que destrabar. No se tocó nada.',
+                [
+                    'deployment_status'          => $upgrade->deployment_status,
+                    'deployment_status_esperado' => 'running',
+                    'ayuda'                      => 'Consultá GET claude/upgrades/' . (int) $upgrade->id
+                        . ' y mirá `siguiente_accion`. `paused` y `paused_post_tasks` son esperas legítimas, no cuelgues.',
+                ]
+            );
+        }
+
+        /* El motivo del force se valida ANTES de medir nada: si viene mal, se rechaza sin haber
+           calculado ni escrito una sola cosa. */
+        $forzado = $this->pidio_en_true($request, 'force');
+        $motivo_del_force = $this->texto_o_null($request->input('force_reason'));
+
+        if ($forzado && ($motivo_del_force === null || mb_strlen($motivo_del_force) < self::FORCE_REASON_MINIMO)) {
+            return $this->error_422(
+                'force_reason es obligatorio cuando force es true, y tiene que tener al menos '
+                    . self::FORCE_REASON_MINIMO . ' caracteres. No se tocó nada.',
+                [
+                    'ayuda' => 'El motivo queda registrado en el log del sistema junto con la medición que se salteó. '
+                        . 'Un freno que se saltea sin dejar rastro no es un freno.',
+                ]
+            );
+        }
+
+        $vencimiento_minutos = VencerDeploymentsColgados::timeout_minutos_efectivo();
+        $salud               = $this->salud_del_upgrade((int) $upgrade->id);
+
+        /* 🔴 Sin `deployment_running_since` no hay ancla, así que NO HAY MEDICIÓN: es el mismo caso
+           que `deployments:vencer-colgados` saltea con su `whereNotNull`. Vencerlo sería inventar
+           la medición, y por eso sólo se sale con force. */
+        if ($upgrade->deployment_running_since === null && ! $forzado) {
+            return $this->error_422(
+                'Este deployment no tiene `deployment_running_since`: sin ancla no se puede medir hace cuánto está '
+                    . 'colgado, y vencerlo sería inventar la medición. No se tocó nada.',
+                [
+                    'deployment_running_since' => null,
+                    'vencimiento_minutos'      => $vencimiento_minutos,
+                    'ayuda'                    => 'Son los upgrades que entraron a `running` ANTES de la migración que '
+                        . 'agregó la columna: `deployments:vencer-colgados` también los saltea. Si sabés a mano que el '
+                        . 'proceso murió, repetí con force=true y force_reason (mínimo ' . self::FORCE_REASON_MINIMO
+                        . ' caracteres).',
+                ]
+            );
+        }
+
+        /* 🔴 La escritura entera —medición, claim atómico, línea de log— vive en el comando. Acá no
+           se reimplementa ninguna de las tres. */
+        $resultado = app(VencerDeploymentsColgados::class)->vencer_upgrade($upgrade, $vencimiento_minutos, $forzado);
+
+        if (! $resultado['vencido'] && $resultado['motivo'] === 'claim_perdido') {
+            return response()->json([
+                'error'             => 'El deployment cambió de estado mientras se lo evaluaba. No se tocó nada.',
+                'upgrade_id'        => (int) $upgrade->id,
+                'deployment_status' => (string) $upgrade->refresh()->deployment_status,
+                'ayuda'             => 'El worker terminó el tramo entre la medición y la escritura, así que el claim '
+                    . 'atómico no afectó ninguna fila: marcar `failed` ahora mataría un tramo distinto del que se midió. '
+                    . 'Consultá GET claude/upgrades/' . (int) $upgrade->id . ' y decidí con el estado nuevo a la vista.',
+            ], 409);
+        }
+
+        if (! $resultado['vencido']) {
+            return $this->error_422('Este deployment no está vencido todavía. No se tocó nada.', [
+                'deployment_stale'      => $salud === null ? null : $salud['deployment_stale'],
+                'minutos_sin_actividad' => $resultado['minutos_sin_actividad'],
+                'stale_minutos_reporte' => $salud === null ? null : $salud['stale_minutos'],
+                'vencimiento_minutos'   => $vencimiento_minutos,
+                'ayuda'                 => '`deployment_stale` en true significa que el worker no reporta hace más de '
+                    . ($salud === null ? '15' : $salud['stale_minutos']) . ' min, que es el umbral de AVISO. Vencer un '
+                    . 'deployment lo marca `failed` y habilita arrancar otro: si el pipeline seguía vivo, quedarían dos '
+                    . 'DeploymentService por SSH sobre el mismo hosting. Esperá a los ' . $vencimiento_minutos
+                    . ' min, o volvé con force=true y force_reason.',
+            ]);
+        }
+
+        /* Constancia del salteo, con el mismo criterio que el gate de horario: se escribe cuando el
+           force hizo una diferencia real, o sea cuando la medición NO alcanzaba el umbral. */
+        $salteo_real = $forzado
+            && ($resultado['minutos_sin_actividad'] === null
+                || $resultado['minutos_sin_actividad'] < $vencimiento_minutos);
+
+        if ($salteo_real) {
+            Log::channel('daily')->warning('[claude/upgrades] Vencimiento FORZADO de un deployment por debajo del umbral.', [
+                'client_id'             => (int) $client->id,
+                'upgrade_id'            => (int) $upgrade->id,
+                'minutos_sin_actividad' => $resultado['minutos_sin_actividad'],
+                'vencimiento_minutos'   => $vencimiento_minutos,
+                'force_reason'          => $motivo_del_force,
+            ]);
+        }
+
+        $respuesta = [
+            'vencido'                  => true,
+            'upgrade_id'               => (int) $upgrade->id,
+            'upgrade_uuid'             => (string) $upgrade->uuid,
+            'deployment_status'        => 'failed',
+            'minutos_sin_actividad'    => $resultado['minutos_sin_actividad'],
+            'timeout_minutos'          => $vencimiento_minutos,
+            'motivo_escrito_en_el_log' => $resultado['motivo_escrito_en_el_log'],
+            'siguiente_accion'         => 'POST claude/upgrades/' . (int) $upgrade->id . '/deploy/start',
+            'advertencia'              => '⚠️ El servidor del cliente quedó en un estado DESCONOCIDO: se marcó `failed` '
+                . 'para poder reintentar, no porque se sepa que falló. Verificá en qué estado quedó antes de volver a '
+                . 'arrancar.',
+            'nota'                     => 'Es la misma escritura que hace `deployments:vencer-colgados` cada cinco '
+                . 'minutos: se llama al mismo método, no a una copia. Los logs del deployment NO se borraron; los borra '
+                . '`deploy/start` cuando se reintenta.',
+        ];
+
+        if ($salteo_real) {
+            $respuesta['vencimiento_forzado'] = [
+                'minutos_sin_actividad' => $resultado['minutos_sin_actividad'],
+                'vencimiento_minutos'   => $vencimiento_minutos,
+                'motivo'                => $motivo_del_force,
+                'registrado'            => true,
+            ];
+        }
+
+        return response()->json($respuesta, 200);
     }
 
     /* ==============================================================================================
@@ -776,6 +1083,154 @@ class ClaudeUpgradeOpsController extends Controller
                     . '?include=apis, y usá el id de una de ellas (o no mandes target_client_api_id y dejá el default).',
             ]
         );
+    }
+
+    /**
+     * Aplica el GATE DE HORARIO a un arranque de tareas sobre el sistema EN USO del cliente, con su
+     * salteo por `force` + `force_reason` y su constancia en el log diario.
+     *
+     * 🔴 Existe porque tiene DOS llamadores —`deploy_start_post_closure_json()` y
+     * `deploy_retry_commands_json()`— y un freno con dos copias es un freno que se va a
+     * desincronizar: alcanza con que alguien ajuste el mínimo del motivo, o lo que se registra en el
+     * log, en una sola de las dos. Las dos operaciones hacen exactamente la misma pregunta (¿ya
+     * terminó la jornada de hoy?) sobre exactamente el mismo riesgo (correr seeders o comandos sobre
+     * el sistema que el negocio está usando), así que tienen que tener una sola respuesta.
+     *
+     * ⚠️ El texto del log incluye `$donde` para poder distinguir después cuál de los dos se salteó.
+     * Para el post-cierre queda idéntico al que este controlador viene escribiendo desde el 24/8.
+     *
+     * @param Request              $request Request entrante (force, force_reason).
+     * @param Client               $client  Cliente del upgrade, con horarios cargados.
+     * @param ClientVersionUpgrade $upgrade Upgrade involucrado.
+     * @param string               $donde   Nombre de la operación, para el log ('el post-cierre'…).
+     *
+     * @return array{rechazo: \Illuminate\Http\JsonResponse|null, salteado: array<string, mixed>|null}
+     */
+    private function aplicar_gate_de_horario(Request $request, Client $client, ClientVersionUpgrade $upgrade, $donde)
+    {
+        $tz       = $this->timezone();
+        $ahora    = Carbon::now($tz);
+        $resolver = app(ClientScheduleResolver::class);
+        $estado   = $resolver->estado_en($client, $ahora, $tz);
+
+        /*
+         * 🔴 La decisión NO es "¿está cerrado en este instante?" sino "¿ya terminó la jornada de
+         * hoy?". Un `estado_en()` de instante deja pasar el hueco del mediodía y el rato de antes
+         * de abrir, y en los dos casos el negocio reabre con las tareas a medio correr.
+         */
+        $rechazo_del_gate = $this->rechazo_del_gate_de_horario($resolver, $client, $ahora, $tz, $estado);
+
+        $forzado = $this->pidio_en_true($request, 'force');
+
+        if (! $forzado) {
+            if ($rechazo_del_gate !== null) {
+                return [
+                    'rechazo'  => $this->error_422($rechazo_del_gate['mensaje'], $rechazo_del_gate['detalle']),
+                    'salteado' => null,
+                ];
+            }
+
+            return ['rechazo' => null, 'salteado' => null];
+        }
+
+        $motivo = $this->texto_o_null($request->input('force_reason'));
+
+        if ($motivo === null || mb_strlen($motivo) < self::FORCE_REASON_MINIMO) {
+            return [
+                'rechazo' => $this->error_422(
+                    'force_reason es obligatorio cuando force es true, y tiene que tener al menos '
+                        . self::FORCE_REASON_MINIMO . ' caracteres. No se encoló nada.',
+                    [
+                        'ayuda' => 'El motivo queda registrado en el log del sistema junto con el estado de horario que '
+                            . 'se salteó. Un freno que se saltea sin dejar rastro no es un freno.',
+                    ]
+                ),
+                'salteado' => null,
+            ];
+        }
+
+        /*
+         * 🔴 La constancia del salteo se escribe SIEMPRE que el gate hubiera rechazado, no solo
+         * cuando el estado del instante no era `cerrado`. Un negocio "cerrado a las 14:00 pero
+         * que reabre a las 16" forzado tiene que dejar rastro igual que uno abierto.
+         */
+        if ($rechazo_del_gate === null) {
+            return ['rechazo' => null, 'salteado' => null];
+        }
+
+        Log::channel('daily')->warning('[claude/upgrades] Gate de horario SALTEADO con force en ' . $donde . '.', [
+            'client_id'          => (int) $client->id,
+            'upgrade_id'         => (int) $upgrade->id,
+            'estado_ahora'       => $estado,
+            'motivo_del_gate'    => $rechazo_del_gate['motivo_del_gate'],
+            'force_reason'       => $motivo,
+            'timezone'           => $tz,
+            'momento_evaluado'   => $ahora->toIso8601String(),
+        ]);
+
+        return [
+            'rechazo'  => null,
+            'salteado' => [
+                'estado_ahora'    => $estado,
+                'motivo_del_gate' => $rechazo_del_gate['motivo_del_gate'],
+                'motivo'          => $motivo,
+                'registrado'      => true,
+            ],
+        ];
+    }
+
+    /**
+     * Lista legible de los comandos que el reintento va a volver a correr.
+     *
+     * Es contexto de la respuesta 202: quien pide un reintento tiene que poder ver QUÉ se va a
+     * ejecutar sobre el sistema del cliente sin ir a buscarlo a otro endpoint.
+     *
+     * @param \Illuminate\Support\Collection $retriables UpdateCommand ya filtrados.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function detalle_de_comandos($retriables)
+    {
+        $detalle = [];
+
+        foreach ($retriables as $update_command) {
+            $version_command = $update_command->version_command;
+
+            $detalle[] = [
+                'update_command_id' => (int) $update_command->id,
+                'comando'           => $version_command === null ? null : $version_command->command,
+                'status'            => $update_command->status,
+            ];
+        }
+
+        return $detalle;
+    }
+
+    /**
+     * Bloque `salud` de `GET claude/upgrades/{id}` para este upgrade.
+     *
+     * 🔴 Se pide al controlador de LECTURA en vez de recalcularlo: `deployment_stale` y
+     * `stale_minutos` tienen UNA definición (`ClaudeClientOpsController::salud_del_deployment()`), y
+     * el 422 de `expire-stuck` publica esos dos números al lado del umbral de vencimiento justamente
+     * para explicar por qué son distintos. Con una copia acá, el endpoint podría terminar diciendo
+     * que el deployment está `stale` con un criterio que el endpoint de poleo ya no usa.
+     *
+     * @param int $upgrade_id Id del upgrade.
+     *
+     * @return array<string, mixed>|null Null si la lectura no devolvió 200.
+     */
+    private function salud_del_upgrade($upgrade_id)
+    {
+        $lectura   = app(ClaudeClientOpsController::class);
+        $respuesta = $lectura->upgrade_json(Request::create('/', 'GET'), $upgrade_id);
+
+        if ($respuesta->getStatusCode() !== 200) {
+            return null;
+        }
+
+        $datos = $respuesta->getData(true);
+
+        return isset($datos['salud']) ? $datos['salud'] : null;
     }
 
     /**
