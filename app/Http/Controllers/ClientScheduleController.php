@@ -5,12 +5,10 @@ namespace App\Http\Controllers;
 use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
 use App\Models\ClientScheduleDay;
-use App\Models\ClientScheduleRange;
+use App\Services\ClientScheduleReplacementService;
 use App\Services\ClientScheduleResolver;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Validation\ValidationException;
 
 /**
  * API JSON (Sanctum) de los horarios comerciales de un cliente, para la pestaña "Horarios" del
@@ -29,6 +27,12 @@ use Illuminate\Validation\ValidationException;
  *  2. 🔴 Toda validación que falla devuelve 422 SIN escribir ni una fila. Se valida el payload
  *     entero antes de abrir la transacción: nada de borrar primero y descubrir el error después.
  *
+ * ⚠️ Las dos ideas de arriba ya NO se implementan acá: viven en
+ * `ClientScheduleReplacementService`, que es el único lugar donde están escritas. Este controlador
+ * es hoy el camino de la SPA hacia ese servicio; el otro camino es
+ * `PUT claude/clients/{id}/schedule`. Ver el docblock del servicio para por qué se extrajo en vez
+ * de espejarse.
+ *
  * La enumeración de días (`day_keys`) y la resolución de la semana viajan desde el back para que
  * la SPA no reimplemente ni la lista ni la regla de precedencia de "Todos los días".
  */
@@ -36,9 +40,6 @@ class ClientScheduleController extends Controller
 {
     /** Días que se resuelven y viajan en la respuesta, para que la UI muestre "cómo queda la semana". */
     const DIAS_RESUELTOS = 7;
-
-    /** Formato aceptado para una hora: 'H:i' de 00:00 a 23:59. */
-    const REGEX_HORA = '/^([01][0-9]|2[0-3]):[0-5][0-9]$/';
 
     /**
      * Horarios cargados del cliente + la enumeración de días + la semana ya resuelta.
@@ -58,44 +59,23 @@ class ClientScheduleController extends Controller
      * Reemplaza el conjunto entero de horarios del cliente y devuelve el mismo payload que
      * show_json(), ya releído de la base.
      *
-     * @param  Request                $request
-     * @param  int|string             $clientId Id numérico o uuid del cliente.
-     * @param  ClientScheduleResolver $resolver Inyectado por el IoC de Laravel.
+     * @param  Request                           $request
+     * @param  int|string                        $clientId Id numérico o uuid del cliente.
+     * @param  ClientScheduleResolver            $resolver Inyectado por el IoC de Laravel.
+     * @param  ClientScheduleReplacementService  $reemplazo Inyectado por el IoC de Laravel.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function update_json(Request $request, $clientId, ClientScheduleResolver $resolver)
+    public function update_json(Request $request, $clientId, ClientScheduleResolver $resolver, ClientScheduleReplacementService $reemplazo)
     {
         $client = $this->find_client_by_route_id($clientId);
 
-        // 🔴 Primero se valida TODO el payload. Si algo está mal, se sale con 422 antes de tocar
-        // una sola fila: el guardado no puede dejar al cliente con la mitad vieja y la mitad nueva.
-        $dias = $this->validar_dias($request);
+        // 🔴 Primero se valida TODO el payload. Si algo está mal, la ValidationException sale con
+        // 422 antes de tocar una sola fila: el guardado no puede dejar al cliente con la mitad
+        // vieja y la mitad nueva. Validar y escribir son dos llamadas separadas justamente para
+        // que ese orden no dependa de que nadie lo mueva de lugar.
+        $dias = $reemplazo->validar($request->all());
 
-        DB::transaction(function () use ($client, $dias) {
-            // Reemplazo atómico: se borran todos los días del cliente (la FK con onDelete cascade
-            // se lleva sus rangos) y se recrea el conjunto desde el payload.
-            ClientScheduleDay::where('client_id', $client->id)->delete();
-
-            foreach ($dias as $dia) {
-                $fila            = new ClientScheduleDay();
-                $fila->client_id = $client->id;
-                $fila->day_key   = $dia['dia'];
-                $fila->save();
-
-                // sort_order se asigna por hora de apertura ascendente (los rangos ya vienen
-                // ordenados de la validación): es orden de presentación, no dato del usuario.
-                $orden = 0;
-                foreach ($dia['rangos'] as $rango) {
-                    $fila_rango                         = new ClientScheduleRange();
-                    $fila_rango->client_schedule_day_id = $fila->id;
-                    $fila_rango->start_time             = $rango['desde'];
-                    $fila_rango->end_time               = $rango['hasta'];
-                    $fila_rango->sort_order             = $orden;
-                    $fila_rango->save();
-                    $orden++;
-                }
-            }
-        });
+        $reemplazo->reemplazar($client, $dias);
 
         /* Los horarios ya quedaron guardados: recién ahora se avisa al empresa-api del cliente, y se
          * hace ENCOLANDO.
@@ -143,112 +123,6 @@ class ClientScheduleController extends Controller
                 . 'dispara cada minuto. El estado que viaja acá todavía es el del intento anterior: '
                 . 'volvé a pedir GET admin/client/{clientId}/horarios para ver el resultado.',
         ], 202);
-    }
-
-    /**
-     * Valida el body del PUT y lo devuelve normalizado.
-     *
-     * Las seis validaciones del plan, todas 422 y todas antes de escribir:
-     *
-     *  1. `dias` es array (vacío es válido: borra todo).
-     *  2. `dia` pertenece a ClientScheduleDay::DAY_KEYS y no se repite.
-     *  3. `rangos` es array (vacío es válido: ese día el negocio está cerrado).
-     *  4. `desde` y `hasta` en formato 'H:i'.
-     *  5. `hasta` estrictamente mayor que `desde` (un rango no cruza la medianoche).
-     *  6. Dos rangos del mismo día no se solapan.
-     *
-     * @param  Request $request Request del PUT.
-     * @return array<int, array> Días normalizados, con los rangos ordenados por hora de apertura.
-     *
-     * @throws ValidationException
-     */
-    private function validar_dias(Request $request)
-    {
-        // Estructura y formato. `present` en vez de `required` porque un array vacío es un valor
-        // válido acá (borrar todo / día cerrado) y `required` lo rechazaría.
-        $request->validate([
-            'dias'                 => ['present', 'array'],
-            'dias.*.dia'           => ['required', 'string', 'in:' . implode(',', ClientScheduleDay::DAY_KEYS)],
-            'dias.*.rangos'        => ['present', 'array'],
-            'dias.*.rangos.*.desde' => ['required', 'string', 'regex:' . self::REGEX_HORA],
-            'dias.*.rangos.*.hasta' => ['required', 'string', 'regex:' . self::REGEX_HORA],
-        ]);
-
-        $dias_crudos = $request->input('dias', []);
-        $normalizados = [];
-        $vistos       = [];
-
-        foreach ($dias_crudos as $indice => $dia_crudo) {
-            $day_key = (string) $dia_crudo['dia'];
-
-            // Un día no puede venir dos veces: el unique (client_id, day_key) lo rechazaría con un
-            // error de base, y un error de base no es una respuesta que la UI pueda mostrar.
-            if (in_array($day_key, $vistos, true)) {
-                throw ValidationException::withMessages([
-                    'dias.' . $indice . '.dia' => 'El día "' . ClientScheduleDay::label_for($day_key) . '" está cargado más de una vez.',
-                ]);
-            }
-
-            $vistos[] = $day_key;
-
-            $normalizados[] = [
-                'dia'    => $day_key,
-                'rangos' => $this->validar_rangos_de_un_dia($dia_crudo['rangos'], $day_key, $indice),
-            ];
-        }
-
-        return $normalizados;
-    }
-
-    /**
-     * Valida y ordena los rangos de un día.
-     *
-     * @param  array  $rangos_crudos Rangos tal como vinieron en el body.
-     * @param  string $day_key       Clave del día, para el mensaje de error.
-     * @param  int    $indice        Índice del día en el array, para el campo del error.
-     * @return array<int, array<string, string>> Rangos normalizados y ordenados por 'desde'.
-     *
-     * @throws ValidationException
-     */
-    private function validar_rangos_de_un_dia($rangos_crudos, $day_key, $indice)
-    {
-        $rangos = [];
-
-        foreach ($rangos_crudos as $rango_crudo) {
-            $rangos[] = [
-                'desde' => (string) $rango_crudo['desde'],
-                'hasta' => (string) $rango_crudo['hasta'],
-            ];
-        }
-
-        // Con el formato 'H:i' garantizado por el regex, comparar como strings es comparar horas.
-        usort($rangos, function ($a, $b) {
-            return strcmp($a['desde'], $b['desde']);
-        });
-
-        $anterior = null;
-
-        foreach ($rangos as $rango) {
-            // 🔴 Un rango no cruza la medianoche: se exige hasta > desde estricto. Un negocio que
-            // cierra a medianoche o después se carga con 23:59 (limitación declarada del modelo).
-            if (strcmp($rango['hasta'], $rango['desde']) <= 0) {
-                throw ValidationException::withMessages([
-                    'dias.' . $indice . '.rangos' => 'En "' . ClientScheduleDay::label_for($day_key) . '", la hora de cierre (' . $rango['hasta'] . ') tiene que ser posterior a la de apertura (' . $rango['desde'] . ').',
-                ]);
-            }
-
-            // Ya ordenados por apertura: si este empieza antes de que termine el anterior, se pisan.
-            // Dos rangos que se tocan (13:00–16:00 después de 09:00–13:00) NO se solapan.
-            if ($anterior !== null && strcmp($rango['desde'], $anterior['hasta']) < 0) {
-                throw ValidationException::withMessages([
-                    'dias.' . $indice . '.rangos' => 'En "' . ClientScheduleDay::label_for($day_key) . '", los rangos ' . $anterior['desde'] . '–' . $anterior['hasta'] . ' y ' . $rango['desde'] . '–' . $rango['hasta'] . ' se solapan.',
-                ]);
-            }
-
-            $anterior = $rango;
-        }
-
-        return $rangos;
     }
 
     /**

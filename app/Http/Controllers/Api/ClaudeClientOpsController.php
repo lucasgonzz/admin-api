@@ -9,14 +9,23 @@ use App\Http\Controllers\UpdateController;
 use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
 use App\Models\ClientScheduleDay;
+use App\Services\ClientScheduleReplacementService;
 use App\Services\ClientScheduleResolver;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 /**
- * Endpoints de LECTURA de clientes, horarios, versiones y actualizaciones para Claude
+ * Endpoints de clientes, horarios, versiones y actualizaciones para Claude
  * (misión "actualizaciones manejadas por Claude + horarios del cliente", 24/8/2026).
+ *
+ * Es de lectura salvo por los DOS endpoints de horarios que escriben:
+ * `POST clients/{id}/schedule/sync` (idempotente, sin frenos: reenvía lo que el admin ya tiene) y
+ * `PUT clients/{id}/schedule` (reemplazo del conjunto entero, con `dry_run` y `confirm_client_name`).
+ * Los dos viven acá y no en un controlador aparte porque el corte de este bloque es por ENTIDAD
+ * —clientes, upgrades, ecommerce— y no por verbo: separar el PUT del GET de la misma ruta
+ * obligaría a copiar `dias_cargados_de()`, `resolver_client_id()` y el resolvedor a otro archivo.
  *
  * Protegidos por el middleware `claude.task.key` (clave fija en X-Claude-Task-Key), el mismo
  * bloque que ya usan ClaudeTaskIngestController y ClaudeLeadsAnalyticsController. No hay Sanctum:
@@ -269,6 +278,23 @@ class ClaudeClientOpsController extends Controller
                         'desde'    => 'Fecha Y-m-d. Default hoy.',
                         'timezone' => 'Default ' . config('app.timezone') . '.',
                     ],
+                ],
+                'PUT claude/clients/{id}/schedule' => [
+                    'parametros' => [
+                        'dias'                => '🔴 El conjunto COMPLETO de días: lo que no viaja acá se BORRA. Cada ítem es '
+                            . '{"dia": <una de ' . implode('|', ClientScheduleDay::DAY_KEYS) . '>, "rangos": [{"desde":"HH:MM","hasta":"HH:MM"}]}.',
+                        'dry_run'             => 'Booleano. Default TRUE: valida todo, devuelve dias_antes y dias_despues, y no escribe una fila.',
+                        'confirm_client_name' => 'Obligatorio cuando dry_run es false. Tiene que coincidir con clients.name (trim + minúsculas). El error no dice el nombre correcto: es un freno, no un formulario.',
+                    ],
+                    'modelo_de_dias' => [
+                        'fila del día CON rangos' => 'Ese día rige ese horario.',
+                        'fila del día SIN rangos' => 'Ese día el negocio está CERRADO.',
+                        'día sin fila'            => 'Rige la fila `todos` si existe; si no existe, el día queda SIN CONFIGURAR.',
+                    ],
+                    'nota' => '🔴 `sin_configurar` NO es `cerrado`, y el gate de horario del post-cierre rechaza los dos. '
+                        . 'Un rango no cruza la medianoche (`hasta` > `desde`; un negocio que cierra a las 00:00 se carga '
+                        . 'con 23:59) y dos rangos del mismo día no se solapan. Guardar encola el push al empresa-api del '
+                        . 'cliente: el resultado se mira después en `sincronizacion` del GET.',
                 ],
                 'GET claude/versions' => [
                     'filtros' => [
@@ -653,11 +679,10 @@ class ClaudeClientOpsController extends Controller
     /**
      * Encola el push de los horarios de un cliente a su empresa-api.
      *
-     * Es el único endpoint de ESCRITURA de este controlador, y entra acá porque escribe sobre la
-     * misma entidad que el resto: es idempotente (reenvía el estado actual de los horarios, no
-     * acumula nada del lado del cliente) y por eso no lleva `confirm_client_name` ni `dry_run`. Lo
-     * único que hace es empujarle a la propia API del cliente un dato que el admin ya tiene: el
-     * daño posible es cero.
+     * Es idempotente (reenvía el estado actual de los horarios, no acumula nada del lado del
+     * cliente) y por eso no lleva `confirm_client_name` ni `dry_run`, a diferencia de
+     * `PUT clients/{id}/schedule`, que SÍ los lleva porque modifica el dato. Lo único que hace es
+     * empujarle a la propia API del cliente algo que el admin ya tiene: el daño posible es cero.
      *
      * 🔴 Encola con `->onConnection('database')` explícito y devuelve 202: nunca corre el HTTP
      * adentro del request. Con QUEUE_CONNECTION=sync un dispatch pelado lo correría inline y le
@@ -711,6 +736,171 @@ class ClaudeClientOpsController extends Controller
                 . 'espera a que el push termine. Si el empresa-api del cliente todavía no tiene la '
                 . 'ruta admin-sync/business-hours, el resultado esperado es `manual_required`.',
         ], 202);
+    }
+
+    /**
+     * Reemplaza el conjunto entero de horarios de un cliente. Es el ÚNICO endpoint de `claude/*`
+     * que escribe horarios, y el que le permite a Claude cargarlos sin pasar por el modal del admin.
+     *
+     * 🔴 REEMPLAZO ATÓMICO, no un parche por día. Manda el conjunto COMPLETO: lo que no viaja en
+     * `dias` se borra. Un PUT con `dias: []` deja al cliente sin ningún horario (que NO es lo mismo
+     * que cerrado: lo deja `sin_configurar`). La regla y la transacción viven en
+     * `ClientScheduleReplacementService`, el mismo servicio que usa la SPA — no hay dos criterios.
+     *
+     * 🔴 EL MODELO DE DÍAS, QUE ES DONDE SE EQUIVOCA EL QUE LLAMA:
+     *   - fila del día CON rangos  → ese día rige ese horario;
+     *   - fila del día SIN rangos  → ese día el negocio está CERRADO;
+     *   - día sin fila             → rige la fila `todos` si existe; si no, queda SIN CONFIGURAR.
+     *   `sin_configurar` no es `cerrado`, y el gate de horario del post-cierre rechaza los dos: no
+     *   se asume que un cliente sin horarios cargados esté cerrado.
+     *
+     * Frenos, en el mismo orden y con el mismo criterio que `POST claude/upgrades`:
+     *   1. `dry_run`, por defecto `true`. Sin `dry_run=false` explícito esto NO escribe una fila,
+     *      pero valida el payload entero igual: un dry-run que pasa garantiza que el real no va a
+     *      rebotar por forma.
+     *   2. `confirm_client_name`, obligatorio cuando `dry_run` es false. El daño más grande posible
+     *      acá es pisarle los horarios al cliente equivocado, y un id numérico no tiene ninguna
+     *      redundancia; el nombre sí. El error NO revela el nombre correcto.
+     *
+     * El push al empresa-api del cliente se ENCOLA (`->onConnection('database')`), nunca corre
+     * adentro del request: ver `SyncClientScheduleJob`.
+     *
+     * @param Request                          $request   Request entrante.
+     * @param int|string                       $id        Id numérico o uuid del cliente.
+     * @param ClientScheduleReplacementService $reemplazo Inyectado por el IoC de Laravel.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function update_schedule_json(Request $request, $id, ClientScheduleReplacementService $reemplazo)
+    {
+        /* `confirm_client_name` es nullable acá y obligatorio más abajo, cuando `dry_run` es false:
+           un dry-run tiene que poder previsualizar sin saber el nombre todavía. Mismo criterio que
+           `POST claude/upgrades`. */
+        $invalido = $this->validar_o_422($request, [
+            'confirm_client_name' => 'nullable|string|max:190',
+            'dry_run'             => 'nullable|boolean',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $client_id = $this->resolver_client_id($id);
+        if ($client_id === null) {
+            return $this->error_404('no existe el cliente ' . $id);
+        }
+
+        $cliente = $this->cargar_cliente_con_horarios($client_id);
+        if ($cliente === null) {
+            return $this->error_404('no existe el cliente ' . $id);
+        }
+
+        /* La forma del payload la decide el servicio, que es el que la define para los dos caminos.
+           Su ValidationException se traduce acá al 422 con la forma única del bloque `claude/*`:
+           quien consume esta API no tiene por qué recibir dos cuerpos de error distintos según qué
+           validación falló. */
+        try {
+            $dias = $reemplazo->validar($request->all());
+        } catch (ValidationException $e) {
+            return $this->error_422(
+                'El payload de horarios no es válido. No se escribió nada.',
+                [
+                    'client_id' => (int) $cliente->id,
+                    'detalles'  => $e->validator->errors()->all(),
+                    'ayuda'     => 'Cada día es {"dia": <una de day_keys>, "rangos": [{"desde":"HH:MM","hasta":"HH:MM"}]}. '
+                        . 'Un día con "rangos": [] significa CERRADO. `hasta` tiene que ser mayor que `desde` '
+                        . '(un rango no cruza la medianoche: usá 23:59) y dos rangos del mismo día no se solapan.',
+                ]
+            );
+        }
+
+        $dias_antes = $this->dias_cargados_de($cliente);
+
+        /* Freno 1: sin `dry_run=false` explícito esto no escribe nada. Se contesta con el conjunto
+           que QUEDARÍA, ya normalizado y ordenado por el servicio, para que se pueda comparar
+           contra `dias_antes` antes de decidir. */
+        $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
+        if ($dry_run) {
+            return response()->json([
+                'dry_run'    => true,
+                'escribio'   => false,
+                'client'     => [
+                    'id'   => (int) $cliente->id,
+                    'uuid' => (string) $cliente->uuid,
+                    'name' => (string) $cliente->name,
+                ],
+                'dias_antes'   => $dias_antes,
+                'dias_despues' => $this->dias_como_payload($dias),
+                'nota' => 'No se escribió NADA. Para guardar de verdad, repetí la misma llamada con '
+                    . 'dry_run=false y confirm_client_name con el nombre exacto del cliente. ⚠️ Es un '
+                    . 'REEMPLAZO: `dias_despues` es lo que va a quedar, no lo que se agrega.',
+            ], 200);
+        }
+
+        /* Freno 2: el nombre. Con `dry_run=false` ya no es opcional. */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma(
+            $request,
+            $cliente,
+            'No se escribió nada.'
+        );
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $reemplazo->reemplazar($cliente, $dias);
+
+        /* Después de la transacción, nunca adentro: el job lee el cliente de la base cuando corre,
+           así que despacharlo adentro sería empujar un estado que todavía puede hacer rollback. */
+        SyncClientScheduleJob::dispatch($cliente->id)->onConnection('database');
+
+        $tz       = $this->normalizar_timezone(null);
+        $ahora    = Carbon::now($tz);
+        $resolver = $this->resolvedor();
+
+        // load() y no loadMissing(): la relación en memoria quedó vieja después del reemplazo.
+        $cliente->load('schedule_days.schedule_ranges');
+
+        return response()->json([
+            'dry_run'  => false,
+            'escribio' => true,
+            'client'   => [
+                'id'   => (int) $cliente->id,
+                'uuid' => (string) $cliente->uuid,
+                'name' => (string) $cliente->name,
+            ],
+            'timezone'      => $tz,
+            'dias_antes'    => $dias_antes,
+            'dias_cargados' => $this->dias_cargados_de($cliente),
+            'resueltos'     => $resolver->resolve_dias($cliente, $ahora, self::DIAS_SCHEDULE_DEFAULT, $tz),
+            'estado_ahora'  => $resolver->estado_en($cliente, $ahora, $tz),
+            'sync_encolado' => true,
+            'nota' => 'Los horarios quedaron guardados. El push al empresa-api del cliente se encoló '
+                . 'en la conexión `database` y corre en el worker que el scheduler dispara cada '
+                . 'minuto: el resultado se consulta con GET claude/clients/' . (int) $cliente->id
+                . '/schedule, en `sincronizacion`.',
+        ], 200);
+    }
+
+    /**
+     * Los días ya validados, con la etiqueta visible agregada, para que el `dry_run` se lea igual
+     * que `dias_cargados`.
+     *
+     * @param array<int, array> $dias Días normalizados que devolvió el servicio.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function dias_como_payload(array $dias)
+    {
+        $salida = [];
+
+        foreach ($dias as $dia) {
+            $salida[] = [
+                'dia'       => (string) $dia['dia'],
+                'dia_label' => ClientScheduleDay::label_for($dia['dia']),
+                'rangos'    => $dia['rangos'],
+            ];
+        }
+
+        return $salida;
     }
 
     /**

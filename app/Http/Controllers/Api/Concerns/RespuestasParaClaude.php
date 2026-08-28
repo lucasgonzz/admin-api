@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api\Concerns;
 
+use App\Models\Client;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -413,5 +414,88 @@ trait RespuestasParaClaude
         } catch (\Throwable $e) {
             return null;
         }
+    }
+
+    /**
+     * Freno del nombre: `confirm_client_name` tiene que coincidir con `clients.name`, comparado con
+     * trim + mb_strtolower en las dos puntas.
+     *
+     * 🔴 POR QUÉ ESTÁ ACÁ Y NO EN CADA CONTROLADOR. Este cuerpo estaba escrito DOS veces —
+     * `ClaudeUpgradeOpsController` y `ClaudeEcommerceOpsController`—, con una nota en la segunda que
+     * decía "réplica deliberada […] queda anotado para el que unifique". El motivo declarado para no
+     * unificarlo era que las dos copias difieren en dos cosas: el cierre del mensaje ("No se
+     * escribió nada." contra "No se encoló nada.") y el `upgrade_id` que una de ellas mete en el
+     * cuerpo del error. Las dos diferencias son datos del que llama, no reglas distintas: entran por
+     * parámetro y el cuerpo queda idéntico al que ya tenían los dos. Con el tercer consumidor
+     * (`PUT claude/clients/{id}/schedule`) iban a ser tres copias del freno más peligroso del
+     * bloque, que es exactamente lo que este trait existe para impedir.
+     *
+     * 🔴 El error NO revela el nombre correcto. Si lo revelara dejaría de ser un freno y sería un
+     * formulario a completar: quien se equivocó de cliente leería el nombre real y lo copiaría sin
+     * darse cuenta de que está por tocar otro negocio. Se dice qué cliente resolvió (por id), no
+     * cómo se llama.
+     *
+     * @param Request              $request Request entrante.
+     * @param Client               $client  Cliente involucrado.
+     * @param string               $cierre  Cómo termina el mensaje de error: qué es lo que NO pasó
+     *                                      ("No se escribió nada.", "No se encoló nada.").
+     * @param array<string, mixed> $extra   Datos extra del cuerpo del error, después de `ayuda`.
+     *
+     * @return \Illuminate\Http\JsonResponse|null Null si confirma bien.
+     */
+    protected function rechazar_si_el_nombre_del_cliente_no_confirma(Request $request, Client $client, $cierre, array $extra = [])
+    {
+        $recibido = $this->normalizar_nombre($request->input('confirm_client_name'));
+        $real     = $this->normalizar_nombre($client->name);
+
+        /*
+         * 🔴 Cliente sin nombre cargado: `$real` queda vacío y NINGÚN `confirm_client_name` puede
+         * coincidir, así que los endpoints de escritura le devolverían 422 para siempre con un
+         * mensaje que habla de que el nombre "no coincide" — o sea, mintiendo sobre la causa. El
+         * freno se mantiene cerrado (no se afloja), pero se dice qué pasa de verdad y cómo se
+         * arregla.
+         */
+        if ($real === '') {
+            return $this->error_422(
+                'El cliente NO tiene nombre cargado en el admin: por eso no se puede confirmar con '
+                    . 'confirm_client_name y esta operación no se puede hacer. ' . $cierre,
+                array_merge([
+                    'client_id'   => (int) $client->id,
+                    'client_uuid' => (string) $client->uuid,
+                    'ayuda'       => 'Abrí el cliente en el admin y cargale el campo Nombre. Sin nombre no hay con qué '
+                        . 'confirmar contra qué negocio se está operando, y este freno no se saltea.',
+                ], $extra)
+            );
+        }
+
+        if ($recibido !== '' && $recibido === $real) {
+            return null;
+        }
+
+        return $this->error_422(
+            'confirm_client_name no coincide con el nombre del cliente de esta operación. ' . $cierre,
+            array_merge([
+                'client_id'   => (int) $client->id,
+                'client_uuid' => (string) $client->uuid,
+                'ayuda'       => 'Verificá contra qué cliente estás operando con GET claude/clients/' . (int) $client->id
+                    . '. La respuesta de este error no dice el nombre a propósito: es un freno, no un formulario a completar.',
+            ], $extra)
+        );
+    }
+
+    /**
+     * Normaliza un nombre para la comparación del freno: recorte y minúsculas multibyte.
+     *
+     * @param mixed $valor Valor crudo.
+     *
+     * @return string
+     */
+    protected function normalizar_nombre($valor)
+    {
+        if ($valor === null || is_array($valor)) {
+            return '';
+        }
+
+        return mb_strtolower(trim((string) $valor));
     }
 }

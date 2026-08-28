@@ -984,6 +984,12 @@ class ClaudeUpgradeOpsController extends Controller
      * Freno 1: `confirm_client_name` tiene que coincidir con `clients.name`, comparado con trim +
      * mb_strtolower en las dos puntas.
      *
+     * ⚠️ El cuerpo del freno vive en `RespuestasParaClaude::rechazar_si_el_nombre_del_cliente_no_confirma()`
+     * desde que fue el mismo código escrito en dos controladores. Esto que queda es la firma propia
+     * de este controlador —la que recibe el upgrade— para no tocar los seis lugares que la llaman:
+     * lo único que agrega es el `upgrade_id` en el cuerpo del error y el cierre del mensaje. La
+     * respuesta es byte por byte la que devolvía antes.
+     *
      * 🔴 El error NO revela el nombre correcto. Si lo revelara, dejaría de ser un freno y sería un
      * formulario a completar: quien se equivocó de cliente leería el nombre real y lo copiaría sin
      * darse cuenta de que está por tocar otro negocio. Se dice qué cliente resolvió (por id), no
@@ -997,53 +1003,11 @@ class ClaudeUpgradeOpsController extends Controller
      */
     private function rechazar_si_el_nombre_no_confirma(Request $request, Client $client, $upgrade)
     {
-        $recibido = $this->normalizar_nombre($request->input('confirm_client_name'));
-        $real     = $this->normalizar_nombre($client->name);
-
-        /*
-         * 🔴 Cliente sin nombre cargado: `$real` queda vacío y NINGÚN `confirm_client_name` puede
-         * coincidir, así que los seis endpoints de escritura le devolverían 422 para siempre con un
-         * mensaje que habla de que el nombre "no coincide" — o sea, mintiendo sobre la causa. El
-         * freno se mantiene cerrado (no se afloja), pero se dice qué pasa de verdad y cómo se
-         * arregla.
-         */
-        if ($real === '') {
-            $sin_nombre = [
-                'client_id'   => (int) $client->id,
-                'client_uuid' => (string) $client->uuid,
-                'ayuda'       => 'Abrí el cliente en el admin y cargale el campo Nombre. Sin nombre no hay con qué '
-                    . 'confirmar contra qué negocio se está operando, y este freno no se saltea.',
-            ];
-
-            if ($upgrade !== null) {
-                $sin_nombre['upgrade_id'] = (int) $upgrade->id;
-            }
-
-            return $this->error_422(
-                'El cliente NO tiene nombre cargado en el admin: por eso no se puede confirmar con '
-                    . 'confirm_client_name y esta operación no se puede hacer. No se escribió nada.',
-                $sin_nombre
-            );
-        }
-
-        if ($recibido !== '' && $recibido === $real) {
-            return null;
-        }
-
-        $extra = [
-            'client_id'   => (int) $client->id,
-            'client_uuid' => (string) $client->uuid,
-            'ayuda'       => 'Verificá contra qué cliente estás operando con GET claude/clients/' . (int) $client->id
-                . '. La respuesta de este error no dice el nombre a propósito: es un freno, no un formulario a completar.',
-        ];
-
-        if ($upgrade !== null) {
-            $extra['upgrade_id'] = (int) $upgrade->id;
-        }
-
-        return $this->error_422(
-            'confirm_client_name no coincide con el nombre del cliente de esta operación. No se escribió nada.',
-            $extra
+        return $this->rechazar_si_el_nombre_del_cliente_no_confirma(
+            $request,
+            $client,
+            'No se escribió nada.',
+            $upgrade === null ? [] : ['upgrade_id' => (int) $upgrade->id]
         );
     }
 
@@ -1231,22 +1195,6 @@ class ClaudeUpgradeOpsController extends Controller
         $datos = $respuesta->getData(true);
 
         return isset($datos['salud']) ? $datos['salud'] : null;
-    }
-
-    /**
-     * Normaliza un nombre para la comparación del freno 1: recorte y minúsculas multibyte.
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return string
-     */
-    private function normalizar_nombre($valor)
-    {
-        if ($valor === null || is_array($valor)) {
-            return '';
-        }
-
-        return mb_strtolower(trim((string) $valor));
     }
 
     /**

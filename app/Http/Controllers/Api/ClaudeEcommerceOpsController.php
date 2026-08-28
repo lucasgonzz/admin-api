@@ -962,11 +962,12 @@ class ClaudeEcommerceOpsController extends Controller
      * Freno del nombre: `confirm_client_name` tiene que coincidir con `clients.name`, comparado con
      * trim + mb_strtolower en las dos puntas.
      *
-     * ⚠️ ESTA ES UNA RÉPLICA DELIBERADA de `ClaudeUpgradeOpsController::rechazar_si_el_nombre_no_confirma()`,
-     * que es `private` y por lo tanto no se puede llamar desde acá. No se movió al trait
-     * `RespuestasParaClaude` porque el original arma su respuesta con `upgrade_id` adentro: llevarlo
-     * al trait obligaría a cambiarle la firma y el cuerpo del error a seis endpoints de escritura ya
-     * en uso, que es un cambio de contrato disfrazado de refactor. Queda anotado para el que unifique.
+     * ✅ Ya NO es una réplica. El cuerpo se unificó en
+     * `RespuestasParaClaude::rechazar_si_el_nombre_del_cliente_no_confirma()`: las dos diferencias
+     * que habían frenado la unificación —el cierre del mensaje y el `upgrade_id` del otro
+     * controlador— resultaron ser datos del que llama, no reglas distintas, así que entran por
+     * parámetro sin cambiarle la respuesta a nadie. Esto que queda es el cierre propio de este
+     * controlador, que encola en vez de escribir.
      *
      * 🔴 El error NO revela el nombre correcto, igual que el original. Si lo revelara dejaría de ser
      * un freno y sería un formulario a completar: quien se equivocó de cliente leería el nombre real,
@@ -979,54 +980,7 @@ class ClaudeEcommerceOpsController extends Controller
      */
     private function rechazar_si_el_nombre_no_confirma(Request $request, Client $client)
     {
-        $recibido = $this->normalizar_nombre($request->input('confirm_client_name'));
-        $real     = $this->normalizar_nombre($client->name);
-
-        /* 🔴 Cliente sin nombre: ningún `confirm_client_name` puede coincidir, así que el freno se
-           mantiene cerrado (no se afloja) pero se dice la causa real en vez de mentir con "no
-           coincide". Mismo criterio que el original. */
-        if ($real === '') {
-            return $this->error_422(
-                'El cliente NO tiene nombre cargado en el admin: por eso no se puede confirmar con confirm_client_name '
-                    . 'y esta operación no se puede hacer. No se encoló nada.',
-                [
-                    'client_id'   => (int) $client->id,
-                    'client_uuid' => (string) $client->uuid,
-                    'ayuda'       => 'Abrí el cliente en el admin y cargale el campo Nombre. Sin nombre no hay con qué '
-                        . 'confirmar contra qué negocio se está operando, y este freno no se saltea.',
-                ]
-            );
-        }
-
-        if ($recibido !== '' && $recibido === $real) {
-            return null;
-        }
-
-        return $this->error_422(
-            'confirm_client_name no coincide con el nombre del cliente de esta operación. No se encoló nada.',
-            [
-                'client_id'   => (int) $client->id,
-                'client_uuid' => (string) $client->uuid,
-                'ayuda'       => 'Verificá contra qué cliente estás operando con GET claude/clients/' . (int) $client->id
-                    . '. La respuesta de este error no dice el nombre a propósito: es un freno, no un formulario a completar.',
-            ]
-        );
-    }
-
-    /**
-     * Normaliza un nombre para la comparación del freno: recorte y minúsculas multibyte.
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return string
-     */
-    private function normalizar_nombre($valor)
-    {
-        if ($valor === null || is_array($valor)) {
-            return '';
-        }
-
-        return mb_strtolower(trim((string) $valor));
+        return $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se encoló nada.');
     }
 
     /**

@@ -323,6 +323,23 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'PUT api/claude/clients/{id}/schedule' => [
+            'para_que'     => 'Carga o reemplaza los horarios comerciales de un cliente sin pasar por el modal del admin. Es lo que hace que el gate de horario del post-cierre pueda decidir: un cliente sin horarios queda `sin_configurar`, y `sin_configurar` rechaza igual que `abierto`.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'dry_run por defecto true: sin dry_run=false explícito valida el payload entero y no escribe una fila.',
+                'confirm_client_name obligatorio cuando dry_run es false, y el error no revela el nombre correcto.',
+                'Toda validación que falla es 422 y no escribe nada: se valida el conjunto entero antes de abrir la transacción.',
+                'El push al empresa-api del cliente se encola, nunca corre adentro del request.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El cliente cuyos horarios se reemplazan.'],
+                ['nombre' => 'dias', 'obligatorio' => true, 'validacion' => 'array (puede venir vacío)', 'que_es' => '🔴 El conjunto COMPLETO: lo que no viaja acá se borra. Cada ítem es {"dia": <una de day_keys>, "rangos": [{"desde":"HH:MM","hasta":"HH:MM"}]}. Un día con "rangos": [] es CERRADO; un día que no aparece hereda de la fila "todos" y, si no hay, queda SIN CONFIGURAR (que no es cerrado). Un rango no cruza la medianoche: hasta > desde, y dos rangos del mismo día no se solapan.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'booleano, 1/0', 'que_es' => 'Por defecto true. En true valida todo, devuelve dias_antes y dias_despues, y no escribe nada.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'string de hasta 190; tiene que coincidir con clients.name (trim + minúsculas)', 'que_es' => 'Obligatorio cuando dry_run es false. Es la redundancia contra escribirle los horarios al cliente equivocado: el id numérico no tiene ninguna.'],
+            ],
+        ],
         'POST api/claude/clients/{id}/schedule/sync' => [
             'para_que'     => 'Reintenta el push de los horarios del cliente a su empresa-api.',
             'escribe'      => true,

@@ -188,6 +188,11 @@ Route::middleware('claude.task.key')
         Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
         Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
         Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
+        /* 🔴 Carga de horarios sin pasar por el modal del admin. REEMPLAZA el conjunto entero: lo
+           que no viaja en `dias` se borra. Los frenos (dry_run por defecto y confirm_client_name
+           cuando dry_run es false) están en ClaudeClientOpsController; la regla del modelo y la
+           transacción, en ClientScheduleReplacementService, que es el mismo que usa la SPA. */
+        Route::put('clients/{id}/schedule', 'Api\ClaudeClientOpsController@update_schedule_json');
         /* Reintento del push de horarios al empresa-api del cliente. Idempotente y sin frenos:
            reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
         Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
