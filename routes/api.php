@@ -176,6 +176,15 @@ Route::middleware('claude.task.key')
            `ops-schema` describe todo este sub-bloque (filtros, enumeraciones, la máquina de estados
            del deployment y los frenos de escritura). 🔴 No se toca `schema`, que es el de leads. */
         Route::get('ops-schema', 'Api\ClaudeClientOpsController@ops_schema_json');
+        /* Índice auto-descriptivo de TODO lo que Claude puede pedirle al admin, y lectura genérica
+           por lista blanca. `catalog` DERIVA las rutas de las registradas y los modelos del config
+           (no es una lista escrita a mano) y denuncia en `salud_del_catalogo` cualquier ruta
+           claude/* que nadie haya descripto.
+           🔴 `query` es SÓLO GET, y eso es la garantía mecánica de que no hay escritura genérica:
+           un POST sobre esta ruta devuelve 405 de Laravel. Una escritura por nombre de modelo
+           saltearía todos los frenos que están escritos endpoint por endpoint. */
+        Route::get('catalog', 'Api\ClaudeCatalogController@index_json');
+        Route::get('query', 'Api\ClaudeQueryController@index_json');
         Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
         Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
         Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
@@ -188,18 +197,50 @@ Route::middleware('claude.task.key')
         Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');
 
         /* Operación de clientes y actualizaciones: ESCRITURA.
-           🔴 Estas seis rutas crean actualizaciones sobre clientes REALES y arrancan deployments por
-           SSH que pueden dejar un negocio sin sistema. Los frenos (confirm_client_name en todas,
-           dry_run por defecto al crear, allow_deploy_to_active_api y el gate de horario del
-           post-cierre) están en ClaudeUpgradeOpsController.
+           🔴 Estas nueve rutas crean actualizaciones sobre clientes REALES y arrancan deployments
+           por SSH que pueden dejar un negocio sin sistema. Los frenos de las OCHO que viven en
+           ClaudeUpgradeOpsController son confirm_client_name (en todas ellas), dry_run por defecto
+           al crear, allow_deploy_to_active_api, el gate de horario del post-cierre —que también
+           lleva retry-commands— y el umbral destructivo de expire-stuck.
+           🔴 La novena, `upgrades/batch`, es la excepción y por eso se aclara aparte: vive en
+           ClaudeUpgradeBatchController y NO usa confirm_client_name, porque en un lote de veinte no
+           hay UN nombre que confirmar. Su equivalente es confirm_client_count + confirm_token.
+           No leas este encabezado como si la cubriera: ver su comentario propio, abajo.
            `upgrades/preview` se declara ANTES que cualquier ruta con {id}, para que ninguna la
            capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
         Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
+        /* Alta EN LOTE, pegada a `preview` y ANTES que cualquier ruta con {id}, por lo mismo que
+           aquélla. 🔴 Sólo CREA actualizaciones: no arranca ningún deployment, porque el gate de
+           horario y allow_deploy_to_active_api son por cliente. Los frenos (tope de 25, dry_run por
+           defecto, confirm_client_count y confirm_token) están en ClaudeUpgradeBatchController. */
+        Route::post('upgrades/batch', 'Api\ClaudeUpgradeBatchController@store_batch_json');
         Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');
         Route::post('upgrades/{id}/deploy/start', 'Api\ClaudeUpgradeOpsController@deploy_start_json');
         Route::post('upgrades/{id}/mark-crons', 'Api\ClaudeUpgradeOpsController@mark_crons_json');
         Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
         Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
+        /* Reintento de comandos: espejo del botón del panel MÁS el gate de horario, porque
+           `run_commands` corre sobre el sistema en uso del cliente. Destrabe de un deployment
+           colgado: no reimplementa el vencimiento, llama al mismo VencerDeploymentsColgados que
+           corre el scheduler, y exige el umbral DESTRUCTIVO (45 min), no el de reporte (15). */
+        Route::post('upgrades/{id}/deploy/retry-commands', 'Api\ClaudeUpgradeOpsController@deploy_retry_commands_json');
+        Route::post('upgrades/{id}/deploy/expire-stuck', 'Api\ClaudeUpgradeOpsController@deploy_expire_stuck_json');
+
+        /* Tiendas (ecommerce) de los clientes: lectura y ACTUALIZACIÓN.
+           🔴 Las dos rutas de escritura arrancan pipelines SSH reales contra el hosting de un
+           negocio (compilan tienda-spa en el VPS de builds y suben SPA + API por SFTP). Los frenos
+           —confirm_client_name en el de a uno, y dry_run por defecto + confirm_client_count +
+           confirm_token + tope de 5 en el lote— están en ClaudeEcommerceOpsController.
+           🔴 NINGUNA de estas rutas hace la instalación inicial de una tienda: sólo actualización.
+           `ecommerce/updates/batch` se declara ANTES que cualquier ruta con {id}, por lo mismo que
+           `upgrades/preview`: para que ninguna la capture si mañana se agrega un
+           POST claude/ecommerce/updates/{id}. */
+        Route::get('ecommerce/stores', 'Api\ClaudeEcommerceOpsController@stores_json');
+        Route::get('ecommerce/installations', 'Api\ClaudeEcommerceOpsController@installations_json');
+        Route::get('ecommerce/installations/{id}', 'Api\ClaudeEcommerceOpsController@installation_json');
+        Route::get('ecommerce/installations/{id}/logs', 'Api\ClaudeEcommerceOpsController@installation_logs_json');
+        Route::post('ecommerce/updates/batch', 'Api\ClaudeEcommerceOpsController@update_batch_json');
+        Route::post('ecommerce/updates', 'Api\ClaudeEcommerceOpsController@update_json');
 
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron

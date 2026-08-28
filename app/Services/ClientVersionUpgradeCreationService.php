@@ -72,6 +72,37 @@ class ClientVersionUpgradeCreationService
     }
 
     /**
+     * ¿Esta candidata viene TILDADA por defecto en la sugerencia del panel?
+     *
+     * La regla es una sola y siempre fue la misma: troncal sí, hotfix no, y la versión destino
+     * siempre, sea o no hotfix (define el upgrade y no puede quedar afuera).
+     *
+     * 🔴 Vive acá y es estática porque tiene DOS consumidores y no puede tener dos definiciones:
+     * `ClaudeUpgradeOpsController::preview_json()` la publica como `default_checked` —o sea, es lo
+     * que un humano ve tildado antes de confirmar— y `ClaudeUpgradeBatchController::store_batch_json()`
+     * la usa para armar el conjunto de cada cliente cuando la política es `sugeridas_del_panel`. Si
+     * el lote tuviera su propia copia, el día que cambie la regla el lote crearía upgrades con un
+     * conjunto distinto del que el preview muestra, y nadie lo notaría hasta que un cliente quede con
+     * un hotfix de más o de menos.
+     *
+     * ⚠️ Es una SUGERENCIA, no una decisión: el alta de a uno (`store_json`) sigue exigiendo
+     * `confirmed_version_ids` nombrados uno por uno y no llama a esto. En el lote, lo que hace las
+     * veces de esa confirmación es el `confirm_token`, que incorpora el conjunto resultante de cada
+     * cliente.
+     *
+     * @param  Version  $candidata  Versión del rango que se está evaluando.
+     * @param  Version  $destino    Versión destino del upgrade.
+     * @return bool
+     */
+    public static function es_sugerida_por_defecto(Version $candidata, Version $destino): bool
+    {
+        $es_destino = ((int) $candidata->id === (int) $destino->id);
+        $es_hotfix  = (bool) $candidata->is_hotfix;
+
+        return (! $es_hotfix) || $es_destino;
+    }
+
+    /**
      * Crea el upgrade, sincroniza las versiones confirmadas, genera los UpdateSeeder /
      * UpdateCommand del camino y aplica el auto-skip de base compartida.
      *

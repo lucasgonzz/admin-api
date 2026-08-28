@@ -168,7 +168,6 @@ class VencerDeploymentsColgados extends Command
     public function handle(): int
     {
         $timeout_minutos = $this->timeout_minutos();
-        $limite          = Carbon::now()->subMinutes($timeout_minutos);
 
         /* `whereNotNull('deployment_running_since')` no es defensivo: es la condición que decide.
          * Un upgrade que ya estaba en `running` ANTES de la migración que agregó la columna la
@@ -184,50 +183,125 @@ class VencerDeploymentsColgados extends Command
         $vencidos = 0;
 
         foreach ($candidatos as $upgrade) {
-            $ultima_actividad = $this->ultima_actividad($upgrade);
+            $resultado = $this->vencer_upgrade($upgrade, $timeout_minutos);
 
-            if ($ultima_actividad === null || ! $ultima_actividad->lessThan($limite)) {
-                continue;
+            if ($resultado['vencido']) {
+                $vencidos++;
             }
-
-            $minutos = (int) $ultima_actividad->diffInMinutes(Carbon::now());
-
-            /* UPDATE condicionado, y no un `save()` sobre el modelo que se leyó recién: entre el
-             * `get()` de arriba y este momento el worker puede haber terminado bien y haber escrito
-             * `success`, `paused` o `failed`. Mismo criterio que el claim atómico de
-             * `RunDemoSetupService::run()`.
-             *
-             * 🔴 La condición incluye el ANCLA, no solo el estado —y acá se aparta del molde, que
-             * puede condicionar solo por estado porque su ancla es la misma columna que filtra—.
-             * Sin ella queda esta ventana: el worker termina el tramo y escribe `paused`, alguien
-             * aprieta post-cierre, el upgrade vuelve a `running` con un sello NUEVO, y este UPDATE
-             * afecta 1 fila igual: mataríamos un tramo recién nacido con el motivo de una medición
-             * que ya no aplica. Con el ancla adentro, el claim dice "matá exactamente el tramo que
-             * medí" y esa carrera se cierra sola. */
-            $afectadas = ClientVersionUpgrade::where('id', $upgrade->id)
-                ->where('deployment_status', 'running')
-                ->where('deployment_running_since', $upgrade->deployment_running_since)
-                ->update(['deployment_status' => 'failed']);
-
-            if ($afectadas !== 1) {
-                continue;
-            }
-
-            $this->escribir_motivo($upgrade, $minutos, $timeout_minutos);
-
-            Log::warning('VencerDeploymentsColgados: deployment vencido por falta de actividad', [
-                'upgrade_id'            => (int) $upgrade->id,
-                'client_id'             => (int) $upgrade->client_id,
-                'minutos_sin_actividad' => $minutos,
-                'timeout_minutos'       => $timeout_minutos,
-            ]);
-
-            $vencidos++;
         }
 
         $this->info("Deployments colgados vencidos: {$vencidos}");
 
         return 0;
+    }
+
+    /**
+     * Vence UN upgrade: mide, reclama el tramo con un UPDATE condicionado y escribe el motivo.
+     *
+     * 🔴 Es el cuerpo del `foreach` de `handle()`, extraído a un método público **porque tiene un
+     * segundo llamador**: `POST claude/upgrades/{id}/deploy/expire-stuck`, el destrabe a mano. Sin
+     * esta extracción existirían dos definiciones de "vencer un deployment" —la del scheduler y la
+     * del endpoint— y la que se quedaría vieja sería justo la que un humano invoca cuando algo ya
+     * salió mal. La lógica y los tres números (`DEFAULT_TIMEOUT_MINUTOS`,
+     * `MARGEN_SOBRE_EL_JOB_MINUTOS`, `MAX_TIMEOUT_MINUTOS`) son exactamente los de antes.
+     *
+     * ⚠️ CON UNA DIFERENCIA MEDIBLE, Y SE ESCRIBE PARA NO LLAMARLO "REFACTOR PURO" CUANDO NO LO ES:
+     * el `$limite` (`Carbon::now()->subMinutes($timeout_minutos)`) antes se calculaba UNA vez, fuera
+     * del `foreach` de `handle()`, y ahora se recalcula adentro de cada llamada, o sea una vez por
+     * upgrade. El efecto es sub-segundo —el reloj corre unos milisegundos entre el primer candidato
+     * y el último, así que el umbral del último es marginalmente más exigente—, no cambia ningún
+     * desenlace real y no amerita volver atrás. Pero es un cambio de comportamiento, no cero, y
+     * decir "esto es refactor puro" sobre algo que sí movió una cuenta es exactamente cómo se pierde
+     * la confianza en los comentarios del resto del archivo.
+     *
+     * 🔴 El UPDATE es condicionado, y no un `save()` sobre el modelo que se leyó recién: entre la
+     * lectura y este momento el worker puede haber terminado bien y haber escrito `success`,
+     * `paused` o `failed`. Mismo criterio que el claim atómico de `RunDemoSetupService::run()`.
+     *
+     * 🔴 La condición incluye el ANCLA, no solo el estado —y acá se aparta del molde, que puede
+     * condicionar solo por estado porque su ancla es la misma columna que filtra—. Sin ella queda
+     * esta ventana: el worker termina el tramo y escribe `paused`, alguien aprieta post-cierre, el
+     * upgrade vuelve a `running` con un sello NUEVO, y este UPDATE afecta 1 fila igual: mataríamos
+     * un tramo recién nacido con el motivo de una medición que ya no aplica. Con el ancla adentro,
+     * el claim dice "matá exactamente el tramo que medí" y esa carrera se cierra sola. Cuando el
+     * claim no afecta ninguna fila se devuelve `motivo = 'claim_perdido'` y no se escribe nada: el
+     * endpoint lo traduce a un 409.
+     *
+     * ⚠️ `$forzado` lo usa SOLO el endpoint, y saltea la comparación contra el umbral (no el claim,
+     * que es lo que cierra la carrera y no se saltea nunca). El comando nunca lo pasa: su llamada
+     * queda idéntica a lo que corría antes.
+     *
+     * @param ClientVersionUpgrade $upgrade         Upgrade a evaluar.
+     * @param int                  $timeout_minutos Umbral aplicado, en minutos.
+     * @param bool                 $forzado         True saltea la comparación con el umbral.
+     *
+     * @return array{vencido: bool, motivo: string|null, minutos_sin_actividad: int|null,
+     *               timeout_minutos: int, motivo_escrito_en_el_log: string|null}
+     */
+    public function vencer_upgrade(ClientVersionUpgrade $upgrade, int $timeout_minutos, bool $forzado = false): array
+    {
+        $ultima_actividad = $this->ultima_actividad($upgrade);
+        $minutos          = $ultima_actividad === null
+            ? null
+            : (int) $ultima_actividad->diffInMinutes(Carbon::now());
+
+        if (! $forzado) {
+            $limite = Carbon::now()->subMinutes($timeout_minutos);
+
+            if ($ultima_actividad === null || ! $ultima_actividad->lessThan($limite)) {
+                return $this->resultado_sin_vencer(
+                    $ultima_actividad === null ? 'sin_medicion' : 'con_actividad',
+                    $minutos,
+                    $timeout_minutos
+                );
+            }
+        }
+
+        $afectadas = ClientVersionUpgrade::where('id', $upgrade->id)
+            ->where('deployment_status', 'running')
+            ->where('deployment_running_since', $upgrade->deployment_running_since)
+            ->update(['deployment_status' => 'failed']);
+
+        if ($afectadas !== 1) {
+            return $this->resultado_sin_vencer('claim_perdido', $minutos, $timeout_minutos);
+        }
+
+        $motivo_escrito = $this->escribir_motivo($upgrade, $minutos, $timeout_minutos, $forzado);
+
+        Log::warning('VencerDeploymentsColgados: deployment vencido por falta de actividad', [
+            'upgrade_id'            => (int) $upgrade->id,
+            'client_id'             => (int) $upgrade->client_id,
+            'minutos_sin_actividad' => $minutos,
+            'timeout_minutos'       => $timeout_minutos,
+        ]);
+
+        return [
+            'vencido'                  => true,
+            'motivo'                   => null,
+            'minutos_sin_actividad'    => $minutos,
+            'timeout_minutos'          => $timeout_minutos,
+            'motivo_escrito_en_el_log' => $motivo_escrito,
+        ];
+    }
+
+    /**
+     * Resultado de un upgrade que NO se venció, con el motivo por el que se lo dejó como estaba.
+     *
+     * @param string   $motivo          sin_medicion | con_actividad | claim_perdido.
+     * @param int|null $minutos         Minutos sin actividad medidos, si se pudo medir.
+     * @param int      $timeout_minutos Umbral aplicado.
+     *
+     * @return array<string, mixed>
+     */
+    private function resultado_sin_vencer(string $motivo, $minutos, int $timeout_minutos): array
+    {
+        return [
+            'vencido'                  => false,
+            'motivo'                   => $motivo,
+            'minutos_sin_actividad'    => $minutos,
+            'timeout_minutos'          => $timeout_minutos,
+            'motivo_escrito_en_el_log' => null,
+        ];
     }
 
     /**
@@ -357,22 +431,38 @@ class VencerDeploymentsColgados extends Command
      * `level = 'error'`, sin ningún cambio en la SPA) y de donde `GET claude/upgrades/{id}` saca
      * `logs.ultimo_error`.
      *
-     * @param ClientVersionUpgrade $upgrade         Upgrade vencido.
-     * @param int                  $minutos         Minutos sin actividad.
-     * @param int                  $timeout_minutos Umbral aplicado.
+     * ⚠️ Los dos parámetros que se agregaron con la extracción de `vencer_upgrade()` sólo cambian el
+     * texto en casos que la corrida automática NO puede alcanzar: `$minutos` en null pasa únicamente
+     * cuando se vence a mano un upgrade sin ancla ni logs (el comando esos los saltea con su
+     * `whereNotNull`), y `$forzado` sólo lo manda el endpoint. Para el scheduler el texto queda
+     * palabra por palabra el que venía escribiendo.
      *
-     * @return void
+     * @param ClientVersionUpgrade $upgrade         Upgrade vencido.
+     * @param int|null             $minutos         Minutos sin actividad, o null si no se pudo medir.
+     * @param int                  $timeout_minutos Umbral aplicado.
+     * @param bool                 $forzado         True si se venció a mano salteando el umbral.
+     *
+     * @return string El texto que quedó escrito en el log.
      */
-    private function escribir_motivo(ClientVersionUpgrade $upgrade, int $minutos, int $timeout_minutos): void
+    private function escribir_motivo(ClientVersionUpgrade $upgrade, $minutos, int $timeout_minutos, bool $forzado = false): string
     {
         /* 🔴 El texto dice que NO SE SABE cómo terminó, que es información distinta de "falló", y
          * avisa que el servidor del cliente quedó en un estado desconocido. Esa segunda mitad no
          * está en el molde de los demo setups y acá es lo más importante: reintentar un deployment
          * no es gratis como reintentar el armado de una demo. */
-        $motivo = 'El deployment no reportó actividad en ' . $minutos . ' minutos (umbral: '
-            . $timeout_minutos . '). El proceso que lo ejecutaba probablemente murió. Se marcó como '
-            . 'fallido para poder reintentarlo: verificá en qué estado quedó el servidor del cliente '
-            . 'antes de volver a arrancar.';
+        $motivo = $minutos === null
+            ? 'El deployment se venció a mano sin poder medir la actividad: no tiene deployment_running_since ni '
+                . 'ninguna línea de log. El proceso que lo ejecutaba probablemente murió. Se marcó como fallido para '
+                . 'poder reintentarlo: verificá en qué estado quedó el servidor del cliente antes de volver a arrancar.'
+            : 'El deployment no reportó actividad en ' . $minutos . ' minutos (umbral: '
+                . $timeout_minutos . '). El proceso que lo ejecutaba probablemente murió. Se marcó como '
+                . 'fallido para poder reintentarlo: verificá en qué estado quedó el servidor del cliente '
+                . 'antes de volver a arrancar.';
+
+        if ($forzado) {
+            $motivo .= ' 🔴 El vencimiento se pidió A MANO (force) desde claude/upgrades/'
+                . (int) $upgrade->id . '/deploy/expire-stuck, con el motivo registrado en el log del sistema.';
+        }
 
         $deployment_log = DeploymentLog::create([
             'client_version_upgrade_id' => $upgrade->id,
@@ -383,6 +473,8 @@ class VencerDeploymentsColgados extends Command
         ]);
 
         event(new DeploymentLogCreated($deployment_log));
+
+        return $motivo;
     }
 
     /**

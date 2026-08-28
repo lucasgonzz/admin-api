@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Console\Commands\VencerDeploymentsColgados;
+use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\UpdateController;
 use App\Jobs\SyncClientScheduleJob;
@@ -12,7 +13,6 @@ use App\Services\ClientScheduleResolver;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Validation\ValidationException;
 
 /**
  * Endpoints de LECTURA de clientes, horarios, versiones y actualizaciones para Claude
@@ -44,6 +44,16 @@ use Illuminate\Validation\ValidationException;
  */
 class ClaudeClientOpsController extends Controller
 {
+    /**
+     * Paginación por cursor, normalización de parámetros y las respuestas 422/404 con la forma
+     * única del bloque `claude/*`. Estos quince métodos vivían acá adentro como privados: se
+     * movieron al trait tal cual estaban, sin tocarles una línea, cuando aparecieron los
+     * controladores nuevos de `claude/query` y el lote — con ellos iban a ser seis copias de
+     * `validar_o_422` conviviendo. Ver `ayuda_del_schema()` más abajo: es lo único que este
+     * controlador sobrescribe, y es para que su texto de error NO cambie.
+     */
+    use RespuestasParaClaude;
+
     /** Página por defecto y tope duro del listado de clientes. */
     const LIMIT_CLIENTS_DEFAULT = 200;
     const LIMIT_CLIENTS_MAX     = 500;
@@ -786,6 +796,14 @@ class ClaudeClientOpsController extends Controller
             'status'              => 'nullable|string|in:' . implode(',', array_keys(UpdateController::STATUS_LABELS)),
             'deployment_status'   => 'nullable|string|in:' . implode(',', self::DEPLOYMENT_STATUSES),
             'to_version_id'       => 'nullable|integer|min:1',
+            /* 🔴 `ids` y `created_via` existen para poder preguntar por un LOTE de una sola vez.
+               Sin ellos, después de `POST claude/upgrades/batch` con veinte clientes no había forma
+               de saber cómo iban esos veinte salvo veinte llamadas a GET claude/upgrades/{id} —y el
+               lote de ecommerce sí lo tenía resuelto (su 202 manda a
+               GET claude/ecommerce/installations?created_via=claude). Empresa quedó sin el equivalente.
+               `ids` no lleva regla de tipo porque acepta las dos formas de siempre del bloque
+               (`ids[]=1&ids[]=2` o `ids=1,2`) y lo normaliza `normalizar_lista_enteros()`. */
+            'created_via'         => 'nullable|string|max:30',
             'scheduled_date_from' => 'nullable|date_format:Y-m-d',
             'scheduled_date_to'   => 'nullable|date_format:Y-m-d',
             'activos'             => 'nullable|boolean',
@@ -809,6 +827,20 @@ class ClaudeClientOpsController extends Controller
         $client_id = $this->entero_o_null($request->input('client_id'));
         if ($client_id !== null) {
             $query->where('client_version_upgrades.client_id', $client_id);
+        }
+
+        /* El filtro que convierte "¿cómo van los 20 que creó el lote?" en UNA llamada. La respuesta
+           201 de POST claude/upgrades/batch devuelve esta misma lista de ids armada. */
+        $ids = $this->normalizar_lista_enteros($request->input('ids'));
+        if (count($ids) > 0) {
+            $query->whereIn('client_version_upgrades.id', $ids);
+        }
+
+        /* Contraparte de `created_via` del lote de ecommerce: sirve para pedir "todo lo que creó
+           Claude" cuando ya no se tienen los ids a mano. */
+        $created_via = $this->texto_o_null($request->input('created_via'));
+        if ($created_via !== null) {
+            $query->where('client_version_upgrades.created_via', $created_via);
         }
 
         $status = $this->texto_o_null($request->input('status'));
@@ -989,6 +1021,13 @@ class ClaudeClientOpsController extends Controller
             $horario['proximo_cierre_motivo'] = $detalle['motivo'];
         }
 
+        $salud = $this->salud_del_deployment(
+            $deployment_status,
+            $fila['deployment_started_at'],
+            $logs['ultimo_at'],
+            $fila['deployment_running_since']
+        );
+
         return response()->json([
             'upgrade' => [
                 'id'                          => (int) $fila['id'],
@@ -1023,18 +1062,20 @@ class ClaudeClientOpsController extends Controller
                 'ultimo_error'  => $logs['ultimo_error'],
                 'consultar_en'  => 'GET claude/upgrades/' . (int) $fila['id'] . '/logs',
             ],
-            'salud'            => $this->salud_del_deployment(
-                $deployment_status,
-                $fila['deployment_started_at'],
-                $logs['ultimo_at'],
-                $fila['deployment_running_since']
-            ),
+            'salud'            => $salud,
             'horario_cliente'  => $horario,
+            /* 🔴 La salud se calcula UNA vez y se le pasa: `siguiente_accion` necesita
+               `deployment_stale` para saber si ofrecer expire-stuck, y recalcularlo adentro serían
+               dos mediciones del mismo instante que pueden no coincidir (`jobs_en_cola` y el último
+               log se leen de la base). Lo que se publica y lo que se propone tienen que salir del
+               mismo número. */
             'siguiente_accion' => $this->siguiente_accion(
                 (int) $fila['id'],
                 $deployment_status,
                 $fila['crons_supervisor_at'],
-                $fila['comandos_ejecutados_at']
+                $fila['comandos_ejecutados_at'],
+                (bool) $salud['deployment_stale'],
+                (int) $salud['vencimiento_minutos']
             ),
             'generado_a_las' => Carbon::now($tz)->toIso8601String(),
         ], 200);
@@ -1540,11 +1581,19 @@ class ClaudeClientOpsController extends Controller
             'stale_minutos'             => self::STALE_MINUTOS,
             'deployment_running_since'  => $deployment_running_since,
             'vencimiento_minutos'       => VencerDeploymentsColgados::timeout_minutos_efectivo(),
+            /* ⚠️ Los destrabadores son DOS desde el 28/8/2026 y esta nota los nombra a los dos. Decir sólo el
+               del scheduler mandaba a esperar cinco minutos por algo que ya se puede pedir a mano, y ese es
+               justamente el caso para el que se construyó `deploy/expire-stuck`. Los dos llaman al MISMO
+               `VencerDeploymentsColgados::vencer_upgrade()`: no son dos definiciones de "vencer un deployment". */
             'nota'                      => '`deployment_stale` REPORTA que el worker no está avanzando; no lo arregla. '
-                . 'Quien lo destraba es `deployments:vencer-colgados`, que el scheduler corre cada cinco minutos y que '
-                . 'pasa el upgrade a `failed` con el motivo escrito como línea de log cuando no reporta actividad por '
-                . 'más de `vencimiento_minutos`. Un upgrade que quedó en `running` ANTES de que existiera '
-                . '`deployment_running_since` no se vence solo: ese sigue saliendo a mano.',
+                . 'Lo destraban DOS, y los dos corren el mismo vencimiento: `deployments:vencer-colgados`, que el '
+                . 'scheduler dispara cada cinco minutos, y `POST claude/upgrades/{id}/deploy/expire-stuck`, que lo pide '
+                . 'a mano. Los dos pasan el upgrade a `failed` con el motivo escrito como línea de log cuando no '
+                . 'reporta actividad por más de `vencimiento_minutos` — que NO son los `stale_minutos` de esta misma '
+                . 'respuesta: estar stale no alcanza para vencer, y expire-stuck contesta 422 si todavía no llegó al '
+                . 'umbral destructivo. Un upgrade que quedó en `running` ANTES de que existiera '
+                . '`deployment_running_since` no se vence solo ni por el comando ni por el endpoint: ese sigue '
+                . 'saliendo a mano, o con force.',
         ];
     }
 
@@ -1560,26 +1609,74 @@ class ClaudeClientOpsController extends Controller
      * la etapa final. En los dos casos se devuelve también la `alternativa`, para no esconder el
      * otro camino.
      *
+     * 🔴 CONOCE LOS DOS ENDPOINTS QUE SE AGREGARON EL 28/8/2026, PORQUE SI NO ESTE MÉTODO MIENTE.
+     * Es el único lugar del que sale "qué hago ahora", así que un endpoint que no figura acá no
+     * existe para el que orquesta:
+     *   - `expire-stuck` en `running` + `salud.deployment_stale`. Antes se devolvía `endpoint: null`
+     *     y "esperá", que es exactamente el consejo equivocado para un worker que ya no avanza: el
+     *     endpoint se construyó para este caso. ⚠️ Se ofrece SÓLO con `deployment_stale` en true, y
+     *     el texto aclara que vencer exige el umbral destructivo (`vencimiento_minutos`) y no el de
+     *     aviso (15), para no proponer una llamada que va a contestar 422.
+     *   - `retry-commands` en `failed` y en `paused_post_tasks`. Es el camino barato —reintenta sólo
+     *     los comandos y NO borra los logs— y estaba invisible, así que la máquina de estados
+     *     empujaba a `start`, que sí los borra: el motivo por el que falló se perdía justo antes de
+     *     leerlo. Va como `alternativa` y no como `endpoint` a propósito: exige seeders completos y
+     *     al menos un comando reintentable, y eso no se puede saber desde acá sin consultar.
+     *
+     * 🔴 La FORMA de la respuesta no cambió: siguen siendo `endpoint`, `motivo` y `alternativa`.
+     * Cambió qué proponen, no las claves.
+     *
      * @param int         $upgrade_id             Id del upgrade.
      * @param string|null $deployment_status      Estado del deployment.
      * @param string|null $crons_supervisor_at    Cuándo se marcaron los crons.
      * @param string|null $comandos_ejecutados_at Cuándo se ejecutaron los comandos.
+     * @param bool        $deployment_stale       `salud.deployment_stale` ya calculado.
+     * @param int|null    $vencimiento_minutos    Umbral destructivo, en minutos.
      *
      * @return array<string, mixed>
      */
-    private function siguiente_accion($upgrade_id, $deployment_status, $crons_supervisor_at, $comandos_ejecutados_at)
-    {
+    private function siguiente_accion(
+        $upgrade_id,
+        $deployment_status,
+        $crons_supervisor_at,
+        $comandos_ejecutados_at,
+        $deployment_stale = false,
+        $vencimiento_minutos = null
+    ) {
         $start            = 'POST claude/upgrades/' . $upgrade_id . '/deploy/start';
         $mark_crons       = 'POST claude/upgrades/' . $upgrade_id . '/mark-crons';
         $post_closure     = 'POST claude/upgrades/' . $upgrade_id . '/deploy/start-post-closure';
         $configure_system = 'POST claude/upgrades/' . $upgrade_id . '/deploy/configure-system';
+        $retry_commands   = 'POST claude/upgrades/' . $upgrade_id . '/deploy/retry-commands';
+        $expire_stuck     = 'POST claude/upgrades/' . $upgrade_id . '/deploy/expire-stuck';
+
+        $umbral = $vencimiento_minutos === null
+            ? VencerDeploymentsColgados::timeout_minutos_efectivo()
+            : (int) $vencimiento_minutos;
 
         if ($deployment_status === 'running') {
+            /* Con el worker avanzando no hay nada que hacer más que esperar: proponer expire-stuck
+               acá sería proponer matar un pipeline vivo, y quedarían dos DeploymentService por SSH
+               sobre el hosting del mismo cliente. */
+            if (! $deployment_stale) {
+                return [
+                    'endpoint' => null,
+                    'motivo'   => 'El deployment está corriendo en el worker. Esperá y volvé a consultar '
+                        . 'GET claude/upgrades/' . $upgrade_id . ' cada 30 o 60 segundos (rate limit por IP). '
+                        . 'Si `salud.deployment_stale` se pone en true, el worker no está avanzando.',
+                ];
+            }
+
             return [
-                'endpoint' => null,
-                'motivo'   => 'El deployment está corriendo en el worker. Esperá y volvé a consultar '
-                    . 'GET claude/upgrades/' . $upgrade_id . ' cada 30 o 60 segundos (rate limit por IP). '
-                    . 'Si `salud.deployment_stale` se pone en true, el worker no está avanzando.',
+                'endpoint'    => $expire_stuck,
+                'motivo'      => 'El deployment figura `running` pero `salud.deployment_stale` está en true: el worker '
+                    . 'no reporta actividad hace más de ' . self::STALE_MINUTOS . ' minutos. expire-stuck lo pasa a '
+                    . '`failed` con el motivo escrito como línea de log y recién ahí se puede arrancar de nuevo. '
+                    . '⚠️ Vencer exige el umbral DESTRUCTIVO, que son ' . $umbral . ' minutos sin actividad, no los '
+                    . self::STALE_MINUTOS . ' del aviso: si todavía no llegó, contesta 422 y no toca nada. Mirá '
+                    . '`salud.vencimiento_minutos` y `salud.segundos_desde_ultimo_log` antes de llamar.',
+                'alternativa' => 'Esperar. `deployments:vencer-colgados` corre solo cada cinco minutos y hace '
+                    . 'exactamente lo mismo cuando se cumple el umbral: expire-stuck sólo evita la espera.',
             ];
         }
 
@@ -1602,28 +1699,49 @@ class ClaudeClientOpsController extends Controller
         }
 
         if ($deployment_status === 'paused_post_tasks') {
+            /* `retry-commands` también es legal acá y no aparecía: el panel lo rechaza sólo en
+               `running`, así que `paused` y `paused_post_tasks` pasan. Es el camino para el caso en
+               que los seeders terminaron y quedó un comando fallado: reintentarlo no obliga a pasar
+               por configure-system con un comando pendiente adentro. */
             return [
-                'endpoint' => $configure_system,
-                'motivo'   => 'Las tareas post-cierre terminaron. Falta la etapa final de configuración del sistema.',
+                'endpoint'    => $configure_system,
+                'motivo'      => 'Las tareas post-cierre terminaron. Falta la etapa final de configuración del sistema.',
+                'alternativa' => $retry_commands . ' si quedó algún comando fallado o pendiente: reintenta SOLO los '
+                    . 'comandos, no borra ningún log y lleva el mismo gate de horario que el post-cierre (corre sobre el '
+                    . 'sistema en uso). Exige seeders completos y al menos un comando reintentable; si no los hay, 422 y '
+                    . 'no toca nada.',
             ];
         }
 
         if ($deployment_status === 'failed') {
+            /* 🔴 `retry-commands` entra en las DOS ramas de `failed`. Las dos proponían un endpoint
+               caro: `start` reintenta el pipeline entero Y BORRA LOS LOGS del intento fallido —o sea
+               el motivo por el que falló, justo antes de leerlo—, y `configure-system` se saltea los
+               comandos. Si lo que falló fue un comando, el camino barato es reintentar ese comando.
+               Va como alternativa y no como endpoint porque tiene precondiciones que desde acá no se
+               pueden mirar sin consultar. */
+            $alternativa_retry = $retry_commands . ' reintenta SOLO los comandos y 🔴 NO borra ningún log: si lo que '
+                . 'falló fue un comando, es el camino barato. Exige seeders completos y al menos un comando fallado o '
+                . 'pendiente; si no, 422 sin tocar nada.';
+
             if ($comandos_ejecutados_at !== null) {
                 return [
                     'endpoint'    => $configure_system,
                     'motivo'      => 'El deployment falló DESPUÉS de ejecutar seeders y comandos: lo único que falta es la '
                         . 'etapa final, y configure-system reintenta ese mismo paso.',
-                    'alternativa' => $start . ' reintenta el pipeline COMPLETO desde compile_spa. 🔴 Borra los logs de '
-                        . 'este intento: leelos antes.',
+                    'alternativa' => $alternativa_retry . ' | ' . $start . ' reintenta el pipeline COMPLETO desde '
+                        . 'compile_spa. 🔴 Borra los logs de este intento: leelos antes.',
                 ];
             }
 
             return [
                 'endpoint'    => $start,
                 'motivo'      => 'El deployment falló antes de terminar las tareas post-cierre: se reintenta el pipeline '
-                    . 'desde el principio. 🔴 start BORRA los logs de este intento fallido: leelos antes de reintentar.',
-                'alternativa' => $configure_system . ' solo si lo que falló fue la etapa final de configuración.',
+                    . 'desde el principio. 🔴 start BORRA los logs de este intento fallido: leelos antes de reintentar. '
+                    . 'Antes de pagar eso, mirá la alternativa: si lo que falló fue un comando, retry-commands lo '
+                    . 'reintenta solo y no borra nada.',
+                'alternativa' => $alternativa_retry . ' | ' . $configure_system . ' solo si lo que falló fue la etapa '
+                    . 'final de configuración.',
             ];
         }
 
@@ -1796,327 +1914,17 @@ class ClaudeClientOpsController extends Controller
     }
 
     /**
-     * Aplica el cursor por id respetando la dirección del orden.
+     * Endpoint que se le sugiere al que recibió un 422.
      *
-     * @param \Illuminate\Database\Query\Builder $query    Query en construcción.
-     * @param string                             $columna  Columna del cursor (calificada).
-     * @param int|null                           $after_id Id del cursor.
-     * @param string                             $direction asc | desc.
-     *
-     * @return void
-     */
-    private function aplicar_cursor($query, $columna, $after_id, $direction)
-    {
-        if ($after_id === null) {
-            return;
-        }
-
-        if ($direction === 'desc') {
-            $query->where($columna, '<', $after_id);
-
-            return;
-        }
-
-        $query->where($columna, '>', $after_id);
-    }
-
-    /**
-     * Trae una página pidiendo una fila de más, para saber si hay siguiente sin contar el total.
-     *
-     * @param \Illuminate\Database\Query\Builder $query Query ya ordenada.
-     * @param int                                $limit Tamaño de página.
-     *
-     * @return array<string, mixed>
-     */
-    private function traer_pagina($query, $limit)
-    {
-        $rows     = $query->limit($limit + 1)->get();
-        $has_more = $rows->count() > $limit;
-
-        if ($has_more) {
-            $rows = $rows->slice(0, $limit)->values();
-        }
-
-        return ['rows' => $rows, 'has_more' => $has_more];
-    }
-
-    /**
-     * Normaliza y valida el parámetro `include` contra la lista blanca del endpoint.
-     * Acepta `include[]=a&include[]=b` o `include=a,b`.
-     *
-     * @param Request            $request    Request entrante.
-     * @param array<int, string> $permitidos Includes válidos.
-     *
-     * @return array<int, string>|\Illuminate\Http\JsonResponse
-     */
-    private function resolver_includes(Request $request, array $permitidos)
-    {
-        $includes = $this->normalizar_lista($request->input('include'));
-
-        foreach ($includes as $include) {
-            if (! in_array($include, $permitidos, true)) {
-                return $this->error_422('El include "' . $include . '" no existe en este endpoint.', [
-                    'includes_validos' => $permitidos,
-                ]);
-            }
-        }
-
-        return $includes;
-    }
-
-    /**
-     * Normaliza un parámetro que puede llegar como array (`client_ids[]=1&client_ids[]=2`) o como
-     * string separado por comas (`client_ids=1,2`).
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return array<int, string>
-     */
-    private function normalizar_lista($valor)
-    {
-        if ($valor === null) {
-            return [];
-        }
-
-        if (! is_array($valor)) {
-            $valor = explode(',', (string) $valor);
-        }
-
-        $lista = [];
-        foreach ($valor as $item) {
-            if (is_array($item)) {
-                continue;
-            }
-
-            $item = trim((string) $item);
-            if ($item === '' || in_array($item, $lista, true)) {
-                continue;
-            }
-
-            $lista[] = $item;
-        }
-
-        return $lista;
-    }
-
-    /**
-     * Igual que normalizar_lista() pero devolviendo enteros positivos.
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return array<int, int>
-     */
-    private function normalizar_lista_enteros($valor)
-    {
-        $enteros = [];
-
-        foreach ($this->normalizar_lista($valor) as $item) {
-            if (! is_numeric($item)) {
-                continue;
-            }
-
-            $entero = (int) $item;
-            if ($entero > 0 && ! in_array($entero, $enteros, true)) {
-                $enteros[] = $entero;
-            }
-        }
-
-        return $enteros;
-    }
-
-    /**
-     * Tamaño de página: default si no vino, y recorte al tope duro en vez de error.
-     *
-     * @param mixed $raw     Valor crudo del parámetro.
-     * @param int   $default Valor por defecto.
-     * @param int   $max     Tope duro.
-     *
-     * @return int
-     */
-    private function resolver_limite($raw, $default, $max)
-    {
-        if ($raw === null || $raw === '' || ! is_numeric($raw)) {
-            return $default;
-        }
-
-        $limite = (int) $raw;
-
-        if ($limite < 1) {
-            return 1;
-        }
-
-        return $limite > $max ? $max : $limite;
-    }
-
-    /**
-     * Corre `$request->validate()` garantizando una respuesta JSON 422 aunque la request no traiga
-     * `Accept: application/json`. Sin esto, una GET pelada de un script recibiría un redirect 302
-     * en vez del error, que es imposible de diagnosticar del otro lado.
-     *
-     * @param Request               $request Request entrante.
-     * @param array<string, string> $reglas  Reglas de validación.
-     *
-     * @return \Illuminate\Http\JsonResponse|null Null si validó bien.
-     */
-    private function validar_o_422(Request $request, array $reglas)
-    {
-        try {
-            $request->validate($reglas, $this->mensajes_de_validacion());
-        } catch (ValidationException $e) {
-            return response()->json([
-                'error'   => 'parámetros inválidos',
-                'errores' => $e->errors(),
-                'ayuda'   => 'Consultá GET claude/ops-schema para ver los filtros y valores válidos.',
-            ], 422);
-        }
-
-        return null;
-    }
-
-    /**
-     * Mensajes de validación en español. El proyecto solo tiene traducciones en inglés
-     * (resources/lang/en), así que se pasan inline.
-     *
-     * @return array<string, string>
-     */
-    private function mensajes_de_validacion()
-    {
-        return [
-            'required'    => 'El parámetro :attribute es obligatorio.',
-            'date'        => 'El parámetro :attribute tiene que ser una fecha válida.',
-            'date_format' => 'El parámetro :attribute tiene que venir en formato :format.',
-            'integer'     => 'El parámetro :attribute tiene que ser un número entero.',
-            'boolean'     => 'El parámetro :attribute tiene que ser booleano (1, 0, true o false).',
-            'string'      => 'El parámetro :attribute tiene que ser texto.',
-            'in'          => 'El parámetro :attribute tiene un valor que no está permitido. Mirá GET claude/ops-schema '
-                . 'para ver los válidos.',
-            'min'         => 'El parámetro :attribute está por debajo del mínimo permitido.',
-            'max'         => 'El parámetro :attribute supera el máximo permitido.',
-        ];
-    }
-
-    /**
-     * Respuesta 422 con mensaje legible en español.
-     *
-     * @param string              $mensaje Mensaje del error.
-     * @param array<string, mixed> $extra   Datos adicionales.
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    private function error_422($mensaje, array $extra = [])
-    {
-        return response()->json(array_merge(['error' => $mensaje], $extra), 422);
-    }
-
-    /**
-     * Respuesta 404 con mensaje legible en español.
-     *
-     * @param string $mensaje Mensaje del error.
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    private function error_404($mensaje)
-    {
-        return response()->json(['error' => $mensaje], 404);
-    }
-
-    /**
-     * Lee un parámetro booleano distinguiendo "ausente" (null) de "false" explícito. Sin esto,
-     * `$request->boolean()` devolvería false para un filtro que nunca se pidió y el filtro se
-     * aplicaría igual.
-     *
-     * @param Request $request Request entrante.
-     * @param string  $clave   Nombre del parámetro.
-     *
-     * @return bool|null
-     */
-    private function booleano_o_null(Request $request, $clave)
-    {
-        if (! $request->has($clave)) {
-            return null;
-        }
-
-        $valor = $request->input($clave);
-        if ($valor === null || $valor === '') {
-            return null;
-        }
-
-        return filter_var($valor, FILTER_VALIDATE_BOOLEAN);
-    }
-
-    /**
-     * Entero, o null si el parámetro vino vacío o ausente.
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return int|null
-     */
-    private function entero_o_null($valor)
-    {
-        if ($valor === null || $valor === '' || is_array($valor) || ! is_numeric($valor)) {
-            return null;
-        }
-
-        return (int) $valor;
-    }
-
-    /**
-     * Texto de un parámetro, cayendo al default cuando llega vacío o ausente.
-     *
-     * 🔴 Existe porque `$request->input('order', 'asc')` NO alcanza: el middleware global
-     * `ConvertEmptyStringsToNull` convierte `?order=` en null, y como la clave EXISTE con valor
-     * null, `input()` devuelve null en vez del default. Ese null terminaba en `orderBy('')`, que
-     * en Laravel 8 tira InvalidArgumentException: un `?order=` de más devolvía 500 en vez del 422
-     * legible que este controlador se propone devolver siempre.
-     *
-     * @param Request $request Request entrante.
-     * @param string  $clave   Nombre del parámetro.
-     * @param string  $default Valor por defecto.
+     * 🔴 Sobrescribe el default del trait (`GET claude/catalog`) para devolver el mismo
+     * `GET claude/ops-schema` que este controlador viene publicando desde el 24/8/2026. La
+     * extracción al trait no puede cambiar ni un carácter de una respuesta que ya está en uso:
+     * el que quiera el texto nuevo es un endpoint nuevo, no este.
      *
      * @return string
      */
-    private function texto_con_default(Request $request, $clave, $default)
+    protected function ayuda_del_schema()
     {
-        $valor = $this->texto_o_null($request->input($clave));
-
-        return $valor !== null ? $valor : $default;
-    }
-
-    /**
-     * Texto recortado, o null si quedó vacío.
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return string|null
-     */
-    private function texto_o_null($valor)
-    {
-        if ($valor === null || is_array($valor)) {
-            return null;
-        }
-
-        $valor = trim((string) $valor);
-
-        return $valor === '' ? null : $valor;
-    }
-
-    /**
-     * Parsea una fecha-hora sin lanzar.
-     *
-     * @param string|null $valor Valor crudo.
-     *
-     * @return Carbon|null
-     */
-    private function parsear_o_null($valor)
-    {
-        if ($valor === null || $valor === '') {
-            return null;
-        }
-
-        try {
-            return Carbon::parse($valor, config('app.timezone'));
-        } catch (\Exception $e) {
-            return null;
-        }
+        return 'GET claude/ops-schema';
     }
 }

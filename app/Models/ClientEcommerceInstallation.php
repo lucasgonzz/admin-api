@@ -17,6 +17,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int         $client_ecommerce_id
  * @property string      $mode              install | update
  * @property string      $status            pendiente | instalando | completada | fallida
+ * @property string|null $created_via       claude | NULL (panel del admin, y todo lo anterior a la columna)
  * @property string|null $failure_reason
  * @property \Carbon\Carbon|null $started_at
  * @property \Carbon\Carbon|null $finished_at
@@ -24,6 +25,18 @@ use Illuminate\Database\Eloquent\Model;
 class ClientEcommerceInstallation extends Model
 {
     use HasUuid;
+
+    /**
+     * Valor de `created_via` para las corridas disparadas por Claude
+     * (POST claude/ecommerce/updates y POST claude/ecommerce/updates/batch).
+     *
+     * La columna es nullable y sin default: NULL = origen no marcado (los tres botones del panel
+     * en EcommerceInstallationController, y todo lo anterior a la migración 2026_08_28_120000).
+     *
+     * 🔴 No es sólo trazabilidad: es lo que le permite al lote distinguir sus propias corridas de
+     * las del panel para aplicar el cooldown. Ver el docblock de la migración.
+     */
+    const CREATED_VIA_CLAUDE = 'claude';
 
     /**
      * Permite asignación masiva de todos los campos.
