@@ -176,6 +176,15 @@ Route::middleware('claude.task.key')
            `ops-schema` describe todo este sub-bloque (filtros, enumeraciones, la máquina de estados
            del deployment y los frenos de escritura). 🔴 No se toca `schema`, que es el de leads. */
         Route::get('ops-schema', 'Api\ClaudeClientOpsController@ops_schema_json');
+        /* Índice auto-descriptivo de TODO lo que Claude puede pedirle al admin, y lectura genérica
+           por lista blanca. `catalog` DERIVA las rutas de las registradas y los modelos del config
+           (no es una lista escrita a mano) y denuncia en `salud_del_catalogo` cualquier ruta
+           claude/* que nadie haya descripto.
+           🔴 `query` es SÓLO GET, y eso es la garantía mecánica de que no hay escritura genérica:
+           un POST sobre esta ruta devuelve 405 de Laravel. Una escritura por nombre de modelo
+           saltearía todos los frenos que están escritos endpoint por endpoint. */
+        Route::get('catalog', 'Api\ClaudeCatalogController@index_json');
+        Route::get('query', 'Api\ClaudeQueryController@index_json');
         Route::get('clients', 'Api\ClaudeClientOpsController@clients_json');
         Route::get('clients/{id}', 'Api\ClaudeClientOpsController@client_json');
         Route::get('clients/{id}/schedule', 'Api\ClaudeClientOpsController@client_schedule_json');
