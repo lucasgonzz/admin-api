@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\ModelProperties\ClientVersionUpgradeProperties;
 use App\Models\Concerns\HasUuid;
+use App\Services\VersionNumberComparator;
 use Illuminate\Database\Eloquent\Model;
 
 class ClientVersionUpgrade extends Model
@@ -26,6 +27,98 @@ class ClientVersionUpgrade extends Model
     }
 
     protected $guarded = [];
+
+    /**
+     * Un upgrade en `terminada` significa que el cliente YA ESTA en la version de destino, asi que
+     * `clients.current_version_id` se alinea solo.
+     *
+     * Va en un hook del modelo y no en el controller a proposito: hasta ahora la unica que lo
+     * escribia era PublishVersionService::syncExisting() -- el boton "sincronizar al cliente" --, y
+     * los otros dos caminos que dejan un upgrade en `terminada` no lo tocaban:
+     *
+     *   1. El pipeline de deployment. step_complete() promovia active_client_api_id del cliente y
+     *      dejaba la version sin mover (cliente Servian, upgrade 56 del 1/8/2026: deployment
+     *      `completed` con los seis pasos hechos, y el cliente segui figurando en 3.3.1 con la
+     *      3.3.3 arriba).
+     *   2. La edicion a mano del select "Estado" en la grilla del admin-spa, que pasa por el
+     *      update_json generico (cliente ananda, upgrade 72 del 24/8/2026).
+     *
+     * Cualquier save() que deje el status en `terminada` pasa por aca, asi que ningun camino nuevo
+     * puede volver a dejar la version desalineada sin que nada avise.
+     */
+    protected static function boot()
+    {
+        parent::boot();
+
+        static::saved(function ($upgrade) {
+
+            if ($upgrade->status !== 'terminada') {
+                return;
+            }
+
+            // wasChanged() cubre el update; wasRecentlyCreated, el alta directa en `terminada`.
+            // Un save() que no movio el status no paga ninguna query.
+            if (!$upgrade->wasRecentlyCreated && !$upgrade->wasChanged('status')) {
+                return;
+            }
+
+            $upgrade->alinear_version_del_cliente();
+        });
+    }
+
+    /**
+     * Deja `clients.current_version_id` en la version de destino de este upgrade.
+     *
+     * 🔴 Nunca BAJA la version del cliente. Marcar `terminada` un upgrade viejo (a mano, o
+     * reabriendo uno de hace meses) no puede retroceder a un cliente que ya subio por otro
+     * camino: se compara por valor semantico con VersionNumberComparator, no por `id` de la fila,
+     * porque con hotfixes de por medio el `id` no refleja el orden de las versiones.
+     *
+     * Se lee el cliente y la version de destino con una consulta propia y no por la relacion ya
+     * cargada: este hook corre desde el pipeline de deployment, donde la instancia en memoria
+     * puede venir de mucho antes.
+     *
+     * @return bool true si se escribio la version del cliente.
+     */
+    public function alinear_version_del_cliente()
+    {
+        /**
+         * Hoy el esquema no permite ninguna de las dos (las columnas son NOT NULL y tienen FK a
+         * `clients` y `versions`), asi que esto es defensa y no un caso conocido: la alineacion no
+         * es motivo para tirar abajo un save() del pipeline de deployment si manana el esquema se
+         * afloja o el dato llega por otro lado.
+         */
+        if (is_null($this->client_id) || is_null($this->to_version_id)) {
+            return false;
+        }
+
+        $client = Client::find($this->client_id);
+        $destino = Version::find($this->to_version_id);
+
+        if (is_null($client) || is_null($destino)) {
+            return false;
+        }
+
+        if (!is_null($client->current_version_id)) {
+
+            if ((int) $client->current_version_id === (int) $destino->id) {
+                return false;
+            }
+
+            $actual = Version::find($client->current_version_id);
+
+            if (
+                !is_null($actual)
+                && VersionNumberComparator::compare($destino->version, $actual->version) <= 0
+            ) {
+                return false;
+            }
+        }
+
+        $client->update(['current_version_id' => $destino->id]);
+
+        return true;
+    }
 
     protected $casts = [
         'scheduled_date'         => 'date:Y-m-d',

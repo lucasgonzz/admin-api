@@ -1069,12 +1069,32 @@ class DeploymentService
      */
     private function step_complete()
     {
-        $this->upgrade->deployment_status = 'completed';
-        $this->upgrade->save();
-
+        /**
+         * La promocion de la API activa va PRIMERO y el cierre del upgrade despues, y el orden
+         * importa: el hook `saved` de ClientVersionUpgrade alinea `clients.current_version_id`
+         * cuando el status pasa a `terminada`, y lo hace sobre una instancia fresca del cliente.
+         * Guardando aca abajo una instancia que puede venir de mucho antes en el pipeline se
+         * corria el riesgo de escribir el cliente despues del hook.
+         */
         $client = $this->upgrade->client;
         $client->active_client_api_id = $this->target_api->id;
         $client->save();
+
+        /**
+         * 🔴 Un deployment que llega hasta aca dejaba el upgrade con el status que tuviera y la
+         * version del cliente sin mover: `terminada` solo la escribia
+         * PublishVersionService::syncExisting(), que es el boton aparte "sincronizar al cliente".
+         * El caso que lo dejo a la vista es el cliente Servian (upgrade 56, 1/8/2026): deployment
+         * `completed` con los seis pasos hechos, y el cliente siguio figurando en 3.3.1 con la
+         * 3.3.3 arriba. La version la alinea el hook `saved` del modelo, que se dispara con este
+         * mismo save().
+         */
+        $this->upgrade->deployment_status = 'completed';
+        $this->upgrade->status            = 'terminada';
+        if (is_null($this->upgrade->finished_at)) {
+            $this->upgrade->finished_at = now();
+        }
+        $this->upgrade->save();
 
         $this->log('complete', 'Deployment completado exitosamente', 'success');
     }
