@@ -197,10 +197,15 @@ Route::middleware('claude.task.key')
         Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');
 
         /* Operación de clientes y actualizaciones: ESCRITURA.
-           🔴 Estas seis rutas crean actualizaciones sobre clientes REALES y arrancan deployments por
-           SSH que pueden dejar un negocio sin sistema. Los frenos (confirm_client_name en todas,
-           dry_run por defecto al crear, allow_deploy_to_active_api y el gate de horario del
-           post-cierre) están en ClaudeUpgradeOpsController.
+           🔴 Estas nueve rutas crean actualizaciones sobre clientes REALES y arrancan deployments
+           por SSH que pueden dejar un negocio sin sistema. Los frenos de las OCHO que viven en
+           ClaudeUpgradeOpsController son confirm_client_name (en todas ellas), dry_run por defecto
+           al crear, allow_deploy_to_active_api, el gate de horario del post-cierre —que también
+           lleva retry-commands— y el umbral destructivo de expire-stuck.
+           🔴 La novena, `upgrades/batch`, es la excepción y por eso se aclara aparte: vive en
+           ClaudeUpgradeBatchController y NO usa confirm_client_name, porque en un lote de veinte no
+           hay UN nombre que confirmar. Su equivalente es confirm_client_count + confirm_token.
+           No leas este encabezado como si la cubriera: ver su comentario propio, abajo.
            `upgrades/preview` se declara ANTES que cualquier ruta con {id}, para que ninguna la
            capture si mañana se agrega un POST claude/upgrades/{id} a secas. */
         Route::post('upgrades/preview', 'Api\ClaudeUpgradeOpsController@preview_json');
