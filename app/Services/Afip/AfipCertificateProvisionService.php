@@ -308,6 +308,53 @@ class AfipCertificateProvisionService
     }
 
     /**
+     * Repone en una API remota los certificados que le falten, abriendo la sesión SFTP con el
+     * callable que le pasa el pipeline.
+     *
+     * 🔴 NUNCA propaga una excepción. Los tres pipelines que la llaman ya subieron el código y
+     * están a mitad de camino cuando llegan acá: una corrida cortada porque el admin todavía no
+     * tiene los certificados cargados es peor que un certificado que ya venía faltando de antes.
+     * Cuando hace falta cortar, corta el verificador de esa etapa, no esto
+     * (ver InstallationService::verify_api_installation()).
+     *
+     * La sesión la abre un callable y no un SFTP ya construido porque cada pipeline resuelve su
+     * credencial distinto (get_hosting_credential_type() en clientes, demo_credential_type() en
+     * demos) y porque así la conexión no se abre si nunca se llega a usar.
+     *
+     * Se atrapa \Exception y no \Throwable a propósito: un \Error es un bug de programación de este
+     * mismo código, y tiene que reventar en los tests en vez de esconderse como un warning en un
+     * log de producción.
+     *
+     * @param  callable  $abrir_sftp  function(): SFTP
+     * @param  string  $api_path  Directorio raíz de la API remota
+     * @param  callable  $log  function(string $linea, string $nivel): void
+     * @param  bool  $pisar  true solo si se quiere sobrescribir lo que el servidor ya tenga
+     * @return void
+     */
+    public function reponer_en_api(callable $abrir_sftp, string $api_path, callable $log, bool $pisar = false): void
+    {
+        $log('Verificando certificados AFIP contra el servidor del admin...', 'info');
+
+        $sftp = null;
+
+        try {
+            $sftp = call_user_func($abrir_sftp);
+            $resultado = $this->provision($sftp, $api_path, $log, $pisar);
+            $this->loguear_resultado($resultado, $log);
+        } catch (\Exception $e) {
+            $log(
+                'No se pudieron reponer los certificados AFIP: ' . $e->getMessage()
+                . ' La corrida sigue igual; revisar a mano que se pueda facturar.',
+                'warning'
+            );
+        }
+
+        if ($sftp !== null) {
+            $sftp->disconnect();
+        }
+    }
+
+    /**
      * Une el directorio de la API del cliente con la ruta relativa de un destino.
      *
      * En shared_hosting `$api_path` es relativo al home del usuario SSH (`domains/...`), en VPS es

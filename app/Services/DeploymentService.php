@@ -1457,32 +1457,18 @@ class DeploymentService
     private function provision_afip_certificates(string $step): void
     {
         $service = new AfipCertificateProvisionService();
-        $api_path = $this->get_api_path();
 
         $log = function (string $linea, string $nivel) use ($step) {
             $this->log($step, $linea, $nivel);
         };
 
-        $this->log($step, 'Verificando certificados AFIP contra el servidor del admin...');
-
-        $sftp = null;
-
-        try {
-            $sftp = $this->open_sftp_session($this->get_hosting_credential_type());
-            $resultado = $service->provision($sftp, $api_path, $log);
-            $service->loguear_resultado($resultado, $log);
-        } catch (\Exception $e) {
-            $this->log(
-                $step,
-                'No se pudieron verificar los certificados AFIP del cliente: ' . $e->getMessage()
-                . ' La actualización sigue igual; revisar a mano que el cliente pueda facturar.',
-                'warning'
-            );
-        }
-
-        if ($sftp !== null) {
-            $sftp->disconnect();
-        }
+        $service->reponer_en_api(
+            function () {
+                return $this->open_sftp_session($this->get_hosting_credential_type());
+            },
+            $this->get_api_path(),
+            $log
+        );
 
         // El resto de step_run_migrations sigue con run_command() sobre la sesión SSH: se reconecta
         // por las dudas, igual que después de cada operación SFTP larga del resto del pipeline.
