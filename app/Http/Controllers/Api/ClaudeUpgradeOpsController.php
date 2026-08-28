@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Jobs\RunDeploymentJob;
 use App\Models\Client;
@@ -67,6 +68,19 @@ use Illuminate\Validation\ValidationException;
  */
 class ClaudeUpgradeOpsController extends Controller
 {
+    /**
+     * Los helpers genéricos del bloque `claude/*`: normalización de parámetros y las respuestas
+     * 422 y 404 con la forma única del bloque. Este controlador tenía su propia copia privada de
+     * `texto_o_null()`, `error_422()` y `error_404()`, con el mismo cuerpo línea por línea que las
+     * de `ClaudeClientOpsController`; se borraron y ahora salen del trait.
+     *
+     * ⚠️ `validar_o_422()` y `mensajes_de_validacion()` NO se borraron: las de acá divergieron de
+     * las de ClientOps y siguen abajo, sobrescribiendo al trait. El motivo está escrito en cada
+     * una. Se unifican el día que se decida cambiar el texto de esas respuestas, que es un cambio
+     * de contrato y no un refactor.
+     */
+    use RespuestasParaClaude;
+
     /**
      * Estados que indican un deployment todavía activo: con cualquiera de ellos no se arranca
      * otro. Misma lista que `DeploymentController::$active_deployment_statuses`.
@@ -1262,27 +1276,16 @@ class ClaudeUpgradeOpsController extends Controller
     }
 
     /**
-     * Texto recortado, o null si quedó vacío.
-     *
-     * @param mixed $valor Valor crudo.
-     *
-     * @return string|null
-     */
-    private function texto_o_null($valor)
-    {
-        if ($valor === null || is_array($valor)) {
-            return null;
-        }
-
-        $valor = trim((string) $valor);
-
-        return $valor === '' ? null : $valor;
-    }
-
-    /**
      * Corre `$request->validate()` garantizando una respuesta JSON 422 aunque la request no traiga
      * `Accept: application/json`. Sin esto, un POST pelado de un script recibiría un redirect 302 en
      * vez del error, que es imposible de diagnosticar del otro lado.
+     *
+     * 🔴 SOBRESCRIBE la del trait `RespuestasParaClaude` en vez de usarla, y no es un descuido:
+     * las dos copias YA divergieron. Esta dice "para ver los frenos y los valores válidos" y la de
+     * `ClaudeClientOpsController` dice "para ver los filtros y valores válidos" — que para un
+     * controlador de escritura es la diferencia entre nombrar lo que te protege y nombrar lo que
+     * no tiene. Unificarlas cambiaría el texto de una respuesta que ya está en producción, así que
+     * la divergencia queda declarada acá y se resuelve cuando se decida cambiar el contrato.
      *
      * @param Request               $request Request entrante.
      * @param array<string, string> $reglas  Reglas de validación.
@@ -1308,6 +1311,12 @@ class ClaudeUpgradeOpsController extends Controller
      * Mensajes de validación en español. El proyecto solo tiene traducciones en inglés
      * (resources/lang/en), así que se pasan inline.
      *
+     * 🔴 SOBRESCRIBE la del trait `RespuestasParaClaude`, que tampoco es lo mismo: esta lista trae
+     * `exists` y `array` (que el trait no tiene, porque los endpoints de lectura no validan contra
+     * la base ni reciben listas) y NO trae `date` ni `in`. Devolver la del trait le cambiaría el
+     * mensaje a un `exists` fallado, que es el error más común de estos POST. Se unifican el día
+     * que las dos listas sean la misma; hoy no lo son.
+     *
      * @return array<string, string>
      */
     private function mensajes_de_validacion()
@@ -1323,30 +1332,5 @@ class ClaudeUpgradeOpsController extends Controller
             'min'         => 'El parámetro :attribute está por debajo del mínimo permitido.',
             'max'         => 'El parámetro :attribute supera el máximo permitido.',
         ];
-    }
-
-    /**
-     * Respuesta 422 con mensaje legible en español.
-     *
-     * @param string               $mensaje Mensaje del error.
-     * @param array<string, mixed> $extra   Datos adicionales.
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    private function error_422($mensaje, array $extra = [])
-    {
-        return response()->json(array_merge(['error' => $mensaje], $extra), 422);
-    }
-
-    /**
-     * Respuesta 404 con mensaje legible en español.
-     *
-     * @param string $mensaje Mensaje del error.
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    private function error_404($mensaje)
-    {
-        return response()->json(['error' => $mensaje], 404);
     }
 }
