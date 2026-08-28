@@ -6,6 +6,7 @@ use App\Models\ClientSshCredential;
 use App\Models\Demo;
 use App\Models\DemoUpdate;
 use App\Models\Version;
+use App\Services\Afip\AfipCertificateProvisionService;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
 use App\Services\ClientEmpresaApiUrlResolver;
@@ -465,6 +466,19 @@ class DemoUpdateService
         // Path del API de la demo en su servidor, con el mismo criterio que step_upload_api().
         $api_path = $this->demo_api_path();
 
+        /* Va acá y no en step_upload_api() por dos motivos. Primero, el `unzip -o` de esa etapa
+         * acaba de reescribir el árbol: reponer antes sería reponer sobre el código viejo.
+         * Segundo, es el mismo punto donde lo hace DeploymentService (línea 486), así que los dos
+         * pipelines se leen igual.
+         *
+         * 🔴 Y va ANTES del connect_hosting_ssh() de abajo a propósito: la reposición usa una
+         * sesión SFTP aparte, y el connect que ya estaba hace de reconexión posterior sin que haya
+         * que agregar un reconnect_hosting_ssh() propio. Si alguna vez se mueve la llamada debajo
+         * del connect, hay que agregar ese reconnect —como hace DeploymentService—, porque los
+         * artisan de esta etapa corren por SSH y una sesión tocada por la transferencia devuelve
+         * salida vacía sin dar error. */
+        $this->provision_afip_certificates('run_migrations');
+
         // step_upload_api() termina con reconnect_build_vps(), así que la sesión SSH activa
         // al cerrar esa etapa es la del VPS, no la del hosting: hay que reconectar acá.
         $this->connect_hosting_ssh();
@@ -687,6 +701,60 @@ class DemoUpdateService
             "La demo no responde en {$label} ({$url}): status {$status_text} tras {$max_attempts} intentos. "
             . 'El código se subió bien, pero la demo no responde en esa URL — revisá el campo '
             . 'erp_api_url de la demo.'
+        );
+    }
+
+    /**
+     * Repone en la demo los certificados de AFIP que le falten, tomándolos del servidor del admin.
+     *
+     * 🔴 POR QUÉ HACE FALTA, Y POR QUÉ NO ALCANZABA CON LO QUE YA HABÍA
+     *
+     * Desde el commit ec6e164a de empresa-api (26/7/2026) los certificados no viajan más en el
+     * código: viven en storage/app/afip/, gitignoreados. El ZIP de esta misma clase excluye
+     * `storage/*` (ver step_upload_api), así que ninguna actualización de demo los repuso nunca.
+     * El síntoma no se parece a la causa: buscar un cliente por CUIT o DNI en el módulo vender
+     * devuelve HTTP 500 en 0,2 s —antes de salir a la red hacia ARCA— porque el constructor de
+     * AfipWSAAHelper tira apenas no encuentra el archivo. Medido en demo, demo2 y demo3 el
+     * 28/8/2026. El 20/8/2026 esto se había automatizado solo para clientes
+     * (InstallationService y DeploymentService); el pipeline de demos quedó afuera.
+     *
+     * 🔴 NO HAY NADA QUE SINCRONIZAR DESDE UNA CARPETA ANTERIOR, y esa es la diferencia con
+     * DeploymentService, que además del provision corre un sync_afip_certificates(). Un CLIENTE
+     * alterna carpeta física en cada actualización (v1/v2, ver active_client_api_id) y storage/ no
+     * se comparte entre las dos, así que hay que arrastrar lo que tenía. Una DEMO usa siempre el
+     * mismo directorio: DemoPathResolver::api_path() se deriva del slug y del hosting, y
+     * step_upload_api() descomprime con `unzip -o` ahí adentro sin borrar nada. storage/ sobrevive
+     * al update. Portar el sync acá sería código muerto que además haría creer que la demo alterna
+     * carpetas.
+     *
+     * 🔴 Nunca aborta el update, y en demos el argumento es todavía más fuerte que en clientes: a
+     * esta altura el código ya está subido y quedarse a mitad deja la demo rota delante de un lead.
+     * Además, si el admin no tuviera los certificados cargados, un corte acá haría fallar TODAS las
+     * actualizaciones de demo por un archivo que ni siquiera es del camino crítico de la demo. La
+     * política vive en AfipCertificateProvisionService::reponer_en_api().
+     *
+     * @param  string  $step
+     * @return void
+     */
+    private function provision_afip_certificates(string $step): void
+    {
+        $service = new AfipCertificateProvisionService();
+
+        /* append_log() es una sola tira de texto sin niveles, así que el nivel se antepone al
+         * renglón: si no, un error de SFTP se lee igual que "ya los tenía todos". Se usa la misma
+         * palabra AVISO que step_restart_queue_workers(), que es el otro paso de este pipeline que
+         * se degrada en vez de abortar. */
+        $log = function (string $linea, string $nivel) use ($step) {
+            $prefijo = ($nivel === 'error' || $nivel === 'warning') ? 'AVISO: ' : '';
+            $this->append_log('[' . $step . '] ' . $prefijo . $linea);
+        };
+
+        $service->reponer_en_api(
+            function () {
+                return $this->open_sftp_session($this->demo_credential_type());
+            },
+            $this->demo_api_path(),
+            $log
         );
     }
 
