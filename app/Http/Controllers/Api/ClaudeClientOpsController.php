@@ -673,7 +673,32 @@ class ClaudeClientOpsController extends Controller
             'estado_ahora'          => $resolver->estado_en($cliente, $ahora, $tz),
             'proximo_cierre'        => $this->instante_iso($detalle['instante']),
             'proximo_cierre_motivo' => $detalle['motivo'],
+            /* Estado del último push de estos horarios al empresa-api del cliente. Viaja acá porque
+               es el GET al que apuntan tanto el PUT como el POST .../sync cuando dicen "consultá el
+               resultado después": sin esto, el que sigue esa indicación no encontraba el dato y la
+               única forma de verlo era `GET claude/query?model=client`. Las tres claves en null
+               significan "nunca se intentó", que NO es un fallo. */
+            'sincronizacion'        => $this->estado_de_sincronizacion_de($cliente),
         ], 200);
+    }
+
+    /**
+     * Estado del último push de los horarios de un cliente a su empresa-api.
+     *
+     * 🔴 Los tres en null son "nunca se intentó", que no es lo mismo que un fallo. Ningún consumidor
+     * puede colapsarlos a un booleano.
+     *
+     * @param Client $cliente Cliente.
+     *
+     * @return array<string, string|null>
+     */
+    private function estado_de_sincronizacion_de(Client $cliente)
+    {
+        return [
+            'estado'          => $cliente->schedule_sync_status === null ? null : (string) $cliente->schedule_sync_status,
+            'mensaje'         => $cliente->schedule_sync_message === null ? null : (string) $cliente->schedule_sync_message,
+            'sincronizado_at' => $cliente->schedule_synced_at === null ? null : (string) $cliente->schedule_synced_at,
+        ];
     }
 
     /**
@@ -718,17 +743,7 @@ class ClaudeClientOpsController extends Controller
                 'uuid' => (string) $cliente->uuid,
                 'name' => (string) $cliente->name,
             ],
-            'sincronizacion' => [
-                'estado'  => $cliente->schedule_sync_status === null
-                    ? null
-                    : (string) $cliente->schedule_sync_status,
-                'mensaje' => $cliente->schedule_sync_message === null
-                    ? null
-                    : (string) $cliente->schedule_sync_message,
-                'sincronizado_at' => $cliente->schedule_synced_at === null
-                    ? null
-                    : (string) $cliente->schedule_synced_at,
-            ],
+            'sincronizacion' => $this->estado_de_sincronizacion_de($cliente),
             'latencia_maxima_segundos' => 60,
             'consultar_estado_en'      => 'GET claude/clients/' . $cliente->id . '/schedule',
             'nota' => 'El push corre en el worker `queue:work database` que el scheduler dispara '

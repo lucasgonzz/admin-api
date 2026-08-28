@@ -521,6 +521,32 @@ class HorariosDelClientePorClaudeTest extends TestCase
         });
     }
 
+    /**
+     * 🔴 El GET al que apunta la nota del PUT tiene que devolver `sincronizacion` de verdad. La
+     * primera versión de este endpoint mandaba a consultar ahí un dato que ese GET no traía: una
+     * respuesta que dice dónde mirar y se equivoca es peor que no decir nada.
+     */
+    public function test_el_get_devuelve_el_estado_de_sincronizacion_que_promete_el_put(): void
+    {
+        $client = $this->crear_cliente('Cliente Con Sincronización');
+
+        $get = $this->withHeaders($this->headers())->getJson($this->url($client));
+        $get->assertStatus(200);
+        $get->assertJsonStructure(['sincronizacion' => ['estado', 'mensaje', 'sincronizado_at']]);
+
+        // Nunca se intentó: los tres en null. Que NO es lo mismo que un fallo.
+        $get->assertJsonPath('sincronizacion.estado', null);
+        $get->assertJsonPath('sincronizacion.sincronizado_at', null);
+
+        $client->schedule_sync_status  = 'manual_required';
+        $client->schedule_sync_message = 'La versión instalada todavía no tiene el endpoint.';
+        $client->save();
+
+        $get2 = $this->withHeaders($this->headers())->getJson($this->url($client));
+        $get2->assertStatus(200);
+        $get2->assertJsonPath('sincronizacion.estado', 'manual_required');
+    }
+
     /** En dry-run no se encola nada: no pasó nada que contarle al cliente. */
     public function test_el_dry_run_no_encola_ningun_push(): void
     {
