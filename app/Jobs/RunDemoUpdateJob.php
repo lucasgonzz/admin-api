@@ -21,16 +21,34 @@ class RunDemoUpdateJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     /**
-     * Tiempo máximo de ejecución en segundos (60 minutos).
+     * Tiempo máximo de ejecución en segundos (35 minutos).
      * El pipeline SSH puede tardar bastante: npm ci + build + SFTP + composer install en
      * hosting compartido. Si se excede, failed() marca el registro como fallido.
      *
      * Importante (13/7/2026): el --timeout del worker de la cola (supervisor / queue:work)
      * tiene que ser mayor o igual que este valor, o el worker mata el proceso antes.
      *
+     * 🔴 BAJADO DE 3600 A 2100 EL 29/8/2026, y no es un ajuste cosmético: tiene que quedar por
+     * DEBAJO del `retry_after` de la conexión `database` (2400). Con 3600 el job quedaba 20 minutos
+     * por encima, y eso significa que a los 40 minutos la cola lo vuelve a marcar disponible
+     * mientras el primer worker lo sigue corriendo bien: el worker siguiente lo reserva, ve
+     * `attempts > tries` y lo manda a `failed_jobs` con MaxAttemptsExceededException. No hay doble
+     * ejecución, pero la demo aparece como fallida sin haber fallado.
+     *
+     * Hasta hoy el invariante no se rompía sólo porque este job se despachaba SIN
+     * `->onConnection('database')` — `RobustezDelDeploymentDesatendidoTest` ya lo tenía anotado
+     * como "a un onConnection de romper el invariante". `ClaudeDemoOpsController` es justamente ese
+     * onConnection, así que el invariante se cierra ahora.
+     *
+     * Por qué 2100 y no subir el `retry_after`: subirlo aflojaría la red de seguridad de TODOS los
+     * deployments de clientes, que es lo más riesgoso del sistema, para acomodar el pipeline más
+     * chico. 35 minutos además es más holgado que los 30 (`RunDeploymentJob::$timeout = 1800`) con
+     * los que corre el pipeline equivalente de un cliente, que hace el mismo trabajo sobre
+     * instalaciones más grandes.
+     *
      * @var int
      */
-    public $timeout = 3600;
+    public $timeout = 2100;
 
     /**
      * Sin reintentos automáticos: un fallo en el pipeline requiere revisión manual del log.

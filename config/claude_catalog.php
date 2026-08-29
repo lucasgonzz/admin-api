@@ -215,6 +215,48 @@ return [
             ],
         ],
 
+        /* ------------------------------------------- Demos: actualizar la version */
+
+        'GET api/claude/demos' => [
+            'para_que'     => 'Las demos que existen, con su URL, su hosting y si tienen una actualizacion en curso. Es el punto de entrada: de aca sale el demo_id y la URL con la que se confirma.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'GET api/claude/demo-updates' => [
+            'para_que'     => 'Las ultimas actualizaciones de demo, opcionalmente filtradas por demo.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => 'demo_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|exists:demos,id', 'que_es' => 'Filtra por una demo.'],
+                ['nombre' => 'limit', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1|max:100', 'que_es' => 'Cuantas devolver (default 20).'],
+            ],
+        ],
+        'GET api/claude/demo-updates/{id}' => [
+            'para_que'     => 'El detalle de una actualizacion: estado, cola del log y las señales de salud que distinguen "todavia no arranco" de "no hay worker y no va a arrancar nunca", que desde afuera se ven igual.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/demo-updates' => [
+            'para_que'     => 'Actualiza la version de una demo: crea el DemoUpdate y encola el pipeline (compile_spa, upload_spa, upload_api, run_migrations, restart_queue_workers, verify_demo). Devuelve 202 y NO espera: el pipeline SSH nunca corre adentro del request.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'dry_run viene en true por defecto: sin dry_run=false explicito no se escribe ni se encola nada.',
+                'confirm_demo_name tiene que coincidir con la erp_spa_url de la demo. El error NO dice cual es la correcta: es un freno, no un formulario a completar.',
+                'Rechaza si esa demo ya tiene una actualizacion en pendiente o ejecutandose: dos pipelines sobre la misma demo se pisan los archivos.',
+                'El dispatch va con onConnection(database) explicito. En sync correria el pipeline SSH entero adentro del request HTTP, donde lo mata max_execution_time.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'demo_id', 'obligatorio' => true, 'validacion' => 'required|integer|exists:demos,id', 'que_es' => 'Que demo se actualiza. Sale de GET claude/demos.'],
+                ['nombre' => 'version_id', 'obligatorio' => true, 'validacion' => 'required|integer|exists:versions,id', 'que_es' => 'A que version. Sale de GET claude/versions.'],
+                ['nombre' => 'confirm_demo_name', 'obligatorio' => false, 'validacion' => 'nullable|string. Obligatorio en la practica cuando dry_run=false', 'que_es' => 'La erp_spa_url de la demo, tal cual figura en GET claude/demos.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '⚠️ Default TRUE. Sin dry_run=false no pasa nada: se devuelve lo que se haria.'],
+            ],
+        ],
+
         /* ---------------------------------------------------------- Leads: lectura */
 
         'GET api/claude/leads' => [

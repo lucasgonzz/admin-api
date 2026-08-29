@@ -261,6 +261,18 @@ Route::middleware('claude.task.key')
            hay dos definiciones de "slot valido". */
         Route::get('demo-media', 'Api\ClaudeDemoMediaController@index_json');
         Route::put('demo-media', 'Api\ClaudeDemoMediaController@update_json');
+
+        /* Actualizar la VERSION de una demo. Es el hermano del bloque de upgrades de clientes, pero
+           sobre la otra maquina: una demo no es un Client — tiene modelo propio (Demo) y pipeline
+           propio (DemoUpdate -> RunDemoUpdateJob -> DemoUpdateService). Existe por el mismo motivo
+           que demo-media: cuando un clip queda trabado por un arreglo que ya esta en develop, la
+           sesion que filma no tenia forma de bajarlo a la instancia y el clip esperaba a que
+           alguien apretara el boton en el panel. El POST devuelve 202 y encola: el pipeline SSH
+           NUNCA corre adentro del request. */
+        Route::get('demos', 'Api\ClaudeDemoOpsController@demos_json');
+        Route::get('demo-updates', 'Api\ClaudeDemoOpsController@demo_updates_json');
+        Route::get('demo-updates/{id}', 'Api\ClaudeDemoOpsController@demo_update_json');
+        Route::post('demo-updates', 'Api\ClaudeDemoOpsController@store_json');
     });
 
 /*
