@@ -96,10 +96,27 @@ class DemoCommandRunner
         $resolver = new DemoPathResolver();
         $api_path = $resolver->api_path($demo);
 
-        $credential = ClientSshCredential::where('type', 'shared_hosting')->first();
+        /*
+         * 🔴 EL TIPO DE CREDENCIAL SALE DEL RESOLVER, NO SE ASUME.
+         *
+         * La primera versión de esto hardcodeaba `shared_hosting`, copiando lo que parecía hacer el
+         * constructor de `DemoUpdateService`. Está mal: ese constructor llama a
+         * `demo_credential_type()`, que delega en `DemoPathResolver::credential_type()` y devuelve
+         * `vps` para las demos que viven en el VPS — que son las tres de hoy.
+         *
+         * El síntoma fue engañoso y conviene dejarlo escrito: la ruta que se armaba era la
+         * CORRECTA (`/home/api-demo/empresa-api`, la del VPS), pero se abría contra el servidor de
+         * hosting compartido, así que el error que volvía era
+         * `cd: /home/api-demo/empresa-api: No such file or directory` — un mensaje que hace pensar
+         * en la ruta cuando el problema era a qué máquina se estaba entrando. Medido el 30/8/2026
+         * contra las tres demos.
+         */
+        $credential_type = $resolver->credential_type($demo);
+
+        $credential = ClientSshCredential::where('type', $credential_type)->first();
 
         if ($credential === null) {
-            throw new \RuntimeException('No hay credencial SSH de tipo shared_hosting cargada.');
+            throw new \RuntimeException('No hay credencial SSH de tipo ' . $credential_type . ' cargada.');
         }
 
         $ssh = new SSH2($credential->host, (int) $credential->port);

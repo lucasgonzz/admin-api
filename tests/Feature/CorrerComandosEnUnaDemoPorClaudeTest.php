@@ -192,6 +192,34 @@ class CorrerComandosEnUnaDemoPorClaudeTest extends TestCase
         $this->assertSame(0, preg_match($patron, '; id'));
     }
 
+    /**
+     * 🔴 La credencial SSH sale del tipo de hosting de la demo, no se asume `shared_hosting`.
+     *
+     * La primera versión del runner hardcodeaba `shared_hosting`, y contra las tres demos reales
+     * —que viven en VPS— el error que volvía era
+     * `cd: /home/api-demo/empresa-api: No such file or directory`: la RUTA era la correcta, pero se
+     * abría contra la máquina equivocada. El mensaje mandaba a mirar la ruta cuando el problema era
+     * el servidor.
+     *
+     * @return void
+     */
+    public function test_la_credencial_sale_del_tipo_de_hosting_de_la_demo(): void
+    {
+        $resolver = new \App\Services\DemoPathResolver();
+
+        $demo_vps = $this->demo();
+        $this->assertSame('vps', $resolver->credential_type($demo_vps));
+
+        $demo_compartido                    = $this->demo();
+        $demo_compartido->erp_hosting_type  = 'shared_hosting';
+        $this->assertSame('shared_hosting', $resolver->credential_type($demo_compartido));
+
+        /* Y la reja de fondo: que el runner NO tenga el tipo escrito a mano. */
+        $fuente = (string) file_get_contents(app_path('Services/DemoCommandRunner.php'));
+        $this->assertStringContainsString('credential_type($demo)', $fuente);
+        $this->assertStringNotContainsString("where('type', 'shared_hosting')", $fuente);
+    }
+
     /* ------------------------------------------------------------------------------------------
      | 2. dry_run y el freno del nombre
      |----------------------------------------------------------------------------------------- */
