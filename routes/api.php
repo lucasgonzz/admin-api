@@ -273,6 +273,15 @@ Route::middleware('claude.task.key')
         Route::get('demo-updates', 'Api\ClaudeDemoOpsController@demo_updates_json');
         Route::get('demo-updates/{id}', 'Api\ClaudeDemoOpsController@demo_update_json');
         Route::post('demo-updates', 'Api\ClaudeDemoOpsController@store_json');
+
+        /* Correr UN comando de artisan de la lista blanca sobre el servidor de una demo. Existe
+           porque el pipeline de actualizacion hace seis etapas fijas y NO corre comandos sueltos,
+           mientras que DeploymentService -el de los clientes- si tiene run_seeders y run_commands.
+           Esa asimetria trabo el clip 4.4 (necesita demo:sembrar-trazabilidad, que ya esta en el
+           servidor desde la 4.0.7) y los clips 1.7/1.8/2.10 (esperaban un queue:restart). La otra
+           salida era el demo-setup, que arranca con migrate:fresh y le vacia la base a la
+           instancia. Es SINCRONO: estos comandos tardan segundos, no minutos. */
+        Route::post('demo-commands', 'Api\ClaudeDemoOpsController@run_command_json');
     });
 
 /*

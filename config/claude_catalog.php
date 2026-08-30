@@ -257,6 +257,25 @@ return [
             ],
         ],
 
+        'POST api/claude/demo-commands' => [
+            'para_que'     => 'Corre UN comando de artisan de la lista blanca sobre el servidor de una demo (sembrar la trazabilidad del clip 4.4, reiniciar los workers de cola, limpiar cachés). Es SINCRONO y devuelve la salida: estos comandos tardan segundos.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'LISTA BLANCA de comandos, y patron cerrado para los argumentos. Un endpoint que acepte comando libre es una shell remota con otro nombre. La lista vive en DemoCommandRunner::COMANDOS_PERMITIDOS.',
+                'dry_run viene en true por defecto: sin dry_run=false explicito no se corre nada.',
+                'confirm_demo_name tiene que coincidir con la erp_spa_url de la demo, y el error no dice cual es la correcta.',
+                'La ruta de la API en el servidor sale del mismo DemoPathResolver que usa el pipeline de actualizacion: no hay dos definiciones de donde vive una demo.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'demo_id', 'obligatorio' => true, 'validacion' => 'required|integer|exists:demos,id', 'que_es' => 'Sobre que demo se corre. Sale de GET claude/demos.'],
+                ['nombre' => 'comando', 'obligatorio' => true, 'validacion' => 'required|string, y tiene que estar en la lista blanca', 'que_es' => 'Hoy: demo:sembrar-trazabilidad, queue:restart, config:clear, cache:clear, route:clear, view:clear. Un 422 devuelve la lista completa.'],
+                ['nombre' => 'argumentos', 'obligatorio' => false, 'validacion' => 'nullable|string, y tiene que matchear el patron del comando', 'que_es' => 'Ej: "--article_id=43". Todo lo que no matchea se rechaza ANTES de tocar el SSH.'],
+                ['nombre' => 'confirm_demo_name', 'obligatorio' => false, 'validacion' => 'nullable|string. Obligatorio cuando dry_run=false', 'que_es' => 'La erp_spa_url de la demo.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '⚠️ Default TRUE. Sin dry_run=false no se corre nada.'],
+            ],
+        ],
+
         /* ---------------------------------------------------------- Leads: lectura */
 
         'GET api/claude/leads' => [

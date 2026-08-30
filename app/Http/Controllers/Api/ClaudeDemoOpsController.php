@@ -8,6 +8,7 @@ use App\Jobs\RunDemoUpdateJob;
 use App\Models\Demo;
 use App\Models\DemoUpdate;
 use App\Models\Version;
+use App\Services\DemoCommandRunner;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -302,6 +303,107 @@ class ClaudeDemoOpsController extends Controller
             'ayuda'         => 'Seguila con GET claude/demo-updates/' . (int) $update->id
                 . '. Puede tardar hasta ' . self::LATENCIA_MAXIMA_SEGUNDOS . ' segundos en arrancar.',
         ], 202);
+    }
+
+    /**
+     * Corre un comando de Artisan de la lista blanca sobre el servidor de una demo.
+     *
+     * 🔴 POR QUÉ HACE FALTA. El pipeline de actualización hace seis etapas fijas y **no corre
+     * comandos sueltos**; `DeploymentService`, el equivalente de los clientes, sí tiene
+     * `run_seeders` y `run_commands`. Esa asimetría trabó trabajo dos veces: el clip `4.4`, que
+     * necesita `demo:sembrar-trazabilidad` —un comando que YA está en el servidor de las tres demos
+     * desde la release 4.0.7 y que no había forma de ejecutar—, y los clips `1.7`, `1.8` y `2.10`,
+     * que el 28/8 se trabaron esperando un `queue:restart`.
+     *
+     * La única alternativa era el demo-setup, que arranca con `migrate:fresh` y le vacía la base a
+     * la instancia: inaceptable sobre una demo en uso.
+     *
+     * ⚠️ Es SÍNCRONO, a diferencia de `store_json()`: estos comandos tardan segundos, no minutos.
+     * Por eso devuelve 200 con la salida, y no 202.
+     *
+     * Frenos, los mismos de la escritura de este bloque más el de la lista blanca:
+     *  1. `dry_run` en `true` por defecto.
+     *  2. `confirm_demo_name` contra la `erp_spa_url`.
+     *  3. 🔴 Lista blanca de comandos y patrón cerrado de argumentos, en `DemoCommandRunner`. Un
+     *     endpoint que acepte comando libre es una shell remota con otro nombre.
+     *
+     * @param Request $request Request entrante.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function run_command_json(Request $request)
+    {
+        $error = $this->validar_o_422($request, [
+            'demo_id'           => 'required|integer|exists:demos,id',
+            'comando'           => 'required|string',
+            'argumentos'        => 'nullable|string',
+            'confirm_demo_name' => 'nullable|string',
+            'dry_run'           => 'nullable|boolean',
+        ]);
+
+        if ($error !== null) {
+            return $error;
+        }
+
+        $demo       = Demo::find($request->input('demo_id'));
+        $comando    = $this->texto_o_null($request->input('comando'));
+        $argumentos = $this->texto_o_null($request->input('argumentos'));
+        $argumentos = $argumentos === null ? '' : $argumentos;
+
+        // La lista blanca se chequea ANTES del dry run, para que el simulacro también avise que el
+        // comando no está permitido en vez de decir que se haría algo que nunca se haría.
+        if (! array_key_exists($comando, DemoCommandRunner::COMANDOS_PERMITIDOS)) {
+            return $this->error_422('El comando "' . $comando . '" no está permitido. No se corrió nada.', [
+                'comandos_permitidos' => array_keys(DemoCommandRunner::COMANDOS_PERMITIDOS),
+                'ayuda'               => 'La lista blanca vive en DemoCommandRunner::COMANDOS_PERMITIDOS. '
+                    . 'Si hace falta uno nuevo, se agrega ahí con el patrón de sus argumentos, no se afloja el freno.',
+            ]);
+        }
+
+        $dry_run = $this->booleano_o_null($request, 'dry_run');
+        $dry_run = $dry_run === null ? true : $dry_run;
+
+        if ($dry_run) {
+            return response()->json([
+                'dry_run'  => true,
+                'se_haria' => [
+                    'demo_id'          => (int) $demo->id,
+                    'erp_spa_url'      => $demo->erp_spa_url,
+                    'comando_completo' => 'php artisan ' . $comando . ($argumentos !== '' ? ' ' . $argumentos : ''),
+                ],
+                'ayuda' => 'Para correrlo de verdad, repetí con dry_run=false y confirm_demo_name '
+                    . 'igual a la erp_spa_url de la demo.',
+            ], 200);
+        }
+
+        $rechazo = $this->rechazar_si_el_nombre_de_la_demo_no_confirma($request, $demo);
+
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        try {
+            $runner    = new DemoCommandRunner();
+            $resultado = $runner->run($demo, $comando, $argumentos);
+        } catch (\Throwable $e) {
+            /*
+             * Se devuelve 422 y no 500: el fallo esperable acá es de configuración o de la propia
+             * demo (credencial faltante, SSH rechazado, comando que salió con error), no un bug de
+             * este endpoint. El mensaje del runner ya dice cuál de los tres fue.
+             */
+            return $this->error_422('No se pudo correr el comando: ' . $e->getMessage(), [
+                'demo_id' => (int) $demo->id,
+            ]);
+        }
+
+        return response()->json([
+            'demo_id'          => (int) $demo->id,
+            'erp_spa_url'      => $demo->erp_spa_url,
+            'comando_completo' => $resultado['comando_completo'],
+            'salida'           => $resultado['salida'],
+            'ayuda'            => 'La salida es la del artisan tal cual, incluida la de error: este endpoint no '
+                . 'interpreta si el comando "salió bien". Leela.',
+        ], 200);
     }
 
     /**
