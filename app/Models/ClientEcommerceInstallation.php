@@ -63,8 +63,15 @@ class ClientEcommerceInstallation extends Model
      */
     public function scopeWithAll($query)
     {
+        /* El dueño de la tienda viaja anidado desde el 31/8/2026, cuando `client_ecommerce` pasó a
+         * poder pertenecer a un Client O a una Demo. Sin estas dos líneas, `GET
+         * /ecommerce-installations` devuelve la corrida sin nada con qué nombrar de quién es, y la
+         * grilla de admin-spa tiene que salir a pedir el dueño de cada fila por separado. Las dos
+         * relaciones son nullable por diseño (una tienda tiene exactamente una de las dos), así que
+         * cargar ambas es correcto: la que no aplica viene en null y no cuesta una consulta extra. */
         $query->with([
-            'client_ecommerce',
+            'client_ecommerce.client',
+            'client_ecommerce.demo',
             'logs',
         ]);
     }

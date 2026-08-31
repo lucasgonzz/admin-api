@@ -51,13 +51,28 @@ class Demo extends Model
     }
 
     /**
+     * Corridas de instalación desde cero del SISTEMA (ERP) de esta demo.
+     *
+     * Es `hasMany` y no `hasOne` a propósito, al revés que `client_ecommerce()`: una demo tiene una
+     * sola tienda, pero se puede reinstalar tantas veces como haga falta y cada intento queda
+     * registrado con su log. Mismo criterio que `Client::installations()`.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function installations()
+    {
+        return $this->hasMany(DemoInstallation::class);
+    }
+
+    /**
      * Nombre a mostrar del comercio de esta demo.
      *
      * Es el equivalente de `clients.company_name ?? clients.name`: lo consume el pipeline de
      * ecommerce para el APP_NAME del .env de tienda-api, el nombre de la PWA y VUE_APP_SITE_NAME.
      *
-     * Cae al slug del ERP (demo3) cuando `nombre` está vacío, que es el estado de las 2838 demos
-     * que ya existían cuando se agregó la columna. Es un nombre feo, sí — pero el pipeline escribe
+     * Cae al slug del ERP (demo3) cuando `nombre` está vacío, que es el estado en el que quedan
+     * todas las demos que ya existían cuando se agregó la columna (la migración no la completa:
+     * es un dato de negocio). Es un nombre feo, sí — pero el pipeline escribe
      * ese valor en tres lugares del build y quedarse con la cadena vacía deja la tienda sin
      * nombre en la pestaña del navegador, en el manifest de la PWA y en la etiqueta og:site_name.
      * Un feo visible se corrige; un vacío silencioso se publica.

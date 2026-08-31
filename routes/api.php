@@ -20,6 +20,7 @@ use App\Http\Controllers\DemoController;
 use App\Http\Controllers\DemoEventosController;
 use App\Http\Controllers\DemoExperienciaController;
 use App\Http\Controllers\DemoMediaUrlsController;
+use App\Http\Controllers\DemoInstallationController;
 use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\AiSystemPromptController;
@@ -548,6 +549,17 @@ Route::prefix('admin')->group(function () {
         Route::get('demo-update/{id}', [DemoUpdateController::class, 'show_json']);
         Route::post('demo-update', [DemoUpdateController::class, 'store_json']);
         Route::delete('demo-update/{id}', [DemoUpdateController::class, 'destroy_json']);
+
+        // Instalaciones desde cero del SISTEMA (ERP) de una demo.
+        //
+        // 🔴 No hay un `start` aparte como en client-installations: el POST crea la corrida Y
+        // dispara el pipeline, cuya etapa run_demo_setup le hace migrate:fresh a la base de la
+        // demo. Un endpoint de arranque separado permitiría re-arrancar la misma fila, o sea un
+        // segundo migrate:fresh sobre una instancia que puede seguir sembrando.
+        Route::get('demo-installation', [DemoInstallationController::class, 'index_json']);
+        Route::get('demo-installation/{id}', [DemoInstallationController::class, 'show_json']);
+        Route::post('demo-installation', [DemoInstallationController::class, 'store_json']);
+        Route::delete('demo-installation/{id}', [DemoInstallationController::class, 'destroy_json']);
 
         Route::get('update', [UpdateController::class, 'index_json']);
         Route::post('update', [UpdateController::class, 'store_json']);
