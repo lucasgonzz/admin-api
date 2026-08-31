@@ -6,12 +6,15 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\EnvTemplate;
+use App\Services\EnvSshService;
 use App\Services\HostingProvisioningService;
 use App\Services\HostingerApiClient;
 use App\Services\SharedHostingProvisioning;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Tests\Fakes\EnvSshServiceFake;
 use Tests\Fakes\HostingerApiClientFake;
 use Tests\TestCase;
 
@@ -43,6 +46,13 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
      * @var array<int, array<string, string>>
      */
     private $lineas = [];
+
+    /**
+     * Reemplazo en memoria del servicio SSH que escribe el .env del cliente.
+     *
+     * @var EnvSshServiceFake|null
+     */
+    private $env_fake = null;
 
     protected function setUp(): void
     {
@@ -446,8 +456,285 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // U4 — ENGANCHE EN EL PIPELINE DE INSTALACIÓN
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * El pipeline de una fila real con aprovisionamiento arranca con los 4 pasos nuevos y termina
+     * con el cron y el certificado.
+     *
+     * 🔴 provision_check ANTES de compile_spa no es orden estético: es el paso que puede pasar las
+     * ClientApi a hosting_type='vps', y compile_spa compila el bundle agregándole '/public' a la URL
+     * cuando el hosting es compartido. Con el flip llegando tarde, el SPA queda pidiendo
+     * '.../public' contra un VPS cuyo docroot ya es public/ → 404 en todo el sistema.
+     */
+    public function test_el_pipeline_real_con_aprovisionamiento_arranca_por_el_preflight(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $service = new \App\Services\InstallationService($datos['installation']);
+
+        $this->assertSame(
+            [
+                'provision_check',
+                'provision_sites',
+                'provision_dns',
+                'provision_db',
+                'compile_spa',
+                'upload_spa',
+                'upload_api',
+                'write_env',
+                'finalize_api',
+                'provision_cron',
+                'provision_ssl',
+            ],
+            $this->steps_de($service)
+        );
+    }
+
+    /**
+     * El esqueleto aprovisiona igual (los 4 subdominios son de las dos instancias) pero NO crea el
+     * cron ni pide el certificado: no tiene vendor/ ni sistema.
+     */
+    public function test_el_pipeline_del_esqueleto_aprovisiona_pero_no_crea_cron_ni_certificado(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+
+        $esqueleto = ClientInstallation::create([
+            'client_id'              => $datos['client']->id,
+            'client_api_id'          => $datos['api2']->id,
+            'kind'                   => ClientInstallation::KIND_ESQUELETO,
+            'status'                 => 'pendiente',
+            'provision_hosting_type' => ClientInstallation::PROVISION_SHARED_HOSTING,
+        ]);
+
+        $steps = $this->steps_de(new \App\Services\InstallationService($esqueleto));
+
+        $this->assertSame(
+            ['provision_check', 'provision_sites', 'provision_dns', 'provision_db',
+             'prepare_dirs', 'upload_public', 'write_env', 'finalize_skeleton'],
+            $steps
+        );
+        $this->assertNotContains('provision_cron', $steps);
+        $this->assertNotContains('provision_ssl', $steps);
+    }
+
+    /**
+     * 🔴 Contrato viejo intacto: sin provision_hosting_type el pipeline es el de siempre, byte por
+     * byte. Es lo que hace que las filas ya existentes —y las que cree un SPA que no manda el
+     * campo— no cambien de comportamiento.
+     */
+    public function test_sin_aprovisionamiento_el_pipeline_es_exactamente_el_de_siempre(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+
+        $datos['installation']->provision_hosting_type = null;
+        $datos['installation']->save();
+
+        $service = new \App\Services\InstallationService($datos['installation']->fresh());
+
+        $this->assertSame(
+            ['compile_spa', 'upload_spa', 'upload_api', 'write_env', 'finalize_api'],
+            $this->steps_de($service)
+        );
+    }
+
+    /**
+     * step_write_env() saca las DB_* de los secretos del aprovisionamiento, no de env_manual_values.
+     */
+    public function test_el_env_se_escribe_con_las_db_del_aprovisionamiento(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $slug  = $datos['slug'];
+        $this->crear_templates_de_env();
+
+        /* Lo que dejó provision_db: las dos ClientApi comparten la misma base. */
+        foreach ([$datos['api1'], $datos['api2']] as $api) {
+            $api->provisioning_secrets = [
+                'db_name'     => 'u767360347_' . $slug,
+                'db_user'     => 'u767360347_' . $slug,
+                'db_password' => 'Un4-Clave-Generada-Xyz12',
+            ];
+            $api->save();
+        }
+
+        /* Y lo que el operador dejó cargado a mano de una vez anterior: NO tiene que ganar. */
+        $datos['installation']->env_manual_values = ['DB_DATABASE' => 'base_vieja_a_mano'];
+        $datos['installation']->save();
+
+        $this->correr_write_env($datos['installation']->fresh());
+
+        $escrito = $this->env_fake->escrituras[$datos['api1']->id];
+
+        $this->assertSame('u767360347_' . $slug, $escrito['DB_DATABASE']);
+        $this->assertSame('u767360347_' . $slug, $escrito['DB_USERNAME']);
+        $this->assertSame('Un4-Clave-Generada-Xyz12', $escrito['DB_PASSWORD']);
+    }
+
+    /**
+     * Si la fila pide aprovisionar y no hay secretos guardados, write_env FALLA.
+     *
+     * Escribir un .env con DB_DATABASE vacío deja un sistema instalado que no bootea, y eso se
+     * descubre con el cliente adentro.
+     */
+    public function test_sin_secretos_guardados_el_write_env_falla_en_vez_de_escribir_vacio(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_de_env();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('no tiene guardado el secreto');
+
+        $this->correr_write_env($datos['installation']);
+    }
+
+    /**
+     * Test 14 de §7 — guarda de Redis: hosting vps + CACHE_DRIVER=redis sin prefijo derivable → la
+     * etapa falla.
+     *
+     * El VPS tiene UN SOLO Redis para todos los clientes. Sin prefijo, las claves de este cliente
+     * viven en el mismo keyspace que las de los demás.
+     */
+    public function test_vps_con_redis_y_sin_prefijo_derivable_falla_la_etapa(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_de_env();
+        $this->crear_template_de_env('CACHE_DRIVER', 'redis');
+
+        /* spa_url fuera del dominio de config: el label no se puede derivar y queda vacío. */
+        $datos['api1']->hosting_type = 'vps';
+        $datos['api1']->spa_url      = 'https://cliente.otrodominio.com';
+        $datos['api1']->save();
+
+        $datos['installation']->provision_hosting_type = null;
+        $datos['installation']->save();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('un solo Redis');
+
+        $this->correr_write_env($datos['installation']->fresh());
+    }
+
+    /**
+     * Con hosting vps y un spa_url normal, los dos prefijos se escriben siempre, aunque el .env de
+     * hoy no use Redis: deja el terreno listo y es inofensivo con file/database.
+     */
+    public function test_vps_escribe_siempre_los_prefijos_de_redis(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $slug  = $datos['slug'];
+        $this->crear_templates_de_env();
+
+        $datos['api1']->hosting_type = 'vps';
+        $datos['api1']->save();
+
+        $datos['installation']->provision_hosting_type = null;
+        $datos['installation']->save();
+
+        $this->correr_write_env($datos['installation']->fresh());
+
+        $escrito = $this->env_fake->escrituras[$datos['api1']->id];
+
+        /* Con guion bajo al final: sin él, 'lacava' + '2:foo' y 'lacava2' + ':foo' son la misma
+         * clave, y las dos instancias del mismo cliente se pisarían entre sí. */
+        $this->assertSame($slug . '_', $escrito['CACHE_PREFIX']);
+        $this->assertSame($slug . '_', $escrito['REDIS_PREFIX']);
+    }
+
+    /**
+     * En hosting compartido no se toca nada de Redis: es una sola instalación por carpeta y no hay
+     * Redis compartido que colisionar.
+     */
+    public function test_en_hosting_compartido_no_se_escriben_prefijos_de_redis(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_de_env();
+
+        $datos['installation']->provision_hosting_type = null;
+        $datos['installation']->save();
+
+        $this->correr_write_env($datos['installation']->fresh());
+
+        $escrito = $this->env_fake->escrituras[$datos['api1']->id];
+
+        $this->assertArrayNotHasKey('CACHE_PREFIX', $escrito);
+        $this->assertArrayNotHasKey('REDIS_PREFIX', $escrito);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Corre la etapa write_env con el servicio SSH falseado.
+     *
+     * @param  ClientInstallation  $installation
+     * @return void
+     */
+    private function correr_write_env(ClientInstallation $installation): void
+    {
+        $this->env_fake = new EnvSshServiceFake();
+        $this->app->instance(EnvSshService::class, $this->env_fake);
+
+        $service = new \App\Services\InstallationService($installation);
+        $metodo  = new \ReflectionMethod($service, 'step_write_env');
+        $metodo->setAccessible(true);
+        $metodo->invoke($service);
+    }
+
+    /**
+     * Pipeline de etapas de un servicio ya construido.
+     *
+     * @param  \App\Services\InstallationService  $service
+     * @return array<int, string>
+     */
+    private function steps_de($service): array
+    {
+        $propiedad = new \ReflectionProperty($service, 'steps');
+        $propiedad->setAccessible(true);
+
+        return $propiedad->getValue($service);
+    }
+
+    /**
+     * Plantilla mínima de .env. admin_testing_s6 tiene env_templates vacía.
+     *
+     * @return void
+     */
+    private function crear_templates_de_env(): void
+    {
+        $filas = [
+            ['APP_NAME', 'ComercioCity', false],
+            ['APP_URL', null, false],
+            ['DB_DATABASE', null, true],
+            ['DB_USERNAME', null, true],
+            ['DB_PASSWORD', null, true],
+        ];
+
+        foreach ($filas as $indice => $fila) {
+            $this->crear_template_de_env($fila[0], $fila[1], $fila[2], $indice + 1);
+        }
+    }
+
+    /**
+     * @param  string       $key
+     * @param  string|null  $value
+     * @param  bool         $manual
+     * @param  int          $orden
+     * @return void
+     */
+    private function crear_template_de_env(string $key, $value = null, bool $manual = false, int $orden = 50): void
+    {
+        $template                      = new EnvTemplate();
+        $template->key                 = $key;
+        $template->value               = $value;
+        $template->group               = 'app';
+        $template->scope               = 'empresa';
+        $template->is_common           = false;
+        $template->is_manual_on_create = $manual;
+        $template->sort_order          = $orden;
+        $template->save();
+    }
+
 
     /**
      * Cliente con sus dos ClientApi estándar, una instalación con aprovisionamiento tildado y el

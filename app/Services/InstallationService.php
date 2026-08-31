@@ -9,6 +9,7 @@ use App\Models\ClientSshCredential;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
 use App\Services\Afip\AfipCertificateProvisionService;
+use App\Services\Concerns\InstallationProvisioningSteps;
 use Illuminate\Support\Collection;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
@@ -42,6 +43,14 @@ use phpseclib3\Net\SSH2;
  */
 class InstallationService
 {
+    /*
+     * Las etapas de aprovisionamiento del hosting (provision_check, provision_sites, provision_dns,
+     * provision_db, provision_cron y provision_ssl) viven en el trait y no acá: son delegación pura
+     * hacia HostingProvisioningService, y la regla R1 de §9 le pone techo de 2350 líneas a este
+     * archivo. Mover, no agregar.
+     */
+    use InstallationProvisioningSteps;
+
     /**
      * La única ruta del esqueleto que tiene que ser un SYMLINK y no un archivo o directorio común.
      *
@@ -149,6 +158,12 @@ class InstallationService
             $this->assert_skeleton_target_supported();
         }
 
+        // Con provision_hosting_type cargado, el pipeline arranca con los 4 pasos de
+        // aprovisionamiento y —solo en la fila real— termina con el cron y el certificado. Sin él,
+        // $steps queda exactamente como estaba: es lo que hace que toda fila vieja, y toda fila
+        // creada por un SPA que no manda el campo, corra el pipeline de siempre byte por byte.
+        $this->steps = $this->build_steps_con_aprovisionamiento($this->steps);
+
         // Credenciales SSH de hosting compartido (una sola entrada en el sistema).
         $this->credential = ClientSshCredential::where('type', 'shared_hosting')->firstOrFail();
     }
@@ -236,6 +251,18 @@ class InstallationService
                     break;
                 case 'finalize_skeleton':
                     $this->step_finalize_skeleton();
+                    break;
+                case 'provision_check':
+                    $this->step_provision_check();
+                    break;
+                case 'provision_sites':
+                    $this->step_provision_sites();
+                    break;
+                case 'provision_dns':
+                    $this->step_provision_dns();
+                    break;
+                case 'provision_db':
+                    $this->step_provision_db();
                     break;
             }
         }
@@ -574,6 +601,12 @@ class InstallationService
             }
         }
 
+        // b-bis) Las tres DB_* que completó el aprovisionamiento, si la fila lo pidió. Van DESPUÉS
+        //        de las manuales y ANTES de APP_URL: son las claves que start() deja de exigirle al
+        //        operador justamente porque las escribe el pipeline, así que un valor viejo en
+        //        env_manual_values no puede pisar la base recién creada.
+        $vars_to_write = $this->merge_env_del_aprovisionamiento($vars_to_write);
+
         // c) APP_URL: URL cruda de la API del cliente, SIN /public (a diferencia de VUE_APP_API_URL).
         $vars_to_write['APP_URL'] = rtrim((string) $this->target_api->url, '/');
 
@@ -593,6 +626,9 @@ class InstallationService
         if ($installation_client !== null && $installation_client->user_id !== null && (int) $installation_client->user_id > 0) {
             $vars_to_write['USER_ID'] = (string) $installation_client->user_id;
         }
+
+        // f) Prefijos de Redis del VPS: el VPS tiene un solo Redis para todos los clientes (§3.3).
+        $vars_to_write = $this->aplicar_prefijos_de_redis($vars_to_write);
 
         $this->log(
             'write_env',
