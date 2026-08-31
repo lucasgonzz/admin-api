@@ -215,13 +215,14 @@ return [
                 'Tope de 100 entradas por lote.',
                 'created_via se estampa sólo en el alta: actualizar una ficha no le cambia el origen.',
                 'No envía nada ni toca el sistema de ningún cliente: sólo deja las fichas cargadas.',
-                'El log de auditoría lleva los client_id y los contadores, nunca el texto de las fichas.',
+                'Tope de 20.000 caracteres por campo: la ficha se inyecta entera en cada consulta del agente.',
+                'El log de auditoría lleva los client_id y los contadores, nunca el texto de las fichas. Una QueryException tampoco lo filtra: el mensaje de Laravel trae el SQL con los bindings interpolados y por eso se captura y se loguea sólo el SQLSTATE.',
             ],
             'parametros'   => [
                 ['nombre' => 'entries[]', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:100', 'que_es' => 'El lote de fichas, una por cliente.'],
                 ['nombre' => 'entries[].client_id', 'obligatorio' => true, 'validacion' => 'required|integer|exists:clients,id', 'que_es' => 'Clave natural: es por lo que la carga es idempotente.'],
-                ['nombre' => 'entries[].ficha_operativa', 'obligatorio' => false, 'validacion' => 'nullable|string', 'que_es' => '🔴 Markdown libre, y es LO ÚNICO que llega al prompt del agente. Cómo se comunica el cliente, qué módulos usa, qué conviene evitar. Nada que se pueda calcular.'],
-                ['nombre' => 'entries[].notas_internas', 'obligatorio' => false, 'validacion' => 'nullable|string', 'que_es' => '🔴 Markdown libre que NO se inyecta nunca en el prompt. Para el operador humano: juicios sobre la persona, temas comerciales.'],
+                ['nombre' => 'entries[].ficha_operativa', 'obligatorio' => false, 'validacion' => 'nullable|string|max:20000', 'que_es' => '🔴 Markdown libre, y es LO ÚNICO que llega al prompt del agente. Cómo se comunica el cliente, qué módulos usa, qué conviene evitar. Nada que se pueda calcular. El tope existe porque se inyecta entera en cada consulta.'],
+                ['nombre' => 'entries[].notas_internas', 'obligatorio' => false, 'validacion' => 'nullable|string|max:20000', 'que_es' => '🔴 Markdown libre que NO se inyecta nunca en el prompt. Para el operador humano: juicios sobre la persona, temas comerciales.'],
             ],
         ],
         'GET api/claude/demo-media' => [

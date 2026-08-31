@@ -134,10 +134,22 @@ class SupportClientContextService
 
         $lineas = [];
 
-        if ($datos['antiguedad'] !== null) {
-            $lineas[] = 'Es cliente desde ' . $datos['alta'] . ' (' . $datos['antiguedad'] . ').';
+        /* 🔴 "Figura en el admin desde", NO "es cliente desde". El dato sale de `clients.created_at`
+           y esa tabla se creó el 17/4/2026: un cliente que ya venía de antes tiene ahí la fecha en
+           que se lo cargó al admin, no la fecha en que empezó a ser cliente. Con la redacción
+           anterior el agente le decía a un cliente de cinco años "sos cliente hace cuatro meses",
+           con toda la confianza de un dato calculado. Se dice lo que el dato es. */
+        if ($datos['alta_estado'] === 'ok') {
+            $lineas[] = 'Figura en el admin desde ' . $datos['alta'] . ' (' . $datos['antiguedad']
+                . '). Ojo: es la fecha de carga en el admin, que puede ser posterior a cuándo empezó '
+                . 'a ser cliente. No se la afirmes como antigüedad.';
+        } elseif ($datos['alta_estado'] === 'ilegible') {
+            /* No es lo mismo que "no figura": el dato está y no se pudo leer. Decirle al agente que
+               no figura sería convertir una falla del sistema en un dato sobre el cliente. */
+            $lineas[] = 'La fecha de carga de este cliente está en el admin pero no se pudo leer en '
+                . 'esta consulta.';
         } else {
-            $lineas[] = 'No figura la fecha de alta de este cliente en el admin.';
+            $lineas[] = 'No figura la fecha de carga de este cliente en el admin.';
         }
 
         if ($datos['version'] !== null) {
@@ -152,7 +164,10 @@ class SupportClientContextService
         $lineas[] = 'Mensajes intercambiados con este cliente en todos sus tickets: '
             . $datos['mensajes_totales'] . '.';
 
-        $lineas[] = 'Veces que un ticket suyo se escaló a un humano: ' . $datos['veces_escalado'] . '.';
+        /* 🔴 "Tickets que se escalaron", NO "veces que se escaló". `support_tickets.escalated_at` es
+           una sola columna que se pisa: un ticket escalado tres veces sigue contando 1. La
+           redacción anterior prometía un conteo de escalados que la base no tiene. */
+        $lineas[] = 'Tickets suyos que se escalaron a un humano alguna vez: ' . $datos['veces_escalado'] . '.';
 
         return $lineas;
     }
@@ -180,9 +195,10 @@ class SupportClientContextService
             ->select(['clients.created_at', 'versions.version'])
             ->first();
 
-        $alta       = null;
-        $antiguedad = null;
-        $version    = null;
+        $alta        = null;
+        $antiguedad  = null;
+        $version     = null;
+        $alta_estado = 'ausente';
 
         if ($cliente !== null) {
             $version = $this->texto_o_null(isset($cliente->version) ? $cliente->version : null);
@@ -191,14 +207,28 @@ class SupportClientContextService
             if ($creado !== null && $creado !== '') {
                 /* 🔴 `catch (\Throwable)` y no `catch (\Exception)`: Carbon::parse() tira TypeError
                    —que es \Error, no \Exception— cuando lo que llega no es un string. Es la misma
-                   clase de error ya documentada en RespuestasParaClaude::parsear_o_null(). */
+                   clase de error ya documentada en RespuestasParaClaude::parsear_o_null().
+                   |
+                   🔴 Y EL CATCH NO ES MUDO, QUE ES LA OTRA MITAD DE ESA MISMA CLASE DE ERROR. La
+                   primera versión de esto dejaba `$alta` en null y listo, y el bloque terminaba
+                   diciéndole al agente "no figura la fecha de alta de este cliente" — que es una
+                   afirmación DISTINTA y falsa: la fecha figura, lo que no se pudo fue leerla. Un
+                   error del sistema disfrazado de dato sobre el cliente. Ahora se distinguen los
+                   dos estados y el fallo queda en el log. */
                 try {
-                    $fecha      = \Carbon\Carbon::parse($creado, config('app.timezone'));
-                    $alta       = $fecha->format('d/m/Y');
-                    $antiguedad = $this->antiguedad_en_palabras($fecha);
+                    $fecha       = \Carbon\Carbon::parse($creado, config('app.timezone'));
+                    $alta        = $fecha->format('d/m/Y');
+                    $antiguedad  = $this->antiguedad_en_palabras($fecha);
+                    $alta_estado = 'ok';
                 } catch (\Throwable $e) {
-                    $alta       = null;
-                    $antiguedad = null;
+                    $alta        = null;
+                    $antiguedad  = null;
+                    $alta_estado = 'ilegible';
+
+                    Log::warning('SupportClientContextService: created_at del cliente no se pudo parsear.', [
+                        'client_id' => $client_id,
+                        'error'     => $e->getMessage(),
+                    ]);
                 }
             }
         }
@@ -218,6 +248,7 @@ class SupportClientContextService
         return [
             'alta'             => $alta,
             'antiguedad'       => $antiguedad,
+            'alta_estado'      => $alta_estado,
             'version'          => $version,
             'tickets_totales'  => $tickets !== null ? (int) $tickets->totales : 0,
             'tickets_abiertos' => $tickets !== null ? (int) $tickets->abiertos : 0,
@@ -245,6 +276,10 @@ class SupportClientContextService
 
         if ($meses < 1) {
             $dias = $desde->diffInDays(now());
+
+            if ($dias === 0) {
+                return 'lo cargaron hoy';
+            }
 
             return $dias === 1 ? 'hace 1 día' : 'hace ' . $dias . ' días';
         }

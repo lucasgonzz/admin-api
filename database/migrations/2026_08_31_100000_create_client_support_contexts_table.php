@@ -54,6 +54,11 @@ class CreateClientSupportContextsTable extends Migration
             $table->string('created_via', 30)->nullable();
 
             $table->timestamps();
+
+            /* Borrar un cliente se lleva su ficha. Sin esto queda huérfana y el GET la sigue
+               devolviendo con `client_name` en null: una ficha con notas sobre una persona,
+               sobreviviendo al cliente que la justificaba. */
+            $table->foreign('client_id')->references('id')->on('clients')->onDelete('cascade');
         });
     }
 

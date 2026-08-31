@@ -114,8 +114,14 @@ class ClaudeClientContextController extends Controller
         $error = $this->validar_o_422($request, [
             'entries'                   => 'required|array|min:1|max:' . self::MAX_ENTRIES,
             'entries.*.client_id'       => 'required|integer|exists:clients,id',
-            'entries.*.ficha_operativa' => 'nullable|string',
-            'entries.*.notas_internas'  => 'nullable|string',
+            /* 🔴 El tope no es burocracia: `ficha_operativa` se inyecta ENTERA en el prompt de
+               cada consulta sobre ese cliente, así que su largo se paga en tokens una y otra vez.
+               20.000 caracteres son varias pantallas de prosa — de sobra para una ficha— y frenan
+               el accidente real, que es pegar un manual entero adentro. `notas_internas` no va al
+               prompt pero lleva el mismo tope: la columna es TEXT (65.535 bytes) y con el modo no
+               estricto de MySQL un texto más largo se TRUNCA en silencio en vez de fallar. */
+            'entries.*.ficha_operativa' => 'nullable|string|max:20000',
+            'entries.*.notas_internas'  => 'nullable|string|max:20000',
         ]);
         if ($error !== null) {
             return $error;
@@ -195,38 +201,63 @@ class ClaudeClientContextController extends Controller
         $ids_tocados = [];
 
         /* El lote entra o no entra: si una fila explota a mitad, no puede quedar medio lote cargado
-           y la mitad afuera, porque del otro lado no hay forma de saber dónde se cortó. */
-        DB::transaction(function () use ($filas, &$resultados, &$ids_tocados) {
-            foreach ($filas as $fila) {
-                $client_id = (int) $fila['client_id'];
+           y la mitad afuera, porque del otro lado no hay forma de saber dónde se cortó.
+           |
+           🔴 Y EL catch NO ES DEFENSA GENÉRICA: es lo que mantiene la promesa de este endpoint.
+           El mensaje de una QueryException de Laravel trae el SQL con los bindings YA
+           INTERPOLADOS, o sea el texto completo de la ficha y de la nota interna. Sin este catch,
+           un insert que falle se lo entrega al handler global, que lo escribe entero en
+           laravel.log —y en el cuerpo de la respuesta si APP_DEBUG estuviera prendido—. Todo este
+           trabajo existe para que una nota del tipo "es de trato difícil" quede contenida; que se
+           escape por el camino del error sería el mismo problema con otra puerta. Se contesta 500
+           con un mensaje propio y se loguean los client_id, nunca el SQL. */
+        try {
+            DB::transaction(function () use ($filas, &$resultados, &$ids_tocados) {
+                foreach ($filas as $fila) {
+                    $client_id = (int) $fila['client_id'];
 
-                /* 🔴 El lock es lo que hace que la idempotencia aguante dos corridas encimadas.
-                   Sin él esto es un SELECT y después un INSERT: dos requests con el mismo
-                   client_id nuevo pueden pasar los dos por el SELECT antes de que cualquiera
-                   inserte, y el índice único de la tabla hace que el segundo tire una
-                   QueryException. Como el lote entero va en una transacción, esa excepción voltea
-                   las treinta y una fichas de esa corrida y no sólo la que chocó. No es
-                   hipotético: acá se reenvía el lote completo cada vez que se corrige una ficha, y
-                   un timeout con reintento alcanza para encimar dos. Misma lección que
-                   ClaudeClientTemplatesController. */
-                $existente = ClientSupportContext::query()
-                    ->where('client_id', $client_id)
-                    ->lockForUpdate()
-                    ->first();
+                    /* 🔴 El lock es lo que hace que la idempotencia aguante dos corridas encimadas.
+                       Sin él esto es un SELECT y después un INSERT: dos requests con el mismo
+                       client_id nuevo pueden pasar los dos por el SELECT antes de que cualquiera
+                       inserte, y el índice único de la tabla hace que el segundo tire una
+                       QueryException. Como el lote entero va en una transacción, esa excepción voltea
+                       las treinta y una fichas de esa corrida y no sólo la que chocó. No es
+                       hipotético: acá se reenvía el lote completo cada vez que se corrige una ficha, y
+                       un timeout con reintento alcanza para encimar dos. Misma lección que
+                       ClaudeClientTemplatesController. */
+                    $existente = ClientSupportContext::query()
+                        ->where('client_id', $client_id)
+                        ->lockForUpdate()
+                        ->first();
 
-                $datos = $this->fila_de_datos($fila, $client_id, $existente);
+                    $datos = $this->fila_de_datos($fila, $client_id, $existente);
 
-                if ($existente !== null) {
-                    $existente->update($datos);
-                    $resultados['actualizadas']++;
-                } else {
-                    ClientSupportContext::create($datos);
-                    $resultados['creadas']++;
+                    if ($existente !== null) {
+                        $existente->update($datos);
+                        $resultados['actualizadas']++;
+                    } else {
+                        ClientSupportContext::create($datos);
+                        $resultados['creadas']++;
+                    }
+
+                    $ids_tocados[] = $client_id;
                 }
+            });
+        } catch (\Illuminate\Database\QueryException $e) {
+            /* 🔴 NO SE LOGUEA $e->getMessage(): ese mensaje ES el SQL con los bindings
+               interpolados, o sea el texto entero de las fichas y las notas de este lote. Se
+               loguea el SQLSTATE, que es lo único que sirve para diagnosticar, más los client_id
+               involucrados. Tampoco se le devuelve al que llama. */
+            Log::error('ClaudeClientContextController: falló la carga de fichas de contexto.', [
+                'sqlstate'   => $e->getCode(),
+                'client_ids' => $vistos,
+            ]);
 
-                $ids_tocados[] = $client_id;
-            }
-        });
+            return response()->json([
+                'error' => 'No se pudo guardar el lote de fichas: la base rechazó la escritura. No se '
+                    . 'escribió nada. El detalle quedó en el log del admin, sin el texto de las fichas.',
+            ], 500);
+        }
 
         $fichas = ClientSupportContext::query()
             ->whereIn('client_id', $ids_tocados)

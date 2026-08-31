@@ -208,7 +208,50 @@ class ContextoDeClienteParaElAgenteTest extends TestCase
 
         $this->assertStringContainsString('1 abiertos y 2 en total', $prompt);
         $this->assertStringContainsString('en todos sus tickets: 2', $prompt);
-        $this->assertStringContainsString('se escaló a un humano: 1', $prompt);
+        $this->assertStringContainsString('se escalaron a un humano alguna vez: 1', $prompt);
+    }
+
+    /**
+     * 🔴 El bloque dice lo que el dato ES, no lo que uno querría que fuera.
+     *
+     * `clients.created_at` es la fecha en que el cliente se cargó en el admin —tabla creada el
+     * 17/4/2026—, no la fecha en que empezó a ser cliente. Redactarlo como "es cliente desde"
+     * hacía que el agente le dijera a un cliente de cinco años que hace cuatro meses que está,
+     * con la confianza de un dato calculado. Y el conteo de escalados cuenta TICKETS con
+     * `escalated_at`, no escalados: esa columna se pisa.
+     *
+     * @return void
+     */
+    public function test_el_bloque_calculado_no_promete_mas_de_lo_que_el_dato_es()
+    {
+        $client = $this->crear_cliente();
+        $ticket = $this->crear_ticket($client);
+
+        $prompt = $this->prompt_del_agente($ticket);
+
+        $this->assertStringContainsString('Figura en el admin desde', $prompt);
+        $this->assertStringNotContainsString('Es cliente desde', $prompt);
+        $this->assertStringContainsString('Tickets suyos que se escalaron a un humano alguna vez:', $prompt);
+    }
+
+    /**
+     * Una ficha desmedida se rechaza: se inyecta entera en cada consulta y se paga en tokens una
+     * y otra vez.
+     *
+     * @return void
+     */
+    public function test_una_ficha_mas_larga_que_el_tope_es_422()
+    {
+        $client = $this->crear_cliente();
+
+        $respuesta = $this->postJson('/api/claude/client-context', [
+            'entries' => [
+                ['client_id' => $client->id, 'ficha_operativa' => str_repeat('a', 20001)],
+            ],
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertSame(0, ClientSupportContext::where('client_id', $client->id)->count());
     }
 
     /**
