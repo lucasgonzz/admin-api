@@ -625,8 +625,23 @@ SYSTEM;
 
         $historial = $this->format_conversation_history($ticket->id);
 
+        /* Ficha operativa del cliente + los datos que se calculan leyendo la base al momento.
+         * Hasta acá el agente atendía a los cuarenta clientes sabiendo sólo el nombre, el mail y
+         * el historial de ESTE ticket.
+         *
+         * 🔴 De este bloque NO sale `client_support_contexts.notas_internas`: ese campo es para el
+         * operador humano y nunca entra al prompt. La garantía es estructural y está en
+         * ClientSupportContext::ficha_operativa_de_cliente() — un SELECT de una sola columna.
+         *
+         * 🔴 El servicio no lanza nunca: si una consulta falla, el bloque lo dice y el agente
+         * contesta igual. Una excepción acá caería en el catch de generate() y dejaría al cliente
+         * sin respuesta por no haber podido contar sus tickets. */
+        $contexto_del_cliente = (new SupportClientContextService())->bloque_para_el_prompt($ticket);
+
         return <<<USER
 Cliente: {$client_name} ({$client_email})
+
+{$contexto_del_cliente}
 
 Historial de la conversación:
 {$historial}
@@ -654,6 +669,10 @@ Reglas para tipo_respuesta y fuentes_kb:
   que ser una que hayas leído recién acá. El sistema lo verifica: si citás algo que no leíste, o no
   citás nada, tu respuesta NO se le manda al cliente y el caso se escala igual.
 - No cites de memoria ni por el nombre del archivo en el índice: leelo primero con get_manual_file.
+- El bloque "Contexto de este cliente" NO es una fuente y nunca va en fuentes_kb. Sirve para saber
+  a quién le estás hablando, ajustar el tono y no volver a pedir datos que ya tenés. No lo uses
+  para respaldar una afirmacion_del_sistema: para eso está el manual, sin excepción. Si lo único
+  que tenés es la ficha, lo que estás por decir todavía no está verificado.
 
 Reglas para should_close y should_escalate:
 - should_close y should_escalate son mutuamente excluyentes: nunca ambos en true al mismo tiempo.

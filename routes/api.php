@@ -254,6 +254,22 @@ Route::middleware('claude.task.key')
         Route::get('client-templates', 'Api\ClaudeClientTemplatesController@index_json');
         Route::post('client-templates', 'Api\ClaudeClientTemplatesController@store_json');
 
+        /* Ficha de contexto por CLIENTE para el agente de soporte. Idempotente por `client_id`:
+           reenviar la ficha actualiza la fila, nunca crea una segunda, y nunca borra las fichas
+           que no vinieron en el payload.
+           🔴 SON DOS CAMPOS Y NO SON EQUIVALENTES: `ficha_operativa` se inyecta en el prompt del
+           agente en cada consulta sobre ese cliente; `notas_internas` NO se inyecta nunca y es
+           para el operador humano. La separación es del esquema —dos columnas— y el camino que
+           llega al prompt hace un SELECT de una sola, así que la nota no puede filtrarse al tono
+           de una respuesta que se le manda a ese mismo cliente.
+           ⚠️ El GET sí devuelve las dos, y no es contradicción: el consumidor prohibido es el
+           prompt, no la sesión que carga las fichas, que necesita leer antes de pisar.
+           🔴 Nada calculable se acepta en el payload (tickets abiertos, antigüedad, versión que
+           corre, mensajes, escalados): eso lo lee SupportClientContextService de la base al armar
+           el prompt. Guardarlo sería garantizar que quede viejo sin que nada lo denuncie. */
+        Route::get('client-context', 'Api\ClaudeClientContextController@index_json');
+        Route::post('client-context', 'Api\ClaudeClientContextController@store_json');
+
         /* Multimedia de la demo: el mismo GET/PUT que la pantalla /multimedia-demo del admin,
            pero para la sesion de Claude que produce los clips. Es el ultimo paso del pipeline de
            `/filmar` — sin esto, un clip publicado en R2 queda invisible para el lead porque nadie
