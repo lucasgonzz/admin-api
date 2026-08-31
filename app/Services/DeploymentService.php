@@ -1278,11 +1278,32 @@ class DeploymentService
     /**
      * Script bash: vacía el public_html del SPA, descomprime dist.zip en la raíz (no en /dist).
      *
+     * 🔴 ESTE MÉTODO ARMA UN BORRADO RECURSIVO, igual que su gemelo de InstallationService, y por
+     * eso lleva la misma guarda dura. No es defensa teórica: si el directorio calculado sale vacío
+     * —una ClientApi con hosting_type='vps' y vps_path NULL, que es como están hoy en producción
+     * los clientes 13 y 43 según el relevamiento del 26/8/2026— el `find . -mindepth 1 -delete` de
+     * abajo corre sobre 'domains/comerciocity.com/public_html/' y vacía la cuenta compartida
+     * entera: las carpetas de los ~40 clientes activos, de una.
+     *
+     * La guarda nació el 31/8/2026 en InstallationService, donde el agujero se descubrió. Se adopta
+     * acá en el mismo movimiento porque este es el servicio que corre en CADA actualización de
+     * cliente, o sea el camino por el que el problema llegaría antes. Dejar la guarda en uno solo de
+     * los dos lugares que tienen la misma línea es exactamente la clase de arreglo que vuelve con
+     * otra cara — ver APRENDER_NO_PARCHEAR.md.
+     *
+     * Y va ANTES de armar el string, no adentro del shell remoto: un `if` del lado del servidor ya
+     * viajó, y cualquier error de escapado lo saltea.
+     *
      * @return string
+     * @throws \RuntimeException Si el directorio calculado no es identificable como el de este cliente.
      */
     private function build_spa_hosting_deploy_shell(): string
     {
         $spa_dir = $this->get_spa_hosting_dir();
+
+        $path_resolver = new ClientApiPathResolver();
+        $path_resolver->assert_directorio_de_spa_borrable($this->target_api, $spa_dir);
+
         $temp_zip_basename = 'dist_deploy_' . $this->upgrade->uuid . '.zip';
         $deploy_zip_name = 'dist.zip';
 
