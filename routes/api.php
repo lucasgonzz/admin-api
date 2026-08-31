@@ -374,6 +374,12 @@ Route::prefix('admin')->group(function () {
         // Mensualidad del cliente (inputs manuales + total calculado de forma autónoma, prompt 329).
         Route::get('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'show_json']);
         Route::put('client/{clientId}/mensualidad', [ClientMensualidadController::class, 'update_json']);
+        /* Botón "Obtener datos" de la tarjeta Facturación: consulta el padrón de ARCA por CUIT y
+           devuelve razón social, domicilio y condición IVA para completar el formulario. No guarda
+           nada (el alta la confirma el "Guardar" de la tarjeta, que va por el PUT de arriba).
+           El `{cuit}` se restringe a dígitos y separadores para que no se coma otra ruta del grupo. */
+        Route::get('client/{clientId}/mensualidad/datos-afip/{cuit}', [ClientMensualidadController::class, 'datos_afip_por_cuit_json'])
+            ->where('cuit', '[0-9\-\.]+');
         // Horarios comerciales del cliente: el PUT reemplaza el conjunto entero de días y rangos.
         Route::get('client/{clientId}/horarios', [ClientScheduleController::class, 'show_json']);
         Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);

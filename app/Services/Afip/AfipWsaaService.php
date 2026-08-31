@@ -77,32 +77,64 @@ class AfipWsaaService
     protected $work_dir;
 
     /**
+     * Si el ambiente vino forzado por el llamador en vez de leerse de la config
+     * fiscal. `null` = se resuelve desde `ComerciocityAfipConfig`.
+     *
+     * @var bool|null
+     */
+    protected $forzar_produccion;
+
+    /**
      * Constructor: resuelve entorno (prod/homologación) desde la config
      * fiscal de ComercioCity y arma todas las rutas de archivos necesarias.
      *
-     * @param  string $ws_name Nombre del web service AFIP (default 'wsfe').
+     * @param  string    $ws_name           Nombre del web service AFIP (default 'wsfe').
+     * @param  bool|null $forzar_produccion Ambiente forzado; `null` (default) lo resuelve
+     *                                      desde la config fiscal, como siempre.
      */
-    public function __construct($ws_name = 'wsfe')
+    public function __construct($ws_name = 'wsfe', $forzar_produccion = null)
     {
         $this->ws_name = $ws_name;
+        $this->forzar_produccion = $forzar_produccion;
 
         $this->define();
     }
 
     /**
      * Resuelve entorno y rutas de certificado/clave/trabajo según
-     * `ComerciocityAfipConfig::current()->afip_produccion`.
+     * `ComerciocityAfipConfig::current()->afip_produccion`, salvo que el
+     * llamador haya forzado el ambiente.
+     *
+     * El forzado existe para la consulta al padrón de ARCA
+     * (`AfipConstanciaInscripcionService`), que es una LECTURA sin efecto
+     * fiscal y siempre va contra producción: la homologación del padrón
+     * devuelve datos de prueba que no sirven para cargar un cliente real.
+     * Emitir comprobantes (WSFE) sigue respetando la config, porque ahí
+     * equivocarse de ambiente sí tiene consecuencia fiscal.
      *
      * @return void
      */
     protected function define()
     {
-        // Config fiscal única de ComercioCity: define si se opera en
-        // producción o en homologación contra los web services de AFIP.
-        $afip_config = ComerciocityAfipConfig::current();
-        $this->testing_es_produccion = (bool) $afip_config->afip_produccion;
+        if (! is_null($this->forzar_produccion)) {
+            $this->testing_es_produccion = (bool) $this->forzar_produccion;
+        } else {
+            // Config fiscal única de ComercioCity: define si se opera en
+            // producción o en homologación contra los web services de AFIP.
+            $afip_config = ComerciocityAfipConfig::current();
+            $this->testing_es_produccion = (bool) $afip_config->afip_produccion;
+        }
 
-        // Directorio de trabajo (TRA/TA/CMS) para este ws_name, dentro de storage.
+        /* 🔴 El directorio del TA depende SOLO del ws_name: el ambiente no forma
+           parte de la ruta, aunque el certificado y la URL de WSAA sí cambian con
+           él. Hoy no colisiona porque los dos ws_name en uso van a ambientes fijos
+           ('wsfe' siempre por config, 'ws_sr_constancia_inscripcion' siempre a
+           producción). Pero si algún día se fuerza el ambiente de un ws_name que
+           además se usa con la config, el TA de un ambiente pisa al del otro y
+           `check_wsaa()` lo da por bueno —solo mira `expirationTime`, nunca de
+           dónde vino—: ARCA rechaza con un error de autenticación críptico y
+           reintentar no arregla nada hasta que el TA venza (~12hs). Si hace falta
+           ese caso, el ambiente tiene que entrar acá. */
         $this->work_dir = storage_path('app/afip/wsaa/'.$this->ws_name.'/');
 
         // Crea el directorio de trabajo si todavía no existe (recursivo).
