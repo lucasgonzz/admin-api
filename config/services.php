@@ -222,6 +222,91 @@ return [
         'meta_scrape_token' => env('META_SCRAPE_TOKEN', ''),
     ],
 
+    // API pública de Hostinger (developers.hostinger.com): subdominios, bases de datos, cronjobs
+    // y zonas DNS de la cuenta de shared hosting. La consume App\Services\HostingerApiClient.
+    //
+    // Todo lo que acá aparece como valor por defecto sale de la documentación leída el 31/8/2026 y
+    // NO de una ejecución real: el token todavía no existe. Por eso cada dato del contrato vive en
+    // config y no hardcodeado en el cliente: si la primera corrida real contra un slug descartable
+    // dice otra cosa, se corrige acá, en una línea, sin tocar código.
+    'hostinger' => [
+        // Token Bearer generado en hPanel → API → Generate API token.
+        // 🔴 Nunca se loguea, ni entero ni parcial, y no viaja jamás por query string: Guzzle copia
+        // la URI completa adentro del mensaje de sus excepciones de transporte (mismo motivo que
+        // está escrito arriba en 'meta_scrape_token').
+        'api_token' => env('HOSTINGER_API_TOKEN', ''),
+
+        // Usuario de la cuenta de hosting (ej: u767360347), NO el usuario de hPanel. Es el que va
+        // en la ruta /api/hosting/v1/accounts/{username}/...
+        'account_username' => env('HOSTINGER_ACCOUNT_USERNAME', 'u767360347'),
+
+        // Dominio dueño de la zona DNS y de los subdominios de todos los clientes.
+        // 🔴 Guarda G5 del plan: el dominio sale SIEMPRE de acá y jamás de un request o de la base.
+        // No hay un solo camino por el que un valor de afuera llegue a la URL de la zona.
+        'domain' => env('HOSTINGER_DOMAIN', 'comerciocity.com'),
+
+        // Base de la API, sin barra final. El path completo lo arma HostingerApiClient.
+        'base_url' => env('HOSTINGER_API_BASE_URL', 'https://developers.hostinger.com'),
+
+        // IP del VPS propio, destino de los A records cuando el cliente se aprovisiona en VPS.
+        'vps_ip' => env('HOSTINGER_VPS_IP', '76.13.171.147'),
+
+        // 🔴 GUARDA G2 — interruptor de escritura del DNS, APAGADO por defecto y a propósito.
+        //
+        // Prenderlo habilita el único PUT irreversible de todo el aprovisionamiento: un PUT sobre
+        // la zona de comerciocity.com, que es donde viven los subdominios de los ~40 clientes
+        // activos. Si ese PUT resultara ser un reemplazo total de la zona en vez de un agregado
+        // (no se pudo verificar, §10.3 del plan), una corrida mal armada deja a los 40 clientes
+        // sin resolver DNS de una: el ERP y la tienda de todos ellos dejan de existir para
+        // internet hasta que alguien restaure el snapshot a mano desde hPanel.
+        //
+        // Con el flag en false no hay forma de llegar a esa llamada: provision_check falla antes.
+        // El hosting compartido NO lo necesita (ahí el DNS es de solo lectura, guarda G1), así que
+        // esto solo se prende, a mano y a propósito, para el primer cliente en VPS.
+        'dns_write_enabled' => (bool) env('HOSTINGER_DNS_WRITE_ENABLED', false),
+
+        // Configuración TLS, calcada de 'anthropic': WAMP/Windows puede necesitar apuntar el CA
+        // bundle a mano o el handshake falla con "unable to get local issuer certificate".
+        // Ruta absoluta a cacert.pem (https://curl.se/ca/cacert.pem). Si no se define, se reusa
+        // ANTHROPIC_CAINFO, que es el mismo archivo en la máquina de desarrollo.
+        'ca_bundle' => env('HOSTINGER_CAINFO', env('ANTHROPIC_CAINFO')),
+        // Solo desarrollo: false evita el error cURL 60. En producción SIEMPRE true — por el header
+        // Authorization viaja el token.
+        'verify_ssl' => filter_var(
+            env('HOSTINGER_VERIFY_SSL', env('ANTHROPIC_VERIFY_SSL', true)),
+            FILTER_VALIDATE_BOOLEAN
+        ),
+
+        // Segundos de espera de la llamada HTTP.
+        'timeout' => env('HOSTINGER_API_TIMEOUT', 45),
+
+        // --- Contrato del POST de subdominio -------------------------------------------------
+        //
+        // Los dos valores que no se pudieron verificar contra la API real (§10.1 del plan) y que
+        // por eso salen de config. Los consume el servicio de aprovisionamiento del hosting
+        // compartido al armar el payload; HostingerApiClient los recibe ya resueltos.
+        //
+        // {path} se reemplaza por la ruta relativa del sitio dentro de public_html, ej: 'lacava/api'.
+        // El default asume que 'directory' es relativo a public_html. Si la primera corrida real
+        // muestra que es relativo al home del usuario, esto pasa a
+        // 'domains/{domain}/public_html/{path}' y no se toca una línea de código.
+        'subdomain_directory_template' => env('HOSTINGER_SUBDOMAIN_DIRECTORY_TEMPLATE', '{path}'),
+
+        // 🔴 false, y no es un detalle de gusto: el subdominio de la API apunta a '<slug>/api' y
+        // NUNCA a '<slug>/api/public'. ClientEmpresaApiUrlResolver::normalize_api_base_url() le
+        // agrega '/public' a la URL de toda ClientApi con hosting_type='shared_hosting', y eso
+        // alimenta APP_URL y VUE_APP_API_URL. Si el docroot ya fuera public/, el SPA pediría
+        // '.../public/api/...' sobre un docroot que ya es public/ → 404 en todo el sistema. Los 30
+        // clientes de producción con '/public' en la URL son la evidencia de que la convención es
+        // esta.
+        'subdomain_is_using_public_directory' => (bool) env('HOSTINGER_SUBDOMAIN_IS_USING_PUBLIC_DIRECTORY', false),
+
+        // Techo, en segundos, de la espera de propagación del DNS antes de pedirle el certificado
+        // a Let's Encrypt (solo VPS). Es una estimación: si un cliente nuevo tarda más, el paso
+        // falla y el log imprime los comandos para correr a mano.
+        'dns_wait_seconds' => env('HOSTINGER_DNS_WAIT_SECONDS', 180),
+    ],
+
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).
     // Si la clave no está definida, el endpoint queda cerrado: no se acepta ninguna request.
     'claude_task_ingest' => [
