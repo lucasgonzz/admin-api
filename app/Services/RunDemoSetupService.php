@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Helpers\AppTime;
+use App\Models\Demo;
 use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Services\DemoHitosService;
@@ -477,6 +478,111 @@ class RunDemoSetupService
         // usan_cuentas_corrientes) tienen que pisar a las viejas, no al revés. Para la dinámica
         // actual claves_de_la_dinamica_nueva() devuelve [] y el payload queda idéntico al de siempre.
         return array_merge($payload, $this->claves_de_la_dinamica_nueva($lead));
+    }
+
+    /**
+     * Arma el payload del demo-setup SIN lead: sólo los defaults del catálogo y las URLs de la demo.
+     *
+     * Lo usa el pipeline de INSTALACIÓN de una demo (DemoInstallationService::step_run_demo_setup),
+     * que corre sobre una demo recién instalada, con la base vacía y todavía sin ningún lead
+     * asignado. El resultado tiene que ser una demo lista para mostrar: catálogo sembrado, usuario
+     * creado y ecommerce apuntado a la tienda de esa misma demo.
+     *
+     * 🔴 ESTÁ AL LADO DE `build_payload()` Y NO ADENTRO, A PROPÓSITO, aunque comparta un puñado de
+     * claves. `build_payload(Lead)` lo consumen leads REALES en producción y el criterio de
+     * aceptación de esta misión es que siga devolviendo exactamente lo mismo que antes para
+     * cualquier lead. Refactorizar los dos caminos contra una base común obligaba a mover al menos
+     * una clave del camino del lead, y una diferencia de una clave en este payload no falla: la
+     * demo se arma distinto y nadie se entera hasta que está delante del lead. Un poco de
+     * duplicación explícita es más barato que eso.
+     *
+     * QUÉ NO LLEVA, Y POR QUÉ:
+     *
+     *   - `doc_number`, `email`, `name`/`company_name` de una persona: no hay lead. El nombre sale
+     *     de `Demo::display_name()`, que es el mismo que usa el pipeline de ecommerce para el
+     *     APP_NAME de la tienda, así que el ERP y la tienda de la demo quedan diciendo lo mismo.
+     *   - El bloque de la dinámica nueva (`demo_experiencia`, `respuestas_formulario`, `demo_plan`,
+     *     `demo_media_urls`, `demo_eventos_*`) y el `demo_ingreso_token`: todo eso describe la
+     *     experiencia de UN lead concreto en su página inmersiva. Sin lead no hay nada que
+     *     describir, y mandarlo con valores inventados haría que la demo arranque con un roadmap y
+     *     un token que no son de nadie. Cuando después se le asigne un lead, `run()` dispara el
+     *     demo-setup de verdad con sus respuestas y lo pisa todo.
+     *
+     * Los tres flags legados (`use_price_lists`, `use_deposits`, `usan_cuentas_corrientes`) se
+     * derivan de `LeadDemoFormMapper::RESPUESTAS_POR_DEFECTO` y no se escriben a mano, para que
+     * "los defaults del catálogo" tengan UNA sola fuente: el día que Lucas cambie un default del
+     * formulario, la demo recién instalada lo toma sin que haya que acordarse de este archivo. El
+     * resto de los flags va en `false`, que es exactamente el default de esas columnas en `leads`
+     * — o sea, lo mismo que recibe hoy un lead que no tocó nada.
+     *
+     * @param Demo $demo Demo recién instalada.
+     *
+     * @return array<string, mixed>
+     */
+    public function payload_de_defaults(Demo $demo)
+    {
+        $respuestas = LeadDemoFormMapper::RESPUESTAS_POR_DEFECTO;
+
+        $nombre = $demo->display_name();
+
+        $payload = [
+            // Datos visibles del User dueño de la demo. Sin lead, el nombre del comercio es el del
+            // catálogo (o el slug del subdominio, que es a lo que cae display_name()).
+            'name'         => $nombre,
+            'company_name' => $nombre,
+            'doc_number'   => null,
+            'email'        => null,
+
+            // Tienda de ESTA demo: es lo que el ERP guarda como su ecommerce.
+            'online'       => $demo->ecommerce_api_url,
+
+            /* `ferreteria` y no null: es el único valor que hoy sigue cambiando algo del otro lado
+             * (DemoSetupHelper::apply_business_type_rules() le agrega la extensión
+             * `unidades_individuales_en_articulos`; el resto de las ramas están comentadas), y es
+             * el que se corresponde con el catálogo que esa misma función siembra siempre
+             * (`FerreteriaArticlesSeeder`). Declarar otra cosa dejaría la demo diciendo que vende
+             * una cosa y mostrando artículos de otra. */
+            'business_type' => 'ferreteria',
+
+            // Flags booleanos: el default de todas estas columnas en `leads` es false, así que esto
+            // es literalmente "un lead que no tocó nada".
+            'iva_included'                 => false,
+            'redondear_centenas_en_vender' => false,
+            'ask_amount_in_vender'         => false,
+            'ventas_con_fecha_de_entrega'  => false,
+            'cajas'                        => false,
+            'usar_codigos_de_barra'        => false,
+            'codigos_de_barra_por_defecto' => false,
+            'consultora_de_precios'        => false,
+            'imagenes'                     => false,
+            'produccion'                   => false,
+
+            // Los tres legados, derivados de los defaults del formulario (ver docblock).
+            'use_price_lists'         => ($respuestas['tipo_precios'] === 'listas'),
+            'use_deposits'            => (bool) $respuestas['usa_depositos'],
+            'usan_cuentas_corrientes' => (bool) $respuestas['usa_cuentas_corrientes_clientes'],
+
+            // Depósitos y listas de precios: sin lead no hay nombres cargados.
+            'address_1'    => null,
+            'address_2'    => null,
+            'address_3'    => null,
+            'price_type_1' => null,
+            'price_type_2' => null,
+            'price_type_3' => null,
+
+            // Cuota diaria de Google Custom Search: no es un secreto y tiene default sano, así que
+            // se manda siempre — igual que en build_payload().
+            'google_cuota' => ImplementationSettings::get_google_cuota_demo(),
+        ];
+
+        // La API key de Google sólo viaja si está cargada en el admin; si no, empresa-api usa su
+        // constante de fallback. Mismo criterio que build_payload().
+        $google_api_key = ImplementationSettings::get_google_api_key_demo();
+        if ($google_api_key !== '') {
+            $payload['google_custom_search_api_key'] = $google_api_key;
+        }
+
+        return $payload;
     }
 
     /**
