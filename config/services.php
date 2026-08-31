@@ -301,6 +301,16 @@ return [
         // esta.
         'subdomain_is_using_public_directory' => (bool) env('HOSTINGER_SUBDOMAIN_IS_USING_PUBLIC_DIRECTORY', false),
 
+        // Prefijo obligatorio del nombre y del usuario de toda base de datos de la cuenta
+        // compartida: Hostinger lo impone y el nombre completo tiene que entrar en los 32
+        // caracteres de MySQL (guarda 5 de §1.4 del plan). Se manda explícito en el POST; si la
+        // primera corrida real muestra que la API lo agrega sola, se vacía acá y listo.
+        // En el VPS NO hay prefijo (§F3 del informe de migración): esa rama lo sobreescribe.
+        'database_prefix' => env(
+            'HOSTINGER_DATABASE_PREFIX',
+            env('HOSTINGER_ACCOUNT_USERNAME', 'u767360347') . '_'
+        ),
+
         // Techo, en segundos, de la espera de propagación del DNS antes de pedirle el certificado
         // a Let's Encrypt (solo VPS). Es una estimación: si un cliente nuevo tarda más, el paso
         // falla y el log imprime los comandos para correr a mano.
