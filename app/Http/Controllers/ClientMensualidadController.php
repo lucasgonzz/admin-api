@@ -7,6 +7,7 @@ use App\Models\ComerciocityAfipConfig;
 use App\Models\MensualidadInvoice;
 use App\Models\MensualidadInvoicePdfAccessToken;
 use App\Http\Controllers\Pdf\MensualidadFacturaPdf;
+use App\Services\Afip\AfipConstanciaInscripcionService;
 use App\Services\Afip\AfipFacturacionService;
 use App\Services\ClientMensualidadService;
 use App\Services\ClientMensualidadSyncService;
@@ -73,6 +74,34 @@ class ClientMensualidadController extends Controller
         $service->guardar($client, $validated);
 
         return response()->json($service->estado($client));
+    }
+
+    /**
+     * Trae de ARCA los datos del contribuyente de un CUIT (razón social,
+     * domicilio y condición IVA) para completar los datos fiscales del receptor
+     * antes de facturarle. Es el botón "Obtener datos" de la tarjeta
+     * Facturación del modal del cliente.
+     *
+     * NO guarda nada: devuelve los datos para que el front complete el
+     * formulario y sea Lucas quien confirme con "Guardar". El `clientId` va en
+     * la ruta por consistencia con el resto del grupo (y para que la consulta
+     * quede atada a un cliente existente), aunque la consulta a ARCA dependa
+     * solo del CUIT.
+     *
+     * Responde 200 siempre: un CUIT que ARCA no reconoce no es un error del
+     * request, es un resultado. El front distingue por `hubo_un_error`, igual
+     * que el modal de VENDER en empresa-spa.
+     *
+     * @param  int|string                        $clientId
+     * @param  string                            $cuit     CUIT a consultar (puede traer guiones).
+     * @param  AfipConstanciaInscripcionService  $service  Inyectado por el IoC de Laravel.
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function datos_afip_por_cuit_json($clientId, $cuit, AfipConstanciaInscripcionService $service)
+    {
+        Client::findOrFail($clientId);
+
+        return response()->json($service->consultar($cuit));
     }
 
     /**
