@@ -562,10 +562,20 @@ class RunDemoSetupService
             'use_deposits'            => (bool) $respuestas['usa_depositos'],
             'usan_cuentas_corrientes' => (bool) $respuestas['usa_cuentas_corrientes_clientes'],
 
-            // Depósitos y listas de precios: sin lead no hay nombres cargados.
-            'address_1'    => null,
-            'address_2'    => null,
-            'address_3'    => null,
+            /* Sucursales: los mismos tres nombres que el hook `creating` de Lead le estampa a
+             * TODO lead nuevo ("todo lead nuevo arranca configurado para demo").
+             *
+             * ⚠️ Hoy estos tres valores son INERTES: DemoSetupHelper sólo crea las direcciones si
+             * `use_deposits` viene en true, y arriba sale de los defaults del catálogo, que dicen
+             * que no. Van igual porque el día que ese default cambie, la demo tiene que nacer con
+             * sus tres sucursales y no con depósitos sin una sola dirección — que es un estado
+             * roto que no falla, sólo se ve vacío. */
+            'address_1'    => 'Sucursal 1',
+            'address_2'    => 'Sucursal 2',
+            'address_3'    => 'Sucursal 3',
+
+            // Listas de precios: sin lead no hay nombres cargados, y con `use_price_lists` en
+            // false del catálogo, DemoSetupHelper no las mira.
             'price_type_1' => null,
             'price_type_2' => null,
             'price_type_3' => null,
