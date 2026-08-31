@@ -8,6 +8,7 @@ use App\Models\DemoInstallation;
 use App\Models\DemoInstallationLog;
 use App\Models\EnvTemplate;
 use App\Models\Version;
+use App\Services\Afip\AfipCertificateProvisionService;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -831,10 +832,9 @@ class DemoInstallationService
     /**
      * Etapa 7: corre en la demo los artisan que composer no ejecutó por falta de .env.
      *
-     * Calcado de InstallationService::step_finalize_api(), sin el bloque de certificados de AFIP:
-     * ese lo repone el pipeline de actualización de demos
-     * (DemoUpdateService::provision_afip_certificates()) y meterlo también acá duplicaría la
-     * política en dos lugares que después divergen. Queda anotado en el informe de la misión.
+     * Calcado de InstallationService::step_finalize_api(). Incluye la reposición de los
+     * certificados de AFIP —que el ZIP no puede traer— pero con la política de las DEMOS, no la de
+     * los clientes: acá no aborta nunca. El porqué está en provision_afip_certificates().
      *
      * @return void
      */
@@ -901,9 +901,63 @@ class DemoInstallationService
             );
         }
 
+        $this->provision_afip_certificates('finalize_api');
+
+        /* 🔴 Imprescindible: verify_installation() usa la sesión SSH, no la SFTP que acaba de abrir
+         * la reposición de certificados. Sin reconectar, una sesión tocada por la transferencia
+         * devuelve salida VACÍA sin dar error, la verificación no encuentra su VERIFY_DONE y marca
+         * fallida una instalación que en realidad quedó perfecta. */
+        $this->reconnect_hosting_ssh();
+
         $this->verify_installation();
 
         $this->log('finalize_api', 'API finalizada y lista para bootear', 'success');
+    }
+
+    /**
+     * Copia a la demo los certificados de AFIP, que el ZIP no puede traer.
+     *
+     * Desde el commit ec6e164a de empresa-api (26/7/2026) los certificados no viajan más en el
+     * código: viven en `storage/app/afip/` y están gitignoreados. El ZIP de la etapa 5 excluye
+     * `storage/*`, así que sin este paso la demo nace sin poder facturar — y el síntoma no se
+     * parece a la causa: buscar un cliente por CUIT o DNI en el módulo vender devuelve HTTP 500 en
+     * 0,2 s, antes de salir a la red hacia ARCA, porque el constructor de AfipWSAAHelper tira
+     * apenas no encuentra el archivo. Medido en demo, demo2 y demo3 el 28/8/2026.
+     *
+     * 🔴 NUNCA aborta la instalación, y esa es la diferencia con el camino de los CLIENTES.
+     * InstallationService sí corta: `required_installation_paths()` exige las cuatro rutas, porque
+     * un cliente entregado sin certificados parece perfecto hasta que intenta emitir su primera
+     * factura de verdad. En una demo la política es la contraria y ya está decidida
+     * (DemoUpdateService::provision_afip_certificates(), 28/8/2026): si el admin no tuviera los
+     * certificados cargados, un corte acá haría fallar TODAS las instalaciones de demo por un
+     * archivo que no es del camino crítico de una demo. Por eso este pipeline usa
+     * `reponer_en_api()`, que no propaga excepciones, y por eso los certificados NO están en
+     * `required_installation_paths()`.
+     *
+     * @param  string  $step
+     * @return void
+     */
+    private function provision_afip_certificates(string $step): void
+    {
+        $service = new AfipCertificateProvisionService();
+
+        /* El nivel se antepone al renglón además de guardarse en la columna `level`, para que el
+         * log se lea igual en una consola sin colores: un error de SFTP no puede leerse igual que
+         * "ya los tenía todos". Mismo criterio que DemoUpdateService. */
+        $log = function (string $linea, string $nivel) use ($step) {
+            $prefijo = ($nivel === 'error' || $nivel === 'warning') ? 'AVISO: ' : '';
+            $this->log($step, $prefijo . $linea, $nivel);
+        };
+
+        $this->log($step, 'Instalando los certificados AFIP desde el servidor del admin...');
+
+        $service->reponer_en_api(
+            function () {
+                return $this->open_sftp_session($this->demo_credential_type());
+            },
+            $this->demo_api_path(),
+            $log
+        );
     }
 
     /**
