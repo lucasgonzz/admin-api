@@ -709,6 +709,16 @@ Route::prefix('admin')->group(function () {
 
         // Instalación/actualización del ecommerce (tienda-spa + tienda-api): job en cola +
         // endpoints de estado/logs para el polling del panel (prompts 583/584/585).
+        //
+        // Desde el 31/8/2026 los dos endpoints de arranque (`start-install` y `start-update`)
+        // aceptan `{ demo_id }` como alternativa a `{ client_id }`: es el mismo pipeline y las
+        // mismas rutas, cambia solo el dueño de la tienda (ver la sección "DUEÑO DE LA TIENDA" de
+        // EcommerceInstallationService). NO se agregaron rutas paralelas por demo a propósito:
+        // dos rutas que terminan en el mismo servicio es la forma conocida de que una se quede
+        // sin la guarda que se le agrega a la otra.
+        //
+        // `ecommerce-installations` acepta además `?owner=cliente|demo` para filtrar el listado
+        // por tipo de dueño. Sin el parámetro devuelve todo, como siempre.
         Route::get('ecommerce-installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'index_json']);
         Route::get('client-ecommerce/{client_ecommerce}/installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'show_json']);
         Route::post('client-ecommerce/{client_ecommerce}/installations/start-install', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_install_json']);
