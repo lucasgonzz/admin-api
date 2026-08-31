@@ -21,6 +21,7 @@ use Illuminate\Support\Collection;
  * @property int|null    $version_id
  * @property string      $kind              completa | esqueleto
  * @property string|null $group_uuid        UUID del par de filas que se crearon y se inician juntas
+ * @property string|null $provision_hosting_type  null = no aprovisionar | shared_hosting | vps
  * @property string      $status            pendiente | instalando | completada | fallida
  * @property array|null  $env_manual_values Valores de variables is_manual_on_create
  * @property string|null $failure_reason
@@ -54,6 +55,48 @@ class ClientInstallation extends Model
      * @var array<int, string>
      */
     const KINDS = [self::KIND_COMPLETA, self::KIND_ESQUELETO];
+
+    /**
+     * Aprovisionar el hosting compartido de Hostinger antes de instalar: los 4 subdominios, la base
+     * de datos y el cron, todo por la API de developers.hostinger.com.
+     *
+     * @var string
+     */
+    const PROVISION_SHARED_HOSTING = 'shared_hosting';
+
+    /**
+     * Aprovisionar el VPS propio antes de instalar: los 4 sitios de CloudPanel, los A records, la
+     * base, el cron y el certificado.
+     *
+     * @var string
+     */
+    const PROVISION_VPS = 'vps';
+
+    /**
+     * Valores válidos de provision_hosting_type. La AUSENCIA de valor (null) también es válida y es
+     * el default: significa "no aprovisiones nada", que es el comportamiento de siempre.
+     *
+     * @var array<int, string>
+     */
+    const PROVISION_HOSTING_TYPES = [self::PROVISION_SHARED_HOSTING, self::PROVISION_VPS];
+
+    /**
+     * Las tres claves del .env que el aprovisionamiento completa solo.
+     *
+     * 🔴 Existen como constante porque hay CUATRO lugares que tienen que estar de acuerdo sobre
+     * cuáles son, y desalinearlos deja el sistema trabado sin decir por qué:
+     *
+     * 1. start(), que hoy exige que TODA variable is_manual_on_create tenga valor antes de
+     *    despachar. Sin exceptuar estas tres, con el aprovisionamiento tildado el operador nunca
+     *    podría apretar "Iniciar": el botón queda gris esperando un valor que va a existir recién
+     *    quince minutos después, adentro del pipeline.
+     * 2. step_write_env(), que las lee de las credenciales generadas en vez de env_manual_values.
+     * 3. El modal de gestión, que las muestra deshabilitadas.
+     * 4. all_manual_values_filled() del SPA, espejo exacto de (1).
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_ENV_APROVISIONADAS = ['DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD'];
 
     /**
      * Permite asignación masiva de todos los campos.
