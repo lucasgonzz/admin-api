@@ -63,14 +63,19 @@ class ClientEcommerceInstallation extends Model
      */
     public function scopeWithAll($query)
     {
-        /* El dueño de la tienda viaja anidado desde el 31/8/2026, cuando `client_ecommerce` pasó a
-         * poder pertenecer a un Client O a una Demo. Sin estas dos líneas, `GET
-         * /ecommerce-installations` devuelve la corrida sin nada con qué nombrar de quién es, y la
-         * grilla de admin-spa tiene que salir a pedir el dueño de cada fila por separado. Las dos
-         * relaciones son nullable por diseño (una tienda tiene exactamente una de las dos), así que
-         * cargar ambas es correcto: la que no aplica viene en null y no cuesta una consulta extra. */
+        /* `client_ecommerce.demo` viaja anidado desde el 31/8/2026, cuando una tienda pasó a poder
+         * pertenecer a un Client O a una Demo: sin eso, la grilla de demos recibe la corrida sin
+         * nada con qué nombrar de quién es.
+         *
+         * 🔴 Y `client_ecommerce.client` NO se carga, aunque parezca la contraparte simétrica. La
+         * grilla de clientes no la necesita —resuelve el nombre contra su propio `clients_by_id`
+         * usando `client_ecommerce.client_id`—, y cargarla sale caro: `Client` tiene cuatro
+         * `$appends` (ecommerce_spa_url, ecommerce_api_url, ecommerce_spa_path, ecommerce_api_path)
+         * que resuelven contra `$this->client_ecommerce`, que en esa ruta anidada no queda
+         * eager-cargada. O sea una consulta extra por fila al serializar, más un Client entero por
+         * corrida en el payload — el mismo N+1 que ClaudeClientOpsController documenta en su
+         * cabecera, metido en una pantalla del camino de producción a cambio de nada. */
         $query->with([
-            'client_ecommerce.client',
             'client_ecommerce.demo',
             'logs',
         ]);

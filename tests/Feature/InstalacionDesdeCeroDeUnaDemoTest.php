@@ -72,6 +72,85 @@ class InstalacionDesdeCeroDeUnaDemoTest extends TestCase
         Queue::assertPushed(RunDemoInstallationJob::class, 1);
     }
 
+    public function test_no_se_instala_una_demo_sin_id_de_comercio(): void
+    {
+        Queue::fake();
+
+        /* 🔴 El pipeline le hace migrate:fresh a la base de la demo en la etapa 8. Una validación
+         * que llegue después de eso llega tarde: la base ya se vació. Por eso el rechazo tiene que
+         * pasar acá, antes de crear siquiera la fila. */
+        $demo    = $this->crear_demo(['user_id' => null]);
+        $version = $this->crear_version();
+
+        $response = (new DemoInstallationController())->store_json(Request::create(
+            '/demo-installation',
+            'POST',
+            ['demo_id' => $demo->id, 'version_id' => $version->id]
+        ));
+
+        $this->assertSame(422, $response->getStatusCode());
+        $this->assertStringContainsString('ID de comercio', $response->getData(true)['message']);
+
+        // Ni fila ni job: el rechazo es total, no deja rastro a medias.
+        $this->assertSame(0, DemoInstallation::where('demo_id', $demo->id)->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_no_se_arranca_una_segunda_instalacion_sobre_la_misma_demo(): void
+    {
+        Queue::fake();
+
+        /* Dos corridas simultáneas sobre la misma demo serían dos jobs descomprimiendo sobre el
+         * mismo directorio remoto y dos migrate:fresh sobre la misma base. Y es fácil llegar acá
+         * sin querer: el pipeline tarda media hora, así que da la sensación de que no arrancó. */
+        $demo    = $this->crear_demo();
+        $version = $this->crear_version();
+
+        DemoInstallation::create([
+            'demo_id'    => $demo->id,
+            'version_id' => $version->id,
+            'status'     => DemoInstallation::STATUS_INSTALANDO,
+            'uuid'       => (string) Str::uuid(),
+        ]);
+
+        $response = (new DemoInstallationController())->store_json(Request::create(
+            '/demo-installation',
+            'POST',
+            ['demo_id' => $demo->id, 'version_id' => $version->id]
+        ));
+
+        $this->assertSame(422, $response->getStatusCode());
+        $this->assertStringContainsString('ya tiene una instalación en curso', $response->getData(true)['message']);
+        $this->assertSame(1, DemoInstallation::where('demo_id', $demo->id)->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_una_corrida_terminada_no_bloquea_una_instalacion_nueva(): void
+    {
+        Queue::fake();
+
+        // La guarda mira solo los estados EN CURSO: reinstalar una demo cuya corrida anterior ya
+        // terminó (o falló) tiene que seguir siendo posible.
+        $demo    = $this->crear_demo();
+        $version = $this->crear_version();
+
+        DemoInstallation::create([
+            'demo_id'    => $demo->id,
+            'version_id' => $version->id,
+            'status'     => DemoInstallation::STATUS_FALLIDA,
+            'uuid'       => (string) Str::uuid(),
+        ]);
+
+        $response = (new DemoInstallationController())->store_json(Request::create(
+            '/demo-installation',
+            'POST',
+            ['demo_id' => $demo->id, 'version_id' => $version->id]
+        ));
+
+        $this->assertSame(201, $response->getStatusCode());
+        Queue::assertPushed(RunDemoInstallationJob::class, 1);
+    }
+
     public function test_no_se_puede_borrar_una_instalacion_que_esta_corriendo(): void
     {
         $installation = $this->crear_instalacion(['status' => DemoInstallation::STATUS_INSTALANDO]);
@@ -198,6 +277,10 @@ class InstalacionDesdeCeroDeUnaDemoTest extends TestCase
     private function crear_demo(array $atributos = []): Demo
     {
         return Demo::create(array_merge([
+            // user_id es obligatorio para instalar: sin el id de comercio el .env queda con
+            // USER_ID= vacío y el demo-setup siembra los datos colgando de otro usuario. La guarda
+            // está en DemoInstallationController y se prueba abajo.
+            'user_id'           => 4242,
             'erp_spa_url'       => 'https://demo-s11.comerciocity.com',
             'erp_api_url'       => 'https://api-demo-s11.comerciocity.com',
             'ecommerce_spa_url' => 'https://tienda-demo-s11.comerciocity.com',

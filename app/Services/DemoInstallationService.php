@@ -1101,13 +1101,24 @@ class DemoInstallationService
     {
         $api_base_url = $this->demo_api_base_url();
 
-        // Demos locales (las que arma el seeder, ej. empresa.local:8000) no son hosting real: se
-        // saltea el POST y se deja constancia, igual que hace la verificación por HTTP. Mismo
-        // criterio y misma señal: "la URL no es absoluta".
-        if (! $this->es_url_absoluta($api_base_url)) {
+        /* 🔴 "Demo local" se decide por el HOST, no por si la URL trae esquema. La versión anterior
+         * de esta guarda preguntaba `es_url_absoluta($api_base_url)`, y `demo_api_base_url()`
+         * devuelve crudo todo lo que no arranca con http/https — o sea que una demo de PRODUCCIÓN
+         * cargada como `api-demo3.comerciocity.com` (sin esquema, que es la forma más común de
+         * cargarla a mano, según el docblock de DemoUrlNormalizer::host_of()) se leía como local.
+         * El resultado era un éxito silencioso de manual: se salteaba el demo-setup —la única
+         * etapa que le pone datos a la demo—, se salteaba también la verificación por la misma
+         * razón, y la corrida terminaba en `completada`, verde en el panel, con la demo vacía y el
+         * bundle apuntando a una URL sin esquema.
+         *
+         * DemoUrlNormalizer ya sabe distinguir un host local de uno real (lista de hosts, sufijos
+         * `.local` y demás, e IPs privadas de LAN) y lo expresa en el esquema que elige: http para
+         * local, https para cualquier host real. Se reusa ese criterio en vez de escribir uno
+         * nuevo, que es exactamente lo que había divergido. */
+        if ($this->demo_es_local()) {
             $this->log(
                 'run_demo_setup',
-                'Se saltea el demo-setup: "' . $api_base_url . '" no es una URL absoluta (demo local).'
+                'Se saltea el demo-setup: "' . $api_base_url . '" apunta a un host local.'
             );
 
             return;
@@ -1193,12 +1204,14 @@ class DemoInstallationService
             );
         }
 
-        // Demos locales (seeder): no es hosting real, no tiene sentido pegarle por HTTP.
-        if (! $this->es_url_absoluta($this->compiled_api_url)) {
+        // Demos locales (seeder): no es hosting real, no tiene sentido pegarle por HTTP. Mismo
+        // criterio por host que step_run_demo_setup(), y por el mismo motivo: preguntar si la URL
+        // trae esquema daba "local" para una demo de producción cargada a mano sin esquema, y
+        // entonces esta etapa dejaba pasar en silencio justo el caso que existe para atajar.
+        if ($this->demo_es_local()) {
             $this->log(
                 'verify',
-                'Se saltea la verificación: "' . $this->compiled_api_url . '" no es una URL '
-                . 'absoluta (demo local).'
+                'Se saltea la verificación: "' . $this->compiled_api_url . '" apunta a un host local.'
             );
 
             return;
@@ -1445,18 +1458,26 @@ class DemoInstallationService
     }
 
     /**
-     * ¿La URL tiene esquema http/https?
+     * ¿Esta demo apunta a un host local (las que arma el seeder, ej. `empresa.local:8000`)?
      *
-     * Es la señal con la que este pipeline —igual que DemoUpdateService— reconoce una demo LOCAL
-     * (las que arma el seeder, ej. `empresa.local:8000`) para saltearse lo que sale a la red. Sin
-     * esto, correr el pipeline en desarrollo dispara tráfico real.
+     * Es la señal con la que el pipeline se saltea lo que sale a la red, para que correrlo en
+     * desarrollo no dispare tráfico real contra ningún servidor.
      *
-     * @param  string  $url
      * @return bool
      */
-    private function es_url_absoluta(string $url): bool
+    private function demo_es_local(): bool
     {
-        return preg_match('/^https?:\/\//i', $url) === 1;
+        /* DemoUrlNormalizer::absolute() elige el esquema mirando el host: http:// para los hosts
+         * locales que tiene enumerados (localhost, sufijos tipo .local, IPs privadas de LAN) y
+         * https:// para cualquier host real. Ese es el clasificador que ya usa el resto del
+         * proyecto, así que se lee de ahí en vez de mantener una segunda lista de hosts locales
+         * que tarde o temprano queda desincronizada.
+         *
+         * Se mira `erp_api_url` cruda y no la normalizada del pipeline: es el dato que cargó el
+         * operador, y es sobre ese dato que hay que decidir si esta demo es de desarrollo. */
+        $absoluta = DemoUrlNormalizer::absolute((string) $this->demo->erp_api_url);
+
+        return strpos($absoluta, 'http://') === 0;
     }
 
     /**

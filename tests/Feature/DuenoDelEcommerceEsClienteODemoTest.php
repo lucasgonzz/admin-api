@@ -387,6 +387,30 @@ class DuenoDelEcommerceEsClienteODemoTest extends TestCase
      *
      * @return void
      */
+    public function test_start_update_de_una_demo_sin_tienda_instalada_no_la_crea(): void
+    {
+        Queue::fake();
+        $this->admin_logueado();
+        $this->cargar_entorno_de_deploy();
+
+        /* 🔴 Una actualización NO puede crear la tienda. Si la crea, EcommerceDeploymentService sale
+         * a "actualizar" un directorio remoto que no existe — o, peor, uno que existe y está
+         * sirviendo otra cosa, porque el despliegue del SPA hace `rm -rf` sobre el docroot antes de
+         * reemplazarlo. Es la misma guarda que el camino del cliente ya tenía ("El cliente no tiene
+         * una tienda (ecommerce) configurada") y que al camino de la demo le faltaba. */
+        $demo = $this->crear_demo();
+        $this->assertSame(0, ClientEcommerce::where('demo_id', $demo->id)->count());
+
+        $response = $this->postJson('/api/admin/ecommerce-installations/start-update', ['demo_id' => $demo->id]);
+
+        $response->assertStatus(422);
+        $this->assertStringContainsString('todavía no tiene instalada su tienda', $response->json('error'));
+
+        // Ni tienda ni corrida ni job: el rechazo no deja nada escrito.
+        $this->assertSame(0, ClientEcommerce::where('demo_id', $demo->id)->count());
+        Queue::assertNothingPushed();
+    }
+
     public function test_start_update_con_demo_id_reutiliza_la_tienda_y_refresca_las_urls(): void
     {
         Queue::fake();

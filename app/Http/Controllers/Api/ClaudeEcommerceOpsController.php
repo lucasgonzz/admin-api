@@ -220,7 +220,14 @@ class ClaudeEcommerceOpsController extends Controller
         $limit     = $this->resolver_limite($request->input('limit'), self::LIMIT_STORES_DEFAULT, self::LIMIT_STORES_MAX);
         $after_id  = $this->entero_o_null($request->input('after_id'));
 
-        $query = ClientEcommerce::query()->with('client');
+        /* 🔴 `whereNotNull('client_id')` desde el 31/8/2026: una tienda puede pertenecer a un
+         * cliente O a una demo, y todo el vocabulario de este endpoint (y de los de disparo que lo
+         * consumen: `confirm_client_name`, `confirm_client_count`, `client_ids[]`) es de clientes.
+         * Sin este filtro, las tiendas de demo aparecían acá con `client_id` y `client_name` en
+         * null y `puede_actualizarse: true`, y `calcular_confirm_token` hashea `client_name` sin
+         * protección para null. El contrato de este listado —toda fila tiene cliente— se mantiene
+         * como estaba; las tiendas de demo se miran desde el módulo Demos. */
+        $query = ClientEcommerce::query()->whereNotNull('client_id')->with('client');
 
         $client_id = $this->entero_o_null($request->input('client_id'));
         if ($client_id !== null) {
@@ -330,7 +337,11 @@ class ClaudeEcommerceOpsController extends Controller
                 'cei.created_via', 'cei.failure_reason', 'cei.started_at', 'cei.finished_at',
                 'cei.created_at', 'cei.updated_at',
                 'ce.client_id', 'ce.domain', 'c.name as client_name',
-            ]);
+            ])
+            /* Mismo criterio que stores_json(): este listado es de corridas de tiendas de
+             * CLIENTES. Las corridas de tiendas de demo tienen `ce.client_id` en null y se miran
+             * desde el módulo Demos. */
+            ->whereNotNull('ce.client_id');
 
         $client_id = $this->entero_o_null($request->input('client_id'));
         if ($client_id !== null) {

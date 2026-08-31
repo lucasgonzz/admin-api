@@ -105,7 +105,7 @@ class EcommerceInstallationController extends BaseController
      */
     public function start_update_json(Request $request): JsonResponse
     {
-        $client_ecommerce = $this->resolve_ecommerce_from_request($request);
+        $client_ecommerce = $this->resolve_ecommerce_from_request($request, 'update');
         if ($client_ecommerce instanceof JsonResponse) {
             return $client_ecommerce;
         }
@@ -129,7 +129,7 @@ class EcommerceInstallationController extends BaseController
      */
     public function start_install_for_client_json(Request $request): JsonResponse
     {
-        $client_ecommerce = $this->resolve_ecommerce_from_request($request);
+        $client_ecommerce = $this->resolve_ecommerce_from_request($request, 'install');
         if ($client_ecommerce instanceof JsonResponse) {
             return $client_ecommerce;
         }
@@ -145,13 +145,15 @@ class EcommerceInstallationController extends BaseController
      * "Falta client_id." de siempre, para no romper al panel viejo.
      *
      * @param  Request  $request  { client_id } o { demo_id }
+     * @param  string   $mode     'install' | 'update'. Solo una instalación puede crear la tienda
+     *                            de una demo que todavía no la tiene; ver resolve_ecommerce_de_demo().
      * @return ClientEcommerce|JsonResponse  La tienda, o la respuesta de error a devolver tal cual.
      */
-    protected function resolve_ecommerce_from_request(Request $request)
+    protected function resolve_ecommerce_from_request(Request $request, string $mode = 'install')
     {
         $demo_id = $request->input('demo_id');
         if (! empty($demo_id)) {
-            return $this->resolve_ecommerce_de_demo($demo_id);
+            return $this->resolve_ecommerce_de_demo($demo_id, $mode);
         }
 
         $client_id = $request->input('client_id');
@@ -184,10 +186,18 @@ class EcommerceInstallationController extends BaseController
      * es la de esa demo, sin que nada lo denuncie. (Para un cliente esto no pasa: ahí las URLs se
      * cargan a mano en el perfil, que ES la fuente de verdad.)
      *
-     * @param  mixed  $demo_id
+     * 🔴 Y solo la CREA cuando el modo es `install`. En una actualización, una demo sin tienda es
+     * un 422, igual que un cliente sin tienda (ver el camino de arriba). Crearla en `update`
+     * mandaba a EcommerceDeploymentService a "actualizar" un directorio remoto que no existe — o,
+     * peor, uno que existe y está sirviendo otra cosa, porque el despliegue del SPA hace `rm -rf`
+     * sobre el docroot antes de reemplazarlo. El error llegaba recién adentro del job, con el
+     * pipeline ya corriendo contra un servidor real.
+     *
+     * @param  mixed   $demo_id
+     * @param  string  $mode  'install' | 'update'
      * @return ClientEcommerce|JsonResponse
      */
-    protected function resolve_ecommerce_de_demo($demo_id)
+    protected function resolve_ecommerce_de_demo($demo_id, string $mode = 'install')
     {
         $demo = Demo::find($demo_id);
         if ($demo === null) {
@@ -215,6 +225,13 @@ class EcommerceInstallationController extends BaseController
         }
 
         $client_ecommerce = ClientEcommerce::where('demo_id', $demo->id)->first();
+
+        if ($client_ecommerce === null && $mode !== 'install') {
+            return response()->json([
+                'error' => 'Esta demo todavía no tiene instalada su tienda, así que no hay nada que '
+                    . 'actualizar. Instalala primero desde Demos > Instalaciones > Ecommerce.',
+            ], 422);
+        }
 
         if ($client_ecommerce === null) {
             $client_ecommerce = ClientEcommerce::create([
