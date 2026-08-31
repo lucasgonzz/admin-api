@@ -107,76 +107,39 @@ class SupportWhatsappOpenerService
      */
     public function open(Client $client, string $phone, string $operator_text, Admin $admin, string $ticket_name = ''): array
     {
-        $contact = $this->phone_directory->resolve_for_client($client, $phone);
-        if ($contact === null) {
-            throw new \InvalidArgumentException(
-                'Ese número no está cargado en la ficha del cliente. Cargalo primero como teléfono del cliente o como empleado, si no el webhook no va a reconocer la respuesta y va a caer en el pipeline de leads.'
-            );
-        }
-
-        $normalized_phone = (string) $contact['phone'];
-        $client_employee_id = $contact['client_employee_id'];
-
-        $window = $this->window_service->window_state($normalized_phone);
-        $use_template = ! $window['open'];
-
-        $contact_name = (string) $contact['label'];
-        $admin_name = trim((string) ($admin->name ?? ''));
-        if ($admin_name === '') {
-            $admin_name = 'Soporte';
-        }
-
         // Se persiste el texto CRUDO del operador. El body solo pasa a ser el texto completo
         // de la plantilla cuando el envío se confirma: si se guardara envuelto de entrada, un
         // envío fallido dejaría en la bandeja un mensaje con saludo y firma que el cliente
         // nunca recibió, y el botón de reintentar lo volvería a envolver sobre sí mismo.
         $operator_text = trim($operator_text);
 
-        $reused = false;
         $ticket = null;
         $message = null;
+        $reused = false;
+        $normalized_phone = '';
+        $contact_name = '';
 
         // La transacción cubre solo la escritura local. El POST a Kapso queda afuera a
         // propósito: tiene timeout de 15s y dos reintentos, y no se sostiene una transacción
         // abierta durante 45 segundos.
         DB::transaction(function () use (
             $client,
-            $normalized_phone,
-            $client_employee_id,
-            $contact_name,
+            $phone,
             $ticket_name,
             $admin,
             $operator_text,
             &$ticket,
             &$message,
-            &$reused
+            &$reused,
+            &$normalized_phone,
+            &$contact_name
         ) {
-            // La búsqueda va adentro de la transacción y con lock: suelta, dos operadores
-            // simultáneos (o un operador y un mensaje entrante) abrían dos hilos del mismo
-            // contacto, y el webhook después engancha las respuestas en uno solo.
-            $ticket = $this->find_reusable_ticket($client, $normalized_phone, $client_employee_id, true);
-            $reused = $ticket !== null;
+            $resuelto = $this->resolve_or_create_ticket($client, $phone, $admin, $ticket_name);
 
-            if ($ticket === null) {
-                $ticket = SupportTicket::create([
-                    'client_id'          => $client->id,
-                    'client_employee_id' => $client_employee_id,
-                    'client_user_id'     => 0,
-                    'client_user_name'   => $contact_name !== '' ? $contact_name : null,
-                    // Al operador que la abre, igual que el alta del canal ERP. Asignarla al
-                    // dueño por defecto (criterio de los tickets ENTRANTES) la sacaría de su
-                    // bandeja apenas la crea: el filtro por defecto es "mine".
-                    'assigned_admin_id'  => (int) $admin->id,
-                    'name'               => trim($ticket_name) !== '' ? trim($ticket_name) : null,
-                    'status'             => 'open',
-                    'source'             => 'whatsapp',
-                    'whatsapp_phone'     => $normalized_phone,
-                    'opened_at'          => now(),
-                ]);
-            } elseif (trim($ticket_name) !== '' && empty($ticket->name)) {
-                $ticket->name = trim($ticket_name);
-                $ticket->save();
-            }
+            $ticket = $resuelto['ticket'];
+            $reused = $resuelto['reused'];
+            $contact_name = $resuelto['contact_name'];
+            $normalized_phone = $resuelto['phone'];
 
             $message = SupportMessage::create([
                 'support_ticket_id' => $ticket->id,
@@ -187,6 +150,14 @@ class SupportWhatsappOpenerService
                 'delivered_at'      => now(),
             ]);
         });
+
+        $window = $this->window_service->window_state($normalized_phone);
+        $use_template = ! $window['open'];
+
+        $admin_name = trim((string) ($admin->name ?? ''));
+        if ($admin_name === '') {
+            $admin_name = 'Soporte';
+        }
 
         // El mensaje de apertura también se parte si el operador escribió el separador. La regla
         // vale desde el primer mensaje y no recién desde la segunda respuesta: para quien escribe
@@ -223,6 +194,94 @@ class SupportWhatsappOpenerService
                 'window_open'   => (bool) $window['open'],
                 'window'        => $window,
             ]),
+        ];
+    }
+
+    /**
+     * Resuelve el contacto y busca-o-crea el ticket, sin mandar ni persistir ningún mensaje.
+     *
+     * Es el primer tramo de open(), separado para que el alta con plantilla elegida (el
+     * operador manda una plantilla real en vez de texto libre auto-envuelto) pueda reusar
+     * exactamente la misma resolución de contacto y el mismo criterio de reuso de ticket, sin
+     * pasar por la creación de un SupportMessage ni por ningún envío.
+     *
+     * @param Client $client      Cliente destino.
+     * @param string $phone       Teléfono elegido por el operador, en cualquier formato.
+     * @param Admin  $admin       Operador que abre la conversación.
+     * @param string $ticket_name Título opcional del ticket.
+     *
+     * @return array{ticket: SupportTicket, reused: bool, contact_name: string, phone: string, client_employee_id: int|null}
+     *
+     * @throws \InvalidArgumentException Si el teléfono no pertenece al cliente.
+     */
+    public function resolve_or_create_ticket(Client $client, string $phone, Admin $admin, string $ticket_name = ''): array
+    {
+        $contact = $this->phone_directory->resolve_for_client($client, $phone);
+        if ($contact === null) {
+            throw new \InvalidArgumentException(
+                'Ese número no está cargado en la ficha del cliente. Cargalo primero como teléfono del cliente o como empleado, si no el webhook no va a reconocer la respuesta y va a caer en el pipeline de leads.'
+            );
+        }
+
+        $normalized_phone = (string) $contact['phone'];
+        $client_employee_id = $contact['client_employee_id'];
+        $contact_name = (string) $contact['label'];
+
+        // Transacción propia: este método se puede llamar suelto (alta con plantilla elegida,
+        // desde el controller) o anidado adentro de la transacción de open(). Si se llamara
+        // suelto sin abrir transacción acá, el lockForUpdate() de abajo se soltaría apenas
+        // termina esa consulta -MySQL hace autocommit por sentencia fuera de una transacción-
+        // y dos altas simultáneas del mismo contacto podrían crear dos tickets. Anidada dentro
+        // de la transacción de open(), Laravel la convierte en un SAVEPOINT: el lock lo sigue
+        // sosteniendo la transacción externa hasta su commit, así que el comportamiento de hoy
+        // no cambia un poco.
+        $ticket = null;
+        $reused = false;
+
+        DB::transaction(function () use (
+            $client,
+            $normalized_phone,
+            $client_employee_id,
+            $contact_name,
+            $ticket_name,
+            $admin,
+            &$ticket,
+            &$reused
+        ) {
+            // La búsqueda va con lock: suelta, dos operadores simultáneos (o un operador y un
+            // mensaje entrante) abrían dos hilos del mismo contacto, y el webhook después
+            // engancha las respuestas en uno solo.
+            $ticket = $this->find_reusable_ticket($client, $normalized_phone, $client_employee_id, true);
+            $reused = $ticket !== null;
+
+            if ($ticket === null) {
+                $ticket = SupportTicket::create([
+                    'client_id'          => $client->id,
+                    'client_employee_id' => $client_employee_id,
+                    'client_user_id'     => 0,
+                    'client_user_name'   => $contact_name !== '' ? $contact_name : null,
+                    // Al operador que la abre, igual que el alta del canal ERP. Asignarla al
+                    // dueño por defecto (criterio de los tickets ENTRANTES) la sacaría de su
+                    // bandeja apenas la crea: el filtro por defecto es "mine".
+                    'assigned_admin_id'  => (int) $admin->id,
+                    'name'               => trim($ticket_name) !== '' ? trim($ticket_name) : null,
+                    'status'             => 'open',
+                    'source'             => 'whatsapp',
+                    'whatsapp_phone'     => $normalized_phone,
+                    'opened_at'          => now(),
+                ]);
+            } elseif (trim($ticket_name) !== '' && empty($ticket->name)) {
+                $ticket->name = trim($ticket_name);
+                $ticket->save();
+            }
+        });
+
+        return [
+            'ticket'              => $ticket,
+            'reused'              => $reused,
+            'contact_name'        => $contact_name,
+            'phone'               => $normalized_phone,
+            'client_employee_id'  => $client_employee_id,
         ];
     }
 
