@@ -65,10 +65,15 @@ class ClientMensualidadController extends Controller
             'precio_mercado_libre' => ['nullable', 'numeric', 'min:0'],
             'precio_tienda_nube' => ['nullable', 'numeric', 'min:0'],
             'payment_expired_at' => ['nullable', 'date'],
-            'afip_cuit' => ['nullable', 'string'],
-            'afip_razon_social' => ['nullable', 'string'],
-            'afip_condicion_iva' => ['nullable', 'string'],
-            'afip_domicilio' => ['nullable', 'string'],
+            /* Los `max` son los anchos reales de las columnas en `clients` (migración
+               2026_07_08_100100). Sin ellos, un valor más largo —que ahora puede
+               llegar solo, traído de ARCA por el botón "Obtener datos"— explota como
+               500 genérico contra el modo estricto de MySQL en vez de volver un 422
+               que la pantalla pueda mostrar. */
+            'afip_cuit' => ['nullable', 'string', 'max:50'],
+            'afip_razon_social' => ['nullable', 'string', 'max:120'],
+            'afip_condicion_iva' => ['nullable', 'string', 'max:60'],
+            'afip_domicilio' => ['nullable', 'string', 'max:200'],
         ]);
 
         $service->guardar($client, $validated);

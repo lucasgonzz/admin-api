@@ -126,6 +126,13 @@ class AfipPadronService
     {
         $result = null;
 
+        /* `connection_timeout` solo cubre el connect de la llamada SOAP: ni la
+           bajada del WSDL ni la lectura de la respuesta lo miran, esas van por
+           `default_socket_timeout`, que por default son 60 segundos. Sin esto,
+           un ARCA lento deja el botón "Consultando..." un minuto por cada tramo.
+           Es lo mismo que hace `WS::__call()` en empresa-api. */
+        @ini_set('default_socket_timeout', '15');
+
         try {
             if (is_null($this->soap_client)) {
                 $this->soap_client = new \SoapClient(self::URL_PRODUCCION.'?WSDL', [
@@ -134,7 +141,13 @@ class AfipPadronService
                     // Ver el docblock de la clase: lo pide el servicio. La respuesta
                     // se pasa a UTF-8 en el orquestador, no acá.
                     'encoding' => 'ISO-8859-1',
-                    'cache_wsdl' => WSDL_CACHE_NONE,
+                    /* Con WSDL_CACHE_NONE cada consulta bajaba de nuevo el WSDL entero
+                       de ARCA: un ida y vuelta de red de más por click, y una caída del
+                       `?WSDL` dejaba sin funcionar una consulta que no lo necesita.
+                       empresa-api resuelve lo mismo con un archivo local con TTL y
+                       fallback al vencido (`WS::get_wsdl_to_use()`); acá alcanza con la
+                       caché en disco que trae PHP, sin sumar esa maquinaria. */
+                    'cache_wsdl' => WSDL_CACHE_DISK,
                     'trace' => 1,
                     'exceptions' => 1,
                     'connection_timeout' => 15,

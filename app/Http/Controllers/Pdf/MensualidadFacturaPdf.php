@@ -219,14 +219,14 @@ class MensualidadFacturaPdf extends fpdf
         $this->SetX(80);
         $this->SetFont('Arial', 'B', 8);
         $this->Cell(47, 5, 'Apellido y Nombre / Razón Social:', 0, 0, 'L');
-        $this->SetFont('Arial', '', 8);
-        $this->Cell(60, 5, (string) $this->client->afip_razon_social, 0, 1, 'L');
+        // El valor arranca en x=127 y el recuadro cierra en x=205: 78mm útiles.
+        $this->print_valor_ajustado((string) $this->client->afip_razon_social, 78);
 
         $this->SetX(80);
         $this->SetFont('Arial', 'B', 8);
         $this->Cell(30, 5, 'Domicilio Comercial:', 0, 0, 'L');
-        $this->SetFont('Arial', '', 8);
-        $this->Cell(60, 5, (string) $this->client->afip_domicilio, 0, 1, 'L');
+        // El valor arranca en x=110 y el recuadro cierra en x=205: 95mm útiles.
+        $this->print_valor_ajustado((string) $this->client->afip_domicilio, 95);
 
         // Líneas del recuadro de receptor (igual que `printClientLines`).
         $this->SetLineWidth(.3);
@@ -236,6 +236,49 @@ class MensualidadFacturaPdf extends fpdf
         $this->Line(205, 52, 205, 68);
 
         $this->y = 75;
+    }
+
+    /**
+     * Imprime un valor del bloque de receptor haciéndolo entrar en el ancho que
+     * queda hasta el borde del recuadro.
+     *
+     * 🔴 Por qué hace falta: `Cell()` de FPDF **no envuelve ni recorta**. Lo que no
+     * entra se dibuja igual, por encima del borde del recuadro y del margen de la
+     * hoja. Con los datos que se tipeaban a mano no se notaba; desde que la razón
+     * social y el domicilio los trae ARCA (botón "Obtener datos") vienen con el
+     * nombre legal completo y el domicilio con localidad y provincia, y un
+     * contribuyente de CABA se sale de la página.
+     *
+     * Se baja el cuerpo antes que recortar: perder texto de un comprobante fiscal
+     * es peor que imprimirlo un punto más chico. El recorte queda como último
+     * recurso, ya en el tamaño mínimo legible.
+     *
+     * @param  string $texto            Valor a imprimir (UTF-8).
+     * @param  float  $ancho_disponible Ancho en mm desde donde arranca el valor hasta el borde.
+     * @return void
+     */
+    protected function print_valor_ajustado($texto, $ancho_disponible)
+    {
+        /* `Cell()` hace `utf8_decode()` del texto (fpdf.php), pero `GetStringWidth()`
+           no: hay que medir el texto ya decodificado o cada acento cuenta doble. */
+        foreach ([8, 7, 6] as $tamanio) {
+            $this->SetFont('Arial', '', $tamanio);
+
+            if ($this->GetStringWidth(utf8_decode($texto)) <= $ancho_disponible) {
+                $this->Cell($ancho_disponible, 5, $texto, 0, 1, 'L');
+
+                return;
+            }
+        }
+
+        // Ya en el cuerpo más chico y sigue sin entrar: se recorta por caracteres
+        // (mb_substr, para no partir un acento al medio) hasta que entre con los
+        // puntos suspensivos que avisan que el dato está cortado.
+        while ($texto !== '' && $this->GetStringWidth(utf8_decode($texto.'...')) > $ancho_disponible) {
+            $texto = mb_substr($texto, 0, mb_strlen($texto) - 1);
+        }
+
+        $this->Cell($ancho_disponible, 5, $texto.'...', 0, 1, 'L');
     }
 
     /**

@@ -41,8 +41,13 @@ class Utf8Normalizer
             $value = self::a_utf8($value);
             $value = self::limpiar($value);
 
-            // ARCA a veces devuelve la comilla simple escapada; queda como basura visible.
-            return str_replace("\\'", '', $value);
+            /* ARCA a veces devuelve la comilla simple escapada. Se la restaura, no se
+               la borra: el original de empresa-api hace `str_replace("\\'", '')`, que
+               convierte "D'ANGELO S.A." en "DANGELO S.A." — y eso entra así a
+               `clients.afip_razon_social` y sale impreso en la factura. Los apellidos
+               con apóstrofo (D'Angelo, D'Agostino, O'Higgins) no son raros en el
+               padrón, así que acá el port se aparta del original a propósito. */
+            return str_replace("\\'", "'", $value);
         }
 
         return $value;

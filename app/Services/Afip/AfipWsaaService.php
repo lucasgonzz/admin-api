@@ -125,7 +125,16 @@ class AfipWsaaService
             $this->testing_es_produccion = (bool) $afip_config->afip_produccion;
         }
 
-        // Directorio de trabajo (TRA/TA/CMS) para este ws_name, dentro de storage.
+        /* 🔴 El directorio del TA depende SOLO del ws_name: el ambiente no forma
+           parte de la ruta, aunque el certificado y la URL de WSAA sí cambian con
+           él. Hoy no colisiona porque los dos ws_name en uso van a ambientes fijos
+           ('wsfe' siempre por config, 'ws_sr_constancia_inscripcion' siempre a
+           producción). Pero si algún día se fuerza el ambiente de un ws_name que
+           además se usa con la config, el TA de un ambiente pisa al del otro y
+           `check_wsaa()` lo da por bueno —solo mira `expirationTime`, nunca de
+           dónde vino—: ARCA rechaza con un error de autenticación críptico y
+           reintentar no arregla nada hasta que el TA venza (~12hs). Si hace falta
+           ese caso, el ambiente tiene que entrar acá. */
         $this->work_dir = storage_path('app/afip/wsaa/'.$this->ws_name.'/');
 
         // Crea el directorio de trabajo si todavía no existe (recursivo).

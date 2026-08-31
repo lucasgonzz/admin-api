@@ -46,7 +46,9 @@ class AfipConstanciaInscripcionService
      * completar el formulario de facturación del cliente.
      *
      * Nunca lanza: cualquier problema (CUIT mal formado, ARCA caída, respuesta
-     * incompleta) vuelve como `hubo_un_error` con un texto mostrable al usuario.
+     * incompleta o inconvertible a UTF-8) vuelve como `hubo_un_error` con un
+     * texto mostrable al usuario. Por eso el `try` cubre el método entero y no
+     * solo la autenticación: el mapeo y la normalización también pueden tirar.
      *
      * @param  string $cuit CUIT a consultar; puede venir con guiones o puntos.
      * @return array{hubo_un_error: bool, error: string|null, datos: array|null}
@@ -59,48 +61,48 @@ class AfipConstanciaInscripcionService
             return $this->error('El CUIT tiene que tener 11 dígitos.');
         }
 
-        // CUIT del titular del certificado con el que se firma el TA. Es el mismo
-        // valor que usa la emisión como CUIT del emisor: el certificado de
-        // ComercioCity está emitido a este CUIT, así que si acá fuera otro, ARCA
-        // rechazaría el request por no coincidir con la firma.
-        $config = ComerciocityAfipConfig::current();
-
-        if (empty($config->cuit)) {
-            return $this->error('Falta configurar el CUIT de ComercioCity para poder consultar a ARCA (ver configuración fiscal).');
-        }
-
         try {
+            // CUIT del titular del certificado con el que se firma el TA. Es el mismo
+            // valor que usa la emisión como CUIT del emisor: el certificado de
+            // ComercioCity está emitido a este CUIT, así que si acá fuera otro, ARCA
+            // rechazaría el request por no coincidir con la firma.
+            $config = ComerciocityAfipConfig::current();
+
+            if (empty($config->cuit)) {
+                return $this->error('Falta configurar el CUIT de ComercioCity para poder consultar a ARCA (ver configuración fiscal).');
+            }
+
             // `true` = forzar producción, ver el docblock de la clase.
             $wsaa = new AfipWsaaService(self::WS_NAME, true);
             $wsaa->check_wsaa();
 
             $padron = new AfipPadronService($config->cuit);
             $padron->set_xml_ta(file_get_contents($wsaa->ta_file_path()));
+
+            $respuesta = $padron->get_persona_v2($digitos);
+
+            if ($respuesta['hubo_un_error']) {
+                return $this->error('ARCA respondió con un error: '.$respuesta['error']);
+            }
+
+            $datos = $this->mapear($respuesta['result'], $digitos);
+
+            if (is_null($datos)) {
+                Log::info('AfipConstanciaInscripcionService: respuesta sin datosGenerales para el CUIT '.$digitos);
+
+                return $this->error('ARCA no devolvió datos para el CUIT '.$digitos.'. Verificá que el número sea correcto y que el contribuyente esté activo.');
+            }
+
+            return [
+                'hubo_un_error' => false,
+                'error' => null,
+                'datos' => Utf8Normalizer::convertir($datos),
+            ];
         } catch (\Throwable $e) {
-            Log::error('AfipConstanciaInscripcionService: error obteniendo TA/padron - '.$e->getMessage());
+            Log::error('AfipConstanciaInscripcionService: '.$e->getMessage());
 
-            return $this->error('No se pudo autenticar contra ARCA: '.$e->getMessage());
+            return $this->error('No se pudo consultar a ARCA: '.$e->getMessage());
         }
-
-        $respuesta = $padron->get_persona_v2($digitos);
-
-        if ($respuesta['hubo_un_error']) {
-            return $this->error('ARCA respondió con un error: '.$respuesta['error']);
-        }
-
-        $datos = $this->mapear($respuesta['result'], $digitos);
-
-        if (is_null($datos)) {
-            Log::info('AfipConstanciaInscripcionService: respuesta sin datosGenerales para el CUIT '.$digitos);
-
-            return $this->error('ARCA no devolvió datos para el CUIT '.$digitos.'. Verificá que el número sea correcto y que el contribuyente esté activo.');
-        }
-
-        return [
-            'hubo_un_error' => false,
-            'error' => null,
-            'datos' => Utf8Normalizer::convertir($datos),
-        ];
     }
 
     /**
@@ -161,12 +163,26 @@ class AfipConstanciaInscripcionService
      */
     protected function domicilio($generales)
     {
-        if (! property_exists($generales, 'domicilioFiscal') || ! is_object($generales->domicilioFiscal)) {
+        if (! property_exists($generales, 'domicilioFiscal')) {
             return '';
         }
 
         $domicilio_fiscal = $generales->domicilioFiscal;
+
+        // Para algunos contribuyentes ARCA repite el nodo y el cliente SOAP lo
+        // entrega como array. Se usa el primero, igual que hace el camino del
+        // padrón A13 en empresa-api; sin esto el domicilio se perdía en silencio
+        // y era indistinguible de un contribuyente que no tiene domicilio cargado.
+        if (is_array($domicilio_fiscal)) {
+            $domicilio_fiscal = count($domicilio_fiscal) > 0 ? $domicilio_fiscal[0] : null;
+        }
+
+        if (! is_object($domicilio_fiscal)) {
+            return '';
+        }
+
         $partes = [];
+        $partes_normalizadas = [];
 
         foreach (['direccion', 'localidad', 'descripcionProvincia'] as $campo) {
             if (! property_exists($domicilio_fiscal, $campo)) {
@@ -175,9 +191,21 @@ class AfipConstanciaInscripcionService
 
             $valor = trim((string) $domicilio_fiscal->$campo);
 
-            if ($valor !== '') {
-                $partes[] = $valor;
+            if ($valor === '') {
+                continue;
             }
+
+            // CABA viene con localidad y provincia idénticas ("CIUDAD AUTONOMA
+            // BUENOS AIRES" las dos). Repetirlo solo alarga un texto que después
+            // tiene que entrar en una celda de ancho fijo del PDF de la factura.
+            $normalizado = mb_strtoupper($valor);
+
+            if (in_array($normalizado, $partes_normalizadas, true)) {
+                continue;
+            }
+
+            $partes[] = $valor;
+            $partes_normalizadas[] = $normalizado;
         }
 
         return implode(', ', $partes);
@@ -210,10 +238,32 @@ class AfipConstanciaInscripcionService
                 $impuestos = [$impuestos];
             }
 
+            $es_exento = false;
+
             foreach ($impuestos as $impuesto) {
-                if (isset($impuesto->descripcionImpuesto) && $impuesto->descripcionImpuesto === 'IVA') {
+                if (! isset($impuesto->descripcionImpuesto)) {
+                    continue;
+                }
+
+                $descripcion = mb_strtoupper(trim((string) $impuesto->descripcionImpuesto));
+
+                // El IVA "a secas" es el del responsable inscripto.
+                if ($descripcion === 'IVA') {
                     return 'Responsable inscripto';
                 }
+
+                /* Al exento ARCA lo nombra "IVA EXENTO" (impuesto 32). Comparando
+                   exacto contra 'IVA' —como hace el original de empresa-api— no
+                   matcheaba, la condición volvía vacía, y al facturar
+                   CondicionIvaReceptorResolver caía a Consumidor Final (id 5) e
+                   imprimía eso en el comprobante. */
+                if (strpos($descripcion, 'EXENTO') !== false) {
+                    $es_exento = true;
+                }
+            }
+
+            if ($es_exento) {
+                return 'Exento';
             }
         }
 

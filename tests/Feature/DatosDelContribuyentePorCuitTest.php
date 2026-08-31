@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Admin;
 use App\Models\Client;
+use App\Models\ComerciocityAfipConfig;
 use App\Services\Afip\AfipConstanciaInscripcionService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Str;
@@ -176,9 +177,15 @@ class DatosDelContribuyentePorCuitTest extends TestCase
 
     /**
      * Un CUIT que no tiene 11 dígitos se corta en el servicio real, antes de
-     * pedir el TA y antes de abrir ningún socket. Este test corre contra el
-     * servicio REAL a propósito: si la guarda se rompiera, el test saldría a
-     * la red y fallaría por timeout en vez de pasar en silencio.
+     * pedir el TA y antes de abrir ningún socket.
+     *
+     * 🔴 Estos dos tests corren contra el servicio REAL a propósito, y por eso
+     * las dos barreras importan: si se rompieran las dos, lo que sigue no es un
+     * timeout, es un login real contra `wsaa.afip.gov.ar` firmado con el
+     * certificado de PRODUCCIÓN, que además pisaría el `TA.xml` del slot (un
+     * archivo fuera de la base, que `DatabaseTransactions` no revierte). Por eso
+     * el CUIT de ComercioCity se pone explícitamente en null acá abajo, en vez
+     * de confiar en que la base de testing esté vacía.
      *
      * @return void
      */
@@ -186,6 +193,7 @@ class DatosDelContribuyentePorCuitTest extends TestCase
     {
         $this->admin_logueado();
         $client = $this->crear_cliente();
+        $this->sin_cuit_de_comerciocity();
 
         $response = $this->getJson($this->url($client, '3071851'));
 
@@ -194,6 +202,41 @@ class DatosDelContribuyentePorCuitTest extends TestCase
             'hubo_un_error' => true,
             'error' => 'El CUIT tiene que tener 11 dígitos.',
         ]);
+    }
+
+    /**
+     * Segunda barrera antes de la red: sin el CUIT de ComercioCity cargado no se
+     * puede firmar nada contra ARCA, y se corta con un mensaje que dice qué
+     * configurar en vez de fallar con un error de certificado.
+     *
+     * @return void
+     */
+    public function test_sin_cuit_de_comerciocity_no_sale_a_la_red()
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente();
+        $this->sin_cuit_de_comerciocity();
+
+        $response = $this->getJson($this->url($client, '30718519531'));
+
+        $response->assertStatus(200);
+        $response->assertJson([
+            'hubo_un_error' => true,
+            'error' => 'Falta configurar el CUIT de ComercioCity para poder consultar a ARCA (ver configuración fiscal).',
+        ]);
+    }
+
+    /**
+     * Deja la config fiscal sin CUIT dentro de la transacción del test, para que
+     * los tests que corren el servicio real no puedan llegar nunca a la red.
+     *
+     * @return void
+     */
+    private function sin_cuit_de_comerciocity(): void
+    {
+        $config = ComerciocityAfipConfig::current();
+        $config->cuit = null;
+        $config->save();
     }
 
     /**
@@ -297,6 +340,93 @@ class DatosDelContribuyentePorCuitTest extends TestCase
         ]));
 
         $this->assertSame('Responsable inscripto', $datos['condicion_iva']);
+    }
+
+    /**
+     * 🔴 Exento: ARCA lo nombra "IVA EXENTO" (impuesto 32). Comparando exacto
+     * contra 'IVA' —como hace el original de empresa-api— no matcheaba, la
+     * condición volvía vacía y al facturar `CondicionIvaReceptorResolver` caía a
+     * Consumidor Final (id 5), que es lo que terminaba impreso en el PDF.
+     *
+     * @return void
+     */
+    public function test_mapea_un_exento_como_exento_y_no_como_vacio()
+    {
+        $datos = $this->mapear($this->respuesta_arca([
+            'razonSocial' => 'FUNDACION EXENTA',
+        ], [
+            'datosRegimenGeneral' => (object) [
+                'impuesto' => [
+                    (object) ['descripcionImpuesto' => 'GANANCIAS'],
+                    (object) ['descripcionImpuesto' => 'IVA EXENTO'],
+                ],
+            ],
+        ]));
+
+        $this->assertSame('Exento', $datos['condicion_iva']);
+    }
+
+    /**
+     * Si el contribuyente tiene los dos, el IVA a secas manda: es responsable
+     * inscripto y así hay que facturarle.
+     *
+     * @return void
+     */
+    public function test_el_iva_a_secas_gana_sobre_el_exento()
+    {
+        $datos = $this->mapear($this->respuesta_arca([
+            'razonSocial' => 'LOS DOS SA',
+        ], [
+            'datosRegimenGeneral' => (object) [
+                'impuesto' => [
+                    (object) ['descripcionImpuesto' => 'IVA EXENTO'],
+                    (object) ['descripcionImpuesto' => 'IVA'],
+                ],
+            ],
+        ]));
+
+        $this->assertSame('Responsable inscripto', $datos['condicion_iva']);
+    }
+
+    /**
+     * CABA devuelve localidad y provincia con el mismo texto. Repetirlo solo
+     * alarga un domicilio que después tiene que entrar en una celda de ancho
+     * fijo del PDF.
+     *
+     * @return void
+     */
+    public function test_no_repite_la_localidad_cuando_la_provincia_es_igual()
+    {
+        $datos = $this->mapear($this->respuesta_arca([
+            'razonSocial' => 'PORTEÑA SA',
+            'domicilioFiscal' => (object) [
+                'direccion' => 'AV RIVADAVIA 1234',
+                'localidad' => 'CIUDAD AUTONOMA BUENOS AIRES',
+                'descripcionProvincia' => 'CIUDAD AUTONOMA BUENOS AIRES',
+            ],
+        ], []));
+
+        $this->assertSame('AV RIVADAVIA 1234, CIUDAD AUTONOMA BUENOS AIRES', $datos['domicilio']);
+    }
+
+    /**
+     * Para algunos contribuyentes ARCA repite el nodo y el cliente SOAP entrega
+     * `domicilioFiscal` como array. Antes se devolvía vacío y era indistinguible
+     * de un contribuyente sin domicilio cargado: se perdía en silencio.
+     *
+     * @return void
+     */
+    public function test_toma_el_primer_domicilio_cuando_arca_manda_un_array()
+    {
+        $datos = $this->mapear($this->respuesta_arca([
+            'razonSocial' => 'DOS DOMICILIOS SA',
+            'domicilioFiscal' => [
+                (object) ['direccion' => 'CALLE PRIMERA 100', 'localidad' => 'ROSARIO'],
+                (object) ['direccion' => 'CALLE SEGUNDA 200', 'localidad' => 'SANTA FE'],
+            ],
+        ], []));
+
+        $this->assertSame('CALLE PRIMERA 100, ROSARIO', $datos['domicilio']);
     }
 
     /**
