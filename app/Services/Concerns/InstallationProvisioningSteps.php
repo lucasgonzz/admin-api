@@ -129,6 +129,48 @@ trait InstallationProvisioningSteps
     }
 
     /**
+     * Etapa: el cron de la instancia. Va al final del pipeline, después de finalize_api.
+     *
+     * 🔴 El comando se DECIDE VERIFICANDO, no asumiendo: se cuentan las apariciones de
+     * 'stop-when-empty' en el Kernel.php que upload_api acaba de subir. Con Kernel nuevo va
+     * `schedule:run` sin flock (el propio Kernel usa withoutOverlapping(75)); con Kernel viejo va
+     * `queue:work --stop-when-empty` con flock obligatorio. Ese archivo NO existe en el servidor
+     * hasta que upload_api corre, y por eso este paso no puede ir al inicio.
+     *
+     * @return void
+     */
+    private function step_provision_cron(): void
+    {
+        if ($this->installation->kind !== ClientInstallation::KIND_COMPLETA) {
+            $this->log('provision_cron', 'Esta fila no es la instalación real: no se crea ningún cron.');
+
+            return;
+        }
+
+        $api_path = $this->get_api_path();
+        $this->reconnect_hosting_ssh();
+
+        /* `|| true` para que un Kernel.php ausente devuelva 0 en vez de romper la etapa. */
+        $salida = $this->exec_hosting_ssh(
+            'provision_cron',
+            'grep -c stop-when-empty ' . escapeshellarg($api_path . '/app/Console/Kernel.php') . ' || true',
+            false
+        );
+
+        $this->provisioner()->provision_cron($api_path, ((int) trim($salida)) > 0);
+    }
+
+    /**
+     * Etapa: el certificado. Último de todo el pipeline.
+     *
+     * @return void
+     */
+    private function step_provision_ssl(): void
+    {
+        $this->provisioner()->provision_ssl();
+    }
+
+    /**
      * Proveedor de aprovisionamiento de esta fila, con el log enchufado al panel de operaciones.
      *
      * @return HostingProvisioningService

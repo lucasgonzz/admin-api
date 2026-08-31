@@ -21,9 +21,11 @@ use Tests\TestCase;
 /**
  * Aprovisionamiento del hosting del cliente desde el admin.
  *
- * Cubre las columnas nuevas (U2) y el aprovisionamiento del hosting compartido (U3): el camino
- * feliz de punta a punta, la idempotencia del reintento, el fallo temprano sin token, la guarda G1
- * (en shared no existe el PUT de DNS) y las guardas de derivación del slug.
+ * Cubre las columnas nuevas (U2), el aprovisionamiento del hosting compartido (U3), el enganche en
+ * el pipeline de instalación (U4) y el cron y el certificado del final (U5): el camino feliz de
+ * punta a punta, la idempotencia del reintento, el fallo temprano sin token, la guarda G1 (en shared
+ * no existe el PUT de DNS), las guardas de derivación del slug, el orden del pipeline, las DB_* del
+ * .env, la guarda de Redis del VPS y los dos comandos exactos del cron.
  *
  * 🔴 Ningún test de este archivo sale a la red. HostingerApiClientFake sobreescribe UN método
  * —request(), que es transporte puro— así que todo lo que importa corre de verdad: el armado del
@@ -344,9 +346,13 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         /* Se busca la LLAMADA ('->put_dns_zone(') y no el nombre pelado: el docblock de la clase
          * nombra el método justamente para explicar por qué no se usa, y esa mención tiene que
          * poder quedarse. */
-        $fuente = file_get_contents(app_path('Services/SharedHostingProvisioning.php'));
-        $this->assertStringNotContainsString('->put_dns_zone(', $fuente);
-        $this->assertStringNotContainsString('->create_dns_snapshot(', $fuente);
+        $archivos = ['Services/SharedHostingProvisioning.php', 'Services/SharedHostingSubdomains.php'];
+
+        foreach ($archivos as $archivo) {
+            $fuente = file_get_contents(app_path($archivo));
+            $this->assertStringNotContainsString('->put_dns_zone(', $fuente, $archivo);
+            $this->assertStringNotContainsString('->create_dns_snapshot(', $fuente, $archivo);
+        }
     }
 
     /**
@@ -661,8 +667,169 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // U5 — CRON Y CERTIFICADO AL FINAL DEL PIPELINE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Test 11 de §7 — el comando del cron, string por string.
+     *
+     * 🔴 Las dos reglas salen del README de crons-hostinger y no se escriben de memoria:
+     *  - Kernel optimizado → `schedule:run` SIN flock, porque el Kernel ya usa withoutOverlapping(75);
+     *  - Kernel viejo → `queue:work --stop-when-empty` CON `flock -n /tmp/queue-<slug>.lock`, porque
+     *    sin flock una cola que tarda más de un minuto apila workers, que es el problema que este
+     *    cron viene a evitar.
+     *
+     * Y la ruta va ABSOLUTA (/home/<cuenta>/domains/...), como los crons de producción: es además lo
+     * que hace que crons_for_api_path() encuentre después este mismo cron, porque esa función busca
+     * '/<api_path>/artisan' con la barra adelante.
+     */
+    public function test_el_comando_del_cron_es_exactamente_el_del_informe(): void
+    {
+        $datos     = $this->preparar_cliente_aprovisionable();
+        $slug      = $datos['slug'];
+        $api_path  = 'domains/comerciocity.com/public_html/' . $slug . '/api';
+        $absoluta  = '/home/u767360347/' . $api_path;
+        $proveedor = $datos['proveedor'];
+
+        $this->assertSame(
+            '/usr/bin/php ' . $absoluta . '/artisan schedule:run',
+            $proveedor->comando_de_cron($api_path, true)
+        );
+        $this->assertStringNotContainsString('flock', $proveedor->comando_de_cron($api_path, true));
+
+        $this->assertSame(
+            '/usr/bin/flock -n /tmp/queue-' . $slug . '.lock /usr/bin/php '
+                . $absoluta . '/artisan queue:work --stop-when-empty',
+            $proveedor->comando_de_cron($api_path, false)
+        );
+    }
+
+    /**
+     * Test 12 de §7 — un solo cron, y solo en la instancia que recibió la instalación real.
+     *
+     * El esqueleto no tiene vendor/ ni sistema: un schedule:run ahí escupe un fatal de PHP una vez
+     * por minuto, para siempre, contra un servidor que ya está a load 14.
+     */
+    public function test_se_crea_un_solo_cron_y_solo_en_la_instancia_real(): void
+    {
+        $datos    = $this->preparar_cliente_aprovisionable();
+        $slug     = $datos['slug'];
+        $api_path = 'domains/comerciocity.com/public_html/' . $slug . '/api';
+
+        /* La cuenta tiene crons de otros clientes y comandos de negocio: ninguno es de esta ruta. */
+        $this->hostinger->responder('/cron-jobs', [
+            ['uid' => 'aaa', 'time' => '* * * * *', 'command' => '/usr/bin/php /home/u767360347/domains/comerciocity.com/public_html/otro/api/artisan schedule:run'],
+            ['uid' => 'bbb', 'time' => '0 3 * * *', 'command' => '/usr/bin/php /home/u767360347/domains/comerciocity.com/public_html/' . $slug . '/api/artisan check_stocks'],
+        ], 'GET');
+        $this->hostinger->responder('/cron-jobs', ['uid' => 'nuevo-uid'], 'POST');
+
+        $datos['proveedor']->provision_cron($api_path, true);
+
+        $posts = $this->posts_a('/cron-jobs');
+        $this->assertCount(1, $posts);
+        $this->assertSame('* * * * *', $posts[0]['body']['time']);
+        $this->assertStringContainsString('schedule:run', $posts[0]['body']['command']);
+
+        /* El uid queda guardado: es lo único con lo que después se puede mover o borrar este cron. */
+        $this->assertSame('nuevo-uid', ClientApi::find($datos['api1']->id)->provisioning_secrets['cron_uid']);
+
+        /* Y el pipeline del esqueleto ni siquiera tiene la etapa (ya fijado arriba), así que un
+         * grupo de dos filas hace exactamente un POST de cron. */
+        $esqueleto = ClientInstallation::create([
+            'client_id'              => $datos['client']->id,
+            'client_api_id'          => $datos['api2']->id,
+            'kind'                   => ClientInstallation::KIND_ESQUELETO,
+            'status'                 => 'pendiente',
+            'provision_hosting_type' => ClientInstallation::PROVISION_SHARED_HOSTING,
+        ]);
+
+        $this->assertNotContains(
+            'provision_cron',
+            $this->steps_de(new \App\Services\InstallationService($esqueleto))
+        );
+    }
+
+    /**
+     * Si esa instancia ya tiene un cron de cola, no se crea otro: warning y se sigue.
+     *
+     * Dos crons de cola sobre la misma ruta no rompen nada (el flock los serializa) pero duplican
+     * carga en un servidor que ya está al límite.
+     */
+    public function test_si_ya_hay_un_cron_de_cola_no_se_crea_otro(): void
+    {
+        $datos    = $this->preparar_cliente_aprovisionable();
+        $slug     = $datos['slug'];
+        $api_path = 'domains/comerciocity.com/public_html/' . $slug . '/api';
+
+        $this->hostinger->responder('/cron-jobs', [
+            ['uid' => 'ya-estaba', 'time' => '* * * * *', 'command' => '/usr/bin/php /home/u767360347/' . $api_path . '/artisan schedule:run'],
+        ], 'GET');
+
+        $datos['proveedor']->provision_cron($api_path, true);
+
+        $this->assertCount(0, $this->posts_a('/cron-jobs'));
+        $this->assertSame('ya-estaba', $datos['proveedor']->result()->ya_existian()[0]['nombre']);
+    }
+
+    /**
+     * Los crons de comandos de negocio de la misma instancia NO cuentan como cron de cola.
+     *
+     * Al 26/8/2026 había 47 cronjobs de ese tipo en la cuenta (set_company_performances,
+     * check_stocks, etc.) y ninguno está en el Kernel.php: tratarlos como reemplazables apagaría
+     * funcionalidad sin reemplazo.
+     */
+    public function test_un_cron_de_negocio_no_impide_crear_el_de_la_cola(): void
+    {
+        $datos    = $this->preparar_cliente_aprovisionable();
+        $slug     = $datos['slug'];
+        $api_path = 'domains/comerciocity.com/public_html/' . $slug . '/api';
+
+        $this->hostinger->responder('/cron-jobs', [
+            ['uid' => 'negocio', 'time' => '0 2 * * *', 'command' => '/usr/bin/php /home/u767360347/' . $api_path . '/artisan set_company_performances'],
+        ], 'GET');
+        $this->hostinger->responder('/cron-jobs', ['uid' => 'uid-nuevo'], 'POST');
+
+        $datos['proveedor']->provision_cron($api_path, false);
+
+        $this->assertCount(1, $this->posts_a('/cron-jobs'));
+        $this->assertStringContainsString('flock -n /tmp/queue-' . $slug . '.lock', $this->posts_a('/cron-jobs')[0]['body']['command']);
+    }
+
+    /**
+     * En hosting compartido el certificado es un no-op: Hostinger lo emite por su cuenta.
+     */
+    public function test_el_certificado_en_shared_no_llama_a_nadie(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+
+        $datos['proveedor']->provision_ssl();
+
+        $this->assertSame([], $this->hostinger->llamadas);
+        $this->assertStringContainsString('Hostinger emite el certificado', $this->ultima_linea('provision_ssl'));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Última línea que el proveedor mandó al panel para una etapa.
+     *
+     * @param  string  $step
+     * @return string
+     */
+    private function ultima_linea(string $step): string
+    {
+        $encontrada = '';
+
+        foreach ($this->lineas as $linea) {
+            if ($linea['step'] === $step) {
+                $encontrada = $linea['linea'];
+            }
+        }
+
+        return $encontrada;
+    }
 
     /**
      * Corre la etapa write_env con el servicio SSH falseado.

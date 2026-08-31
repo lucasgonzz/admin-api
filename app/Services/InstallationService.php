@@ -264,6 +264,12 @@ class InstallationService
                 case 'provision_db':
                     $this->step_provision_db();
                     break;
+                case 'provision_cron':
+                    $this->step_provision_cron();
+                    break;
+                case 'provision_ssl':
+                    $this->step_provision_ssl();
+                    break;
             }
         }
     }

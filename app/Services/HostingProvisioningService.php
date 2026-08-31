@@ -28,32 +28,6 @@ use App\Models\ClientInstallation;
 abstract class HostingProvisioningService
 {
     /**
-     * Largo de toda contraseña generada.
-     *
-     * @var int
-     */
-    const LARGO_PASSWORD = 24;
-
-    /**
-     * 🔴 Alfabeto ACOTADO a propósito, y no es paranoia de más.
-     *
-     * Estas contraseñas viajan por línea de comando SSH (clpctl las recibe como argumento) y por el
-     * `sed -i` de EnvSshService cuando se escriben en el .env del cliente. Los caracteres que faltan
-     * —`$ " ' \ ` ; | & < >` y el espacio— son exactamente los que tienen significado en alguna de
-     * esas dos capas. Es más barato sacarlos del alfabeto que confiar en que tres capas de escapado
-     * seguidas estén todas bien: si una falla, no falla con un error, falla con una contraseña
-     * distinta de la que quedó guardada, y la base queda inaccesible sin que nada se ponga en rojo.
-     *
-     * Con 24 caracteres de este alfabeto la entropía sigue arriba de 140 bits.
-     *
-     * @var string
-     */
-    const ALFABETO_MAYUSCULAS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    const ALFABETO_MINUSCULAS = 'abcdefghijklmnopqrstuvwxyz';
-    const ALFABETO_DIGITOS    = '0123456789';
-    const ALFABETO_ESPECIALES = '._-';
-
-    /**
      * Instalación que dispara el aprovisionamiento.
      *
      * @var ClientInstallation
@@ -178,6 +152,35 @@ abstract class HostingProvisioningService
     abstract public function provision_db(): void;
 
     /**
+     * Crea el cron de la instancia que recibió la instalación real.
+     *
+     * Va al FINAL del pipeline y no al inicio (§3.1): el Kernel.php no existe en el servidor hasta
+     * que upload_api lo sube, así que al inicio habría que adivinar cuál de los dos comandos va. Y
+     * un cron creado en el minuto 0 correría artisan contra un directorio sin vendor/ una vez por
+     * minuto durante los ~15 minutos que dura la instalación, contra un servidor que ya está a
+     * load 14.
+     *
+     * @param  string  $api_path           Ruta de la API en el servidor (ClientApiPathResolver).
+     * @param  bool    $kernel_optimizado  Lo decide el grep sobre el Kernel.php YA subido.
+     * @return void
+     * @throws \RuntimeException
+     */
+    abstract public function provision_cron(string $api_path, bool $kernel_optimizado): void;
+
+    /**
+     * Deja los 4 dominios sirviendo HTTPS.
+     *
+     * En el hosting compartido es un no-op: Hostinger emite el certificado del subdominio por su
+     * cuenta. En el VPS (U8) hay que esperar la propagación del A record y pedirle el certificado a
+     * Let's Encrypt, y por eso este paso es el último de todo el pipeline: los ~15 minutos de
+     * compile_spa + uploads SON la espera de propagación, gratis.
+     *
+     * @return void
+     * @throws \RuntimeException
+     */
+    abstract public function provision_ssl(): void;
+
+    /**
      * Inventario de lo hecho en esta corrida.
      *
      * @return HostingProvisioningResult
@@ -254,7 +257,7 @@ abstract class HostingProvisioningService
      */
     public function comando_de_cron(string $api_path, bool $kernel_optimizado): string
     {
-        $artisan = rtrim($api_path, '/') . '/artisan';
+        $artisan = rtrim($this->ruta_absoluta_de_api($api_path), '/') . '/artisan';
 
         if ($kernel_optimizado) {
             return '/usr/bin/php ' . $artisan . ' schedule:run';
@@ -262,6 +265,21 @@ abstract class HostingProvisioningService
 
         return '/usr/bin/flock -n /tmp/queue-' . $this->slug() . '.lock'
             . ' /usr/bin/php ' . $artisan . ' queue:work --stop-when-empty';
+    }
+
+    /**
+     * Ruta absoluta de la API en el servidor, a partir de la que devuelve ClientApiPathResolver.
+     *
+     * En el VPS esa ruta ya es absoluta (/home/api-<slug>/empresa-api) y no hay nada que hacer; en
+     * el compartido es relativa al home del usuario SSH, y el cron necesita la absoluta. Por eso es
+     * un punto de extensión y no una constante.
+     *
+     * @param  string  $api_path
+     * @return string
+     */
+    protected function ruta_absoluta_de_api(string $api_path): string
+    {
+        return $api_path;
     }
 
     /**
@@ -316,48 +334,17 @@ abstract class HostingProvisioningService
     }
 
     /**
-     * Contraseña nueva del alfabeto acotado: 24 caracteres, con al menos una mayúscula, una
-     * minúscula, un dígito y exactamente uno de `._-`.
+     * Contraseña nueva para una base o un sitio del cliente.
      *
-     * random_int() y no rand()/str_shuffle(): son contraseñas de bases de datos de producción y el
-     * generador de PHP sin sembrar es predecible.
+     * La generación vive en ProvisioningPasswordGenerator: el alfabeto acotado tiene un motivo
+     * largo y propio (estos valores viajan por línea de comando SSH y por el `sed` de EnvSshService)
+     * y merece un archivo con su nombre, además de que la regla R2 de §9 no dejaba que creciera acá.
      *
      * @return string
      */
     protected function generar_password(): string
     {
-        $alfanumerico = self::ALFABETO_MAYUSCULAS . self::ALFABETO_MINUSCULAS . self::ALFABETO_DIGITOS;
-
-        /* Los cuatro obligatorios primero, el resto alfanumérico, y después se mezcla todo. */
-        $caracteres = [
-            $this->caracter_al_azar(self::ALFABETO_MAYUSCULAS),
-            $this->caracter_al_azar(self::ALFABETO_MINUSCULAS),
-            $this->caracter_al_azar(self::ALFABETO_DIGITOS),
-            $this->caracter_al_azar(self::ALFABETO_ESPECIALES),
-        ];
-
-        while (count($caracteres) < self::LARGO_PASSWORD) {
-            $caracteres[] = $this->caracter_al_azar($alfanumerico);
-        }
-
-        /* Fisher-Yates con random_int: str_shuffle usa el generador débil. */
-        for ($i = count($caracteres) - 1; $i > 0; $i--) {
-            $j = random_int(0, $i);
-            $temporal        = $caracteres[$i];
-            $caracteres[$i]  = $caracteres[$j];
-            $caracteres[$j]  = $temporal;
-        }
-
-        return implode('', $caracteres);
-    }
-
-    /**
-     * @param  string  $alfabeto
-     * @return string
-     */
-    private function caracter_al_azar(string $alfabeto): string
-    {
-        return $alfabeto[random_int(0, strlen($alfabeto) - 1)];
+        return app(ProvisioningPasswordGenerator::class)->generar();
     }
 
     /**
