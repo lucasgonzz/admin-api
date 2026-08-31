@@ -198,9 +198,18 @@ class RemoteCommandRunner
     }
 
     /**
-     * 🔴 EL ÚNICO ESCAPADOR DE ARGUMENTOS REMOTOS DE TODO EL ADMIN. Es estático y vive acá —en la
-     * clase que manda los comandos— justamente para que no haya una segunda copia de esta
-     * convención dando vueltas.
+     * 🔴 EL ESCAPADOR DE ARGUMENTOS REMOTOS DEL APROVISIONAMIENTO Y DE LA INSTALACIÓN. Es estático y
+     * vive acá —en la clase que manda los comandos— justamente para que no haya una segunda copia de
+     * esta convención dando vueltas. `InstallationService` y `EnvSshService` tenían la suya y ahora
+     * delegan acá: de tres implementaciones quedó una.
+     *
+     * ⚠️ Decía "el único de todo el admin" y dejó de ser cierto el 31/8/2026, cuando el merge de
+     * `master` trajo el módulo de instalación de demos: `DemoInstallationService` tiene su propia
+     * copia de `escape_remote_arg()` y `DemoUpdateService` usa `escapeshellarg()` en ~30 llamadas,
+     * incluida la del `SPA_DIR` de su `find . -mindepth 1 -delete`. Es deuda de ese módulo, no de
+     * este, y migrarla es mecánico ahora que este escapador existe — pero la frase absoluta se
+     * corrige en vez de dejarla mintiendo, porque un docblock que promete una garantía que no da es
+     * peor que no tenerlo.
      *
      * NO SE USA escapeshellarg() PARA UN COMANDO QUE EJECUTA OTRA MÁQUINA. Esa función escapa
      * según el sistema donde corre PHP y no según el del otro lado: en Linux emite comillas
