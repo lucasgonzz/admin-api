@@ -8,12 +8,14 @@ use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientEmployee;
+use App\Models\ClientTemplate;
 use App\Models\Lead;
 use App\Models\SupportTicket;
 use App\Models\SupportMessage;
 use App\Services\ClientPhoneDirectory;
 use App\Services\SupportAiSuggestionDraftService;
 use App\Services\SupportClientSyncService;
+use App\Services\SupportTemplateSendService;
 use App\Services\SupportWhatsappOpenerService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Http\Request;
@@ -273,10 +275,18 @@ class SupportTicketController extends BaseController
      * Con `source=whatsapp` abre la conversación por WhatsApp en vez de replicarla al ERP
      * del cliente. Sin ese parámetro el comportamiento es exactamente el de siempre, para no
      * romper el modal que ya está en producción.
+     *
+     * Y con `source=whatsapp` + `client_template_id` el primer mensaje sale por una plantilla
+     * real del catálogo de client_templates, elegida por el operador, en vez de texto libre
+     * auto-envuelto en la plantilla oculta de apertura.
      */
     public function store(Request $request, SupportClientSyncService $sync_service)
     {
         if ($request->input('source') === 'whatsapp') {
+            if ($request->filled('client_template_id')) {
+                return $this->store_whatsapp_con_plantilla($request);
+            }
+
             return $this->store_whatsapp($request);
         }
 
@@ -359,6 +369,100 @@ class SupportTicketController extends BaseController
             'reused'   => $result['reused'],
             'whatsapp' => $result['whatsapp'],
         ], $result['reused'] ? 200 : 201);
+    }
+
+    /**
+     * Abre una conversación de soporte por WhatsApp mandando una plantilla real elegida por el
+     * operador, en vez de texto libre auto-envuelto en la plantilla oculta de apertura.
+     *
+     * Es el mismo camino que store_whatsapp() en la resolución de contacto y el reuso de ticket
+     * -los dos pasan por SupportWhatsappOpenerService::resolve_or_create_ticket()-, pero el envío
+     * lo hace SupportTemplateSendService::enviar(), el mismo servicio que ya usa
+     * ClientTemplateController::send_to_ticket_json() para conversaciones existentes. No se
+     * bloquea por ventana abierta: una plantilla se puede mandar siempre.
+     *
+     * @param Request $request Alta con client_id, whatsapp_phone, client_template_id y variables.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function store_whatsapp_con_plantilla(Request $request)
+    {
+        $validated = $request->validate([
+            'client_id'          => 'required|integer|exists:clients,id',
+            'whatsapp_phone'     => 'required|string',
+            'client_template_id' => 'required|integer|exists:client_templates,id',
+            'variables'          => 'nullable|array',
+            'variables.*'        => 'nullable|string|max:600',
+            'name'               => 'nullable|string|max:255',
+        ]);
+
+        // Elegir una cosa o la otra: si además viene un body con contenido, no se ignora en
+        // silencio -el operador pensaría que mandó las dos cosas y solo salió una-.
+        if (trim((string) $request->input('body', '')) !== '') {
+            return response()->json([
+                'error' => 'Elegí una cosa o la otra: o mandás texto libre o mandás una plantilla, no las dos en el mismo alta.',
+            ], 422);
+        }
+
+        $client = Client::findOrFail((int) $validated['client_id']);
+
+        // Mismo motivo y mismo texto que store_whatsapp(): el webhook exige is_active en sus
+        // tres formas de reconocer un número.
+        if (! $client->is_active) {
+            return response()->json([
+                'error' => 'Ese cliente está dado de baja: el webhook no lo va a reconocer y su respuesta caería en el pipeline de leads.',
+            ], 422);
+        }
+
+        $admin = Admin::find((int) Auth::id());
+        if ($admin === null) {
+            return response()->json(['error' => 'admin no encontrado'], 401);
+        }
+
+        $template = ClientTemplate::findOrFail((int) $validated['client_template_id']);
+
+        if ($template->activa === false) {
+            return response()->json(['error' => 'Esa plantilla está desactivada.'], 422);
+        }
+
+        $opener = app(SupportWhatsappOpenerService::class);
+
+        try {
+            $resuelto = $opener->resolve_or_create_ticket(
+                $client,
+                (string) $validated['whatsapp_phone'],
+                $admin,
+                (string) $request->input('name', '')
+            );
+        } catch (\InvalidArgumentException $exception) {
+            return response()->json(['error' => $exception->getMessage()], 422);
+        }
+
+        $ticket = $resuelto['ticket'];
+
+        $window = app(WhatsappSessionWindowService::class)->window_state($resuelto['phone']);
+
+        // Valores en el orden en que los cargó el operador. Se re-indexa porque un objeto JSON
+        // con claves salteadas ("0", "2") desordenaría los {{n}} sin avisar -mismo criterio que
+        // send_to_ticket_json()-.
+        $variables = array_values((array) $request->input('variables', []));
+
+        $resultado = app(SupportTemplateSendService::class)->enviar($ticket, $template, $variables, $admin);
+
+        return response()->json([
+            'model'    => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
+            'message'  => $resultado['message'],
+            'reused'   => $resuelto['reused'],
+            'whatsapp' => [
+                'delivery'      => $resultado['delivery'],
+                'message_id'    => $resultado['message']->whatsapp_message_id,
+                'error'         => $resultado['error'],
+                'used_template' => true,
+                'window_open'   => (bool) $window['open'],
+                'window'        => $window,
+                'template_name' => $template->template_name,
+            ],
+        ], $resuelto['reused'] ? 200 : 201);
     }
 
     /**
