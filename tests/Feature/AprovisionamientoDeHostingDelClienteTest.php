@@ -2,17 +2,20 @@
 
 namespace Tests\Feature;
 
+use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\EnvTemplate;
+use App\Models\Version;
 use App\Services\EnvSshService;
 use App\Services\HostingProvisioningService;
 use App\Services\HostingerApiClient;
 use App\Services\SharedHostingProvisioning;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Tests\Fakes\EnvSshServiceFake;
 use Tests\Fakes\HostingerApiClientFake;
@@ -809,6 +812,249 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // U6 — ALTA DE INSTALACIÓN CON APROVISIONAMIENTO
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * El alta acepta provision_hosting_type y lo copia a las DOS filas del grupo.
+     *
+     * Las dos lo llevan porque los 4 subdominios y la base son del CLIENTE, no de una instancia: si
+     * solo la real lo tuviera, el esqueleto correría el pipeline viejo contra un subdominio que
+     * todavía no existe.
+     */
+    public function test_el_alta_copia_el_tipo_de_aprovisionamiento_a_las_dos_filas(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $version = $this->crear_version_publicada();
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'              => $datos['client']->id,
+            'version_id'             => $version->id,
+            'provision_hosting_type' => 'shared_hosting',
+            'targets'                => [
+                ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+                ['client_api_id' => $datos['api2']->id, 'kind' => 'esqueleto'],
+            ],
+        ]);
+
+        $respuesta->assertStatus(201);
+
+        $filas = $respuesta->json('models');
+        $this->assertCount(2, $filas);
+        $this->assertSame('shared_hosting', $filas[0]['provision_hosting_type']);
+        $this->assertSame('shared_hosting', $filas[1]['provision_hosting_type']);
+    }
+
+    /**
+     * Test 9 de §7, la mitad que vive de este lado: un POST SIN el campo deja la fila en null.
+     *
+     * 🔴 La otra mitad —que el payload viejo con client_api_id suelto sigue creando una completa—
+     * la fija InstalacionEsqueletoEnElSubdominioSecundarioTest, que es donde ese contrato nació el
+     * 24/8. Ahí se extendió con la aserción de provision_hosting_type en vez de duplicarlo acá.
+     */
+    public function test_un_alta_sin_el_campo_nuevo_deja_la_fila_sin_aprovisionamiento(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $version = $this->crear_version_publicada();
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'  => $datos['client']->id,
+            'version_id' => $version->id,
+            'targets'    => [
+                ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+            ],
+        ]);
+
+        $respuesta->assertStatus(201);
+        $this->assertNull($respuesta->json('model.provision_hosting_type'));
+
+        /* Y el pipeline de esa fila es exactamente el de siempre, sin un paso nuevo. */
+        $fila = ClientInstallation::find($respuesta->json('model.id'));
+        $this->assertSame(
+            ['compile_spa', 'upload_spa', 'upload_api', 'write_env', 'finalize_api'],
+            $this->steps_de(new \App\Services\InstallationService($fila))
+        );
+    }
+
+    /**
+     * Test 10 de §7 — 🔴 la guarda contra el `find . -mindepth 1 -delete`.
+     *
+     * Mientras U9 no exista, el pipeline de instalación resuelve la credencial SSH, el path de la
+     * API y el del SPA asumiendo hosting compartido. Con las ClientApi ya pasadas a
+     * hosting_type='vps' por provision_check, build_spa_hosting_deploy_shell() arma el docroot como
+     * 'domains/comerciocity.com/public_html/' . get_spa_path() y ese `find -delete` vacía el
+     * public_html de los ~40 clientes activos. Este 422 es lo único que lo impide, y U9 es la única
+     * unidad autorizada a sacarlo.
+     */
+    public function test_el_alta_en_vps_se_rechaza_con_422_y_en_castellano(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $version = $this->crear_version_publicada();
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'              => $datos['client']->id,
+            'version_id'             => $version->id,
+            'provision_hosting_type' => 'vps',
+            'targets'                => [
+                ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+            ],
+        ]);
+
+        $respuesta->assertStatus(422);
+        $this->assertStringContainsString('todavía no está soportada', $respuesta->json('error'));
+        $this->assertStringContainsString('hosting compartido', $respuesta->json('error'));
+
+        /* 🔴 Y no se creó ni una fila: el rechazo va antes de tocar la base. */
+        $this->assertSame(
+            0,
+            ClientInstallation::where('client_id', $datos['client']->id)
+                ->where('id', '!=', $datos['installation']->id)
+                ->count()
+        );
+    }
+
+    /**
+     * Un tipo de hosting que no existe se rechaza con la regla `in:`, en castellano.
+     */
+    public function test_un_tipo_de_aprovisionamiento_desconocido_se_rechaza(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $version = $this->crear_version_publicada();
+
+        $this->actingAs($this->crear_admin(), 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'              => $datos['client']->id,
+            'version_id'             => $version->id,
+            'provision_hosting_type' => 'cpanel',
+            'targets'                => [['client_api_id' => $datos['api1']->id, 'kind' => 'completa']],
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('provision_hosting_type');
+    }
+
+    /**
+     * Test 8 de §7, primera mitad: con aprovisionamiento tildado, start() NO exige las DB_*.
+     *
+     * 🔴 Sin esto el botón "Iniciar" del modal queda gris para siempre (§0.4): esas tres claves son
+     * is_manual_on_create, las genera provision_db y no hay forma de que el operador las complete.
+     */
+    public function test_start_no_exige_las_db_cuando_la_fila_tiene_aprovisionamiento(): void
+    {
+        Queue::fake();
+
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_manuales_completos();
+
+        /* Solo las tres que SÍ tipea el operador. Las DB_* quedan sin cargar a propósito. */
+        $datos['installation']->update([
+            'env_manual_values' => ['DB_CONNECTION' => 'mysql', 'DB_HOST' => '127.0.0.1', 'DB_PORT' => '3306'],
+        ]);
+
+        $this->actingAs($this->crear_admin(), 'sanctum')
+            ->postJson('/api/admin/client-installations/' . $datos['installation']->id . '/start')
+            ->assertStatus(200);
+
+        $this->assertSame('instalando', $datos['installation']->fresh()->status);
+    }
+
+    /**
+     * Test 8 de §7, segunda mitad: sin aprovisionamiento las DB_* se siguen exigiendo igual que
+     * siempre. Es el camino viejo, y es el que no se puede aflojar por el arreglo de arriba.
+     */
+    public function test_start_sigue_exigiendo_las_db_sin_aprovisionamiento(): void
+    {
+        Queue::fake();
+
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_manuales_completos();
+
+        $datos['installation']->update([
+            'provision_hosting_type' => null,
+            'env_manual_values'      => ['DB_CONNECTION' => 'mysql', 'DB_HOST' => '127.0.0.1', 'DB_PORT' => '3306'],
+        ]);
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')
+            ->postJson('/api/admin/client-installations/' . $datos['installation']->id . '/start');
+
+        $respuesta->assertStatus(422);
+        $this->assertContains('DB_DATABASE', $respuesta->json('missing_keys'));
+        $this->assertContains('DB_PASSWORD', $respuesta->json('missing_keys'));
+
+        Queue::assertNothingPushed();
+        $this->assertSame('pendiente', $datos['installation']->fresh()->status);
+    }
+
+    /**
+     * Con aprovisionamiento, una variable manual que NO es de las tres del aprovisionamiento sigue
+     * siendo obligatoria: la excepción es de tres claves, no de la validación entera.
+     */
+    public function test_con_aprovisionamiento_las_otras_variables_manuales_se_siguen_exigiendo(): void
+    {
+        Queue::fake();
+
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_manuales_completos();
+
+        $datos['installation']->update([
+            'env_manual_values' => ['DB_CONNECTION' => 'mysql', 'DB_HOST' => '127.0.0.1'],
+        ]);
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')
+            ->postJson('/api/admin/client-installations/' . $datos['installation']->id . '/start');
+
+        $respuesta->assertStatus(422);
+        $this->assertSame(['DB_PORT'], $respuesta->json('missing_keys'));
+    }
+
+    /**
+     * El endpoint de credenciales devuelve los secretos descifrados, y solo por ahí.
+     */
+    public function test_las_credenciales_del_hosting_salen_por_su_endpoint_y_no_por_el_show(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $admin = $this->crear_admin();
+
+        $datos['api1']->provisioning_secrets = [
+            'db_name'     => 'u767360347_' . $datos['slug'],
+            'db_password' => 'Cl4ve-Que-No-Sale-En-El-Show',
+        ];
+        $datos['api1']->hosting_provisioned_at = now();
+        $datos['api1']->save();
+
+        $respuesta = $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/admin/client-apis/' . $datos['api1']->id . '/hosting-credentials');
+
+        $respuesta->assertStatus(200);
+        $this->assertSame(
+            'Cl4ve-Que-No-Sale-En-El-Show',
+            $respuesta->json('provisioning_secrets.db_password')
+        );
+        $this->assertNotNull($respuesta->json('hosting_provisioned_at'));
+
+        /*
+         * 🔴 Y el show de la instalación —que carga client_api— NO trae la contraseña. Es el $hidden
+         * del modelo, y es la razón por la que este endpoint existe aparte.
+         */
+        $show = $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/admin/client-installations/' . $datos['installation']->id);
+
+        $show->assertStatus(200);
+        $this->assertStringNotContainsString('Cl4ve-Que-No-Sale-En-El-Show', $show->getContent());
+    }
+
+    /**
+     * Una API sin aprovisionar devuelve el array vacío, no un 500.
+     */
+    public function test_las_credenciales_de_una_api_sin_aprovisionar_son_un_array_vacio(): void
+    {
+        $api = $this->crear_api_de_cliente();
+
+        $this->actingAs($this->crear_admin(), 'sanctum')
+            ->getJson('/api/admin/client-apis/' . $api->id . '/hosting-credentials')
+            ->assertStatus(200)
+            ->assertJson(['provisioning_secrets' => [], 'hosting_provisioned_at' => null]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1008,6 +1254,56 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         }
 
         return $encontrados;
+    }
+
+    /**
+     * Las SEIS variables is_manual_on_create de EnvTemplateSeeder, que es lo que start() valida.
+     *
+     * crear_templates_de_env() siembra solo las que necesita step_write_env; acá hacen falta también
+     * DB_CONNECTION, DB_HOST y DB_PORT, que son las tres que el operador SÍ tiene que tipear aunque
+     * el aprovisionamiento esté tildado.
+     *
+     * @return void
+     */
+    private function crear_templates_manuales_completos(): void
+    {
+        $this->crear_template_de_env('DB_CONNECTION', 'mysql', true, 1);
+        $this->crear_template_de_env('DB_HOST', '127.0.0.1', true, 2);
+        $this->crear_template_de_env('DB_PORT', '3306', true, 3);
+        $this->crear_template_de_env('DB_DATABASE', null, true, 4);
+        $this->crear_template_de_env('DB_USERNAME', null, true, 5);
+        $this->crear_template_de_env('DB_PASSWORD', null, true, 6);
+    }
+
+    /**
+     * Versión publicada: sin una, store_global() responde 422 antes de crear nada.
+     *
+     * @return Version
+     */
+    private function crear_version_publicada(): Version
+    {
+        $version          = new Version();
+        $version->version = '9.9.' . random_int(1000, 9999);
+        $version->status  = 'published';
+        $version->save();
+
+        return $version;
+    }
+
+    /**
+     * Admin para autenticar las requests del módulo.
+     *
+     * @return Admin
+     */
+    private function crear_admin(): Admin
+    {
+        $admin           = new Admin();
+        $admin->name     = 'Admin de prueba';
+        $admin->email    = 'aprovisionamiento-' . Str::random(8) . '@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+
+        return $admin;
     }
 
     /**

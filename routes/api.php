@@ -765,6 +765,12 @@ Route::prefix('admin')->group(function () {
         Route::delete('client-installations/{installation}', [ClientInstallationController::class, 'destroy']);
         Route::put('client-installations/{installation}/env-values', [ClientInstallationController::class, 'update_env_values']);
         Route::post('client-installations/{installation}/start', [ClientInstallationController::class, 'start']);
+        // Credenciales que generó el aprovisionamiento del hosting, descifradas y BAJO DEMANDA.
+        // 🔴 Endpoint aparte y no un campo del show: ClientApi::$hidden oculta provisioning_secrets
+        // porque esa relación viaja en el index y en el show de instalaciones, de upgrades y de
+        // clientes. Los secretos salen solo por acá, de a una API por vez y cuando alguien aprieta
+        // el botón.
+        Route::get('client-apis/{client_api}/hosting-credentials', [ClientInstallationController::class, 'hosting_credentials']);
 
         // Plantilla base de variables .env: gestión y comparación con clientes.
         Route::get('env-template', [EnvTemplateController::class, 'index']);

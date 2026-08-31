@@ -173,6 +173,17 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
 
         // Un consumidor viejo del endpoint tiene que seguir recibiendo una sola fila.
         $this->assertCount(1, $response->json('models'));
+
+        // 🔴 31/8/2026 — el alta acepta desde hoy 'provision_hosting_type', y este payload no lo
+        // manda: la fila tiene que quedar en null, que es el estado "no aprovisionar nada" y el
+        // comportamiento de siempre, byte por byte. Es la mitad del test 9 del plan de
+        // aprovisionamiento que le corresponde a este archivo, donde el contrato viejo nació el
+        // 24/8. La otra mitad —el alta CON el campo— vive en
+        // AprovisionamientoDeHostingDelClienteTest, para no duplicar este test.
+        $this->assertNull($response->json('model.provision_hosting_type'));
+        $this->assertNull(
+            ClientInstallation::find($response->json('model.id'))->provision_hosting_type
+        );
     }
 
     public function test_el_endpoint_por_cliente_sigue_creando_una_completa_con_el_kind_en_la_respuesta(): void

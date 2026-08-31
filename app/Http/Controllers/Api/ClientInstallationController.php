@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreClientInstallationRequest;
 use App\Jobs\RunClientInstallationGroupJob;
 use App\Jobs\RunClientInstallationJob;
 use App\Models\Client;
@@ -105,38 +106,29 @@ class ClientInstallationController extends Controller
      *
      * Acepta dos formas del payload:
      *
-     *   Nueva:  { client_id, version_id?, targets: [ {client_api_id, kind}, ... ] }
+     *   Nueva:  { client_id, version_id?, targets: [ {client_api_id, kind}, ... ], provision_hosting_type? }
      *   Vieja:  { client_id, client_api_id?, version_id? }
      *
      * 🔴 Si no viene 'targets' el comportamiento es idéntico al de antes del 24/8/2026: una sola
      * fila, kind='completa', group_uuid=null. Es la compatibilidad hacia atrás del endpoint, y hay
      * un test que la fija. Si vienen los dos, 'targets' gana y client_api_id se ignora.
      *
-     * @param  Request  $request
+     * 🔴 Lo mismo vale para 'provision_hosting_type', que llegó el 31/8/2026: si no viene, la fila
+     * queda con null y el pipeline es el de siempre, byte por byte. La validación y los mensajes
+     * viven en StoreClientInstallationRequest (la regla R3 del plan le pone un techo de 700 líneas
+     * a este archivo y la acción prescrita para cruzarlo es exactamente esa extracción).
+     *
+     * @param  StoreClientInstallationRequest  $request
      * @return JsonResponse  { model, models } (201) o { error: string } (422)
      */
-    public function store_global(Request $request): JsonResponse
+    public function store_global(StoreClientInstallationRequest $request): JsonResponse
     {
-        $request->validate([
-            'client_id'               => 'required|integer|exists:clients,id',
-            'client_api_id'           => 'nullable|integer',
-            'version_id'              => 'nullable|integer',
-            'targets'                 => 'nullable|array|max:2',
-            'targets.*.client_api_id' => 'required_with:targets|integer',
-            'targets.*.kind'          => 'required_with:targets|in:completa,esqueleto',
-        ], [
-            // 🔴 Mensaje propio y en castellano. config/app.php tiene locale 'en', así que el
-            // default de Laravel acá sale en inglés ("The targets may not have more than 2 items"),
-            // en un endpoint donde todos los demás 422 están en castellano y explicados. Y es
-            // alcanzable de verdad: Client::client_apis() es un hasMany sin límite y hay endpoints
-            // vivos para agregar una tercera API a un cliente (routes/api.php, el CRUD de
-            // client-apis), así que el modal —que tilda todas las APIs por default— le manda tres
-            // destinos al POST sin que el operador haya hecho nada raro. El mensaje tiene que
-            // decirle qué hacer, no informarle que hay una regla.
-            'targets.max' => 'Solo se pueden instalar dos APIs de una vez: una con la instalación '
-                . 'real y otra con el esqueleto. Destildá las que sobren y creá el resto en un '
-                . 'segundo pedido.',
-        ]);
+        $provision_hosting_type = $request->input('provision_hosting_type');
+
+        $rechazo = $this->rechazo_de_instalacion_en_vps($provision_hosting_type);
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
 
         // Cliente destino de la nueva instalación.
         $client = Client::findOrFail($request->input('client_id'));
@@ -183,12 +175,15 @@ class ClientInstallationController extends Controller
         $created = [];
         foreach ($targets as $target) {
             $created[] = ClientInstallation::create([
-                'client_id'     => $client->id,
-                'client_api_id' => $target['client_api_id'],
-                'version_id'    => $version_id,
-                'kind'          => $target['kind'],
-                'group_uuid'    => $group_uuid,
-                'status'        => 'pendiente',
+                'client_id'              => $client->id,
+                'client_api_id'          => $target['client_api_id'],
+                'version_id'             => $version_id,
+                'kind'                   => $target['kind'],
+                'group_uuid'             => $group_uuid,
+                'status'                 => 'pendiente',
+                // Las DOS filas del grupo llevan el mismo tipo de aprovisionamiento: los 4
+                // subdominios y la base son del cliente, no de una instancia.
+                'provision_hosting_type' => $provision_hosting_type,
             ]);
         }
 
@@ -374,7 +369,21 @@ class ClientInstallationController extends Controller
             $missing_keys = [];
             foreach ($rows as $row) {
                 $env_manual_values = $row->env_manual_values ?? [];
+
+                // 🔴 Con aprovisionamiento tildado, DB_DATABASE, DB_USERNAME y DB_PASSWORD no las
+                // tipea nadie: las genera el paso provision_db y las escribe step_write_env. Si se
+                // siguieran exigiendo acá, el operador no tendría forma de completarlas y el botón
+                // "Iniciar" del modal quedaría gris para siempre (§0.4 del plan). Sin
+                // aprovisionamiento la lista queda vacía y la validación es la de siempre.
+                $exceptuadas = trim((string) $row->provision_hosting_type) === ''
+                    ? []
+                    : ClientInstallation::CLAVES_ENV_APROVISIONADAS;
+
                 foreach ($manual_templates as $template) {
+                    if (in_array($template->key, $exceptuadas, true)) {
+                        continue;
+                    }
+
                     $value = $env_manual_values[$template->key] ?? '';
                     if (trim((string) $value) === '' && ! in_array($template->key, $missing_keys, true)) {
                         $missing_keys[] = $template->key;
@@ -432,9 +441,67 @@ class ClientInstallationController extends Controller
         return response()->json($response);
     }
 
+    /**
+     * Devuelve, descifradas, las credenciales que el aprovisionamiento generó para una ClientApi.
+     *
+     * 🔴 Es un endpoint aparte y no un campo del show, y eso es el diseño y no una casualidad:
+     * ClientApi::$hidden oculta provisioning_secrets y tiene que seguir ocultándolo. Esa relación se
+     * carga con scopeWithAll() y viaja en el index y en el show de instalaciones, de upgrades y de
+     * clientes; sin el $hidden, la contraseña de la base de cada cliente saldría descifrada en todos
+     * esos payloads y quedaría escrita en cualquier log de request y en la caché del navegador. Acá
+     * salen bajo demanda —cuando una persona aprieta el botón— y de a una API por vez.
+     *
+     * @param  ClientApi  $client_api
+     * @return JsonResponse  { provisioning_secrets, hosting_provisioned_at, hosting_type }
+     */
+    public function hosting_credentials(ClientApi $client_api): JsonResponse
+    {
+        $secretos = $client_api->provisioning_secrets;
+
+        return response()->json([
+            'provisioning_secrets'   => is_array($secretos) ? $secretos : [],
+            'hosting_provisioned_at' => $client_api->hosting_provisioned_at,
+            'hosting_type'           => $client_api->hosting_type,
+        ]);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * 🔴 GUARDA TEMPORAL: mientras la unidad U9 no esté construida, un alta con
+     * provision_hosting_type='vps' se rechaza acá y no llega a crearse.
+     *
+     * 🔴 U9 SACA ESTA GUARDA —es lo único que hay que borrar para habilitar el VPS— y por eso está
+     * en un solo lugar. Existe porque entre U8 y U9 el aprovisionamiento del VPS ya funciona y el
+     * pipeline de instalación todavía no: InstallationService resuelve la credencial SSH, el path de
+     * la API y el del SPA asumiendo hosting compartido, y build_spa_hosting_deploy_shell() arma el
+     * docroot como 'domains/comerciocity.com/public_html/' . get_spa_path(). Con las ClientApi ya
+     * pasadas a hosting_type='vps' por provision_check y sin la rama de VPS del pipeline, ese path
+     * queda apuntando a la raíz de la cuenta compartida, y el `find . -mindepth 1 -delete` que viene
+     * después vacía el public_html de los ~40 clientes activos, de una.
+     *
+     * 🔴 Mira el provision_hosting_type DEL PEDIDO y no client_apis.hosting_type: en el momento del
+     * alta las dos ClientApi todavía dicen 'shared_hosting' —las pasa a 'vps' el aprovisionamiento,
+     * ya adentro del job—, así que una guarda sobre la columna no vería nada.
+     *
+     * @param  string|null  $provision_hosting_type
+     * @return JsonResponse|null  El 422 a devolver, o null si el pedido puede seguir.
+     */
+    private function rechazo_de_instalacion_en_vps($provision_hosting_type)
+    {
+        if ((string) $provision_hosting_type !== ClientInstallation::PROVISION_VPS) {
+            return null;
+        }
+
+        return response()->json([
+            'error' => 'La instalación sobre VPS todavía no está soportada: el pipeline resuelve '
+                . 'las rutas del código y del SPA asumiendo hosting compartido, así que instalar '
+                . 'sobre una API en VPS escribiría en el servidor equivocado. Elegí "Hosting '
+                . 'compartido" o destildá el aprovisionamiento.',
+        ], 422);
+    }
 
     /**
      * Valida y ordena los destinos del payload nuevo.
