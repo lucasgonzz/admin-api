@@ -65,9 +65,23 @@ class EcommerceInstallationService
     /**
      * Cliente dueño de la tienda (para leer company_name, user_id y la API de empresa).
      *
-     * @var \App\Models\Client
+     * 🔴 PUEDE SER NULL desde el 31/8/2026: si el dueño de la tienda es una demo, acá hay null y
+     * el dato sale de `$this->demo`. NO agregues lecturas nuevas de `$this->client` sueltas —
+     * usá los métodos `owner_*()` de la sección "DUEÑO DE LA TIENDA", que resuelven los dos casos.
+     *
+     * @var \App\Models\Client|null
      */
     protected $client;
+
+    /**
+     * Demo dueña de la tienda, cuando el ecommerce es el de una demo y no el de un cliente.
+     *
+     * Null en el caso normal (dueño cliente). Exactamente uno de `$client` / `$demo` está cargado:
+     * lo garantiza `ClientEcommerce::assert_tiene_un_solo_dueno()`.
+     *
+     * @var \App\Models\Demo|null
+     */
+    protected $demo;
 
     /**
      * Sesión SSH activa al hosting compartido del cliente (phpseclib).
@@ -127,28 +141,250 @@ class EcommerceInstallationService
     ];
 
     /**
-     * Carga la corrida, la tienda y el cliente. Valida que sea una instalación (mode = install):
-     * las actualizaciones se resuelven en EcommerceDeploymentService (prompt 585).
+     * Carga la corrida, la tienda y su dueño (cliente o demo). Valida que sea una instalación
+     * (mode = install): las actualizaciones se resuelven en EcommerceDeploymentService (prompt 585).
      *
      * @param  ClientEcommerceInstallation  $installation
-     * @throws \RuntimeException  Si no hay tienda asociada o el mode no es 'install'.
+     * @throws \RuntimeException  Si no hay tienda asociada, si no tiene dueño, si el ecommerce de
+     *                            la demo está marcado como VPS, o si el mode no es el esperado.
      */
     public function __construct(ClientEcommerceInstallation $installation)
     {
         $this->installation = $installation;
-        $this->installation->loadMissing('client_ecommerce.client.active_client_api');
+        $this->installation->loadMissing('client_ecommerce.client.active_client_api', 'client_ecommerce.demo');
 
         $this->ecommerce = $this->installation->client_ecommerce;
         if ($this->ecommerce === null) {
             throw new \RuntimeException('La corrida no tiene tienda (client_ecommerce) asociada.');
         }
 
+        // Un dueño y solo uno. La misma guarda que corre al guardar la fila, repetida acá porque
+        // una fila cargada por otro camino (un update directo por SQL, una fila vieja) no pasó
+        // necesariamente por el hook: mejor frenar en el arranque que a mitad del pipeline.
+        $this->ecommerce->assert_tiene_un_solo_dueno();
+
         $this->client = $this->ecommerce->client;
-        if ($this->client === null) {
-            throw new \RuntimeException('La tienda no tiene cliente asociado.');
+        $this->demo   = $this->ecommerce->demo;
+        if ($this->client === null && $this->demo === null) {
+            throw new \RuntimeException('La tienda no tiene cliente ni demo asociada.');
         }
 
+        // 🔴 Guarda de VPS ANTES de cualquier conexión (ver assert_ecommerce_soportado()).
+        $this->assert_ecommerce_soportado();
+
         $this->assert_expected_mode();
+    }
+
+    /* ═════════════════════════════════════════════════════════════════════════════════════════
+     * DUEÑO DE LA TIENDA (cliente o demo)
+     *
+     * 🔴 REGLA DE ORO DE ESTA SECCIÓN: para un dueño `Client`, todos estos métodos devuelven
+     * EXACTAMENTE lo que devolvía el código anterior a la polimorfización (31/8/2026), byte por
+     * byte, incluidos los fallbacks y los mensajes de warning. Los ~40 clientes en producción
+     * pasan por este pipeline y no hay suite de regresión que los cubra: la rama del cliente es
+     * la línea original movida de lugar, no una reescritura. Si tocás algo acá, tocalo en la rama
+     * de la demo.
+     *
+     * Son cinco datos y nada más — es todo lo que el pipeline de ~2900 líneas le pedía al Client.
+     * ═════════════════════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * ¿El dueño de esta tienda es una demo?
+     *
+     * @return bool
+     */
+    protected function owner_is_demo(): bool
+    {
+        return $this->demo !== null;
+    }
+
+    /**
+     * Frena el pipeline si la tienda es la de una demo marcada como VPS.
+     *
+     * 🔴 POR QUÉ EN EL CONSTRUCTOR Y NO EN LA ETAPA QUE CORRESPONDA. El pipeline de ecommerce
+     * tiene `shared_hosting` FIJO en cinco puntos (connect_hosting_ssh(), los dos
+     * open_sftp_session() y EnvSshService::connect_to()), y esos cinco puntos son compartidos con
+     * el camino de los clientes: hacerlos VPS-capaces es otra misión, con su propio riesgo sobre
+     * producción. Mientras tanto, dejar pasar una demo marcada como VPS significa desplegarla
+     * entera al servidor equivocado. Se falla acá, antes de abrir una sola sesión SSH — el job
+     * marca la corrida como fallida con este mismo mensaje y el panel lo muestra.
+     *
+     * @return void
+     * @throws \RuntimeException
+     */
+    protected function assert_ecommerce_soportado(): void
+    {
+        if (! $this->owner_is_demo()) {
+            return;
+        }
+
+        if ((new DemoPathResolver())->ecommerce_is_vps($this->demo)) {
+            throw new \RuntimeException(DemoPathResolver::ECOMMERCE_VPS_NO_SOPORTADO);
+        }
+    }
+
+    /**
+     * Nombre a mostrar del comercio: APP_NAME del .env, nombre de la PWA y VUE_APP_SITE_NAME.
+     *
+     * - Cliente: `company_name` y, si está vacío, `name`. Es la lógica que estaba repetida en
+     *   step_write_env() y en pwa_display_name(), unificada acá.
+     * - Demo: `demos.nombre` y, si está vacío, el slug de `erp_spa_url` (ver Demo::display_name()).
+     *
+     * ⚠️ ÚNICA DIFERENCIA DELIBERADA CON EL CÓDIGO ANTERIOR (y está documentada porque el resto de
+     * esta sección promete no tener ninguna): APP_NAME se armaba con
+     * `company_name ?? name ?? 'Tienda'`, o sea con `??`, que NO se cae al siguiente cuando el
+     * valor es la CADENA VACÍA — solo cuando es null. La PWA, en cambio, ya usaba trim + "si está
+     * vacío, el siguiente". O sea que un cliente con `company_name = ''` terminaba con
+     * `APP_NAME=` (vacío) en el .env de tienda-api y con su `name` en el manifest de la PWA: dos
+     * nombres distintos para el mismo comercio, y uno de los dos vacío. Se unifica en el criterio
+     * de la PWA, que es el que nunca devuelve vacío.
+     *
+     * @return string
+     */
+    protected function owner_display_name(): string
+    {
+        if ($this->owner_is_demo()) {
+            return $this->demo->display_name();
+        }
+
+        $name = trim((string) ($this->client->company_name ?? ''));
+        if ($name === '') {
+            $name = trim((string) ($this->client->name ?? 'Tienda'));
+        }
+
+        return $name;
+    }
+
+    /**
+     * Id de comercio (commerce id) del dueño: VUE_APP_COMMERCE_ID del build de tienda-spa y el
+     * `{id}` de GET {tienda-api}/api/commerce/{id}.
+     *
+     * - Cliente: `clients.user_id`.
+     * - Demo: `demos.user_id`, que es el mismo número del `USER_ID` del .env de su ERP.
+     *
+     * @return int|null  Null si no está cargado (cada llamador decide si eso es fatal o degrada).
+     */
+    protected function owner_commerce_id(): ?int
+    {
+        $commerce_id = $this->owner_is_demo() ? $this->demo->user_id : $this->client->user_id;
+
+        return $commerce_id === null ? null : (int) $commerce_id;
+    }
+
+    /**
+     * Devuelve el commerce id del dueño, o tira con un mensaje que dice DÓNDE cargarlo.
+     *
+     * Sin este número la tienda compila igual y queda publicada pidiéndole su configuración a un
+     * comercio que no existe: se ve en blanco, sin ningún error. Por eso es fatal y no un warning.
+     *
+     * @return int
+     * @throws \RuntimeException
+     */
+    protected function assert_owner_commerce_id(): int
+    {
+        $commerce_id = $this->owner_commerce_id();
+        if ($commerce_id !== null) {
+            return $commerce_id;
+        }
+
+        if ($this->owner_is_demo()) {
+            throw new \RuntimeException(
+                'La demo no tiene cargado el «ID de comercio (USER_ID)»: es el mismo número que '
+                . 'tiene USER_ID en el .env del ERP de esta demo, y sin él la tienda queda en '
+                . 'blanco. Cargalo desde el módulo de Demos.'
+            );
+        }
+
+        throw new \RuntimeException('El cliente no tiene user_id (bloque ComercioCity) configurado.');
+    }
+
+    /**
+     * Api key server-to-server del dueño, para el header `X-Admin-Api-Key` contra empresa-api.
+     *
+     * - Cliente: `clients.api_key`.
+     * - Demo: `demos.api_key`.
+     *
+     * Puede venir vacía en los dos casos, y en los dos casos el pipeline degrada igual: avisa por
+     * log y se cae al branding de la tienda-api (ver fetch_branding_from_empresa_api()).
+     *
+     * @return string
+     */
+    protected function owner_api_key(): string
+    {
+        $api_key = $this->owner_is_demo() ? $this->demo->api_key : $this->client->api_key;
+
+        return (string) ($api_key ?? '');
+    }
+
+    /**
+     * URL completa del endpoint de branding en la empresa-api del dueño.
+     *
+     * - Cliente: `ClientEmpresaApiUrlResolver::admin_sync_url()`, que recorre los candidatos del
+     *   cliente (API destino del upgrade, API activa, cada ClientApi, `clients.api_url` legacy) y
+     *   normaliza el `/public` según el hosting de cada uno.
+     * - Demo: `normalize_demo_api_base_url(demos.erp_api_url)` con el hosting_type que resuelve
+     *   DemoPathResolver (y no la columna cruda, como pide el docblock de ese método), más
+     *   BRANDING_PATH. Es la misma ruta que consume el cliente: `api/admin-sync/branding` no lleva
+     *   `{user_id}` — el comercio lo identifica la api key del header.
+     *
+     * @return string  Cadena vacía si no se pudo resolver la base (cada llamador degrada).
+     */
+    protected function owner_empresa_branding_url(): string
+    {
+        $api_url_resolver = new ClientEmpresaApiUrlResolver();
+
+        if (! $this->owner_is_demo()) {
+            return $api_url_resolver->admin_sync_url($this->client, ClientEmpresaApiUrlResolver::BRANDING_PATH);
+        }
+
+        $base_url = $api_url_resolver->normalize_demo_api_base_url(
+            $this->demo->erp_api_url,
+            (new DemoPathResolver())->hosting_type($this->demo)
+        );
+        if ($base_url === '') {
+            return '';
+        }
+
+        return $base_url . '/' . ltrim(ClientEmpresaApiUrlResolver::BRANDING_PATH, '/');
+    }
+
+    /**
+     * Variables del `.env` de la empresa-api del dueño, de donde salen DB_DATABASE, DB_USERNAME,
+     * DB_PASSWORD y APP_KEY para el `.env` de tienda-api (misma base física).
+     *
+     * - Cliente: la `ClientApi` activa, leída con `read_env_for()` — que conecta al servidor que
+     *   le corresponde a ESA API (shared_hosting o vps). Sin API activa es un error fatal, igual
+     *   que antes.
+     * - Demo: el `.env` del ERP de la demo, en la ruta que resuelve `DemoPathResolver::api_path()`
+     *   y en el servidor que dice `DemoPathResolver::hosting_type()`. Se usan los métodos
+     *   genéricos de EnvSshService (`connect_to()` + `read_env()`) en vez de los `*_for()`, que
+     *   piden una `ClientApi` que una demo no tiene.
+     *
+     * Recibe el `EnvSshService` en vez de crearlo para que el llamador se quede con la MISMA
+     * instancia: después de leer, step_write_env() la reconecta a 'shared_hosting' para escribir.
+     *
+     * @param  EnvSshService  $env_ssh_service
+     * @return array<string, string>
+     * @throws \RuntimeException  Si el dueño no tiene de dónde leer el .env de empresa.
+     */
+    protected function owner_empresa_env_vars(EnvSshService $env_ssh_service): array
+    {
+        if (! $this->owner_is_demo()) {
+            $empresa_client_api = $this->client->active_client_api;
+            if ($empresa_client_api === null) {
+                throw new \RuntimeException(
+                    'El cliente no tiene una ClientApi activa (empresa): no se puede clonar DB/APP_KEY para tienda-api.'
+                );
+            }
+
+            return $env_ssh_service->read_env_for($empresa_client_api);
+        }
+
+        $resolver = new DemoPathResolver();
+
+        $env_ssh_service->connect_to($resolver->credential_type($this->demo));
+
+        return $env_ssh_service->read_env($resolver->api_path($this->demo));
     }
 
     /**
@@ -527,9 +763,9 @@ class EcommerceInstallationService
         if ($spa_url === '') {
             throw new \RuntimeException('La tienda no tiene spa_url configurada.');
         }
-        if ($this->client->user_id === null) {
-            throw new \RuntimeException('El cliente no tiene user_id (bloque ComercioCity) configurado.');
-        }
+        // El commerce id (clients.user_id o demos.user_id) se exige acá, antes de compilar: es lo
+        // que se escribe en VUE_APP_COMMERCE_ID del build y sin él la tienda queda en blanco.
+        $this->assert_owner_commerce_id();
 
         /** Nombre a mostrar del comercio: mismo valor que ya usan la PWA y los íconos (pwa_display_name()). */
         $site_name = $this->pwa_display_name();
@@ -1168,7 +1404,7 @@ class EcommerceInstallationService
         }
 
         // b) APP_NAME / APP_URL.
-        $vars_to_write['APP_NAME'] = (string) ($this->client->company_name ?? $this->client->name ?? 'Tienda');
+        $vars_to_write['APP_NAME'] = $this->owner_display_name();
         $vars_to_write['APP_URL']  = rtrim((string) $this->ecommerce->api_url, '/');
 
         // c) Variables derivadas del dominio único de la tienda.
@@ -1208,20 +1444,16 @@ class EcommerceInstallationService
             }
         }
 
-        // d) DB y APP_KEY: se copian del .env de empresa-api del mismo cliente (misma base de
+        // d) DB y APP_KEY: se copian del .env de la empresa-api del MISMO dueño (misma base de
         // datos física; la APP_KEY se unifica entre empresa y tienda por decisión de producto).
-        $empresa_client_api = $this->client->active_client_api;
-        if ($empresa_client_api === null) {
-            throw new \RuntimeException(
-                'El cliente no tiene una ClientApi activa (empresa): no se puede clonar DB/APP_KEY para tienda-api.'
-            );
-        }
-
-        // Lee el .env de empresa del cliente conectando al servidor que corresponde a ESA API
-        // (shared_hosting o vps). Si el cliente de empresa vive en un VPS, su .env no está en el
-        // hosting compartido — antes se leía siempre de ahí y salía vacío o de otro sistema.
+        //
+        // Lee ese .env conectando al servidor que le corresponde (shared_hosting o vps). Si la
+        // empresa vive en un VPS, su .env no está en el hosting compartido — antes se leía
+        // siempre de ahí y salía vacío o de otro sistema. Para un cliente el camino es el de
+        // siempre (la ClientApi activa); para una demo, el .env del ERP que resuelve
+        // DemoPathResolver. Ver owner_empresa_env_vars().
         $env_ssh_service  = new EnvSshService();
-        $empresa_env_vars = $env_ssh_service->read_env_for($empresa_client_api);
+        $empresa_env_vars = $this->owner_empresa_env_vars($env_ssh_service);
 
         foreach (['DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'APP_KEY'] as $shared_key) {
             if (isset($empresa_env_vars[$shared_key])) {
@@ -1618,25 +1850,28 @@ class EcommerceInstallationService
      */
     protected function fetch_branding_from_empresa_api(): ?array
     {
-        /** Resolver de URL de empresa-api del cliente (mismo mecanismo que admin-sync/employees). */
-        $api_url_resolver = new ClientEmpresaApiUrlResolver();
-        $branding_url = $api_url_resolver->admin_sync_url($this->client, ClientEmpresaApiUrlResolver::BRANDING_PATH);
+        /** URL de empresa-api del dueño (cliente o demo), resuelta en owner_empresa_branding_url(). */
+        $branding_url = $this->owner_empresa_branding_url();
+
+        /** Cómo nombrar al dueño en los warnings de abajo, sin cambiar el texto para un cliente. */
+        $owner_label = $this->owner_is_demo() ? 'demo' : 'cliente';
 
         if ($branding_url === '') {
             $this->log(
                 'compile_spa',
-                'empresa-api no respondió el branding (sin URL de empresa-api configurada para el cliente); '
-                . 'se prueba con la tienda-api',
+                'empresa-api no respondió el branding (sin URL de empresa-api configurada para el '
+                . $owner_label . '); se prueba con la tienda-api',
                 'warning'
             );
 
             return null;
         }
 
-        if (empty($this->client->api_key)) {
+        $api_key = $this->owner_api_key();
+        if ($api_key === '') {
             $this->log(
                 'compile_spa',
-                'empresa-api no respondió el branding (cliente sin api_key configurada); se prueba con la tienda-api',
+                'empresa-api no respondió el branding (' . $owner_label . ' sin api_key configurada); se prueba con la tienda-api',
                 'warning'
             );
 
@@ -1645,7 +1880,7 @@ class EcommerceInstallationService
 
         try {
             $response = Http::withHeaders([
-                    'X-Admin-Api-Key' => $this->client->api_key,
+                    'X-Admin-Api-Key' => $api_key,
                     'Accept'          => 'application/json',
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
@@ -1699,7 +1934,7 @@ class EcommerceInstallationService
      */
     protected function fetch_branding_from_tienda_api(): ?array
     {
-        $commerce_id = $this->client->user_id;
+        $commerce_id = $this->owner_commerce_id();
         $api_url     = trim((string) $this->ecommerce->api_url);
 
         if ($api_url === '' || $commerce_id === null) {
@@ -1817,12 +2052,9 @@ class EcommerceInstallationService
      */
     protected function pwa_display_name(): string
     {
-        $name = trim((string) ($this->client->company_name ?? ''));
-        if ($name === '') {
-            $name = trim((string) ($this->client->name ?? 'Tienda'));
-        }
-
-        return $name;
+        // Delega en el resolver de dueño: es el mismo nombre que va al APP_NAME del .env y a
+        // VUE_APP_SITE_NAME, y ahora también sabe resolverlo cuando el dueño es una demo.
+        return $this->owner_display_name();
     }
 
     /**
@@ -2576,7 +2808,7 @@ class EcommerceInstallationService
 
         $env_vars = [
             'VUE_APP_API_URL'      => $api_url,
-            'VUE_APP_COMMERCE_ID'  => (string) $this->client->user_id,
+            'VUE_APP_COMMERCE_ID'  => (string) $this->owner_commerce_id(),
             'VUE_APP_APP_URL'      => $spa_url,
             'VUE_APP_ICONS_VERSION' => date('YmdHis'),
         ];

@@ -20,6 +20,7 @@ use App\Http\Controllers\DemoController;
 use App\Http\Controllers\DemoEventosController;
 use App\Http\Controllers\DemoExperienciaController;
 use App\Http\Controllers\DemoMediaUrlsController;
+use App\Http\Controllers\DemoInstallationController;
 use App\Http\Controllers\DemoUpdateController;
 use App\Http\Controllers\CommonLaravel\UpdateController as MassUpdateController;
 use App\Http\Controllers\AiSystemPromptController;
@@ -549,6 +550,17 @@ Route::prefix('admin')->group(function () {
         Route::post('demo-update', [DemoUpdateController::class, 'store_json']);
         Route::delete('demo-update/{id}', [DemoUpdateController::class, 'destroy_json']);
 
+        // Instalaciones desde cero del SISTEMA (ERP) de una demo.
+        //
+        // 🔴 No hay un `start` aparte como en client-installations: el POST crea la corrida Y
+        // dispara el pipeline, cuya etapa run_demo_setup le hace migrate:fresh a la base de la
+        // demo. Un endpoint de arranque separado permitiría re-arrancar la misma fila, o sea un
+        // segundo migrate:fresh sobre una instancia que puede seguir sembrando.
+        Route::get('demo-installation', [DemoInstallationController::class, 'index_json']);
+        Route::get('demo-installation/{id}', [DemoInstallationController::class, 'show_json']);
+        Route::post('demo-installation', [DemoInstallationController::class, 'store_json']);
+        Route::delete('demo-installation/{id}', [DemoInstallationController::class, 'destroy_json']);
+
         Route::get('update', [UpdateController::class, 'index_json']);
         Route::post('update', [UpdateController::class, 'store_json']);
         // Antes de update/{id}: sin segmento variable, no colisiona (los demás POST
@@ -709,6 +721,16 @@ Route::prefix('admin')->group(function () {
 
         // Instalación/actualización del ecommerce (tienda-spa + tienda-api): job en cola +
         // endpoints de estado/logs para el polling del panel (prompts 583/584/585).
+        //
+        // Desde el 31/8/2026 los dos endpoints de arranque (`start-install` y `start-update`)
+        // aceptan `{ demo_id }` como alternativa a `{ client_id }`: es el mismo pipeline y las
+        // mismas rutas, cambia solo el dueño de la tienda (ver la sección "DUEÑO DE LA TIENDA" de
+        // EcommerceInstallationService). NO se agregaron rutas paralelas por demo a propósito:
+        // dos rutas que terminan en el mismo servicio es la forma conocida de que una se quede
+        // sin la guarda que se le agrega a la otra.
+        //
+        // `ecommerce-installations` acepta además `?owner=cliente|demo` para filtrar el listado
+        // por tipo de dueño. Sin el parámetro devuelve todo, como siempre.
         Route::get('ecommerce-installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'index_json']);
         Route::get('client-ecommerce/{client_ecommerce}/installations', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'show_json']);
         Route::post('client-ecommerce/{client_ecommerce}/installations/start-install', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'start_install_json']);
