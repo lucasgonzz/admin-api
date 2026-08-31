@@ -57,6 +57,20 @@ class HostingerApiClientFake extends HostingerApiClient
     private $fallas = [];
 
     /**
+     * Respuestas que cambian entre una llamada y la siguiente sobre la misma ruta.
+     *
+     * 🔴 Existe por la guarda G8 del plan (§5): la verificación posterior del PUT de DNS hace un GET
+     * de la zona ANTES y otro DESPUÉS, y toda la guarda consiste justamente en que esas dos
+     * respuestas pueden ser distintas. Con una regla fija de responder() no hay forma de escribir el
+     * caso que importa —el PUT se llevó puesto un registro— y G8 quedaría sin test.
+     *
+     * Cada entrada: ['ruta' => string, 'metodo' => string|'', 'respuestas' => array<int, array>].
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private $secuencias = [];
+
+    /**
      * Prepara la respuesta de toda llamada cuya ruta contenga $ruta_parcial.
      *
      * @param  string  $ruta_parcial  Fragmento de la ruta (ej: '/databases').
@@ -98,6 +112,26 @@ class HostingerApiClientFake extends HostingerApiClient
     }
 
     /**
+     * Prepara respuestas que se van consumiendo, una por llamada, sobre la misma ruta.
+     *
+     * La última se repite si hay más llamadas que respuestas. Se evalúa despues de las fallas y
+     * ANTES de responder(), para que una secuencia pueda ganarle a una regla fija.
+     *
+     * @param  string  $ruta_parcial
+     * @param  array<int, array<int|string, mixed>>  $respuestas  En orden de consumo.
+     * @param  string  $metodo
+     * @return void
+     */
+    public function responder_secuencia(string $ruta_parcial, array $respuestas, string $metodo = ''): void
+    {
+        $this->secuencias[] = [
+            'ruta'       => $ruta_parcial,
+            'metodo'     => strtoupper($metodo),
+            'respuestas' => array_values($respuestas),
+        ];
+    }
+
+    /**
      * Borra todas las reglas y el registro de llamadas.
      *
      * @return void
@@ -107,6 +141,7 @@ class HostingerApiClientFake extends HostingerApiClient
         $this->llamadas    = [];
         $this->respuestas  = [];
         $this->fallas      = [];
+        $this->secuencias  = [];
     }
 
     /**
@@ -194,6 +229,21 @@ class HostingerApiClientFake extends HostingerApiClient
                     (int) $falla['codigo']
                 );
             }
+        }
+
+        foreach ($this->secuencias as $indice => $secuencia) {
+            if (! $this->matchea($secuencia, $method, $path)) {
+                continue;
+            }
+
+            /* Se consume una; la última queda pegada para las llamadas que sobren. */
+            if (count($secuencia['respuestas']) > 1) {
+                $respuesta = array_shift($this->secuencias[$indice]['respuestas']);
+
+                return $respuesta;
+            }
+
+            return $secuencia['respuestas'][0];
         }
 
         foreach ($this->respuestas as $regla) {

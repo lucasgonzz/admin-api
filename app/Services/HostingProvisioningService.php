@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
+use App\Models\ClientSshCredential;
 
 /**
  * Base del aprovisionamiento del hosting de un cliente: lo que es igual en el hosting compartido y
@@ -70,6 +71,16 @@ abstract class HostingProvisioningService
     private $structure = null;
 
     /**
+     * Runners de comandos remotos ya abiertos, uno por tipo de credencial.
+     *
+     * Se cachean para que los cuatro sitios del VPS compartan una sola sesión SSH: abrir una por
+     * comando multiplica el handshake por veinte en un paso que ya es el más lento del pipeline.
+     *
+     * @var array<string, RemoteCommandRunner>
+     */
+    private $runners = [];
+
+    /**
      * @param  ClientInstallation  $installation
      * @param  ClientApi           $target_api
      * @param  \Closure            $logger  function (string $step, string $linea, string $level).
@@ -99,17 +110,8 @@ abstract class HostingProvisioningService
             return new SharedHostingProvisioning($installation, $target_api, $logger);
         }
 
-        /*
-         * El VPS lo construye U8. Hasta entonces esto tiene que fallar fuerte y no devolver el
-         * proveedor de shared "mientras tanto": aprovisionar un cliente de VPS contra la cuenta
-         * compartida crearía cuatro subdominios y una base que nadie va a usar, en el hosting de
-         * los otros 40 clientes.
-         */
         if ($tipo === ClientInstallation::PROVISION_VPS) {
-            throw new \RuntimeException(
-                'El aprovisionamiento en VPS todavía no está implementado en este servidor. '
-                . 'Destildá el aprovisionamiento o elegí hosting compartido.'
-            );
+            return new VpsHostingProvisioning($installation, $target_api, $logger);
         }
 
         throw new \RuntimeException(
@@ -317,6 +319,44 @@ abstract class HostingProvisioningService
     protected function hostinger(): HostingerApiClient
     {
         return app(HostingerApiClient::class);
+    }
+
+    /**
+     * Runner de comandos remotos para un tipo de credencial, con el log ya enchufado.
+     *
+     * 🔴 Todo comando remoto del aprovisionamiento pasa por acá y NUNCA por exec_hosting_ssh(): ese
+     * helper loguea el comando entero (InstallationService.php:~1580) y el VPS ejecuta
+     * `clpctl site:add:php ... --siteUserPassword=<generada>`. RemoteCommandRunner redacta los
+     * secretos antes de que la línea llegue al panel y a deployment_logs; el motivo largo está
+     * escrito en esa clase.
+     *
+     * makeWith() y no `new`: es lo que deja que un test bindee RemoteCommandRunner a un fake y
+     * pruebe el string exacto de cada comando sin abrir una sesión SSH contra un servidor de verdad.
+     *
+     * @param  string  $tipo_de_credencial  'vps' | 'shared_hosting'.
+     * @return RemoteCommandRunner
+     * @throws \RuntimeException Si no hay credencial cargada de ese tipo.
+     */
+    protected function runner(string $tipo_de_credencial): RemoteCommandRunner
+    {
+        if (! isset($this->runners[$tipo_de_credencial])) {
+            $credencial = ClientSshCredential::where('type', $tipo_de_credencial)->first();
+
+            if ($credencial === null) {
+                throw new \RuntimeException(
+                    'No hay credencial SSH de tipo "' . $tipo_de_credencial . '" cargada en el '
+                    . 'admin. Cargala antes de aprovisionar: sin ella no se puede ejecutar ni un '
+                    . 'comando en el servidor.'
+                );
+            }
+
+            $runner = app()->makeWith(RemoteCommandRunner::class, ['credential' => $credencial]);
+            $runner->usar_logger($this->logger);
+
+            $this->runners[$tipo_de_credencial] = $runner;
+        }
+
+        return $this->runners[$tipo_de_credencial];
     }
 
     /**

@@ -34,11 +34,41 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
     {
         $slug = $this->slug();
 
-        foreach ($this->directorios_de_subdominios() as $subdominio => $directorio) {
-            $this->crear_subdominio((string) $subdominio, (string) $directorio);
+        foreach ($this->paths_de_subdominios() as $subdominio => $path) {
+            $this->crear_directorio_del_sitio((string) $path);
+            $this->crear_subdominio((string) $subdominio, $this->directorio_de((string) $path));
         }
 
         $this->log('provision_sites', 'Los 4 subdominios de ' . $slug . ' están.', 'success');
+    }
+
+    /**
+     * Crea por SSH el directorio destino del subdominio, ANTES del POST que lo da de alta.
+     *
+     * 🔴 Va antes y no después, y `mkdir -p` y no `mkdir`. Dos motivos:
+     *
+     * 1. No se pudo verificar si la API de Hostinger crea sola la carpeta que recibe en `directory`
+     *    (§10.1 del plan: el token todavía no existe). Si no la crea, el subdominio queda apuntando
+     *    a la nada y el error recién aparece quince minutos después, cuando upload_spa intenta
+     *    entrar ahí. Creándola primero, el caso "no la crea" deja de existir y el caso "la crea"
+     *    no se rompe: `mkdir -p` sobre un directorio que ya está no falla ni cambia nada.
+     * 2. Es idempotente por construcción, que es lo que el reintento necesita.
+     *
+     * La ruta se arma con la convención del hosting compartido —la misma que hardcodea
+     * ClientApiPathResolver::resolve()— y es relativa al home del usuario SSH, que es donde la
+     * sesión aterriza.
+     *
+     * @param  string  $path  Ruta relativa dentro de public_html (ej: 'lacava/api').
+     * @return void
+     * @throws \RuntimeException
+     */
+    private function crear_directorio_del_sitio(string $path): void
+    {
+        $absoluto = 'domains/' . $this->dominio() . '/public_html/' . trim($path, '/');
+
+        $this->runner('shared_hosting')
+            ->para_etapa('provision_sites')
+            ->run('mkdir -p ' . escapeshellarg($absoluto));
     }
 
     /**
@@ -81,31 +111,36 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
     }
 
     /**
-     * Los 4 subdominios con su directorio destino, en el orden en que se crean.
+     * Los 4 subdominios con su ruta relativa dentro de public_html, en el orden en que se crean.
      *
      * 🔴 EL SUBDOMINIO DE LA API APUNTA A `<slug>/api`, NUNCA A `<slug>/api/public`.
      *
      * Si estás por "arreglar" esto agregándole `/public`, leé esto primero:
      * ClientEmpresaApiUrlResolver::normalize_api_base_url() le AGREGA `/public` a la URL de toda
      * ClientApi con hosting_type='shared_hosting', y esa URL alimenta APP_URL y VUE_APP_API_URL.
-     * Con el docroot ya apuntando a public/, el SPA pediría `.../public/api/...` sobre un docroot que
-     * YA es public/ → 404 en todo el sistema, en el ERP y en la tienda. Los ~30 clientes de
+     * Con el docroot ya apuntando a public/, el SPA pediría `.../public/api/...` sobre un docroot
+     * que YA es public/ → 404 en todo el sistema, en el ERP y en la tienda. Los ~30 clientes de
      * producción que hoy andan tienen `/public` en la URL: esa es la evidencia de cuál es la
      * convención.
      *
      * Por eso también `is_using_public_directory` sale en false desde config.
      *
-     * @return array<string, string>  subdominio => directorio.
+     * Es la ruta REAL en el disco, sin la plantilla de config aplicada: la necesitan así el
+     * `mkdir -p` previo y, ya pasada por directorio_de(), el payload del POST. Los dos valores
+     * pueden diferir, porque la plantilla existe justamente para poder cambiar lo que espera la API
+     * sin tocar código (§10.1).
+     *
+     * @return array<string, string>  subdominio => ruta relativa.
      */
-    public function directorios_de_subdominios(): array
+    private function paths_de_subdominios(): array
     {
         $slug = $this->slug();
 
         return [
-            'api-' . $slug        => $this->directorio_de($slug . '/api'),
-            $slug                 => $this->directorio_de($slug . '/spa'),
-            'api-' . $slug . '2'  => $this->directorio_de($slug . '2/api'),
-            $slug . '2'           => $this->directorio_de($slug . '2/spa'),
+            'api-' . $slug        => $slug . '/api',
+            $slug                 => $slug . '/spa',
+            'api-' . $slug . '2'  => $slug . '2/api',
+            $slug . '2'           => $slug . '2/spa',
         ];
     }
 
@@ -119,7 +154,7 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
      * @param  string  $path  Ruta relativa dentro de public_html (ej: 'lacava/api').
      * @return string
      */
-    private function directorio_de(string $path): string
+    protected function directorio_de(string $path): string
     {
         $plantilla = (string) config('services.hostinger.subdomain_directory_template', '{path}');
 
@@ -223,52 +258,18 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
     }
 
     /**
-     * Labels presentes en la zona DNS, normalizados.
+     * Labels presentes en la zona DNS.
      *
-     * Es deliberadamente tolerante con la forma de la respuesta: el contrato del GET de la zona no
-     * se pudo verificar (§10.1) y lo único que necesitamos de acá son los nombres. Se acepta tanto
-     * un array plano de registros como uno anidado, y se normaliza el nombre a label pelado
-     * (`api-lacava.comerciocity.com.` → `api-lacava`) porque cada proveedor lo devuelve distinto.
+     * El parseo vive en DnsZoneRecords porque la rama del VPS lee la misma respuesta para la guarda
+     * G8 (diferencia de conjuntos antes y después del PUT): dos copias del mismo parseo es lo que
+     * después diverge sin que nadie lo note, y una divergencia ahí hace que G8 no denuncie una zona
+     * que perdió registros.
      *
      * @param  array<int|string, mixed>  $zona
      * @return array<int, string>
      */
     public function nombres_de_la_zona(array $zona): array
     {
-        $nombres = [];
-
-        foreach ($zona as $entrada) {
-            if (is_array($entrada) && isset($entrada['name'])) {
-                $nombres[] = $this->normalizar_nombre_de_zona((string) $entrada['name']);
-                continue;
-            }
-
-            /* Una respuesta envuelta ({data: [...]}) trae los registros un nivel más adentro. */
-            if (is_array($entrada)) {
-                foreach ($this->nombres_de_la_zona($entrada) as $anidado) {
-                    $nombres[] = $anidado;
-                }
-            }
-        }
-
-        return array_values(array_unique($nombres));
-    }
-
-    /**
-     * `api-lacava.comerciocity.com.` → `api-lacava`.
-     *
-     * @param  string  $nombre
-     * @return string
-     */
-    private function normalizar_nombre_de_zona(string $nombre): string
-    {
-        $nombre = rtrim(trim($nombre), '.');
-        $sufijo = '.' . $this->dominio();
-
-        if (substr($nombre, -strlen($sufijo)) === $sufijo) {
-            $nombre = substr($nombre, 0, strlen($nombre) - strlen($sufijo));
-        }
-
-        return $nombre;
+        return (new DnsZoneRecords($zona))->nombres();
     }
 }

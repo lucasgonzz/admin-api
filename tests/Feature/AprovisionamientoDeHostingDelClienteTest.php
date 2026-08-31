@@ -7,18 +7,22 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
 use App\Models\Version;
 use App\Services\EnvSshService;
 use App\Services\HostingProvisioningService;
 use App\Services\HostingerApiClient;
+use App\Services\RemoteCommandRunner;
 use App\Services\SharedHostingProvisioning;
+use App\Services\VpsHostingProvisioning;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Tests\Fakes\EnvSshServiceFake;
 use Tests\Fakes\HostingerApiClientFake;
+use Tests\Fakes\RemoteCommandRunnerFake;
 use Tests\TestCase;
 
 /**
@@ -59,12 +63,37 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
      */
     private $env_fake = null;
 
+    /**
+     * Reemplazo en memoria del runner de comandos remotos. Se crea perezosamente porque necesita la
+     * credencial que el propio servicio resuelve.
+     *
+     * @var RemoteCommandRunnerFake|null
+     */
+    private $runner = null;
+
     protected function setUp(): void
     {
         parent::setUp();
 
         $this->hostinger = new HostingerApiClientFake();
         $this->app->instance(HostingerApiClient::class, $this->hostinger);
+
+        /*
+         * 🔴 bind() con closure y no instance(): HostingProvisioningService::runner() resuelve el
+         * runner con makeWith(['credential' => ...]), y el container ignora un binding de tipo
+         * instance() cuando la resolución lleva parámetros (needsContextualBuild). Con el closure,
+         * el fake recibe la credencial de verdad y devuelve siempre el mismo objeto, así que un
+         * test puede leer todos los comandos de la corrida en un solo lugar.
+         *
+         * Sin esto, provision_sites() abriría un SSH real contra 127.0.0.1 en cada test.
+         */
+        $this->app->bind(RemoteCommandRunner::class, function ($app, $parametros) {
+            if ($this->runner === null) {
+                $this->runner = new RemoteCommandRunnerFake($parametros['credential']);
+            }
+
+            return $this->runner;
+        });
 
         /*
          * La config se fija en el test y no se hereda del .env: si mañana admin_testing_s6 corre en
@@ -812,6 +841,580 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // U8 — APROVISIONAMIENTO EN EL VPS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * El pendiente que dejó U3: el `mkdir -p` del directorio va ANTES del POST del subdominio.
+     *
+     * No se pudo verificar si la API de Hostinger crea sola la carpeta que recibe en `directory`
+     * (§10.1). Si no la crea, el subdominio queda apuntando a la nada y el error recién aparece
+     * quince minutos después, en upload_spa.
+     */
+    public function test_en_shared_el_directorio_se_crea_por_ssh_antes_del_post(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $slug  = $datos['slug'];
+
+        $this->responder_zona_completa($slug);
+        $datos['proveedor']->provision_sites();
+
+        $mkdirs = $this->runner_fake()->crudos_con('mkdir -p');
+        $this->assertCount(4, $mkdirs);
+
+        $raiz = 'domains/comerciocity.com/public_html/';
+        $this->assertStringContainsString($raiz . $slug . '/api', $this->sin_comillas($mkdirs[0]));
+        $this->assertStringContainsString($raiz . $slug . '/spa', $this->sin_comillas($mkdirs[1]));
+        $this->assertStringContainsString($raiz . $slug . '2/api', $this->sin_comillas($mkdirs[2]));
+        $this->assertStringContainsString($raiz . $slug . '2/spa', $this->sin_comillas($mkdirs[3]));
+
+        /* Y los 4 POST se hicieron igual: el mkdir se suma, no reemplaza nada. */
+        $this->assertCount(4, $this->posts_a('/subdomains'));
+    }
+
+    /**
+     * La fábrica devuelve el proveedor del VPS cuando la fila lo pide.
+     */
+    public function test_la_fabrica_devuelve_el_proveedor_del_vps(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+
+        $this->assertInstanceOf(VpsHostingProvisioning::class, $datos['proveedor']);
+    }
+
+    /**
+     * El preflight del VPS verifica los binarios y pasa las 2 ClientApi a hosting_type='vps'.
+     *
+     * 🔴 Y NO toca client_apis.path. Un path vacío en una ClientApi de VPS es lo que hace que
+     * build_spa_hosting_deploy_shell() arme el docroot en la raíz de la cuenta compartida y el
+     * `find . -mindepth 1 -delete` vacíe el public_html de los ~40 clientes activos.
+     */
+    public function test_el_preflight_del_vps_marca_las_apis_sin_tocar_el_path(): void
+    {
+        $datos     = $this->preparar_cliente_vps();
+        $slug      = $datos['slug'];
+        $path_1    = $datos['api1']->path;
+        $path_2    = $datos['api2']->path;
+
+        $datos['proveedor']->provision_check();
+
+        $crudos = $this->runner_fake()->crudos;
+        $this->assertContains('command -v clpctl', $crudos);
+        $this->assertContains('command -v supervisorctl', $crudos);
+
+        $api1 = ClientApi::find($datos['api1']->id);
+        $api2 = ClientApi::find($datos['api2']->id);
+
+        $this->assertSame('vps', $api1->hosting_type);
+        $this->assertSame('vps', $api2->hosting_type);
+        $this->assertSame($slug, $api1->vps_path);
+        $this->assertSame($slug . '2', $api2->vps_path);
+
+        /* 🔴 El path viejo sigue intacto. */
+        $this->assertSame($path_1, $api1->path);
+        $this->assertSame($path_2, $api2->path);
+    }
+
+    /**
+     * Sin clpctl en el VPS, el preflight falla y no marca nada.
+     */
+    public function test_sin_clpctl_el_preflight_del_vps_falla(): void
+    {
+        /* Antes de preparar: en el fake gana la primera regla que matchea. */
+        $this->runner_fake()->responder('command -v clpctl', '');
+
+        $datos = $this->preparar_cliente_vps();
+
+        $this->assertStringContainsString(
+            'clpctl',
+            $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_check();
+            })
+        );
+
+        $this->assertSame('shared_hosting', ClientApi::find($datos['api1']->id)->hosting_type);
+    }
+
+    /**
+     * Los 4 sitios de CloudPanel, con el vhost Generic, y el symlink del docroot de las dos APIs.
+     *
+     * 🔴 `rmdir` y NUNCA `rm -rf`: en un reintento sobre un sitio ya instalado, un `rm -rf` acá
+     * borra el docroot de un cliente que está sirviendo producción.
+     */
+    public function test_los_sitios_del_vps_usan_rmdir_y_nunca_rm_rf(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $datos['proveedor']->provision_sites();
+
+        $sitios = $this->runner_fake()->crudos_con('clpctl site:add:php');
+        $this->assertCount(4, $sitios);
+
+        $primero = $this->sin_comillas($sitios[0]);
+        $this->assertStringContainsString('--domainName=api-' . $slug . '.comerciocity.com', $primero);
+        $this->assertStringContainsString('--phpVersion=7.4', $primero);
+        $this->assertStringContainsString('--vhostTemplate=Generic', $primero);
+        $this->assertStringContainsString('--siteUser=api-' . $slug, $primero);
+
+        /* 🔴 El aserto que importa de este test. */
+        $this->assertCount(2, $this->runner_fake()->crudos_con('rmdir '));
+        $this->assertSame([], $this->runner_fake()->crudos_con('rm -rf'));
+        $this->assertSame([], $this->runner_fake()->crudos_con('rm -r'));
+
+        /* El symlink es solo de las dos APIs; el docroot del SPA es htdocs/<dominio> tal cual. */
+        $enlaces = $this->runner_fake()->crudos_con('ln -sfn');
+        $this->assertCount(2, $enlaces);
+        $this->assertStringContainsString(
+            '/home/api-' . $slug . '/empresa-api/public /home/api-' . $slug . '/htdocs/api-' . $slug . '.comerciocity.com',
+            $this->sin_comillas($enlaces[0])
+        );
+    }
+
+    /**
+     * Si el docroot no quedó siendo el symlink, la etapa falla y NO borra nada.
+     */
+    public function test_un_docroot_con_contenido_hace_fallar_la_etapa_sin_borrar(): void
+    {
+        /* Antes de preparar: en el fake gana la primera regla que matchea. */
+        $this->runner_fake()->responder('readlink', '');
+
+        $datos = $this->preparar_cliente_vps();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('no quedó apuntando a');
+
+        $datos['proveedor']->provision_sites();
+    }
+
+    /**
+     * La base del VPS va SIN el prefijo u767360347_ (§F3 del informe de migración).
+     */
+    public function test_la_base_del_vps_no_lleva_el_prefijo_de_la_cuenta_compartida(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $datos['proveedor']->provision_db();
+
+        $comandos = $this->runner_fake()->crudos_con('clpctl db:add');
+        $this->assertCount(1, $comandos);
+
+        $comando = $this->sin_comillas($comandos[0]);
+        $this->assertStringContainsString('--databaseName=' . $slug, $comando);
+        $this->assertStringContainsString('--databaseUserName=' . $slug, $comando);
+        $this->assertStringNotContainsString('u767360347_', $comando);
+
+        $this->assertSame($slug, ClientApi::find($datos['api1']->id)->provisioning_secrets['db_name']);
+    }
+
+    /**
+     * El cron del VPS usa el patrón idempotente del plan, y con Kernel nuevo NO crea supervisor.
+     */
+    public function test_el_cron_del_vps_es_idempotente_y_sin_supervisor_con_kernel_nuevo(): void
+    {
+        $datos    = $this->preparar_cliente_vps();
+        $slug     = $datos['slug'];
+        $api_path = '/home/api-' . $slug . '/empresa-api';
+
+        $datos['proveedor']->provision_cron($api_path, true);
+
+        $crons = $this->runner_fake()->crudos_con('crontab');
+        $this->assertCount(1, $crons);
+
+        $comando = $this->sin_comillas($crons[0]);
+        $this->assertStringContainsString('crontab -u api-' . $slug . ' -l', $comando);
+        $this->assertStringContainsString('grep -qF', $comando);
+        $this->assertStringContainsString('| crontab -u api-' . $slug . ' -', $comando);
+        $this->assertStringContainsString($api_path . '/artisan schedule:run', $comando);
+        $this->assertStringNotContainsString('flock', $comando);
+
+        /* 🔴 Con Kernel nuevo el supervisor competiría por los mismos jobs que el scheduler. */
+        $this->assertSame([], $this->runner_fake()->crudos_con('supervisorctl'));
+        $this->assertSame([], $this->runner_fake()->crudos_con('/etc/supervisor'));
+    }
+
+    /**
+     * Con Kernel viejo va el queue:work con flock Y el worker de supervisor.
+     */
+    public function test_con_kernel_viejo_el_vps_agrega_el_worker_de_supervisor(): void
+    {
+        $datos    = $this->preparar_cliente_vps();
+        $slug     = $datos['slug'];
+        $api_path = '/home/api-' . $slug . '/empresa-api';
+
+        $datos['proveedor']->provision_cron($api_path, false);
+
+        $cron = $this->sin_comillas($this->runner_fake()->crudos_con('crontab')[0]);
+        $this->assertStringContainsString('flock -n /tmp/queue-' . $slug . '.lock', $cron);
+        $this->assertStringContainsString('queue:work --stop-when-empty', $cron);
+
+        $conf = $this->runner_fake()->crudos_con('/etc/supervisor/conf.d/api-' . $slug . '-queue.conf');
+        $this->assertNotEmpty($conf);
+        $this->assertStringContainsString('[program:api-' . $slug . '-queue]', $conf[0]);
+        $this->assertStringContainsString('user=api-' . $slug, $conf[0]);
+
+        $this->assertNotEmpty($this->runner_fake()->crudos_con('supervisorctl reread'));
+        $this->assertNotEmpty($this->runner_fake()->crudos_con('supervisorctl update'));
+    }
+
+    /**
+     * El certificado es FATAL y el mensaje trae los 4 comandos exactos para correr a mano.
+     */
+    public function test_si_falla_el_certificado_el_mensaje_trae_los_cuatro_comandos(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $this->runner_fake()->fallar_con('lets-encrypt', 'Could not issue certificate', 1);
+
+        $mensaje = $this->mensaje_de_error(function () use ($datos) {
+            $datos['proveedor']->provision_ssl();
+        });
+
+        $this->assertStringContainsString('TODO LO DEMÁS YA QUEDÓ HECHO', $mensaje);
+
+        foreach ([$slug, 'api-' . $slug, $slug . '2', 'api-' . $slug . '2'] as $label) {
+            $this->assertStringContainsString(
+                'clpctl lets-encrypt:install:certificate --domainName=' . $label . '.comerciocity.com',
+                $mensaje
+            );
+        }
+
+        /* Dos intentos por dominio, y el primero que falla corta: 2 llamadas, no 8. */
+        $this->assertCount(2, $this->runner_fake()->crudos_con('lets-encrypt'));
+    }
+
+    /**
+     * Un sitio que ya existía no rompe el reintento, pero NO se guarda una contraseña que no es.
+     *
+     * Guardar la generada sería peor que no tener ninguna: el sitio se creó con otra, y nadie
+     * volvería a mirar una credencial que figura guardada.
+     */
+    public function test_un_sitio_que_ya_existia_no_guarda_una_contrasenia_que_no_es(): void
+    {
+        $this->runner_fake()->fallar_con('clpctl site:add:php', 'Site already exists.', 1);
+
+        $datos = $this->preparar_cliente_vps();
+
+        $datos['proveedor']->provision_sites();
+
+        $secretos = ClientApi::find($datos['api1']->id)->provisioning_secrets;
+        $this->assertTrue($secretos === null || ! isset($secretos['api_site_password']));
+
+        $this->assertCount(4, $datos['proveedor']->result()->ya_existian());
+        $this->assertStringContainsString('ya existía', $this->linea_que_contiene('ya existía'));
+    }
+
+    /**
+     * Una base que ya existe y de la que no tenemos la contraseña FRENA la etapa: reusarla a ciegas
+     * dejaría un .env con una contraseña que no es, y el sistema no bootearía.
+     */
+    public function test_una_base_del_vps_que_ya_existe_sin_secreto_frena_la_etapa(): void
+    {
+        $this->runner_fake()->fallar_con('clpctl db:add', 'Database already exists.', 1);
+
+        $datos = $this->preparar_cliente_vps();
+
+        $this->assertStringContainsString(
+            'ya existe en el VPS y no tengo su contraseña',
+            $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_db();
+            })
+        );
+    }
+
+    /**
+     * Un error de clpctl que NO se puede clasificar como "ya existe" hace fallar la etapa.
+     *
+     * Nunca se adivina: dar por bueno un "ya existe" que no fue deja el pipeline creyendo que el
+     * sitio está, y el error aparece quince minutos después en un paso que no tiene nada que ver.
+     */
+    public function test_un_error_desconocido_de_clpctl_no_se_toma_como_ya_existe(): void
+    {
+        $this->runner_fake()->fallar_con('clpctl site:add:php', 'Something went sideways.', 1);
+
+        $datos = $this->preparar_cliente_vps();
+
+        $this->assertStringContainsString(
+            'Something went sideways',
+            $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_sites();
+            })
+        );
+    }
+
+    // ── Test 5 de §7: las guardas del PUT de DNS. Es la parte irreversible. ──────────────
+
+    /**
+     * Test 5 (a) — con dns_write_enabled en false la etapa falla y NO se llama a nadie.
+     */
+    public function test_guarda_g2_con_el_flag_apagado_no_se_toca_la_zona(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        config(['services.hostinger.dns_write_enabled' => false]);
+
+        $this->assertStringContainsString(
+            'HOSTINGER_DNS_WRITE_ENABLED',
+            $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_dns();
+            })
+        );
+
+        /* 🔴 Ni una escritura, y ni siquiera el GET: la guarda es lo PRIMERO del método. */
+        $this->assertSame([], $this->hostinger->escrituras());
+        $this->assertSame([], $this->hostinger->llamadas);
+    }
+
+    /**
+     * Test 5 (b) — el cuerpo tiene exactamente los 4 nombres, overwrite=false, y el snapshot se
+     * pidió ANTES del PUT.
+     */
+    public function test_guardas_g4_g6_g7_el_cuerpo_del_put_y_el_orden_del_snapshot(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        /* La zona antes no tiene ninguno de los 4; después los tiene, más los de otros clientes. */
+        $this->hostinger->responder_secuencia('/api/dns/v1/zones/', [
+            [['name' => 'otrocliente', 'type' => 'A', 'content' => '1.2.3.4']],
+            [
+                ['name' => 'otrocliente', 'type' => 'A', 'content' => '1.2.3.4'],
+                ['name' => 'api-' . $slug, 'type' => 'A', 'content' => '76.13.171.147'],
+                ['name' => $slug, 'type' => 'A', 'content' => '76.13.171.147'],
+                ['name' => 'api-' . $slug . '2', 'type' => 'A', 'content' => '76.13.171.147'],
+                ['name' => $slug . '2', 'type' => 'A', 'content' => '76.13.171.147'],
+            ],
+        ], 'GET');
+        $this->hostinger->responder('/api/dns/v1/snapshots/', ['id' => 'snap-123'], 'POST');
+
+        $datos['proveedor']->provision_dns();
+
+        $puts = $this->hostinger->llamadas_de('PUT');
+        $this->assertCount(1, $puts);
+
+        /* 🔴 G6: overwrite en false, siempre. El literal true no existe en el código. */
+        $this->assertFalse($puts[0]['body']['overwrite']);
+
+        /* G4 + G3: exactamente los 4 nombres del cliente, todos type A. */
+        $nombres = [];
+        foreach ($puts[0]['body']['zone'] as $registro) {
+            $nombres[] = $registro['name'];
+            $this->assertSame('A', $registro['type']);
+            $this->assertSame('76.13.171.147', $registro['records'][0]['content']);
+        }
+
+        sort($nombres);
+        $esperados = ['api-' . $slug, 'api-' . $slug . '2', $slug, $slug . '2'];
+        sort($esperados);
+        $this->assertSame($esperados, $nombres);
+
+        /* 🔴 G7: el snapshot se pidió ANTES del PUT. Sin snapshot no hay vuelta atrás. */
+        $this->assertLessThan(
+            $this->indice_de_llamada('PUT', '/api/dns/v1/zones/'),
+            $this->indice_de_llamada('POST', '/api/dns/v1/snapshots/')
+        );
+
+        $this->assertStringContainsString('snap-123', $this->linea_que_contiene('snap-123'));
+    }
+
+    /**
+     * Test 5 (c) — G3 y G4: un nombre fuera de la lista blanca revienta ANTES de llamar a nadie.
+     *
+     * Se fuerza por reflexión a propósito: hoy registros_a_escribir() no puede armar un nombre así,
+     * y este test existe justamente para el día en que alguien lo cambie.
+     */
+    public function test_guarda_g3_un_nombre_fuera_de_la_lista_blanca_no_llega_a_la_zona(): void
+    {
+        $datos     = $this->preparar_cliente_vps();
+        $proveedor = $datos['proveedor'];
+
+        $prohibidos = [
+            [['name' => '@', 'type' => 'A']],
+            [['name' => '*', 'type' => 'A']],
+            [['name' => 'www', 'type' => 'A']],
+            [['name' => 'otrocliente', 'type' => 'A']],
+            [['name' => 'api-' . $datos['slug'] . '.comerciocity.com', 'type' => 'A']],
+            [['name' => 'api-' . $datos['slug'], 'type' => 'CNAME']],
+        ];
+
+        foreach ($prohibidos as $registros) {
+            $exploto = false;
+
+            try {
+                $this->invocar($proveedor, 'assert_lista_blanca', [$registros]);
+            } catch (\RuntimeException $excepcion) {
+                $exploto = true;
+            }
+
+            $this->assertTrue($exploto, 'Pasó la lista blanca: ' . json_encode($registros));
+        }
+
+        /* G4 — cardinalidad: ni 0 registros ni 5. */
+        foreach ([[], array_fill(0, 5, ['name' => 'x', 'type' => 'A'])] as $cuerpo) {
+            $exploto = false;
+
+            try {
+                $this->invocar($proveedor, 'assert_cardinalidad', [$cuerpo]);
+            } catch (\RuntimeException $excepcion) {
+                $exploto = true;
+            }
+
+            $this->assertTrue($exploto, 'Pasó la cardinalidad con ' . count($cuerpo) . ' registro(s).');
+        }
+
+        $this->assertSame([], $this->hostinger->escrituras());
+    }
+
+    /**
+     * Test 5 (d) — 🔴 G8: si el GET posterior devuelve menos registros, la etapa falla, loguea el id
+     * del snapshot y NO intenta restaurar sola.
+     */
+    public function test_guarda_g8_si_la_zona_perdio_registros_la_etapa_falla_con_el_snapshot(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $this->hostinger->responder_secuencia('/api/dns/v1/zones/', [
+            [
+                ['name' => 'clienteviejo', 'type' => 'A', 'content' => '1.2.3.4'],
+                ['name' => 'api-clienteviejo', 'type' => 'A', 'content' => '1.2.3.4'],
+            ],
+            /* El PUT se llevó puesto a clienteviejo: es el escenario que G8 existe para detectar. */
+            [
+                ['name' => 'api-clienteviejo', 'type' => 'A', 'content' => '1.2.3.4'],
+            ],
+        ], 'GET');
+        $this->hostinger->responder('/api/dns/v1/snapshots/', ['id' => 'snap-456'], 'POST');
+
+        $mensaje = $this->mensaje_de_error(function () use ($datos) {
+            $datos['proveedor']->provision_dns();
+        });
+
+        $this->assertStringContainsString('PERDIÓ REGISTROS', $mensaje);
+        $this->assertStringContainsString('clienteviejo|A', $mensaje);
+        $this->assertStringContainsString('snap-456', $mensaje);
+        $this->assertStringContainsString('NO restaura solo', $mensaje);
+
+        /* La línea del panel va en nivel error, no info. */
+        $this->assertSame('error', $this->nivel_de_la_ultima_linea('provision_dns'));
+
+        /* 🔴 Y no se intentó restaurar: un restore automático sobre una zona a medio arreglar es
+         * peor que el problema. La única escritura posterior al PUT no existe. */
+        $escrituras = $this->hostinger->escrituras();
+        $this->assertSame('PUT', $escrituras[count($escrituras) - 1]['metodo']);
+    }
+
+    /**
+     * Un A record que ya existe apuntando a OTRA IP hace fallar la etapa: no se repunta.
+     */
+    public function test_un_a_record_que_apunta_a_otra_ip_no_se_repunta(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $this->hostinger->responder('/api/dns/v1/zones/', [
+            ['name' => 'api-' . $slug, 'type' => 'A', 'content' => '190.0.0.9'],
+        ], 'GET');
+
+        $mensaje = $this->mensaje_de_error(function () use ($datos) {
+            $datos['proveedor']->provision_dns();
+        });
+
+        $this->assertStringContainsString('190.0.0.9', $mensaje);
+        $this->assertStringContainsString('NO se repunta', $mensaje);
+
+        $this->assertSame([], $this->hostinger->escrituras());
+    }
+
+    /**
+     * Si los 4 ya apuntaban al VPS no se escribe nada y ni siquiera se pide el snapshot.
+     */
+    public function test_si_los_a_records_ya_apuntaban_al_vps_no_se_escribe_nada(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $registros = [];
+        foreach (['api-' . $slug, $slug, 'api-' . $slug . '2', $slug . '2'] as $nombre) {
+            $registros[] = ['name' => $nombre, 'type' => 'A', 'content' => '76.13.171.147'];
+        }
+        $this->hostinger->responder('/api/dns/v1/zones/', $registros, 'GET');
+
+        $datos['proveedor']->provision_dns();
+
+        $this->assertSame([], $this->hostinger->escrituras());
+    }
+
+    /**
+     * 🔴 Si el snapshot falla, NO SE ESCRIBE (guarda G7).
+     */
+    public function test_guarda_g7_sin_snapshot_no_se_escribe_la_zona(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+
+        $this->hostinger->responder('/api/dns/v1/zones/', [], 'GET');
+        $this->hostinger->fallar_con('/api/dns/v1/snapshots/', 500, 'internal error', 'POST');
+
+        $mensaje = $this->mensaje_de_error(function () use ($datos) {
+            $datos['proveedor']->provision_dns();
+        });
+
+        $this->assertStringContainsString('snapshot', $mensaje);
+        $this->assertStringContainsString('NO se escribe nada', $mensaje);
+
+        $this->assertSame([], $this->hostinger->llamadas_de('PUT'));
+    }
+
+    // ── Test 6 de §7: ninguna contraseña en el log. ─────────────────────────────────────
+
+    /**
+     * Test 6 de §7 — 🔴 NINGUNA CONTRASEÑA GENERADA APARECE EN NINGÚN DeploymentLog.
+     *
+     * Es el test que impide que alguien "simplifique" RemoteCommandRunner y vuelva a
+     * exec_hosting_ssh(), que loguea el comando entero: ahí la contraseña del sitio de CloudPanel y
+     * la de la base del cliente quedan escritas en claro en deployment_logs y a la vista en el panel
+     * de operaciones que Lucas comparte en pantalla (§0.5 del plan).
+     */
+    public function test_ninguna_contrasenia_generada_llega_a_los_deployment_logs(): void
+    {
+        $datos = $this->preparar_cliente_vps(null, true);
+
+        $datos['proveedor']->provision_sites();
+        $datos['proveedor']->provision_db();
+
+        $secretos     = ClientApi::find($datos['api1']->id)->provisioning_secrets;
+        $contrasenias = [
+            $secretos['api_site_password'],
+            $secretos['spa_site_password'],
+            $secretos['api2_site_password'],
+            $secretos['spa2_site_password'],
+            $secretos['db_password'],
+        ];
+
+        $lineas = DeploymentLog::where('client_installation_id', $datos['installation']->id)
+            ->pluck('line')
+            ->implode("\n");
+
+        $this->assertNotEmpty($lineas, 'La corrida no logueó nada: el test sería vacío.');
+
+        foreach ($contrasenias as $contrasenia) {
+            $this->assertNotEmpty($contrasenia);
+
+            /* 🔴 El aserto de este test. */
+            $this->assertStringNotContainsString($contrasenia, $lineas);
+
+            /* Y el comando que se EJECUTÓ sí la lleva: si no, el test sería vacío. */
+            $this->assertStringContainsString($contrasenia, implode("\n", $this->runner_fake()->crudos));
+
+            /* Lo que el runner manda al log, en cambio, la trae redactada. */
+            $this->assertStringNotContainsString($contrasenia, $this->runner_fake()->texto_redactado());
+        }
+
+        $this->assertStringContainsString('***', $this->runner_fake()->texto_redactado());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // U6 — ALTA DE INSTALACIÓN CON APROVISIONAMIENTO
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1254,6 +1857,228 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         }
 
         return $encontrados;
+    }
+
+    /**
+     * Cliente con las dos ClientApi estándar y el proveedor del VPS ya instanciado, con el VPS
+     * respondiendo lo que un servidor sano respondería.
+     *
+     * @param  string|null  $slug
+     * @param  bool  $log_real  true = las líneas van a DeploymentLog de verdad (lo necesita el test 6).
+     * @return array<string, mixed>
+     */
+    private function preparar_cliente_vps($slug = null, bool $log_real = false): array
+    {
+        $datos = $this->preparar_cliente_aprovisionable($slug);
+
+        $datos['installation']->provision_hosting_type = ClientInstallation::PROVISION_VPS;
+        $datos['installation']->save();
+
+        $this->crear_credencial_vps();
+
+        config([
+            'services.hostinger.vps_ip'            => '76.13.171.147',
+            'services.hostinger.dns_write_enabled' => true,
+            /* 0 = una sola sonda de propagación y sin sleep, para no colgar la suite 3 minutos. */
+            'services.hostinger.dns_wait_seconds'  => 0,
+        ]);
+
+        $lineas       = &$this->lineas;
+        $installation = $datos['installation']->fresh();
+
+        $datos['installation'] = $installation;
+        $datos['proveedor']    = HostingProvisioningService::para(
+            $installation,
+            $datos['api1'],
+            function ($step, $linea, $level) use (&$lineas, $installation, $log_real) {
+                $lineas[] = ['step' => $step, 'linea' => $linea, 'level' => $level];
+
+                if ($log_real) {
+                    /* Mismo shape que InstallationService::log(), sin el evento de broadcast. */
+                    DeploymentLog::create([
+                        'client_installation_id'    => $installation->id,
+                        'client_version_upgrade_id' => null,
+                        'step'                      => $step,
+                        'line'                      => $linea,
+                        'level'                     => $level,
+                        'created_at'                => now(),
+                    ]);
+                }
+            }
+        );
+
+        $this->responder_como_un_vps_sano($datos['slug']);
+
+        return $datos;
+    }
+
+    /**
+     * Salidas de los comandos que el VPS contesta en el camino feliz.
+     *
+     * @param  string  $slug
+     * @return void
+     */
+    private function responder_como_un_vps_sano(string $slug): void
+    {
+        $runner = $this->runner_fake();
+
+        $runner->responder('command -v clpctl', '/usr/bin/clpctl');
+        $runner->responder('command -v supervisorctl', '/usr/bin/supervisorctl');
+        $runner->responder('dig +short', '76.13.171.147');
+
+        foreach (['api-' . $slug, 'api-' . $slug . '2'] as $label) {
+            $docroot = '/home/' . $label . '/htdocs/' . $label . '.comerciocity.com';
+            $runner->responder('readlink ' . escapeshellarg($docroot), '/home/' . $label . '/empresa-api/public');
+        }
+    }
+
+    /**
+     * El fake del runner, forzando su creación si todavía no se resolvió del container.
+     *
+     * @return RemoteCommandRunnerFake
+     */
+    private function runner_fake(): RemoteCommandRunnerFake
+    {
+        if ($this->runner === null) {
+            $this->runner = new RemoteCommandRunnerFake($this->crear_credencial_vps());
+        }
+
+        return $this->runner;
+    }
+
+    /**
+     * Credencial SSH del VPS (el preflight la exige y admin_testing_s6 no la tiene).
+     *
+     * @return ClientSshCredential
+     */
+    private function crear_credencial_vps(): ClientSshCredential
+    {
+        $credential = ClientSshCredential::where('type', 'vps')->first();
+
+        if ($credential !== null) {
+            return $credential;
+        }
+
+        $credential           = new ClientSshCredential();
+        $credential->type     = 'vps';
+        $credential->host     = '127.0.0.1';
+        $credential->port     = 22;
+        $credential->username = 'root';
+        $credential->password = 'test';
+        $credential->save();
+
+        return $credential;
+    }
+
+    /**
+     * Saca las comillas de un comando para poder afirmar su contenido sin depender del sistema.
+     *
+     * ⚠️ escapeshellarg() es dependiente del sistema operativo: en Linux —donde corre admin-api en
+     * producción— envuelve en comillas simples, y en el Windows de esta máquina en dobles. Lo que
+     * los tests fijan es el comando, no el escapado.
+     *
+     * @param  string  $comando
+     * @return string
+     */
+    private function sin_comillas(string $comando): string
+    {
+        return str_replace(['"', "'"], '', $comando);
+    }
+
+    /**
+     * Índice de la primera llamada de un verbo contra una ruta, o -1.
+     *
+     * @param  string  $metodo
+     * @param  string  $ruta_parcial
+     * @return int
+     */
+    private function indice_de_llamada(string $metodo, string $ruta_parcial): int
+    {
+        foreach ($this->hostinger->llamadas as $indice => $llamada) {
+            if ($llamada['metodo'] === strtoupper($metodo)
+                && strpos($llamada['ruta'], $ruta_parcial) !== false) {
+                return $indice;
+            }
+        }
+
+        return -1;
+    }
+
+    /**
+     * Primera línea del panel que contiene un texto, o ''.
+     *
+     * @param  string  $texto
+     * @return string
+     */
+    private function linea_que_contiene(string $texto): string
+    {
+        foreach ($this->lineas as $linea) {
+            if (strpos($linea['linea'], $texto) !== false) {
+                return $linea['linea'];
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Nivel de la última línea de una etapa.
+     *
+     * @param  string  $step
+     * @return string
+     */
+    private function nivel_de_la_ultima_linea(string $step): string
+    {
+        $nivel = '';
+
+        foreach ($this->lineas as $linea) {
+            if ($linea['step'] === $step) {
+                $nivel = $linea['level'];
+            }
+        }
+
+        return $nivel;
+    }
+
+    /**
+     * Corre algo que TIENE que fallar y devuelve el mensaje del error, o '' si no falló.
+     *
+     * 🔴 Existe porque $this->fail() de PHPUnit tira una AssertionFailedError que hereda de
+     * \RuntimeException: puesto adentro de un `try { ... } catch (\RuntimeException)`, el propio
+     * catch se lo come y el test pasa igual aunque el código no haya fallado nunca. Con esto, un
+     * método que no explota devuelve '' y la aserción de contenido se pone en rojo sola.
+     *
+     * @param  \Closure  $accion
+     * @return string
+     */
+    private function mensaje_de_error(\Closure $accion): string
+    {
+        try {
+            $accion();
+        } catch (\Throwable $excepcion) {
+            return $excepcion->getMessage();
+        }
+
+        return '';
+    }
+
+    /**
+     * Invoca un método privado por reflexión.
+     *
+     * Se usa solo para las guardas del PUT de DNS que hoy no son alcanzables desde afuera: existen
+     * para el día en que alguien cambie el armado del cuerpo, y probarlas es justamente el punto.
+     *
+     * @param  object  $objeto
+     * @param  string  $metodo
+     * @param  array<int, mixed>  $argumentos
+     * @return mixed
+     */
+    private function invocar($objeto, string $metodo, array $argumentos)
+    {
+        $reflexion = new \ReflectionMethod($objeto, $metodo);
+        $reflexion->setAccessible(true);
+
+        return $reflexion->invokeArgs($objeto, $argumentos);
     }
 
     /**
