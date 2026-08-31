@@ -152,6 +152,14 @@ class ClientInstallationController extends Controller
             $targets = $target_or_error;
         }
 
+        // 🔴 El hosting elegido tiene que ser el de las ClientApi destino. Se chequea acá para que
+        // el operador se entere apretando "Crear" y no quince minutos después con recursos ya
+        // creados de los dos lados; la guarda que de verdad frena está en el preflight del proveedor.
+        $incoherencia = $this->hosting_incoherente($targets, $provision_hosting_type);
+        if ($incoherencia !== null) {
+            return $incoherencia;
+        }
+
         // Resuelve version_id: la del request si viene; si no, la última versión publicada
         // (misma lógica que store()).
         $version_id = $request->input('version_id');
@@ -543,6 +551,46 @@ class ClientInstallationController extends Controller
         });
 
         return $targets;
+    }
+
+    /**
+     * 422 si el hosting que se pidió aprovisionar no es el de alguna ClientApi destino.
+     *
+     * 🔴 Esto es el aviso temprano; la guarda de verdad está en el preflight del proveedor. El
+     * escenario cruzado que las dos cierran está escrito entero en
+     * HostingProvisioningStructure::assert_hosting_type_coherente(). ⚠️ Pedir 'vps' sobre APIs en
+     * 'shared_hosting' NO es incoherencia: es el alta normal de la primera vez.
+     *
+     * @param  array<int, array>  $targets
+     * @param  string|null        $provision_hosting_type
+     * @return JsonResponse|null  null si está todo bien.
+     */
+    private function hosting_incoherente(array $targets, $provision_hosting_type)
+    {
+        $pedido = trim((string) $provision_hosting_type);
+
+        if ($pedido === '' || $pedido === ClientInstallation::PROVISION_VPS) {
+            return null;
+        }
+
+        foreach ($targets as $target) {
+            $client_api = ClientApi::find($target['client_api_id']);
+            $actual     = $client_api === null ? '' : trim((string) $client_api->hosting_type);
+
+            if ($actual !== 'vps') {
+                continue;
+            }
+
+            return response()->json([
+                'error' => 'Elegiste aprovisionar "' . $pedido . '" pero la API ' . $client_api->url
+                    . ' del cliente está marcada como "vps". Aprovisionar en un servidor mientras la '
+                    . 'instalación va al otro deja los subdominios y la base de un lado y el código '
+                    . 'del otro. Elegí VPS, o corregí el hosting_type de las dos APIs del cliente si '
+                    . 'de verdad volvió al hosting compartido.',
+            ], 422);
+        }
+
+        return null;
     }
 
     /**

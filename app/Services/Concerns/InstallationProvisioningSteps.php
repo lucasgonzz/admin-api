@@ -90,11 +90,12 @@ trait InstallationProvisioningSteps
         $this->provisioner()->provision_check();
 
         /*
-         * 🔴 refresh() obligatorio: en la rama VPS este paso marca las ClientApi como
-         * hosting_type='vps' escribiendo por OTRAS instancias del modelo. La que tiene esta clase la
-         * cargó el constructor, y es la que después leen compile_spa (para el '/public' de la URL) y
-         * get_api_path(). Sin este refresh el flip existe en la base y no en memoria, que es la
-         * peor de las dos combinaciones: el pipeline sigue creyendo que es hosting compartido.
+         * refresh() defensivo: hasta el 31/8/2026 este paso era el que marcaba las ClientApi como
+         * hosting_type='vps' y sin refrescar acá el flip existía en la base y no en memoria. El flip
+         * se mudó al final de provision_sites (el porqué está en VpsSiteProvisioner::provision_sites)
+         * y el refresh que importa se mudó con él, a step_provision_sites(). Este queda porque el
+         * preflight igual puede correr después de que otra fila del grupo haya escrito, y recargar
+         * una fila que no cambió no cuesta nada.
          */
         $this->target_api->refresh();
     }
@@ -107,6 +108,17 @@ trait InstallationProvisioningSteps
     private function step_provision_sites(): void
     {
         $this->provisioner()->provision_sites();
+
+        /*
+         * 🔴 refresh() obligatorio: en la rama VPS este paso es el que marca las ClientApi como
+         * hosting_type='vps', y lo escribe por OTRAS instancias del modelo (las que devuelve
+         * HostingProvisioningStructure). La que tiene esta clase la cargó el constructor, y es la
+         * que después leen compile_spa —para decidir si la URL de la API lleva '/public'— y
+         * get_api_path(). Sin este refresh el flip existe en la base y no en memoria, que es la peor
+         * de las dos combinaciones: el pipeline sigue creyendo que instala en hosting compartido y
+         * el bundle sale con una URL que en el VPS da 404 en todo.
+         */
+        $this->target_api->refresh();
     }
 
     /**
@@ -144,6 +156,12 @@ trait InstallationProvisioningSteps
      * `queue:work --stop-when-empty` con flock obligatorio. Ese archivo NO existe en el servidor
      * hasta que upload_api corre, y por eso este paso no puede ir al inicio.
      *
+     * 🔴 Y ese grep decide SOLO la rama del hosting compartido. Desde el commit del 26/8/2026 de
+     * empresa-api, el `queue:work --stop-when-empty` del scheduler está envuelto en un
+     * `if (! config('app.VPS'))`: en un VPS el grep sigue dando > 0 y sin embargo el scheduler no
+     * programa la cola. El proveedor del VPS ignora este booleano a propósito y crea el supervisor
+     * siempre — el porqué completo está en VpsDatabaseProvisioner::provision_cron().
+     *
      * @return void
      */
     private function step_provision_cron(): void
@@ -157,10 +175,21 @@ trait InstallationProvisioningSteps
         $api_path = $this->get_api_path();
         $this->reconnect_hosting_ssh();
 
-        /* `|| true` para que un Kernel.php ausente devuelva 0 en vez de romper la etapa. */
+        /*
+         * `|| true` para que un Kernel.php ausente devuelva 0 en vez de romper la etapa.
+         *
+         * 🔴 escape_remote_arg() y NO escapeshellarg(): el comando lo ejecuta el `sh` del servidor
+         * del cliente, no el shell de esta máquina. escapeshellarg() escapa según el sistema donde
+         * corre PHP, y como admin-api también corre local sobre WAMP, en Windows emite comillas
+         * DOBLES — adentro de las cuales el `sh` remoto expande `$`, backticks y barras. El
+         * $api_path lleva client_apis.path pegado, que es texto libre del CRUD y NO pasa por las
+         * cinco guardas de HostingProvisioningStructure (esas validan el slug derivado del spa_url,
+         * que es otro dato). Un path con `$(...)` se ejecutaría en el hosting del cliente. La
+         * explicación larga está en EnvSshService::escape_remote_arg().
+         */
         $salida = $this->exec_hosting_ssh(
             'provision_cron',
-            'grep -c stop-when-empty ' . escapeshellarg($api_path . '/app/Console/Kernel.php') . ' || true',
+            'grep -c stop-when-empty ' . $this->escape_remote_arg($api_path . '/app/Console/Kernel.php') . ' || true',
             false
         );
 
@@ -220,8 +249,15 @@ trait InstallationProvisioningSteps
             return '';
         }
 
-        return 'chown -R ' . escapeshellarg($usuario . ':' . $usuario) . ' '
-            . escapeshellarg($api_path) . ' 2>&1';
+        /*
+         * 🔴 escape_remote_arg() y NO escapeshellarg(), por el mismo motivo que el grep del cron —
+         * y acá pesa más: la credencial SSH del VPS es ROOT. El usuario y el path se arman con
+         * client_apis.vps_path, que es texto libre del CRUD del admin, no el slug validado. Con
+         * admin-api corriendo sobre WAMP, un vps_path con `$(...)` sería ejecución de comandos como
+         * root en el VPS donde viven todos los clientes migrados.
+         */
+        return 'chown -R ' . $this->escape_remote_arg($usuario . ':' . $usuario) . ' '
+            . $this->escape_remote_arg($api_path) . ' 2>&1';
     }
 
     /**
@@ -314,9 +350,31 @@ trait InstallationProvisioningSteps
     }
 
     /**
-     * Guarda de Redis del VPS (§3.3): prefijos siempre puestos, y falla si hicieran falta y no están.
+     * Las variables que un .env de VPS lleva y uno de hosting compartido NO: la bandera VPS y los
+     * prefijos de Redis (§3.3).
      *
-     * El VPS tiene UN SOLO Redis para todos los clientes. Hoy la plantilla trae CACHE_DRIVER=file y
+     * 🔴 `VPS=true` no es cosmética, y su ausencia es un fallo SILENCIOSO en el sistema del cliente.
+     * Verificado el 31/8/2026 contra `origin/develop` de empresa-api, donde esa misma variable
+     * decide dos cosas distintas:
+     *
+     *   1. `config/filesystems.php:44` arma la URL del disco `public` agregándole '/public' salvo
+     *      que `env('VPS')` sea verdadera. En el VPS el docroot YA es empresa-api/public, así que
+     *      sin la variable toda imagen y todo adjunto del cliente sale como
+     *      `.../public/storage/...` → 404 en TODOS los archivos.
+     *   2. `app/Console/Kernel.php` (commit del 26/8/2026) envuelve el `queue:work
+     *      --stop-when-empty` del scheduler en un `if (! config('app.VPS'))`, porque en el VPS la
+     *      cola la maneja supervisor. De ahí sale el hallazgo B y por eso el supervisor del VPS ya
+     *      no depende del grep: ver VpsDatabaseProvisioner::configurar_supervisor().
+     *
+     * Los clientes ya migrados a mano (demo2, demo3, grupolimp) la tienen puesta a mano justamente
+     * por (1) — §F5 del informe 20260826-plan-migracion-shared-a-vps.md.
+     *
+     * 🔴 Y en hosting compartido NO se escribe, ni siquiera como `false`. Hoy no existe en el .env
+     * de ninguno de los ~40 clientes del compartido y el default de `env('VPS')` ya es false: el
+     * comportamiento sería idéntico y el precio, tocarle el .env a 40 clientes sin motivo.
+     *
+     * Los prefijos de Redis van por el mismo camino porque tienen la misma condición: el VPS tiene
+     * UN SOLO Redis para todos los clientes. Hoy la plantilla trae CACHE_DRIVER=file y
      * QUEUE_CONNECTION=database, así que la colisión no aplica — pero el día que alguien ponga redis
      * en un cliente, sin prefijo las claves de todos los clientes viven en el mismo keyspace: una
      * sesión de un cliente pisa la de otro y un `cache:clear` los vacía a todos.
@@ -328,11 +386,14 @@ trait InstallationProvisioningSteps
      * @return array<string, string>
      * @throws \RuntimeException
      */
-    private function aplicar_prefijos_de_redis(array $vars_to_write): array
+    private function aplicar_variables_del_vps(array $vars_to_write): array
     {
         if (trim((string) $this->target_api->hosting_type) !== 'vps') {
             return $vars_to_write;
         }
+
+        /* La bandera que leen config/filesystems.php y config/app.php de empresa-api. */
+        $vars_to_write['VPS'] = 'true';
 
         $slug = HostingProvisioningStructure::label_de_url((string) $this->target_api->spa_url);
 

@@ -76,10 +76,36 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
     }
 
     /**
-     * Crea el cron de la instancia y, si el Kernel es viejo, el worker de supervisor.
+     * En el VPS el cron es SIEMPRE `schedule:run` y el worker de supervisor se crea SIEMPRE.
+     *
+     * 🔴 LEER ESTO ANTES DE "UNIFICAR" ESTA RAMA CON LA DEL HOSTING COMPARTIDO.
+     *
+     * Hasta el 31/8/2026 las dos ramas las decidía el mismo `grep -c stop-when-empty Kernel.php`, y
+     * esa regla quedó VENCIDA para el VPS con el commit del 26/8/2026 de empresa-api (verificable
+     * con `git show origin/develop:app/Console/Kernel.php`): desde ese commit el
+     * `queue:work --stop-when-empty` del scheduler está envuelto en un `if (! config('app.VPS'))`.
+     *
+     * O sea que en un VPS —donde el .env lleva VPS=true, que es lo que escribe
+     * InstallationProvisioningSteps::aplicar_variables_del_vps()— pasa esto:
+     *
+     *   • el grep SIGUE dando > 0, porque la cadena está en el archivo, solo que adentro del `if`;
+     *   • el scheduler NO programa la cola;
+     *   • el código concluía "Kernel optimizado" y NO creaba el worker de supervisor;
+     *   • resultado: nadie procesaba la cola del cliente. Sin error, sin aviso, sin una línea en el
+     *     log. El modo de falla más caro de los cuatro que encontró el chequeo del 31/8.
+     *
+     * La regla correcta ya no depende del grep sino del hosting:
+     *
+     *   | Hosting     | VPS en el .env | ¿El schedule programa la cola? | Qué hace falta                |
+     *   |-------------|----------------|--------------------------------|-------------------------------|
+     *   | compartido  | no está        | sí, si el Kernel es nuevo      | cron único (lo decide el grep)|
+     *   | VPS         | true           | NO, nunca                      | schedule:run + supervisor     |
+     *
+     * En el compartido el grep sigue siendo la regla correcta y NO se toca: eso vive en la clase
+     * base (HostingProvisioningService::comando_de_cron) y en SharedHostingProvisioning.
      *
      * @param  string  $api_path
-     * @param  bool    $kernel_optimizado
+     * @param  bool    $kernel_optimizado  Lo ignora esta rama, a propósito. Ver arriba.
      * @return void
      * @throws \RuntimeException
      */
@@ -106,53 +132,72 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
 
         $this->result->creado('cron', $usuario);
 
-        $this->configurar_supervisor($api_path, $kernel_optimizado, $usuario);
+        $this->configurar_supervisor($api_path, $usuario);
 
         $this->log('provision_cron', 'El cron de ' . $usuario . ' está.', 'success');
     }
 
     /**
-     * Worker de supervisor: SOLO si el Kernel.php del cliente es el viejo.
+     * El comando del cron en el VPS: SIEMPRE `schedule:run`, sin mirar el grep.
      *
-     * 🔴 Es una desviación del enunciado y está fundada en §2.2 del informe de migración. El
-     * Kernel.php nuevo programa `queue:work --stop-when-empty` ADENTRO del schedule: con él, un
-     * worker de supervisor compite por los mismos jobs que el que dispara el scheduler, y dos
-     * procesos tomando de la misma cola es exactamente el problema que el `withoutOverlapping(75)`
-     * del Kernel viene a evitar. Con Kernel nuevo —el caso de toda instalación desde cero, que
-     * siempre trae la última versión— el `schedule:run` alcanza y el supervisor sobra.
+     * 🔴 Es el otro lado del mismo hallazgo que documenta provision_cron(). En el VPS la cola la
+     * procesa el worker de supervisor, que ahora se crea siempre. Si acá saliera el
+     * `flock ... queue:work --stop-when-empty` de la rama "Kernel viejo", quedarían DOS procesos
+     * tomando de la misma cola —el cron y el worker—, que es exactamente el problema que el
+     * `withoutOverlapping(75)` del Kernel viene a evitar (§2.2 del informe de migración).
      *
-     * Con Kernel viejo, en cambio, el schedule no dispara ningún worker: ahí el supervisor es el que
-     * procesa la cola de verdad y el cron con flock es el respaldo que la vacía si el worker se cae.
+     * `schedule:run` hace falta igual, con Kernel nuevo o viejo: el scheduler programa el resto de
+     * las tareas de negocio del cliente (sincronizaciones, embeddings, sugerencias), que no tienen
+     * nada que ver con la cola.
      *
-     * La regla es mecánica y es el MISMO grep que decide las dos ramas de los dos hostings.
+     * En el hosting compartido esto NO se toca: ahí manda el `comando_de_cron()` de la clase base,
+     * con las dos ramas que decide el grep.
      *
      * @param  string  $api_path
-     * @param  bool    $kernel_optimizado
+     * @param  bool    $kernel_optimizado  Ignorado en el VPS, a propósito.
+     * @return string
+     */
+    public function comando_de_cron(string $api_path, bool $kernel_optimizado): string
+    {
+        return parent::comando_de_cron($api_path, true);
+    }
+
+    /**
+     * Worker de supervisor: en el VPS, SIEMPRE.
+     *
+     * 🔴 ACÁ ES DONDE ALGUIEN VA A QUERER VOLVER A METER EL GREP. No lo hagas sin leer el bloque de
+     * provision_cron(): desde el commit del 26/8/2026 de empresa-api el `queue:work
+     * --stop-when-empty` del scheduler vive adentro de un `if (! config('app.VPS'))`, así que en un
+     * VPS —donde el .env lleva VPS=true— el scheduler NO programa la cola por más nuevo que sea el
+     * Kernel. El grep, en cambio, sigue contando esa cadena porque el texto está en el archivo.
+     * Condicionar el supervisor a ese grep deja la cola del cliente sin procesar, en silencio.
+     *
+     * Las dos combinaciones posibles terminan en el mismo lugar:
+     *   • Kernel nuevo + VPS=true → el `if` deja el queue:work afuera → hace falta el supervisor.
+     *   • Kernel viejo           → el schedule nunca programó la cola → hace falta el supervisor.
+     *
+     * No hay competencia con el scheduler en ninguna de las dos, y el cron del VPS es siempre
+     * `schedule:run` (ver comando_de_cron()).
+     *
+     * ⚠️ Y es idempotente: `cat >` reescribe el .conf con el mismo contenido y el `reread`/`update`
+     * de supervisor no reinicia un programa cuya configuración no cambió. Un reintento de la
+     * instalación no deja dos workers.
+     *
+     * @param  string  $api_path
      * @param  string  $usuario
      * @return void
      * @throws \RuntimeException
      */
-    private function configurar_supervisor(string $api_path, bool $kernel_optimizado, string $usuario): void
+    private function configurar_supervisor(string $api_path, string $usuario): void
     {
-        if ($kernel_optimizado) {
-            $this->log(
-                'provision_cron',
-                'El Kernel.php ya programa queue:work --stop-when-empty adentro del schedule: NO se '
-                    . 'crea worker de supervisor, competiría con el que dispara el propio scheduler.'
-            );
-
-            return;
-        }
-
         $programa = $usuario . '-queue';
         $ruta     = '/etc/supervisor/conf.d/' . $programa . '.conf';
         $runner   = $this->vps('provision_cron');
 
         $this->log(
             'provision_cron',
-            'El Kernel.php es el viejo (no programa queue:work): se crea el worker de supervisor '
-                . $programa . '.',
-            'warning'
+            'En el VPS la cola la procesa supervisor y no el scheduler (el Kernel.php de empresa-api '
+                . 'saltea el queue:work cuando VPS=true): se deja el worker ' . $programa . '.'
         );
 
         /*

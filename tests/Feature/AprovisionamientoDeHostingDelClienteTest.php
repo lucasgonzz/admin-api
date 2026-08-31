@@ -687,7 +687,7 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
 
     /**
      * En hosting compartido no se toca nada de Redis: es una sola instalación por carpeta y no hay
-     * Redis compartido que colisionar.
+     * Redis compartido que colisionar. Y tampoco se escribe la bandera VPS (ver el test de abajo).
      */
     public function test_en_hosting_compartido_no_se_escriben_prefijos_de_redis(): void
     {
@@ -703,6 +703,55 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
 
         $this->assertArrayNotHasKey('CACHE_PREFIX', $escrito);
         $this->assertArrayNotHasKey('REDIS_PREFIX', $escrito);
+    }
+
+    /**
+     * 🔴 HALLAZGO A — una instalación en VPS escribe VPS=true en el .env del cliente, y una en
+     * hosting compartido NO escribe esa clave de ninguna forma.
+     *
+     * Verificado el 31/8/2026 contra `origin/develop` de empresa-api. Sin esa variable pasan las
+     * dos cosas a la vez, y ninguna avisa:
+     *
+     *   • `config/filesystems.php:44` le agrega '/public' a la URL del disco público salvo que
+     *     env('VPS') sea verdadera. En el VPS el docroot YA es empresa-api/public, así que toda
+     *     imagen y todo adjunto del cliente sale como .../public/storage/... → 404 en TODOS los
+     *     archivos. Los clientes migrados a mano (demo2, demo3, grupolimp) la tienen puesta a mano
+     *     por esto (§F5 del informe del 26/8).
+     *   • `app/Console/Kernel.php` saltea el queue:work del scheduler cuando VPS=true, que es de
+     *     donde sale el hallazgo B.
+     *
+     * Y no se escribe en el compartido —ni como 'false'— porque hoy no existe en el .env de ninguno
+     * de los ~40 clientes de esa cuenta y el default de env('VPS') ya es false: sería tocarle el
+     * .env a 40 clientes para dejar todo exactamente igual.
+     */
+    public function test_en_vps_el_env_lleva_la_bandera_vps_y_en_compartido_no(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $this->crear_templates_de_env();
+        $this->crear_credencial_vps();
+
+        $datos['api1']->hosting_type = 'vps';
+        $datos['api1']->vps_path     = $datos['slug'];
+        $datos['api1']->save();
+
+        $datos['installation']->provision_hosting_type = null;
+        $datos['installation']->save();
+
+        $this->correr_write_env($datos['installation']->fresh());
+
+        /* 'true' y no '1': es el literal que el dotenv de Laravel castea a booleano. */
+        $escrito_en_vps = $this->env_fake->escrituras[$datos['api1']->id];
+        $this->assertSame('true', $escrito_en_vps['VPS']);
+
+        /* El mismo cliente en compartido: la clave no aparece. (correr_write_env() reemplaza el
+         * fake, así que lo de arriba se lee ANTES de la segunda corrida.) */
+        $otros = $this->preparar_cliente_aprovisionable();
+        $otros['installation']->provision_hosting_type = null;
+        $otros['installation']->save();
+
+        $this->correr_write_env($otros['installation']->fresh());
+
+        $this->assertArrayNotHasKey('VPS', $this->env_fake->escrituras[$otros['api1']->id]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -890,13 +939,23 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     /**
-     * El preflight del VPS verifica los binarios y pasa las 2 ClientApi a hosting_type='vps'.
+     * El preflight del VPS verifica los binarios y NO ESCRIBE NADA. El flip a hosting_type='vps' lo
+     * hace provision_sites, cuando los 4 sitios ya existen.
      *
-     * 🔴 Y NO toca client_apis.path. Un path vacío en una ClientApi de VPS es lo que hace que
-     * build_spa_hosting_deploy_shell() arme el docroot en la raíz de la cuenta compartida y el
+     * 🔴 Hasta el 31/8/2026 este test afirmaba lo contrario —que el preflight dejaba las dos
+     * ClientApi en 'vps'— y esa era exactamente la forma del hallazgo D: el paso documentado como
+     * "preflight, no escribe nada" escribía en nuestra base la columna que DeploymentService usa
+     * para resolver credencial, api_path y docroot de TODO upgrade futuro del cliente. Si después
+     * fallaba provision_sites, las dos filas quedaban diciendo 'vps' sin que existiera un solo sitio
+     * del otro lado, el cliente seguía sirviendo desde el compartido y el admin ya no sabía llegar
+     * ahí. La aserción cambió porque cambió el comportamiento, y el comportamiento nuevo es el
+     * correcto: el estado guardado no puede mentir.
+     *
+     * 🔴 Y sigue sin tocar client_apis.path. Un path vacío en una ClientApi de VPS es lo que hace
+     * que build_spa_hosting_deploy_shell() arme el docroot en la raíz de la cuenta compartida y el
      * `find . -mindepth 1 -delete` vacíe el public_html de los ~40 clientes activos.
      */
-    public function test_el_preflight_del_vps_marca_las_apis_sin_tocar_el_path(): void
+    public function test_el_preflight_del_vps_no_escribe_y_el_flip_llega_con_los_sitios(): void
     {
         $datos     = $this->preparar_cliente_vps();
         $slug      = $datos['slug'];
@@ -909,6 +968,13 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $this->assertContains('command -v clpctl', $crudos);
         $this->assertContains('command -v supervisorctl', $crudos);
 
+        /* 🔴 El preflight no dejó ni una escritura en nuestra base. */
+        $this->assertSame('shared_hosting', ClientApi::find($datos['api1']->id)->hosting_type);
+        $this->assertSame('shared_hosting', ClientApi::find($datos['api2']->id)->hosting_type);
+        $this->assertNull(ClientApi::find($datos['api1']->id)->vps_path);
+
+        $datos['proveedor']->provision_sites();
+
         $api1 = ClientApi::find($datos['api1']->id);
         $api2 = ClientApi::find($datos['api2']->id);
 
@@ -920,6 +986,37 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         /* 🔴 El path viejo sigue intacto. */
         $this->assertSame($path_1, $api1->path);
         $this->assertSame($path_2, $api2->path);
+    }
+
+    /**
+     * 🔴 HALLAZGO D — si el aprovisionamiento se cae ANTES de que los sitios existan, las ClientApi
+     * NO quedan mintiendo.
+     *
+     * Es el test que fija el arreglo. El `readlink` del segundo docroot devuelve otra cosa (lo que
+     * pasa cuando el `rmdir` falló porque el directorio tenía contenido), así que provision_sites
+     * revienta a mitad de camino: con el flip en el preflight, las dos filas ya estaban en 'vps' y
+     * ahí se quedaban para siempre. Ahora siguen en 'shared_hosting', que es donde el cliente está
+     * sirviendo de verdad, y el próximo upgrade lo encuentra.
+     */
+    public function test_si_provision_sites_falla_las_apis_no_quedan_marcadas_como_vps(): void
+    {
+        /* Antes de preparar: en el fake gana la primera regla que matchea. */
+        $this->runner_fake()->responder('readlink', '/otra/cosa');
+
+        $datos = $this->preparar_cliente_vps();
+
+        $this->assertStringContainsString(
+            'no quedó apuntando a',
+            $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_check();
+                $datos['proveedor']->provision_sites();
+            })
+        );
+
+        $this->assertSame('shared_hosting', ClientApi::find($datos['api1']->id)->hosting_type);
+        $this->assertSame('shared_hosting', ClientApi::find($datos['api2']->id)->hosting_type);
+        $this->assertNull(ClientApi::find($datos['api1']->id)->vps_path);
+        $this->assertNull(ClientApi::find($datos['api2']->id)->vps_path);
     }
 
     /**
@@ -1016,9 +1113,9 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     /**
-     * El cron del VPS usa el patrón idempotente del plan, y con Kernel nuevo NO crea supervisor.
+     * El cron del VPS usa el patrón idempotente del plan y es SIEMPRE `schedule:run`.
      */
-    public function test_el_cron_del_vps_es_idempotente_y_sin_supervisor_con_kernel_nuevo(): void
+    public function test_el_cron_del_vps_es_idempotente_y_siempre_schedule_run(): void
     {
         $datos    = $this->preparar_cliente_vps();
         $slug     = $datos['slug'];
@@ -1035,16 +1132,57 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $this->assertStringContainsString('| crontab -u api-' . $slug . ' -', $comando);
         $this->assertStringContainsString($api_path . '/artisan schedule:run', $comando);
         $this->assertStringNotContainsString('flock', $comando);
-
-        /* 🔴 Con Kernel nuevo el supervisor competiría por los mismos jobs que el scheduler. */
-        $this->assertSame([], $this->runner_fake()->crudos_con('supervisorctl'));
-        $this->assertSame([], $this->runner_fake()->crudos_con('/etc/supervisor'));
     }
 
     /**
-     * Con Kernel viejo va el queue:work con flock Y el worker de supervisor.
+     * 🔴 HALLAZGO B — EN EL VPS EL SUPERVISOR SE CREA SIEMPRE, AUNQUE EL GREP DIGA QUE EL KERNEL ES
+     * NUEVO. Es el test más importante de esta ronda de arreglos.
+     *
+     * Hasta el 31/8/2026 este archivo tenía dos tests que afirmaban lo contrario: con
+     * $kernel_optimizado=true no se creaba supervisor, y con false se creaba junto a un cron de
+     * `flock ... queue:work`. Esa regla venía del README de crons-hostinger, que es ANTERIOR al
+     * commit del 26/8/2026 de empresa-api. Desde ese commit el `queue:work --stop-when-empty` del
+     * scheduler vive adentro de un `if (! config('app.VPS'))`, así que en un VPS —donde el .env
+     * lleva VPS=true, que es lo que ahora escribe el arreglo del hallazgo A— pasaba esto:
+     *
+     *   • el `grep -c stop-when-empty Kernel.php` SEGUÍA dando > 0 (la cadena está en el archivo,
+     *     solo que adentro del `if`);
+     *   • el scheduler NO programaba la cola;
+     *   • el código concluía "Kernel optimizado" y NO creaba el worker;
+     *   • nadie procesaba la cola del cliente. Sin error, sin aviso, sin una línea en el log.
+     *
+     * Las aserciones cambiaron porque fijaban un comportamiento que dejó de ser correcto. Lo que
+     * este test fija ahora es la regla nueva: en el VPS el supervisor no depende del grep.
      */
-    public function test_con_kernel_viejo_el_vps_agrega_el_worker_de_supervisor(): void
+    public function test_en_vps_el_supervisor_se_crea_aunque_el_grep_diga_que_el_kernel_es_nuevo(): void
+    {
+        $datos    = $this->preparar_cliente_vps();
+        $slug     = $datos['slug'];
+        $api_path = '/home/api-' . $slug . '/empresa-api';
+
+        /* true = el grep contó 'stop-when-empty' en el Kernel.php. Da igual: es VPS. */
+        $datos['proveedor']->provision_cron($api_path, true);
+
+        $conf = $this->runner_fake()->crudos_con('/etc/supervisor/conf.d/api-' . $slug . '-queue.conf');
+        $this->assertNotEmpty($conf);
+        $this->assertStringContainsString('[program:api-' . $slug . '-queue]', $conf[0]);
+        $this->assertStringContainsString('user=api-' . $slug, $conf[0]);
+        $this->assertStringContainsString($api_path . '/artisan queue:work', $conf[0]);
+
+        $this->assertNotEmpty($this->runner_fake()->crudos_con('supervisorctl reread'));
+        $this->assertNotEmpty($this->runner_fake()->crudos_con('supervisorctl update'));
+    }
+
+    /**
+     * Con Kernel viejo el resultado es el MISMO: supervisor, y el cron sigue siendo schedule:run.
+     *
+     * 🔴 El cron ya no manda `flock ... queue:work --stop-when-empty` en el VPS, y esa aserción
+     * también cambió a propósito: con el supervisor creado siempre, ese cron sería un segundo
+     * proceso tomando de la misma cola que el worker de larga vida — exactamente la competencia que
+     * el `withoutOverlapping(75)` del Kernel viene a evitar (§2.2 del informe de migración).
+     * `schedule:run` hace falta igual, para las tareas de negocio que no son la cola.
+     */
+    public function test_con_kernel_viejo_el_vps_llega_al_mismo_lugar(): void
     {
         $datos    = $this->preparar_cliente_vps();
         $slug     = $datos['slug'];
@@ -1053,16 +1191,36 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $datos['proveedor']->provision_cron($api_path, false);
 
         $cron = $this->sin_comillas($this->runner_fake()->crudos_con('crontab')[0]);
-        $this->assertStringContainsString('flock -n /tmp/queue-' . $slug . '.lock', $cron);
-        $this->assertStringContainsString('queue:work --stop-when-empty', $cron);
+        $this->assertStringContainsString($api_path . '/artisan schedule:run', $cron);
+        $this->assertStringNotContainsString('flock', $cron);
+        $this->assertStringNotContainsString('queue:work', $cron);
 
         $conf = $this->runner_fake()->crudos_con('/etc/supervisor/conf.d/api-' . $slug . '-queue.conf');
         $this->assertNotEmpty($conf);
         $this->assertStringContainsString('[program:api-' . $slug . '-queue]', $conf[0]);
-        $this->assertStringContainsString('user=api-' . $slug, $conf[0]);
+    }
 
-        $this->assertNotEmpty($this->runner_fake()->crudos_con('supervisorctl reread'));
-        $this->assertNotEmpty($this->runner_fake()->crudos_con('supervisorctl update'));
+    /**
+     * 🔴 Y en hosting compartido el grep SIGUE decidiendo, sin cambiar una coma.
+     *
+     * Es la otra mitad del hallazgo B y va acá para que quede pegada a la del VPS: la regla vieja no
+     * se rompió, se acotó. En el compartido no hay VPS=true en el .env, así que el Kernel nuevo sí
+     * programa la cola y el `schedule:run` alcanza; con Kernel viejo va el queue:work con flock. Y
+     * el compartido no tiene supervisor de ninguna manera.
+     */
+    public function test_en_hosting_compartido_el_grep_sigue_decidiendo_las_dos_ramas(): void
+    {
+        $datos     = $this->preparar_cliente_aprovisionable();
+        $slug      = $datos['slug'];
+        $api_path  = 'domains/comerciocity.com/public_html/' . $slug . '/api';
+        $proveedor = $datos['proveedor'];
+
+        $this->assertStringContainsString('schedule:run', $proveedor->comando_de_cron($api_path, true));
+        $this->assertStringNotContainsString('flock', $proveedor->comando_de_cron($api_path, true));
+
+        $viejo = $proveedor->comando_de_cron($api_path, false);
+        $this->assertStringContainsString('flock -n /tmp/queue-' . $slug . '.lock', $viejo);
+        $this->assertStringContainsString('queue:work --stop-when-empty', $viejo);
     }
 
     /**
@@ -1453,6 +1611,102 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $this->assertCount(2, $filas);
         $this->assertSame('shared_hosting', $filas[0]['provision_hosting_type']);
         $this->assertSame('shared_hosting', $filas[1]['provision_hosting_type']);
+    }
+
+    /**
+     * 🔴 HALLAZGO C — el escenario cruzado: elegir un hosting teniendo la ClientApi en el otro.
+     *
+     * El caso concreto, y es el flujo de reintento normal: una instalación en VPS falla, el operador
+     * borra la fila fallida y crea otra, esta vez tildando "Hosting compartido" — pero las dos
+     * ClientApi ya quedaron en 'vps'. Sin guarda, el aprovisionamiento crea los 4 subdominios y la
+     * base EN LA CUENTA COMPARTIDA (SharedHostingProvisioning fuerza la credencial 'shared_hosting')
+     * mientras el pipeline sube el código AL VPS (get_api_path, la credencial y el SFTP salen del
+     * hosting_type de la fila, vía ClientApiPathResolver). Recursos creados de los dos lados y un
+     * DB_HOST=127.0.0.1 apuntando a una base que vive en el MySQL del otro servidor.
+     *
+     * La guarda frena en el alta, con 422 y los dos valores en el mensaje.
+     */
+    public function test_pedir_compartido_sobre_una_api_en_vps_se_rechaza_en_el_alta(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $version = $this->crear_version_publicada();
+
+        foreach ([$datos['api1'], $datos['api2']] as $api) {
+            $api->hosting_type = 'vps';
+            $api->vps_path     = $datos['slug'];
+            $api->save();
+        }
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'              => $datos['client']->id,
+            'version_id'             => $version->id,
+            'provision_hosting_type' => 'shared_hosting',
+            'targets'                => [
+                ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+            ],
+        ]);
+
+        $respuesta->assertStatus(422);
+        $this->assertStringContainsString('shared_hosting', $respuesta->json('error'));
+        $this->assertStringContainsString('vps', $respuesta->json('error'));
+
+        /* Y no quedó ni una fila creada. */
+        $this->assertSame(
+            0,
+            ClientInstallation::where('client_id', $datos['client']->id)
+                ->where('id', '!=', $datos['installation']->id)
+                ->count()
+        );
+    }
+
+    /**
+     * 🔴 El camino inverso —pedir VPS sobre APIs que todavía dicen 'shared_hosting'— es el alta
+     * normal de la primera vez y TIENE que seguir funcionando: el flip a 'vps' lo hace el propio
+     * aprovisionamiento, al final de provision_sites.
+     */
+    public function test_pedir_vps_sobre_apis_en_compartido_sigue_siendo_el_camino_normal(): void
+    {
+        $datos   = $this->preparar_cliente_aprovisionable();
+        $version = $this->crear_version_publicada();
+
+        $respuesta = $this->actingAs($this->crear_admin(), 'sanctum')->postJson('/api/admin/installations', [
+            'client_id'              => $datos['client']->id,
+            'version_id'             => $version->id,
+            'provision_hosting_type' => 'vps',
+            'targets'                => [
+                ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+            ],
+        ]);
+
+        $respuesta->assertStatus(201);
+        $this->assertSame('vps', $respuesta->json('model.provision_hosting_type'));
+    }
+
+    /**
+     * 🔴 Y la guarda de verdad está en el preflight, no solo en el alta: frena aunque la fila se
+     * haya creado por otro camino, o aunque el hosting_type haya cambiado entre el alta y la
+     * corrida. Frena ANTES de la primera escritura del proveedor.
+     */
+    public function test_el_preflight_frena_si_el_hosting_de_la_api_no_es_el_que_se_pidio(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+
+        foreach ([$datos['api1'], $datos['api2']] as $api) {
+            $api->hosting_type = 'vps';
+            $api->vps_path     = $datos['slug'];
+            $api->save();
+        }
+
+        $this->assertStringContainsString(
+            'No se toca nada',
+            $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_check();
+            })
+        );
+
+        /* Ni un POST ni un PUT: la guarda corre antes de crear el primer subdominio. */
+        $this->assertSame([], $this->hostinger->llamadas_de('POST'));
+        $this->assertSame([], $this->hostinger->llamadas_de('PUT'));
     }
 
     /**

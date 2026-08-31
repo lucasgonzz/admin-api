@@ -58,6 +58,16 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
         );
 
         /*
+         * 🔴 Guarda 6: el hosting pedido tiene que ser el de las ClientApi. Acá el caso peligroso es
+         * el real —aprovisionar el compartido para un cliente cuyas APIs ya dicen 'vps' crea los
+         * subdominios y la base en la cuenta compartida mientras el pipeline sube el código al VPS—
+         * y el motivo largo está en HostingProvisioningStructure::assert_hosting_type_coherente().
+         */
+        $this->structure()->assert_hosting_type_coherente(
+            trim((string) $this->installation->provision_hosting_type)
+        );
+
+        /*
          * La credencial de shared la exige el pipeline de instalación entero (InstallationService la
          * carga con firstOrFail en su constructor). Se chequea acá igual para que la falta salga en
          * el preflight y no quince minutos después, en medio de un upload.

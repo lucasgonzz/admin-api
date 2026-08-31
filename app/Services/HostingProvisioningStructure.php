@@ -100,6 +100,66 @@ class HostingProvisioningStructure
     }
 
     /**
+     * 🔴 GUARDA 6 — el hosting que se pidió aprovisionar tiene que ser el mismo que el de las dos
+     * ClientApi del cliente. Frena ANTES de la primera escritura, de los dos lados.
+     *
+     * El escenario que cierra, medido el 31/8/2026: una instalación en VPS falla después de que
+     * provision_sites marcó las dos ClientApi como 'vps'. El operador hace lo que manda el flujo de
+     * reintento —borrar la fila fallida y crear otra— y esta vez tilda "Hosting compartido". Sin
+     * esta guarda, el aprovisionamiento crea los 4 subdominios y la base EN LA CUENTA COMPARTIDA
+     * (SharedHostingProvisioning fuerza la credencial 'shared_hosting') mientras el pipeline de
+     * instalación sube el código AL VPS (get_api_path(), la credencial y el SFTP salen de
+     * ClientApiPathResolver, o sea del hosting_type de la fila). Quedan recursos creados de los dos
+     * lados y un sistema con DB_HOST=127.0.0.1 apuntando a una base que vive en el MySQL del otro
+     * servidor: no bootea, y el desastre ya está hecho cuando alguien se entera.
+     *
+     * ⚠️ El desvío legítimo, y es UNO SOLO: pedir 'vps' sobre APIs que todavía dicen
+     * 'shared_hosting'. Ese es el camino normal de la primera vez —el flip a 'vps' lo hace el propio
+     * aprovisionamiento, al final de provision_sites— y tiene que seguir funcionando. El inverso,
+     * pedir 'shared_hosting' sobre una API que ya dice 'vps', es el caso peligroso y es el que se
+     * frena.
+     *
+     * 🔴 Y por eso quien la llama tiene que hacerlo ANTES del flip: si se corriera después de
+     * marcar_apis_como_vps() no compararía nada.
+     *
+     * Mira las DOS ClientApi y no solo la destino: las dos comparten los subdominios y la base, y un
+     * par a medio migrar (una en 'vps' y la otra en 'shared_hosting') es un estado que ningún
+     * aprovisionamiento sabe resolver solo.
+     *
+     * @param  string  $pedido  provision_hosting_type de la instalación, ya trimeado.
+     * @return void
+     * @throws \RuntimeException
+     */
+    public function assert_hosting_type_coherente(string $pedido): void
+    {
+        foreach ($this->apis() as $api) {
+            $actual = trim((string) $api->hosting_type);
+            if ($actual === '') {
+                $actual = 'shared_hosting';
+            }
+
+            if ($actual === $pedido) {
+                continue;
+            }
+
+            /* El único desvío legítimo: el alta de un cliente que todavía vive en el compartido. */
+            if ($pedido === 'vps' && $actual === 'shared_hosting') {
+                continue;
+            }
+
+            throw new \RuntimeException(
+                'La instalación pide aprovisionar "' . $pedido . '" pero la ClientApi '
+                . $api->url . ' del cliente está marcada como "' . $actual . '". No se toca nada: '
+                . 'aprovisionar en un servidor mientras el pipeline instala en el otro deja los '
+                . 'subdominios y la base de un lado y el código del otro, con una base de datos que '
+                . 'el sistema no puede alcanzar. Si el cliente ya está en el VPS, aprovisioná VPS; '
+                . 'si de verdad volvió al hosting compartido, corregí el hosting_type de sus dos '
+                . 'ClientApi antes de instalar.'
+            );
+        }
+    }
+
+    /**
      * Los 4 labels del cliente, en el orden en que se crean.
      *
      * @return array<int, string>

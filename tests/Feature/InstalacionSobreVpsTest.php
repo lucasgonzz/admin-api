@@ -314,19 +314,25 @@ class InstalacionSobreVpsTest extends TestCase
      * constructor, esa segunda fila moría al construirse con un mensaje que no tenía nada que ver
      * con lo que había pasado.
      *
-     * Acá el flip lo hace el preflight de verdad —el mismo VpsSiteProvisioner que corre en
+     * Acá el flip lo hacen los pasos de verdad —el mismo VpsSiteProvisioner que corre en
      * producción, con el runner y la API de Hostinger falseados— y recién después se construye el
      * esqueleto.
+     *
+     * 🔴 El test corre provision_check Y provision_sites, y eso cambió el 31/8/2026 junto con el
+     * arreglo del hallazgo D: el flip se mudó del preflight al final de provision_sites, para que
+     * las ClientApi no queden diciendo 'vps' cuando no existe un solo sitio del otro lado. Lo que
+     * este test fija no cambió —que el esqueleto se construye sin morir cuando las APIs ya están en
+     * VPS— pero el momento en que eso pasa sí, y la simulación tiene que seguir al pipeline real.
      */
-    public function test_el_esqueleto_se_construye_despues_de_que_el_preflight_paso_las_apis_a_vps(): void
+    public function test_el_esqueleto_se_construye_despues_de_que_el_aprovisionamiento_paso_las_apis_a_vps(): void
     {
         $datos = $this->cliente_en_shared('lacava');
 
-        /* La fila real, con aprovisionamiento en VPS, corre su preflight y hace el flip. */
+        /* La fila real, con aprovisionamiento en VPS, corre su preflight y crea los sitios. */
         $datos['installation']->provision_hosting_type = ClientInstallation::PROVISION_VPS;
         $datos['installation']->save();
         $this->crear_credencial_vps();
-        $this->responder_como_un_vps_sano();
+        $this->responder_como_un_vps_sano($datos['slug']);
 
         $proveedor = HostingProvisioningService::para(
             $datos['installation']->fresh(),
@@ -335,6 +341,11 @@ class InstalacionSobreVpsTest extends TestCase
             }
         );
         $proveedor->provision_check();
+
+        /* El preflight NO escribe: las APIs siguen en el compartido hasta que los sitios existan. */
+        $this->assertSame('shared_hosting', $datos['api2']->fresh()->hosting_type);
+
+        $proveedor->provision_sites();
 
         $this->assertSame('vps', $datos['api2']->fresh()->hosting_type);
 
@@ -385,10 +396,28 @@ class InstalacionSobreVpsTest extends TestCase
         $api_path = '/home/' . $usuario . '/empresa-api';
         $vps      = new InstallationService($datos['installation']);
 
+        /*
+         * 🔴 El esperado se escribe con comillas SIMPLES literales, no con escapeshellarg().
+         *
+         * Hasta el 31/8/2026 este test usaba escapeshellarg() para armar el esperado, así que
+         * comparaba el código contra sí mismo y pasaba en cualquier sistema — tapando justamente el
+         * bug: escapeshellarg() escapa según el sistema donde corre PHP, y en el WAMP de esta
+         * máquina emite comillas DOBLES, adentro de las cuales el `sh` del VPS expande `$` y
+         * backticks. Con vps_path cargado a mano desde el CRUD, eso era ejecución de comandos como
+         * root en el VPS. Lo encontró el chequeo de restricciones duras.
+         *
+         * Ahora el comando se arma con escape_remote_arg(), que emite POSIX siempre, y el esperado
+         * es un literal: si alguien vuelve a escapeshellarg(), este test se pone rojo en Windows.
+         */
         $this->assertSame(
-            'chown -R ' . escapeshellarg($usuario . ':' . $usuario) . ' '
-                . escapeshellarg($api_path) . ' 2>&1',
+            "chown -R '" . $usuario . ':' . $usuario . "' '" . $api_path . "' 2>&1",
             $this->invocar($vps, 'build_vps_chown_command', [$api_path])
+        );
+
+        /* Y ninguna comilla doble, que es la forma que toma el bug. */
+        $this->assertStringNotContainsString(
+            '"',
+            (string) $this->invocar($vps, 'build_vps_chown_command', [$api_path])
         );
 
         $shared = new InstallationService($this->cliente_en_shared('colman')['installation']);
@@ -522,11 +551,12 @@ class InstalacionSobreVpsTest extends TestCase
     }
 
     /**
-     * Salidas del VPS en el camino feliz del preflight.
+     * Salidas del VPS en el camino feliz del preflight y de la creación de los sitios.
      *
+     * @param  string  $slug  Slug del cliente; con él se preparan los readlink de los dos docroots.
      * @return void
      */
-    private function responder_como_un_vps_sano(): void
+    private function responder_como_un_vps_sano(string $slug = ''): void
     {
         if ($this->runner === null) {
             $this->runner = new RemoteCommandRunnerFake($this->crear_credencial_vps());
@@ -534,6 +564,19 @@ class InstalacionSobreVpsTest extends TestCase
 
         $this->runner->responder('command -v clpctl', '/usr/bin/clpctl');
         $this->runner->responder('command -v supervisorctl', '/usr/bin/supervisorctl');
+
+        if ($slug === '') {
+            return;
+        }
+
+        /* Los dos docroots de API quedan siendo el symlink que enlazar_docroot_de_api() verifica. */
+        foreach (['api-' . $slug, 'api-' . $slug . '2'] as $label) {
+            $docroot = '/home/' . $label . '/htdocs/' . $label . '.comerciocity.com';
+            $this->runner->responder(
+                'readlink ' . escapeshellarg($docroot),
+                '/home/' . $label . '/empresa-api/public'
+            );
+        }
     }
 
     /**

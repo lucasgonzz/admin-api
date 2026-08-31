@@ -644,8 +644,11 @@ class InstallationService
             $vars_to_write['USER_ID'] = (string) $installation_client->user_id;
         }
 
-        // f) Prefijos de Redis del VPS: el VPS tiene un solo Redis para todos los clientes (§3.3).
-        $vars_to_write = $this->aplicar_prefijos_de_redis($vars_to_write);
+        // f) Las variables propias de un .env de VPS: la bandera VPS=true —sin la cual empresa-api
+        //    le agrega '/public' a la URL de todos los archivos y el scheduler vuelve a programar la
+        //    cola— y los prefijos de Redis, porque el VPS tiene un solo Redis para todos (§3.3).
+        //    En hosting compartido no agrega ni una clave.
+        $vars_to_write = $this->aplicar_variables_del_vps($vars_to_write);
 
         $this->log(
             'write_env',
