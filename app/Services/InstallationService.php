@@ -155,7 +155,6 @@ class InstallationService
         // fila reintentada tiene que correr siempre lo mismo.
         if ($this->installation->kind === ClientInstallation::KIND_ESQUELETO) {
             $this->steps = $this->skeleton_steps;
-            $this->assert_skeleton_target_supported();
         }
 
         // Con provision_hosting_type cargado, el pipeline arranca con los 4 pasos de
@@ -164,12 +163,21 @@ class InstallationService
         // creada por un SPA que no manda el campo, corra el pipeline de siempre byte por byte.
         $this->steps = $this->build_steps_con_aprovisionamiento($this->steps);
 
-        // Credenciales SSH de hosting compartido (una sola entrada en el sistema).
-        $this->credential = ClientSshCredential::where('type', 'shared_hosting')->firstOrFail();
+        // Credencial SSH del servidor donde vive la API destino: compartido o VPS, según su
+        // hosting_type. Antes era fija ('shared_hosting'), y esa línea era la mitad de por qué el
+        // esqueleto se rechazaba en VPS. Se resuelve igual en connect(), porque entre la
+        // construcción y la conexión puede correr provision_check y pasar la API a VPS.
+        $this->credential = ClientSshCredential::where('type', $this->get_hosting_credential_type())
+            ->firstOrFail();
     }
 
     /**
-     * Conecta por SSH al servidor de hosting compartido.
+     * Conecta por SSH al servidor de la API destino (hosting compartido o VPS, según hosting_type).
+     *
+     * 🔴 La credencial se vuelve a resolver acá y no se reusa la del constructor a propósito: en un
+     * grupo con aprovisionamiento, provision_check pasa las dos ClientApi a hosting_type='vps' DESPUÉS
+     * de que esta clase se construyó. Con la credencial congelada, el resto del pipeline seguiría
+     * escribiendo en el hosting compartido — que es el bug que U9 vino a cerrar, no a mover de lugar.
      *
      * @return void
      * @throws \RuntimeException Si las credenciales son rechazadas.
@@ -177,6 +185,10 @@ class InstallationService
     public function connect()
     {
         $this->disconnect_hosting_ssh();
+
+        $this->credential = ClientSshCredential::where('type', $this->get_hosting_credential_type())
+            ->firstOrFail();
+
         $this->ssh = new SSH2($this->credential->host, (int) $this->credential->port);
 
         $logged_in = $this->ssh->login($this->credential->username, $this->credential->password);
@@ -402,10 +414,9 @@ class InstallationService
         $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
         $this->log('upload_spa', 'ZIP descargado al servidor de admin');
 
-        // Sube al hosting compartido.
-        $spa_path          = $this->get_spa_path();
-        $hosting_zip_remote = "domains/comerciocity.com/public_html/{$spa_path}/dist.zip";
-        $sftp_hosting      = $this->open_sftp_session('shared_hosting');
+        // Sube al servidor del cliente (compartido o VPS, según la API destino).
+        $hosting_zip_remote = $this->get_spa_hosting_dir() . '/dist.zip';
+        $sftp_hosting       = $this->open_sftp_session($this->get_hosting_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $hosting_zip_remote, 'upload_spa');
         $this->log('upload_spa', 'ZIP subido al hosting');
 
@@ -515,7 +526,7 @@ class InstallationService
         // Sube al hosting y descomprime.
         $api_path      = $this->get_api_path();
         $remote_zip    = "{$api_path}/{$zip_name}";
-        $sftp_hosting  = $this->open_sftp_session('shared_hosting');
+        $sftp_hosting  = $this->open_sftp_session($this->get_hosting_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
         $this->log('upload_api', 'ZIP subido al hosting');
 
@@ -535,7 +546,7 @@ class InstallationService
         $this->reconnect_hosting_ssh();
         $this->exec_hosting_ssh(
             'upload_api',
-            $this->build_composer_install_command($api_path, false),
+            $this->build_hosting_composer_install_command($api_path),
             true,
             true
         );
@@ -770,6 +781,11 @@ class InstallationService
         // de verify_api_installation() porque esa verificación ahora los exige.
         $this->provision_afip_certificates();
 
+        // Y recién acá el chown del VPS: TODO lo que escribe esta etapa (bootstrap/cache,
+        // storage/, el symlink, los certificados) lo escribió root, así que cambiar el dueño antes
+        // de terminar dejaría archivos nuevos de root igual. En compartido no hace nada.
+        $this->chown_api_dir_en_vps($api_path, 'finalize_api');
+
         // Última comprobación antes de dar la etapa (y la instalación) por completada: si algo
         // quedó incompleto en el hosting, verify_api_installation() lanza y la instalación se
         // marca como fallida en vez de exitosa.
@@ -808,7 +824,7 @@ class InstallationService
         $sftp = null;
 
         try {
-            $sftp = $this->open_sftp_session('shared_hosting');
+            $sftp = $this->open_sftp_session($this->get_hosting_credential_type());
             $resultado = $service->provision($sftp, $api_path, $log);
             $service->loguear_resultado($resultado, $log);
         } catch (\Exception $e) {
@@ -968,37 +984,20 @@ class InstallationService
     // ETAPAS DEL ESQUELETO (kind = 'esqueleto')
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Corta antes de empezar si el esqueleto apuntaría a una API en VPS.
+    /*
+     * 🔴 ACÁ VIVÍA assert_skeleton_target_supported(), que tiraba excepción si el esqueleto apuntaba
+     * a una API en VPS. Se sacó en U9 (31/8/2026), que es la unidad que hizo hosting-aware a todo
+     * este pipeline: get_api_path(), get_spa_path(), la credencial SSH, el SFTP y el chown ahora
+     * salen del hosting_type de la API destino, así que el motivo del rechazo dejó de existir.
      *
-     * 🔴 No es una limitación caprichosa: get_api_path() (más abajo en esta misma clase) hardcodea
-     * el prefijo del hosting compartido y connect() carga siempre la credencial 'shared_hosting',
-     * a diferencia de ClientApiPathResolver, que sí mira hosting_type. Un esqueleto sobre una API
-     * en VPS escribiría los directorios y el .env en el servidor equivocado y devolvería éxito —
-     * exactamente el bug documentado en la cabecera de EnvSshService. Arreglar esa deuda es una
-     * misión aparte, sobre el pipeline real que hoy anda en producción; acá se rechaza y listo.
-     *
-     * PromoteLeadToClientService crea las dos ClientApi del par siempre como 'shared_hosting', así
-     * que este caso no aparece en el uso normal.
-     *
-     * @return void
-     * @throws \RuntimeException Si la API destino está en VPS.
+     * 🔴 Y no se reemplazó por otra guarda en el constructor, a propósito. Esa aserción corría al
+     * CONSTRUIR el servicio, y en un grupo [real, esqueleto] con aprovisionamiento el esqueleto se
+     * construye DESPUÉS de que la fila real ya pasó las dos ClientApi a hosting_type='vps': una
+     * guarda ahí mata la segunda fila con un mensaje que no tiene nada que ver con lo que pasó.
+     * Lo que sí frena una ClientApi mal cargada es ClientApiPathResolver, en el momento de resolver
+     * la ruta y con el mensaje que corresponde, y la guarda de borrado de
+     * build_spa_hosting_deploy_shell().
      */
-    private function assert_skeleton_target_supported(): void
-    {
-        $hosting_type = trim((string) $this->target_api->hosting_type);
-        if ($hosting_type === '') {
-            $hosting_type = 'shared_hosting';
-        }
-
-        if ($hosting_type === 'vps') {
-            throw new \RuntimeException(
-                'El esqueleto todavía no soporta APIs en VPS: el pipeline de instalación resuelve '
-                . 'las rutas asumiendo hosting compartido y escribiría en el servidor equivocado. '
-                . 'Instalá esa API con el pipeline completo.'
-            );
-        }
-    }
 
     /**
      * Deja solo las claves que hay que escribir de verdad en el .env del destino.
@@ -1078,7 +1077,7 @@ class InstallationService
     private function step_prepare_dirs(): void
     {
         $api_path = $this->get_api_path();
-        $spa_dir  = 'domains/comerciocity.com/public_html/' . $this->get_spa_path();
+        $spa_dir  = $this->get_spa_hosting_dir();
 
         $this->log('prepare_dirs', 'Preparando los directorios del subdominio...');
         $this->reconnect_hosting_ssh();
@@ -1199,7 +1198,7 @@ class InstallationService
         // Sube al hosting del cliente.
         $api_path     = $this->get_api_path();
         $remote_zip   = $api_path . '/' . $zip_name;
-        $sftp_hosting = $this->open_sftp_session('shared_hosting');
+        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
         $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_public');
         $this->log('upload_public', 'ZIP de public/ subido al hosting');
 
@@ -1274,6 +1273,10 @@ class InstallationService
             false
         );
         $this->log('finalize_skeleton', $this->truncate_for_log($link_output));
+
+        // Mismo chown que la instalación real: el esqueleto también deja archivos escritos por root
+        // en el VPS, y el upgrade que venga después va a correr artisan como el usuario del sitio.
+        $this->chown_api_dir_en_vps($api_path, 'finalize_skeleton');
 
         $this->verify_skeleton_installation();
 
@@ -1861,23 +1864,56 @@ class InstallationService
     }
 
     /**
-     * Ruta relativa del SPA en el hosting (reemplaza /api por /spa).
+     * Ruta del SPA de la API destino, según su hosting_type.
+     *
+     * 🔴 Delega en ClientApiPathResolver y no repite la cuenta: esa clase es la única fuente de la
+     * convención de rutas del proyecto, y dos copias es exactamente lo que después diverge sin que
+     * nadie lo note. En compartido devuelve la ruta relativa (colman/spa); en VPS, el path absoluto
+     * del docroot del sitio de CloudPanel.
      *
      * @return string
      */
     private function get_spa_path(): string
     {
-        return str_replace('/api', '/spa', $this->target_api->path);
+        $resolver = new ClientApiPathResolver();
+
+        return $resolver->resolve_spa($this->target_api);
     }
 
     /**
-     * Ruta del API en el hosting compartido (prefijo estándar del hosting).
+     * Directorio del SPA listo para un `cd` remoto (con prefijo de la cuenta en compartido).
+     *
+     * @return string
+     */
+    private function get_spa_hosting_dir(): string
+    {
+        $resolver = new ClientApiPathResolver();
+
+        return $resolver->spa_hosting_dir($this->target_api);
+    }
+
+    /**
+     * Ruta del API en el servidor de la API destino, según su hosting_type.
      *
      * @return string
      */
     private function get_api_path(): string
     {
-        return 'domains/comerciocity.com/public_html/' . $this->target_api->path;
+        $resolver = new ClientApiPathResolver();
+
+        return $resolver->resolve($this->target_api);
+    }
+
+    /**
+     * Tipo de credencial SSH/SFTP del servidor donde vive la API destino.
+     *
+     * @return string  'shared_hosting' | 'vps'
+     */
+    private function get_hosting_credential_type(): string
+    {
+        $resolver = new ClientApiPathResolver();
+
+        return $resolver->credential_type($this->target_api);
     }
 
     /**
@@ -1950,13 +1986,28 @@ class InstallationService
     }
 
     /**
-     * Script bash para desplegar el SPA en el public_html del hosting.
+     * Script bash para desplegar el SPA en el docroot del servidor destino.
+     *
+     * 🔴 ESTE MÉTODO ARMA UN BORRADO RECURSIVO. La línea `find . -mindepth 1 -delete` de abajo vacía
+     * el directorio entero, y por eso acá hay una guarda dura antes de escribir una sola letra del
+     * comando: si el directorio calculado está vacío, es una raíz compartida, o no contiene el
+     * identificador del cliente (el `path` en compartido, el `vps_path` en VPS), se tira excepción y
+     * el comando NO se arma. El incidente concreto que evita está escrito en
+     * ClientApiPathResolver::assert_directorio_de_spa_borrable().
+     *
+     * La guarda va ANTES de armar el string y no adentro del shell remoto a propósito: un `if` del
+     * lado del servidor ya viajó, y cualquier error de escapado lo saltea.
      *
      * @return string
+     * @throws \RuntimeException Si el directorio calculado no es identificable como el de este cliente.
      */
     private function build_spa_hosting_deploy_shell(): string
     {
-        $spa_dir            = 'domains/comerciocity.com/public_html/' . $this->get_spa_path();
+        $spa_dir = $this->get_spa_hosting_dir();
+
+        $resolver = new ClientApiPathResolver();
+        $resolver->assert_directorio_de_spa_borrable($this->target_api, $spa_dir);
+
         $temp_zip_basename  = 'dist_deploy_' . $this->installation->uuid . '.zip';
         $deploy_zip_name    = 'dist.zip';
 
@@ -2119,7 +2170,9 @@ class InstallationService
      * Los comandos de artisan se ejecutan después, en step_finalize_api(), ya con el .env escrito.
      *
      * @param  string  $work_dir
-     * @param  bool    $is_vps  true en VPS de builds (envuelve el comando); false en hosting
+     * @param  bool    $is_vps  true si el destino es un VPS (envuelve el comando en bash de login,
+     *                          que es lo que carga el PATH donde vive composer); false en el
+     *                          hosting compartido, donde el shell no interactivo ya lo encuentra.
      * @return string
      */
     private function build_composer_install_command(string $work_dir, bool $is_vps): string

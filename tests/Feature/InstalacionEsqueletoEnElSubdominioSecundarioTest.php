@@ -341,7 +341,7 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         $this->assertSame($antes, ClientInstallation::count());
     }
 
-    public function test_un_esqueleto_sobre_una_api_en_vps_es_rechazado(): void
+    public function test_un_esqueleto_sobre_una_api_en_vps_ya_se_acepta(): void
     {
         $admin   = $this->crear_admin();
         $datos   = $this->crear_cliente_con_dos_apis();
@@ -349,9 +349,8 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         $version = $this->crear_version_publicada();
 
         $api2->hosting_type = 'vps';
+        $api2->vps_path     = 'esqueletovps';
         $api2->save();
-
-        $antes = ClientInstallation::count();
 
         $response = $this->actingAs($admin, 'sanctum')->postJson('/api/admin/installations', [
             'client_id'  => $datos['client']->id,
@@ -361,11 +360,14 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
             ],
         ]);
 
-        // El pipeline del esqueleto resuelve las rutas asumiendo hosting compartido: dejarlo correr
-        // sobre una API en VPS crearía los directorios y el .env en el servidor equivocado y
-        // devolvería éxito. Es el mismo bug que ya está documentado en EnvSshService.
-        $response->assertStatus(422);
-        $this->assertSame($antes, ClientInstallation::count());
+        // 🔴 Este test fijaba el 422 del rechazo hasta el 31/8/2026: el pipeline del esqueleto
+        // resolvía las rutas asumiendo hosting compartido y habría creado los directorios y el .env
+        // en el servidor equivocado devolviendo éxito. U9 lo hizo hosting-aware (rutas, credencial
+        // SSH, SFTP y chown salen del hosting_type de la API destino), así que el rechazo se
+        // levantó. Se le cambió el sentido y no se borró: lo que hay que seguir fijando es qué pasa
+        // con un esqueleto en VPS, y ahora lo que pasa es que se acepta.
+        $response->assertStatus(201);
+        $this->assertSame('esqueleto', $response->json('model.kind'));
     }
 
     public function test_una_instalacion_completa_sobre_una_api_en_vps_sigue_permitida(): void
@@ -896,18 +898,65 @@ class InstalacionEsqueletoEnElSubdominioSecundarioTest extends TestCase
         );
     }
 
-    public function test_el_servicio_rechaza_un_esqueleto_sobre_una_api_en_vps(): void
+    public function test_el_servicio_construye_un_esqueleto_sobre_una_api_en_vps_y_resuelve_sus_rutas(): void
     {
         $filas = $this->crear_grupo_para_el_servicio();
+        $this->crear_credencial_vps();
 
         $filas['api2']->hosting_type = 'vps';
+        $filas['api2']->vps_path     = 'esqueletovps2';
         $filas['api2']->save();
 
-        // Segunda barrera, además del 422 del controlador: una fila creada antes de que existiera
-        // la validación, o metida a mano en la base, tampoco puede llegar a escribir.
-        $this->expectException(\RuntimeException::class);
+        // 🔴 Este test esperaba una \RuntimeException hasta el 31/8/2026 (era la segunda barrera del
+        // rechazo del esqueleto en VPS). U9 sacó esa aserción del constructor, así que ahora lo que
+        // hay que fijar es lo contrario: que el servicio se construye y que las rutas que resuelve
+        // son las del VPS y no las de la cuenta compartida.
+        $service = new InstallationService($filas['esqueleto']->fresh());
 
-        new InstallationService($filas['esqueleto']->fresh());
+        $this->assertSame(
+            '/home/api-esqueletovps2/empresa-api',
+            $this->invocar_metodo($service, 'get_api_path')
+        );
+        $this->assertSame(
+            ['prepare_dirs', 'upload_public', 'write_env', 'finalize_skeleton'],
+            $this->steps_de($service)
+        );
+    }
+
+    /**
+     * Credencial SSH del VPS: el constructor del servicio la resuelve por el hosting_type del
+     * destino, y admin_testing_s6 no la trae cargada.
+     *
+     * @return void
+     */
+    private function crear_credencial_vps(): void
+    {
+        if (ClientSshCredential::where('type', 'vps')->first() !== null) {
+            return;
+        }
+
+        $credential           = new ClientSshCredential();
+        $credential->type     = 'vps';
+        $credential->host     = '127.0.0.1';
+        $credential->port     = 22;
+        $credential->username = 'root';
+        $credential->password = 'test';
+        $credential->save();
+    }
+
+    /**
+     * Invoca un método privado del servicio por reflexión.
+     *
+     * @param  InstallationService  $service
+     * @param  string               $metodo
+     * @return mixed
+     */
+    private function invocar_metodo(InstallationService $service, string $metodo)
+    {
+        $reflexion = new \ReflectionMethod($service, $metodo);
+        $reflexion->setAccessible(true);
+
+        return $reflexion->invoke($service);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

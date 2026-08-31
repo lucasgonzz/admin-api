@@ -3,17 +3,24 @@
 namespace App\Services\Concerns;
 
 use App\Models\ClientInstallation;
+use App\Services\ClientApiPathResolver;
 use App\Services\HostingProvisioningService;
 use App\Services\HostingProvisioningStructure;
 
 /**
- * Las etapas de aprovisionamiento del hosting, para InstallationService.
+ * Las etapas de aprovisionamiento del hosting —y los ajustes propios del VPS— para
+ * InstallationService.
  *
  * 🔴 Por qué es un trait y no métodos sueltos adentro de InstallationService. La regla R1 del plan
  * (§9) le pone a esa clase un techo de 2350 líneas, y estaba en 2222 antes de esta misión: los seis
  * pasos con sus docblocks no entraban. La acción prescrita en la tabla de §9 para ese caso es
  * exactamente esta —"sacar los step_provision_* a un trait InstallationProvisioningSteps (mueve
  * líneas, no las agrega)"—, así que se aplicó antes de commitear y no después.
+ *
+ * 🔴 Y por eso mismo bajaron acá, en U9, el chown a los usuarios de CloudPanel y el composer install
+ * del servidor del cliente: son las dos piezas de la instalación que existen SOLO porque el destino
+ * puede ser un VPS, y con ellas adentro InstallationService cruzaba R1 otra vez (2386). Mismo freno,
+ * misma acción prescrita, mismo trait. Todo lo demás de la instalación siguió donde estaba.
  *
  * Lo que hay acá adentro es delegación y nada más: cada paso instancia el proveedor y le pasa un
  * closure de log. La lógica del aprovisionamiento vive en HostingProvisioningService y sus
@@ -168,6 +175,75 @@ trait InstallationProvisioningSteps
     private function step_provision_ssl(): void
     {
         $this->provisioner()->provision_ssl();
+    }
+
+    /**
+     * Le devuelve al usuario del sitio de CloudPanel los archivos que subió root. No-op en compartido.
+     *
+     * 🔴 Sin esto la instalación en VPS queda "perfecta" y no anda: php-fpm corre como el usuario del
+     * sitio (§F6 del informe de migración del 26/8/2026) y todo lo que dejó el pipeline es de root,
+     * así que el sistema del cliente no puede escribir en storage/ — ni logs, ni caché, ni sesiones,
+     * ni un adjunto. Y no lo denuncia ninguna verificación: los archivos ESTÁN, solo que no son suyos.
+     *
+     * @param  string  $api_path
+     * @param  string  $step
+     * @return void
+     */
+    private function chown_api_dir_en_vps(string $api_path, string $step): void
+    {
+        $comando = $this->build_vps_chown_command($api_path);
+        if ($comando === '') {
+            return;
+        }
+
+        $this->log($step, 'Devolviéndole los archivos al usuario del sitio de CloudPanel...');
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh($step, $comando, true, true);
+        $this->log($step, 'Archivos de la API con el dueño correcto en el VPS', 'success');
+    }
+
+    /**
+     * Comando de chown para el VPS, o '' si la API destino no está en un VPS.
+     *
+     * Separado de quien lo ejecuta —igual que build_skeleton_verify_command()— porque es un string y
+     * es lo único de esta parte que un test puede fijar sin un servidor del otro lado.
+     *
+     * @param  string  $api_path
+     * @return string
+     */
+    private function build_vps_chown_command(string $api_path): string
+    {
+        $resolver = new ClientApiPathResolver();
+        $usuario  = $resolver->vps_site_user($this->target_api);
+
+        if ($usuario === '') {
+            return '';
+        }
+
+        return 'chown -R ' . escapeshellarg($usuario . ':' . $usuario) . ' '
+            . escapeshellarg($api_path) . ' 2>&1';
+    }
+
+    /**
+     * El composer install que corre en el servidor del CLIENTE, con el envoltorio que le toque.
+     *
+     * 🔴 El flag salía hardcodeado en `false` = "no es VPS". Con la API destino en VPS eso mandaba
+     * el comando pelado por una sesión SSH no interactiva de Ubuntu, donde `composer` puede no estar
+     * en el PATH: el mismo motivo por el que el VPS de builds usa el envoltorio desde siempre.
+     * DeploymentService hace la misma distinción con ese mismo parámetro.
+     *
+     * Existe como método propio —y no como una expresión adentro de step_upload_api()— porque es la
+     * única forma de fijar por test qué comando sale para cada hosting sin un servidor del otro lado.
+     *
+     * @param  string  $api_path
+     * @return string
+     */
+    private function build_hosting_composer_install_command(string $api_path): string
+    {
+        return $this->build_composer_install_command(
+            $api_path,
+            $this->get_hosting_credential_type() === 'vps'
+        );
     }
 
     /**

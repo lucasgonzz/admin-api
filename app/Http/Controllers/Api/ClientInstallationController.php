@@ -123,12 +123,13 @@ class ClientInstallationController extends Controller
      */
     public function store_global(StoreClientInstallationRequest $request): JsonResponse
     {
+        // 🔴 Hasta U9 acá había una guarda que rechazaba con 422 todo alta con
+        // provision_hosting_type='vps': entre U8 y U9 el aprovisionamiento del VPS ya funcionaba y
+        // el pipeline de instalación todavía no, y esa combinación era la que armaba el docroot del
+        // SPA como la raíz de la cuenta compartida y la vaciaba con un `find . -mindepth 1 -delete`.
+        // U9 hizo hosting-aware al pipeline y puso la guarda donde de verdad corresponde: pegada al
+        // borrado, en ClientApiPathResolver::assert_directorio_de_spa_borrable().
         $provision_hosting_type = $request->input('provision_hosting_type');
-
-        $rechazo = $this->rechazo_de_instalacion_en_vps($provision_hosting_type);
-        if ($rechazo !== null) {
-            return $rechazo;
-        }
 
         // Cliente destino de la nueva instalación.
         $client = Client::findOrFail($request->input('client_id'));
@@ -470,40 +471,6 @@ class ClientInstallationController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * 🔴 GUARDA TEMPORAL: mientras la unidad U9 no esté construida, un alta con
-     * provision_hosting_type='vps' se rechaza acá y no llega a crearse.
-     *
-     * 🔴 U9 SACA ESTA GUARDA —es lo único que hay que borrar para habilitar el VPS— y por eso está
-     * en un solo lugar. Existe porque entre U8 y U9 el aprovisionamiento del VPS ya funciona y el
-     * pipeline de instalación todavía no: InstallationService resuelve la credencial SSH, el path de
-     * la API y el del SPA asumiendo hosting compartido, y build_spa_hosting_deploy_shell() arma el
-     * docroot como 'domains/comerciocity.com/public_html/' . get_spa_path(). Con las ClientApi ya
-     * pasadas a hosting_type='vps' por provision_check y sin la rama de VPS del pipeline, ese path
-     * queda apuntando a la raíz de la cuenta compartida, y el `find . -mindepth 1 -delete` que viene
-     * después vacía el public_html de los ~40 clientes activos, de una.
-     *
-     * 🔴 Mira el provision_hosting_type DEL PEDIDO y no client_apis.hosting_type: en el momento del
-     * alta las dos ClientApi todavía dicen 'shared_hosting' —las pasa a 'vps' el aprovisionamiento,
-     * ya adentro del job—, así que una guarda sobre la columna no vería nada.
-     *
-     * @param  string|null  $provision_hosting_type
-     * @return JsonResponse|null  El 422 a devolver, o null si el pedido puede seguir.
-     */
-    private function rechazo_de_instalacion_en_vps($provision_hosting_type)
-    {
-        if ((string) $provision_hosting_type !== ClientInstallation::PROVISION_VPS) {
-            return null;
-        }
-
-        return response()->json([
-            'error' => 'La instalación sobre VPS todavía no está soportada: el pipeline resuelve '
-                . 'las rutas del código y del SPA asumiendo hosting compartido, así que instalar '
-                . 'sobre una API en VPS escribiría en el servidor equivocado. Elegí "Hosting '
-                . 'compartido" o destildá el aprovisionamiento.',
-        ], 422);
-    }
-
-    /**
      * Valida y ordena los destinos del payload nuevo.
      *
      * Devuelve un array de ['client_api_id' => int, 'kind' => string] con la instalación real
@@ -557,16 +524,12 @@ class ClientInstallationController extends Controller
                 }
             }
 
-            // Se rechaza acá y no recién en el job: InstallationService::get_api_path() hardcodea el
-            // prefijo del hosting compartido, así que un esqueleto sobre una API en VPS crearía los
-            // directorios y el .env en el servidor equivocado y devolvería éxito. El pipeline
-            // completo sí sabe manejarlo, por eso la restricción es solo para el esqueleto.
-            if ($kind === ClientInstallation::KIND_ESQUELETO && (string) $client_api->hosting_type === 'vps') {
-                return response()->json([
-                    'error' => 'El esqueleto todavía no soporta APIs en VPS: el pipeline de instalación resuelve las rutas asumiendo hosting compartido. Instalá esa API con el pipeline completo.',
-                ], 422);
-            }
-
+            // 🔴 Acá se rechazaba un esqueleto sobre una API en VPS, porque
+            // InstallationService::get_api_path() hardcodeaba el prefijo del hosting compartido y el
+            // esqueleto habría escrito los directorios y el .env en el servidor equivocado
+            // devolviendo éxito. U9 (31/8/2026) hizo hosting-aware a los dos pipelines —las rutas,
+            // la credencial SSH, el SFTP y el chown salen del hosting_type de la API destino— así
+            // que el motivo del rechazo dejó de existir y la restricción se levantó.
             $targets[] = ['client_api_id' => $client_api_id, 'kind' => $kind];
         }
 

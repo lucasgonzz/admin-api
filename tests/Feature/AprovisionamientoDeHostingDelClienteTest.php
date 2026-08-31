@@ -638,8 +638,12 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $this->crear_templates_de_env();
         $this->crear_template_de_env('CACHE_DRIVER', 'redis');
 
+        /* Desde U9 el constructor del servicio resuelve la credencial por el hosting del destino. */
+        $this->crear_credencial_vps();
+
         /* spa_url fuera del dominio de config: el label no se puede derivar y queda vacío. */
         $datos['api1']->hosting_type = 'vps';
+        $datos['api1']->vps_path     = $datos['slug'];
         $datos['api1']->spa_url      = 'https://cliente.otrodominio.com';
         $datos['api1']->save();
 
@@ -662,7 +666,10 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $slug  = $datos['slug'];
         $this->crear_templates_de_env();
 
+        $this->crear_credencial_vps();
+
         $datos['api1']->hosting_type = 'vps';
+        $datos['api1']->vps_path     = $slug;
         $datos['api1']->save();
 
         $datos['installation']->provision_hosting_type = null;
@@ -1480,16 +1487,21 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     /**
-     * Test 10 de §7 — 🔴 la guarda contra el `find . -mindepth 1 -delete`.
+     * Test 10 de §7, con el sentido que le dio U9 (y el apéndice A1 del plan).
      *
-     * Mientras U9 no exista, el pipeline de instalación resuelve la credencial SSH, el path de la
-     * API y el del SPA asumiendo hosting compartido. Con las ClientApi ya pasadas a
-     * hosting_type='vps' por provision_check, build_spa_hosting_deploy_shell() arma el docroot como
-     * 'domains/comerciocity.com/public_html/' . get_spa_path() y ese `find -delete` vacía el
-     * public_html de los ~40 clientes activos. Este 422 es lo único que lo impide, y U9 es la única
-     * unidad autorizada a sacarlo.
+     * 🔴 Hasta U9 este test fijaba un 422: el alta con provision_hosting_type='vps' se rechazaba
+     * porque entre U8 y U9 el aprovisionamiento del VPS ya funcionaba y el pipeline de instalación
+     * todavía no. En esa ventana, provision_check pasaba las ClientApi a hosting_type='vps' y
+     * build_spa_hosting_deploy_shell() seguía armando el docroot como
+     * 'domains/comerciocity.com/public_html/' . get_spa_path() — o sea, la raíz de la cuenta
+     * compartida— y le corría adentro un `find . -mindepth 1 -delete`.
+     *
+     * U9 hizo hosting-aware al pipeline, así que la guarda del controlador se levantó y este test
+     * fija el comportamiento nuevo. 🔴 Lo que NO desapareció es la protección contra ese borrado:
+     * se mudó a donde de verdad corresponde, pegada al `find -delete`, y la fija
+     * InstalacionSobreVpsTest::test_con_un_path_vacio_el_deploy_del_spa_no_llega_a_borrar_nada().
      */
-    public function test_el_alta_en_vps_se_rechaza_con_422_y_en_castellano(): void
+    public function test_el_alta_en_vps_ya_no_se_rechaza_y_crea_las_filas(): void
     {
         $datos   = $this->preparar_cliente_aprovisionable();
         $version = $this->crear_version_publicada();
@@ -1500,20 +1512,20 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
             'provision_hosting_type' => 'vps',
             'targets'                => [
                 ['client_api_id' => $datos['api1']->id, 'kind' => 'completa'],
+                ['client_api_id' => $datos['api2']->id, 'kind' => 'esqueleto'],
             ],
         ]);
 
-        $respuesta->assertStatus(422);
-        $this->assertStringContainsString('todavía no está soportada', $respuesta->json('error'));
-        $this->assertStringContainsString('hosting compartido', $respuesta->json('error'));
+        $respuesta->assertStatus(201);
 
-        /* 🔴 Y no se creó ni una fila: el rechazo va antes de tocar la base. */
-        $this->assertSame(
-            0,
-            ClientInstallation::where('client_id', $datos['client']->id)
-                ->where('id', '!=', $datos['installation']->id)
-                ->count()
-        );
+        $filas = $respuesta->json('models');
+        $this->assertCount(2, $filas);
+        $this->assertSame('vps', $filas[0]['provision_hosting_type']);
+        $this->assertSame('vps', $filas[1]['provision_hosting_type']);
+
+        /* Y el esqueleto sobre VPS entra en el mismo grupo, que era la otra mitad del rechazo. */
+        $this->assertSame('completa', $filas[0]['kind']);
+        $this->assertSame('esqueleto', $filas[1]['kind']);
     }
 
     /**
