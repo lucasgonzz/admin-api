@@ -91,6 +91,14 @@ class HostingerApiClient extends HostingerHttpTransport
     /**
      * Borra un cronjob por su uid.
      *
+     * ⚠️ El pipeline de aprovisionamiento NO lo llama: crea crons, no los borra. Se queda igual,
+     * y el criterio es este: es la única forma programática de deshacer un cron creado por este
+     * mismo cliente —en el hosting compartido no existe el binario `crontab` y /var/spool/cron
+     * está vacío adentro del CageFS, así que esta llamada es el único camino—, y es el paso V2 del
+     * runbook de migración (apagar los crons del cliente en el shared). Además es lo que fija por
+     * test el escapado del uid en la ruta y que un 204 sin cuerpo no sea un error, que son dos
+     * reglas del transporte que valen para todos los verbos.
+     *
      * @param  string  $uid
      * @return void
      * @throws \RuntimeException
@@ -145,17 +153,6 @@ class HostingerApiClient extends HostingerHttpTransport
     {
         return strpos($command, 'schedule:run') !== false
             || strpos($command, 'queue:work') !== false;
-    }
-
-    /**
-     * Lista los subdominios del dominio de config.
-     *
-     * @return array<int|string, mixed>
-     * @throws \RuntimeException
-     */
-    public function list_subdomains(): array
-    {
-        return $this->request('GET', $this->ruta_subdominios());
     }
 
     /**

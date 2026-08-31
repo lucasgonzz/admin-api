@@ -27,6 +27,16 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
         . 'destildando el aprovisionamiento—, o borrá la base si es un resto de una prueba.';
 
     /**
+     * Marca que imprime el comando del cron cuando no pudo LEER el crontab del usuario.
+     *
+     * Es una constante y no un string suelto porque la usan dos lados: el comando remoto que la
+     * imprime y el test que fija que ese camino frena en vez de escribir.
+     *
+     * @var string
+     */
+    const MARCA_CRONTAB_ILEGIBLE = 'NO_PUDE_LEER_EL_CRONTAB';
+
+    /**
      * Crea la base del cliente (una sola para las dos instancias) y persiste su contraseña.
      *
      * 🔴 SIN el prefijo u767360347_ (§F3 del informe de migración): ese prefijo se lo impone
@@ -46,10 +56,10 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
         $password = $this->generar_password();
 
         $comando = 'clpctl db:add'
-            . ' --domainName=' . escapeshellarg('api-' . $this->slug() . '.' . $this->dominio())
-            . ' --databaseName=' . escapeshellarg($nombre)
-            . ' --databaseUserName=' . escapeshellarg($nombre)
-            . ' --databaseUserPassword=' . escapeshellarg($password);
+            . ' --domainName=' . $this->escapar('api-' . $this->slug() . '.' . $this->dominio())
+            . ' --databaseName=' . $this->escapar($nombre)
+            . ' --databaseUserName=' . $this->escapar($nombre)
+            . ' --databaseUserPassword=' . $this->escapar($password);
 
         $this->log('provision_db', 'Creando la base ' . $nombre . ' en el VPS...');
 
@@ -116,25 +126,68 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
 
         $this->log('provision_cron', 'Dejando el cron de ' . $usuario . ': ' . $linea);
 
-        /*
-         * 🔴 Idempotente por construcción y no por consulta previa: se pregunta y se escribe en el
-         * MISMO comando. Con dos comandos (leer, decidir, escribir) hay una ventana en la que otra
-         * corrida escribe entremedio y el segundo `crontab -` pisa lo que la primera puso: el
-         * crontab se reemplaza entero, no se agrega una línea. Acá el `||` hace que el pipe ni
-         * siquiera se evalúe cuando la línea ya está.
-         */
-        $comando = 'crontab -u ' . escapeshellarg($usuario) . ' -l 2>/dev/null | grep -qF '
-            . escapeshellarg($linea)
-            . ' || ( crontab -u ' . escapeshellarg($usuario) . ' -l 2>/dev/null; echo '
-            . escapeshellarg($linea) . ' ) | crontab -u ' . escapeshellarg($usuario) . ' -';
-
-        $this->vps('provision_cron')->run($comando);
+        $this->vps('provision_cron')->run($this->comando_para_dejar_el_cron($usuario, $linea));
 
         $this->result->creado('cron', $usuario);
 
         $this->configurar_supervisor($api_path, $usuario);
 
         $this->log('provision_cron', 'El cron de ' . $usuario . ' está.', 'success');
+    }
+
+    /**
+     * El comando que deja la línea en el crontab del usuario, sin poder pisar lo que ya había.
+     *
+     * 🔴 LEER ESTO ANTES DE "SIMPLIFICARLO" AL PIPE DE UNA LÍNEA.
+     *
+     * Hasta el 31/8/2026 esto era:
+     *
+     *     crontab -u U -l 2>/dev/null | grep -qF 'LINEA' \
+     *       || ( crontab -u U -l 2>/dev/null; echo 'LINEA' ) | crontab -u U -
+     *
+     * El parseo del shell era correcto y la idempotencia estaba bien pensada, pero el
+     * `2>/dev/null` de la SEGUNDA lectura silenciaba el único chequeo previo de una escritura
+     * destructiva: si ese `crontab -l` fallaba por algo que no fuera "no crontab for user" —el
+     * archivo tomado por otra escritura, un permiso, el spool lleno—, el subshell emitía SOLO la
+     * línea nueva y el `crontab -` REEMPLAZABA EL CRONTAB ENTERO DEL USUARIO CON UNA SOLA LÍNEA.
+     * Y devolvía exit 0, así que el paso loguéaba "el cron está" y nadie se enteraba hasta que
+     * alguien notara que las tareas del cliente dejaron de correr.
+     *
+     * Acá la lectura se hace UNA vez, con salida y error en archivos separados, y se distinguen
+     * los tres casos: leyó (se usa lo que leyó), no hay crontab todavía (se arranca vacío), o
+     * falló por otra cosa (SE FRENA sin escribir, con el motivo del propio cron adentro del
+     * mensaje). Un `crontab -l` que falla por un motivo inesperado no puede terminar en una
+     * escritura.
+     *
+     * ⚠️ Lo que se pierde y por qué se acepta: la lectura y la escritura ya no son el mismo
+     * comando, así que existe una ventana en la que otra corrida podría escribir entremedio. Es
+     * una ventana de milisegundos, entre dos corridas sobre el MISMO usuario del VPS —o sea, dos
+     * instalaciones del mismo cliente a la vez, que RunClientInstallationGroupJob serializa a
+     * propósito—, y su peor caso es perder una línea agregada por la otra corrida. El caso que se
+     * elimina es perder el crontab entero por un error que nadie miró. No son comparables.
+     *
+     * Y si el `crontab -l` de una implementación rara escribiera su "no crontab for user" por
+     * stdout en vez de stderr, este comando falla en vez de escribir: el grep del elif no lo
+     * encuentra en el archivo de errores. Fallar ruidoso es la dirección correcta del error.
+     *
+     * @param  string  $usuario
+     * @param  string  $linea  Línea completa del crontab, ya armada.
+     * @return string
+     */
+    private function comando_para_dejar_el_cron(string $usuario, string $linea): string
+    {
+        $u = $this->escapar($usuario);
+        $l = $this->escapar($linea);
+
+        return 'set -e; '
+            . 'TMP=$(mktemp); ERR=$(mktemp); '
+            . 'if crontab -u ' . $u . ' -l >"$TMP" 2>"$ERR"; then :; '
+            . 'elif grep -qi ' . $this->escapar('no crontab for') . ' "$ERR"; then : >"$TMP"; '
+            . 'else echo ' . self::MARCA_CRONTAB_ILEGIBLE . '; cat "$ERR"; rm -f "$TMP" "$ERR"; '
+            . 'exit 1; fi; '
+            . 'grep -qF ' . $l . ' "$TMP" || { printf \'\n%s\n\' ' . $l . ' >>"$TMP"; '
+            . 'crontab -u ' . $u . ' "$TMP"; }; '
+            . 'rm -f "$TMP" "$ERR"';
     }
 
     /**
@@ -190,8 +243,8 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
      */
     private function configurar_supervisor(string $api_path, string $usuario): void
     {
-        $programa = $usuario . '-queue';
-        $ruta     = '/etc/supervisor/conf.d/' . $programa . '.conf';
+        $programa = $this->nombre_del_programa($usuario);
+        $ruta     = '/etc/supervisor/conf.d/' . $usuario . '-queue.conf';
         $runner   = $this->vps('provision_cron');
 
         $this->log(
@@ -200,12 +253,16 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
                 . 'saltea el queue:work cuando VPS=true): se deja el worker ' . $programa . '.'
         );
 
+        /* El log del worker vive en /home/<usuario>/logs (§F8): si el directorio no está,
+           supervisor no puede abrir el archivo y el programa queda en FATAL. */
+        $runner->run('mkdir -p ' . $this->escapar('/home/' . $usuario . '/logs'));
+
         /*
          * Heredoc con el delimitador entre comillas simples: adentro el shell no expande nada, así
          * que el bloque viaja tal cual sin una sola capa de escapado que pueda salir mal.
          */
         $runner->run(
-            'cat > ' . escapeshellarg($ruta) . " <<'SUPERVISOR_EOF'\n"
+            'cat > ' . $this->escapar($ruta) . " <<'SUPERVISOR_EOF'\n"
             . $this->bloque_de_supervisor($programa, $api_path, $usuario) . "\nSUPERVISOR_EOF"
         );
 
@@ -213,13 +270,52 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
         $runner->run('supervisorctl update');
 
         /* `update` ya arranca los programas nuevos: un start redundante devuelve error y no importa. */
-        $runner->run('supervisorctl start ' . escapeshellarg($programa . ':*'), [], false);
+        $runner->run('supervisorctl start ' . $this->escapar($programa . ':*'), [], false);
 
         $this->result->creado('supervisor', $programa);
     }
 
     /**
-     * El bloque de configuración del worker (§F8 del informe de migración).
+     * Nombre del programa de supervisor, con guiones BAJOS: `api_<slug>_queue`.
+     *
+     * 🔴 No es el nombre del archivo. El .conf se llama `api-<slug>-queue.conf` (con guiones) y el
+     * programa de adentro `api_<slug>_queue` (con guiones bajos): así está en §F8 del informe
+     * 20260826-plan-migracion-shared-a-vps.md, que describe los workers que HOY están corriendo en
+     * producción (demo2, demo3, grupolimp). Hasta el 31/8/2026 este código emitía
+     * `api-<slug>-queue` en los dos lugares, así que un `supervisorctl status api_<slug>_queue`
+     * copiado del runbook de migración no encontraba nada en un cliente aprovisionado por el admin.
+     *
+     * @param  string  $usuario  Usuario del sitio de CloudPanel (`api-<slug>`).
+     * @return string
+     */
+    private function nombre_del_programa(string $usuario): string
+    {
+        return 'api_' . substr($usuario, strlen('api-')) . '_queue';
+    }
+
+    /**
+     * El bloque de configuración del worker, calcado de §F8 del informe de migración
+     * (20260826-plan-migracion-shared-a-vps.md), que es el que describe los workers que hoy corren
+     * en producción.
+     *
+     * 🔴 Los flags SON los de §F8 y no una variante. Hasta el 31/8/2026 este bloque emitía
+     * `--tries=3 --max-time=3600` y el log en `storage/logs/`, que difería del informe sin que
+     * nadie lo hubiera decidido — y desde que el supervisor se crea SIEMPRE en el VPS, este bloque
+     * dejó de ser código muerto y pasa a correr en cada instalación. Las tres diferencias no eran
+     * cosméticas:
+     *
+     *   • `--tries=3` reintenta tres veces un job que falla; producción usa 1 y los fallos se miran
+     *     a mano. Con 3, un job que rompe se ejecuta tres veces (y si tiene efectos, tres veces).
+     *   • `--max-time=3600` acota la VIDA DEL WORKER pero deja el timeout POR JOB en el default de
+     *     60 s, que es menos de lo que tarda cualquier sincronización del cliente: el job se mata a
+     *     mitad. §F8 usa `--timeout=3600` (por job) y acota el worker con `--memory=512
+     *     --max-jobs=50`, que además es lo que lo protege de una fuga de memoria.
+     *   • el log iba a `<api>/storage/logs/queue-worker.log`, que se borra y se recrea en cada
+     *     upgrade del cliente; §F8 lo deja en `/home/<usuario>/logs/`, afuera del código.
+     *
+     * La única diferencia que se conserva a propósito es `directory=`, que §F8 no trae: es
+     * inofensivo (el path del artisan ya es absoluto) y hace que un comando relativo del worker
+     * resuelva contra la raíz de la API y no contra `/`.
      *
      * @param  string  $programa
      * @param  string  $api_path
@@ -232,16 +328,17 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
 
         return "[program:" . $programa . "]\n"
             . "process_name=%(program_name)s_%(process_num)02d\n"
-            . "command=/usr/bin/php " . $raiz . "/artisan queue:work --sleep=3 --tries=3 --max-time=3600\n"
+            . "command=/usr/bin/php " . $raiz . "/artisan queue:work"
+                . " --sleep=3 --tries=1 --timeout=3600 --memory=512 --max-jobs=50\n"
             . "directory=" . $raiz . "\n"
-            . "user=" . $usuario . "\n"
-            . "numprocs=1\n"
             . "autostart=true\n"
             . "autorestart=true\n"
             . "stopasgroup=true\n"
             . "killasgroup=true\n"
+            . "user=" . $usuario . "\n"
+            . "numprocs=1\n"
             . "redirect_stderr=true\n"
-            . "stdout_logfile=" . $raiz . "/storage/logs/queue-worker.log\n"
+            . "stdout_logfile=/home/" . $usuario . "/logs/queue-worker.log\n"
             . "stopwaitsecs=3600";
     }
 
@@ -266,7 +363,6 @@ abstract class VpsDatabaseProvisioner extends VpsSiteProvisioner
         }
 
         $this->result->ya_existia('base', $nombre);
-        $this->result->agregar_credenciales($secretos);
         $this->log(
             'provision_db',
             'La base ' . $nombre . ' ya existía y tengo su contraseña guardada: se reusa.',

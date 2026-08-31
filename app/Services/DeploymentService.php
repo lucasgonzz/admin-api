@@ -1185,37 +1185,23 @@ class DeploymentService
      * shared_hosting: ruta relativa derivada del path de la API (reemplaza /api por /spa).
      * vps: path absoluto construido como /home/{vps_path}/htdocs/{dominio_spa}.
      *
+     * 🔴 DELEGA EN ClientApiPathResolver Y NO CALCULA NADA, desde el 31/8/2026. Acá había una
+     * copia entera de esa convención, y esa copia era peligrosa por una razón puntual: el
+     * `build_spa_hosting_deploy_shell()` de más arriba le pasa este valor a
+     * assert_directorio_de_spa_borrable() antes de correr un `find . -mindepth 1 -delete`, y esa
+     * guarda VALIDA EL STRING QUE LE PASAN, no lo recalcula. O sea que si las dos copias divergen,
+     * la guarda sigue pasando y el borrado corre sobre el directorio que calculó la copia mala.
+     * Agregar la guarda y dejar la duplicación que produce el valor que esa guarda valida no era
+     * medio arreglo: era el arreglo con el agujero adentro.
+     *
      * @return string
+     * @throws \RuntimeException Si es un VPS sin vps_path o sin spa_url.
      */
     private function get_spa_path()
     {
-        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+        $resolver = new ClientApiPathResolver();
 
-        if ($hosting_type === 'vps') {
-            /* Validar que vps_path esté configurado */
-            $vps_path = trim((string) ($this->target_api->vps_path ?? ''));
-            if ($vps_path === '') {
-                throw new \RuntimeException(
-                    'La ClientApi destino tiene hosting_type=vps pero no tiene vps_path configurado. '
-                    . 'Completá el campo vps_path antes de deployar.'
-                );
-            }
-
-            /* Derivar el dominio del SPA desde spa_url (ej: https://arfren.comerciocity.com → arfren.comerciocity.com) */
-            $spa_url = trim((string) ($this->target_api->spa_url ?? ''));
-            $spa_domain = preg_replace('#^https?://#', '', rtrim($spa_url, '/'));
-            if ($spa_domain === '') {
-                throw new \RuntimeException(
-                    'La ClientApi destino tiene hosting_type=vps pero no tiene spa_url configurada. '
-                    . 'Completá el campo spa_url antes de deployar.'
-                );
-            }
-
-            return '/home/' . $vps_path . '/htdocs/' . $spa_domain;
-        }
-
-        /* shared_hosting: reemplazar /api por /spa en el path relativo */
-        return str_replace('/api', '/spa', $this->target_api->path);
+        return $resolver->resolve_spa($this->target_api);
     }
 
     /**
@@ -1258,21 +1244,23 @@ class DeploymentService
     /**
      * Ruta SSH del directorio público del SPA en el servidor destino.
      *
-     * VPS: get_spa_path() ya devuelve el path absoluto (ej: /home/arfren2/htdocs/arfren.comerciocity.com).
-     * shared_hosting: agrega el prefijo Hostinger al path relativo.
+     * VPS: el path ya es absoluto (ej: /home/arfren2/htdocs/arfren.comerciocity.com).
+     * shared_hosting: lleva adelante el prefijo de la cuenta de Hostinger.
+     *
+     * 🔴 También delega, y por el mismo motivo que get_spa_path(): el prefijo
+     * 'domains/comerciocity.com/public_html/' estaba escrito acá a mano y ES la raíz de la cuenta
+     * compartida. Concatenarlo con un path vacío da exactamente el directorio que el
+     * `find . -mindepth 1 -delete` de build_spa_hosting_deploy_shell() no puede tocar nunca. En el
+     * resolver ese prefijo es una constante con su motivo escrito al lado.
      *
      * @return string
+     * @throws \RuntimeException Si es un VPS sin vps_path o sin spa_url.
      */
     private function get_spa_hosting_dir(): string
     {
-        $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
+        $resolver = new ClientApiPathResolver();
 
-        if ($hosting_type === 'vps') {
-            /* En VPS el path ya es absoluto */
-            return $this->get_spa_path();
-        }
-
-        return 'domains/comerciocity.com/public_html/' . $this->get_spa_path();
+        return $resolver->spa_hosting_dir($this->target_api);
     }
 
     /**

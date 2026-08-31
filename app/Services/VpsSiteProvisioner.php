@@ -70,6 +70,24 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
         $this->assert_binario('clpctl');
         $this->assert_binario('supervisorctl');
 
+        /*
+         * `dig` NO es fatal —el certificado se pide igual, Let's Encrypt valida contra su propio
+         * resolver— pero su ausencia tiene que salir ACÁ y no doce minutos después: sin dnsutils,
+         * `dig +short` devuelve vacío en cada sonda y los 4 dominios esperaban el tope completo sin
+         * que ninguna línea del log dijera por qué. provision_ssl se saltea la espera cuando falta.
+         */
+        if ($this->hay_dig('provision_check')) {
+            $this->log('provision_check', 'dig está: se va a poder verificar la propagación del DNS.');
+        } else {
+            $this->log(
+                'provision_check',
+                'El VPS no tiene `dig` (falta el paquete dnsutils). No frena la instalación, pero no '
+                    . 'se va a poder verificar la propagación del DNS antes de pedir el certificado: '
+                    . 'instalalo con `apt-get install -y dnsutils` si querés esa verificación.',
+                'warning'
+            );
+        }
+
         $this->assert_dns_write_enabled();
 
         $this->log(
@@ -230,11 +248,11 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
         $password = $this->generar_password();
 
         $comando = 'clpctl site:add:php'
-            . ' --domainName=' . escapeshellarg($dominio)
-            . ' --phpVersion=' . escapeshellarg(self::PHP_VERSION)
-            . ' --vhostTemplate=' . escapeshellarg(self::VHOST_TEMPLATE)
-            . ' --siteUser=' . escapeshellarg($label)
-            . ' --siteUserPassword=' . escapeshellarg($password);
+            . ' --domainName=' . $this->escapar($dominio)
+            . ' --phpVersion=' . $this->escapar(self::PHP_VERSION)
+            . ' --vhostTemplate=' . $this->escapar(self::VHOST_TEMPLATE)
+            . ' --siteUser=' . $this->escapar($label)
+            . ' --siteUserPassword=' . $this->escapar($password);
 
         try {
             /* 🔴 El password va en la lista de redacción: es lo que impide que termine en el panel. */
@@ -292,15 +310,23 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
     /**
      * Deja htdocs/<dominio> apuntando a empresa-api/public.
      *
-     * 🔴 `rmdir` Y NUNCA `rm -rf`. CloudPanel crea htdocs/<dominio> como DIRECTORIO, y un
-     * `ln -sfn destino dir_existente` crea el enlace ADENTRO del directorio en vez de reemplazarlo:
-     * hay que sacarlo primero. Pero con rmdir, que FALLA si tiene contenido. En un reintento sobre
-     * un sitio ya instalado, un `rm -rf` acá borraría el docroot de un cliente que está sirviendo
-     * producción. El rmdir que falla es la señal correcta: "esto ya tiene algo, mirá qué es".
+     * 🔴 `rmdir` Y NUNCA `rm -rf`. CloudPanel crea htdocs/<dominio> como DIRECTORIO y el symlink no
+     * lo puede reemplazar: hay que sacarlo primero, pero con rmdir, que FALLA si tiene contenido.
+     * En un reintento sobre un sitio ya instalado, un `rm -rf` acá borraría el docroot de un cliente
+     * que está sirviendo producción. El rmdir que falla es la señal correcta: "esto ya tiene algo,
+     * mirá qué es".
      *
      * Por eso el rmdir va con must_succeed en false y la verificación se hace después con readlink:
      * en un reintento sobre un docroot que YA es el symlink, el rmdir también falla ("Not a
      * directory") y ahí no hay nada malo. Lo que decide es a dónde apunta el docroot al final.
+     *
+     * ⚠️ Qué pasa exactamente si el rmdir no pudo sacar el directorio, porque el comentario que
+     * había acá prometía otra cosa: con `-n` —que es lo que este código usa— GNU `ln` NO crea el
+     * enlace adentro del directorio; se niega con "cannot overwrite directory" y sale con exit ≠ 0,
+     * así que el que corta es el `run()` del `ln`, antes del readlink. (Sin `-n`, y solo sin `-n`,
+     * el enlace se crearía adentro.) El resultado final es el mismo y sigue siendo el correcto
+     * —falla ruidosa, no se borra nada—, pero el error que ve el operador es el del `ln`, no el
+     * mensaje del readlink de más abajo.
      *
      * @param  string  $label
      * @return void
@@ -313,11 +339,11 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
         $docroot = $home . '/htdocs/' . $label . '.' . $this->dominio();
         $runner  = $this->vps('provision_sites');
 
-        $runner->run('mkdir -p ' . escapeshellarg($home . '/empresa-api'));
-        $runner->run('rmdir ' . escapeshellarg($docroot), [], false);
-        $runner->run('ln -sfn ' . escapeshellarg($destino) . ' ' . escapeshellarg($docroot));
+        $runner->run('mkdir -p ' . $this->escapar($home . '/empresa-api'));
+        $runner->run('rmdir ' . $this->escapar($docroot), [], false);
+        $runner->run('ln -sfn ' . $this->escapar($destino) . ' ' . $this->escapar($docroot));
 
-        $apunta_a = trim($runner->run('readlink ' . escapeshellarg($docroot), [], false));
+        $apunta_a = trim($runner->run('readlink ' . $this->escapar($docroot), [], false));
 
         if ($apunta_a !== $destino) {
             throw new \RuntimeException(

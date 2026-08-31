@@ -167,8 +167,37 @@ class InstallationService
         // hosting_type. Antes era fija ('shared_hosting'), y esa línea era la mitad de por qué el
         // esqueleto se rechazaba en VPS. Se resuelve igual en connect(), porque entre la
         // construcción y la conexión puede correr provision_check y pasar la API a VPS.
-        $this->credential = ClientSshCredential::where('type', $this->get_hosting_credential_type())
-            ->firstOrFail();
+        $this->credential = $this->cargar_credencial_del_hosting();
+    }
+
+    /**
+     * La credencial SSH del hosting de la API destino, o una excepción que dice qué falta.
+     *
+     * 🔴 Existe por el mensaje. Acá había un `firstOrFail()` pelado, y desde que el tipo puede ser
+     * 'vps' (U9) una instalación sobre una ClientApi ya migrada sin esa fila moría con "No query
+     * results for model [App\Models\ClientSshCredential]" en failure_reason: el operador lee eso en
+     * el panel y no sabe qué le falta. El preflight del VPS tiene el mensaje bueno pero corre
+     * DESPUÉS: este constructor es lo primero que se ejecuta.
+     *
+     * @return ClientSshCredential
+     * @throws \RuntimeException Si no hay ninguna cargada de ese tipo.
+     */
+    private function cargar_credencial_del_hosting(): ClientSshCredential
+    {
+        $tipo       = $this->get_hosting_credential_type();
+        $credencial = ClientSshCredential::where('type', $tipo)->first();
+
+        if ($credencial === null) {
+            throw new \RuntimeException(
+                'No hay ninguna credencial SSH de tipo "' . $tipo . '" cargada en el admin, y la API '
+                . 'destino de esta instalación vive en ese hosting (hosting_type='
+                . trim((string) $this->target_api->hosting_type) . '). Cargala en Configuración → '
+                . 'Credenciales SSH antes de instalar: sin ella el pipeline no puede ni conectarse '
+                . 'al servidor.'
+            );
+        }
+
+        return $credencial;
     }
 
     /**
@@ -186,8 +215,7 @@ class InstallationService
     {
         $this->disconnect_hosting_ssh();
 
-        $this->credential = ClientSshCredential::where('type', $this->get_hosting_credential_type())
-            ->firstOrFail();
+        $this->credential = $this->cargar_credencial_del_hosting();
 
         $this->ssh = new SSH2($this->credential->host, (int) $this->credential->port);
 
@@ -684,10 +712,11 @@ class InstallationService
         }
 
         // Si el .env todavía no existe, lo crea vacío. 🔴 El touch va POR LA SESIÓN DE
-        // EnvSshService, no por exec_hosting_ssh: esa otra sesión conecta fija al hosting
-        // compartido (connect(), línea ~119), así que con una API destino en VPS el touch caía en
-        // un servidor y la escritura en el otro — el archivo nunca aparecía donde se lo iba a
-        // buscar. Es el mismo par path/servidor para las dos operaciones o no sirve de nada.
+        // EnvSshService y no por exec_hosting_ssh: son DOS sesiones SSH distintas, cada una resuelve
+        // su credencial por su cuenta, y el touch y la escritura tienen que caer en el MISMO
+        // servidor y el mismo path o el archivo nunca aparece donde se lo va a buscar. (Hasta el
+        // 31/8/2026 el motivo era más burdo: connect() conectaba FIJO al compartido. Ya no, pero la
+        // conclusión no cambió.)
         $env_ssh_service->ensure_env_file_for($this->target_api);
 
         // EnvSshService reutiliza la misma lógica de sed del sistema, y verifica la escritura.
@@ -1482,11 +1511,10 @@ class InstallationService
     /**
      * Escapa un argumento para el shell del servidor REMOTO, que siempre es POSIX.
      *
-     * 🔴 No se usa escapeshellarg(): esa función escapa según el sistema donde corre PHP, no según
-     * el del otro lado. En Windows emite comillas DOBLES, y el `sh` remoto expande `$`, backticks y
-     * barras adentro de comillas dobles. Como admin-api también corre local sobre WAMP, un
-     * client_apis.path con `$(...)` aplicado desde ahí se ejecutaría en el servidor del cliente.
-     * Copiado de EnvSshService::escape_remote_arg(), donde está la explicación larga.
+     * 🔴 Delegación de una línea: la convención vive en un solo lugar de todo el admin, que es
+     * RemoteCommandRunner::escapar_argumento(), y ahí está escrito por qué escapeshellarg() no
+     * sirve para un comando que ejecuta OTRA máquina. Hasta el 31/8/2026 esta implementación
+     * estaba copiada acá y en EnvSshService.
      *
      * Los escapeshellarg() que ya están en las etapas de la instalación real son deuda previa: se
      * dejan como están, se arreglan en una misión propia.
@@ -1496,7 +1524,7 @@ class InstallationService
      */
     private function escape_remote_arg(string $value): string
     {
-        return "'" . str_replace("'", "'\\''", $value) . "'";
+        return RemoteCommandRunner::escapar_argumento($value);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

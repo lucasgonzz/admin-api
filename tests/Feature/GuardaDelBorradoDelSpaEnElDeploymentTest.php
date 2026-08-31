@@ -7,6 +7,7 @@ use App\Models\ClientApi;
 use App\Models\ClientSshCredential;
 use App\Models\ClientVersionUpgrade;
 use App\Models\Version;
+use App\Services\ClientApiPathResolver;
 use App\Services\DeploymentService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Str;
@@ -116,6 +117,58 @@ class GuardaDelBorradoDelSpaEnElDeploymentTest extends TestCase
          */
         $identificador = explode('/', $upgrade->target_client_api->path)[0];
         $this->assertStringContainsString($identificador . '/spa', $shell);
+    }
+
+    /**
+     * 🔴 HALLAZGO K — el directorio del SPA sale del RESOLVER, y da lo mismo que la copia vieja.
+     *
+     * Hasta el 31/8/2026 DeploymentService tenía su propia copia de esta convención
+     * (get_spa_path() / get_spa_hosting_dir()) mientras ClientApiPathResolver tenía la otra. Esa
+     * duplicación era peligrosa por una razón puntual: assert_directorio_de_spa_borrable() —la
+     * guarda de los dos tests de arriba— VALIDA EL STRING QUE LE PASAN, no lo recalcula. Con las dos
+     * copias divergiendo, la guarda seguía pasando mientras el `find . -mindepth 1 -delete` corría
+     * sobre el directorio que calculó la copia mala.
+     *
+     * Este test fija que los dos hostings dan EXACTAMENTE lo mismo que el resolver, que es lo único
+     * que hace que la guarda sirva de algo.
+     *
+     * @return void
+     */
+    public function test_el_directorio_del_spa_es_identico_al_del_resolver_en_los_dos_hostings()
+    {
+        $resolver = new ClientApiPathResolver();
+
+        foreach (['shared_hosting', 'vps'] as $hosting) {
+            $upgrade = $this->crear_upgrade($hosting);
+            $api     = $upgrade->target_client_api;
+            $service = new DeploymentService($upgrade);
+
+            $this->assertSame(
+                $resolver->resolve_spa($api),
+                (string) $this->invocar($service, 'get_spa_path'),
+                'get_spa_path() dejó de coincidir con el resolver en ' . $hosting . '.'
+            );
+
+            $this->assertSame(
+                $resolver->spa_hosting_dir($api),
+                (string) $this->invocar($service, 'get_spa_hosting_dir'),
+                'get_spa_hosting_dir() dejó de coincidir con el resolver en ' . $hosting . '.'
+            );
+        }
+
+        /* Y los valores concretos, para que el test diga también QUÉ tienen que ser. */
+        $vps = $this->crear_upgrade('vps');
+        $this->assertSame(
+            '/home/guarda-vps/htdocs/guarda.ejemplo.test',
+            (string) $this->invocar(new DeploymentService($vps), 'get_spa_hosting_dir')
+        );
+
+        $shared = $this->crear_upgrade('shared_hosting');
+        $this->assertSame(
+            'domains/comerciocity.com/public_html/'
+                . str_replace('/api', '/spa', $shared->target_client_api->path),
+            (string) $this->invocar(new DeploymentService($shared), 'get_spa_hosting_dir')
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

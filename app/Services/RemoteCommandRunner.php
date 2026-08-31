@@ -198,16 +198,31 @@ class RemoteCommandRunner
     }
 
     /**
-     * Cierra la sesión si estaba abierta.
+     * 🔴 EL ÚNICO ESCAPADOR DE ARGUMENTOS REMOTOS DE TODO EL ADMIN. Es estático y vive acá —en la
+     * clase que manda los comandos— justamente para que no haya una segunda copia de esta
+     * convención dando vueltas.
      *
-     * @return void
+     * NO SE USA escapeshellarg() PARA UN COMANDO QUE EJECUTA OTRA MÁQUINA. Esa función escapa
+     * según el sistema donde corre PHP y no según el del otro lado: en Linux emite comillas
+     * simples, pero admin-api también corre local sobre WAMP y ahí emite comillas DOBLES —adentro
+     * de las cuales el `sh` remoto expande `$`, backticks y `\`— y encima borra los `%`. O sea que
+     * el mismo código, corrido desde la máquina de desarrollo, manda un comando distinto y
+     * ejecutable.
+     *
+     * Y no es teórico: la línea del crontab del VPS lleva adentro el api_path, que se deriva de
+     * client_apis.vps_path —texto libre del CRUD del admin, que NO pasa por las guardas de
+     * HostingProvisioningStructure (esas validan el slug derivado del spa_url, que es otro dato)—,
+     * y la credencial del VPS es ROOT.
+     *
+     * Comillas simples POSIX: adentro todo es literal, y la única comilla simple se cierra, se
+     * escapa y se reabre. El resultado es idéntico en Windows, en Linux y en cualquier otro lado.
+     *
+     * @param  string  $valor
+     * @return string  El valor entre comillas simples, listo para concatenar en un comando.
      */
-    public function desconectar(): void
+    public static function escapar_argumento(string $valor): string
     {
-        if ($this->ssh !== null) {
-            $this->ssh->disconnect();
-            $this->ssh = null;
-        }
+        return "'" . str_replace("'", "'\\''", $valor) . "'";
     }
 
     /**

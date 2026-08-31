@@ -166,6 +166,14 @@ trait InstallationProvisioningSteps
      */
     private function step_provision_cron(): void
     {
+        /*
+         * Defensa, no una rama del flujo: build_steps_con_aprovisionamiento() solo agrega este paso
+         * cuando el kind ya es 'completa', así que hoy este `if` es inalcanzable. Se deja porque lo
+         * que protege es caro —un `schedule:run` una vez por minuto sobre un esqueleto sin vendor/
+         * escupe un fatal de PHP para siempre— y porque el pipeline se arma en un archivo y se
+         * ejecuta en otro: alcanza con que alguien sume este paso a la lista del esqueleto para que
+         * esta línea pase a ser la única que lo frena.
+         */
         if ($this->installation->kind !== ClientInstallation::KIND_COMPLETA) {
             $this->log('provision_cron', 'Esta fila no es la instalación real: no se crea ningún cron.');
 

@@ -14,8 +14,13 @@ use App\Models\ClientApi;
  *
  * Desde el 31/8/2026 también resuelve el directorio del SPA y el dueño de los archivos en el VPS,
  * porque InstallationService dejó de asumir hosting compartido (U9). Esa convención estaba
- * duplicada adentro de DeploymentService::get_spa_path()/get_spa_hosting_dir(): acá queda la copia
- * buena, y la de allá se unifica cuando se toque ese archivo, que no es de esta misión.
+ * duplicada adentro de DeploymentService::get_spa_path()/get_spa_hosting_dir(); ese archivo se
+ * terminó tocando igual en esta misma misión —para meterle la guarda del borrado— así que la
+ * duplicación se cerró ahí mismo: los dos métodos de allá ahora delegan acá.
+ *
+ * 🔴 Y no era una duplicación inofensiva: assert_directorio_de_spa_borrable() valida el string
+ * que le pasan y no lo recalcula, así que con dos copias divergentes la guarda pasa igual mientras
+ * el `find -delete` corre sobre el directorio que calculó la copia mala.
  *
  * PHP 7.4: sin `?->`, `match`, `str_contains`, argumentos nombrados, union types, promoción en
  * constructor, `readonly`, `enum`, atributos, `mixed` ni `never`.
@@ -84,8 +89,9 @@ class ClientApiPathResolver
             $vps_path = trim((string) ($client_api->vps_path ?? ''));
             if ($vps_path === '') {
                 throw new \RuntimeException(
-                    'La ClientApi tiene hosting_type=vps pero no tiene vps_path configurado. '
-                    . 'Completá el campo vps_path antes de instalar.'
+                    'La ClientApi tiene hosting_type=vps pero no tiene vps_path configurado, y de '
+                    . 'ahí sale el directorio del SPA. Completá el campo vps_path antes de instalar '
+                    . 'o de actualizar a este cliente.'
                 );
             }
 
@@ -95,7 +101,7 @@ class ClientApiPathResolver
                 throw new \RuntimeException(
                     'La ClientApi tiene hosting_type=vps pero no tiene spa_url configurada, y el '
                     . 'docroot del SPA en el VPS es /home/<vps_path>/htdocs/<dominio del SPA>. '
-                    . 'Completá el campo spa_url antes de instalar.'
+                    . 'Completá el campo spa_url antes de instalar o de actualizar a este cliente.'
                 );
             }
 

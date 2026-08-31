@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\RunClientInstallationGroupJob;
+use App\Jobs\RunClientInstallationJob;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\ClientApi;
@@ -15,6 +17,7 @@ use App\Services\HostingProvisioningService;
 use App\Services\HostingerApiClient;
 use App\Services\RemoteCommandRunner;
 use App\Services\SharedHostingProvisioning;
+use App\Services\VpsDatabaseProvisioner;
 use App\Services\VpsHostingProvisioning;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
@@ -106,6 +109,11 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
             'services.hostinger.database_prefix'  => 'u767360347_',
             'services.hostinger.subdomain_directory_template'        => '{path}',
             'services.hostinger.subdomain_is_using_public_directory' => false,
+            /* 0 = una sola lectura de la zona y sin sleep, para no colgar la suite. El test que
+               prueba la espera lo sube a mano. */
+            'services.hostinger.zone_wait_seconds'                   => 0,
+            /* 0 = sin pausa entre los dos intentos de certificado (en produccion son 30 s). */
+            'services.hostinger.ssl_retry_seconds'                   => 0,
         ]);
     }
 
@@ -918,11 +926,12 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $mkdirs = $this->runner_fake()->crudos_con('mkdir -p');
         $this->assertCount(4, $mkdirs);
 
+        /* 🔴 Con las comillas puestas: lo que se fija acá es el comando Y su escapado. */
         $raiz = 'domains/comerciocity.com/public_html/';
-        $this->assertStringContainsString($raiz . $slug . '/api', $this->sin_comillas($mkdirs[0]));
-        $this->assertStringContainsString($raiz . $slug . '/spa', $this->sin_comillas($mkdirs[1]));
-        $this->assertStringContainsString($raiz . $slug . '2/api', $this->sin_comillas($mkdirs[2]));
-        $this->assertStringContainsString($raiz . $slug . '2/spa', $this->sin_comillas($mkdirs[3]));
+        $this->assertSame('mkdir -p ' . RemoteCommandRunner::escapar_argumento($raiz . $slug . '/api'), $mkdirs[0]);
+        $this->assertSame('mkdir -p ' . RemoteCommandRunner::escapar_argumento($raiz . $slug . '/spa'), $mkdirs[1]);
+        $this->assertSame('mkdir -p ' . RemoteCommandRunner::escapar_argumento($raiz . $slug . '2/api'), $mkdirs[2]);
+        $this->assertSame('mkdir -p ' . RemoteCommandRunner::escapar_argumento($raiz . $slug . '2/spa'), $mkdirs[3]);
 
         /* Y los 4 POST se hicieron igual: el mkdir se suma, no reemplaza nada. */
         $this->assertCount(4, $this->posts_a('/subdomains'));
@@ -1055,11 +1064,14 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $sitios = $this->runner_fake()->crudos_con('clpctl site:add:php');
         $this->assertCount(4, $sitios);
 
-        $primero = $this->sin_comillas($sitios[0]);
-        $this->assertStringContainsString('--domainName=api-' . $slug . '.comerciocity.com', $primero);
-        $this->assertStringContainsString('--phpVersion=7.4', $primero);
-        $this->assertStringContainsString('--vhostTemplate=Generic', $primero);
-        $this->assertStringContainsString('--siteUser=api-' . $slug, $primero);
+        $primero = $sitios[0];
+        $this->assertStringContainsString(
+            '--domainName=' . RemoteCommandRunner::escapar_argumento('api-' . $slug . '.comerciocity.com'),
+            $primero
+        );
+        $this->assertStringContainsString('--phpVersion=' . RemoteCommandRunner::escapar_argumento('7.4'), $primero);
+        $this->assertStringContainsString('--vhostTemplate=' . RemoteCommandRunner::escapar_argumento('Generic'), $primero);
+        $this->assertStringContainsString('--siteUser=' . RemoteCommandRunner::escapar_argumento('api-' . $slug), $primero);
 
         /* 🔴 El aserto que importa de este test. */
         $this->assertCount(2, $this->runner_fake()->crudos_con('rmdir '));
@@ -1069,9 +1081,10 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         /* El symlink es solo de las dos APIs; el docroot del SPA es htdocs/<dominio> tal cual. */
         $enlaces = $this->runner_fake()->crudos_con('ln -sfn');
         $this->assertCount(2, $enlaces);
-        $this->assertStringContainsString(
-            '/home/api-' . $slug . '/empresa-api/public /home/api-' . $slug . '/htdocs/api-' . $slug . '.comerciocity.com',
-            $this->sin_comillas($enlaces[0])
+        $this->assertSame(
+            'ln -sfn ' . RemoteCommandRunner::escapar_argumento('/home/api-' . $slug . '/empresa-api/public')
+                . ' ' . RemoteCommandRunner::escapar_argumento('/home/api-' . $slug . '/htdocs/api-' . $slug . '.comerciocity.com'),
+            $enlaces[0]
         );
     }
 
@@ -1104,9 +1117,9 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $comandos = $this->runner_fake()->crudos_con('clpctl db:add');
         $this->assertCount(1, $comandos);
 
-        $comando = $this->sin_comillas($comandos[0]);
-        $this->assertStringContainsString('--databaseName=' . $slug, $comando);
-        $this->assertStringContainsString('--databaseUserName=' . $slug, $comando);
+        $comando = $comandos[0];
+        $this->assertStringContainsString('--databaseName=' . RemoteCommandRunner::escapar_argumento($slug), $comando);
+        $this->assertStringContainsString('--databaseUserName=' . RemoteCommandRunner::escapar_argumento($slug), $comando);
         $this->assertStringNotContainsString('u767360347_', $comando);
 
         $this->assertSame($slug, ClientApi::find($datos['api1']->id)->provisioning_secrets['db_name']);
@@ -1126,10 +1139,20 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $crons = $this->runner_fake()->crudos_con('crontab');
         $this->assertCount(1, $crons);
 
-        $comando = $this->sin_comillas($crons[0]);
-        $this->assertStringContainsString('crontab -u api-' . $slug . ' -l', $comando);
+        $comando = $crons[0];
+        $this->assertStringContainsString(
+            'crontab -u ' . RemoteCommandRunner::escapar_argumento('api-' . $slug) . ' -l >"$TMP" 2>"$ERR"',
+            $comando
+        );
         $this->assertStringContainsString('grep -qF', $comando);
-        $this->assertStringContainsString('| crontab -u api-' . $slug . ' -', $comando);
+
+        /* 🔴 La escritura es `crontab -u USUARIO ARCHIVO`, nunca más el `| crontab -u USUARIO -`
+           que reemplazaba el crontab entero cuando la lectura previa fallaba en silencio. */
+        $this->assertStringContainsString(
+            'crontab -u ' . RemoteCommandRunner::escapar_argumento('api-' . $slug) . ' "$TMP"',
+            $comando
+        );
+        $this->assertStringNotContainsString('| crontab -u', $comando);
         $this->assertStringContainsString($api_path . '/artisan schedule:run', $comando);
         $this->assertStringNotContainsString('flock', $comando);
     }
@@ -1165,7 +1188,12 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
 
         $conf = $this->runner_fake()->crudos_con('/etc/supervisor/conf.d/api-' . $slug . '-queue.conf');
         $this->assertNotEmpty($conf);
-        $this->assertStringContainsString('[program:api-' . $slug . '-queue]', $conf[0]);
+
+        /* 🔴 El archivo lleva guiones y el programa guiones BAJOS: así está en §F8 del informe de
+           migración, que describe los workers que hoy corren en producción. Esta aserción cambió el
+           31/8/2026 porque el código emitía `api-<slug>-queue` en los dos lugares y un
+           `supervisorctl status api_<slug>_queue` copiado del runbook no encontraba nada. */
+        $this->assertStringContainsString('[program:api_' . $slug . '_queue]', $conf[0]);
         $this->assertStringContainsString('user=api-' . $slug, $conf[0]);
         $this->assertStringContainsString($api_path . '/artisan queue:work', $conf[0]);
 
@@ -1190,14 +1218,14 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
 
         $datos['proveedor']->provision_cron($api_path, false);
 
-        $cron = $this->sin_comillas($this->runner_fake()->crudos_con('crontab')[0]);
+        $cron = $this->runner_fake()->crudos_con('crontab')[0];
         $this->assertStringContainsString($api_path . '/artisan schedule:run', $cron);
         $this->assertStringNotContainsString('flock', $cron);
         $this->assertStringNotContainsString('queue:work', $cron);
 
         $conf = $this->runner_fake()->crudos_con('/etc/supervisor/conf.d/api-' . $slug . '-queue.conf');
         $this->assertNotEmpty($conf);
-        $this->assertStringContainsString('[program:api-' . $slug . '-queue]', $conf[0]);
+        $this->assertStringContainsString('[program:api_' . $slug . '_queue]', $conf[0]);
     }
 
     /**
@@ -1529,6 +1557,337 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $this->assertStringContainsString('NO se escribe nada', $mensaje);
 
         $this->assertSame([], $this->hostinger->llamadas_de('PUT'));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SEGUNDA RONDA DE ARREGLOS (31/8/2026) — los 🟡 y los ⚪ del chequeo
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * 🔴 HALLAZGO E — TODO comando remoto sale con comillas SIMPLES, en cualquier sistema.
+     *
+     * Este test es el candado que faltaba, y su ausencia es lo que volvía el bug permanente: hasta
+     * el 31/8/2026 este mismo archivo tenía un helper sin_comillas() que le sacaba las comillas al
+     * comando antes de asertar, con el comentario "lo que los tests fijan es el comando, no el
+     * escapado". O sea que la suite borraba a mano justamente la diferencia que distingue el
+     * escapado bueno del malo: alguien podía volver a escapeshellarg() —que en el WAMP de esta
+     * máquina emite comillas DOBLES, adentro de las cuales el `sh` remoto expande `$`, backticks y
+     * la barra invertida— y ningún test se enteraba.
+     *
+     * Se verifica de las tres maneras a propósito: la función sola, el código fuente de las clases
+     * de aprovisionamiento, y los comandos de una corrida de verdad.
+     */
+    public function test_todo_comando_remoto_del_aprovisionamiento_va_con_comillas_simples(): void
+    {
+        /* 1. La función: comillas simples, y la comilla simple de adentro cerrada, escapada y reabierta. */
+        $this->assertSame("'lacava'", RemoteCommandRunner::escapar_argumento('lacava'));
+        $this->assertSame("'a'\\''b'", RemoteCommandRunner::escapar_argumento("a'b"));
+
+        /* Lo peligroso queda literal: nada de esto lo puede expandir el shell del otro lado. */
+        $this->assertSame(
+            "'x\$(id)`id`%PATH%'",
+            RemoteCommandRunner::escapar_argumento('x$(id)`id`%PATH%')
+        );
+
+        /* 2. Ninguna de las clases de aprovisionamiento vuelve a llamar a escapeshellarg(). */
+        $clases = [
+            'Services/SharedHostingSubdomains.php',
+            'Services/SharedHostingProvisioning.php',
+            'Services/VpsCertificateProvisioner.php',
+            'Services/VpsSiteProvisioner.php',
+            'Services/VpsDatabaseProvisioner.php',
+            'Services/VpsHostingProvisioning.php',
+        ];
+
+        foreach ($clases as $clase) {
+            $this->assertStringNotContainsString(
+                'escapeshellarg(',
+                (string) file_get_contents(app_path($clase)),
+                $clase . ' volvió a escapar con escapeshellarg(), que escapa según el sistema donde '
+                    . 'corre PHP y no según el `sh` que ejecuta el comando.'
+            );
+        }
+
+        /* 3. Y en una corrida de verdad: ni una comilla doble alrededor de un argumento. */
+        $datos = $this->preparar_cliente_vps();
+        $datos['proveedor']->provision_sites();
+        $datos['proveedor']->provision_db();
+
+        foreach ($this->runner_fake()->crudos as $comando) {
+            $this->assertStringNotContainsString('"', $comando, 'Comando con comillas dobles: ' . $comando);
+        }
+    }
+
+    /**
+     * 🔴 HALLAZGO G — un `crontab -l` que falla por un motivo inesperado FRENA, no escribe.
+     *
+     * El comando viejo leía el crontab con `2>/dev/null` y, si esa lectura fallaba por algo que no
+     * fuera "no crontab for user", el subshell emitía solo la línea nueva y el `crontab -`
+     * reemplazaba el crontab entero del usuario con una sola línea — devolviendo exit 0 y con el
+     * paso logueando "el cron está".
+     */
+    public function test_si_no_se_puede_leer_el_crontab_la_etapa_frena_sin_escribir(): void
+    {
+        $datos    = $this->preparar_cliente_vps();
+        $slug     = $datos['slug'];
+        $api_path = '/home/api-' . $slug . '/empresa-api';
+
+        $this->runner_fake()->fallar_con(
+            'crontab',
+            VpsDatabaseProvisioner::MARCA_CRONTAB_ILEGIBLE . "\ncrontab: cannot open spool",
+            1
+        );
+
+        $mensaje = $this->mensaje_de_error(function () use ($datos, $api_path) {
+            $datos['proveedor']->provision_cron($api_path, true);
+        });
+
+        $this->assertStringContainsString(
+            VpsDatabaseProvisioner::MARCA_CRONTAB_ILEGIBLE,
+            $mensaje,
+            'La etapa tenía que cortar con el motivo del cron adentro del mensaje.'
+        );
+
+        /* Y no siguió de largo: ni supervisor, ni la línea de éxito. */
+        $this->assertSame([], $this->runner_fake()->crudos_con('supervisorctl'));
+        $this->assertStringNotContainsString('está.', $this->ultima_linea('provision_cron'));
+    }
+
+    /**
+     * 🔴 HALLAZGO F (1) — sin `dig` no se espera nada, y se DICE.
+     *
+     * Con el VPS sin dnsutils, `dig +short` devolvía vacío en cada sonda (must_succeed=false, así
+     * que ni fallaba) y los 4 dominios esperaban el tope completo —hasta 12 minutos de sleep
+     * adentro de un job— sin una sola línea del log que dijera qué estaba pasando.
+     */
+    public function test_sin_dig_no_se_sondea_la_propagacion_y_queda_escrito_en_el_log(): void
+    {
+        /* El fake gana la primera regla que matchea: esta se registra antes que la del VPS sano. */
+        $this->runner_fake()->responder('command -v dig', '');
+
+        $datos = $this->preparar_cliente_vps();
+
+        $datos['proveedor']->provision_ssl();
+
+        $this->assertSame([], $this->runner_fake()->crudos_con('dig +short'));
+        $this->assertStringContainsString('dnsutils', $this->linea_que_contiene('dnsutils'));
+
+        /* Y los 4 certificados se piden igual: la falta de dig no frena la etapa. */
+        $this->assertCount(4, $this->runner_fake()->crudos_con('lets-encrypt'));
+    }
+
+    /**
+     * 🔴 HALLAZGO F (2) — la IP se compara por línea EXACTA y no por substring.
+     *
+     * 76.13.171.147 (la del VPS) es substring de 176.13.171.147, que es otro servidor: con
+     * strpos() el paso daba "ya resuelve" para un dominio apuntado a cualquier lado.
+     */
+    public function test_una_ip_que_solo_es_substring_no_cuenta_como_propagada(): void
+    {
+        $this->runner_fake()->responder('dig +short', "176.13.171.147\n");
+
+        $datos = $this->preparar_cliente_vps();
+
+        $datos['proveedor']->provision_ssl();
+
+        $this->assertStringContainsString(
+            'todavía no resuelve',
+            $this->linea_que_contiene('todavía no resuelve'),
+            '176.13.171.147 no es 76.13.171.147: la comparación por substring las confundía.'
+        );
+    }
+
+    /**
+     * 🔴 HALLAZGO F (3) — el timeout del job cubre la espera de propagación del peor caso.
+     *
+     * Los dos números quedan atados acá: si alguien sube dns_wait_seconds sin subir el timeout del
+     * job, la instalación se muere en el último paso con TODO lo demás ya hecho.
+     */
+    public function test_el_timeout_del_job_cubre_la_espera_de_propagacion_del_dns(): void
+    {
+        /* El default de config (180 s por dominio, 4 dominios), no el 0 que ponen los tests. */
+        $espera_del_peor_caso = 4 * 180;
+        $pipeline_sin_esperas = 1800;
+
+        $suelto = new RunClientInstallationJob('uuid-de-prueba');
+        $grupo  = new RunClientInstallationGroupJob(['uno', 'dos']);
+
+        $this->assertGreaterThanOrEqual(
+            $espera_del_peor_caso + $pipeline_sin_esperas,
+            $suelto->timeout,
+            'provision_ssl espera hasta 180 s por cada uno de los 4 dominios: con este timeout el '
+                . 'worker mata la instalación en el último paso, con los 4 sitios, el DNS, la base '
+                . 'y el cron ya hechos.'
+        );
+
+        $this->assertGreaterThanOrEqual(
+            $suelto->timeout * 2,
+            $grupo->timeout,
+            'El job de grupo corre DOS pipelines adentro del mismo handle().'
+        );
+    }
+
+    /**
+     * 🔴 HALLAZGO H — la zona del hosting compartido se relee antes de dar por faltante un registro.
+     *
+     * provision_sites hace los 4 POST y este paso corre en el instante siguiente: que Hostinger
+     * publique el A record en la lectura de la zona en ese mismo instante es §10.4 del plan,
+     * explícitamente no verificado. Si tardaba unos segundos, la instalación quedaba 'fallida' con
+     * los 4 subdominios creados y el operador entraba a hPanel y los veía a los cuatro.
+     */
+    public function test_la_zona_del_compartido_se_reintenta_antes_de_dar_por_faltante_un_record(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+        $slug  = $datos['slug'];
+
+        /* 2 segundos de tope: alcanza para una sonda de más y no cuelga la suite. */
+        config(['services.hostinger.zone_wait_seconds' => 2]);
+
+        $completa = [];
+        foreach (['api-' . $slug, $slug, 'api-' . $slug . '2', $slug . '2'] as $nombre) {
+            $completa[] = ['name' => $nombre, 'type' => 'A'];
+        }
+
+        /* Primera lectura: falta el último. Segunda: ya están los 4. */
+        $this->hostinger->responder_secuencia('/api/dns/v1/zones/', [
+            array_slice($completa, 0, 3),
+            $completa,
+        ], 'GET');
+
+        $datos['proveedor']->provision_dns();
+
+        $this->assertCount(2, $this->hostinger->llamadas_de('GET'));
+        $this->assertStringContainsString('Los 4 A records', $this->ultima_linea('provision_dns'));
+
+        /* 🔴 Y sigue sin escribir NADA: la espera acota el falso negativo, no habilita el PUT. */
+        $this->assertSame([], $this->hostinger->escrituras());
+    }
+
+    /**
+     * 🔴 HALLAZGO L — si el GET posterior al PUT falla, el mensaje dice que el PUT YA PASÓ.
+     *
+     * Era el único camino ciego de G8: subía la excepción cruda del transporte ("La API de
+     * Hostinger respondió 502") y el operador la leía en provision_dns concluyendo, con toda razón,
+     * que no se había escrito nada — cuando la escritura ya se había ejecutado.
+     *
+     * Se fuerza por reflexión porque el fake no puede hacer fallar el segundo GET de la zona y no
+     * el primero: los dos comparten ruta y verbo.
+     */
+    public function test_si_la_verificacion_posterior_no_puede_leer_la_zona_lo_dice_sin_mentir(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+
+        $this->hostinger->fallar_con('/api/dns/v1/zones/', 502, 'Bad gateway', 'GET');
+
+        $mensaje = $this->mensaje_de_error(function () use ($datos) {
+            $this->invocar($datos['proveedor'], 'assert_no_se_perdio_nada', [['lacava|A'], 'snap-777']);
+        });
+
+        $this->assertStringContainsString('YA SE EJECUTÓ', $mensaje);
+        $this->assertStringContainsString('snap-777', $mensaje);
+        $this->assertStringContainsString('502', $mensaje);
+    }
+
+    /**
+     * 🔴 HALLAZGO O — el bloque de supervisor es el de §F8 del informe de migración, que es el que
+     * describe los workers que HOY corren en producción.
+     *
+     * Desde que el supervisor se crea siempre en el VPS, este bloque dejó de ser código muerto: sale
+     * en cada instalación. Las tres diferencias que tenía no eran cosméticas —`--tries=3` reintenta
+     * lo que producción no reintenta, `--max-time` deja el timeout POR JOB en el default de 60 s, y
+     * el log adentro de storage/ se borra en cada upgrade del cliente—.
+     */
+    public function test_el_bloque_de_supervisor_es_el_de_f8_del_informe(): void
+    {
+        $datos    = $this->preparar_cliente_vps();
+        $slug     = $datos['slug'];
+        $api_path = '/home/api-' . $slug . '/empresa-api';
+
+        $datos['proveedor']->provision_cron($api_path, true);
+
+        $conf = $this->runner_fake()->crudos_con('/etc/supervisor/conf.d/api-' . $slug . '-queue.conf')[0];
+
+        $this->assertStringContainsString(
+            'queue:work --sleep=3 --tries=1 --timeout=3600 --memory=512 --max-jobs=50',
+            $conf
+        );
+        $this->assertStringContainsString(
+            'stdout_logfile=/home/api-' . $slug . '/logs/queue-worker.log',
+            $conf
+        );
+        $this->assertStringContainsString('stopwaitsecs=3600', $conf);
+
+        /* Lo que se fue, se fue: son los tres valores que diferían del informe. */
+        $this->assertStringNotContainsString('--tries=3', $conf);
+        $this->assertStringNotContainsString('--max-time', $conf);
+        $this->assertStringNotContainsString('storage/logs/queue-worker.log', $conf);
+
+        /* El directorio del log se crea antes: si no, supervisor no puede abrir el archivo. */
+        $this->assertNotEmpty($this->runner_fake()->crudos_con(
+            'mkdir -p ' . RemoteCommandRunner::escapar_argumento('/home/api-' . $slug . '/logs')
+        ));
+    }
+
+    /**
+     * 🔴 HALLAZGO P — EL ORDEN DE LOS PASOS ES UN CONTRATO CON EL SPA, y este test es el candado.
+     *
+     * La otra copia de este array vive en admin-spa:
+     * `src/components/installation/extra-props/OperationsPanel.vue`
+     * (PASOS_APROVISIONAMIENTO_INICIO / PASOS_APROVISIONAMIENTO_FINAL + LOG_STEPS_ORDER_*), y ese
+     * lado NO tiene tests. Su propio comentario avisa por qué importa: get_step_status() decide
+     * "completado" mirando si el paso SIGUIENTE del array ya tiene logs, así que un array
+     * desalineado deja etapas en gris para siempre, sin ningún error y sin que nada lo denuncie.
+     *
+     * 🔴 Si este test se pone rojo porque cambiaste el pipeline, el arreglo NO es actualizar el
+     * array de acá: es actualizar los dos y dejarlos alineados.
+     */
+    public function test_el_orden_de_los_pasos_es_el_contrato_con_el_operations_panel_del_spa(): void
+    {
+        $datos = $this->preparar_cliente_aprovisionable();
+
+        /* Fila real con aprovisionamiento: 4 adelante, el pipeline de siempre, 2 atrás. */
+        $this->assertSame(
+            [
+                'provision_check', 'provision_sites', 'provision_dns', 'provision_db',
+                'compile_spa', 'upload_spa', 'upload_api', 'write_env', 'finalize_api',
+                'provision_cron', 'provision_ssl',
+            ],
+            $this->steps_de(new \App\Services\InstallationService($datos['installation']->fresh()))
+        );
+
+        /* Esqueleto con aprovisionamiento: los mismos 4 adelante y NADA atrás. */
+        $esqueleto = ClientInstallation::create([
+            'client_id'              => $datos['client']->id,
+            'client_api_id'          => $datos['api2']->id,
+            'kind'                   => ClientInstallation::KIND_ESQUELETO,
+            'status'                 => 'pendiente',
+            'provision_hosting_type' => ClientInstallation::PROVISION_SHARED_HOSTING,
+        ]);
+
+        $this->assertSame(
+            [
+                'provision_check', 'provision_sites', 'provision_dns', 'provision_db',
+                'prepare_dirs', 'upload_public', 'write_env', 'finalize_skeleton',
+            ],
+            $this->steps_de(new \App\Services\InstallationService($esqueleto))
+        );
+
+        /* Y sin aprovisionamiento, las dos listas de siempre, byte por byte. */
+        $datos['installation']->provision_hosting_type = null;
+        $datos['installation']->save();
+
+        $this->assertSame(
+            ['compile_spa', 'upload_spa', 'upload_api', 'write_env', 'finalize_api'],
+            $this->steps_de(new \App\Services\InstallationService($datos['installation']->fresh()))
+        );
+
+        $esqueleto->provision_hosting_type = null;
+        $esqueleto->save();
+
+        $this->assertSame(
+            ['prepare_dirs', 'upload_public', 'write_env', 'finalize_skeleton'],
+            $this->steps_de(new \App\Services\InstallationService($esqueleto->fresh()))
+        );
     }
 
     // ── Test 6 de §7: ninguna contraseña en el log. ─────────────────────────────────────
@@ -2190,11 +2549,19 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
 
         $runner->responder('command -v clpctl', '/usr/bin/clpctl');
         $runner->responder('command -v supervisorctl', '/usr/bin/supervisorctl');
+        $runner->responder('command -v dig', '/usr/bin/dig');
         $runner->responder('dig +short', '76.13.171.147');
 
         foreach (['api-' . $slug, 'api-' . $slug . '2'] as $label) {
             $docroot = '/home/' . $label . '/htdocs/' . $label . '.comerciocity.com';
-            $runner->responder('readlink ' . escapeshellarg($docroot), '/home/' . $label . '/empresa-api/public');
+
+            /* 🔴 escapar_argumento() y NO escapeshellarg(): la regla del fake tiene que matchear el
+               comando REAL, y el comando real sale con comillas simples en cualquier sistema. Con
+               escapeshellarg() acá, esta regla no matcheaba nada en Windows. */
+            $runner->responder(
+                'readlink ' . RemoteCommandRunner::escapar_argumento($docroot),
+                '/home/' . $label . '/empresa-api/public'
+            );
         }
     }
 
@@ -2234,21 +2601,6 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $credential->save();
 
         return $credential;
-    }
-
-    /**
-     * Saca las comillas de un comando para poder afirmar su contenido sin depender del sistema.
-     *
-     * ⚠️ escapeshellarg() es dependiente del sistema operativo: en Linux —donde corre admin-api en
-     * producción— envuelve en comillas simples, y en el Windows de esta máquina en dobles. Lo que
-     * los tests fijan es el comando, no el escapado.
-     *
-     * @param  string  $comando
-     * @return string
-     */
-    private function sin_comillas(string $comando): string
-    {
-        return str_replace(['"', "'"], '', $comando);
     }
 
     /**

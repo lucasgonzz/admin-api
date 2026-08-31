@@ -29,23 +29,31 @@ class RunClientInstallationGroupJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     /**
-     * Tiempo máximo de ejecución en segundos: 65 minutos.
+     * Tiempo máximo de ejecución en segundos: 95 minutos.
      *
-     * 🔴 NO es el mismo número que RunClientInstallationJob (1800 = 30 min) y no puede serlo. Ese
+     * 🔴 NO es el mismo número que RunClientInstallationJob (2700 = 45 min) y no puede serlo. Ese
      * job corre UN pipeline; éste corre DOS, uno atrás del otro, adentro del mismo handle(). Con
      * 1800, una instalación real que tarda 28 minutos —que está dentro de lo normal: compila el
      * SPA, sube el ZIP de la API y corre composer install en un hosting compartido— deja al
      * esqueleto arrancando en el minuto 28 y el worker lo mata en el 30, dejando su fila clavada en
      * 'instalando' para siempre.
      *
-     * El número sale de ahí: 1800 (el techo que RunClientInstallationJob declara para un pipeline)
-     * × 2 = 3600, más 300 segundos de margen para lo que pasa ENTRE las dos corridas (la reconexión
-     * SSH y la lectura de la segunda fila) = 3900. Si algún día RunClientInstallationJob sube su
+     * El número sale de ahí: 2700 (el techo que RunClientInstallationJob declara para un pipeline)
+     * × 2 = 5400, más 300 segundos de margen para lo que pasa ENTRE las dos corridas (la reconexión
+     * SSH y la lectura de la segunda fila) = 5700. Si algún día RunClientInstallationJob sube su
      * timeout, éste tiene que subir con él: es el doble más el margen, no un número suelto.
+     *
+     * 🔴 Y el 31/8/2026 pasó exactamente eso: el otro subió de 1800 a 2700 —porque el pipeline
+     * ahora incluye la espera de propagación del DNS del certificado— y éste subió con él, de 3900
+     * a 5700. La fórmula no cambió; cambió su base. El doble es conservador a propósito: la espera
+     * del certificado la paga solo la fila real (el esqueleto ni siquiera tiene los pasos de cron y
+     * SSL en su pipeline), así que el peor caso verdadero es menor. Es más barato sobrar tiempo que
+     * que el worker mate una instalación a mitad. Lo ata por test
+     * InstalacionEsqueletoEnElSubdominioSecundarioTest::test_el_timeout_del_job_de_grupo_cubre_las_dos_corridas().
      *
      * @var int
      */
-    public $timeout = 3900;
+    public $timeout = 5700;
 
     /**
      * Sin reintentos automáticos: los fallos se analizan a mano.

@@ -612,7 +612,7 @@ class RobustezDelDeploymentDesatendidoTest extends TestCase
      * `retry_after`.
      *
      * Comparar contra `RunDeploymentJob` a mano no alcanza: hoy `RunClientInstallationGroupJob`
-     * ($timeout = 3900) y `RunDemoUpdateJob` ($timeout = 3600) corren en `sync`, pero están a un
+     * ($timeout = 5700) y `RunDemoUpdateJob` ($timeout = 3600) corren en `sync`, pero están a un
      * `->onConnection('database')` de romper el invariante sin que nada lo denuncie. Este test
      * recorre `app/Jobs/` por reflexión para que el día que alguien los mueva, se entere acá.
      *

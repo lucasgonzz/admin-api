@@ -155,6 +155,13 @@ abstract class HostingerHttpTransport
      * al llamador. Si necesitás distinguirlos —por ejemplo para consultar la zona antes de
      * rendirte—, usá clasificar_error() y mirá las tres categorías.
      *
+     * ⚠️ Hoy no lo llama nadie del código: los tres lugares que clasifican un error del proveedor
+     * necesitan distinguir "desconocido" de "otro error", así que usan clasificar_error(). Se queda
+     * igual, y el criterio es este: es el par legible de una constante pública que SÍ se usa
+     * (CLASIFICACION_YA_EXISTE), cuesta dos líneas y lo cubre HostingerApiClientTest en los tres
+     * casos —incluido el que importa, el desconocido que NO puede dar true—. Si algún día hace
+     * falta borrar algo de este archivo, este método es el primero de la lista.
+     *
      * @param  \Throwable  $excepcion
      * @return bool
      */

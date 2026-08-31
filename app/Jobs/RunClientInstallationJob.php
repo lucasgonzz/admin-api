@@ -21,11 +21,28 @@ class RunClientInstallationJob implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     /**
-     * Tiempo máximo de ejecución en segundos (30 min, igual que RunDeploymentJob).
+     * Tiempo máximo de ejecución en segundos: 45 minutos.
+     *
+     * 🔴 NO son los 1800 (30 min) de RunDeploymentJob, y dejó de serlo el 31/8/2026. Desde que el
+     * pipeline puede aprovisionar el hosting, este job incluye la espera de propagación del DNS de
+     * provision_ssl: cada uno de los 4 dominios espera hasta `services.hostinger.dns_wait_seconds`
+     * (180 s por default) en sondas de 15 s, o sea hasta 720 s de sleep ADEMÁS de los ~15 minutos
+     * que ya tardaba compilar el SPA y subir la API. Con 1800, una instalación en VPS con el DNS
+     * lento se quedaba sin tiempo justo en el último paso: el worker mataba el job con los 4 sitios,
+     * el DNS, la base y el cron ya hechos, y la fila quedaba 'instalando' para siempre.
+     *
+     * 1800 (el techo que ya tenía el pipeline sin aprovisionamiento) + 720 (la espera del peor caso)
+     * = 2520, redondeado a 2700 para que un cambio chico de `dns_wait_seconds` no lo cruce.
+     * `AprovisionamientoDeHostingDelClienteTest` ata los dos números por test: si alguien sube
+     * dns_wait_seconds sin subir esto, se pone rojo.
+     *
+     * ⚠️ Si alguna vez estos jobs se encolan en la conexión `database` (hoy corren en la default,
+     * que es `sync`), este número tiene que quedar por debajo de su `retry_after` — hoy 2400. Lo
+     * mira RobustezDelDeploymentDesatendidoTest.
      *
      * @var int
      */
-    public $timeout = 1800;
+    public $timeout = 2700;
 
     /**
      * Sin reintentos automáticos: los fallos deben analizarse manualmente.

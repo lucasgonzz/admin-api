@@ -315,6 +315,20 @@ return [
         // a Let's Encrypt (solo VPS). Es una estimación: si un cliente nuevo tarda más, el paso
         // falla y el log imprime los comandos para correr a mano.
         'dns_wait_seconds' => env('HOSTINGER_DNS_WAIT_SECONDS', 180),
+
+        // Pausa, en segundos, entre el primer intento fallido de certificado y el segundo (solo
+        // VPS). No es prolijidad: Let's Encrypt permite 5 validaciones FALLIDAS por hostname por
+        // hora y un cliente tiene 4 hostnames, así que dos intentos en el mismo segundo queman un
+        // slot sin poder dar distinto. En 0 no espera —es lo que usan los tests—.
+        'ssl_retry_seconds' => env('HOSTINGER_SSL_RETRY_SECONDS', 30),
+
+        // Techo, en segundos, de la espera a que Hostinger publique en la zona los A records de los
+        // subdominios recién creados (solo hosting COMPARTIDO, y es solo lectura). El POST del
+        // subdominio y la lectura de la zona son dos sistemas distintos del proveedor y no se pudo
+        // verificar que el registro aparezca en el mismo instante (§10.4 del plan): sin esta espera,
+        // unos segundos de demora dejan la instalación en 'fallida' con los 4 subdominios creados.
+        // En 0 hace una sola lectura y decide, que es lo que usan los tests.
+        'zone_wait_seconds' => env('HOSTINGER_ZONE_WAIT_SECONDS', 30),
     ],
 
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).

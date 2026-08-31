@@ -360,6 +360,20 @@ abstract class HostingProvisioningService
     }
 
     /**
+     * Escapa un argumento para el `sh` del servidor remoto (compartido o VPS, donde corre como
+     * root). 🔴 Delegación de una línea: la implementación y el motivo largo viven en
+     * RemoteCommandRunner::escapar_argumento(), ÚNICO lugar del admin con esta convención escrita.
+     * Si te tienta copiar el `str_replace` acá adentro, leé el docblock de allá.
+     *
+     * @param  string  $valor
+     * @return string
+     */
+    protected function escapar(string $valor): string
+    {
+        return RemoteCommandRunner::escapar_argumento($valor);
+    }
+
+    /**
      * Escribe una línea en el panel de operaciones de la instalación.
      *
      * @param  string  $step
@@ -414,8 +428,6 @@ abstract class HostingProvisioningService
             $api->hosting_provisioned_at = now();
             $api->save();
         }
-
-        $this->result->agregar_credenciales($secretos);
     }
 
     /**

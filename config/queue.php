@@ -85,7 +85,7 @@ return [
              *
              * El invariante lo verifica `RobustezDelDeploymentDesatendidoTest`, que además chequea
              * que ningún OTRO job de esta conexión tenga un `$timeout` por encima — hoy
-             * `RunClientInstallationGroupJob` (3900) y `RunDemoUpdateJob` (3600) están a un
+             * `RunClientInstallationGroupJob` (5700) y `RunDemoUpdateJob` (3600) están a un
              * `->onConnection('database')` de romper esto. */
             'retry_after' => 2400,
             'after_commit' => false,

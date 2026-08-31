@@ -378,6 +378,38 @@ class InstalacionSobreVpsTest extends TestCase
         );
     }
 
+    /**
+     * 🔴 HALLAZGO I — sin la credencial del hosting, el mensaje dice QUÉ falta y DÓNDE cargarlo.
+     *
+     * El constructor de InstallationService resuelve la credencial SSH según el hosting_type de la
+     * API destino, y desde U9 ese tipo puede ser 'vps'. Con un `firstOrFail()` pelado, una
+     * instalación sobre una ClientApi ya migrada sin esa fila cargada moría con "No query results
+     * for model [App\Models\ClientSshCredential]" escrito en failure_reason: el operador lee eso en
+     * el panel y no tiene con qué saber qué le falta. El preflight del VPS tiene el mensaje bueno,
+     * pero corre después —este constructor es lo primero que se ejecuta—.
+     *
+     * @return void
+     */
+    public function test_sin_credencial_del_hosting_el_error_dice_que_falta_y_donde_cargarlo(): void
+    {
+        $datos = $this->cliente_en_vps('lacava');
+
+        /* Se saca la credencial del VPS: es el estado de un cliente recién migrado a mano. */
+        ClientSshCredential::where('type', 'vps')->delete();
+
+        $mensaje = '';
+
+        try {
+            new InstallationService($datos['installation']->fresh());
+        } catch (\Throwable $excepcion) {
+            $mensaje = $excepcion->getMessage();
+        }
+
+        $this->assertStringNotContainsString('No query results for model', $mensaje);
+        $this->assertStringContainsString('credencial SSH de tipo "vps"', $mensaje);
+        $this->assertStringContainsString('Credenciales SSH', $mensaje);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // CHOWN Y COMPOSER
     // ─────────────────────────────────────────────────────────────────────────
@@ -564,16 +596,22 @@ class InstalacionSobreVpsTest extends TestCase
 
         $this->runner->responder('command -v clpctl', '/usr/bin/clpctl');
         $this->runner->responder('command -v supervisorctl', '/usr/bin/supervisorctl');
+        $this->runner->responder('command -v dig', '/usr/bin/dig');
 
         if ($slug === '') {
             return;
         }
 
-        /* Los dos docroots de API quedan siendo el symlink que enlazar_docroot_de_api() verifica. */
+        /* Los dos docroots de API quedan siendo el symlink que enlazar_docroot_de_api() verifica.
+         *
+         * 🔴 La aguja se arma con escapar_argumento() y NO con escapeshellarg(): la regla del fake
+         * tiene que matchear el comando REAL, y el comando real sale con comillas simples corra
+         * donde corra. Con escapeshellarg() acá, en Windows esta regla no matcheaba nada y el
+         * readlink devolvía vacío. */
         foreach (['api-' . $slug, 'api-' . $slug . '2'] as $label) {
             $docroot = '/home/' . $label . '/htdocs/' . $label . '.comerciocity.com';
             $this->runner->responder(
-                'readlink ' . escapeshellarg($docroot),
+                'readlink ' . RemoteCommandRunner::escapar_argumento($docroot),
                 '/home/' . $label . '/empresa-api/public'
             );
         }

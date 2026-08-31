@@ -25,6 +25,13 @@ namespace App\Services;
 abstract class SharedHostingSubdomains extends HostingProvisioningService
 {
     /**
+     * Segundos entre dos lecturas de la zona mientras se espera a que aparezcan los A records.
+     *
+     * @var int
+     */
+    const INTERVALO_DE_SONDA_DE_ZONA = 2;
+
+    /**
      * Crea los 4 subdominios del cliente.
      *
      * @return void
@@ -68,7 +75,7 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
 
         $this->runner('shared_hosting')
             ->para_etapa('provision_sites')
-            ->run('mkdir -p ' . escapeshellarg($absoluto));
+            ->run('mkdir -p ' . $this->escapar($absoluto));
     }
 
     /**
@@ -81,14 +88,7 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
     {
         $this->log('provision_dns', 'Leyendo la zona DNS de ' . $this->dominio() . ' (solo lectura).');
 
-        $nombres_en_la_zona = $this->nombres_de_la_zona($this->hostinger()->get_dns_zone());
-        $faltantes          = [];
-
-        foreach ($this->nombres_de_subdominios() as $nombre) {
-            if (! in_array($nombre, $nombres_en_la_zona, true)) {
-                $faltantes[] = $nombre;
-            }
-        }
+        $faltantes = $this->esperar_a_que_la_zona_tenga_los_cuatro();
 
         /*
          * 🔴 Si falta alguno, se FALLA y se dice cuál. No se escribe el registro que falta.
@@ -108,6 +108,57 @@ abstract class SharedHostingSubdomains extends HostingProvisioningService
         }
 
         $this->log('provision_dns', 'Los 4 A records ya estaban en la zona.', 'success');
+    }
+
+    /**
+     * Lee la zona hasta que estén los 4 nombres, con un tope. Devuelve los que faltan al final.
+     *
+     * 🔴 POR QUÉ HAY UNA ESPERA Y NO UNA SOLA LECTURA. El paso anterior (provision_sites) hace los
+     * 4 POST de subdominio y este corre en el instante siguiente. Que el A record que Hostinger
+     * crea solo aparezca en la lectura de la zona EN ESE MISMO INSTANTE es justamente lo que §10.4
+     * del plan marca como no verificado: son dos sistemas distintos del proveedor. Si tarda unos
+     * segundos, la instalación queda 'fallida' con los 4 subdominios ya creados, y el operador
+     * entra a hPanel y los ve a los cuatro — el peor mensaje posible, porque le dice que el
+     * pipeline se equivocó cuando lo único que pasó es que llegó temprano.
+     *
+     * Sigue sin escribir NADA (guarda G1): esto son GET de la zona y nada más. Y sigue fallando si
+     * al final del tope falta alguno: la espera acota el falso negativo, no lo tapa.
+     *
+     * Con zone_wait_seconds en 0 hace una sola lectura y decide, sin dormir: es lo que deja probar
+     * el camino de la falla sin colgar la suite.
+     *
+     * @return array<int, string>  Los nombres que siguen faltando (vacío si están los 4).
+     * @throws \RuntimeException Si la zona no se puede leer.
+     */
+    private function esperar_a_que_la_zona_tenga_los_cuatro(): array
+    {
+        $tope         = (int) config('services.hostinger.zone_wait_seconds', 30);
+        $transcurrido = 0;
+
+        while (true) {
+            $en_la_zona = $this->nombres_de_la_zona($this->hostinger()->get_dns_zone());
+            $faltantes  = [];
+
+            foreach ($this->nombres_de_subdominios() as $nombre) {
+                if (! in_array($nombre, $en_la_zona, true)) {
+                    $faltantes[] = $nombre;
+                }
+            }
+
+            if ($faltantes === [] || $transcurrido + self::INTERVALO_DE_SONDA_DE_ZONA > $tope) {
+                return $faltantes;
+            }
+
+            $this->log(
+                'provision_dns',
+                'Todavía faltan en la zona: ' . implode(', ', $faltantes) . '. Hostinger los crea al '
+                    . 'crear el subdominio y puede tardar unos segundos en publicarlos: se vuelve a '
+                    . 'leer en ' . self::INTERVALO_DE_SONDA_DE_ZONA . ' s.'
+            );
+
+            sleep(self::INTERVALO_DE_SONDA_DE_ZONA);
+            $transcurrido += self::INTERVALO_DE_SONDA_DE_ZONA;
+        }
     }
 
     /**

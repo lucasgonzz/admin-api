@@ -3,17 +3,19 @@
 namespace App\Services;
 
 /**
- * Lo que dejó una corrida de aprovisionamiento: qué se creó, qué ya existía y qué credenciales se
- * generaron.
+ * Lo que dejó una corrida de aprovisionamiento: qué se creó y qué ya existía.
  *
  * Existe por §4 del plan: NO se revierte nada, nunca, automáticamente. La reversión es una
  * operación manual e informada, y para que una persona pueda decidir qué hacer a las tres de la
  * mañana el log tiene que decir exactamente qué quedó creado del otro lado. Este DTO es lo que
  * junta ese inventario mientras los pasos corren.
  *
- * 🔴 Las credenciales que junta este objeto NO se loguean nunca. Viven acá para que el llamador las
- * persista cifradas (ClientApi::provisioning_secrets) y para nada más. Si alguna vez alguien
- * necesita imprimir el resultado, que use resumen(), que a propósito solo nombra recursos.
+ * 🔴 ACÁ ADENTRO NO HAY UNA SOLA CREDENCIAL, y eso es a propósito. Hasta el 31/8/2026 este objeto
+ * también acumulaba las contraseñas generadas, con un getter que no llamaba nadie: quien las
+ * persiste cifradas es HostingProvisioningService::persistir_secretos(), contra la ClientApi, y
+ * quien las muestra es el endpoint de credenciales, que las lee de la base. O sea que las
+ * contraseñas de las bases de los clientes quedaban en memoria en un objeto que solo existe para
+ * imprimirse. Si alguna vez hace falta mostrar el resultado, resumen() nombra recursos y nada más.
  *
  * PHP 7.4: sin promoción en constructor, sin `readonly`, sin union types.
  */
@@ -32,13 +34,6 @@ class HostingProvisioningResult
      * @var array<int, array<string, string>>
      */
     private $ya_existian = [];
-
-    /**
-     * Credenciales generadas, con la misma forma que provisioning_secrets (§2, M2).
-     *
-     * @var array<string, string>
-     */
-    private $credenciales = [];
 
     /**
      * Registra un recurso creado de cero.
@@ -65,17 +60,6 @@ class HostingProvisioningResult
     }
 
     /**
-     * Suma credenciales al inventario (no pisa las que ya estaban salvo que repita la clave).
-     *
-     * @param  array<string, string>  $credenciales
-     * @return void
-     */
-    public function agregar_credenciales(array $credenciales): void
-    {
-        $this->credenciales = array_merge($this->credenciales, $credenciales);
-    }
-
-    /**
      * @return array<int, array<string, string>>
      */
     public function creados(): array
@@ -89,14 +73,6 @@ class HostingProvisioningResult
     public function ya_existian(): array
     {
         return $this->ya_existian;
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    public function credenciales(): array
-    {
-        return $this->credenciales;
     }
 
     /**

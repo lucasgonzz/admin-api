@@ -107,16 +107,6 @@ class DnsZoneRecords
     }
 
     /**
-     * Cuántos registros tiene la zona.
-     *
-     * @return int
-     */
-    public function cantidad(): int
-    {
-        return count($this->registros);
-    }
-
-    /**
      * Recorre la respuesta, entre a la profundidad que entre, y saca los registros.
      *
      * @param  array<int|string, mixed>  $zona

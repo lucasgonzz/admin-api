@@ -303,7 +303,27 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
      */
     private function assert_no_se_perdio_nada(array $antes, string $snapshot): void
     {
-        $despues  = (new DnsZoneRecords($this->hostinger()->get_dns_zone()))->pares();
+        /*
+         * 🔴 El GET va envuelto, y no por prolijidad. Este método arranca releyendo la zona, y si
+         * ESA lectura falla —un 502 del proveedor, un timeout— hasta el 31/8/2026 subía la
+         * excepción cruda del transporte ("La API de Hostinger respondió 502"). El operador la leía
+         * en el paso provision_dns y concluía, razonablemente, que no se había escrito nada; pero
+         * el PUT YA SE EJECUTÓ una línea más arriba. Era el único camino ciego de G8: el estado del
+         * mundo cambió y el mensaje decía lo contrario.
+         */
+        try {
+            $zona_despues = $this->hostinger()->get_dns_zone();
+        } catch (\Throwable $excepcion) {
+            throw new \RuntimeException(
+                '🔴 EL PUT SOBRE LA ZONA DE ' . $this->dominio() . ' YA SE EJECUTÓ, y lo que falló '
+                . 'fue la verificación posterior: no se pudo volver a leer la zona para comprobar '
+                . 'que no se perdió ningún registro. NO des por hecho que no se escribió nada. '
+                . 'Entrá a hPanel → DNS y miralo a mano; si algo falta, restaurá el snapshot '
+                . $snapshot . '. Error de la lectura: ' . $excepcion->getMessage()
+            );
+        }
+
+        $despues  = (new DnsZoneRecords($zona_despues))->pares();
         $perdidos = array_values(array_diff($antes, $despues));
 
         if ($perdidos === [] && count($despues) >= count($antes)) {

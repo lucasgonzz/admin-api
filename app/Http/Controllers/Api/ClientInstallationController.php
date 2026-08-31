@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -453,12 +454,12 @@ class ClientInstallationController extends Controller
     /**
      * Devuelve, descifradas, las credenciales que el aprovisionamiento generó para una ClientApi.
      *
-     * 🔴 Es un endpoint aparte y no un campo del show, y eso es el diseño y no una casualidad:
-     * ClientApi::$hidden oculta provisioning_secrets y tiene que seguir ocultándolo. Esa relación se
-     * carga con scopeWithAll() y viaja en el index y en el show de instalaciones, de upgrades y de
-     * clientes; sin el $hidden, la contraseña de la base de cada cliente saldría descifrada en todos
-     * esos payloads y quedaría escrita en cualquier log de request y en la caché del navegador. Acá
-     * salen bajo demanda —cuando una persona aprieta el botón— y de a una API por vez.
+     * 🔴 Es un endpoint aparte y no un campo del show: ClientApi::$hidden oculta
+     * provisioning_secrets y tiene que seguir ocultándolo, porque esa relación viaja en el index y
+     * en el show de instalaciones, upgrades y clientes. Acá salen bajo demanda, de a una API por
+     * vez, Y QUEDA RASTRO: lo único que protege al único endpoint que las devuelve descifradas es
+     * `auth:sanctum`, así que el "bajo demanda" solo vale si se puede contestar quién las pidió. El
+     * Log no lleva ninguna credencial: solo los NOMBRES de las claves.
      *
      * @param  ClientApi  $client_api
      * @return JsonResponse  { provisioning_secrets, hosting_provisioned_at, hosting_type }
@@ -466,6 +467,14 @@ class ClientInstallationController extends Controller
     public function hosting_credentials(ClientApi $client_api): JsonResponse
     {
         $secretos = $client_api->provisioning_secrets;
+        $admin    = auth()->user();
+
+        Log::info('Credenciales de hosting consultadas', [
+            'admin'         => $admin === null ? null : $admin->id . ' ' . $admin->email,
+            'client_api_id' => $client_api->id,
+            'ip'            => request()->ip(),
+            'claves'        => is_array($secretos) ? array_keys($secretos) : [],
+        ]);
 
         return response()->json([
             'provisioning_secrets'   => is_array($secretos) ? $secretos : [],

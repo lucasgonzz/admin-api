@@ -706,20 +706,18 @@ class EnvSshService
     /**
      * Escapa un argumento para el shell del servidor REMOTO, que siempre es POSIX.
      *
-     * 🔴 No se usa escapeshellarg(): esa función escapa según el sistema donde corre PHP, no según
-     * el del otro lado. En Windows emite comillas DOBLES, y el `sh` remoto expande `$`, backticks y
-     * barras adentro de comillas dobles. Como admin-api también corre local sobre WAMP, un valor
-     * con `$(...)` aplicado desde ahí se ejecutaría en el servidor del cliente.
-     *
-     * Comillas simples POSIX: todo literal, y la única comilla simple se cierra, se escapa y se
-     * reabre.
+     * 🔴 Delegación de una línea: la convención —y el motivo largo de por qué escapeshellarg() no
+     * sirve para un comando que ejecuta OTRA máquina— vive en un solo lugar de todo el admin, que
+     * es RemoteCommandRunner::escapar_argumento(). Hasta el 31/8/2026 esta implementación estaba
+     * copiada acá, en InstallationService y —vía escapeshellarg()— en las cinco clases de
+     * aprovisionamiento. Tres copias de la misma regla es exactamente lo que después diverge.
      *
      * @param  string  $value
      * @return string
      */
     private function escape_remote_arg(string $value): string
     {
-        return "'" . str_replace("'", "'\\''", $value) . "'";
+        return RemoteCommandRunner::escapar_argumento($value);
     }
 
     /**

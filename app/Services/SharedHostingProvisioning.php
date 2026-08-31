@@ -269,7 +269,6 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
         }
 
         $this->result->ya_existia('base', $nombre);
-        $this->result->agregar_credenciales($secretos);
         $this->log(
             'provision_db',
             'La base ' . $nombre . ' ya existía y tengo su contraseña guardada: se reusa.',
