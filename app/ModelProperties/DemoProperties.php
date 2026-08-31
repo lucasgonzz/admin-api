@@ -29,6 +29,35 @@ class DemoProperties
                 'group_title' => 'Demo',
             ],
             [
+                'key' => 'nombre',
+                'text' => 'Nombre del comercio',
+                'type' => 'text',
+                'value' => '',
+                'show' => true,
+                'use_to_filter_in_search' => true,
+                'width' => 180,
+                'placeholder' => 'ej: Tienda Demo 3',
+                'description' => 'Nombre a mostrar del comercio de esta demo. Es el equivalente de «Razón social» en un cliente: va como APP_NAME del .env de la tienda, nombre de la PWA y título del sitio. Si lo dejás vacío se usa el subdominio del ERP (demo3), que funciona pero queda feo en la pestaña del navegador.',
+            ],
+            [
+                'key' => 'user_id',
+                'text' => 'ID de comercio (USER_ID)',
+                'type' => 'number',
+                'value' => null,
+                'show' => true,
+                'width' => 150,
+                'description' => 'EL MISMO NÚMERO que tiene USER_ID en el .env del ERP de esta demo: es el id con el que se crea el usuario dueño de los datos. La tienda lo usa para pedirle su configuración a la API (/api/commerce/{id}). Si no coincide, la tienda queda en blanco sin ningún error.',
+            ],
+            [
+                'key' => 'api_key',
+                'text' => 'API key del ERP',
+                'type' => 'text',
+                'value' => '',
+                'show' => false,
+                'width' => 180,
+                'description' => 'Clave server-to-server con la que el admin le pide a la empresa-api de esta demo el branding (logo, color y descripción) al compilar la tienda. Es el equivalente de la API key de un cliente. Si falta, la instalación no se frena: avisa por log y usa el color por defecto.',
+            ],
+            [
                 'key' => 'erp_spa_url',
                 'text' => 'ERP SPA URL',
                 'type' => 'text',
@@ -94,10 +123,10 @@ class DemoProperties
             ],
             [
                 'key' => 'ecommerce_hosting_type',
-                /* "(informativo)" en el rótulo y no solo en la descripción: la columna se ve en la
-                 * grilla, y un desplegable que se puede cambiar sin que cambie nada en ningún lado
-                 * es exactamente la clase de cosa que hace creer que se guardó algo con efecto. */
-                'text' => 'Hosting ecommerce (informativo)',
+                /* Dejó de ser "(informativo)" el 31/8/2026: desde que existe el pipeline de
+                 * instalación/actualización del ecommerce de una demo, este desplegable SÍ tiene
+                 * efecto — marcarlo como VPS hace que el pipeline se niegue a arrancar. */
+                'text' => 'Hosting ecommerce',
                 'type' => 'select',
                 'value' => 'shared_hosting',
                 'show' => true,
@@ -106,7 +135,7 @@ class DemoProperties
                     ['value' => 'shared_hosting', 'text' => 'Shared hosting'],
                     ['value' => 'vps', 'text' => 'VPS'],
                 ],
-                'description' => 'Dónde vive el ecommerce de esta demo. Hoy es un dato del catálogo: todavía no existe actualización de ecommerce de demo que lo consuma.',
+                'description' => 'Dónde vive el ecommerce de esta demo. Hoy el pipeline solo sabe desplegar en hosting compartido: si la marcás como VPS, la instalación y la actualización del ecommerce se niegan a arrancar con un mensaje explícito, en vez de subir el código al servidor equivocado.',
             ],
             [
                 'key' => 'ecommerce_vps_path',

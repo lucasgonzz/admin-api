@@ -2,12 +2,22 @@
 
 namespace App\Models;
 
+use App\Services\DemoPathResolver;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * Tienda online (ecommerce) asociada a un cliente.
+ * Tienda online (ecommerce) asociada a un cliente o a una demo.
  *
- * @property int         $client_id            Cliente dueño de la tienda.
+ * 🔴 EL DUEÑO ES POLIMÓRFICO Y ES EXACTAMENTE UNO (31/8/2026). Hasta esta misión, una tienda
+ * colgaba siempre de un `Client`, y para instalar o actualizar el ecommerce de una demo había que
+ * crear un cliente falso llamado "demo". Ahora la fila tiene `client_id` O `demo_id` cargado —
+ * nunca los dos, nunca ninguno—, y el pipeline de ~2900 líneas de EcommerceInstallationService
+ * sigue siendo el mismo para los dos casos. La regla la hace cumplir el hook `saving` de abajo,
+ * porque la base no puede expresar "exactamente uno de estos dos" con una FK y porque hay más de
+ * un camino de escritura (el modal del cliente, el módulo de demos, los endpoints de arranque).
+ *
+ * @property int|null    $client_id            Cliente dueño de la tienda (null si el dueño es una demo).
+ * @property int|null    $demo_id              Demo dueña de la tienda (null si el dueño es un cliente).
  * @property string|null $domain               Dominio final de la tienda.
  * @property string|null $api_url              URL de la API de la tienda.
  * @property string|null $spa_url              URL del SPA de la tienda.
@@ -23,6 +33,7 @@ class ClientEcommerce extends Model
      */
     protected $fillable = [
         'client_id',
+        'demo_id',
         'domain',
         'api_url',
         'spa_url',
@@ -40,13 +51,132 @@ class ClientEcommerce extends Model
     ];
 
     /**
-     * Cliente dueño de esta tienda.
+     * Engancha la guarda de dueño único a TODA escritura del modelo.
+     *
+     * 🔴 POR QUÉ UN HOOK `saving` Y NO UNA VALIDACIÓN EN EL CONTROLADOR. La regla "un dueño y solo
+     * uno" no la puede expresar la base (dos FK nullable admiten perfectamente las dos cargadas o
+     * ninguna) y hay al menos cuatro caminos de escritura distintos hacia esta tabla: el modal del
+     * cliente (ClientController::sync_ecommerce_urls_from_request), el firstOrCreate de
+     * EcommerceImplementationController, los endpoints de arranque de ecommerce por demo, y
+     * cualquier `update(['status' => ...])` del propio pipeline. Validar en uno solo de esos
+     * lugares es la forma conocida de que el quinto camino, escrito dentro de seis meses, entre
+     * una fila sin dueño — y una fila sin dueño no rompe nada visible: rompe recién adentro del
+     * pipeline, con `$this->client` en null a mitad de un deploy.
+     *
+     * El costo es que la guarda corre también en cada `update()` del pipeline. Es cálculo puro
+     * sobre dos enteros ya cargados: no toca la base ni las relaciones.
+     *
+     * @return void
+     */
+    protected static function boot()
+    {
+        parent::boot();
+
+        static::saving(function (ClientEcommerce $ecommerce) {
+            $ecommerce->assert_tiene_un_solo_dueno();
+        });
+    }
+
+    /**
+     * Valida que la tienda tenga exactamente un dueño: un cliente o una demo.
+     *
+     * Es `public` para que el servicio y el controlador puedan llamarlo explícitamente antes de
+     * arrancar una corrida (fallar en el arranque es mucho más legible que fallar al guardar),
+     * pero la garantía real la da el hook `saving` de arriba, que no depende de que nadie se
+     * acuerde de llamarlo.
+     *
+     * @return void
+     * @throws \RuntimeException
+     */
+    public function assert_tiene_un_solo_dueno(): void
+    {
+        $tiene_cliente = $this->client_id !== null;
+        $tiene_demo    = $this->demo_id !== null;
+
+        if ($tiene_cliente && $tiene_demo) {
+            throw new \RuntimeException(
+                'Una tienda no puede pertenecer a un cliente y a una demo a la vez (client_id='
+                . $this->client_id . ', demo_id=' . $this->demo_id . '). El pipeline resuelve el '
+                . 'nombre, el id de comercio y la api key según el dueño, así que con los dos '
+                . 'cargados desplegaría datos de uno sobre la tienda del otro.'
+            );
+        }
+
+        if (! $tiene_cliente && ! $tiene_demo) {
+            throw new \RuntimeException(
+                'Una tienda tiene que pertenecer a un cliente o a una demo, y esta no tiene '
+                . 'ninguno de los dos cargados.'
+            );
+        }
+    }
+
+    /**
+     * Cliente dueño de esta tienda. Null si el dueño es una demo.
      *
      * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
      */
     public function client()
     {
         return $this->belongsTo(Client::class);
+    }
+
+    /**
+     * Demo dueña de esta tienda. Null si el dueño es un cliente.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function demo()
+    {
+        return $this->belongsTo(Demo::class);
+    }
+
+    /**
+     * ¿El dueño de esta tienda es una demo?
+     *
+     * Se decide por `demo_id` y no por si la relación está cargada: la relación puede no estar
+     * cargada todavía, y `assert_tiene_un_solo_dueno()` ya garantiza que las dos columnas nunca
+     * están cargadas a la vez.
+     *
+     * @return bool
+     */
+    public function is_demo(): bool
+    {
+        return $this->demo_id !== null;
+    }
+
+    /**
+     * Dueño de esta tienda: el `Client` o la `Demo`, según cuál esté cargado.
+     *
+     * @return \App\Models\Client|\App\Models\Demo|null  Null solo si la fila quedó huérfana
+     *                                                   (el dueño se borró por fuera de la FK).
+     */
+    public function owner()
+    {
+        return $this->is_demo() ? $this->demo : $this->client;
+    }
+
+    /**
+     * Demo dueña de esta tienda, o excepción si no la hay.
+     *
+     * Lo usan los helpers de path de abajo: llegar ahí con `demo_id` cargado y `demo` en null
+     * significa que la demo se borró de la base por fuera de la FK, y seguir con una demo nula
+     * armaría rutas vacías —o sea un `rm -rf` sobre un directorio equivocado, que es justo lo que
+     * todas las guardas de este archivo tratan de evitar.
+     *
+     * @return \App\Models\Demo
+     * @throws \RuntimeException
+     */
+    protected function assert_demo(): Demo
+    {
+        $demo = $this->demo;
+        if ($demo === null) {
+            throw new \RuntimeException(
+                'La tienda dice pertenecer a la demo ' . $this->demo_id . ', pero esa demo ya no '
+                . 'existe en el catálogo. No se pueden resolver sus rutas de instalación.'
+            );
+        }
+
+        return $demo;
     }
 
     /**
@@ -272,6 +402,14 @@ class ClientEcommerce extends Model
             return $domain;
         }
 
+        // Dueño demo: el dominio sale del catálogo de demos (`ecommerce_spa_url`), resuelto por
+        // DemoPathResolver. En la práctica da lo mismo que derivarlo de `spa_url` —los endpoints
+        // de arranque copian una en la otra—, pero el catálogo es la fuente de verdad y así un
+        // cambio de dominio en el módulo de Demos manda sin depender de que se haya re-copiado.
+        if ($this->is_demo()) {
+            return (new DemoPathResolver())->ecommerce_spa_domain($this->assert_demo());
+        }
+
         return self::domain_from_url($this->spa_url);
     }
 
@@ -286,6 +424,13 @@ class ClientEcommerce extends Model
      */
     public function derived_spa_path(): string
     {
+        // Dueño demo: lo resuelve DemoPathResolver con sus propios métodos `ecommerce_*`, que son
+        // los que además frenan si esa demo tiene el ecommerce marcado como VPS (todavía no
+        // soportado) o si el dominio quedaría vacío. Para un cliente, ni una línea cambia.
+        if ($this->is_demo()) {
+            return (new DemoPathResolver())->ecommerce_spa_path($this->assert_demo());
+        }
+
         $domain = $this->resolve_domain();
         if ($domain === '') {
             return '';
@@ -303,6 +448,11 @@ class ClientEcommerce extends Model
      */
     public function derived_api_path(): string
     {
+        // Ver derived_spa_path(): misma delegación, mismos motivos.
+        if ($this->is_demo()) {
+            return (new DemoPathResolver())->ecommerce_api_path($this->assert_demo());
+        }
+
         $domain = $this->resolve_domain();
         if ($domain === '') {
             return '';
