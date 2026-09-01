@@ -95,6 +95,14 @@ class LeadPipelineStatus extends Model
      */
     public const SLUGS_HIDDEN_FROM_SELECT = ['mail2_enviado'];
 
+    /** Estados que muestran tarjeta propia arriba de la grilla de leads (misión tarjetas-estado). */
+    public const SLUGS_TARJETAS_ESTADO = [
+        'calificado',
+        'solicita_disponibilidad',
+        'demo_agendada',
+        'closer_activo',
+    ];
+
     protected $guarded = [];
 
     /**
