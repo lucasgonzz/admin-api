@@ -1394,20 +1394,38 @@ class DemoUpdateService
      * Script bash que vacía el directorio del SPA y descomprime dist.zip en su raíz.
      * Misma lógica que DeploymentService::build_spa_hosting_deploy_shell().
      *
+     * 🔴 ESTE MÉTODO ARMA UN BORRADO RECURSIVO, y por eso la ruta pasa por la guarda ANTES de que se
+     * escriba una sola letra del comando (31/8/2026). Que DemoPathResolver valide su insumo y que la
+     * guarda valide el resultado no es redundante: son dos momentos distintos, y esta segunda es la
+     * que sirve el día en que el resolver devuelva mal. Va acá y no adentro del shell remoto porque
+     * un `if` del lado del servidor ya viajó, y cualquier error de escapado lo saltea.
+     *
+     * 🔴 Y el escapado es escape_remote_arg(), NO escapeshellarg(). Esa función escapa según el
+     * sistema donde corre PHP y no según el del otro lado: en el WAMP de la máquina de desarrollo
+     * emite comillas DOBLES, adentro de las cuales el `sh` remoto expande `$` y backticks. Sobre el
+     * argumento que alimenta un `cd` seguido de un `find -delete`, eso no es un detalle de estilo.
+     * Las demás llamadas a escapeshellarg() de este archivo son deuda previa y se migran aparte; la
+     * de este método no podía esperar. El razonamiento largo está en
+     * RemoteCommandRunner::escapar_argumento().
+     *
      * @param  string  $spa_dir  Directorio del SPA (relativo en shared, absoluto en VPS)
      * @return string
+     * @throws \RuntimeException Si el directorio no es identificable como el del SPA de esta demo.
      */
     private function build_spa_hosting_deploy_shell(string $spa_dir): string
     {
+        $resolver = new DemoPathResolver();
+        $resolver->assert_directorio_de_spa_borrable($this->assert_demo(), $spa_dir);
+
         $temp_zip_basename = 'dist_deploy_' . $this->demo_update->uuid . '.zip';
         $deploy_zip_name   = 'dist.zip';
 
         return 'set -e; '
-            . 'SPA_DIR=' . escapeshellarg($spa_dir) . '; '
-            . 'TEMP_ZIP=' . escapeshellarg('../' . $temp_zip_basename) . '; '
+            . 'SPA_DIR=' . RemoteCommandRunner::escapar_argumento($spa_dir) . '; '
+            . 'TEMP_ZIP=' . RemoteCommandRunner::escapar_argumento('../' . $temp_zip_basename) . '; '
             . 'cd "$SPA_DIR" || exit 1; '
-            . 'if [ -f ' . escapeshellarg($deploy_zip_name) . ' ]; then mv '
-            . escapeshellarg($deploy_zip_name) . ' "$TEMP_ZIP"; fi; '
+            . 'if [ -f ' . RemoteCommandRunner::escapar_argumento($deploy_zip_name) . ' ]; then mv '
+            . RemoteCommandRunner::escapar_argumento($deploy_zip_name) . ' "$TEMP_ZIP"; fi; '
             . 'find . -mindepth 1 -delete 2>/dev/null || true; '
             . 'if [ -f "$TEMP_ZIP" ]; then unzip -o "$TEMP_ZIP" -d .; rm -f "$TEMP_ZIP"; fi; '
             . 'echo SPA_DEPLOY_OK 2>&1';

@@ -1717,17 +1717,22 @@ class DemoInstallationService
      * Escapa un valor para interpolarlo en un comando remoto.
      *
      * 🔴 No es cosmética: `erp_vps_path` es un campo de texto libre del catálogo de Demos y el path
-     * resuelto termina adentro de un `cd` y de un `rm`. Copiado de
-     * EnvSshService::escape_remote_arg(), donde está la explicación larga. Se usa
-     * `escape_remote_arg()` y no `escapeshellarg()` porque este código puede correr en Windows,
-     * donde `escapeshellarg()` usa comillas dobles y el shell remoto es POSIX.
+     * resuelto termina adentro de un `cd` y de un `rm`. Se usa esto y no `escapeshellarg()` porque
+     * este código puede correr en Windows, donde `escapeshellarg()` emite comillas dobles y el shell
+     * remoto es POSIX.
+     *
+     * ⚠️ Era una copia del mismo `str_replace` que había en otros cuatro archivos. Desde el
+     * 31/8/2026 delega en el escapador único; la explicación larga vive allá. Se deja el método
+     * —en vez de reemplazar sus 20 llamadas— para no meter ruido en un archivo que esta misión toca
+     * por otro motivo: lo que importaba era que no quedara una implementación propia que pueda
+     * divergir.
      *
      * @param  string  $value
      * @return string
      */
     private function escape_remote_arg(string $value): string
     {
-        return "'" . str_replace("'", "'\\''", $value) . "'";
+        return RemoteCommandRunner::escapar_argumento($value);
     }
 
     // =========================================================================
@@ -2152,11 +2157,20 @@ class DemoInstallationService
      * segmento vacío: una ruta incompleta no es un error visible, es un directorio equivocado
      * vaciado.
      *
+     * 🔴 Y por eso, desde el 31/8/2026, la ruta pasa además por la guarda ANTES de que se escriba
+     * una sola letra del comando. Que el resolver valide su insumo y que la guarda valide el
+     * resultado no es redundante: son dos momentos distintos, y esta segunda es la que sirve el día
+     * en que el resolver devuelva mal. Va acá y no adentro del shell remoto porque un `if` del lado
+     * del servidor ya viajó, y cualquier error de escapado lo saltea.
+     *
      * @param  string  $spa_dir
      * @return string
+     * @throws \RuntimeException Si el directorio no es identificable como el del SPA de esta demo.
      */
     private function build_spa_hosting_deploy_shell(string $spa_dir): string
     {
+        $this->path_resolver->assert_directorio_de_spa_borrable($this->demo, $spa_dir);
+
         $temp_zip_basename = 'dist_deploy_' . $this->installation->uuid . '.zip';
         $deploy_zip_name   = 'dist.zip';
 

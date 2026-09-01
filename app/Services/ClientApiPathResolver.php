@@ -176,6 +176,10 @@ class ClientApiPathResolver
      * el resolver devuelva mal: es barata, es mecánica y es lo único que se interpone entre un
      * `vps_path` en blanco y el borrado. No la saques porque "el path ya viene resuelto".
      *
+     * ⚠️ La regla en sí se mudó a GuardaDeBorradoDeSpa el 31/8/2026, porque el camino de las DEMOS
+     * necesita exactamente la misma y una demo no es una ClientApi. Acá quedó solo lo que es propio
+     * del cliente: qué lo identifica adentro de su ruta.
+     *
      * @param  ClientApi  $client_api
      * @param  string     $dir  El directorio que el comando remoto va a vaciar.
      * @return void
@@ -183,47 +187,12 @@ class ClientApiPathResolver
      */
     public function assert_directorio_de_spa_borrable(ClientApi $client_api, string $dir): void
     {
-        $dir_limpio = rtrim(trim($dir), '/');
-
-        /* Vacío o la raíz del filesystem. */
-        if ($dir_limpio === '') {
-            throw new \RuntimeException($this->motivo_de_freno($client_api, $dir, 'está vacío'));
-        }
-
-        /* La raíz de la cuenta compartida y la de los homes del VPS: adentro viven TODOS. */
-        $raices = [rtrim(self::PREFIJO_SHARED, '/'), '/home', 'domains', 'domains/comerciocity.com'];
-        if (in_array($dir_limpio, $raices, true)) {
-            throw new \RuntimeException(
-                $this->motivo_de_freno($client_api, $dir, 'es un directorio raíz compartido')
-            );
-        }
-
-        /*
-         * El identificador del cliente tiene que estar ADENTRO de la ruta. En compartido es el
-         * primer segmento del path (el de 'colman/api' es 'colman'), en VPS es el vps_path. Si el
-         * dato está vacío no hay con qué identificar el directorio y se frena: es el caso del
-         * incidente.
-         */
-        $identificador = $this->identificador_de_cliente($client_api);
-        if ($identificador === '') {
-            throw new \RuntimeException(
-                $this->motivo_de_freno(
-                    $client_api,
-                    $dir,
-                    'la ClientApi no tiene ni path ni vps_path, así que no hay con qué identificarlo'
-                )
-            );
-        }
-
-        if (strpos($dir_limpio, $identificador) === false) {
-            throw new \RuntimeException(
-                $this->motivo_de_freno(
-                    $client_api,
-                    $dir,
-                    'no contiene el identificador "' . $identificador . '" de este cliente'
-                )
-            );
-        }
+        GuardaDeBorradoDeSpa::assert(
+            $dir,
+            $this->identificador_de_cliente($client_api),
+            'la ClientApi ' . (int) $client_api->id,
+            'Revisá path / vps_path / spa_url de esa ClientApi antes de reintentar.'
+        );
     }
 
     /**
@@ -246,23 +215,6 @@ class ClientApiPathResolver
         $segmentos = explode('/', $path);
 
         return (string) $segmentos[0];
-    }
-
-    /**
-     * Mensaje único de la guarda: dice qué se frenó, por qué y qué mirar.
-     *
-     * @param  ClientApi  $client_api
-     * @param  string     $dir
-     * @param  string     $motivo
-     * @return string
-     */
-    private function motivo_de_freno(ClientApi $client_api, string $dir, string $motivo): string
-    {
-        return 'FRENADO ANTES DE BORRAR: el directorio del SPA calculado para la ClientApi '
-            . (int) $client_api->id . ' (' . $motivo . ') no se puede vaciar. Ruta calculada: "'
-            . $dir . '". El despliegue del SPA le corre un `find . -mindepth 1 -delete` adentro, así '
-            . 'que con una ruta mal resuelta borraría los archivos de todos los clientes de ese '
-            . 'servidor. Revisá path / vps_path / spa_url de esa ClientApi antes de reintentar.';
     }
 
     /**

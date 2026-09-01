@@ -341,6 +341,63 @@ class DemoPathResolver
         return $slug;
     }
 
+    /**
+     * 🔴 ÚLTIMA LÍNEA ANTES DE UN BORRADO RECURSIVO, para el SPA del ERP de una demo.
+     *
+     * La llaman los dos armadores del comando de despliegue —DemoInstallationService y
+     * DemoUpdateService— justo antes de escribir el string, porque adentro de ese comando hay un
+     * `find . -mindepth 1 -delete`.
+     *
+     * ⚠️ NO REEMPLAZA a assert_slug() ni a assert_no_es_el_sitio_de_la_api(): las suma. Aquellas dos
+     * validan el INSUMO acá adentro del resolver, y hacen bien. Esta valida el string que
+     * efectivamente se va a vaciar, en el armador del comando, que es el último lugar donde todavía
+     * se puede frenar. Es otra cosa y ataja otro día: el día en que este resolver devuelva mal.
+     *
+     * La regla vive en GuardaDeBorradoDeSpa, compartida con el camino de los clientes. Tenerla
+     * escrita dos veces sería exactamente la clase de error que estas guardas vienen a atajar.
+     *
+     * @param  Demo    $demo
+     * @param  string  $dir  El directorio que el comando remoto va a vaciar.
+     * @return void
+     * @throws \RuntimeException Si el directorio no es identificable como el del SPA de esta demo.
+     */
+    public function assert_directorio_de_spa_borrable(Demo $demo, string $dir): void
+    {
+        GuardaDeBorradoDeSpa::assert(
+            $dir,
+            $this->identificador_de_demo($demo),
+            'la demo ' . (int) $demo->id,
+            'Revisá la «ERP SPA URL», el «VPS Path ERP» y el hosting de esa demo antes de reintentar.'
+        );
+    }
+
+    /**
+     * Lo que identifica a la demo adentro de la ruta de su SPA.
+     *
+     * En compartido es el slug (el de `public_html/demo3/spa` es `demo3`); en VPS es el vps_slug,
+     * que sale del «VPS Path ERP» o, si está vacío, del subdominio de la «ERP SPA URL».
+     *
+     * ⚠️ Devuelve '' en vez de propagar la excepción de vps_slug(): acá el objetivo es que frene LA
+     * GUARDA, con su mensaje —el que nombra el borrado y la ruta calculada—, y no una excepción de
+     * resolución que no dice que había un `find -delete` del otro lado. En la práctica no se llega
+     * con el dato vacío, porque spa_path() ya tiró antes; esto es para el día en que no.
+     *
+     * @param  Demo  $demo
+     * @return string  '' si no hay ninguno cargado.
+     */
+    private function identificador_de_demo(Demo $demo): string
+    {
+        try {
+            if ($this->is_vps($demo)) {
+                return $this->vps_slug($demo);
+            }
+
+            return $this->slug($demo);
+        } catch (\Throwable $excepcion) {
+            return '';
+        }
+    }
+
     /* ═════════════════════════════════════════════════════════════════════════════════════════
      * ECOMMERCE DE LA DEMO
      *
