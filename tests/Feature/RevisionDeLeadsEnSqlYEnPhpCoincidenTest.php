@@ -206,6 +206,12 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
         ]);
         $leads['entrega fallida sin is_error'] = $lead;
 
+        // ⚠️ No hay escenario con `kind` NULL a propósito: la columna es NOT NULL con default
+        // 'text' (2026_06_02_190000_add_kind_to_lead_messages_table.php), así que un mensaje con
+        // kind nulo NO se puede insertar. La rama `whereNull('kind')` del scope y el `?? ''` de
+        // LeadConversationAiState son defensa para el día que la columna se vuelva nullable; hoy
+        // ninguna de las dos se puede ejercitar, y las dos se comportan igual si eso cambia.
+
         return $leads;
     }
 
@@ -253,6 +259,52 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
             count($matriz),
             count($ids_sql),
             'La matriz tiene que incluir también escenarios que NO requieren revisión.'
+        );
+    }
+
+    /**
+     * 🔴 El parámetro `$incluir_entrega_fallida` ensancha la razón B en UN solo caso.
+     *
+     * Sin él, el scope tiene que seguir siendo el gemelo exacto del botón de revisión (lo que
+     * mide el test de paridad de arriba). Con él, suma los rechazos que Meta avisa por webhook
+     * (`whatsapp_delivery_status = 'fallido'`), que nunca dejan un `is_error` y por eso son
+     * invisibles para `LeadPendingReviewService`. Es lo que usan las tarjetas de estado, por
+     * pedido de Lucas del 1/9/2026.
+     *
+     * Este test cierra la pinza por los dos lados: que el default no se ensanche, y que el `true`
+     * no afloje el criterio más allá de ese caso.
+     *
+     * @return void
+     */
+    public function test_el_parametro_de_entrega_fallida_suma_el_rechazo_de_meta_y_solo_eso(): void
+    {
+        $matriz = $this->armar_matriz();
+        $lead_rechazado_por_meta = $matriz['entrega fallida sin is_error'];
+
+        // Camino por defecto: el gemelo del botón de revisión, que no ve el rechazo de Meta.
+        $ids_default = Lead::query()->requiereRevision()->pluck('id')->map('intval')->sort()->values()->all();
+
+        // Camino de las tarjetas: el mismo criterio MÁS los rechazos de Meta.
+        $ids_con_fallida = Lead::query()->requiereRevision(true)->pluck('id')->map('intval')->sort()->values()->all();
+
+        $this->assertNotContains(
+            (int) $lead_rechazado_por_meta->id,
+            $ids_default,
+            'Sin el parámetro, el scope tiene que seguir siendo el gemelo exacto del botón de revisión.'
+        );
+        $this->assertContains(
+            (int) $lead_rechazado_por_meta->id,
+            $ids_con_fallida,
+            'Con el parámetro en true, el rechazo de Meta tiene que contar (pedido de Lucas, 1/9/2026).'
+        );
+
+        // 🔴 Y no puede sumar NADA más que ese lead: el parámetro ensancha la razón B en un solo
+        // caso, no afloja el criterio en general.
+        $diferencia = array_values(array_diff($ids_con_fallida, $ids_default));
+        $this->assertSame(
+            [(int) $lead_rechazado_por_meta->id],
+            $diferencia,
+            'El parámetro solo puede agregar el lead con entrega rechazada por Meta, ningún otro.'
         );
     }
 

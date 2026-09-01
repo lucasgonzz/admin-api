@@ -51,10 +51,15 @@ class LeadStatusCardsService
             ->selectRaw('status, COUNT(*) as cantidad')
             ->pluck('cantidad', 'status');
 
-        // De esos, los que ameritan revisión (gemelo SQL del botón de revisión).
+        // De esos, los que necesitan respuesta. 🔴 El `true` suma a la razón B los rechazos que
+        // Meta avisa por webhook (`whatsapp_delivery_status = 'fallido'`), que NO dejan un
+        // `is_error` y por lo tanto son invisibles para el botón de revisión. Va así por decisión
+        // de Lucas del 1/9/2026: el pedido decía "error de sistema o de Meta", y sin el `true` la
+        // tarjeta mostraba 0 arriba de una fila que la grilla pinta de rojo por ese mismo envío.
+        // Ver el PHPDoc de Lead::scopeRequiereRevision() para el detalle de los dos criterios.
         $pendientes = Lead::query()
             ->whereIn('status', $slugs)
-            ->requiereRevision()
+            ->requiereRevision(true)
             ->groupBy('status')
             ->selectRaw('status, COUNT(*) as cantidad')
             ->pluck('cantidad', 'status');
@@ -73,7 +78,11 @@ class LeadStatusCardsService
             $slug = (string) $slug;
 
             if (isset($opciones[$slug])) {
-                $text  = (string) $opciones[$slug]['text'];
+                // Si el catálogo tiene el label vacío, se humaniza el slug igual: una tarjeta sin
+                // título no es una opción.
+                $text  = trim((string) $opciones[$slug]['text']) !== ''
+                    ? (string) $opciones[$slug]['text']
+                    : LeadPipelineStatus::humanize_slug($slug);
                 $color = (string) $opciones[$slug]['color'];
                 $group = $opciones[$slug]['group'];
             } else {

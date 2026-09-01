@@ -14,14 +14,18 @@ use Tests\TestCase;
  *
  * Lo que se protege acá son tres definiciones que se rompen solas en el primer refactor:
  *
- * 1. 🔴 **"Sin responder" es EXACTAMENTE el criterio del botón de revisión**, o sea
+ * 1. 🔴 **"Sin responder" es el criterio del botón de revisión MÁS los rechazos de Meta**, o sea
  *    `LeadPendingReviewService::lead_requiere_revision()`: mensajes del lead sin contestar, o un
  *    error de sistema (`is_error`) sin actividad real posterior. NO es el criterio del badge
  *    amarillo de la columna "Sin leer" (`failed_send_count`), que además cuenta la entrega fallida
  *    de Kapso (`whatsapp_delivery_status = 'fallido'`). Los dos viven a diez líneas de distancia en
  *    `Lead.php` y el comentario de `failed_send_count` dice "replica tiene_error_sin_resolver" —
- *    se refiere a la parte de "sin resolver", no a las fuentes de error. El que unifique los dos
- *    `where` rompe `test_la_entrega_fallida_de_kapso_sola_no_cuenta`.
+ *    se refiere a la parte de "sin resolver", no a las fuentes de error.
+ *
+ *    🔴 Por eso el servicio llama al scope con `requiereRevision(true)`: el default (`false`) es
+ *    el gemelo exacto del botón y lo protege `RevisionDeLeadsEnSqlYEnPhpCoincidenTest`; el `true`
+ *    suma los rechazos de Meta, que es lo que Lucas pidió el 1/9/2026 y lo que protege
+ *    `test_el_rechazo_de_meta_cuenta_como_sin_responder`. Los dos tests tienen que convivir.
  *
  * 2. El número cuenta **LEADS, no mensajes**. Un lead con tres mensajes sin contestar suma 1.
  *
@@ -350,19 +354,26 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
     }
 
     /**
-     * 🔴 El test que ataja la unificación equivocada.
+     * 🔴 El rechazo de Meta cuenta como "sin responder", aunque el botón de revisión no lo vea.
      *
-     * Un saliente con entrega fallida confirmada por Kapso (`whatsapp_delivery_status = 'fallido'`)
-     * e `is_error = false` prende el badge AMARILLO de la columna "Sin leer" (`failed_send_count`)
-     * pero NO el botón de revisión. Las tarjetas siguen al botón de revisión, así que tiene que
-     * dar 0 mientras `failed_send_count` da más de 0.
+     * Cuando Meta rechaza un envío responde 200 en el momento y avisa el fallo después, por
+     * webhook. `WhatsappWebhookController::handle_outbound_status_event()` escribe entonces
+     * `whatsapp_delivery_status = 'fallido'` y **nunca** un `is_error`, así que ese caso es
+     * invisible para `LeadPendingReviewService`. Encima el saliente queda `status = 'enviado'`, o
+     * sea que además apaga la razón A del mensaje del lead que venía antes.
      *
-     * Si alguien "unifica" copiando el `where` de `failed_send_count` adentro de
-     * `Lead::scopeRequiereRevision()`, este test se pone rojo.
+     * Lucas pidió explícitamente (1/9/2026) que la tarjeta lo cuente: sin esto mostraba 0 arriba
+     * de una fila que la grilla pinta de rojo por ese mismo envío. Por eso el servicio llama al
+     * scope con `requiereRevision(true)`.
+     *
+     * 🔴 Este test es el par del de paridad: acá se exige que la tarjeta SÍ lo cuente, y en
+     * `RevisionDeLeadsEnSqlYEnPhpCoincidenTest` se exige que el camino por defecto (el gemelo del
+     * botón) NO lo cuente. Los dos tienen que quedar como están: son criterios distintos a
+     * propósito, no una inconsistencia para "unificar".
      *
      * @return void
      */
-    public function test_la_entrega_fallida_de_kapso_sola_no_cuenta(): void
+    public function test_el_rechazo_de_meta_cuenta_como_sin_responder(): void
     {
         $lead = $this->crear_lead('calificado', 'Entrega fallida');
         $this->crear_mensaje($lead, [
@@ -376,12 +387,12 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
 
         $this->assertSame(1, $tarjetas['calificado']['total']);
         $this->assertSame(
-            0,
+            1,
             $tarjetas['calificado']['sin_responder'],
-            'La entrega fallida de Kapso sola NO amerita revisión: el criterio de la tarjeta es solo is_error.'
+            'Un envío que Meta rechazó tiene que contar en la tarjeta, aunque no haya dejado is_error.'
         );
 
-        // Y del otro lado, el badge amarillo del listado sí la ve: son dos criterios distintos.
+        // Y tiene que quedar alineado con el badge amarillo del listado, que ya lo contaba.
         $listado = $this->actingAs($this->admin_autenticado(), 'sanctum')->getJson('/api/admin/lead');
         $listado->assertStatus(200);
 
@@ -397,7 +408,14 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
         $this->assertGreaterThan(
             0,
             (int) $encontrado['failed_send_count'],
-            'failed_send_count sí cuenta la entrega fallida: es el badge amarillo, más ancho que el botón de revisión.'
+            'failed_send_count también lo cuenta: la tarjeta y el rojo de la grilla tienen que coincidir.'
+        );
+
+        // Y el botón de revisión NO lo ve: es la divergencia deliberada entre los dos criterios.
+        $this->assertFalse(
+            app(\App\Services\LeadPendingReviewService::class)
+                ->lead_requiere_revision($lead->fresh()->load('messages')),
+            'El botón de revisión sigue sin ver el rechazo de Meta: si esto cambia, se movió algo que no correspondía.'
         );
     }
 
