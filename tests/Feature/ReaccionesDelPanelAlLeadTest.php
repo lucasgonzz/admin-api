@@ -461,9 +461,13 @@ class ReaccionesDelPanelAlLeadTest extends TestCase
      * El `delivered` de NUESTRA reacción tiene que caer en el vacío.
      *
      * El webhook correlaciona por `whatsapp_message_id`, y el wamid de la reacción vive en otra
-     * columna: nunca matchea. 🔴 Que a nadie se le ocurra "arreglarlo" haciendo que el webhook
-     * también busque en `admin_reaction_whatsapp_message_id`: eso pisaría el estado de entrega del
-     * MENSAJE ORIGINAL con el de la reacción, y los tildes de la burbuja empezarían a mentir.
+     * columna: nunca matchea, así que el `delivered` se descarta en silencio.
+     *
+     * 🔴 El webhook SÍ busca en `admin_reaction_whatsapp_message_id`, pero en una búsqueda **aparte**
+     * y sólo para `failed` (handle_failed_admin_reaction_status), que toca únicamente las columnas
+     * `admin_reaction_*`. La línea roja es **unificar** las dos búsquedas: eso pisaría el estado de
+     * entrega del MENSAJE ORIGINAL con el de la reacción, y los tildes de la burbuja empezarían a
+     * mentir. Este test fija ese límite por el lado del `delivered`.
      *
      * @return void
      */

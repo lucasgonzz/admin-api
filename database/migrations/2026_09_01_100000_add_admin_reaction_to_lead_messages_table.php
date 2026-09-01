@@ -36,8 +36,10 @@ class AddAdminReactionToLeadMessagesTable extends Migration
             $table->string('admin_reaction_emoji', 32)->nullable()->after('lead_reaction_whatsapp_message_id');
             // Momento en que el admin reaccionó desde el panel.
             $table->timestamp('admin_reaction_at')->nullable()->after('admin_reaction_emoji');
-            // wamid que devolvió Meta por NUESTRO POST de reacción (sin unique: no hay reentrada que desduplicar).
-            $table->string('admin_reaction_whatsapp_message_id', 191)->nullable()->after('admin_reaction_at');
+            // wamid que devolvió Meta por NUESTRO POST de reacción. Sin unique (no hay reentrada que
+            // desduplicar, a diferencia del par entrante), pero CON índice: el webhook busca por esta
+            // columna para despintar la reacción que Meta rechaza después, y lead_messages es grande.
+            $table->string('admin_reaction_whatsapp_message_id', 191)->nullable()->index()->after('admin_reaction_at');
             // Admin que reaccionó, para mostrar el nombre en la burbuja. Sin FK, igual que sent_by_admin_id.
             $table->unsignedBigInteger('admin_reaction_by_admin_id')->nullable()->index()->after('admin_reaction_whatsapp_message_id');
         });

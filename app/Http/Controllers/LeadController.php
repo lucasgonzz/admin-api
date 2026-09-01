@@ -3300,9 +3300,13 @@ class LeadController extends Controller
         }
 
         /* 🔴 Meta NO entrega una reacción cuyo mensaje objetivo tenga más de 30 días, pero responde
-           200 al POST igual: el rechazo lo avisa después, por un webhook que hoy nadie escucha. Sin
-           esta guarda el operador reacciona, la pill se pinta, y el lead no ve nada. Un hilo con
-           historia está lleno de mensajes de más de 30 días y se llega con un clic normal. */
+           200 al POST igual: el rechazo lo avisa después, por webhook. Sin esta guarda el operador
+           reacciona, la pill se pinta, y el lead no ve nada. Un hilo con historia está lleno de
+           mensajes de más de 30 días y se llega con un clic normal.
+
+           WhatsappWebhookController::handle_failed_admin_reaction_status() escucha ese rechazo y
+           despinta la pill, pero es la red de seguridad, no el primer freno: cortar acá evita el
+           viaje de ida y vuelta y la pill que aparece y desaparece sola en la cara del operador. */
         $fecha_del_objetivo = $message->sent_at !== null ? $message->sent_at : $message->created_at;
         if ($fecha_del_objetivo !== null && $fecha_del_objetivo->lt(now()->subDays(30))) {
             return response()->json(['message' => 'WhatsApp no permite reaccionar a mensajes de más de 30 días: el lead no vería la reacción.'], 422);
@@ -3482,9 +3486,11 @@ class LeadController extends Controller
      * status code 400:\n{"error":{"message":"Message failed to send because more than 24 hours…"),
      * y todo lo que ve el usuario va en español. El crudo se loguea; a la pantalla va esto.
      *
-     * `last_send_status_code` (que hasta acá se capturaba y nadie leía) sirve para no diagnosticar
-     * la ventana de 24hs sobre un fallo que claramente es otra cosa: Meta la rechaza con un 400, así
-     * que un 401 o un 500 no son ese caso aunque el texto del error mencione las 24 horas.
+     * `last_send_status_code` sirve para no diagnosticar la ventana de 24hs sobre un fallo que
+     * claramente es otra cosa: Meta la rechaza con un 400, así que un 401 o un 500 no son ese caso
+     * aunque el texto del error mencione las 24 horas. (Ese campo ya lo leía
+     * WhatsappSendService::last_send_was_transient() para decidir reintentos; esta es la segunda
+     * lectura, la primera que termina en la pantalla del operador.)
      *
      * @param string   $detalle     Detalle crudo (last_send_error o el mensaje de la excepción).
      * @param int|null $status_code last_send_status_code del servicio, si lo llegó a capturar.

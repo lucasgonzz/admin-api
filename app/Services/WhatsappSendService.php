@@ -15,8 +15,9 @@ class WhatsappSendService
 {
     /**
      * Motivo del último fallo de envío de esta instancia (excepción, status HTTP, validación, etc.).
-     * Lo lee el llamador tras recibir null de send_text()/send_template() para persistirlo en el LeadMessage
-     * (prompt 336). Se resetea a null al inicio de cada send_text()/send_template() y se setea en
+     * Lo lee el llamador tras recibir null de send_text()/send_template()/send_reaction() para
+     * persistirlo en el LeadMessage (prompt 336) o para armar el mensaje que ve el operador. Se
+     * resetea a null al inicio de cada uno de esos tres métodos y se setea en
      * notify_admins_of_failure(), único punto por el que pasan todos los caminos de fallo. Null si el
      * último envío de esta instancia fue exitoso.
      *
@@ -25,13 +26,19 @@ class WhatsappSendService
     public $last_send_error = null;
 
     /**
-     * Código de status HTTP del último fallo de send_text()/send_template() (409, 429, 500, etc.),
-     * cuando se pudo determinar. Lo lee el llamador (LeadSuggestionSendService::send_body(), prompt
-     * 366 / fix lead #440) tras recibir null de send_text() para decidir, vía last_send_was_transient(),
-     * si el fallo es transitorio (típicamente el 409 de Kapso "otro mensaje en vuelo para esta
-     * conversación") y conviene reintentar con backoff, o si es un rechazo definitivo. Se resetea a
-     * null en el mismo punto que $last_send_error (arranque de send_text()/send_template()). Null si
-     * el último envío de esta instancia fue exitoso o si no se pudo determinar el status HTTP.
+     * Código de status HTTP del último fallo de send_text()/send_template()/send_reaction() (409,
+     * 429, 500, etc.), cuando se pudo determinar. Tiene dos lectores:
+     *
+     * 1. LeadSuggestionSendService::send_body() (prompt 366 / fix lead #440) tras recibir null de
+     *    send_text(), para decidir vía last_send_was_transient() si el fallo es transitorio
+     *    (típicamente el 409 de Kapso "otro mensaje en vuelo para esta conversación") y conviene
+     *    reintentar con backoff, o si es un rechazo definitivo.
+     * 2. LeadController::mensaje_de_reaccion_fallida(), para no diagnosticar la ventana de 24hs
+     *    sobre un fallo que es otra cosa (Meta la rechaza con 400; un 401 o un 500 no son ese caso).
+     *
+     * Se resetea a null en el mismo punto que $last_send_error (arranque de los tres métodos de
+     * envío). Null si el último envío de esta instancia fue exitoso o si no se pudo determinar el
+     * status HTTP.
      *
      * @var int|null
      */
@@ -1105,10 +1112,18 @@ class WhatsappSendService
      * Punto único de disparo hacia {@see SystemErrorWhatsappService}, que a su vez agrupa
      * ráfagas de fallos (máximo 1 WhatsApp cada 10 minutos, ver esa clase para el detalle).
      *
-     * $skip_failure_notification debe ser true únicamente cuando el envío que falló ES la
-     * propia notificación de fallo hacia un admin (SystemErrorWhatsappService::notify_send_error
-     * llama a send_text() con este flag en true) — evita que un Kapso caído dispare una
-     * recursión de notificaciones fallidas notificando notificaciones fallidas.
+     * $skip_failure_notification se pasa en true en dos casos, y sólo en esos dos:
+     *
+     * 1. Cuando el envío que falló ES la propia notificación de fallo hacia un admin
+     *    (SystemErrorWhatsappService::notify_send_error llama a send_text() con este flag en true)
+     *    — evita que un Kapso caído dispare una recursión de notificaciones fallidas notificando
+     *    notificaciones fallidas.
+     * 2. Desde send_reaction(), porque el fallo de una reacción ya se le muestra en el acto al
+     *    operador que la disparó. El aviso a admins está throttleado a 1 cada 10 minutos y es
+     *    global: gastar ese cupo en un pulgar que no salió deja mudo un fallo de envío real.
+     *
+     * En los dos casos $last_send_error se sigue seteando (pasa antes del early return de abajo),
+     * así que el llamador conserva el motivo aunque no se notifique a nadie.
      *
      * @param string $context                    Descripción legible de qué se intentaba enviar.
      * @param string $detail                      Detalle del error (excepción, status HTTP, etc.).
