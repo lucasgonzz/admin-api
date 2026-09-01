@@ -41,7 +41,7 @@ class LeadAiService
     ];
 
     /** Máximo de iteraciones del agentic loop de tools. */
-    private const MAX_TOOL_ITERATIONS = 3;
+    private const MAX_TOOL_ITERATIONS = 10;
 
     /**
      * Texto que reemplaza al mensaje del agente cuando no pudo respaldarlo con el protocolo.
