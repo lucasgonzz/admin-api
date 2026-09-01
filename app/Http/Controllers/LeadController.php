@@ -11,6 +11,7 @@ use App\Models\Admin;
 use App\Models\AdminCalendarConnection;
 use App\Models\AdminSetting;
 use App\Models\Demo;
+use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadDemoHito;
 use App\Models\LeadMessage;
@@ -82,6 +83,34 @@ class LeadController extends Controller
         // 'distribuidora' => 'Distribuidora',
         'ropa'          => 'Tienda de ropa',
         // 'forrajeria'    => 'Forrajería',
+    ];
+
+    /**
+     * Eventos crudos que `demo_roadmap_json()` lee para contar el detalle del recorrido de un clip
+     * (misión del 1/9/2026).
+     *
+     * 🔴 Los tres son de UX y NINGUNO mueve un hito, ni antes ni después de esta misión: caen en la
+     * rama de "evento de negocio" de {@see \App\Services\DemoHitosService::aplicar()}, que busca
+     * hitos con `evento_esperado` igual al nombre, y ningún hito del catálogo declara ninguno de
+     * los tres. Se guardaban en crudo desde la misión 48 y no los leía nadie — el pedido de Lucas
+     * ("*en el admin no estoy pudiendo ver esa información del recorrido de la demo*") era
+     * exactamente eso: el dato estaba, faltaba mostrarlo.
+     *
+     * Leerlos acá NO los convierte en algo que mueva el estado del hito. `estado` sigue saliendo
+     * de las dos marcas del hito y sigue sin poder retroceder; esto agrega detalle al costado.
+     *
+     * @var array<int, string>
+     */
+    const EVENTOS_DETALLE_RECORRIDO = [
+        // Cuánto del video vio el lead: `datos.porcentaje`, entero de 1 a 99. Lo emite
+        // `TarjetaClip.vue` de `empresa-spa` cada vez que el video cruza un décimo nuevo y al
+        // pausar. El 100 no se emite: ése es `clip.terminado`, que sí mueve el hito a `parcial`.
+        'clip.progreso',
+        // El lead apretó "Probar" debajo del video y el tour arrancó: `datos.pasos`.
+        'tour.iniciado',
+        // El tour terminó, llegue o no hasta el final: `datos.completo` (bool), `datos.pasos`,
+        // `datos.mostrados`, `datos.salteados`.
+        'tour.completado',
     ];
 
     /**
@@ -1397,6 +1426,12 @@ class LeadController extends Controller
      * `tiene_plan: false` NO es un error: es el estado normal de casi todos los leads, porque el
      * plan recién se congela cuando completan el formulario de la página inmersiva.
      *
+     * Desde el 1/9/2026 cada hito de tutorial con clip lleva además cinco campos de detalle
+     * (`visto`, `porcentaje_visto`, `tour_iniciado`, `probado`, `porcentaje_tour`), que salen de
+     * los eventos crudos de {@see self::EVENTOS_DETALLE_RECORRIDO}. Son campos AGREGADOS: ninguno
+     * de los que ya estaban se renombró ni se sacó, porque el panel viejo puede seguir cacheado en
+     * el navegador de Lucas después de un `/deploy-admin` y tiene que seguir dibujando igual.
+     *
      * @param int|string $id Identificador del lead.
      *
      * @return \Illuminate\Http\JsonResponse
@@ -1421,6 +1456,13 @@ class LeadController extends Controller
         $parciales = 0;
         $lista     = [];
 
+        /* 🔴 UNA sola consulta para TODOS los hitos, y va acá afuera del `foreach` a propósito.
+         * Este endpoint se poléa cada diez segundos por cada lead abierto (540 veces por lead y
+         * por sesión, es el mismo motivo por el que arriba se piden tres columnas en vez de un
+         * `select *`): resolver el detalle adentro del bucle serían ~20 queries cada diez
+         * segundos por lead en vez de una. */
+        $detalle_por_clip = $this->detalle_de_recorrido_por_clip($lead->id, $hitos);
+
         foreach ($hitos as $hito) {
             if ($hito->estado === LeadDemoHito::ESTADO_COMPLETO) {
                 $completos++;
@@ -1430,7 +1472,7 @@ class LeadController extends Controller
 
             /* Se arma la fila a mano en vez de devolver el modelo entero: así el payload es un
              * contrato explícito y una columna nueva de `lead_demo_hitos` no se filtra sola. */
-            $lista[] = [
+            $fila = [
                 'orden'             => (int) $hito->orden,
                 'tipo'              => $hito->tipo,
                 'seccion'           => $hito->seccion,
@@ -1441,6 +1483,20 @@ class LeadController extends Controller
                 'tutorial_visto_at' => $hito->tutorial_visto_at ? $hito->tutorial_visto_at->format('Y-m-d H:i:s') : null,
                 'accion_hecha_at'   => $hito->accion_hecha_at ? $hito->accion_hecha_at->format('Y-m-d H:i:s') : null,
             ];
+
+            /* Los cinco campos de detalle van SÓLO en los hitos de tutorial que tienen clip.
+             *
+             * El hito de ingreso no tiene ni video ni tour, así que dibujarle un "Visto 0%" no
+             * sería un cero: sería afirmar que hay algo que ver y que el lead no lo vio. Que los
+             * campos directamente no estén es lo que le permite al panel distinguir los dos casos
+             * con la misma regla que usa contra una API vieja — si no vienen, no dibuja nada. */
+            if ($this->hito_lleva_detalle_de_recorrido($hito)) {
+                $lista[] = array_merge($fila, $this->detalle_de_recorrido_del_hito($hito, $detalle_por_clip));
+
+                continue;
+            }
+
+            $lista[] = $fila;
         }
 
         return response()->json([
@@ -1471,6 +1527,280 @@ class LeadController extends Controller
 
             'hitos' => $lista,
         ], 200);
+    }
+
+    /**
+     * ¿A este hito le corresponden los cinco campos de detalle del recorrido?
+     *
+     * Sólo a los de tutorial que tienen clip: son los únicos que tienen un video para ver y un
+     * tour para probar. El hito de ingreso (`tipo: 'ingreso'`) queda afuera, y también un hito de
+     * tutorial sin `clip_id` — que no debería existir, pero el clip del plan congelado puede venir
+     * sin `id` y `DemoHitosService::generar()` lo escribe como null en vez de romper.
+     *
+     * @param LeadDemoHito $hito
+     *
+     * @return bool
+     */
+    protected function hito_lleva_detalle_de_recorrido(LeadDemoHito $hito)
+    {
+        return $hito->tipo === LeadDemoHito::TIPO_TUTORIAL
+            && $hito->clip_id !== null
+            && (string) $hito->clip_id !== '';
+    }
+
+    /**
+     * Los cinco campos de detalle de un hito de tutorial, ya resueltos contra los eventos crudos.
+     *
+     * 🔴 Los dos porcentajes NUNCA son `null` y nunca salen de una división sin divisor: el panel
+     * los compara con `> 0` y un `null` ahí se leería como "no hay dato" cuando lo que hay es un
+     * cero legítimo.
+     *
+     * 🔴 Y los dos caen al comportamiento de antes de esta misión cuando NO hay eventos: una
+     * `empresa` vieja no emite `clip.progreso` ni `tour.completado`, y `empresa` sale a los ~40
+     * clientes por release mientras el admin lo despliega Lucas con `/deploy-admin` — o sea que
+     * durante un tiempo el admin nuevo va a estar leyendo instancias viejas. En ese caso
+     * `porcentaje_visto` es 100 si el hito tiene `tutorial_visto_at` (que la instancia vieja SÍ
+     * manda, vía `clip.terminado`) y 0 si no, que es exactamente lo único que se sabía hasta hoy.
+     *
+     * @param LeadDemoHito                        $hito
+     * @param array<string, array<string, mixed>> $detalle_por_clip Salida de
+     *                                                             {@see self::detalle_de_recorrido_por_clip()}.
+     *
+     * @return array<string, mixed> Las cinco claves del contrato, siempre las cinco.
+     */
+    protected function detalle_de_recorrido_del_hito(LeadDemoHito $hito, array $detalle_por_clip)
+    {
+        $clip = (string) $hito->clip_id;
+
+        /* `visto` sale del hito y no de los eventos: la marca del hito es la que ya escribió
+         * `DemoHitosService` con el `clip.terminado`, y es la que tiene que seguir mandando. Un
+         * `clip.progreso` no puede declarar visto un video, y por eso el emisor no manda el 100. */
+        $visto = $hito->tutorial_visto_at !== null;
+
+        $del_clip = isset($detalle_por_clip[$clip]) ? $detalle_por_clip[$clip] : null;
+
+        if ($del_clip === null) {
+            return [
+                'visto'            => $visto,
+                'porcentaje_visto' => $visto ? 100 : 0,
+                'tour_iniciado'    => false,
+                'probado'          => false,
+                'porcentaje_tour'  => 0,
+            ];
+        }
+
+        return [
+            'visto' => $visto,
+
+            /* El hito visto manda sobre los eventos: si `clip.terminado` llegó, el lead vio el
+             * video entero, aunque el último `clip.progreso` que entró diga 70 (los eventos no
+             * llegan ordenados: el emisor reintenta y la red reordena). */
+            'porcentaje_visto' => $visto ? 100 : $del_clip['porcentaje_visto'],
+
+            'tour_iniciado' => $del_clip['tour_iniciado'],
+            'probado'       => $del_clip['probado'],
+
+            // Misma jerarquía: un tour completo es 100, aunque el conteo de pasos diera otra cosa.
+            'porcentaje_tour' => $del_clip['probado'] ? 100 : $del_clip['porcentaje_tour'],
+        ];
+    }
+
+    /**
+     * Agrupa por clip los eventos de UX del recorrido de un lead: cuánto vio de cada video y
+     * cuánto hizo del tour de cada clip.
+     *
+     * 🔴 UNA sola consulta, con `whereIn` sobre los tres nombres y el índice de `lead_id` que ya
+     * existe. Ver el comentario del llamador: acá el costo se multiplica por 540 por lead.
+     *
+     * El agrupado se hace en PHP y no en SQL porque los tres valores viven adentro del json de
+     * `datos`, que no se agrega de forma portable — y porque el máximo por clip sobre un puñado de
+     * filas es gratis comparado con la ida a la base.
+     *
+     * 🔴 `datos` es json LIBRE que entró desde el navegador de un lead: `porcentaje`, `mostrados`
+     * y `pasos` pueden faltar, venir `null`, venir string, venir negativos o venir absurdos. Cada
+     * valor se lee como si fuera hostil y NUNCA se divide sin haber comprobado antes que el
+     * divisor es un entero positivo.
+     *
+     * @param int                                                          $lead_id
+     * @param \Illuminate\Support\Collection<int, LeadDemoHito>|array      $hitos   Hitos ya leídos.
+     *
+     * @return array<string, array<string, mixed>> Detalle indexado por `clip_id`.
+     */
+    protected function detalle_de_recorrido_por_clip($lead_id, $hitos)
+    {
+        $hay_clips = false;
+
+        foreach ($hitos as $hito) {
+            if ($this->hito_lleva_detalle_de_recorrido($hito)) {
+                $hay_clips = true;
+
+                break;
+            }
+        }
+
+        /* Un lead sin plan —el estado normal de casi todos, y el que más se abre desde el panel—
+         * no tiene ningún hito de tutorial, así que ni se pregunta: el endpoint sigue haciendo las
+         * mismas dos queries que hacía antes de esta misión. */
+        if (! $hay_clips) {
+            return [];
+        }
+
+        /* Tres columnas y no `select *`: `datos` ya es la columna cara de esta tabla (json de
+         * hasta 4 KB por fila, y un lead que miró toda la demo puede tener un par de cientos de
+         * filas de `clip.progreso`), y `uuid`, `ocurrido_at` y los timestamps no se usan acá. */
+        $eventos = DemoEventoRecibido::select('nombre', 'clip_id', 'datos')
+            ->where('lead_id', $lead_id)
+            ->whereIn('nombre', self::EVENTOS_DETALLE_RECORRIDO)
+            ->whereNotNull('clip_id')
+            ->get();
+
+        $detalle = [];
+
+        foreach ($eventos as $evento) {
+            $clip = (string) $evento->clip_id;
+
+            if ($clip === '') {
+                continue;
+            }
+
+            if (! isset($detalle[$clip])) {
+                $detalle[$clip] = [
+                    'porcentaje_visto' => 0,
+                    'tour_iniciado'    => false,
+                    'probado'          => false,
+                    'porcentaje_tour'  => 0,
+                ];
+            }
+
+            /* El cast `array` del modelo es `json_decode($valor, true)`: un json escalar guardado
+             * en la columna (`5`, `"x"`, `true`) se decodifica como escalar y NO como array. Se
+             * pregunta antes de indexar, o un `datos` de esa forma sería un warning por fila. */
+            $datos = is_array($evento->datos) ? $evento->datos : [];
+
+            if ($evento->nombre === 'tour.iniciado') {
+                $detalle[$clip]['tour_iniciado'] = true;
+
+                continue;
+            }
+
+            if ($evento->nombre === 'clip.progreso') {
+                $porcentaje = $this->porcentaje_saneado(
+                    array_key_exists('porcentaje', $datos) ? $datos['porcentaje'] : null
+                );
+
+                /* El MÁXIMO, no el último que entró. Por dos motivos, y los dos son reales: los
+                 * eventos no llegan ordenados (el emisor reintenta y la red reordena), y el lead
+                 * puede retroceder el video. Lo que se quiere mostrar es hasta dónde llegó. */
+                if ($porcentaje !== null && $porcentaje > $detalle[$clip]['porcentaje_visto']) {
+                    $detalle[$clip]['porcentaje_visto'] = $porcentaje;
+                }
+
+                continue;
+            }
+
+            /* Queda `tour.completado`, que llega SIEMPRE que el tour termina, haya llegado al final
+             * o no: `datos.completo` es el que dice cuál de las dos. Ojo con la comparación
+             * estricta — el motor manda un booleano de verdad, y aceptar `"false"` o `0` como
+             * verdadero marcaría probado un tour que el lead abandonó. */
+            if (array_key_exists('completo', $datos) && $datos['completo'] === true) {
+                $detalle[$clip]['probado'] = true;
+            }
+
+            $avance = $this->porcentaje_de_avance_de_tour($datos);
+
+            if ($avance !== null && $avance > $detalle[$clip]['porcentaje_tour']) {
+                $detalle[$clip]['porcentaje_tour'] = $avance;
+            }
+        }
+
+        return $detalle;
+    }
+
+    /**
+     * Lee un porcentaje que vino del navegador y lo devuelve como entero de 0 a 100, o `null` si
+     * no se puede leer como número.
+     *
+     * `null` y `0` NO son lo mismo acá y por eso se distinguen: `null` significa "este evento no
+     * trae un porcentaje utilizable" y entonces no participa del máximo; `0` es un porcentaje
+     * legítimo. Si se devolviera 0 para lo ilegible daría igual —el máximo lo ignora— pero el que
+     * lea este método después no tendría cómo saber cuál de las dos cosas pasó.
+     *
+     * @param mixed $valor Lo que vino en el json, sin ninguna garantía de tipo.
+     *
+     * @return int|null Entero de 0 a 100, o null si no es un número legible.
+     */
+    protected function porcentaje_saneado($valor)
+    {
+        // `is_numeric` cubre de una el int, el float y el string numérico, y rechaza el array, el
+        // bool, el null y el "80%" con el signo pegado.
+        if (! is_numeric($valor)) {
+            return null;
+        }
+
+        $numero = (float) $valor;
+
+        // JSON no sabe expresar NAN ni INF, así que esto no debería poder pasar — pero un
+        // `(int) NAN` en PHP 7.4 da un entero basura sin avisar, y el precio de preguntar es cero.
+        if (! is_finite($numero)) {
+            return null;
+        }
+
+        $entero = (int) round($numero);
+
+        if ($entero < 0) {
+            return 0;
+        }
+
+        if ($entero > 100) {
+            return 100;
+        }
+
+        return $entero;
+    }
+
+    /**
+     * Cuánto del tour recorrió el lead, en porcentaje, a partir del `datos` de un
+     * `tour.completado` (`{ completo, pasos, mostrados, salteados }`).
+     *
+     * 🔴 Nunca divide por cero: si `pasos` no se lee como un entero POSITIVO, este evento no
+     * aporta nada y devuelve `null`. Es el único divisor de todo el endpoint y viene de un json
+     * que escribió el navegador de un lead.
+     *
+     * @param array<string, mixed> $datos Carga del evento, ya garantizada como array.
+     *
+     * @return int|null Entero de 0 a 100, o null si el evento no trae un avance legible.
+     */
+    protected function porcentaje_de_avance_de_tour(array $datos)
+    {
+        $pasos     = array_key_exists('pasos', $datos) ? $datos['pasos'] : null;
+        $mostrados = array_key_exists('mostrados', $datos) ? $datos['mostrados'] : null;
+
+        if (! is_numeric($pasos) || ! is_numeric($mostrados)) {
+            return null;
+        }
+
+        $pasos_float = (float) $pasos;
+
+        if (! is_finite($pasos_float)) {
+            return null;
+        }
+
+        $pasos_enteros = (int) $pasos_float;
+
+        // Acá está la guarda de la división: 0, negativo o "0.4 pasos" no dividen nada.
+        if ($pasos_enteros <= 0) {
+            return null;
+        }
+
+        $mostrados_float = (float) $mostrados;
+
+        if (! is_finite($mostrados_float)) {
+            return null;
+        }
+
+        // El clampeo lo hace el mismo saneador que el otro porcentaje: un `mostrados` mayor que
+        // `pasos` (o negativo) es exactamente el tipo de absurdo que puede llegar de un json libre.
+        return $this->porcentaje_saneado($mostrados_float / $pasos_enteros * 100);
     }
 
     /**
