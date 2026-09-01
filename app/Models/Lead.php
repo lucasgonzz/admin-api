@@ -10,6 +10,7 @@ use App\Models\LeadPipelineStatus;
 use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
+use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
 
@@ -50,8 +51,10 @@ class Lead extends Model
     /**
      * Estados en los que la verificación de mensajes se auto-enciende (latch): desde que el lead
      * entra a solicita_disponibilidad hasta closer_activo, inclusive. Incluye demo_realizada y
-     * closer_activo, que NO están en LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO
-     * (esa const, más corta, la usa el gate de agendamiento y no se toca). Ver latch en booted().
+     * closer_activo, que NO están en LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO (esa
+     * const, más corta, es la que usa el gate de agendamiento — su contenido no cambia, pero desde
+     * el 1/9/2026 el EFECTO de retención de ese gate también depende del mismo interruptor global
+     * que gobierna este latch, ver LeadWhatsappOnboardingSettings). Ver latch en booted().
      */
     public const ESTADOS_VENTANA_VERIFICACION_MENSAJES = [
         'solicita_disponibilidad',
@@ -128,8 +131,16 @@ class Lead extends Model
         // estado FUERA de la ventana hacia uno DENTRO, se enciende requiere_verificacion_mensajes. No se
         // vuelve a forzar después (si el admin lo apaga estando en la ventana, queda apagado — decisión de
         // Lucas, 15/7/2026, el toggle es libremente apagable). Tampoco se apaga al salir de la ventana: una
-        // vez encendida, persiste hasta que el admin la apague. La red de las ACCIONES de agenda no depende
-        // de esto: el gate de agendamiento de LeadAiService las retiene por su cuenta.
+        // vez encendida, persiste hasta que el admin la apague.
+        //
+        // ACTUALIZADO 1/9/2026 (decisión explícita de Lucas): este latch, igual que el gate de
+        // agendamiento de LeadAiService y la retención de seguimientos de LeadFollowupService, ahora
+        // depende del interruptor global de Cuenta (LeadWhatsappOnboardingSettings). Con el
+        // interruptor apagado, NINGUNA red automática queda en pie: ni este latch ni el gate de
+        // agendamiento retienen nada por el solo hecho del tramo — las acciones de agenda (agendar,
+        // cancelar, confirmar ingreso, marcar no ingreso) se aplican en el acto. El toggle manual
+        // por-lead (botón del escudo en la conversación) sigue funcionando siempre, apagado o
+        // prendido el interruptor global.
         static::saving(function (Lead $lead) {
             if (! $lead->isDirty('status')) {
                 return;
@@ -141,7 +152,10 @@ class Lead extends Model
 
             $entra_a_la_ventana = in_array($nuevo, $ventana, true) && ! in_array($anterior, $ventana, true);
 
-            if ($entra_a_la_ventana && ! (bool) $lead->requiere_verificacion_mensajes) {
+            if ($entra_a_la_ventana
+                && ! (bool) $lead->requiere_verificacion_mensajes
+                && LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
+            ) {
                 $lead->requiere_verificacion_mensajes = true;
             }
         });
@@ -553,6 +567,104 @@ class Lead extends Model
                         ->where('lm_post.is_status_event', false);
                 }),
         ]);
+    }
+
+    /**
+     * Leads que ameritan revisión, en SQL puro (gemelo de LeadPendingReviewService::lead_requiere_revision()).
+     *
+     * Razón A: mensajes del lead sin responder tras el último saliente (misma definición que
+     * LeadConversationAiState::has_unanswered_lead_messages(); la relación `messages` está ordenada
+     * por id, así que "posterior en el bucle" es "id mayor").
+     * Razón B: el hilo termina en un error sin actividad real posterior.
+     *
+     * 🔴 **Por qué el segundo parámetro existe, y por qué su default es `false`.**
+     *
+     * Hay DOS criterios de "error de envío" en el sistema, y no son el mismo conjunto:
+     *
+     * - El del **botón de revisión** (`LeadPendingReviewService`): solo `is_error = true`, o sea
+     *   los errores que el propio sistema registró al fallar el envío o la generación.
+     * - El del **badge amarillo** de la columna "Sin leer" (`failed_send_count`, acá arriba):
+     *   `is_error` **o** `whatsapp_delivery_status = 'fallido'`, o sea sumando los rechazos que
+     *   Meta avisa por webhook.
+     *
+     * La diferencia no es cosmética: cuando Meta rechaza un envío responde **200** en el momento
+     * y avisa el fallo después, por webhook. Ese aviso lo procesa
+     * `WhatsappWebhookController::handle_outbound_status_event()`, que escribe
+     * `whatsapp_delivery_status = 'fallido'` y **nunca** un `is_error`. O sea que un rechazo de
+     * Meta es invisible para el criterio del botón de revisión, siempre.
+     *
+     * - Con `$incluir_entrega_fallida = false` (default) este scope es el **gemelo exacto** de
+     *   `LeadPendingReviewService::lead_requiere_revision()`. Es lo que compara
+     *   `RevisionDeLeadsEnSqlYEnPhpCoincidenTest`, y por eso el default no se cambia: si alguien
+     *   le suma la entrega fallida al camino por defecto, ese test se pone rojo con razón.
+     * - Con `$incluir_entrega_fallida = true` suma los rechazos de Meta. Es lo que usan las
+     *   tarjetas de estado de la grilla (`LeadStatusCardsService`), por decisión de Lucas del
+     *   1/9/2026: el "sin responder" de la tarjeta tiene que incluir los leads a los que no se
+     *   les pudo enviar el mensaje **por error de sistema o de Meta**, para que la tarjeta no
+     *   diga 0 arriba de una fila que la grilla está pintando de rojo.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     * @param bool                                  $incluir_entrega_fallida Sumar a la razón B los
+     *                                                                       rechazos de Meta
+     *                                                                       (`whatsapp_delivery_status = 'fallido'`).
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeRequiereRevision($query, $incluir_entrega_fallida = false)
+    {
+        return $query->where(function ($wrap) use ($incluir_entrega_fallida) {
+            // Razón A: mensaje del lead (no reacción) sin ningún saliente posterior.
+            $wrap->whereExists(function ($sin_responder) {
+                $sin_responder->selectRaw('1')
+                    ->from('lead_messages')
+                    ->whereColumn('lead_messages.lead_id', 'leads.id')
+                    ->where('lead_messages.sender', 'lead')
+                    ->where('lead_messages.status', 'enviado')
+                    ->where(function ($no_reaccion) {
+                        $no_reaccion->whereNull('lead_messages.kind')
+                            ->orWhere('lead_messages.kind', '<>', 'reaction');
+                    })
+                    // Reacciones en formato legado de Kapso (texto plano), ver
+                    // LeadWhatsappReactionService::is_legacy_reaction_content(). LIKE y no REGEXP:
+                    // el hosting puede estar en MySQL 5.7.
+                    ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Reacted % to message wamid.%'")
+                    ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Removed reaction from message wamid.%'")
+                    ->whereNotExists(function ($outbound) {
+                        $outbound->selectRaw('1')
+                            ->from('lead_messages as outbound')
+                            ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
+                            ->whereColumn('outbound.id', '>', 'lead_messages.id')
+                            ->where(function ($tipos) {
+                                $tipos->where(function ($setter) {
+                                    $setter->where('outbound.sender', 'setter')
+                                        ->whereIn('outbound.status', ['enviado', 'aprobado']);
+                                })->orWhere(function ($sistema) {
+                                    $sistema->where('outbound.sender', 'sistema')
+                                        ->where('outbound.status', 'aprobado');
+                                });
+                            });
+                    });
+            })
+            // Razón B: último error sin actividad real posterior.
+            ->orWhereExists(function ($error) use ($incluir_entrega_fallida) {
+                $error->selectRaw('1')
+                    ->from('lead_messages')
+                    ->whereColumn('lead_messages.lead_id', 'leads.id')
+                    ->where(function ($fuente) use ($incluir_entrega_fallida) {
+                        $fuente->where('lead_messages.is_error', true);
+                        if ($incluir_entrega_fallida) {
+                            $fuente->orWhere('lead_messages.whatsapp_delivery_status', 'fallido');
+                        }
+                    })
+                    ->whereNotExists(function ($posterior) {
+                        $posterior->selectRaw('1')
+                            ->from('lead_messages as lm_post')
+                            ->whereColumn('lm_post.lead_id', 'lead_messages.lead_id')
+                            ->whereColumn('lm_post.id', '>', 'lead_messages.id')
+                            ->where('lm_post.is_status_event', false);
+                    });
+            });
+        });
     }
 
     /**

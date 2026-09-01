@@ -10,6 +10,7 @@ use App\Services\CloserGoogleCalendarEventService;
 use App\Services\GoogleCalendarOAuthService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
+use App\Services\LeadWhatsappOnboardingSettings;
 use App\Models\AiSystemPrompt;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -82,6 +83,14 @@ TXT;
      * requires_agendamiento_verification_gate() para decidir, sin correr ninguna acción,
      * si hay que diferir el paquete completo (mensaje + acciones) hasta la aprobación humana.
      * closer_activo en adelante ya es 100% manual (Tommy), no se incluye acá.
+     *
+     * Esta lista sigue siendo el tramo de agenda, sin cambios. Lo que cambió el 1/9/2026 es que el
+     * EFECTO de retención que se deriva de ella (en apply_parsed_response,
+     * requires_agendamiento_verification_gate y generate_suggestion_with_availability) ahora
+     * depende del interruptor global de Cuenta (ver retencion_por_tramo_de_agenda_activa()). Los
+     * demás usos de esta const en el archivo —elección de canal de notificación, guardia de
+     * reagendado, armado de contexto para Claude— NO dependen del interruptor: siguen leyendo la
+     * lista tal cual, porque no son decisiones de retención.
      *
      * @var string[]
      */
@@ -798,12 +807,14 @@ TXT;
 
         $parsed = $this->parse_json_response($text);
 
-        /* Mismo gate que en la primera llamada. Este tramo ya fuerza revisión humana por estado
-         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), pero eso protege el AGENDAMIENTO, no lo
-         * que el mensaje afirma: un lead que acepta un horario y de paso pregunta algo del
-         * sistema se lleva las dos cosas en la misma respuesta, y sin esto la segunda mitad
-         * saldría sin respaldo. Coordinar la agenda es `conversacional` y no exige fuentes, así
-         * que el camino normal no se toca. */
+        /* Mismo gate que en la primera llamada. Este tramo fuerza revisión humana por estado
+         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO) cuando el interruptor global de Cuenta está
+         * prendido (condicional desde el 1/9/2026, ver retencion_por_tramo_de_agenda_activa()),
+         * pero eso protege el AGENDAMIENTO, no lo que el mensaje afirma: un lead que acepta un
+         * horario y de paso pregunta algo del sistema se lleva las dos cosas en la misma
+         * respuesta, y sin esto la segunda mitad saldría sin respaldo documental — con o sin esa
+         * otra protección. Coordinar la agenda es `conversacional` y no exige fuentes, así que el
+         * camino normal no se toca. */
         $parsed = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos);
 
         /*
@@ -830,12 +841,14 @@ TXT;
          * agendamiento (came_from_availability_request = true). Desde la óptica de Claude la
          * disponibilidad "ya se resolvió", así que devuelve solicita_disponibilidad: false y
          * estado calificado. Pero el mensaje resultante es justamente el que ofrece los horarios
-         * al lead y, por regla de negocio, tiene que quedar en el tramo de agenda para que
-         * requiera verificación humana (delay 1800s) antes de enviarse. Se fuerza el estado y la
-         * verificación acá, salvo que Claude ya haya escalado el estado por su cuenta (ej.
-         * demo_agendada tras confirmar el slot, o pidió otra vez disponibilidad porque la fecha
-         * cae fuera del JSON). No pisar esos casos: solo elevar cuando el estado sugerido quedó
-         * por debajo del tramo (típicamente 'calificado' o vacío).
+         * al lead, así que el ESTADO se eleva a solicita_disponibilidad siempre (pertenece al
+         * tramo de agenda pase lo que pase). La VERIFICACIÓN que acompañaba esa elevación era
+         * incondicional hasta el 1/9/2026; desde esa fecha depende del interruptor global de
+         * Cuenta (ver el bloque de abajo). Se fuerza el estado acá, salvo que Claude ya haya
+         * escalado el estado por su cuenta (ej. demo_agendada tras confirmar el slot, o pidió
+         * otra vez disponibilidad porque la fecha cae fuera del JSON). No pisar esos casos: solo
+         * elevar cuando el estado sugerido quedó por debajo del tramo (típicamente 'calificado' o
+         * vacío).
          */
         if ($came_from_availability_request) {
             $estado_segunda = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
@@ -846,8 +859,14 @@ TXT;
                 $ya_en_tramo = in_array($ps_segunda->slug, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true);
             }
             if (! $ya_en_tramo && ! $ya_pidio_disp) {
-                $parsed['estado_sugerido']       = 'solicita_disponibilidad';
-                $parsed['requiere_verificacion'] = true;
+                /* La ELEVACIÓN DE ESTADO no se gatea: el mensaje que ofrece horarios pertenece al
+                 * tramo de agenda pase lo que pase. Lo que sí depende del interruptor global
+                 * (1/9/2026) es la RETENCIÓN: sin él, create_message_and_update_lead() no difiere
+                 * este paquete por este motivo (aunque puede seguir reteniéndolo por otro). */
+                $parsed['estado_sugerido'] = 'solicita_disponibilidad';
+                if ($this->retencion_por_tramo_de_agenda_activa()) {
+                    $parsed['requiere_verificacion'] = true;
+                }
                 Log::channel('daily')->debug('LeadAiService: mensaje de disponibilidad elevado a solicita_disponibilidad (herencia de tramo).', [
                     'lead_id'         => $lead->id,
                     'estado_original' => $estado_segunda,
@@ -4319,8 +4338,9 @@ TXT;
          * panel de "esto es lo que va a pasar" (y su edición) sirva en todos los casos. Un mensaje
          * se considera "retenido para verificación" si se cumple cualquiera de estas tres condiciones:
          *
-         *   1. El tramo de agenda lo exige (comportamiento histórico, ver
-         *      requires_agendamiento_verification_gate()).
+         *   1. El tramo de agenda lo exige, Y el interruptor global de Cuenta está prendido (ver
+         *      requires_agendamiento_verification_gate() y retencion_por_tramo_de_agenda_activa();
+         *      condicional desde el 1/9/2026, antes era incondicional).
          *   2. Claude pidió verificación explícita en su propia respuesta (requiere_verificacion: true).
          *   3. El lead tiene requiere_verificacion_mensajes = true (toggle por-lead / auto-encendido al
          *      entrar al tramo de agenda, ver Lead::booted, prompt 406).
@@ -4348,6 +4368,12 @@ TXT;
      * disparar notificaciones. confirmar_fin_demo (→ demo_realizada) queda deliberadamente
      * afuera: ese estado no está en la lista gateada (closer_activo en adelante es 100% manual).
      *
+     * Desde el 1/9/2026, TODO este gate está condicionado al interruptor global de Cuenta (ver
+     * retencion_por_tramo_de_agenda_activa()): con el interruptor apagado devuelve false sin
+     * evaluar ninguna condición, y las acciones de agenda (agendar_demo, cancelar_demo,
+     * confirmar_ingreso, marcar_no_ingreso) se aplican en el acto, con efecto real sobre el
+     * calendario del closer, sin que nadie las revise antes.
+     *
      * @param Lead                 $lead
      * @param array<string, mixed> $parsed
      *
@@ -4355,6 +4381,21 @@ TXT;
      */
     protected function requires_agendamiento_verification_gate(Lead $lead, array $parsed): bool
     {
+        /*
+         * INTERRUPTOR GLOBAL (1/9/2026, decisión explícita de Lucas, viendo la consecuencia). Este
+         * gate era, hasta hoy, independiente de cualquier flag: retenía el paquete por el solo
+         * hecho del tramo de agenda (decisiones del 2/7 y 6/7/2026). Lucas pidió romper esa
+         * independencia a propósito: con el interruptor de Cuenta apagado, cualquier mensaje puede
+         * salir solo durante el tramo, incluidos los que agendan o cancelan una demo real, confirman
+         * ingreso o marcan no-ingreso. Va primero y corta de una: apagado el interruptor, ninguna de
+         * las condiciones de abajo tiene por qué evaluarse. Esto NO desarma la verificación por-lead
+         * ni la explícita de Claude: las dos viven en el llamador (create_message_and_update_lead(),
+         * los otros dos operandos del OR) y siguen reteniendo con el interruptor apagado.
+         */
+        if (! $this->retencion_por_tramo_de_agenda_activa()) {
+            return false;
+        }
+
         /*
          * FIX (6/7/2026, decisión de Lucas — zona manual por estado del lead): si el lead YA está
          * en el tramo de agenda (solicita_disponibilidad en adelante), cualquier respuesta se
@@ -4397,6 +4438,37 @@ TXT;
         }
 
         return false;
+    }
+
+    /**
+     * ¿Sigue vigente la retención automática de mensajes por estar el lead en el tramo de agenda?
+     *
+     * Interruptor global de Cuenta (1/9/2026, decisión explícita de Lucas). En true —el default y
+     * el comportamiento histórico— todo el tramo solicita_disponibilidad..demo_pendiente_de_terminar
+     * espera aprobación humana, igual que antes de este cambio. En false NADA se retiene por el
+     * solo hecho del tramo: el mensaje sale solo y sus acciones (agendar_demo, cancelar_demo,
+     * confirmar_ingreso, marcar_no_ingreso) se aplican en el acto, con efectos reales sobre el
+     * calendario del closer.
+     *
+     * Consumido acá (requires_agendamiento_verification_gate), en la elevación de estado de la
+     * segunda llamada a Claude (generate_suggestion_with_availability) y en el respaldo de
+     * apply_parsed_response(). También en LeadFollowupService, para seguimientos por plantilla.
+     *
+     * Lo que este interruptor NO apaga, y no debe apagar nunca: el flag por-lead
+     * requiere_verificacion_mensajes (toggle del escudo en la conversación), el requiere_verificacion
+     * explícito que devuelva Claude en su propia respuesta, ni las guardas de error del archivo
+     * (respuesta sin respaldo documental, agenda fuera de secuencia, slot descartado, discrepancia
+     * de fecha).
+     *
+     * No se memoiza a propósito: son a lo sumo tres SELECT por generación de mensaje, contra una
+     * llamada a la API de Claude, y cachearlo en la instancia rompería los tests que apagan y
+     * prenden el interruptor sobre el mismo service.
+     *
+     * @return bool
+     */
+    private function retencion_por_tramo_de_agenda_activa(): bool
+    {
+        return LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad();
     }
 
     /**
@@ -5170,13 +5242,18 @@ TXT;
                      * firmó?": solo es true cuando el llamador es apply_pending_actions(). Acá no
                      * hay lock que liberar: no se tomó.
                      *
-                     * ⚠️ La rama de abajo (el correctivo) EN PRODUCCIÓN NO SE ALCANZA: el gate de
-                     * requires_agendamiento_verification_gate() difiere todo paquete con
-                     * agendar_demo, así que ningún paquete llega acá por el camino de generación.
-                     * La ejercitan sólo los tests que llaman a apply_parsed_response() directo
-                     * (DemoExtendidaHastaElFinDelDiaTest). Se conserva en vez de borrarse porque es
-                     * el comportamiento probado de esa rama y borrarla rompería esos tests, no
-                     * porque "los tests la ejerciten" la vuelva código vivo. */
+                     * ⚠️ La rama de abajo (el correctivo) HASTA EL 1/9/2026 NO SE ALCANZABA EN
+                     * PRODUCCIÓN: el gate de requires_agendamiento_verification_gate() difería todo
+                     * paquete con agendar_demo, así que ningún paquete llegaba acá por el camino de
+                     * generación — solo la ejercitaban los tests que llaman a
+                     * apply_parsed_response() directo (DemoExtendidaHastaElFinDelDiaTest).
+                     *
+                     * Desde el 1/9/2026 eso YA NO ES CIERTO cuando el interruptor global de Cuenta
+                     * está apagado (ver retencion_por_tramo_de_agenda_activa()): el gate deja de
+                     * diferir, un paquete con agendar_demo SÍ puede llegar acá por el camino de
+                     * generación real, y esta rama pasa a ser código vivo en producción. Se
+                     * conserva de todas formas porque sigue siendo el comportamiento correcto ante
+                     * un timeout de lock, con interruptor prendido o apagado. */
                     if ($for_approval) {
                         throw new AprobacionEnCursoException(
                             'Se está procesando otra aprobación sobre esta misma instancia de demo. '
@@ -5990,10 +6067,12 @@ TXT;
 
         /*
          * REGLA DE NEGOCIO (1/7/2026, decisión de Lucas): desde que un lead entra a coordinar la
-         * agenda de la demo hasta que llega a closer_activo, todo mensaje que arma Claude requiere
+         * agenda de la demo hasta que llega a closer_activo, el mensaje que arma Claude requiere
          * revisión humana antes de salir — es el tramo de mayor riesgo (bugs de colisión de
-         * horario y confusión de fecha, ver prompts 226/227) y de leads más valiosos. Se fuerza
-         * sin importar lo que haya devuelto Claude en su propio campo requiere_verificacion.
+         * horario y confusión de fecha, ver prompts 226/227) y de leads más valiosos. Esta regla
+         * fue incondicional hasta el 1/9/2026: desde esa fecha depende del interruptor global de
+         * Cuenta (ver bloque de abajo) — el flag por-lead requiere_verificacion_mensajes sigue
+         * forzando siempre, sin excepción, sea cual sea el interruptor.
          * Se evalúa acá, al final de la función, sobre el $estado ya recalculado por todas las
          * inferencias conversacionales de arriba (confirmar_ingreso, confirmar_fin_demo,
          * marcar_no_ingreso, colisión/slot inválido) — es el valor que realmente termina
@@ -6010,11 +6089,18 @@ TXT;
          * el lead salió de la "zona automática" por estado. Ahora la maneja el flag por-lead
          * requiere_verificacion_mensajes (toggle manual / auto-encendido al entrar al tramo de
          * agenda, ver Lead::booted, prompt 406), sumado al tramo de agenda propiamente dicho
-         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), que sigue forzando verificación como
-         * respaldo del gate de agendamiento.
+         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), que forzaba verificación como respaldo del
+         * gate de agendamiento SIEMPRE — hasta el 1/9/2026. Desde esa fecha (decisión explícita de
+         * Lucas), ese respaldo por tramo también queda condicionado al interruptor global de
+         * Cuenta (retencion_por_tramo_de_agenda_activa()): el flag por-lead sigue forzando siempre,
+         * sin excepción, sea cual sea el interruptor.
+         *
+         * El flag por-lead va primero en el OR: es un atributo ya cargado en memoria, así que
+         * cuando está prendido el corto-circuito evita el SELECT del getter del interruptor.
          */
         if (! $for_approval && ((bool) $lead->requiere_verificacion_mensajes
-            || in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true))) {
+            || (in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)
+                && $this->retencion_por_tramo_de_agenda_activa()))) {
             $req_verif = true;
         }
 
@@ -6513,8 +6599,9 @@ TXT;
          * Notificar cuando la sugerencia requiere verificación manual. Dos motivos posibles,
          * dos servicios distintos (ver prompt 230):
          *   - Agendamiento: el lead está en el tramo solicita_disponibilidad..demo_pendiente_de_terminar
-         *     (regla de negocio forzada más arriba en este método, no un error). Push siempre +
-         *     WhatsApp opcional vía notify_verificacion_agendamiento_whatsapp.
+         *     (regla de negocio forzada más arriba en este método cuando el interruptor global de
+         *     Cuenta está prendido, no un error). Push siempre + WhatsApp opcional vía
+         *     notify_verificacion_agendamiento_whatsapp.
          *   - Error: cualquier otro caso (ej. fallback de disponibilidad). WhatsApp vía el flag
          *     viejo notify_verificacion_whatsapp, comportamiento sin cambios.
          */

@@ -18,6 +18,7 @@ use App\Models\LeadMessage;
 use App\Models\LeadMessageAttachment;
 use App\Models\LeadPartner;
 use App\Models\LeadPersonalizedDemoVideo;
+use App\Models\LeadPipelineStatus;
 use App\Models\ProtocolEntry;
 use App\Events\LeadAiSuggestionFinished;
 use App\Events\LeadAiSuggestionGenerating;
@@ -29,6 +30,7 @@ use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadConversationAiState;
+use App\Services\LeadStatusCardsService;
 use App\Services\LeadSuggestionSendService;
 use App\Services\LeadWhatsappOnboardingService;
 use App\Services\LeadWhatsAppPasteCleaner;
@@ -3966,6 +3968,28 @@ class LeadController extends Controller
         return response()->json([
             'unread_total'     => LeadBroadcastService::count_unread_for_admin($admin_id),
             'unread_by_status' => LeadBroadcastService::count_unread_by_status_for_admin($admin_id),
+        ], 200);
+    }
+
+    /**
+     * Tarjetas de estado de la grilla de leads: cuántos leads hay en cada estado clave y cuántos de
+     * ellos necesitan revisión (mismo criterio que el botón de revisión).
+     *
+     * 🔴 Endpoint aparte de `unread_badges_json()` a propósito: aquel es per-admin, cuenta MENSAJES
+     * y se dispara con debounce en cada `LeadConversationUpdated` del sistema entero. Estos conteos
+     * son globales, cuentan LEADS y cambian mucho menos seguido.
+     *
+     * Los conteos no leen ningún filtro del request: son globales, igual que los badges de la barra
+     * de estados.
+     *
+     * @param Request $request
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function status_cards_json(Request $request)
+    {
+        return response()->json([
+            'cards' => LeadStatusCardsService::cards_for_statuses(LeadPipelineStatus::SLUGS_TARJETAS_ESTADO),
         ], 200);
     }
 
