@@ -15,8 +15,9 @@ class WhatsappSendService
 {
     /**
      * Motivo del último fallo de envío de esta instancia (excepción, status HTTP, validación, etc.).
-     * Lo lee el llamador tras recibir null de send_text()/send_template() para persistirlo en el LeadMessage
-     * (prompt 336). Se resetea a null al inicio de cada send_text()/send_template() y se setea en
+     * Lo lee el llamador tras recibir null de send_text()/send_template()/send_reaction() para
+     * persistirlo en el LeadMessage (prompt 336) o para armar el mensaje que ve el operador. Se
+     * resetea a null al inicio de cada uno de esos tres métodos y se setea en
      * notify_admins_of_failure(), único punto por el que pasan todos los caminos de fallo. Null si el
      * último envío de esta instancia fue exitoso.
      *
@@ -25,13 +26,19 @@ class WhatsappSendService
     public $last_send_error = null;
 
     /**
-     * Código de status HTTP del último fallo de send_text()/send_template() (409, 429, 500, etc.),
-     * cuando se pudo determinar. Lo lee el llamador (LeadSuggestionSendService::send_body(), prompt
-     * 366 / fix lead #440) tras recibir null de send_text() para decidir, vía last_send_was_transient(),
-     * si el fallo es transitorio (típicamente el 409 de Kapso "otro mensaje en vuelo para esta
-     * conversación") y conviene reintentar con backoff, o si es un rechazo definitivo. Se resetea a
-     * null en el mismo punto que $last_send_error (arranque de send_text()/send_template()). Null si
-     * el último envío de esta instancia fue exitoso o si no se pudo determinar el status HTTP.
+     * Código de status HTTP del último fallo de send_text()/send_template()/send_reaction() (409,
+     * 429, 500, etc.), cuando se pudo determinar. Tiene dos lectores:
+     *
+     * 1. LeadSuggestionSendService::send_body() (prompt 366 / fix lead #440) tras recibir null de
+     *    send_text(), para decidir vía last_send_was_transient() si el fallo es transitorio
+     *    (típicamente el 409 de Kapso "otro mensaje en vuelo para esta conversación") y conviene
+     *    reintentar con backoff, o si es un rechazo definitivo.
+     * 2. LeadController::mensaje_de_reaccion_fallida(), para no diagnosticar la ventana de 24hs
+     *    sobre un fallo que es otra cosa (Meta la rechaza con 400; un 401 o un 500 no son ese caso).
+     *
+     * Se resetea a null en el mismo punto que $last_send_error (arranque de los tres métodos de
+     * envío). Null si el último envío de esta instancia fue exitoso o si no se pudo determinar el
+     * status HTTP.
      *
      * @var int|null
      */
@@ -350,6 +357,150 @@ class WhatsappSendService
                 'error'    => $exception->getMessage(),
             ]);
             $this->notify_admins_of_failure($notify_context, $exception->getMessage(), false);
+        }
+
+        return null;
+    }
+
+    /**
+     * Envía una reacción con emoji sobre un mensaje ya existente de la conversación.
+     *
+     * 🔴 A diferencia de {@see send_text()}, acá el cuerpo vacío es LEGÍTIMO y no se corta:
+     * `$emoji = ''` es exactamente como la Cloud API de Meta pide QUITAR una reacción. Por eso este
+     * método no tiene la guarda de "cuerpo vacío" que sí tiene send_text() — no es un olvido y no
+     * hay que "arreglarlo". Tampoco se le hace `trim()` al emoji al armar el payload: el string
+     * vacío tiene que viajar tal cual.
+     *
+     * No toca la base ni conoce LeadMessage: solo habla con Kapso, igual que sus hermanos. Quien
+     * llama decide qué persistir según lo que devuelva.
+     *
+     * @param string      $to                        Número destino en formato E.164 (+549…).
+     * @param string      $target_whatsapp_message_id wamid del mensaje al que se reacciona.
+     * @param string      $emoji                      Emoji a aplicar; '' quita la reacción.
+     * @param string|null $context                    Descripción legible para la notificación de
+     *                                                 fallo a admins. Si es null se arma una genérica.
+     * @param bool        $skip_failure_notification  true para NO gastar el aviso por WhatsApp a los
+     *                                                 admins (throttleado globalmente a 1 cada 10
+     *                                                 minutos). El panel lo manda en true: un operador
+     *                                                 toqueteando la paleta en un hilo frío quemaría
+     *                                                 ese cupo y dejaría un fallo de envío REAL de esos
+     *                                                 10 minutos reducido a una línea de log. El motivo
+     *                                                 igual queda en last_send_error, que es lo que el
+     *                                                 llamador le muestra a quien apretó.
+     *
+     * @return string|null wamid de la reacción asignado por Meta, o null si falló.
+     */
+    public function send_reaction(string $to, string $target_whatsapp_message_id, string $emoji, ?string $context = null, bool $skip_failure_notification = false): ?string
+    {
+        // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla.
+        $this->last_send_error = null;
+        // Resetea el status HTTP del fallo anterior por el mismo motivo.
+        $this->last_send_status_code = null;
+
+        $notify_context = $context !== null ? $context : "Reacción a {$target_whatsapp_message_id} para {$to}";
+
+        $target_wamid = trim($target_whatsapp_message_id);
+        if ($target_wamid === '') {
+            Log::channel('daily')->warning('WhatsappSendService: reacción sin wamid del mensaje objetivo.', [
+                'to' => $to,
+            ]);
+            $this->notify_admins_of_failure($notify_context, 'La reacción no se envió: falta el id de WhatsApp del mensaje objetivo.', $skip_failure_notification);
+
+            return null;
+        }
+
+        /*
+         * test_mode: mismo criterio que send_text(). Se chequea ANTES de resolve_send_context(),
+         * porque ese método ya corta a null en test_mode y no expone el motivo hacia arriba, así
+         * que el llamador no podría distinguir "no salió porque estamos probando" de un fallo real.
+         */
+        $active_config = WhatsappConfig::getActive();
+        if ($active_config && $active_config->is_active && $active_config->test_mode) {
+            $normalized_to = WhatsappNormalizer::normalize($to);
+            $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+            if ($to_digits === '') {
+                Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
+                    'to' => $to,
+                ]);
+                $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
+
+                return null;
+            }
+
+            $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
+
+            Log::channel('daily')->info('WhatsappSendService: test_mode activo, reacción simulada (no se llamó a la API real).', [
+                'to'                       => $normalized_to,
+                'target_message_id'        => $target_wamid,
+                'fake_whatsapp_message_id' => $fake_message_id,
+            ]);
+
+            return $fake_message_id;
+        }
+
+        $send_context = $this->resolve_send_context($skip_failure_notification);
+        if ($send_context === null) {
+            return null;
+        }
+
+        $normalized_to = WhatsappNormalizer::normalize($to);
+        $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+        if ($to_digits === '') {
+            Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
+                'to' => $to,
+            ]);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
+
+            return null;
+        }
+
+        $endpoint = $this->messages_endpoint($send_context['phone_number_id']);
+
+        try {
+            $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
+
+            $response = $http
+                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->post($endpoint, [
+                    'messaging_product' => 'whatsapp',
+                    'to'                => $to_digits,
+                    'type'              => 'reaction',
+                    'reaction'          => [
+                        'message_id' => $target_wamid,
+                        // Sin trim(): '' quita la reacción y tiene que viajar tal cual.
+                        'emoji'      => $emoji,
+                    ],
+                ]);
+
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure($notify_context, 'Kapso/Meta no devolvió message_id para la reacción.', $skip_failure_notification);
+            }
+
+            return $message_id;
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsappSendService: excepción al enviar reacción.', [
+                'to'                => $normalized_to,
+                'target_message_id' => $target_wamid,
+                'error'             => $exception->getMessage(),
+            ]);
+
+            /*
+             * Captura del status HTTP real ANTES de notify_admins_of_failure(): es lo que deja
+             * legible el 400 de "pasaron más de 24 horas" (ventana cerrada) en last_send_status_code,
+             * con el motivo en last_send_error para que el operador lo vea en el panel.
+             */
+            if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+                $this->last_send_status_code = (int) $exception->response->status();
+            } else {
+                // Respaldo: algunas excepciones de Guzzle no llegan como RequestException con
+                // response adjunta, pero el mensaje trae el texto "status code XXX" igual.
+                if (preg_match('/status code (\d{3})/', $exception->getMessage(), $matches)) {
+                    $this->last_send_status_code = (int) $matches[1];
+                }
+            }
+
+            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), $skip_failure_notification);
         }
 
         return null;
@@ -961,10 +1112,18 @@ class WhatsappSendService
      * Punto único de disparo hacia {@see SystemErrorWhatsappService}, que a su vez agrupa
      * ráfagas de fallos (máximo 1 WhatsApp cada 10 minutos, ver esa clase para el detalle).
      *
-     * $skip_failure_notification debe ser true únicamente cuando el envío que falló ES la
-     * propia notificación de fallo hacia un admin (SystemErrorWhatsappService::notify_send_error
-     * llama a send_text() con este flag en true) — evita que un Kapso caído dispare una
-     * recursión de notificaciones fallidas notificando notificaciones fallidas.
+     * $skip_failure_notification se pasa en true en dos casos, y sólo en esos dos:
+     *
+     * 1. Cuando el envío que falló ES la propia notificación de fallo hacia un admin
+     *    (SystemErrorWhatsappService::notify_send_error llama a send_text() con este flag en true)
+     *    — evita que un Kapso caído dispare una recursión de notificaciones fallidas notificando
+     *    notificaciones fallidas.
+     * 2. Desde send_reaction(), porque el fallo de una reacción ya se le muestra en el acto al
+     *    operador que la disparó. El aviso a admins está throttleado a 1 cada 10 minutos y es
+     *    global: gastar ese cupo en un pulgar que no salió deja mudo un fallo de envío real.
+     *
+     * En los dos casos $last_send_error se sigue seteando (pasa antes del early return de abajo),
+     * así que el llamador conserva el motivo aunque no se notifique a nadie.
      *
      * @param string $context                    Descripción legible de qué se intentaba enviar.
      * @param string $detail                      Detalle del error (excepción, status HTTP, etc.).

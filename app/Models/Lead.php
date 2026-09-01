@@ -778,8 +778,10 @@ class Lead extends Model
         // sent_by_admin:id,name (prompt 403) se eager-loadea solo acá (el hilo completo del lead),
         // no en notification_messages()/scopeWithAllForList(): esos listados no muestran el nombre
         // del emisor y el accessor sent_by_admin_name ya devuelve null por la guarda relationLoaded.
+        // admin_reaction_by:id,name va por el mismo criterio: solo el hilo completo pinta las
+        // reacciones del panel, y su accessor también devuelve null solo si no vino cargada.
         return $this->hasMany(LeadMessage::class, 'lead_id')
-            ->with(['attachments', 'sent_by_admin:id,name'])
+            ->with(['attachments', 'sent_by_admin:id,name', 'admin_reaction_by:id,name'])
             ->orderBy('id');
     }
 

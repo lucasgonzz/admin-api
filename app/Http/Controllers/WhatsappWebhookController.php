@@ -242,6 +242,9 @@ class WhatsappWebhookController extends Controller
             // Si no existe (p.ej. es de soporte o implementación), ignorar silenciosamente.
             $message = LeadMessage::query()->where('whatsapp_message_id', $wamid)->first();
             if ($message === null) {
+                // Antes de darlo por ajeno: puede ser el wamid de una reacción que el panel mandó.
+                // Camino aparte, solo para 'failed', que NO toca ninguna columna del mensaje original.
+                $this->handle_failed_admin_reaction_status((string) $event_type, (string) $wamid, $payload);
                 return;
             }
 
@@ -294,6 +297,57 @@ class WhatsappWebhookController extends Controller
                 'error'      => $exception->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Despinta la reacción del panel cuando Meta avisa, por webhook, que la rechazó.
+     *
+     * Meta acepta el POST de la reacción con un 200 y recién después manda el `failed`. Hasta acá
+     * ese aviso caía en el vacío —el correlacionador busca por `whatsapp_message_id` y el wamid de
+     * nuestra reacción vive en `admin_reaction_whatsapp_message_id`— y la pill quedaba pintada en
+     * el panel diciendo que el lead vio algo que nunca vio.
+     *
+     * 🔴 Esta búsqueda es APARTE y toca SOLO las columnas `admin_reaction_*`. No se unifica con la
+     * de arriba: buscar en las dos columnas a la vez pisaría el `whatsapp_delivery_status` del
+     * mensaje original con el estado de la reacción y los tildes de entrega de la burbuja
+     * empezarían a mentir. Por eso también corre únicamente para `failed`: un `delivered` o un
+     * `read` de nuestra reacción se siguen ignorando en silencio, como siempre.
+     *
+     * @param string               $event_type Nombre del evento Kapso (clave de STATUS_EVENTS).
+     * @param string               $wamid      wamid que vino en el payload.
+     * @param array<string, mixed> $payload    Body JSON decodificado del webhook.
+     *
+     * @return void
+     */
+    private function handle_failed_admin_reaction_status(string $event_type, string $wamid, array $payload): void
+    {
+        $status = isset(self::STATUS_EVENTS[$event_type]) ? self::STATUS_EVENTS[$event_type] : null;
+        if ($status !== 'fallido') {
+            return;
+        }
+
+        $message = LeadMessage::query()->where('admin_reaction_whatsapp_message_id', $wamid)->first();
+        if ($message === null) {
+            return;
+        }
+
+        $reason = $this->extract_delivery_failure_reason($payload);
+
+        $message->update([
+            'admin_reaction_emoji'               => null,
+            'admin_reaction_at'                  => null,
+            'admin_reaction_whatsapp_message_id' => null,
+            'admin_reaction_by_admin_id'         => null,
+        ]);
+
+        Log::channel('daily')->warning('WhatsApp webhook: Meta rechazó la reacción del panel; se despinta del hilo.', [
+            'lead_id'         => (int) $message->lead_id,
+            'lead_message_id' => (int) $message->id,
+            'wamid_reaccion'  => $wamid,
+            'motivo'          => $reason !== '' ? $reason : 'Meta no informó motivo en el payload.',
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
     }
 
     /**

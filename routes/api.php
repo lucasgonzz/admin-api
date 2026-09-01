@@ -499,6 +499,8 @@ Route::prefix('admin')->group(function () {
         Route::put('lead-message/{id}/cancel-auto-send', [LeadController::class, 'cancel_auto_send_message_json']);
         /* Alterna si el mensaje se incluye o se excluye del historial enviado a Claude. */
         Route::put('lead-message/{id}/toggle-deleted-from-context', [LeadController::class, 'toggle_deleted_from_context_json']);
+        /* Reacción con emoji del panel sobre un mensaje del hilo (emoji vacío = quitar la reacción). */
+        Route::put('lead-message/{id}/reaction', [LeadController::class, 'react_to_message_json']);
 
         Route::get('followup-rule', [FollowupRuleController::class, 'index_json']);
         Route::put('followup-rule/{id}', [FollowupRuleController::class, 'update_json']);
