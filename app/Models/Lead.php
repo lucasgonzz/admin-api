@@ -556,6 +556,76 @@ class Lead extends Model
     }
 
     /**
+     * Leads que ameritan revisión, en SQL puro (gemelo de LeadPendingReviewService::lead_requiere_revision()).
+     *
+     * Razón A: mensajes del lead sin responder tras el último saliente (misma definición que
+     * LeadConversationAiState::has_unanswered_lead_messages(); la relación `messages` está ordenada
+     * por id, así que "posterior en el bucle" es "id mayor").
+     * Razón B: el hilo termina en un error sin actividad real posterior.
+     *
+     * 🔴 A propósito la razón B mira SOLO `is_error`, y NO `whatsapp_delivery_status = 'fallido'`
+     * como hace `failed_send_count` acá arriba. Los dos criterios son distintos: el amarillo de la
+     * columna "Sin leer" es más ancho que el botón de revisión. Este scope tiene que dar EXACTAMENTE
+     * lo que da el botón; si alguien suma la entrega fallida acá, se rompe
+     * RevisionDeLeadsEnSqlYEnPhpCoincidenTest.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeRequiereRevision($query)
+    {
+        return $query->where(function ($wrap) {
+            // Razón A: mensaje del lead (no reacción) sin ningún saliente posterior.
+            $wrap->whereExists(function ($sin_responder) {
+                $sin_responder->selectRaw('1')
+                    ->from('lead_messages')
+                    ->whereColumn('lead_messages.lead_id', 'leads.id')
+                    ->where('lead_messages.sender', 'lead')
+                    ->where('lead_messages.status', 'enviado')
+                    ->where(function ($no_reaccion) {
+                        $no_reaccion->whereNull('lead_messages.kind')
+                            ->orWhere('lead_messages.kind', '<>', 'reaction');
+                    })
+                    // Reacciones en formato legado de Kapso (texto plano), ver
+                    // LeadWhatsappReactionService::is_legacy_reaction_content(). LIKE y no REGEXP:
+                    // el hosting puede estar en MySQL 5.7.
+                    ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Reacted % to message wamid.%'")
+                    ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Removed reaction from message wamid.%'")
+                    ->whereNotExists(function ($outbound) {
+                        $outbound->selectRaw('1')
+                            ->from('lead_messages as outbound')
+                            ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
+                            ->whereColumn('outbound.id', '>', 'lead_messages.id')
+                            ->where(function ($tipos) {
+                                $tipos->where(function ($setter) {
+                                    $setter->where('outbound.sender', 'setter')
+                                        ->whereIn('outbound.status', ['enviado', 'aprobado']);
+                                })->orWhere(function ($sistema) {
+                                    $sistema->where('outbound.sender', 'sistema')
+                                        ->where('outbound.status', 'aprobado');
+                                });
+                            });
+                    });
+            })
+            // Razón B: último error sin actividad real posterior.
+            ->orWhereExists(function ($error) {
+                $error->selectRaw('1')
+                    ->from('lead_messages')
+                    ->whereColumn('lead_messages.lead_id', 'leads.id')
+                    ->where('lead_messages.is_error', true)
+                    ->whereNotExists(function ($posterior) {
+                        $posterior->selectRaw('1')
+                            ->from('lead_messages as lm_post')
+                            ->whereColumn('lm_post.lead_id', 'lead_messages.lead_id')
+                            ->whereColumn('lm_post.id', '>', 'lead_messages.id')
+                            ->where('lm_post.is_status_event', false);
+                    });
+            });
+        });
+    }
+
+    /**
      * Aplica el orden de la bandeja de leads (selector del header en admin-spa: `last_message`,
      * `created_at`, `atencion` — prompt 286/02). Extraído a un scope único porque el criterio de
      * orden estaba **duplicado** en `LeadController::index_json()` y en `SearchController` (el

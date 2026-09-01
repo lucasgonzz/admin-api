@@ -1,0 +1,98 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\Lead;
+use App\Models\LeadPipelineStatus;
+
+/**
+ * Arma las tarjetas de estado que van arriba de la grilla de leads en admin-spa.
+ *
+ * Cada tarjeta dice, para un estado del pipeline, cuántos leads hay en ese estado y cuántos de
+ * esos leads necesitan revisión (mismo criterio que el botón de revisión: mensajes sin responder
+ * o error sin resolver).
+ *
+ * Dos definiciones que no se negocian:
+ *
+ * 1. Los conteos son **globales**: acá no entran los filtros de columna ni de fecha del operador.
+ *    Mismo criterio que los badges de no leídos de la barra de estados.
+ * 2. `sin_responder` cuenta **leads**, no mensajes. Un lead con tres mensajes sin responder suma 1.
+ *
+ * El conteo de revisión se resuelve por SQL con `Lead::scopeRequiereRevision()`, no recorriendo
+ * modelos en PHP: este servicio corre en cada carga de la vista y en cada refresco por webhook, y
+ * la relación `messages` arrastra `with([...])`, o sea decenas de miles de modelos hidratados.
+ */
+class LeadStatusCardsService
+{
+    /**
+     * Gris neutro cuando el estado no tiene color en el catálogo (mismo fallback que
+     * LeadPipelineStatus::color_for()).
+     */
+    const COLOR_FALLBACK = '#ced4da';
+
+    /**
+     * Tarjetas para los estados pedidos, siempre las mismas claves y siempre en el orden recibido
+     * (aunque den cero): el SPA no inventa ni ordena nada.
+     *
+     * @param array<int, string> $slugs Slugs de estado a contar, en el orden de salida.
+     *
+     * @return array<int, array<string, mixed>> Tarjetas {value, text, color, group, total, sin_responder}.
+     */
+    public static function cards_for_statuses(array $slugs): array
+    {
+        if (empty($slugs)) {
+            return [];
+        }
+
+        // Total de leads por estado.
+        $totales = Lead::query()
+            ->whereIn('status', $slugs)
+            ->groupBy('status')
+            ->selectRaw('status, COUNT(*) as cantidad')
+            ->pluck('cantidad', 'status');
+
+        // De esos, los que ameritan revisión (gemelo SQL del botón de revisión).
+        $pendientes = Lead::query()
+            ->whereIn('status', $slugs)
+            ->requiereRevision()
+            ->groupBy('status')
+            ->selectRaw('status, COUNT(*) as cantidad')
+            ->pluck('cantidad', 'status');
+
+        // Catálogo de estados indexado por slug: el color y la etiqueta de la tarjeta salen de la
+        // MISMA fuente que el puntito de la barra de estados, así nunca divergen.
+        $opciones = [];
+        foreach (LeadPipelineStatus::options_for_meta() as $opcion) {
+            if (isset($opcion['value'])) {
+                $opciones[$opcion['value']] = $opcion;
+            }
+        }
+
+        $cards = [];
+        foreach ($slugs as $slug) {
+            $slug = (string) $slug;
+
+            if (isset($opciones[$slug])) {
+                $text  = (string) $opciones[$slug]['text'];
+                $color = (string) $opciones[$slug]['color'];
+                $group = $opciones[$slug]['group'];
+            } else {
+                // Estado que no está en el catálogo visible (por ejemplo, oculto del select).
+                $text  = LeadPipelineStatus::humanize_slug($slug);
+                $color = LeadPipelineStatus::color_for($slug);
+                $group = LeadPipelineStatus::DEFAULT_STATUS_GROUPS[$slug] ?? null;
+            }
+
+            $cards[] = [
+                'value'         => $slug,
+                'text'          => $text,
+                'color'         => $color !== '' ? $color : self::COLOR_FALLBACK,
+                'group'         => $group,
+                'total'         => (int) ($totales[$slug] ?? 0),
+                'sin_responder' => (int) ($pendientes[$slug] ?? 0),
+            ];
+        }
+
+        return $cards;
+    }
+}

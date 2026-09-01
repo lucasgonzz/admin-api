@@ -72,11 +72,15 @@ class LeadPendingReviewService
      * Determina si un lead amerita revisión por razón A (mensajes sin responder) o razón B
      * (error sin resolver al final del hilo).
      *
+     * Público (no privado) porque `Lead::scopeRequiereRevision()` es su gemelo en SQL y
+     * `RevisionDeLeadsEnSqlYEnPhpCoincidenTest` compara las dos implementaciones lead por lead.
+     * No volver a hacerlo privado sin borrar ese test.
+     *
      * @param Lead $lead Lead con relación messages cargada (ordenada por id).
      *
      * @return bool
      */
-    private function lead_requiere_revision(Lead $lead): bool
+    public function lead_requiere_revision(Lead $lead): bool
     {
         /* Razón A: mensajes del lead sin responder (definición existente del sistema). También cubre
            las sugerencias de Claude cuyo envío falló: al fallar quedan 'rechazado' y el mensaje del

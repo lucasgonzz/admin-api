@@ -402,6 +402,10 @@ Route::prefix('admin')->group(function () {
         // Ruta de recovery batch: debe ir antes de las rutas con {id} para evitar colisión.
         Route::post('lead/batch-recover-unanswered', [LeadController::class, 'batch_recover_unanswered_json']);
         Route::post('lead/mark-pending-review', [LeadController::class, 'mark_pending_review_json']);
+        // Tarjetas de estado arriba de la grilla: cuántos leads hay en cada estado y cuántos de ellos
+        // necesitan revisión (mismo criterio que el botón de revisión: sin responder o con error).
+        // 🔴 Va ANTES de lead/{id}: si va después, {id} se come "status-cards".
+        Route::get('lead/status-cards', [LeadController::class, 'status_cards_json']);
         Route::get('lead/{id}', [LeadController::class, 'show_json']);
         Route::post('lead', [LeadController::class, 'store_json']);
         Route::put('lead/{id}', [LeadController::class, 'update_json']);
