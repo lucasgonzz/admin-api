@@ -356,6 +356,142 @@ class WhatsappSendService
     }
 
     /**
+     * Envía una reacción con emoji sobre un mensaje ya existente de la conversación.
+     *
+     * 🔴 A diferencia de {@see send_text()}, acá el cuerpo vacío es LEGÍTIMO y no se corta:
+     * `$emoji = ''` es exactamente como la Cloud API de Meta pide QUITAR una reacción. Por eso este
+     * método no tiene la guarda de "cuerpo vacío" que sí tiene send_text() — no es un olvido y no
+     * hay que "arreglarlo". Tampoco se le hace `trim()` al emoji al armar el payload: el string
+     * vacío tiene que viajar tal cual.
+     *
+     * No toca la base ni conoce LeadMessage: solo habla con Kapso, igual que sus hermanos. Quien
+     * llama decide qué persistir según lo que devuelva.
+     *
+     * @param string      $to                        Número destino en formato E.164 (+549…).
+     * @param string      $target_whatsapp_message_id wamid del mensaje al que se reacciona.
+     * @param string      $emoji                      Emoji a aplicar; '' quita la reacción.
+     * @param string|null $context                    Descripción legible para la notificación de
+     *                                                 fallo a admins. Si es null se arma una genérica.
+     *
+     * @return string|null wamid de la reacción asignado por Meta, o null si falló.
+     */
+    public function send_reaction(string $to, string $target_whatsapp_message_id, string $emoji, ?string $context = null): ?string
+    {
+        // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla.
+        $this->last_send_error = null;
+        // Resetea el status HTTP del fallo anterior por el mismo motivo.
+        $this->last_send_status_code = null;
+
+        $notify_context = $context !== null ? $context : "Reacción a {$target_whatsapp_message_id} para {$to}";
+
+        $target_wamid = trim($target_whatsapp_message_id);
+        if ($target_wamid === '') {
+            Log::channel('daily')->warning('WhatsappSendService: reacción sin wamid del mensaje objetivo.', [
+                'to' => $to,
+            ]);
+            $this->notify_admins_of_failure($notify_context, 'La reacción no se envió: falta el id de WhatsApp del mensaje objetivo.', false);
+
+            return null;
+        }
+
+        /*
+         * test_mode: mismo criterio que send_text(). Se chequea ANTES de resolve_send_context(),
+         * porque ese método ya corta a null en test_mode y no expone el motivo hacia arriba, así
+         * que el llamador no podría distinguir "no salió porque estamos probando" de un fallo real.
+         */
+        $active_config = WhatsappConfig::getActive();
+        if ($active_config && $active_config->is_active && $active_config->test_mode) {
+            $normalized_to = WhatsappNormalizer::normalize($to);
+            $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+            if ($to_digits === '') {
+                Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
+                    'to' => $to,
+                ]);
+                $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", false);
+
+                return null;
+            }
+
+            $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
+
+            Log::channel('daily')->info('WhatsappSendService: test_mode activo, reacción simulada (no se llamó a la API real).', [
+                'to'                       => $normalized_to,
+                'target_message_id'        => $target_wamid,
+                'fake_whatsapp_message_id' => $fake_message_id,
+            ]);
+
+            return $fake_message_id;
+        }
+
+        $send_context = $this->resolve_send_context(false);
+        if ($send_context === null) {
+            return null;
+        }
+
+        $normalized_to = WhatsappNormalizer::normalize($to);
+        $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+        if ($to_digits === '') {
+            Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
+                'to' => $to,
+            ]);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", false);
+
+            return null;
+        }
+
+        $endpoint = $this->messages_endpoint($send_context['phone_number_id']);
+
+        try {
+            $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
+
+            $response = $http
+                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->post($endpoint, [
+                    'messaging_product' => 'whatsapp',
+                    'to'                => $to_digits,
+                    'type'              => 'reaction',
+                    'reaction'          => [
+                        'message_id' => $target_wamid,
+                        // Sin trim(): '' quita la reacción y tiene que viajar tal cual.
+                        'emoji'      => $emoji,
+                    ],
+                ]);
+
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure($notify_context, 'Kapso/Meta no devolvió message_id para la reacción.', false);
+            }
+
+            return $message_id;
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsappSendService: excepción al enviar reacción.', [
+                'to'                => $normalized_to,
+                'target_message_id' => $target_wamid,
+                'error'             => $exception->getMessage(),
+            ]);
+
+            /*
+             * Captura del status HTTP real ANTES de notify_admins_of_failure(): es lo que deja
+             * legible el 400 de "pasaron más de 24 horas" (ventana cerrada) en last_send_status_code,
+             * con el motivo en last_send_error para que el operador lo vea en el panel.
+             */
+            if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+                $this->last_send_status_code = (int) $exception->response->status();
+            } else {
+                // Respaldo: algunas excepciones de Guzzle no llegan como RequestException con
+                // response adjunta, pero el mensaje trae el texto "status code XXX" igual.
+                if (preg_match('/status code (\d{3})/', $exception->getMessage(), $matches)) {
+                    $this->last_send_status_code = (int) $matches[1];
+                }
+            }
+
+            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), false);
+        }
+
+        return null;
+    }
+
+    /**
      * Busca la primera variable de plantilla que llegó vacía y devuelve el motivo legible.
      *
      * Se compara con `trim()` y no con `empty()`: `'   '` no está vacío para PHP y sí lo está para

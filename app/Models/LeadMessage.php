@@ -21,6 +21,27 @@ class LeadMessage extends Model
      */
     public const SENT_VIA_CLAUDE = 'claude';
 
+    /**
+     * Paleta de emojis con los que un admin puede reaccionar a un mensaje desde el panel.
+     *
+     * Va con escapes Unicode explícitos y no con el glifo pegado a propósito: un editor o un git
+     * mal configurado se come el VARIATION SELECTOR-16 del corazón y la validación empieza a
+     * rechazar reacciones legítimas sin que se vea nada raro en el diff.
+     *
+     * `LeadController::resolve_reaction_emoji()` compara contra esta lista y devuelve SIEMPRE la
+     * forma canónica de acá, que es la que sale a Meta (nunca el literal que mandó el navegador).
+     *
+     * @var array<int, string>
+     */
+    public const REACCIONES_DEL_PANEL = [
+        "\u{1F44D}",        // 👍 pulgar
+        "\u{2764}\u{FE0F}", // ❤️ corazón (con selector de variación, como lo manda WhatsApp)
+        "\u{1F602}",        // 😂 risa
+        "\u{1F62E}",        // 😮 sorpresa
+        "\u{1F622}",        // 😢 llanto
+        "\u{1F64F}",        // 🙏 gracias
+    ];
+
     protected $guarded = [];
 
     /**
@@ -67,7 +88,7 @@ class LeadMessage extends Model
      *
      * @var array<int, string>
      */
-    protected $appends = ['suggested_lead_status_label', 'pending_actions_summary', 'sent_by_admin_name'];
+    protected $appends = ['suggested_lead_status_label', 'pending_actions_summary', 'sent_by_admin_name', 'admin_reaction_by_name'];
 
     /**
      * Casts de tiempos de estado del mensaje.
@@ -92,6 +113,8 @@ class LeadMessage extends Model
         'ai_auto_send_at'         => 'datetime',
         /* Momento en que el lead reaccionó a este mensaje por WhatsApp. */
         'lead_reaction_at'        => 'datetime',
+        /* Momento en que un admin reaccionó a este mensaje desde el panel. */
+        'admin_reaction_at'       => 'datetime',
         /* Mensaje excluido del historial enviado a Claude (marcado manualmente por el operador). */
         'deleted_from_context'    => 'boolean',
         /* Array de eventos de notificación a admins disparados por este mensaje. Cada elemento: ['evento' => ..., 'admins' => [...]]. */
@@ -144,6 +167,25 @@ class LeadMessage extends Model
             return null;
         }
         $admin = $this->getRelation('sent_by_admin');
+
+        return $admin ? (string) $admin->name : null;
+    }
+
+    /**
+     * Nombre del admin que reaccionó a este mensaje desde el panel, para el tooltip de la pill
+     * en el admin-spa. Misma guarda que sent_by_admin_name: si la relación no vino eager-loaded
+     * (solo la carga messages() del Lead) devuelve null sin consultar la base, para no generar un
+     * N+1 al serializar hilos largos.
+     *
+     * @return string|null
+     */
+    public function getAdminReactionByNameAttribute()
+    {
+        // Guarda: si la relación no fue eager-loaded, no disparar una consulta nueva por mensaje.
+        if (! $this->relationLoaded('admin_reaction_by')) {
+            return null;
+        }
+        $admin = $this->getRelation('admin_reaction_by');
 
         return $admin ? (string) $admin->name : null;
     }
@@ -462,6 +504,17 @@ class LeadMessage extends Model
     public function sent_by_admin()
     {
         return $this->belongsTo(Admin::class, 'sent_by_admin_id');
+    }
+
+    /**
+     * Admin que reaccionó a este mensaje desde el panel (null si nadie reaccionó).
+     * Ver columna admin_reaction_by_admin_id.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function admin_reaction_by()
+    {
+        return $this->belongsTo(Admin::class, 'admin_reaction_by_admin_id');
     }
 
     /**

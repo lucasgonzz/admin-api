@@ -3229,6 +3229,151 @@ class LeadController extends Controller
     }
 
     /**
+     * Reacciona con un emoji, desde el panel, a un mensaje del hilo del lead.
+     *
+     * El emoji vacío es el "quitar la reacción": así lo pide la Cloud API de Meta y así viaja
+     * desde el SPA, sin un endpoint aparte. Reemplazar una reacción por otra tampoco tiene camino
+     * especial: Meta pisa la anterior sobre el mismo message_id y acá el update pisa las columnas.
+     *
+     * Nada se persiste si el envío no salió: una reacción que no llegó al lead no es información
+     * que nadie necesite recuperar, y pintarla en la burbuja diría que el lead la vio cuando no la
+     * vio. Se devuelve 422 con el motivo y listo — no se registra un bloque rojo en el hilo, que
+     * sería peor que el aviso que ya ve quien apretó.
+     *
+     * @param \Illuminate\Http\Request $request                Trae 'emoji' ('' = quitar).
+     * @param int|string               $message_id             Id de lead_messages.
+     * @param WhatsappSendService      $whatsapp_send_service  Envío saliente vía Kapso.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function react_to_message_json(Request $request, $message_id, WhatsappSendService $whatsapp_send_service)
+    {
+        /* Busca el mensaje incluyendo el lead para poder retornar el modelo completo. */
+        $message = LeadMessage::query()->with('lead')->findOrFail($message_id);
+
+        /* La intención se resuelve antes de validar nada: sin emoji, es un quitado. */
+        $emoji_crudo = trim((string) $request->input('emoji', ''));
+        $quitar = ($emoji_crudo === '');
+
+        $emoji_canonico = null;
+        if (! $quitar) {
+            $emoji_canonico = $this->resolve_reaction_emoji($emoji_crudo);
+            if ($emoji_canonico === null) {
+                return response()->json(['message' => 'Ese emoji no está en la paleta de reacciones rápidas.'], 422);
+            }
+        }
+
+        /* Los eventos internos del hilo nunca salieron por WhatsApp: no hay a qué reaccionarle. */
+        if ($message->is_status_event || $message->is_error) {
+            return response()->json(['message' => 'Los eventos internos del hilo no se envían por WhatsApp, así que no se les puede reaccionar.'], 422);
+        }
+
+        /* Cubre sugerencias sin enviar, rechazadas, historial importado y envíos que fallaron. */
+        $wamid = trim((string) ($message->whatsapp_message_id ?? ''));
+        if ($wamid === '') {
+            return response()->json(['message' => 'Este mensaje nunca salió por WhatsApp, así que el lead no puede ver una reacción sobre él.'], 422);
+        }
+
+        if ((string) $message->whatsapp_delivery_status === 'fallido') {
+            return response()->json(['message' => 'Ese mensaje no se pudo entregar al lead: reaccionarle no tendría a qué engancharse.'], 422);
+        }
+
+        /* wamid simulado de una prueba local, con el modo de prueba ya apagado: ese id no existe en
+           WhatsApp y Meta devolvería un 400. Se corta acá, antes de la red. */
+        if (strncmp($wamid, 'test-', 5) === 0) {
+            $whatsapp_config = \App\Models\WhatsappConfig::getActive();
+            $en_modo_prueba = $whatsapp_config && $whatsapp_config->is_active && $whatsapp_config->test_mode;
+            if (! $en_modo_prueba) {
+                return response()->json(['message' => 'Ese mensaje se envió con el modo de prueba activo: su id no existe en WhatsApp.'], 422);
+            }
+        }
+
+        $lead = $message->lead;
+        if ($lead === null) {
+            return response()->json(['message' => 'El mensaje no tiene un lead asociado.'], 422);
+        }
+
+        $phone = trim((string) ($lead->phone ?? ''));
+        if ($phone === '') {
+            return response()->json(['message' => 'El lead no tiene teléfono cargado.'], 422);
+        }
+
+        try {
+            $reaction_wamid = $whatsapp_send_service->send_reaction(
+                $phone,
+                $wamid,
+                $quitar ? '' : $emoji_canonico,
+                'Reacción del panel - Lead #' . $lead->id . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
+            );
+        } catch (\Throwable $e) {
+            Log::error('LeadController@react_to_message_json: error WhatsApp.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message->id,
+                'error'      => $e->getMessage(),
+            ]);
+
+            return response()->json(['message' => 'No se pudo enviar la reacción por WhatsApp: '.$e->getMessage()], 422);
+        }
+
+        /* Si no salió, no se guarda nada: ver el docblock del método. */
+        if ($reaction_wamid === null) {
+            $motivo = trim((string) $whatsapp_send_service->last_send_error);
+
+            return response()->json(['message' => $motivo !== '' ? $motivo : 'No se pudo enviar la reacción por WhatsApp.'], 422);
+        }
+
+        if ($quitar) {
+            /* Se limpia también el wamid: acá no hay idempotencia de webhook que proteger (a
+               diferencia del camino entrante, que sí lo conserva) y dejarlo sería basura sin lector. */
+            $message->update([
+                'admin_reaction_emoji'               => null,
+                'admin_reaction_at'                  => null,
+                'admin_reaction_whatsapp_message_id' => null,
+                'admin_reaction_by_admin_id'         => null,
+            ]);
+        } else {
+            $message->update([
+                'admin_reaction_emoji'               => $emoji_canonico,
+                'admin_reaction_at'                  => now(),
+                'admin_reaction_whatsapp_message_id' => $reaction_wamid,
+                'admin_reaction_by_admin_id'         => (int) $request->user()->id,
+            ]);
+        }
+
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Valida un emoji recibido contra la paleta del panel y devuelve su forma canónica.
+     *
+     * La comparación se hace sacando los selectores de variación (U+FE0F) de los dos lados. No es
+     * paranoia: el ❤️ viaja del navegador con o sin U+FE0F según cómo se haya escrito el literal
+     * en el .vue, y un in_array() estricto lo rechazaría la mitad de las veces. Lo que sale a Meta
+     * es siempre la forma canónica del backend, nunca lo que mandó el cliente.
+     *
+     * @param string $emoji Emoji tal como llegó en el request.
+     *
+     * @return string|null Forma canónica de la constante, o null si no está en la paleta.
+     */
+    private function resolve_reaction_emoji(string $emoji): ?string
+    {
+        $recibido_normalizado = str_replace("\u{FE0F}", '', $emoji);
+        if ($recibido_normalizado === '') {
+            return null;
+        }
+
+        foreach (LeadMessage::REACCIONES_DEL_PANEL as $permitido) {
+            if (str_replace("\u{FE0F}", '', $permitido) === $recibido_normalizado) {
+                return $permitido;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Sirve un adjunto de lead vía URL firmada (nueva pestaña sin depender de public/storage).
      *
      * @param \Illuminate\Http\Request $request
