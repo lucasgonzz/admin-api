@@ -89,12 +89,30 @@ class GuardaDeBorradoDeSpa
             );
         }
 
-        if (strpos($dir_limpio, $identificador) === false) {
+        /*
+         * 🔴 SEGMENTO COMPLETO, NO SUBSTRING. Este chequeo era un strpos() hasta el 31/8/2026 y
+         * dejaba pasar el directorio del vecino: con identificador "demo", la ruta
+         * `.../public_html/demo2/spa` CONTIENE "demo" y pasaba. O sea que la guarda que existe para
+         * que el pipeline de una demo no vacíe el SPA de otra, no atajaba justamente ese caso.
+         *
+         * Y no es teórico: los pares <slug> / <slug>2 son la convención del sistema —cada cliente
+         * tiene dos instancias, y las demos van demo, demo2, demo3—. En producción están galvan y
+         * galvan2, ferretotal y ferretotal2, arfren y arfren2, trama y trama2.
+         *
+         * Las cuatro formas de ruta que llegan acá tienen al identificador como un segmento entero:
+         *
+         *   cliente shared  domains/comerciocity.com/public_html/{colman}/spa
+         *   cliente VPS     /home/{lacava}/htdocs/lacava.comerciocity.com
+         *   demo shared     domains/comerciocity.com/public_html/{demo3}/spa
+         *   demo VPS        /home/{demo3}/htdocs/demo3.comerciocity.com
+         */
+        $segmentos = explode('/', $dir_limpio);
+        if (! in_array($identificador, $segmentos, true)) {
             throw new \RuntimeException(
                 self::motivo(
                     $sujeto,
                     $dir,
-                    'no contiene el identificador "' . $identificador . '"',
+                    'no tiene al identificador "' . $identificador . '" como uno de sus directorios',
                     $que_revisar
                 )
             );

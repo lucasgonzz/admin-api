@@ -121,6 +121,44 @@ class GuardaDelBorradoDelSpaEnLasDemosTest extends TestCase
     }
 
     /**
+     * 🔴 EL AGUJERO QUE MÁS IMPORTA: el directorio del VECINO.
+     *
+     * El chequeo del identificador era un `strpos` (substring) y por eso, con identificador "demo",
+     * la ruta `.../public_html/demo2/spa` pasaba: contiene "demo". O sea que la guarda que existe
+     * para que el pipeline de una demo no vacíe el SPA de otra no atajaba justamente ese caso.
+     *
+     * Y los pares <slug> / <slug>2 no son una hipótesis: son la convención del sistema. Cada cliente
+     * tiene dos instancias y las demos van demo, demo2, demo3. En producción están galvan y galvan2,
+     * ferretotal y ferretotal2, arfren y arfren2, trama y trama2.
+     *
+     * Ahora el identificador tiene que ser un segmento entero de la ruta.
+     *
+     * @return void
+     */
+    public function test_frena_con_el_directorio_del_vecino_cuyo_slug_empieza_igual()
+    {
+        $casos = [
+            ['domains/comerciocity.com/public_html/demo2/spa', 'demo'],
+            ['/home/demo2/htdocs/demo2.comerciocity.com', 'demo'],
+            ['domains/comerciocity.com/public_html/galvan2/spa', 'galvan'],
+            ['domains/comerciocity.com/public_html/ferretotal2/spa', 'ferretotal'],
+        ];
+
+        foreach ($casos as $caso) {
+            $mensaje = $this->mensaje_de_error(function () use ($caso) {
+                GuardaDeBorradoDeSpa::assert($caso[0], $caso[1], 'la demo 1', 'Revisá la demo.');
+            });
+
+            $this->assertStringContainsString(
+                'FRENADO ANTES DE BORRAR',
+                $mensaje,
+                'La guarda dejó pasar "' . $caso[0] . '" con el identificador "' . $caso[1]
+                    . '": es el SPA del vecino y lo habría vaciado.'
+            );
+        }
+    }
+
+    /**
      * 🔴 La regla nueva, y la que la guarda vieja dejaba pasar.
      *
      * En el VPS el SPA vive en /home/<slug>/htdocs/<dominio>. Si el dominio saliera vacío, la ruta
