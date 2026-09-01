@@ -372,10 +372,18 @@ class WhatsappSendService
      * @param string      $emoji                      Emoji a aplicar; '' quita la reacción.
      * @param string|null $context                    Descripción legible para la notificación de
      *                                                 fallo a admins. Si es null se arma una genérica.
+     * @param bool        $skip_failure_notification  true para NO gastar el aviso por WhatsApp a los
+     *                                                 admins (throttleado globalmente a 1 cada 10
+     *                                                 minutos). El panel lo manda en true: un operador
+     *                                                 toqueteando la paleta en un hilo frío quemaría
+     *                                                 ese cupo y dejaría un fallo de envío REAL de esos
+     *                                                 10 minutos reducido a una línea de log. El motivo
+     *                                                 igual queda en last_send_error, que es lo que el
+     *                                                 llamador le muestra a quien apretó.
      *
      * @return string|null wamid de la reacción asignado por Meta, o null si falló.
      */
-    public function send_reaction(string $to, string $target_whatsapp_message_id, string $emoji, ?string $context = null): ?string
+    public function send_reaction(string $to, string $target_whatsapp_message_id, string $emoji, ?string $context = null, bool $skip_failure_notification = false): ?string
     {
         // Resetea el motivo del fallo anterior: solo debe quedar seteado si ESTE envío falla.
         $this->last_send_error = null;
@@ -389,7 +397,7 @@ class WhatsappSendService
             Log::channel('daily')->warning('WhatsappSendService: reacción sin wamid del mensaje objetivo.', [
                 'to' => $to,
             ]);
-            $this->notify_admins_of_failure($notify_context, 'La reacción no se envió: falta el id de WhatsApp del mensaje objetivo.', false);
+            $this->notify_admins_of_failure($notify_context, 'La reacción no se envió: falta el id de WhatsApp del mensaje objetivo.', $skip_failure_notification);
 
             return null;
         }
@@ -407,7 +415,7 @@ class WhatsappSendService
                 Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
                     'to' => $to,
                 ]);
-                $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", false);
+                $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
 
                 return null;
             }
@@ -423,7 +431,7 @@ class WhatsappSendService
             return $fake_message_id;
         }
 
-        $send_context = $this->resolve_send_context(false);
+        $send_context = $this->resolve_send_context($skip_failure_notification);
         if ($send_context === null) {
             return null;
         }
@@ -434,7 +442,7 @@ class WhatsappSendService
             Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
                 'to' => $to,
             ]);
-            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", false);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
 
             return null;
         }
@@ -459,7 +467,7 @@ class WhatsappSendService
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
-                $this->notify_admins_of_failure($notify_context, 'Kapso/Meta no devolvió message_id para la reacción.', false);
+                $this->notify_admins_of_failure($notify_context, 'Kapso/Meta no devolvió message_id para la reacción.', $skip_failure_notification);
             }
 
             return $message_id;
@@ -485,7 +493,7 @@ class WhatsappSendService
                 }
             }
 
-            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), false);
+            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), $skip_failure_notification);
         }
 
         return null;

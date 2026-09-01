@@ -3240,6 +3240,14 @@ class LeadController extends Controller
      * vio. Se devuelve 422 con el motivo y listo — no se registra un bloque rojo en el hilo, que
      * sería peor que el aviso que ya ve quien apretó.
      *
+     * 🔴 Poner y quitar se ramifican ANTES de las guardas, no después. Las guardas de abajo miran
+     * el estado del mensaje OBJETIVO (que nunca salió, que quedó fallido, que tiene un wamid de
+     * prueba) y eso solo tiene sentido para poner una reacción nueva. Cuando también frenaban el
+     * quitado, una reacción puesta con el modo de prueba encendido —que nunca llegó al teléfono
+     * del lead— quedaba pintada para siempre apenas se apagaba el modo de prueba, sin ninguna
+     * forma de sacarla. El quitado se valida contra la reacción GUARDADA, en
+     * {@see quitar_reaccion_del_panel()}, no contra el mensaje.
+     *
      * @param \Illuminate\Http\Request $request                Trae 'emoji' ('' = quitar).
      * @param int|string               $message_id             Id de lead_messages.
      * @param WhatsappSendService      $whatsapp_send_service  Envío saliente vía Kapso.
@@ -3248,19 +3256,32 @@ class LeadController extends Controller
      */
     public function react_to_message_json(Request $request, $message_id, WhatsappSendService $whatsapp_send_service)
     {
+        /* El campo tiene que venir, y si viene con algo tiene que ser un string. Sin esto, un PUT
+           sin 'emoji' se leía como un quitado —borraba la reacción y devolvía 200— y un array
+           reventaba en 500 al castearlo.
+
+           El `nullable` no es un descuido: el middleware global ConvertEmptyStringsToNull
+           (Http/Kernel.php, línea 23) convierte el "" que manda el SPA en null antes de que este
+           método lo vea, así que acá "cadena vacía" y "null" son literalmente el mismo valor y no
+           hay forma —ni sentido— de separarlos. Los dos son el quitado; lo que se rechaza es el
+           campo AUSENTE y cualquier tipo que no sea string. */
+        $request->validate([
+            'emoji' => ['present', 'nullable', 'string'],
+        ]);
+
         /* Busca el mensaje incluyendo el lead para poder retornar el modelo completo. */
         $message = LeadMessage::query()->with('lead')->findOrFail($message_id);
 
-        /* La intención se resuelve antes de validar nada: sin emoji, es un quitado. */
-        $emoji_crudo = trim((string) $request->input('emoji', ''));
-        $quitar = ($emoji_crudo === '');
+        /* La intención se resuelve antes que nada: sin emoji es un quitado, y el quitado tiene su
+           propio camino con sus propias reglas. */
+        $emoji_crudo = trim((string) $request->input('emoji'));
+        if ($emoji_crudo === '') {
+            return $this->quitar_reaccion_del_panel($message, $whatsapp_send_service);
+        }
 
-        $emoji_canonico = null;
-        if (! $quitar) {
-            $emoji_canonico = $this->resolve_reaction_emoji($emoji_crudo);
-            if ($emoji_canonico === null) {
-                return response()->json(['message' => 'Ese emoji no está en la paleta de reacciones rápidas.'], 422);
-            }
+        $emoji_canonico = $this->resolve_reaction_emoji($emoji_crudo);
+        if ($emoji_canonico === null) {
+            return response()->json(['message' => 'Ese emoji no está en la paleta de reacciones rápidas.'], 422);
         }
 
         /* Los eventos internos del hilo nunca salieron por WhatsApp: no hay a qué reaccionarle. */
@@ -3276,6 +3297,15 @@ class LeadController extends Controller
 
         if ((string) $message->whatsapp_delivery_status === 'fallido') {
             return response()->json(['message' => 'Ese mensaje no se pudo entregar al lead: reaccionarle no tendría a qué engancharse.'], 422);
+        }
+
+        /* 🔴 Meta NO entrega una reacción cuyo mensaje objetivo tenga más de 30 días, pero responde
+           200 al POST igual: el rechazo lo avisa después, por un webhook que hoy nadie escucha. Sin
+           esta guarda el operador reacciona, la pill se pinta, y el lead no ve nada. Un hilo con
+           historia está lleno de mensajes de más de 30 días y se llega con un clic normal. */
+        $fecha_del_objetivo = $message->sent_at !== null ? $message->sent_at : $message->created_at;
+        if ($fecha_del_objetivo !== null && $fecha_del_objetivo->lt(now()->subDays(30))) {
+            return response()->json(['message' => 'WhatsApp no permite reaccionar a mensajes de más de 30 días: el lead no vería la reacción.'], 422);
         }
 
         /* wamid simulado de una prueba local, con el modo de prueba ya apagado: ese id no existe en
@@ -3299,11 +3329,16 @@ class LeadController extends Controller
         }
 
         try {
+            /* El último true es $skip_failure_notification: el aviso por WhatsApp a los admins está
+               throttleado globalmente a 1 cada 10 minutos, y un operador toqueteando la paleta en un
+               hilo frío se comería ese cupo, dejando un fallo de envío REAL de esos 10 minutos
+               reducido a una línea de log. Quien apretó ya ve el error en el acto. */
             $reaction_wamid = $whatsapp_send_service->send_reaction(
                 $phone,
                 $wamid,
-                $quitar ? '' : $emoji_canonico,
-                'Reacción del panel - Lead #' . $lead->id . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
+                $emoji_canonico,
+                'Reacción del panel - Lead #' . $lead->id . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : ''),
+                true
             );
         } catch (\Throwable $e) {
             Log::error('LeadController@react_to_message_json: error WhatsApp.', [
@@ -3312,37 +3347,176 @@ class LeadController extends Controller
                 'error'      => $e->getMessage(),
             ]);
 
-            return response()->json(['message' => 'No se pudo enviar la reacción por WhatsApp: '.$e->getMessage()], 422);
+            return response()->json([
+                'message' => $this->mensaje_de_reaccion_fallida($e->getMessage(), $whatsapp_send_service->last_send_status_code, false),
+            ], 422);
         }
 
-        /* Si no salió, no se guarda nada: ver el docblock del método. */
+        /* Si no salió, no se guarda nada: ver el docblock del método. El detalle crudo va al log; a
+           la pantalla va el mensaje en español que arma mensaje_de_reaccion_fallida(). */
         if ($reaction_wamid === null) {
-            $motivo = trim((string) $whatsapp_send_service->last_send_error);
+            $detalle = trim((string) $whatsapp_send_service->last_send_error);
+            Log::error('LeadController@react_to_message_json: la reacción no salió.', [
+                'lead_id'     => $lead->id,
+                'message_id'  => $message->id,
+                'status_code' => $whatsapp_send_service->last_send_status_code,
+                'detalle'     => $detalle,
+            ]);
 
-            return response()->json(['message' => $motivo !== '' ? $motivo : 'No se pudo enviar la reacción por WhatsApp.'], 422);
+            return response()->json([
+                'message' => $this->mensaje_de_reaccion_fallida($detalle, $whatsapp_send_service->last_send_status_code, false),
+            ], 422);
         }
 
-        if ($quitar) {
-            /* Se limpia también el wamid: acá no hay idempotencia de webhook que proteger (a
-               diferencia del camino entrante, que sí lo conserva) y dejarlo sería basura sin lector. */
-            $message->update([
-                'admin_reaction_emoji'               => null,
-                'admin_reaction_at'                  => null,
-                'admin_reaction_whatsapp_message_id' => null,
-                'admin_reaction_by_admin_id'         => null,
-            ]);
-        } else {
-            $message->update([
-                'admin_reaction_emoji'               => $emoji_canonico,
-                'admin_reaction_at'                  => now(),
-                'admin_reaction_whatsapp_message_id' => $reaction_wamid,
-                'admin_reaction_by_admin_id'         => (int) $request->user()->id,
-            ]);
-        }
+        $message->update([
+            'admin_reaction_emoji'               => $emoji_canonico,
+            'admin_reaction_at'                  => now(),
+            'admin_reaction_whatsapp_message_id' => $reaction_wamid,
+            'admin_reaction_by_admin_id'         => (int) $request->user()->id,
+        ]);
 
         LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Quita la reacción que el panel había dejado sobre un mensaje del hilo.
+     *
+     * 🔴 Acá NO valen las guardas del camino de poner. Lo que se está deshaciendo es una fila
+     * nuestra, no una propiedad del mensaje objetivo: que el mensaje haya quedado fallido después,
+     * o que su wamid sea de una prueba local, no puede impedir sacar de la burbuja algo que el
+     * operador ya no quiere ver. La única pregunta que importa es si esa reacción llegó alguna vez
+     * al teléfono del lead:
+     *
+     * - No hay reacción guardada → 200 sin hacer nada. El endpoint es idempotente.
+     * - La reacción es simulada (wamid 'test-…') o no tiene wamid → nunca existió del lado del
+     *   lead: limpieza local pura, sin tocar la red.
+     * - La reacción es real → se le pide a Meta que la quite (emoji vacío). Si Meta lo rechaza NO
+     *   se limpia nada: la reacción sigue puesta en el teléfono del lead y el panel tiene que
+     *   seguir mostrando lo que el lead realmente ve.
+     *
+     * @param LeadMessage         $message                Mensaje del hilo con la reacción a quitar.
+     * @param WhatsappSendService $whatsapp_send_service  Envío saliente vía Kapso.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function quitar_reaccion_del_panel(LeadMessage $message, WhatsappSendService $whatsapp_send_service)
+    {
+        /* Nada que quitar. Se devuelve el modelo igual para que el SPA tenga qué commitear. */
+        $emoji_guardado = trim((string) ($message->admin_reaction_emoji ?? ''));
+        if ($emoji_guardado === '') {
+            return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+        }
+
+        $reaccion_wamid = trim((string) ($message->admin_reaction_whatsapp_message_id ?? ''));
+        $es_simulada = ($reaccion_wamid === '' || strncmp($reaccion_wamid, 'test-', 5) === 0);
+
+        $lead = $message->lead;
+        $phone = $lead !== null ? trim((string) ($lead->phone ?? '')) : '';
+        $wamid_objetivo = trim((string) ($message->whatsapp_message_id ?? ''));
+
+        if (! $es_simulada) {
+            /* La reacción es real pero no tenemos con qué pedirle el quitado a Meta. No se limpia
+               nada: el lead la sigue viendo en su teléfono. */
+            if ($phone === '' || $wamid_objetivo === '') {
+                return response()->json(['message' => 'No se pudo quitar la reacción: falta el teléfono del lead o el id de WhatsApp del mensaje, y la reacción sigue puesta en el teléfono del lead.'], 422);
+            }
+
+            try {
+                /* $skip_failure_notification en true por el mismo motivo que al poner: no gastar el
+                   cupo global de avisos a admins en algo que el operador ya ve en pantalla. */
+                $quitado_wamid = $whatsapp_send_service->send_reaction(
+                    $phone,
+                    $wamid_objetivo,
+                    '',
+                    'Quitar reacción del panel - Lead #' . $lead->id . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : ''),
+                    true
+                );
+            } catch (\Throwable $e) {
+                Log::error('LeadController@react_to_message_json: error WhatsApp al quitar la reacción.', [
+                    'lead_id'    => $lead->id,
+                    'message_id' => $message->id,
+                    'error'      => $e->getMessage(),
+                ]);
+
+                return response()->json([
+                    'message' => $this->mensaje_de_reaccion_fallida($e->getMessage(), $whatsapp_send_service->last_send_status_code, true),
+                ], 422);
+            }
+
+            /* Meta lo rechazó: las columnas quedan como están, a propósito. */
+            if ($quitado_wamid === null) {
+                $detalle = trim((string) $whatsapp_send_service->last_send_error);
+                Log::error('LeadController@react_to_message_json: el quitado de la reacción no salió.', [
+                    'lead_id'     => $lead->id,
+                    'message_id'  => $message->id,
+                    'status_code' => $whatsapp_send_service->last_send_status_code,
+                    'detalle'     => $detalle,
+                ]);
+
+                return response()->json([
+                    'message' => $this->mensaje_de_reaccion_fallida($detalle, $whatsapp_send_service->last_send_status_code, true),
+                ], 422);
+            }
+        }
+
+        /* Se limpia también el wamid: acá no hay idempotencia de webhook que proteger (a diferencia
+           del camino entrante, que sí lo conserva) y dejarlo sería basura sin lector. */
+        $message->update([
+            'admin_reaction_emoji'               => null,
+            'admin_reaction_at'                  => null,
+            'admin_reaction_whatsapp_message_id' => null,
+            'admin_reaction_by_admin_id'         => null,
+        ]);
+
+        LeadBroadcastService::emit_conversation_updated((int) $message->lead_id, (int) $message->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Traduce un fallo de reacción al mensaje que ve el operador, en español.
+     *
+     * El detalle crudo que sale de Guzzle es inglés técnico y truncado ("HTTP request returned
+     * status code 400:\n{"error":{"message":"Message failed to send because more than 24 hours…"),
+     * y todo lo que ve el usuario va en español. El crudo se loguea; a la pantalla va esto.
+     *
+     * `last_send_status_code` (que hasta acá se capturaba y nadie leía) sirve para no diagnosticar
+     * la ventana de 24hs sobre un fallo que claramente es otra cosa: Meta la rechaza con un 400, así
+     * que un 401 o un 500 no son ese caso aunque el texto del error mencione las 24 horas.
+     *
+     * @param string   $detalle     Detalle crudo (last_send_error o el mensaje de la excepción).
+     * @param int|null $status_code last_send_status_code del servicio, si lo llegó a capturar.
+     * @param bool     $quitando    true si lo que falló era el quitado de una reacción ya puesta.
+     *
+     * @return string
+     */
+    private function mensaje_de_reaccion_fallida(string $detalle, $status_code, bool $quitando): string
+    {
+        $detalle_normalizado = strtolower($detalle);
+        $status = $status_code === null ? null : (int) $status_code;
+        $status_compatible = ($status === null || $status === 400);
+
+        $ventana_cerrada = $status_compatible && (
+            strpos($detalle_normalizado, '131047') !== false
+            || strpos($detalle_normalizado, '24 hours') !== false
+            || strpos($detalle_normalizado, '24 horas') !== false
+        );
+
+        if ($ventana_cerrada) {
+            if ($quitando) {
+                return 'El lead no escribe hace más de 24 horas, así que WhatsApp no deja quitarle la reacción: sigue puesta en su teléfono hasta que vuelva a escribir.';
+            }
+
+            return 'El lead no responde hace más de 24 horas y WhatsApp no deja mandarle nada nuevo hasta que vuelva a escribir.';
+        }
+
+        if ($quitando) {
+            return 'No se pudo quitar la reacción del WhatsApp del lead: sigue puesta en su teléfono. Probá de nuevo en un rato.';
+        }
+
+        return 'No se pudo enviar la reacción por WhatsApp. El detalle quedó en el log; probá de nuevo en un rato.';
     }
 
     /**

@@ -150,6 +150,23 @@ class ReaccionesDelPanelAlLeadTest extends TestCase
     }
 
     /**
+     * Pega al webhook real de Kapso con el payload firmado, para controlar el body crudo.
+     *
+     * @param array<string, mixed> $payload Cuerpo del evento tal como lo manda Kapso.
+     *
+     * @return \Illuminate\Testing\TestResponse
+     */
+    private function postear_webhook(array $payload)
+    {
+        $body = json_encode($payload);
+
+        return $this->call('POST', '/api/webhook/whatsapp', [], [], [], [
+            'CONTENT_TYPE'           => 'application/json',
+            'HTTP_X_KAPSO_SIGNATURE' => hash_hmac('sha256', $body, self::SECRETO),
+        ], $body);
+    }
+
+    /**
      * Devuelve los cuerpos de las peticiones de tipo `reaction` que efectivamente viajaron.
      *
      * Se filtra por tipo en vez de contar todas las peticiones porque el camino de fallo puede
@@ -186,7 +203,12 @@ class ReaccionesDelPanelAlLeadTest extends TestCase
         $lead    = $this->crear_lead('Ana');
         $message = $this->crear_mensaje($lead);
 
-        $this->reaccionar($admin, $message, self::PULGAR)->assertStatus(200);
+        /* La forma de la respuesta importa: `model` es exactamente lo que el SPA lee
+           (res.data.model) para refrescar el hilo. Si se pierde, la pill no se pinta hasta
+           recargar y nadie se entera hasta que lo ve un operador. */
+        $this->reaccionar($admin, $message, self::PULGAR)
+            ->assertStatus(200)
+            ->assertJsonStructure(['model']);
 
         Http::assertSent(function ($request) use ($message) {
             $body = $request->data();
@@ -475,5 +497,201 @@ class ReaccionesDelPanelAlLeadTest extends TestCase
         $message->refresh();
         $this->assertSame('enviado', (string) $message->whatsapp_delivery_status, 'El estado del mensaje original no se toca.');
         $this->assertNull($message->whatsapp_delivered_at);
+    }
+
+    /**
+     * El caso peor del quitado: una reacción puesta con el modo de prueba encendido —que NUNCA
+     * llegó al teléfono del lead— con el modo de prueba ya apagado.
+     *
+     * Cuando las guardas del mensaje objetivo corrían antes de ramificar por quitar/poner, el wamid
+     * `test-` del mensaje frenaba también el quitado y esa reacción quedaba pintada para siempre,
+     * sin ninguna forma de sacarla. Se limpia local y no se toca la red: no hay nada que quitarle a
+     * Meta porque nunca hubo nada.
+     *
+     * @return void
+     */
+    public function test_quitar_una_reaccion_simulada_con_el_modo_de_prueba_apagado_se_puede_igual()
+    {
+        Http::fake();
+
+        $admin   = $this->crear_admin('reacciones-quitar-simulada@test.com');
+        $lead    = $this->crear_lead('Lucia');
+        /* Tal como los deja una prueba local: los dos wamid son simulados. El setUp deja el modo de
+           prueba APAGADO, que es la situación en la que quedaba trabada. */
+        $message = $this->crear_mensaje($lead, [
+            'whatsapp_message_id'                => 'test-' . uniqid(),
+            'admin_reaction_emoji'               => self::PULGAR,
+            'admin_reaction_at'                  => now()->subMinutes(10),
+            'admin_reaction_whatsapp_message_id' => 'test-' . uniqid(),
+        ]);
+        $message->admin_reaction_by_admin_id = $admin->id;
+        $message->save();
+
+        $this->reaccionar($admin, $message, '')->assertStatus(200);
+
+        Http::assertNothingSent();
+
+        $message->refresh();
+        $this->assertNull($message->admin_reaction_emoji);
+        $this->assertNull($message->admin_reaction_at);
+        $this->assertNull($message->admin_reaction_whatsapp_message_id);
+        $this->assertNull($message->admin_reaction_by_admin_id);
+    }
+
+    /**
+     * Un mensaje que después quedó fallido no impide quitar la reacción que ya se le había puesto.
+     *
+     * La reacción es real (viajó a Meta cuando el mensaje todavía estaba bien), así que el quitado
+     * sale a la red igual: lo que se valida es el estado de la REACCIÓN, no el del mensaje.
+     *
+     * @return void
+     */
+    public function test_quitar_la_reaccion_de_un_mensaje_que_quedo_fallido_se_puede()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.QUITADO1']]], 200)]);
+
+        $admin   = $this->crear_admin('reacciones-quitar-fallido@test.com');
+        $lead    = $this->crear_lead('Martin');
+        $message = $this->crear_mensaje($lead, [
+            'whatsapp_delivery_status'           => 'fallido',
+            'admin_reaction_emoji'               => self::PULGAR,
+            'admin_reaction_at'                  => now()->subMinutes(10),
+            'admin_reaction_whatsapp_message_id' => 'wamid.REACCION.REAL',
+        ]);
+        $message->admin_reaction_by_admin_id = $admin->id;
+        $message->save();
+
+        $this->reaccionar($admin, $message, '')->assertStatus(200);
+
+        $enviadas = $this->reacciones_enviadas();
+        $this->assertCount(1, $enviadas, 'La reacción era real: el quitado tiene que salir a Meta.');
+        $this->assertSame('', $enviadas[0]['reaction']['emoji']);
+
+        $message->refresh();
+        $this->assertNull($message->admin_reaction_emoji);
+        $this->assertNull($message->admin_reaction_at);
+        $this->assertNull($message->admin_reaction_whatsapp_message_id);
+        $this->assertNull($message->admin_reaction_by_admin_id);
+        $this->assertSame('fallido', (string) $message->whatsapp_delivery_status, 'El estado del mensaje no se toca.');
+    }
+
+    /**
+     * Meta no ENTREGA una reacción sobre un mensaje de más de 30 días, pero responde 200 al POST
+     * igual y avisa después por un webhook. Sin esta guarda la pill se pinta y el lead no ve nada.
+     *
+     * @return void
+     */
+    public function test_reaccionar_a_un_mensaje_de_mas_de_treinta_dias_se_rechaza()
+    {
+        Http::fake();
+
+        $admin   = $this->crear_admin('reacciones-viejo@test.com');
+        $lead    = $this->crear_lead('Nadia');
+        $message = $this->crear_mensaje($lead, ['sent_at' => now()->subDays(31)]);
+
+        $this->reaccionar($admin, $message, self::PULGAR)->assertStatus(422);
+
+        Http::assertNothingSent();
+
+        $message->refresh();
+        $this->assertNull($message->admin_reaction_emoji);
+    }
+
+    /**
+     * Un PUT sin el campo `emoji` no es un quitado: es un request mal armado.
+     *
+     * Cuando el campo ausente se leía igual que la cadena vacía, borraba la reacción y devolvía 200.
+     *
+     * @return void
+     */
+    public function test_un_put_sin_el_campo_emoji_se_rechaza()
+    {
+        Http::fake();
+
+        $admin   = $this->crear_admin('reacciones-sin-campo@test.com');
+        $lead    = $this->crear_lead('Omar');
+        $message = $this->crear_mensaje($lead, [
+            'admin_reaction_emoji'               => self::PULGAR,
+            'admin_reaction_at'                  => now()->subMinutes(10),
+            'admin_reaction_whatsapp_message_id' => 'wamid.REACCION.PREVIA',
+        ]);
+
+        $this->actingAs($admin, 'sanctum')
+            ->putJson('/api/admin/lead-message/' . $message->id . '/reaction', [])
+            ->assertStatus(422);
+
+        Http::assertNothingSent();
+
+        $message->refresh();
+        $this->assertSame(self::PULGAR, (string) $message->admin_reaction_emoji, 'Un campo ausente no puede borrar la reacción.');
+    }
+
+    /**
+     * Meta acepta el POST de la reacción y recién después avisa por webhook que la rechazó.
+     *
+     * Ese `failed` tiene que despintar la reacción del panel —si no, la pill dice que el lead vio
+     * algo que nunca vio— y 🔴 no puede tocar NADA del mensaje original: el estado de entrega de la
+     * burbuja es del mensaje, no de nuestra reacción.
+     *
+     * @return void
+     */
+    public function test_un_estado_fallido_con_el_wamid_de_nuestra_reaccion_la_despinta_sin_tocar_el_mensaje()
+    {
+        Http::fake(['*' => Http::response(['messages' => [['id' => 'wamid.REACCION7']]], 200)]);
+
+        $admin   = $this->crear_admin('reacciones-webhook-fallido@test.com');
+        $lead    = $this->crear_lead('Paula');
+        $message = $this->crear_mensaje($lead, [
+            'sender'                   => 'setter',
+            'whatsapp_delivery_status' => 'entregado',
+        ]);
+
+        $this->reaccionar($admin, $message, self::PULGAR)->assertStatus(200);
+
+        $this->postear_webhook([
+            'event'   => 'whatsapp.message.failed',
+            'message' => [
+                'id'     => 'wamid.REACCION7',
+                'from'   => $lead->phone,
+                'errors' => [
+                    ['code' => 131047, 'title' => 'Re-engagement message'],
+                ],
+            ],
+        ])->assertStatus(200);
+
+        $message->refresh();
+        $this->assertNull($message->admin_reaction_emoji, 'Meta la rechazó: la pill no puede seguir pintada.');
+        $this->assertNull($message->admin_reaction_at);
+        $this->assertNull($message->admin_reaction_whatsapp_message_id);
+        $this->assertNull($message->admin_reaction_by_admin_id);
+        $this->assertSame('entregado', (string) $message->whatsapp_delivery_status, 'El estado del mensaje original no se toca.');
+        $this->assertNull($message->whatsapp_send_error, 'El motivo del rechazo de la reacción no es un error del mensaje.');
+    }
+
+    /**
+     * Los bloques rojos de error del hilo tampoco admiten reacción.
+     *
+     * En producción `is_error` viaja siempre junto con `is_status_event`; acá se aísla a propósito
+     * para cubrir el segundo lado de la guarda, que hasta ahora ningún test tocaba.
+     *
+     * @return void
+     */
+    public function test_un_bloque_de_error_del_hilo_no_se_puede_reaccionar()
+    {
+        Http::fake();
+
+        $admin   = $this->crear_admin('reacciones-bloque-error@test.com');
+        $lead    = $this->crear_lead('Ramiro');
+        $message = $this->crear_mensaje($lead, [
+            'sender'   => 'sistema',
+            'is_error' => true,
+        ]);
+
+        $this->reaccionar($admin, $message, self::PULGAR)->assertStatus(422);
+
+        Http::assertNothingSent();
+
+        $message->refresh();
+        $this->assertNull($message->admin_reaction_emoji);
     }
 }
