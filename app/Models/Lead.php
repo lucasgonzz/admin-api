@@ -10,6 +10,7 @@ use App\Models\LeadPipelineStatus;
 use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
+use App\Services\LeadWhatsappOnboardingSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
 
@@ -50,8 +51,10 @@ class Lead extends Model
     /**
      * Estados en los que la verificación de mensajes se auto-enciende (latch): desde que el lead
      * entra a solicita_disponibilidad hasta closer_activo, inclusive. Incluye demo_realizada y
-     * closer_activo, que NO están en LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO
-     * (esa const, más corta, la usa el gate de agendamiento y no se toca). Ver latch en booted().
+     * closer_activo, que NO están en LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO (esa
+     * const, más corta, es la que usa el gate de agendamiento — su contenido no cambia, pero desde
+     * el 1/9/2026 el EFECTO de retención de ese gate también depende del mismo interruptor global
+     * que gobierna este latch, ver LeadWhatsappOnboardingSettings). Ver latch en booted().
      */
     public const ESTADOS_VENTANA_VERIFICACION_MENSAJES = [
         'solicita_disponibilidad',
@@ -128,8 +131,16 @@ class Lead extends Model
         // estado FUERA de la ventana hacia uno DENTRO, se enciende requiere_verificacion_mensajes. No se
         // vuelve a forzar después (si el admin lo apaga estando en la ventana, queda apagado — decisión de
         // Lucas, 15/7/2026, el toggle es libremente apagable). Tampoco se apaga al salir de la ventana: una
-        // vez encendida, persiste hasta que el admin la apague. La red de las ACCIONES de agenda no depende
-        // de esto: el gate de agendamiento de LeadAiService las retiene por su cuenta.
+        // vez encendida, persiste hasta que el admin la apague.
+        //
+        // ACTUALIZADO 1/9/2026 (decisión explícita de Lucas): este latch, igual que el gate de
+        // agendamiento de LeadAiService y la retención de seguimientos de LeadFollowupService, ahora
+        // depende del interruptor global de Cuenta (LeadWhatsappOnboardingSettings). Con el
+        // interruptor apagado, NINGUNA red automática queda en pie: ni este latch ni el gate de
+        // agendamiento retienen nada por el solo hecho del tramo — las acciones de agenda (agendar,
+        // cancelar, confirmar ingreso, marcar no ingreso) se aplican en el acto. El toggle manual
+        // por-lead (botón del escudo en la conversación) sigue funcionando siempre, apagado o
+        // prendido el interruptor global.
         static::saving(function (Lead $lead) {
             if (! $lead->isDirty('status')) {
                 return;
@@ -141,7 +152,10 @@ class Lead extends Model
 
             $entra_a_la_ventana = in_array($nuevo, $ventana, true) && ! in_array($anterior, $ventana, true);
 
-            if ($entra_a_la_ventana && ! (bool) $lead->requiere_verificacion_mensajes) {
+            if ($entra_a_la_ventana
+                && ! (bool) $lead->requiere_verificacion_mensajes
+                && LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
+            ) {
                 $lead->requiere_verificacion_mensajes = true;
             }
         });

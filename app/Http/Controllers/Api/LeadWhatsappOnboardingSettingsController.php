@@ -44,6 +44,7 @@ class LeadWhatsappOnboardingSettingsController extends Controller
                 . '|max:' . LeadWhatsappOnboardingSettings::AI_SUGGESTION_DELAY_MAX_SECONDS,
             'verificacion_agendamiento_auto_send_delay_minutes' => 'required|integer|min:'
                 . LeadWhatsappOnboardingSettings::VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MIN_MINUTES,
+            'auto_activar_verificacion_al_solicitar_disponibilidad' => 'required|boolean',
         ]);
 
         // La variante con nombre debe incluir el placeholder para personalizar saludos.

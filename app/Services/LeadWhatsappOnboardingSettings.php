@@ -41,6 +41,28 @@ class LeadWhatsappOnboardingSettings
      */
     public const KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES = 'lead_whatsapp_verificacion_agendamiento_auto_send_delay_minutes';
 
+    /**
+     * Clave: interruptor global de Cuenta que gobierna toda la retención automática de mensajes
+     * por el tramo de agenda (decisión de Lucas, 1/9/2026).
+     *
+     * En `true` (default, comportamiento histórico intacto):
+     * - `Lead::booted()` sigue auto-encendiendo `requiere_verificacion_mensajes` (latch) al entrar
+     *   a la ventana `solicita_disponibilidad` → `closer_activo`.
+     * - `LeadAiService::requires_agendamiento_verification_gate()` sigue difiriendo el paquete
+     *   entero (mensaje + acciones: agendar_demo, cancelar_demo, confirmar_ingreso,
+     *   marcar_no_ingreso) mientras el lead esté en el tramo, sin importar a qué apunte el mensaje.
+     * - `LeadFollowupService` sigue reteniendo el seguimiento por plantilla en vez de enviarlo.
+     *
+     * En `false`: nada de lo anterior se dispara por el solo hecho del tramo. Un lead que entra a
+     * `solicita_disponibilidad` no se marca solo, y las acciones de agenda —incluidas las que
+     * escriben el calendario real del closer— se aplican en el acto, sin espera de aprobación.
+     *
+     * Lo que este interruptor NUNCA apaga: el flag por-lead `requiere_verificacion_mensajes`
+     * prendido a mano (botón del escudo en la conversación), el `requiere_verificacion` explícito
+     * que devuelva Claude en su propia respuesta, ni las guardas de error del sistema.
+     */
+    public const KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD = 'lead_whatsapp_auto_activar_verificacion_al_solicitar_disponibilidad';
+
     /** Placeholder documentado en plantillas editables desde admin-spa. */
     public const PLACEHOLDER_NOMBRE = '{nombre}';
 
@@ -80,6 +102,12 @@ class LeadWhatsappOnboardingSettings
      */
     private const DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES = 30;
 
+    /**
+     * Default del interruptor global (1/9/2026): `'1'` preserva el comportamiento histórico para
+     * toda instalación que nunca abrió la pantalla de Cuenta a tocar esto.
+     */
+    private const DEFAULT_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD = '1';
+
     /** Mínimo y máximo permitidos para demora del mensaje de bienvenida (segundos). 0 = envío inmediato. */
     public const DELAY_MIN_SECONDS = 0;
 
@@ -108,6 +136,7 @@ class LeadWhatsappOnboardingSettings
             'welcome_delay_seconds'        => self::get_welcome_delay_seconds(),
             'ai_suggestion_delay_seconds'         => self::get_ai_suggestion_delay_seconds(),
             'verificacion_agendamiento_auto_send_delay_minutes' => self::get_verificacion_agendamiento_auto_send_delay_minutes(),
+            'auto_activar_verificacion_al_solicitar_disponibilidad' => self::get_auto_activar_verificacion_al_solicitar_disponibilidad(),
             'placeholder_nombre'                  => self::PLACEHOLDER_NOMBRE,
         ];
     }
@@ -130,6 +159,10 @@ class LeadWhatsappOnboardingSettings
         AdminSetting::set(
             self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
             (string) (int) $data['verificacion_agendamiento_auto_send_delay_minutes']
+        );
+        AdminSetting::set(
+            self::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD,
+            $data['auto_activar_verificacion_al_solicitar_disponibilidad'] ? '1' : '0'
         );
     }
 
@@ -162,6 +195,12 @@ class LeadWhatsappOnboardingSettings
             AdminSetting::set(
                 self::KEY_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES,
                 (string) self::DEFAULT_VERIFICACION_AGENDAMIENTO_AUTO_SEND_DELAY_MINUTES
+            );
+        }
+        if (AdminSetting::get(self::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD) === null) {
+            AdminSetting::set(
+                self::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD,
+                self::DEFAULT_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD
             );
         }
     }
@@ -297,6 +336,29 @@ class LeadWhatsappOnboardingSettings
         }
 
         return $value;
+    }
+
+    /**
+     * Interruptor global de Cuenta: ¿sigue vigente la retención automática de mensajes por el
+     * solo hecho de que el lead esté en el tramo de agenda (solicita_disponibilidad..closer_activo)?
+     *
+     * Gobierna: el latch de `Lead::booted()`, el gate de agendamiento de `LeadAiService`
+     * (`requires_agendamiento_verification_gate()` y sus dos puntos de retención hermanos) y la
+     * retención de seguimientos por plantilla de `LeadFollowupService`. Default `true`.
+     *
+     * NO gobierna: el toggle manual por-lead `requiere_verificacion_mensajes` (botón del escudo en
+     * la conversación, siempre gana), el `requiere_verificacion` explícito que devuelva Claude, ni
+     * las guardas de error del sistema (respuesta sin respaldo documental, agenda fuera de
+     * secuencia, slot descartado, etc.).
+     *
+     * @return bool
+     */
+    public static function get_auto_activar_verificacion_al_solicitar_disponibilidad(): bool
+    {
+        return AdminSetting::get(
+            self::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD,
+            self::DEFAULT_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD
+        ) === '1';
     }
 
     /**
