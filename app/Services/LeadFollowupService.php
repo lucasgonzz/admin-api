@@ -154,7 +154,17 @@ class LeadFollowupService
         $template = $this->find_template_for($lead->status, $followup_number, $ingreso_confirmado);
 
         if ($template !== null) {
-            if (in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
+            /*
+             * INTERRUPTOR GLOBAL (1/9/2026): el operando requiere_verificacion_mensajes es
+             * deliberado, no redundante. Sin él, apagar el interruptor global también anularía el
+             * toggle manual por-lead para seguimientos: un lead marcado a mano vería salir su
+             * seguimiento solo. El escudo por-lead siempre gana, apagado o prendido el interruptor.
+             */
+            $retener_seguimiento = (bool) $fresh->requiere_verificacion_mensajes
+                || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
+                    && in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true));
+
+            if ($retener_seguimiento) {
                 $this->create_pending_followup_for_verification($fresh, $template, $followup_number);
                 $via = 'verificacion';
             } else {
@@ -257,13 +267,21 @@ class LeadFollowupService
         $template = $this->find_template_for($lead->status, $followup_number, $ingreso_confirmado);
 
         if ($template !== null) {
-            if (in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)) {
-                // Tramo de agenda (solicita_disponibilidad en adelante): el seguimiento NO se auto-envía.
+            // INTERRUPTOR GLOBAL (1/9/2026): el operando requiere_verificacion_mensajes es
+            // deliberado, no redundante — ver el comentario del otro call site en este archivo.
+            $retener_seguimiento = (bool) $fresh->requiere_verificacion_mensajes
+                || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
+                    && in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true));
+
+            if ($retener_seguimiento) {
+                // Tramo de agenda (solicita_disponibilidad en adelante) con el interruptor global
+                // prendido, o escudo por-lead prendido a mano: el seguimiento NO se auto-envía.
                 // Se crea como sugerencia pendiente de aprobación del setter y se enviará por su plantilla
                 // al aprobar / al vencer el timer de respaldo (ver create_pending_followup_for_verification).
                 $this->create_pending_followup_for_verification($fresh, $template, $followup_number);
             } else {
-                // Fuera del tramo: envío directo por plantilla como siempre.
+                // Fuera del tramo (o interruptor global apagado, sin escudo por-lead): envío directo
+                // por plantilla como siempre.
                 $this->send_followup_via_template($fresh, $template, $followup_number);
             }
         } else {
@@ -367,8 +385,11 @@ class LeadFollowupService
      * Crea el seguimiento como sugerencia PENDIENTE de aprobación del setter, sin enviarlo.
      *
      * Aplica a los leads que ya están en el tramo de agenda (solicita_disponibilidad en adelante,
-     * ver LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO): en ese tramo, la regla de
-     * negocio (6/7/2026) es que cada mensaje al lead lo aprueba un humano. Este método deja el
+     * ver LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO) CON el interruptor global de
+     * Cuenta prendido (regla de negocio 6/7/2026, condicionada desde el 1/9/2026 — ver
+     * LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()),
+     * y también a cualquier lead con el escudo por-lead requiere_verificacion_mensajes prendido a
+     * mano, sin importar el interruptor global. Este método deja el
      * seguimiento en estado 'sugerido' + requiere_verificacion, guardando followup_template_id para
      * que, al aprobarlo (o al vencer el timer de respaldo), se envíe por su plantilla Meta —
      * LeadSuggestionSendService::send_suggestion() detecta el seguimiento y usa send_template() en vez

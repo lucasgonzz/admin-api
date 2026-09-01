@@ -5,11 +5,16 @@ namespace Tests\Feature;
 use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Models\AiSystemPrompt;
+use App\Models\FollowupRule;
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
+use App\Models\LeadMessage;
 use App\Models\SyncedGithubFile;
 use App\Services\LeadAiService;
+use App\Services\LeadFollowupService;
 use App\Services\LeadWhatsappOnboardingSettings;
 use App\Services\WhatsappProtocolService;
+use App\Services\WhatsappSendService;
 use App\Helpers\AppTime;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
@@ -438,5 +443,111 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $msg_claude = $service->crear($lead_claude, $parsed_claude);
         $this->assertNotEmpty($msg_claude->pending_actions, 'El requiere_verificacion explícito de Claude tiene que retener, apagado o prendido el interruptor global.');
         $this->assertTrue((bool) $msg_claude->requiere_verificacion);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* (k) R4: seguimientos por plantilla (LeadFollowupService)            */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Sustituye WhatsappSendService por un espía: mide si se pidió mandar la plantilla, sin salir
+     * a Meta. Mismo patrón que SeguimientoConVariableVaciaTest.
+     *
+     * @return WhatsappSendService
+     */
+    private function espiar_sender(): WhatsappSendService
+    {
+        $espia = new class extends WhatsappSendService {
+            /** @var array<int, array<string, mixed>> */
+            public $envios = [];
+
+            public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
+            {
+                $this->envios[] = ['to' => $to, 'template_name' => $template_name];
+
+                return 'wamid.ENVIADO' . count($this->envios);
+            }
+        };
+
+        $this->app->instance(WhatsappSendService::class, $espia);
+
+        return $espia;
+    }
+
+    /**
+     * FollowupRule + FollowupTemplate para demo_agendada, día 1, sin ingreso confirmado. Se llama
+     * una sola vez por test: `estado` es único en followup_rules.
+     *
+     * @return void
+     */
+    private function sembrar_regla_y_plantilla_de_seguimiento(): void
+    {
+        $rule = new FollowupRule();
+        $rule->estado        = 'demo_agendada';
+        $rule->horas_espera  = 0;
+        $rule->max_followups = 5;
+        $rule->activa        = true;
+        $rule->save();
+
+        $template = new FollowupTemplate();
+        $template->estado                     = 'demo_agendada';
+        $template->dia_numero                 = 1;
+        $template->template_name              = 'cc_seg_demo_agendada_d1';
+        $template->language_code              = 'es_AR';
+        $template->body_template              = 'Hola, ¿segura la demo?';
+        $template->solo_si_ingreso_confirmado = false;
+        $template->activa                     = true;
+        $template->save();
+    }
+
+    /**
+     * Lead nuevo en demo_agendada, listo para force_followup_now() contra la regla/plantilla ya
+     * sembradas.
+     *
+     * @return Lead
+     */
+    private function crear_lead_con_seguimiento_pendiente(): Lead
+    {
+        $lead                = new Lead();
+        $lead->uuid          = (string) Str::uuid();
+        $lead->contact_name  = 'Juana Pérez';
+        $lead->phone         = '+5493417778899';
+        $lead->status        = 'demo_agendada';
+        $lead->save();
+
+        return $lead;
+    }
+
+    /**
+     * (k) R4: interruptor true (default) retiene el seguimiento; interruptor false lo envía
+     * directo; interruptor false + escudo por-lead prendido a mano vuelve a retenerlo (el
+     * operando agregado en LeadFollowupService que cierra el hueco, ver sección 6.4 del plan).
+     */
+    public function test_seguimientos_por_plantilla_respetan_el_interruptor_y_el_escudo_por_lead(): void
+    {
+        $espia   = $this->espiar_sender();
+        $service = app(LeadFollowupService::class);
+        $this->sembrar_regla_y_plantilla_de_seguimiento();
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+        $lead_on     = $this->crear_lead_con_seguimiento_pendiente();
+        $resultado_on = $service->force_followup_now($lead_on);
+        $this->assertSame('verificacion', $resultado_on['via'], 'Interruptor prendido: el seguimiento del tramo debería quedar retenido.');
+        $msg_on = LeadMessage::query()->where('lead_id', $lead_on->id)->where('is_followup', true)->first();
+        $this->assertNotNull($msg_on);
+        $this->assertTrue((bool) $msg_on->requiere_verificacion);
+        $this->assertNull($msg_on->whatsapp_message_id, 'No debería haber salido nada.');
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+        $lead_off     = $this->crear_lead_con_seguimiento_pendiente();
+        $resultado_off = $service->force_followup_now($lead_off);
+        $this->assertSame('template', $resultado_off['via'], 'Interruptor apagado: el seguimiento debería salir directo por plantilla.');
+        $this->assertNotEmpty($espia->envios, 'Debería haberse pedido enviar la plantilla.');
+
+        $lead_manual     = $this->crear_lead_con_seguimiento_pendiente();
+        $lead_manual->requiere_verificacion_mensajes = true;
+        $lead_manual->save();
+        $resultado_manual = $service->force_followup_now($lead_manual);
+        $this->assertSame('verificacion', $resultado_manual['via'], 'Con el interruptor apagado pero el escudo por-lead prendido, el seguimiento tiene que seguir retenido.');
     }
 }
