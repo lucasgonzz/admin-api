@@ -4,9 +4,16 @@ namespace Tests\Feature;
 
 use App\Models\Admin;
 use App\Models\AdminSetting;
+use App\Models\AiSystemPrompt;
 use App\Models\Lead;
+use App\Models\SyncedGithubFile;
+use App\Services\LeadAiService;
 use App\Services\LeadWhatsappOnboardingSettings;
+use App\Services\WhatsappProtocolService;
+use App\Helpers\AppTime;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -24,6 +31,22 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
     use DatabaseTransactions;
 
     private const ENDPOINT_SETTINGS = '/api/admin/settings/lead-whatsapp-onboarding';
+
+    /**
+     * Con QUEUE_CONNECTION=sync (testing), un job con delay() se ejecuta IGUAL en el acto en vez
+     * de esperar — así que crear un LeadMessage 'sugerido' dispara el auto-envío de respaldo antes
+     * de que el test llegue a la aserción. Los casos que miden el estado recién creado del mensaje
+     * (no el auto-envío en sí, que es otra funcionalidad) fakean la cola para medir en el momento
+     * correcto.
+     *
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Queue::fake();
+    }
 
     /**
      * Crea un admin para autenticar contra los endpoints.
@@ -192,5 +215,228 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $lead->save();
         $lead->refresh();
         $this->assertTrue((bool) $lead->requiere_verificacion_mensajes);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* (f)-(j) Extensión: el gate de agendamiento de LeadAiService          */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Instancia de LeadAiService con requires_agendamiento_verification_gate() y
+     * create_message_and_update_lead() expuestos (son protected). La subclase no cambia lógica.
+     *
+     * @return LeadAiService
+     */
+    private function service(): LeadAiService
+    {
+        return new class extends LeadAiService {
+            /**
+             * @param Lead                 $lead
+             * @param array<string, mixed> $parsed
+             *
+             * @return bool
+             */
+            public function gate(Lead $lead, array $parsed): bool
+            {
+                return $this->requires_agendamiento_verification_gate($lead, $parsed);
+            }
+
+            /**
+             * @param Lead                 $lead
+             * @param array<string, mixed> $parsed
+             *
+             * @return \App\Models\LeadMessage
+             */
+            public function crear(Lead $lead, array $parsed): \App\Models\LeadMessage
+            {
+                return $this->create_message_and_update_lead($lead, $parsed, false);
+            }
+
+            /**
+             * @param Lead $lead
+             *
+             * @return \App\Models\LeadMessage
+             */
+            public function segunda_llamada(Lead $lead): \App\Models\LeadMessage
+            {
+                return $this->generate_suggestion_with_availability($lead, false, null, true);
+            }
+        };
+    }
+
+    /**
+     * Fila mínima de AiSystemPrompt + SyncedGithubFile para que build_system_prompt() no tire.
+     * Solo hace falta para el caso (i), que sale de verdad a (un Http::fake de) la API.
+     *
+     * @return void
+     */
+    private function sembrar_prompt_y_protocolo(): void
+    {
+        AiSystemPrompt::create([
+            'contenido'   => 'System prompt de prueba.',
+            'descripcion' => 'Fila mínima para que build_system_prompt() no tire.',
+            'activa'      => true,
+        ]);
+        SyncedGithubFile::create([
+            'key'       => WhatsappProtocolService::SYSTEM_BASE_KEY,
+            'repo_path' => 'comercial/agente_leads/system_base.md',
+            'content'   => 'System base de prueba.',
+            'synced_at' => AppTime::now(),
+        ]);
+    }
+
+    /**
+     * Las 6 condiciones de requires_agendamiento_verification_gate(), reusadas por (f) y (g).
+     *
+     * @return array<string, array{0: string, 1: array<string, mixed>}> status del lead => [status, parsed]
+     */
+    private function escenarios_del_gate(): array
+    {
+        return [
+            'lead ya en el tramo'          => ['solicita_disponibilidad', []],
+            'estado_sugerido entra al tramo' => ['calificado', ['estado_sugerido' => 'demo_agendada']],
+            'agendar_demo'                  => ['calificado', ['agendar_demo' => true]],
+            'cancelar_demo'                 => ['calificado', ['cancelar_demo' => true]],
+            'confirmar_ingreso'             => ['ingresando_demo', ['confirmar_ingreso' => true]],
+            'marcar_no_ingreso'             => ['ingresando_demo', ['marcar_no_ingreso' => true]],
+        ];
+    }
+
+    /**
+     * (f) Interruptor en true (default): las 6 condiciones del gate siguen reteniendo, exactamente
+     * como antes de esta misión.
+     */
+    public function test_global_en_true_las_seis_condiciones_del_gate_retienen(): void
+    {
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+        $service = $this->service();
+
+        foreach ($this->escenarios_del_gate() as $nombre => list($status, $parsed)) {
+            $lead = $this->crear_lead($status);
+            $this->assertTrue($service->gate($lead, $parsed), "Escenario '$nombre': el gate debería retener con el interruptor prendido.");
+        }
+    }
+
+    /**
+     * (g) Interruptor en false: NINGUNA de las 6 condiciones retiene. Es el corazón del pedido de
+     * Lucas: con el interruptor apagado, las acciones de agenda (agendar, cancelar, confirmar
+     * ingreso, marcar no ingreso) dejan de esperar aprobación.
+     */
+    public function test_global_en_false_ninguna_de_las_seis_condiciones_retiene(): void
+    {
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+        $service = $this->service();
+
+        foreach ($this->escenarios_del_gate() as $nombre => list($status, $parsed)) {
+            $lead = $this->crear_lead($status);
+            $this->assertFalse($service->gate($lead, $parsed), "Escenario '$nombre': el gate no debería retener con el interruptor apagado.");
+        }
+    }
+
+    /**
+     * (h) 🔴 El bypass no puede quedar a medias. Interruptor false, lead en demo_agendada, parsed
+     * neutro (sin requiere_verificacion explícito) → el paquete se aplica en el acto: sin
+     * pending_actions, sin requiere_verificacion. Control positivo en el mismo test: interruptor
+     * true → el paquete queda diferido (pending_actions con el parsed crudo, requiere_verificacion).
+     */
+    public function test_el_bypass_completo_no_deja_pending_actions_ni_requiere_verificacion(): void
+    {
+        $service = $this->service();
+        $parsed  = [
+            'mensaje_sugerido' => 'Dale, nos vemos en la demo.',
+            'estado_sugerido'  => 'demo_agendada',
+            'razonamiento'     => '',
+        ];
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+        $lead_on = $this->crear_lead('demo_agendada');
+        $msg_on  = $service->crear($lead_on, $parsed);
+        $this->assertNotEmpty($msg_on->pending_actions, 'Con el interruptor prendido, el paquete debería quedar diferido.');
+        $this->assertTrue((bool) $msg_on->requiere_verificacion);
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+        $lead_off = $this->crear_lead('demo_agendada');
+        $msg_off  = $service->crear($lead_off, $parsed);
+        $this->assertEmpty($msg_off->pending_actions, 'Con el interruptor apagado, el paquete NO debería quedar diferido (R1/R2 a medias).');
+        $this->assertFalse((bool) $msg_off->requiere_verificacion, 'Con el interruptor apagado, el mensaje no debería requerir verificación (R2 sin gatear).');
+    }
+
+    /**
+     * (i) 🔴 R3: la segunda llamada (la que ofrece horarios) eleva el estado a
+     * solicita_disponibilidad SIEMPRE (no se gatea, ver Cambio B), pero la RETENCIÓN de esa
+     * elevación sí depende del interruptor. Sin este caso, el mensaje más típico del tramo de
+     * agenda seguiría retenido aunque el interruptor esté apagado.
+     */
+    public function test_segunda_llamada_eleva_el_estado_siempre_pero_solo_retiene_si_el_interruptor_esta_prendido(): void
+    {
+        $this->sembrar_prompt_y_protocolo();
+        Http::fake([
+            'api.anthropic.com/*' => Http::response([
+                'stop_reason' => 'end_turn',
+                'content'     => [[
+                    'type' => 'text',
+                    'text' => json_encode([
+                        'mensaje_sugerido'   => 'Tengo lugar mañana a las 10.',
+                        'estado_sugerido'    => 'calificado',
+                        'razonamiento'       => '',
+                        'horarios_ofrecidos' => ['2026-09-02 10:00'],
+                    ], JSON_UNESCAPED_UNICODE),
+                ]],
+            ], 200),
+            '*' => Http::response(['ok' => true], 200),
+        ]);
+
+        /*
+         * Nota de método: se afirma sobre suggested_lead_status (lo que el mensaje registró que
+         * había que aplicar), no sobre $lead->status directamente. $lead->status SÍ se aplica en
+         * el acto para el paquete RETENIDO (FIX 6/7/2026, caso especial de
+         * create_pending_agendamiento_message) pero para el paquete APLICADO recién se aplica al
+         * enviarse de verdad (LeadSuggestionSendService), que acá está deliberadamente
+         * deshabilitado por Queue::fake() del setUp() — no es parte de lo que este caso mide.
+         * suggested_lead_status es la señal fiel de que la elevación ocurrió en el $parsed usado
+         * para construir el mensaje, sin importar el camino de envío.
+         */
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+        $lead_on = $this->crear_lead('calificado');
+        $msg_on  = $this->service()->segunda_llamada($lead_on);
+        $this->assertSame('solicita_disponibilidad', $msg_on->suggested_lead_status, 'La elevación de estado tiene que ocurrir con el interruptor prendido.');
+        $this->assertTrue((bool) $msg_on->requiere_verificacion, 'Con el interruptor prendido, el mensaje de disponibilidad debe retenerse.');
+        $this->assertNotEmpty($msg_on->pending_actions);
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+        $lead_off = $this->crear_lead('calificado');
+        $msg_off  = $this->service()->segunda_llamada($lead_off);
+        $this->assertSame('solicita_disponibilidad', $msg_off->suggested_lead_status, 'La elevación de estado NO se gatea: tiene que ocurrir igual con el interruptor apagado.');
+        $this->assertFalse((bool) $msg_off->requiere_verificacion, 'Con el interruptor apagado, el mensaje de disponibilidad NO debería quedar retenido.');
+        $this->assertEmpty($msg_off->pending_actions, 'Con el interruptor apagado, el mensaje de disponibilidad debería salir aplicado, no diferido.');
+    }
+
+    /**
+     * (j) Lo que el interruptor NUNCA apaga: el flag por-lead prendido a mano, y el
+     * requiere_verificacion explícito que devuelva Claude en su propia respuesta.
+     */
+    public function test_global_en_false_no_apaga_el_flag_por_lead_ni_el_requiere_verificacion_explicito(): void
+    {
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+        $service = $this->service();
+        $parsed  = [
+            'mensaje_sugerido' => 'Todo bien, seguimos coordinando.',
+            'estado_sugerido'  => 'calificado',
+            'razonamiento'     => '',
+        ];
+
+        $lead_manual = $this->crear_lead('calificado');
+        $lead_manual->requiere_verificacion_mensajes = true;
+        $lead_manual->save();
+        $msg_manual = $service->crear($lead_manual, $parsed);
+        $this->assertNotEmpty($msg_manual->pending_actions, 'El flag por-lead prendido a mano tiene que retener, apagado o prendido el interruptor global.');
+        $this->assertTrue((bool) $msg_manual->requiere_verificacion);
+
+        $lead_claude = $this->crear_lead('calificado');
+        $parsed_claude = $parsed;
+        $parsed_claude['requiere_verificacion'] = true;
+        $msg_claude = $service->crear($lead_claude, $parsed_claude);
+        $this->assertNotEmpty($msg_claude->pending_actions, 'El requiere_verificacion explícito de Claude tiene que retener, apagado o prendido el interruptor global.');
+        $this->assertTrue((bool) $msg_claude->requiere_verificacion);
     }
 }
