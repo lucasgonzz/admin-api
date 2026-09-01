@@ -161,8 +161,8 @@ class LeadFollowupService
              * seguimiento solo. El escudo por-lead siempre gana, apagado o prendido el interruptor.
              */
             $retener_seguimiento = (bool) $fresh->requiere_verificacion_mensajes
-                || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
-                    && in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true));
+                || (in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)
+                    && LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad());
 
             if ($retener_seguimiento) {
                 $this->create_pending_followup_for_verification($fresh, $template, $followup_number);
@@ -270,8 +270,8 @@ class LeadFollowupService
             // INTERRUPTOR GLOBAL (1/9/2026): el operando requiere_verificacion_mensajes es
             // deliberado, no redundante — ver el comentario del otro call site en este archivo.
             $retener_seguimiento = (bool) $fresh->requiere_verificacion_mensajes
-                || (LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad()
-                    && in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true));
+                || (in_array($fresh->status, LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)
+                    && LeadWhatsappOnboardingSettings::get_auto_activar_verificacion_al_solicitar_disponibilidad());
 
             if ($retener_seguimiento) {
                 // Tramo de agenda (solicita_disponibilidad en adelante) con el interruptor global

@@ -353,9 +353,16 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
             'razonamiento'     => '',
         ];
 
-        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+        /* El lead se crea con el interruptor APAGADO a propósito: crearlo directo en 'demo_agendada'
+         * con el interruptor prendido dispararía también el latch de Lead::booted() (entra a la
+         * ventana en el mismo save()), y entonces este control positivo daría verde por el flag
+         * por-lead en vez de por el gate/Cambios A-C que este test mide. */
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
         $lead_on = $this->crear_lead('demo_agendada');
-        $msg_on  = $service->crear($lead_on, $parsed);
+        $this->assertFalse((bool) $lead_on->requiere_verificacion_mensajes, 'Montaje inválido: el lead nació marcado.');
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
+        $msg_on = $service->crear($lead_on, $parsed);
         $this->assertNotEmpty($msg_on->pending_actions, 'Con el interruptor prendido, el paquete debería quedar diferido.');
         $this->assertTrue((bool) $msg_on->requiere_verificacion);
 
@@ -504,16 +511,35 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
      * Lead nuevo en demo_agendada, listo para force_followup_now() contra la regla/plantilla ya
      * sembradas.
      *
+     * 🔴 Se crea SIEMPRE con el interruptor global apagado, sin importar qué escenario lo llame
+     * después: crear un lead directo en 'demo_agendada' con el interruptor prendido dispara TAMBIÉN
+     * el latch de Lead::booted() (entra a la ventana en el mismo save()), que prendería
+     * requiere_verificacion_mensajes por su cuenta — y entonces el control positivo de (k) daría
+     * verde por el flag por-lead, no por el operando de LeadFollowupService que este test mide.
+     * Se restaura el valor del interruptor pedido recién después, ya con el lead creado.
+     *
+     * @param string $interruptor_deseado '1' o '0': el valor que el interruptor debe tener para el
+     *                                    llamado real a force_followup_now(), ya con el lead a salvo del latch.
+     *
      * @return Lead
      */
-    private function crear_lead_con_seguimiento_pendiente(): Lead
+    private function crear_lead_con_seguimiento_pendiente(string $interruptor_deseado): Lead
     {
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
+
         $lead                = new Lead();
         $lead->uuid          = (string) Str::uuid();
         $lead->contact_name  = 'Juana Pérez';
         $lead->phone         = '+5493417778899';
         $lead->status        = 'demo_agendada';
         $lead->save();
+
+        $this->assertFalse(
+            (bool) $lead->requiere_verificacion_mensajes,
+            'Montaje inválido: el lead nació con el flag prendido, contamina el escenario que este test mide.'
+        );
+
+        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, $interruptor_deseado);
 
         return $lead;
     }
@@ -529,8 +555,7 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $service = app(LeadFollowupService::class);
         $this->sembrar_regla_y_plantilla_de_seguimiento();
 
-        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '1');
-        $lead_on     = $this->crear_lead_con_seguimiento_pendiente();
+        $lead_on      = $this->crear_lead_con_seguimiento_pendiente('1');
         $resultado_on = $service->force_followup_now($lead_on);
         $this->assertSame('verificacion', $resultado_on['via'], 'Interruptor prendido: el seguimiento del tramo debería quedar retenido.');
         $msg_on = LeadMessage::query()->where('lead_id', $lead_on->id)->where('is_followup', true)->first();
@@ -538,13 +563,12 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
         $this->assertTrue((bool) $msg_on->requiere_verificacion);
         $this->assertNull($msg_on->whatsapp_message_id, 'No debería haber salido nada.');
 
-        AdminSetting::set(LeadWhatsappOnboardingSettings::KEY_AUTO_ACTIVAR_VERIFICACION_AL_SOLICITAR_DISPONIBILIDAD, '0');
-        $lead_off     = $this->crear_lead_con_seguimiento_pendiente();
+        $lead_off      = $this->crear_lead_con_seguimiento_pendiente('0');
         $resultado_off = $service->force_followup_now($lead_off);
         $this->assertSame('template', $resultado_off['via'], 'Interruptor apagado: el seguimiento debería salir directo por plantilla.');
         $this->assertNotEmpty($espia->envios, 'Debería haberse pedido enviar la plantilla.');
 
-        $lead_manual     = $this->crear_lead_con_seguimiento_pendiente();
+        $lead_manual = $this->crear_lead_con_seguimiento_pendiente('0');
         $lead_manual->requiere_verificacion_mensajes = true;
         $lead_manual->save();
         $resultado_manual = $service->force_followup_now($lead_manual);

@@ -807,12 +807,14 @@ TXT;
 
         $parsed = $this->parse_json_response($text);
 
-        /* Mismo gate que en la primera llamada. Este tramo ya fuerza revisión humana por estado
-         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO), pero eso protege el AGENDAMIENTO, no lo
-         * que el mensaje afirma: un lead que acepta un horario y de paso pregunta algo del
-         * sistema se lleva las dos cosas en la misma respuesta, y sin esto la segunda mitad
-         * saldría sin respaldo. Coordinar la agenda es `conversacional` y no exige fuentes, así
-         * que el camino normal no se toca. */
+        /* Mismo gate que en la primera llamada. Este tramo fuerza revisión humana por estado
+         * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO) cuando el interruptor global de Cuenta está
+         * prendido (condicional desde el 1/9/2026, ver retencion_por_tramo_de_agenda_activa()),
+         * pero eso protege el AGENDAMIENTO, no lo que el mensaje afirma: un lead que acepta un
+         * horario y de paso pregunta algo del sistema se lleva las dos cosas en la misma
+         * respuesta, y sin esto la segunda mitad saldría sin respaldo documental — con o sin esa
+         * otra protección. Coordinar la agenda es `conversacional` y no exige fuentes, así que el
+         * camino normal no se toca. */
         $parsed = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos);
 
         /*
@@ -839,12 +841,14 @@ TXT;
          * agendamiento (came_from_availability_request = true). Desde la óptica de Claude la
          * disponibilidad "ya se resolvió", así que devuelve solicita_disponibilidad: false y
          * estado calificado. Pero el mensaje resultante es justamente el que ofrece los horarios
-         * al lead y, por regla de negocio, tiene que quedar en el tramo de agenda para que
-         * requiera verificación humana (delay 1800s) antes de enviarse. Se fuerza el estado y la
-         * verificación acá, salvo que Claude ya haya escalado el estado por su cuenta (ej.
-         * demo_agendada tras confirmar el slot, o pidió otra vez disponibilidad porque la fecha
-         * cae fuera del JSON). No pisar esos casos: solo elevar cuando el estado sugerido quedó
-         * por debajo del tramo (típicamente 'calificado' o vacío).
+         * al lead, así que el ESTADO se eleva a solicita_disponibilidad siempre (pertenece al
+         * tramo de agenda pase lo que pase). La VERIFICACIÓN que acompañaba esa elevación era
+         * incondicional hasta el 1/9/2026; desde esa fecha depende del interruptor global de
+         * Cuenta (ver el bloque de abajo). Se fuerza el estado acá, salvo que Claude ya haya
+         * escalado el estado por su cuenta (ej. demo_agendada tras confirmar el slot, o pidió
+         * otra vez disponibilidad porque la fecha cae fuera del JSON). No pisar esos casos: solo
+         * elevar cuando el estado sugerido quedó por debajo del tramo (típicamente 'calificado' o
+         * vacío).
          */
         if ($came_from_availability_request) {
             $estado_segunda = isset($parsed['estado_sugerido']) ? trim((string) $parsed['estado_sugerido']) : '';
@@ -6063,10 +6067,12 @@ TXT;
 
         /*
          * REGLA DE NEGOCIO (1/7/2026, decisión de Lucas): desde que un lead entra a coordinar la
-         * agenda de la demo hasta que llega a closer_activo, todo mensaje que arma Claude requiere
+         * agenda de la demo hasta que llega a closer_activo, el mensaje que arma Claude requiere
          * revisión humana antes de salir — es el tramo de mayor riesgo (bugs de colisión de
-         * horario y confusión de fecha, ver prompts 226/227) y de leads más valiosos. Se fuerza
-         * sin importar lo que haya devuelto Claude en su propio campo requiere_verificacion.
+         * horario y confusión de fecha, ver prompts 226/227) y de leads más valiosos. Esta regla
+         * fue incondicional hasta el 1/9/2026: desde esa fecha depende del interruptor global de
+         * Cuenta (ver bloque de abajo) — el flag por-lead requiere_verificacion_mensajes sigue
+         * forzando siempre, sin excepción, sea cual sea el interruptor.
          * Se evalúa acá, al final de la función, sobre el $estado ya recalculado por todas las
          * inferencias conversacionales de arriba (confirmar_ingreso, confirmar_fin_demo,
          * marcar_no_ingreso, colisión/slot inválido) — es el valor que realmente termina
@@ -6088,10 +6094,13 @@ TXT;
          * Lucas), ese respaldo por tramo también queda condicionado al interruptor global de
          * Cuenta (retencion_por_tramo_de_agenda_activa()): el flag por-lead sigue forzando siempre,
          * sin excepción, sea cual sea el interruptor.
+         *
+         * El flag por-lead va primero en el OR: es un atributo ya cargado en memoria, así que
+         * cuando está prendido el corto-circuito evita el SELECT del getter del interruptor.
          */
         if (! $for_approval && ((bool) $lead->requiere_verificacion_mensajes
-            || ($this->retencion_por_tramo_de_agenda_activa()
-                && in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)))) {
+            || (in_array($estado, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)
+                && $this->retencion_por_tramo_de_agenda_activa()))) {
             $req_verif = true;
         }
 
