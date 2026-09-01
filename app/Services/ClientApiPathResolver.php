@@ -31,7 +31,12 @@ class ClientApiPathResolver
      * Prefijo de la cuenta de hosting compartido, relativo al home del usuario SSH.
      *
      * Está como constante y no suelto en cinco strings porque, sin la barra del final, ES la raíz de
-     * la cuenta compartida: el directorio que la guarda de más abajo tiene prohibido dejar borrar.
+     * la cuenta compartida: el directorio que jamás se puede vaciar.
+     *
+     * 🔴 Y por eso GuardaDeBorradoDeSpa la LEE de acá para armar su lista de raíces prohibidas, en
+     * vez de repetir el string. Si algún día cambia el dominio de la cuenta, la guarda se mueve
+     * sola; si tuviera su propia copia, quedaría vieja en silencio y la raíz de la cuenta pasaría a
+     * ser borrable. Hay un test que lo fija leyendo esta misma constante.
      *
      * @var string
      */
