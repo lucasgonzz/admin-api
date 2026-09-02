@@ -68,16 +68,35 @@ class LeadAiSuggestionScheduler
         // Nuevo inbound del lead: descartar sugerencias pendientes obsoletas y reprogramar Claude.
         // (Mismo criterio que SupportAiSuggestionScheduler: el lead siguió escribiendo.)
         $delay_seconds = LeadWhatsappOnboardingSettings::get_ai_suggestion_delay_seconds();
-        $this->clear_stale_pending_suggestions($lead_id);
+
+        /*
+         * El barrido puede saltear sugerencias que están saliendo por WhatsApp justo ahora. Cuando
+         * eso pasa, el GenerateLeadAiSuggestionJob que se despacha unas líneas más abajo se va a
+         * omitir (ve la sugerencia todavía en 'sugerido'), y el mensaje que el lead acaba de
+         * escribir quedaría sin respuesta.
+         *
+         * 🔴 Acá NO se resuelve. El re-disparo lo hace LeadSuggestionSendService cuando el envío
+         * termina, consumiendo la marca de inbound diferido que el barrido dejó por cada id
+         * salteado. Es a propósito: desde acá lo único que se podría hacer es adivinar un plazo
+         * ("reintentá en 60s"), y un plazo que casi siempre alcanza es la misma familia de error que
+         * esta misión arregla — con 6 partes y reintentos el envío pasa los 130 segundos. El único
+         * que sabe cuándo terminó el envío es el que lo estaba haciendo.
+         *
+         * El retorno queda en el log para que, si esto vuelve a aparecer, se vea de una que hubo un
+         * envío en curso en ese momento.
+         */
+        $hubo_envios_en_curso = $this->clear_stale_pending_suggestions($lead_id);
+
         $schedule_token = $this->bump_schedule_token($lead_id);
 
         $this->dispatch_generate_job($lead_id, $schedule_token, $delay_seconds);
 
         Log::channel('daily')->debug('LeadAiSuggestionScheduler: sugerencia IA reprogramada.', [
-            'lead_id'         => $lead_id,
-            'delay_seconds'   => $delay_seconds,
-            'schedule_token'  => $schedule_token,
-            'inbound_count'   => $lead_inbound_count,
+            'lead_id'                => $lead_id,
+            'delay_seconds'          => $delay_seconds,
+            'schedule_token'         => $schedule_token,
+            'inbound_count'          => $lead_inbound_count,
+            'hubo_envios_en_curso'   => $hubo_envios_en_curso,
         ]);
     }
 
@@ -144,15 +163,19 @@ class LeadAiSuggestionScheduler
     }
 
     /**
-     * Elimina sugerencias IA pendientes de aprobación cuando el lead sigue escribiendo.
+     * Elimina sugerencias IA pendientes de aprobación cuando el lead sigue escribiendo, salteando
+     * las que en este instante se están enviando por WhatsApp en otro request.
      *
      * Cancela también jobs de envío automático asociados y notifica a la conversación abierta.
      *
      * @param int $lead_id
      *
-     * @return void
+     * @return bool True si se salteó al menos una sugerencia por estar en pleno envío. El llamador
+     *              lo usa sólo para el log: la reprogramación de la sugerencia siguiente la dispara
+     *              el propio servicio de envío al terminar, con la marca de inbound diferido que se
+     *              anota acá.
      */
-    private function clear_stale_pending_suggestions(int $lead_id): void
+    private function clear_stale_pending_suggestions(int $lead_id): bool
     {
         $pending_ids = LeadMessage::query()
             ->where('lead_id', $lead_id)
@@ -161,27 +184,76 @@ class LeadAiSuggestionScheduler
             ->pluck('id');
 
         if ($pending_ids->isEmpty()) {
-            return;
+            return false;
         }
 
-        Log::channel('daily')->info('LeadAiSuggestionScheduler: sugerencias pendientes descartadas (nuevo mensaje del lead).', [
-            'lead_id'      => $lead_id,
-            'message_ids'  => $pending_ids->all(),
-        ]);
+        $en_curso      = new LeadSuggestionEnvioEnCurso();
+        $ids_a_borrar  = [];
+        $ids_salteados = [];
 
-        $auto_send_scheduler = new LeadAiSuggestionAutoSendScheduler();
         foreach ($pending_ids as $pending_id) {
-            $auto_send_scheduler->cancel_for_message((int) $pending_id);
+            /*
+             * 🔴 Esta sugerencia se está enviando por WhatsApp EN ESTE MOMENTO, en otro request.
+             * Borrarla acá es exactamente lo que produjo el incidente: el lead recibía el mensaje
+             * —su contestador automático contestaba, que es lo que dispara este mismo barrido— y el
+             * hilo le mostraba al setter un bloque rojo "No se pudo enviar la sugerencia por
+             * WhatsApp" que era falso. LeadMessage no usa SoftDeletes: el DELETE es real y no hay
+             * vuelta atrás.
+             *
+             * NO se resuelve con una transacción ni con un lock de fila: al que hay que esperar no
+             * es un UPDATE de la base, es un POST a Kapso con pausas de 1200ms entre partes y
+             * backoff de hasta 3500ms por reintento. Tener una transacción abierta durante segundos
+             * contra la API de WhatsApp es peor enfermedad que la que cura.
+             */
+            if ($en_curso->esta_en_curso((int) $pending_id)) {
+                $ids_salteados[] = (int) $pending_id;
+
+                /*
+                 * Y hay que dejar anotado que el inbound llegó: como esta sugerencia sobrevive, el
+                 * GenerateLeadAiSuggestionJob que se despacha abajo la va a ver todavía en
+                 * 'sugerido' y se va a omitir (has_pending_non_followup_suggestion), dejando al lead
+                 * sin respuesta. LeadSuggestionSendService consume esta marca al terminar el envío y
+                 * vuelve a llamar a schedule_after_lead_inbound(), ya con el mensaje en 'enviado'.
+                 */
+                $en_curso->anotar_inbound_durante_el_envio((int) $pending_id);
+
+                continue;
+            }
+
+            $ids_a_borrar[] = (int) $pending_id;
         }
 
-        LeadMessage::query()->whereIn('id', $pending_ids)->delete();
-
-        $lead = Lead::query()->find($lead_id);
-        if ($lead !== null) {
-            $lead->sync_suggestion_flags();
+        if (! empty($ids_salteados)) {
+            Log::channel('daily')->info('LeadAiSuggestionScheduler: sugerencias NO descartadas porque se están enviando en este momento.', [
+                'lead_id'     => $lead_id,
+                'message_ids' => $ids_salteados,
+            ]);
         }
 
-        LeadBroadcastService::emit_conversation_updated($lead_id);
+        /* Si todo lo pendiente estaba en vuelo no queda nada que borrar: no se toca la base ni se
+           emite el broadcast, que sólo tendría sentido si algo hubiera cambiado en el hilo. */
+        if (! empty($ids_a_borrar)) {
+            Log::channel('daily')->info('LeadAiSuggestionScheduler: sugerencias pendientes descartadas (nuevo mensaje del lead).', [
+                'lead_id'      => $lead_id,
+                'message_ids'  => $ids_a_borrar,
+            ]);
+
+            $auto_send_scheduler = new LeadAiSuggestionAutoSendScheduler();
+            foreach ($ids_a_borrar as $pending_id) {
+                $auto_send_scheduler->cancel_for_message($pending_id);
+            }
+
+            LeadMessage::query()->whereIn('id', $ids_a_borrar)->delete();
+
+            $lead = Lead::query()->find($lead_id);
+            if ($lead !== null) {
+                $lead->sync_suggestion_flags();
+            }
+
+            LeadBroadcastService::emit_conversation_updated($lead_id);
+        }
+
+        return ! empty($ids_salteados);
     }
 
     /**
