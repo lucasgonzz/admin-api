@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\WhatsappSendService;
@@ -191,6 +192,22 @@ class MensajeDeTextoLibreAUnLeadTest extends TestCase
         $respuesta->assertJson(['ventana_abierta' => false]);
         $this->assertCount(0, $espia->envios, 'Con la ventana cerrada no se puede haber intentado ningún envío.');
         $this->assertSame(0, $this->salientes_de($lead), 'Con la ventana cerrada no se puede haber creado ninguna fila.');
+
+        /* 🔴 El dato que hace accionable este 422, y el que es fácil que quede en null sin que nada
+           lo denuncie: window_state() solo mira entrantes DENTRO de la ventana, así que cuando está
+           cerrada devuelve null y hay que ir a buscarlo aparte. Sin esta aserción, un
+           last_inbound_at siempre nulo pasa el test igual. */
+        $cuerpo = $respuesta->json();
+        $this->assertNotNull(
+            $cuerpo['last_inbound_at'],
+            'El 422 tiene que decir cuándo escribió el lead por última vez: sin eso no se distingue '
+                . '"escribió hace 25 hs" de "no escribió nunca".'
+        );
+        $this->assertStringContainsString(
+            now()->subHours(30)->format('Y-m-d'),
+            (string) $cuerpo['last_inbound_at'],
+            'last_inbound_at tiene que ser la fecha del entrante real, no cualquier fecha.'
+        );
     }
 
     /**
@@ -276,6 +293,51 @@ class MensajeDeTextoLibreAUnLeadTest extends TestCase
         $respuesta->assertStatus(422);
         $this->assertCount(0, $espia->envios);
         $this->assertSame(0, $this->salientes_de($lead));
+
+        /* 🔴 Afirmar el MOTIVO y no solo el 422. Sin esto el test pasa aunque se borre el freno del
+           teléfono: sin teléfono, window_state('') corta temprano y devuelve la ventana cerrada, así
+           que el código roto daría el mismo 422, los mismos 0 envíos y las mismas 0 filas. Los dos
+           caminos son indistinguibles por el status. */
+        $this->assertStringContainsString(
+            'no tiene teléfono cargado',
+            (string) $respuesta->json('message'),
+            'El 422 tiene que ser el del teléfono, no el de la ventana.'
+        );
+    }
+
+    /**
+     * Un lead ya promovido a cliente tampoco recibe, aunque su status no sea cerrado_ganado.
+     *
+     * Es la otra mitad del freno: `promoted_client_id` y `status` se chequean por separado porque
+     * un lead puede estar promovido con el status todavía en otro tramo.
+     *
+     * @return void
+     */
+    public function test_un_lead_con_promoted_client_id_tampoco_recibe()
+    {
+        $lead = $this->crear_lead('Promovido');
+        $this->entrante_del_lead($lead, 1);
+
+        /* Cliente real: promoted_client_id tiene foreign key contra clients. */
+        $cliente            = new Client();
+        $cliente->name      = 'Cliente del lead promovido';
+        $cliente->phone     = '+5493416660009';
+        $cliente->is_active = true;
+        $cliente->save();
+
+        /* Status intacto a propósito: lo que tiene que frenar acá es promoted_client_id solo. */
+        $lead->promoted_client_id = $cliente->id;
+        $lead->save();
+
+        $espia = $this->espiar_sender();
+
+        $respuesta = $this->postJson('/api/claude/leads/' . $lead->id . '/message', [
+            'content' => 'Hola!',
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertCount(0, $espia->envios);
+        $this->assertSame(0, $this->salientes_de($lead));
     }
 
     /**
@@ -305,6 +367,66 @@ class MensajeDeTextoLibreAUnLeadTest extends TestCase
         $segunda->assertJson(['turno_del_lead' => true]);
         $this->assertCount(1, $espia->envios, 'El segundo mensaje no se puede haber intentado.');
         $this->assertSame(1, $this->salientes_de($lead), 'Tiene que haber quedado una sola fila.');
+
+        /* Cuando el turno lo ocupó Claude, el 422 tiene que decirlo: es la diferencia entre
+           "reintentá con la válvula" y "OJO, ese mensaje ya le llegó". */
+        $this->assertTrue(
+            (bool) $segunda->json('ocupado_por.lo_mando_claude'),
+            'El turno lo ocupó un envío de este mismo endpoint y el 422 tiene que reconocerlo.'
+        );
+        $this->assertStringContainsString(
+            'YA LLEGÓ',
+            (string) $segunda->json('message'),
+            'Ante un posible reintento, el 422 tiene que avisar que repetir duplica el mensaje.'
+        );
+    }
+
+    /**
+     * Una respuesta escrita a mano por una persona también ocupa el turno, y el 422 la distingue
+     * de un envío de Claude.
+     *
+     * 🔴 Este es el caso que originó la misión y el que más importa que esté bien: si el closer ya
+     * le contestó algo al lead, mandarle encima un mensaje automático es peor que no mandar nada.
+     * Pero la salida NO es la misma que cuando el turno lo ocupó Claude: acá repetir con la válvula
+     * puede ser exactamente lo que corresponde, y allá sería duplicarle el mensaje al lead.
+     *
+     * @return void
+     */
+    public function test_una_respuesta_de_una_persona_ocupa_el_turno_y_el_422_la_distingue()
+    {
+        $lead  = $this->crear_lead('Contestado a mano');
+        $espia = $this->espiar_sender();
+
+        $this->entrante_del_lead($lead, 3);
+
+        /* Así graba el panel un envío manual del closer: sender setter, enviado, con id de Meta y
+           SIN sent_via='claude'. */
+        $manual                      = new LeadMessage();
+        $manual->lead_id             = $lead->id;
+        $manual->sender              = 'setter';
+        $manual->content             = 'Dale, en qué horario te queda cómodo?';
+        $manual->status              = 'enviado';
+        $manual->whatsapp_message_id = 'wamid.manual.test';
+        $manual->sent_at             = now();
+        $manual->save();
+
+        $respuesta = $this->postJson('/api/claude/leads/' . $lead->id . '/message', [
+            'content' => 'Mensaje automático encima del del closer.',
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $respuesta->assertJson(['turno_del_lead' => true]);
+        $this->assertCount(0, $espia->envios, 'No se puede pisar la respuesta que escribió una persona.');
+
+        $this->assertFalse(
+            (bool) $respuesta->json('ocupado_por.lo_mando_claude'),
+            'El turno lo ocupó una persona: el 422 no puede atribuírselo a Claude.'
+        );
+        $this->assertStringContainsString(
+            'permitir_varios_por_turno',
+            (string) $respuesta->json('message'),
+            'Cuando contestó una persona, la salida ofrecida es la válvula, no una advertencia de duplicado.'
+        );
     }
 
     /**
@@ -357,6 +479,83 @@ class MensajeDeTextoLibreAUnLeadTest extends TestCase
 
         $segunda->assertStatus(200);
         $this->assertCount(2, $espia->envios);
+    }
+
+    /**
+     * 🔴 Con DOS leads del mismo teléfono, el turno se respeta igual.
+     *
+     * `leads.phone` no tiene índice único y el webhook engancha los entrantes al lead más reciente,
+     * así que un mismo número puede tener dos filas y todos sus mensajes caer en una sola. Mirando
+     * por `lead_id`, pegarle al OTRO id daba el turno por libre y dejaba mandar sin ningún tope:
+     * tres llamadas seguidas eran tres WhatsApps reales a la misma persona.
+     *
+     * @return void
+     */
+    public function test_dos_leads_del_mismo_telefono_comparten_el_turno()
+    {
+        $viejo = $this->crear_lead('Duplicado viejo');
+
+        $nuevo        = $this->crear_lead('Duplicado nuevo');
+        $nuevo->phone = $viejo->phone;
+        $nuevo->save();
+
+        $espia = $this->espiar_sender();
+
+        /* El entrante cae en el lead NUEVO, como hace el webhook. */
+        $this->entrante_del_lead($nuevo, 2);
+
+        /* Y la respuesta también. El turno queda ocupado para ese número. */
+        $this->postJson('/api/claude/leads/' . $nuevo->id . '/message', [
+            'content' => 'Respuesta al número.',
+        ], $this->headers())->assertStatus(200);
+
+        /* Pegarle al lead VIEJO, mismo teléfono, tiene que chocar con el mismo turno. */
+        $respuesta = $this->postJson('/api/claude/leads/' . $viejo->id . '/message', [
+            'content' => 'Segundo mensaje al mismo número, por el otro id.',
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $respuesta->assertJson(['turno_del_lead' => true]);
+        $this->assertCount(1, $espia->envios, 'El mismo número no puede recibir dos mensajes por tener dos filas de lead.');
+    }
+
+    /**
+     * 🔴 Un saliente del MISMO SEGUNDO que el entrante ocupa el turno igual.
+     *
+     * `lead_messages.created_at` es un timestamp sin fracción de segundo. Comparando por fecha, un
+     * saliente despachado dentro del mismo segundo que el entrante no es "posterior" a él y el
+     * turno quedaba libre habiendo respondido. Por eso la comparación es por `id`, que es lo que ya
+     * hace el criterio gemelo de `Lead::scopeRequiereRevision()`.
+     *
+     * @return void
+     */
+    public function test_un_saliente_del_mismo_segundo_que_el_entrante_ocupa_el_turno()
+    {
+        $lead  = $this->crear_lead('Empate de segundo');
+        $espia = $this->espiar_sender();
+
+        $entrante = $this->entrante_del_lead($lead, 1);
+
+        /* Saliente despachado, con el created_at pisado al MISMO segundo que el entrante. */
+        $saliente                      = new LeadMessage();
+        $saliente->lead_id             = $lead->id;
+        $saliente->sender              = 'setter';
+        $saliente->content             = 'Respuesta en el mismo segundo.';
+        $saliente->status              = 'enviado';
+        $saliente->whatsapp_message_id = 'wamid.empate.test';
+        $saliente->save();
+
+        DB::table('lead_messages')->where('id', $saliente->id)->update([
+            'created_at' => $entrante->created_at,
+        ]);
+
+        $respuesta = $this->postJson('/api/claude/leads/' . $lead->id . '/message', [
+            'content' => 'No tendría que salir: ya se respondió.',
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $respuesta->assertJson(['turno_del_lead' => true]);
+        $this->assertCount(0, $espia->envios, 'Un empate de segundo no puede liberar el turno.');
     }
 
     /**

@@ -192,7 +192,11 @@ class ClaudeLeadsAnalyticsController extends Controller
                     'body' => [
                         'content' => 'OBLIGATORIO. El texto tal cual lo va a leer el lead. No lleva variables ni plantilla.',
                         'context' => 'Opcional. Texto del aviso a admins si el envío falla.',
-                        'permitir_varios_por_turno' => 'Default false. Saltea el freno de un mensaje por turno.',
+                        'permitir_varios_por_turno' => 'Default false. Saltea el freno de un mensaje por turno. '
+                            . '🔴 Con esto en true NO QUEDA NINGÚN FRENO: dos llamadas iguales son dos mensajes. '
+                            . 'Si la llamada se corta por red con el flag activo, reintentarla le manda el mensaje '
+                            . 'dos veces al lead. Usalo cuando sabés que el envío anterior no salió, no para destrabar '
+                            . 'un 422 sin mirar.',
                     ],
                     'cuando_usar' => '🔴 ES LO PRIMERO QUE HAY QUE DECIDIR ANTES DE ESCRIBIRLE A UN LEAD, y no se elige '
                         . 'por gusto: Meta sólo deja mandar texto libre dentro de las 24 hs posteriores al último mensaje '

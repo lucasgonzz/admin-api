@@ -11,6 +11,7 @@ use App\Services\LeadConversationErrorLogger;
 use App\Services\WhatsappSendService;
 use App\Services\WhatsappSessionWindowService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -142,6 +143,25 @@ class ClaudeLeadsOutboundController extends Controller
      * de a la conexión.
      */
     const ERROR_TEXTO_GENERICO = 'El envío de texto libre no se confirmó (revisar conexión con WhatsApp/Kapso).';
+
+    /**
+     * Segundos que dura el lock por lead del envío de texto libre.
+     *
+     * 20 y no 5: `send_text()` puede tardar lo suyo (timeout del cliente HTTP más `retry(2, 500)`),
+     * y un lock que vence mientras el envío está en vuelo no protege de nada. Tampoco mucho más
+     * alto: si el proceso muere sin liberar, este es el tiempo que el lead queda sin poder recibir.
+     */
+    const LOCK_SEGUNDOS = 20;
+
+    /**
+     * Tope de caracteres del texto libre.
+     *
+     * Es el límite del cuerpo de un mensaje de texto de WhatsApp. Sin esto, un texto más largo
+     * viaja igual a Meta para que lo rechace con un error opaco, y en el camino puede pasarse del
+     * `text` de `lead_messages.content` — o sea, un mensaje que salió y no queda registrado, que es
+     * el peor estado posible porque deja el turno libre y el reintento se lo manda de nuevo.
+     */
+    const MAX_CARACTERES_TEXTO = 4096;
 
     /**
      * Endpoint 7: envía una plantilla Meta a UN lead y registra el mensaje en su conversación.
@@ -676,12 +696,14 @@ class ClaudeLeadsOutboundController extends Controller
            del otro lado eso es indiagnosticable. */
         try {
             $request->validate([
-                'content'                   => 'required|string',
+                'content'                   => 'required|string|max:' . self::MAX_CARACTERES_TEXTO,
                 'context'                   => 'nullable|string|max:500',
                 'permitir_varios_por_turno' => 'nullable|boolean',
             ], [
                 'content.required' => 'El texto del mensaje es obligatorio.',
                 'content.string'   => 'El texto del mensaje tiene que ser texto.',
+                'content.max'      => 'El texto no puede pasar de ' . self::MAX_CARACTERES_TEXTO
+                    . ' caracteres, que es el tope de un mensaje de WhatsApp.',
                 'permitir_varios_por_turno.boolean' => 'permitir_varios_por_turno tiene que ser true o false.',
             ]);
         } catch (\Illuminate\Validation\ValidationException $e) {
@@ -735,12 +757,26 @@ class ClaudeLeadsOutboundController extends Controller
          */
         $estado_ventana = $ventana->window_state($phone);
         if (empty($estado_ventana['open'])) {
+            /*
+             * 🔴 El `last_inbound_at` NO sale de $estado_ventana, y no es un descuido.
+             * `window_state()` solo consulta entrantes DENTRO de las 24 hs: cuando la ventana está
+             * cerrada devuelve su array `$closed`, que trae `last_inbound_at => null` fijo. O sea
+             * que justo en el único caso donde este dato hace falta, el servicio estructuralmente
+             * no lo tiene. Propagarlo tal cual habría cumplido la forma —el campo está— y no la
+             * función: quien llama no podría distinguir "escribió hace 25 hs, por poco" de "no
+             * escribió nunca", que son dos situaciones con salidas distintas.
+             *
+             * Se busca acá, sobre lead_messages. Y para el caso CERRADO es exacto, no una
+             * aproximación: si la ventana está cerrada es porque NINGUNO de los tres canales que
+             * mira el servicio tuvo un entrante en 24 hs, así que el último mensaje del lead es la
+             * mejor información disponible y no hay otro canal que pueda contradecirla.
+             */
             return response()->json([
                 'message' => 'La ventana de 24 hs de Meta está cerrada para el lead #' . (int) $lead->id
                     . ': un mensaje de texto libre no saldría. Fuera de la ventana va una plantilla '
                     . 'aprobada, con POST claude/leads/' . (int) $lead->id . '/send-template.',
                 'ventana_abierta' => false,
-                'last_inbound_at' => isset($estado_ventana['last_inbound_at']) ? $estado_ventana['last_inbound_at'] : null,
+                'last_inbound_at' => $this->ultimo_entrante_del_lead($lead),
             ], 422);
         }
 
@@ -748,19 +784,56 @@ class ClaudeLeadsOutboundController extends Controller
          * Un mensaje por turno de conversación. Ver el comentario de hay_saliente_en_este_turno():
          * reemplaza al cooldown de 24 hs de send-template, que acá sería contraproducente.
          */
-        if ($request->boolean('permitir_varios_por_turno') !== true && $this->hay_saliente_en_este_turno($lead)) {
+        /*
+         * 🔴 El freno de turno y el envío van adentro de un lock, y no es paranoia: entre el SELECT
+         * que dice "el turno está libre" y el `send_text()` no hay nada que impida que otra request
+         * lea lo mismo. Dos sesiones simultáneas —o un doble disparo de la misma— mandan los dos
+         * mensajes, y `claude/*` no tiene throttle propio. El daño no se deshace: son dos WhatsApps
+         * reales a la misma persona.
+         *
+         * Lock y no transacción con lockForUpdate: eso dejaría una transacción de MySQL abierta
+         * durante la llamada HTTP a Meta, que puede tardar decenas de segundos entre timeout y
+         * reintentos.
+         *
+         * Si el lock no se puede tomar hay otro envío en vuelo para este mismo lead: se contesta 409
+         * sin mandar nada. Es exactamente el caso que el lock existe para atrapar.
+         */
+        $lock = Cache::lock('claude-lead-message-' . (int) $lead->id, self::LOCK_SEGUNDOS);
+
+        if (! $lock->get()) {
             return response()->json([
-                'message' => 'Al lead #' . (int) $lead->id . ' ya se le respondió después de su último mensaje: '
-                    . 'el turno es de él. Si de verdad hace falta mandarle otro, repetí la llamada con '
-                    . 'permitir_varios_por_turno=true.',
-                'turno_del_lead' => true,
-            ], 422);
+                'message' => 'Ya hay un envío en curso para el lead #' . (int) $lead->id
+                    . ': no se mandó nada. Esperá a que termine y fijate cómo quedó antes de reintentar.',
+                'envio_en_curso' => true,
+            ], 409);
         }
 
-        $resultado = $this->enviar_texto_libre_al_lead($sender, $lead, [
-            'content' => $content,
-            'context' => trim((string) $request->input('context', '')),
-        ]);
+        try {
+            if ($request->boolean('permitir_varios_por_turno') !== true) {
+                $ocupa_el_turno = $this->hay_saliente_en_este_turno($lead);
+
+                if ($ocupa_el_turno !== null) {
+                    return response()->json([
+                        'message' => 'Al lead #' . (int) $lead->id . ' ya se le respondió después de su último mensaje '
+                            . '(' . $ocupa_el_turno['quien']
+                            . ($ocupa_el_turno['respondido_at'] !== null ? ', el ' . $ocupa_el_turno['respondido_at'] : '')
+                            . '): el turno es de él. ' . ($ocupa_el_turno['lo_mando_claude']
+                                ? '🔴 Ese mensaje salió de este mismo endpoint: si estás reintentando una llamada que se '
+                                    . 'cortó, YA LLEGÓ y repetirla se lo manda dos veces.'
+                                : 'Si aun así hace falta mandarle otro, repetí la llamada con permitir_varios_por_turno=true.'),
+                        'turno_del_lead' => true,
+                        'ocupado_por'    => $ocupa_el_turno,
+                    ], 422);
+                }
+            }
+
+            $resultado = $this->enviar_texto_libre_al_lead($sender, $lead, [
+                'content' => $content,
+                'context' => trim((string) $request->input('context', '')),
+            ]);
+        } finally {
+            $lock->release();
+        }
 
         return response()->json([
             'enviado'             => $resultado['ok'],
@@ -769,6 +842,11 @@ class ClaudeLeadsOutboundController extends Controller
             'lead_message'        => $resultado['lead_message'],
             'ventana_abierta'     => true,
             'ventana_expira'      => isset($estado_ventana['expires_at']) ? $estado_ventana['expires_at'] : null,
+            /* 🔴 Viaja como campo propio y no solo dentro del texto de `error`: es el estado más
+               peligroso del endpoint —el mensaje salió y no quedó fila, así que el turno está libre
+               y un reintento se lo manda de nuevo— y distinguirlo no puede depender de que alguien
+               parsee un string. */
+            'persistencia_fallida' => isset($resultado['persistencia_fallida']) ? (bool) $resultado['persistencia_fallida'] : false,
         ], 200);
     }
 
@@ -795,38 +873,168 @@ class ClaudeLeadsOutboundController extends Controller
      *      estuvo escrito TRES veces a mano en este repo y las tres estaban mal hasta el 2/9/2026.
      *      Escribir una cuarta copia acá sería repetir el error que se acaba de arreglar.
      *
-     * Sin ningún entrante registrado devuelve false: si no hay turno del lead que respetar, el
-     * freno no tiene qué aplicar. No puede pasar en la práctica —la ventana abierta implica un
-     * entrante—, pero se deja explícito para que el orden de los frenos no sea lo único que lo
-     * sostenga.
+     * ⚠️ ES MÁS ANCHO QUE EL COOLDOWN, y conviene saberlo antes de sorprenderse con un 422:
+     * `leads_en_cooldown()` filtra por `sent_via = 'claude'`, así que nunca contaba los seguimientos
+     * automáticos ni las respuestas manuales del panel. El turno los cuenta a todos —
+     * `LeadFollowupService` graba con `sender='sistema'` y `whatsapp_message_id` cargado, y los
+     * envíos a mano del closer con `sender='setter'`: los dos cumplen el criterio. Es deliberado:
+     * el turno del lead es del lead, lo haya usado quien lo haya usado, y mandarle un mensaje
+     * automático encima de la respuesta que le acaba de escribir una persona es peor que no
+     * mandarle nada. Por eso el 422 devuelve QUIÉN ocupó el turno: con esa información quien llama
+     * decide si insistir con `permitir_varios_por_turno` o dejarlo.
+     *
+     * Sin ningún entrante registrado devuelve null: si no hay turno del lead que respetar, el freno
+     * no tiene qué aplicar. No puede pasar en la práctica —la ventana abierta implica un entrante—,
+     * pero se deja explícito para que el orden de los frenos no sea lo único que lo sostenga.
      *
      * @param Lead $lead
      *
-     * @return bool true si hay un saliente despachado posterior al último entrante del lead.
+     * @return array|null Datos del saliente que ocupa el turno (lead_message_id, respondido_at,
+     *                    lo_mando_claude, quien), o null si el turno está libre.
      */
-    protected function hay_saliente_en_este_turno(Lead $lead): bool
+    protected function hay_saliente_en_este_turno(Lead $lead)
     {
-        /* Último entrante real del lead. Los eventos de estado no cuentan: no son mensajes suyos. */
+        /* 🔴 Por TELÉFONO y no por lead_id. Ver ids_de_la_conversacion(). */
+        $lead_ids = $this->ids_de_la_conversacion($lead);
+
         $ultimo_entrante = LeadMessage::query()
-            ->where('lead_id', $lead->id)
+            ->whereIn('lead_id', $lead_ids)
             ->where('sender', 'lead')
             ->where('is_status_event', false)
-            ->max('created_at');
+            ->orderByDesc('id')
+            ->first();
 
         if ($ultimo_entrante === null) {
-            return false;
+            /*
+             * 🔴 FRENA, no pasa. Y el default importa: acá se llegó con la ventana ABIERTA, o sea
+             * que Meta registró un entrante de este número en las últimas 24 hs — pero no está en
+             * `lead_messages`. Lo abrió otro canal: un ticket de soporte o una conversación de
+             * implementación, que `WhatsappSessionWindowService` también mira porque la ventana es
+             * por par de números y no por canal.
+             *
+             * O sea que hay una conversación viva con esa persona que este endpoint no puede ver, y
+             * por lo tanto no puede saber de quién es el turno. Dejar pasar sería mandar sin ningún
+             * freno: el chequeo se saltearía entero y la llamada se podría repetir sin tope. Ante
+             * eso, frenar y exigir que quien llama lo decida a mano es lo barato; lo caro es
+             * descubrirlo con tres mensajes ya enviados.
+             */
+            return [
+                'lead_message_id' => null,
+                'respondido_at'   => null,
+                'lo_mando_claude' => false,
+                'quien'           => 'no se sabe: la ventana la abrió otro canal (soporte o implementación) '
+                    . 'y esa conversación no se ve desde acá',
+            ];
         }
 
         $salientes = LeadMessage::query()
             ->from('lead_messages as lm')
-            ->where('lm.lead_id', $lead->id)
-            ->where('lm.created_at', '>', $ultimo_entrante);
+            ->whereIn('lm.lead_id', $lead_ids)
+            /*
+             * 🔴 Por `id` y NO por `created_at`, aunque "posterior" suene a fecha.
+             * `lead_messages.created_at` es un timestamp SIN fracción de segundo: un saliente
+             * despachado en el mismo segundo que el entrante no es `>` que él, y el turno quedaría
+             * libre habiendo respondido. Es un empate que pasa de verdad, no un caso de laboratorio.
+             * El criterio gemelo que ya existe en el repo compara por id justamente por esto
+             * (`Lead::scopeRequiereRevision()`, `outbound.id > lead_messages.id`).
+             */
+            ->where('lm.id', '>', (int) $ultimo_entrante->id);
 
         /* La definición única de "salió de verdad": sender setter/sistema, estado despachado y
            whatsapp_message_id cargado. Una sugerencia sin enviar no ocupa el turno. */
         LeadMessage::apply_reply_to_lead_conditions($salientes, 'lm');
 
-        return $salientes->exists();
+        $saliente = $salientes->orderBy('lm.id')->first();
+
+        if ($saliente === null) {
+            return null;
+        }
+
+        /*
+         * Quién ocupó el turno, y no solo que está ocupado. Es la diferencia entre un 422 accionable
+         * y uno que obliga a ir a mirar la conversación a mano: la sesión que recibe esto tiene que
+         * poder distinguir "lo mandé yo en un intento anterior que se cortó" —donde repetir sería
+         * duplicarle el mensaje al lead— de "lo contestó una persona" —donde puede que corresponda
+         * mandar igual, con permitir_varios_por_turno.
+         */
+        $de_claude = ((string) $saliente->sent_via === self::ORIGEN_CLAUDE);
+
+        return [
+            'lead_message_id' => (int) $saliente->id,
+            'respondido_at'   => (string) $saliente->created_at,
+            'lo_mando_claude' => $de_claude,
+            'quien'           => $de_claude
+                ? 'Claude, en una llamada anterior a este mismo endpoint'
+                : 'una persona desde el panel, o el seguimiento automático',
+        ];
+    }
+
+    /**
+     * Fecha del último mensaje ENTRANTE del lead, o null si nunca escribió.
+     *
+     * Los eventos de estado no cuentan: son filas internas del admin, no mensajes suyos.
+     *
+     * Existe como método propio porque lo usan dos caminos que tienen que mirar exactamente lo
+     * mismo: el freno de turno y el `last_inbound_at` que viaja en el 422 de ventana cerrada. Si
+     * fueran dos consultas separadas podrían discrepar, y el 422 estaría explicando una situación
+     * distinta de la que el freno evaluó.
+     *
+     * @param Lead $lead
+     *
+     * @return string|null
+     */
+    protected function ultimo_entrante_del_lead(Lead $lead)
+    {
+        $ultimo = LeadMessage::query()
+            ->whereIn('lead_id', $this->ids_de_la_conversacion($lead))
+            ->where('sender', 'lead')
+            ->where('is_status_event', false)
+            ->max('created_at');
+
+        return $ultimo !== null ? (string) $ultimo : null;
+    }
+
+    /**
+     * Ids de TODOS los leads que comparten el teléfono de éste, incluido él mismo.
+     *
+     * 🔴 Existe porque la conversación de WhatsApp es por NÚMERO y no por fila de lead, y esa
+     * diferencia era un agujero real: `WhatsappSessionWindowService` resuelve la ventana por
+     * teléfono, mientras que el freno de turno miraba por `lead_id`. Con dos leads del mismo número
+     * —que pasa: `leads.phone` no tiene índice único y el webhook engancha los entrantes al lead
+     * más reciente (`WhatsappWebhookController::find_lead_by_phone()`)— los entrantes caen todos en
+     * uno solo. Pegándole al otro id, el freno no encontraba ningún entrante, daba el turno por
+     * libre y dejaba mandar sin tope: tres llamadas seguidas eran tres WhatsApps reales a la misma
+     * persona.
+     *
+     * La coincidencia es por el string exacto de `phone`, que es como quedan cargados los duplicados
+     * que crea el propio webhook. Un número escrito con otro formato no entra acá — pero ese caso
+     * no abre el agujero: si el entrante está en el lead que se está tocando, el freno lo encuentra
+     * igual por su propio id, que siempre está en la lista.
+     *
+     * @param Lead $lead
+     *
+     * @return array<int, int> Ids de lead, siempre con al menos el del propio lead.
+     */
+    protected function ids_de_la_conversacion(Lead $lead): array
+    {
+        $ids   = [(int) $lead->id];
+        $phone = trim((string) ($lead->phone ?? ''));
+
+        if ($phone === '') {
+            return $ids;
+        }
+
+        $hermanos = Lead::query()
+            ->where('phone', $phone)
+            ->where('id', '<>', $lead->id)
+            ->pluck('id')
+            ->all();
+
+        foreach ($hermanos as $id) {
+            $ids[] = (int) $id;
+        }
+
+        return $ids;
     }
 
     /**

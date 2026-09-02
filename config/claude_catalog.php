@@ -401,7 +401,10 @@ return [
             'frenos'       => [
                 '🔴 La ventana de 24 hs manda: con la ventana cerrada es 422, no se llama al sender y no se crea ninguna fila. La respuesta trae last_inbound_at y nombra el endpoint de plantillas, porque no es un error de quien llamó: es el estado del mundo.',
                 'La ventana la resuelve WhatsappSessionWindowService, el mismo que usa el resto del sistema: el criterio no se recalcula acá.',
-                'Un solo mensaje por turno de conversación: si ya se le respondió después de su último mensaje, es 422. Para saltearlo hay que repetir la llamada con permitir_varios_por_turno, que queda escrito en el pedido. Reemplaza al cooldown de 24 hs de send-template, que acá dejaría muda la conversación en curso que este endpoint existe para sostener.',
+                'Un solo mensaje por turno de conversación: si ya se le respondió después de su último mensaje, es 422 y la respuesta dice QUIÉN ocupó el turno (Claude en un intento anterior, o una persona). Para saltearlo hay que repetir la llamada con permitir_varios_por_turno, que queda escrito en el pedido. Reemplaza al cooldown de 24 hs de send-template, que acá dejaría muda la conversación en curso que este endpoint existe para sostener.',
+                '🔴 El turno se mira por TELÉFONO, no por lead_id: dos filas de lead con el mismo número comparten la conversación y el freno. Si el número tiene una conversación viva que no está en lead_messages (soporte o implementación), también frena, porque desde acá no se puede saber de quién es el turno.',
+                'Lock por lead durante el chequeo y el envío: dos llamadas simultáneas no mandan dos mensajes. La segunda recibe 409 sin enviar nada.',
+                'Tope de 4096 caracteres, que es el largo máximo de un mensaje de texto de WhatsApp.',
                 'El lead se nombra por id: no hay forma de mandarle a "los que cumplan un filtro".',
                 'El lead tiene que tener teléfono cargado: sin él es 422 y no se crea absolutamente nada.',
                 'El texto no puede venir vacío.',
