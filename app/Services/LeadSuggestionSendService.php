@@ -592,9 +592,16 @@ class LeadSuggestionSendService
      *
      * La condición se consulta contra la base acá mismo, escrita a la vista, y NO se delega en
      * LeadConversationAiState::has_unanswered_lead_messages() ni en has_pending_non_followup_suggestion():
-     * la primera tiene un defecto conocido (cuenta como respuesta un `status = 'aprobado'` que ningún
-     * camino de producción escribe), y las dos esconderían atrás de un nombre el único predicado que
-     * importa acá, que es el MISMO que usa el barrido para elegir qué borrar.
+     * las dos esconderían atrás de un nombre el único predicado que importa acá, que es el MISMO que
+     * usa el barrido para elegir qué borrar. Si los dos lados no preguntan literalmente lo mismo, el
+     * re-disparo puede reprogramar sobre una sugerencia que el barrido no habría tocado, o dejar de
+     * reprogramar sobre una que sí — y ninguna de las dos cosas se ve leyendo un solo archivo.
+     *
+     * (Hasta el 2/9/2026 este comentario decía además que has_unanswered_lead_messages() tenía un
+     * defecto conocido: contaba como respuesta un `status = 'aprobado'` que ningún camino de
+     * producción escribía. Se arregló en `bcbd02e`, en otra misión del mismo día — ahora delega en
+     * LeadMessage::is_reply_to_lead(), que exige `whatsapp_message_id`. El motivo de no delegar
+     * sigue siendo el de arriba, que es de diseño y no de un bug puntual.)
      *
      * @param LeadSuggestionEnvioEnCurso $en_curso
      * @param Lead                       $lead

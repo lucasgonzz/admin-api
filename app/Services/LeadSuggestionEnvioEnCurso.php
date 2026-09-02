@@ -60,32 +60,82 @@ class LeadSuggestionEnvioEnCurso
     private const CACHE_KEY_PREFIX = 'lead_suggestion_envio_en_curso:';
 
     /**
+     * Intentos que enviar_partes() le da a CADA parte antes de darla por perdida, y los dos backoff
+     * que espera entre ellos (1500ms + 3500ms). Están acá y no sueltos en la cuenta para que se vea
+     * de dónde sale cada término: si alguien toca el bucle de enviar_partes(), estos son los dos
+     * números que tiene que venir a mover.
+     */
+    private const INTENTOS_POR_PARTE = 3;
+    private const BACKOFF_POR_PARTE_SEGUNDOS = 5;
+
+    /**
+     * Margen del tramo inicial: lo que puede tardar marcar() → primera parte enviada. Ahí corren la
+     * revalidación de horarios ofrecidos y apply_pending_actions(), que le pegan a Google Calendar.
+     * Es el único tramo del envío sin renovación posible, porque todavía no salió ninguna parte.
+     */
+    private const MARGEN_TRAMO_INICIAL_SEGUNDOS = 45;
+
+    /**
      * Duración del lease, en segundos. Se RENUEVA con cada parte que sale (ver renovar()), así que
      * no es la cota del envío entero: es la cota de la brecha entre dos renovaciones.
      *
-     * 🔴 La cuenta, que es la que justifica el número y no al revés:
+     * 🔴 NO es una constante, y esa es la decisión importante de este archivo. El peor caso sale de
+     * `services.client_api.timeout` y `.retries`, que son configurables por entorno: una constante
+     * calculada a mano a partir de esos dos valores queda vieja, en silencio, el día que alguien
+     * suba `CLIENT_API_TIMEOUT` por .env — el envío se alarga y el lease no. Es el mismo criterio,
+     * y por el mismo motivo, que `ClaudeLeadsOutboundController::segundos_de_lock()` (2/9/2026):
+     * cuando dos lugares protegen el mismo cliente HTTP, los dos derivan del cliente, no del
+     * recuerdo de lo que valía cuando se escribió.
      *
-     *   - Peor caso de UNA parte: WhatsappSendService::send_text() usa timeout de 15s
-     *     (config/services.php, `client_api.timeout`) y encima `->retry(2, 500)`, o sea hasta 30,5s
-     *     por llamada; enviar_partes() la reintenta hasta 3 veces con backoff de 1500ms + 3500ms.
-     *     Una parte que sale recién en el 3er intento cuesta ~50s.
-     *   - Peor caso del tramo inicial marcar() → primera parte: la revalidación de horarios y
-     *     apply_pending_actions() pegándole a Google Calendar, ~30s.
+     * La cuenta, término por término:
      *
-     * O sea que la brecha máxima entre dos renovaciones ronda los 80s, y 120 deja margen encima.
+     *   - Peor caso de UN send_text(): el cliente usa `timeout` segundos y encima reintenta
+     *     `retries` veces con 500ms de espera → `timeout * retries + retries`. Con la config por
+     *     defecto (15 y 2), 32s.
+     *   - Peor caso de UNA parte: enviar_partes() llama a send_text() hasta 3 veces, con 1500ms +
+     *     3500ms de backoff entre medio → 3 * 32 + 5 = **101s**. (La versión anterior de este
+     *     docblock decía "~50s" acá, y era la mitad de lo que corresponde: contaba un solo
+     *     send_text() en vez de los tres del bucle.)
+     *   - Más el tramo inicial sin renovación posible: +45s.
      *
-     * 🔴 Y el número es corto A PROPÓSITO, en las dos direcciones:
+     * Total con la config por defecto: ~146s.
      *
-     *   - Hacia arriba: en HTTP el proceso muere a los 120s por `max_execution_time`, y eso es un
-     *     fatal que NINGÚN `catch` atrapa, así que el `finally` que suelta el lease no corre. Un TTL
-     *     más largo que ese techo deja el marcador vivo después de que el proceso murió, y con él la
-     *     sugerencia protegida de un barrido que sí debería limpiarla: el lead se queda sin
-     *     respuesta todo ese rato.
-     *   - Hacia abajo: sin renovación, cualquier TTL fijo es una apuesta perdida en CLI, donde el
-     *     envío puede durar mucho más (6 partes con reintentos pasan tranquilamente los 300s). Por
-     *     eso el arreglo no fue recalibrar el número, sino renovar mientras el envío está vivo.
+     * 🔴 Sí, eso pasa el techo de `max_execution_time` (120s en HTTP), y es a propósito. El lease
+     * tiene UNA obligación —cubrir el envío que protege— y un lease más corto que su envío no
+     * protege nada: vence en vuelo, el barrido borra la fila y volvemos al incidente que este
+     * archivo existe para evitar. El costo de pasarse es acotado y chico: si el proceso muere por
+     * ese fatal (que ningún `catch` atrapa, así que el `finally` no suelta el lease), el marcador
+     * queda vivo el resto del TTL y en esa ventana el lead no recibe sugerencia nueva. Son ~26s de
+     * sobra sobre el techo, contra los 180s de sobra que tenía la primera versión de 300s fijos.
+     *
+     * Y el techo ni siquiera rige donde el envío largo es más probable: en producción
+     * `QUEUE_CONNECTION=database`, así que el auto-envío de respaldo corre en un worker de cola —
+     * CLI, sin límite de ejecución—. Los 120s aplican sólo a los tres endpoints de aprobación
+     * humana.
+     *
+     * @return int
      */
-    private const CACHE_TTL_SECONDS = 120;
+    private function segundos_de_lease(): int
+    {
+        $timeout  = (int) config('services.client_api.timeout', 15);
+        $intentos = (int) config('services.client_api.retries', 2);
+
+        if ($timeout < 1) {
+            $timeout = 15;
+        }
+
+        if ($intentos < 1) {
+            $intentos = 1;
+        }
+
+        /* Las esperas entre reintentos del cliente son de 500ms: se redondean a 1s por intento,
+         * igual que en segundos_de_lock(), para no arrastrar decimales en una cota. */
+        $peor_send_text = ($timeout * $intentos) + $intentos;
+
+        $peor_parte = (self::INTENTOS_POR_PARTE * $peor_send_text) + self::BACKOFF_POR_PARTE_SEGUNDOS;
+
+        return $peor_parte + self::MARGEN_TRAMO_INICIAL_SEGUNDOS;
+    }
 
     /** Prefijo de la clave de "llegó un inbound del lead mientras este mensaje se enviaba". */
     private const CACHE_KEY_PREFIX_INBOUND = 'lead_suggestion_inbound_durante_envio:';
@@ -116,7 +166,7 @@ class LeadSuggestionEnvioEnCurso
 
         $token = uniqid('', true);
 
-        Cache::put($this->cache_key($message_id), $token, self::CACHE_TTL_SECONDS);
+        Cache::put($this->cache_key($message_id), $token, $this->segundos_de_lease());
 
         return $token;
     }
@@ -139,7 +189,7 @@ class LeadSuggestionEnvioEnCurso
             return false;
         }
 
-        Cache::put($this->cache_key($message_id), $token, self::CACHE_TTL_SECONDS);
+        Cache::put($this->cache_key($message_id), $token, $this->segundos_de_lease());
 
         return true;
     }
