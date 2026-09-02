@@ -98,10 +98,13 @@ class SupportAiSettings
     /**
      * Régimen con el que nace un ticket de soporte nuevo.
      *
-     * El nombre dice `new_ticket` a propósito: este es el ÚNICO punto donde se lee esta clave, y
-     * se lee una sola vez, al crear el ticket. Si aparece una llamada desde un job o desde el
-     * camino de envío, el nombre tiene que frenar a quien la escriba — leerla en runtime dejaría
-     * contestando solos a tickets que un operador ya venía verificando a mano.
+     * El nombre dice `new_ticket` a propósito. Esta clave se puede leer todas las veces que haga
+     * falta para PINTAR el panel de Cuenta (`to_array()`, el fallback del PUT), pero en el camino
+     * de un ticket se lee UNA sola vez: al crearlo, para estampar el régimen. Lo que el nombre
+     * tiene que frenar es una llamada desde el camino de envío —un job, o cualquier lugar que
+     * decida si un mensaje sale—: leerla ahí dejaría contestando solos a tickets que un operador
+     * ya venía verificando a mano, que es justo lo que esta decisión de producto prohíbe. Si
+     * aparece una llamada desde `app/Jobs/` o desde el envío, está mal.
      *
      * @return bool
      */
@@ -109,14 +112,27 @@ class SupportAiSettings
     {
         $raw = AdminSetting::get(self::KEY_REQUIRE_VERIFICATION, null);
 
-        // Ausente o vacío cae en true a propósito, y no en filter_var(''), que da false: el único
-        // error tolerable de este método es hacer esperar de más un mensaje; el otro es mandarle
-        // al cliente algo que nadie leyó.
-        if ($raw === null || $raw === '') {
+        $normalizado = $raw === null ? '' : strtolower(trim((string) $raw));
+
+        // Fila ausente, o presente pero vacía / con puros espacios: nadie dijo nada, y "nadie dijo
+        // nada" no es "apagala". Una fila vacía es una escritura a medias, no una decisión.
+        if ($normalizado === '') {
             return self::DEFAULT_REQUIRE_VERIFICATION;
         }
 
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        // Se listan los valores que APAGAN, y todo lo demás deja la verificación prendida. Es al
+        // revés de lo obvio —un `filter_var($raw, FILTER_VALIDATE_BOOLEAN)` pelado— y es a
+        // propósito: filter_var() manda a false todo lo que no reconoce (' ', 'si', '2', '-1',
+        // 'null'), o sea que cualquier valor raro caería para el lado peligroso, que es justo lo
+        // que este método existe para evitar.
+        //
+        // Los dos errores posibles acá no valen lo mismo: hacer esperar de más un mensaje lo
+        // arregla un operador aprobándolo desde la conversación; mandarle al cliente algo que
+        // nadie leyó no se deshace. Por eso apagar la verificación tiene que decirse sin
+        // ambigüedad. El único escritor normal es el controller, que ya normaliza a '1'/'0'; esta
+        // lista está para lo que escribe una persona en un incidente: un UPDATE a mano, una
+        // remediación por SSH, un import.
+        return ! in_array($normalizado, ['0', 'false', 'off', 'no'], true);
     }
 
     /**

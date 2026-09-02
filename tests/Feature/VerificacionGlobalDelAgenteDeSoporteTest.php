@@ -295,30 +295,102 @@ class VerificacionGlobalDelAgenteDeSoporteTest extends TestCase
     }
 
     /**
-     * Un PUT sin el campo nuevo no da vuelta el régimen.
+     * Un PUT sin el campo nuevo no da vuelta el régimen, en NINGUNA de las dos direcciones.
      *
      * Es el `nullable` del controller: un build viejo del SPA, cacheado en el navegador de un
      * operador, guarda las demoras sin mandar `require_verification`. Con `required` no podría
-     * guardar nada; sin esta guarda, guardar las demoras apagaría el régimen sin que nadie lo
-     * haya pedido.
+     * guardar nada; sin la guarda, guardar las demoras movería el régimen sin que nadie lo pida.
+     *
+     * 🔴 Las dos direcciones, y la que importa es la SEGUNDA. Con la fila en '1' el test pasa
+     * igual con una implementación equivocada como `(bool) ($validated['require_verification'] ??
+     * true)`, porque el valor esperado coincide con el default de la clase: la aserción no
+     * distingue "respetó lo que había" de "cayó en el default". Con la fila en '0' se separan, y
+     * además es el caso de la vida real — la instalación donde Lucas ya apagó el régimen a
+     * propósito y un SPA cacheado no lo tiene que volver a prender solo.
      *
      * @return void
      */
     public function test_un_put_viejo_sin_el_campo_no_da_vuelta_el_regimen()
     {
         $admin = $this->crear_admin('put-viejo-verificacion@test.local');
+
+        $put_viejo = function () use ($admin) {
+            return $this->actingAs($admin, 'sanctum')->putJson('/api/admin/settings/support-ai', [
+                'suggestions_enabled' => true,
+                'suggestion_delay'    => 10,
+                'auto_send_delay'     => 20,
+            ]);
+        };
+
         $this->fijar_verificacion_global(true);
 
-        $response = $this->actingAs($admin, 'sanctum')->putJson('/api/admin/settings/support-ai', [
-            'suggestions_enabled' => true,
-            'suggestion_delay'    => 10,
-            'auto_send_delay'     => 20,
-        ]);
-
+        $response = $put_viejo();
         $response->assertStatus(200);
         $response->assertJsonPath('require_verification', true);
+        $this->assertSame(
+            '1',
+            AdminSetting::get(SupportAiSettings::KEY_REQUIRE_VERIFICATION),
+            'Un PUT sin el campo apagó un régimen que estaba prendido.'
+        );
 
-        $this->assertSame('1', AdminSetting::get(SupportAiSettings::KEY_REQUIRE_VERIFICATION));
+        $this->fijar_verificacion_global(false);
+
+        $response = $put_viejo();
+        $response->assertStatus(200);
+        $response->assertJsonPath('require_verification', false);
+        $this->assertSame(
+            '0',
+            AdminSetting::get(SupportAiSettings::KEY_REQUIRE_VERIFICATION),
+            'Un PUT sin el campo volvió a prender un régimen que Lucas había apagado a propósito.'
+        );
+    }
+
+    /**
+     * 🔴 Un valor raro en la fila deja la verificación PRENDIDA, nunca apagada.
+     *
+     * Es la guarda del fail-safe del getter. El escritor normal es el controller, que normaliza a
+     * '1'/'0', así que estos valores solo aparecen si una persona escribió la fila a mano en un
+     * incidente: un UPDATE por consola, una remediación por SSH, un import. Un
+     * `filter_var($raw, FILTER_VALIDATE_BOOLEAN)` pelado manda todos estos a false —o sea, a
+     * "contestale solo al cliente"—, que es el error que no se puede deshacer. Si alguien
+     * "simplifica" el getter a filter_var(), este test se pone rojo.
+     *
+     * @return void
+     */
+    public function test_un_valor_raro_en_la_fila_deja_la_verificacion_prendida()
+    {
+        $ambiguos = [' ', "	", '', 'si', 'yes', '2', '-1', 'null', 'basura'];
+
+        foreach ($ambiguos as $valor) {
+            AdminSetting::set(SupportAiSettings::KEY_REQUIRE_VERIFICATION, $valor);
+
+            $this->assertTrue(
+                SupportAiSettings::new_ticket_requires_verification(),
+                'El valor ' . var_export($valor, true) . ' apagó la verificación: un valor que nadie sabe leer tiene que caer para el lado seguro.'
+            );
+        }
+    }
+
+    /**
+     * Apagar la verificación se dice sin ambigüedad, y estas son todas las formas de decirlo.
+     *
+     * El espejo del anterior: el fail-safe no puede ser tan estricto que el '0' del controller
+     * —o el 'false' que escribe una persona a mano— deje de apagar nada.
+     *
+     * @return void
+     */
+    public function test_los_valores_explicitos_de_apagado_apagan_la_verificacion()
+    {
+        $apagados = ['0', ' 0 ', 'false', 'FALSE', 'off', 'no', 'NO'];
+
+        foreach ($apagados as $valor) {
+            AdminSetting::set(SupportAiSettings::KEY_REQUIRE_VERIFICATION, $valor);
+
+            $this->assertFalse(
+                SupportAiSettings::new_ticket_requires_verification(),
+                'El valor ' . var_export($valor, true) . ' tendría que apagar la verificación y no lo hizo.'
+            );
+        }
     }
 
     /* ==================================================================================
