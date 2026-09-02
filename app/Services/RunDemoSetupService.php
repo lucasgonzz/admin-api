@@ -44,6 +44,19 @@ class RunDemoSetupService
     const TZ = 'America/Argentina/Buenos_Aires';
 
     /**
+     * Cuánto tarda un demo setup, para contarle la espera al lead en la página de experiencia.
+     *
+     * Sale de una corrida real medida: 565,7 s. Se redondea PARA ARRIBA, a 600, porque el número
+     * se usa para decirle al lead cuánto le falta y prometer de menos es peor que prometer de más:
+     * un contador que llega a cero y no pasa nada se lee como que algo se rompió.
+     *
+     * 🔴 Es un ESTIMADO de presentación, no gobierna ninguna puerta. Quien decide si el lead entra
+     * es `DemoExperienciaController::evaluar_ingreso()`, y sigue siendo `demo_setup_status` +
+     * el gate del video. Si algún día esto empieza a decidir algo, dejó de ser este número.
+     */
+    const DURACION_ESTIMADA_SEGUNDOS = 600;
+
+    /**
      * Estado de `demo_setup_status` para una corrida cuyo desenlace NO se conoce.
      *
      * 🔴 No es un sinónimo elegante de `fallido`: es información distinta. `fallido` afirma que el

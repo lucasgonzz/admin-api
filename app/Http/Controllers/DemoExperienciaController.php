@@ -390,8 +390,22 @@ class DemoExperienciaController extends Controller
             // Estado del armado de la instancia. Hasta la misión 46 no viajaba, así que la página
             // no tenía forma de saber que la demo estaba lista: se enteraba haciendo clic y
             // comiéndose el 409 `preparando`.
+            // `iniciado_hace_seg` y `duracion_estimada_seg` son para CONTARLE la espera al lead
+            // mientras la instancia se arma: sin ellos la página muestra un cartel fijo que, cuando
+            // el setup tarda más que el video de intro (medido: 565,7 s contra ~7 min), se lee como
+            // que algo se colgó. No gobiernan ninguna puerta: la puerta sigue siendo
+            // `puede_ingresar`, más abajo.
+            //
+            // 🔴 El transcurrido se mide contra `now()` REAL y no contra `AppTime::now()`, a
+            // diferencia de build_turno(). No es un descuido: `demo_setup_last_run_at` la estampa
+            // RunDemoSetupService con `now()` real, así que comparar contra el reloj virtual mezcla
+            // dos relojes y da un transcurrido inventado — exactamente el error que documenta el
+            // comentario de ingresar_json() sobre el vencimiento del token. Se compara cada fecha
+            // contra el reloj con el que fue escrita.
             'setup' => [
-                'estado' => (string) ($lead->demo_setup_status ?? 'pendiente'),
+                'estado'                => (string) ($lead->demo_setup_status ?? 'pendiente'),
+                'iniciado_hace_seg'     => $this->setup_iniciado_hace_seg($lead),
+                'duracion_estimada_seg' => RunDemoSetupService::DURACION_ESTIMADA_SEGUNDOS,
             ],
 
             // Progreso del lead sobre el video de introducción y umbral vigente.
@@ -408,6 +422,31 @@ class DemoExperienciaController extends Controller
             // sería la fácil de saltear.
             'puede_ingresar' => $evaluacion['puede'],
         ];
+    }
+
+    /**
+     * Segundos desde que arrancó el armado de la instancia, o null si todavía no arrancó.
+     *
+     * Null NO es un caso de borde: es el estado normal de un lead con la demo agendada cuyo setup
+     * todavía no disparó (`demo_setup_status` en `pendiente`). La página lo usa para saber que NO
+     * tiene que mostrar ningún contador, y cae al texto de siempre.
+     *
+     * El clamp a >= 0 cubre el reloj corrido hacia atrás: un transcurrido negativo haría que el
+     * front calcule un porcentaje negativo y dibuje una barra vacía que se lee como rota.
+     *
+     * @param Lead $lead Lead dueño de la página de experiencia.
+     *
+     * @return int|null
+     */
+    private function setup_iniciado_hace_seg(Lead $lead)
+    {
+        if ($lead->demo_setup_last_run_at === null) {
+            return null;
+        }
+
+        $transcurrido = $lead->demo_setup_last_run_at->diffInSeconds(Carbon::now(), false);
+
+        return $transcurrido > 0 ? (int) $transcurrido : 0;
     }
 
     /**
