@@ -914,10 +914,11 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
             'El inbound que llegó durante el envío no volvió a programar la generación al terminar: el lead se queda sin respuesta.'
         );
 
-        /* La marca se consume de a una: si quedara puesta, cada envío siguiente reprogramaría de más. */
+        /* La marca se atiende de a una: si quedara puesta, cada envío siguiente reprogramaría de más.
+           Se borra DESPUÉS de reprogramar, no antes: ver hay_inbound_durante_el_envio(). */
         $this->assertFalse(
-            (new LeadSuggestionEnvioEnCurso())->consumir_inbound_durante_el_envio((int) $sugerencia->id),
-            'La marca de inbound diferido quedó sin consumir después del envío.'
+            (new LeadSuggestionEnvioEnCurso())->hay_inbound_durante_el_envio((int) $sugerencia->id),
+            'La marca de inbound diferido quedó sin atender después del envío.'
         );
     }
 }

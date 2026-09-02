@@ -46,9 +46,9 @@ use Illuminate\Support\Facades\Log;
  * GenerateLeadAiSuggestionJob la ve pendiente (has_pending_non_followup_suggestion) y SE OMITE — el
  * mensaje que el lead acaba de escribir se queda sin respuesta hasta que vuelva a escribir. La marca
  * de inbound diferido cierra ese agujero: el barrido anota "llegó un inbound mientras esto se
- * enviaba" y el envío, al terminar, la consume y vuelve a programar la generación. Es determinista
- * (sin plazos que "casi siempre alcanzan") y no puede ciclar: la marca sólo la escribe el barrido y
- * se consume de a una, con Cache::pull.
+ * enviaba" y el envío, al terminar, la lee y vuelve a programar la generación. Es determinista (sin
+ * plazos que "casi siempre alcanzan") y no puede ciclar: la marca sólo la escribe el barrido, y el
+ * envío la borra recién después de haberla atendido.
  *
  * Su TTL es más largo (900s) a propósito: tiene que sobrevivir al envío entero que la generó, con
  * todas sus renovaciones de lease, más el tramo final de send_suggestion() que corre después de
@@ -192,20 +192,33 @@ class LeadSuggestionEnvioEnCurso
     }
 
     /**
-     * Consume la marca de inbound diferido y dice si había una.
+     * Dice si hay un inbound anotado durante el envío de ese mensaje, SIN consumirlo.
      *
-     * 🔴 Es un `pull` (leer y borrar en un paso) y no un `get` seguido de `forget`: la marca tiene
-     * que consumirse UNA sola vez. Con get+forget, dos caminos que terminen el mismo envío
-     * reprogramarían la generación dos veces, y con delay 0 el job corre sync dentro del request —
-     * o sea dos llamadas a Claude por un solo mensaje del lead.
+     * 🔴 Leer y borrar están separados (antes era un solo `Cache::pull`) porque el orden importa: si
+     * la marca se consume ANTES de actuar y la reprogramación tira —Claude caído, base lenta—, la
+     * marca ya no está y el mensaje que el lead escribió se queda sin respuesta para siempre, sin
+     * que nada lo denuncie. Se lee, se actúa, y recién si salió bien se borra
+     * (olvidar_inbound_durante_el_envio()).
      *
      * @param int $message_id
      *
-     * @return bool True si había un inbound anotado durante el envío.
+     * @return bool True si el barrido anotó un inbound durante el envío de este mensaje.
      */
-    public function consumir_inbound_durante_el_envio(int $message_id): bool
+    public function hay_inbound_durante_el_envio(int $message_id): bool
     {
-        return (bool) Cache::pull($this->cache_key_inbound($message_id), false);
+        return (bool) Cache::get($this->cache_key_inbound($message_id), false);
+    }
+
+    /**
+     * Borra la marca de inbound diferido, una vez atendida.
+     *
+     * @param int $message_id
+     *
+     * @return void
+     */
+    public function olvidar_inbound_durante_el_envio(int $message_id): void
+    {
+        Cache::forget($this->cache_key_inbound($message_id));
     }
 
     /**

@@ -571,9 +571,30 @@ class LeadSuggestionSendService
      * dejó clear_stale_pending_suggestions() al saltear este id; acá se consume y se vuelve a
      * programar, ahora que el mensaje ya pasó a 'enviado' y el guard del job no se dispara.
      *
-     * Se llama DESPUÉS de liberar el marcador, no antes: si corriera con el marcador todavía puesto,
-     * el barrido que dispara la reprogramación volvería a saltear este mismo id y a anotar otra
-     * marca, y ahí sí habría un ciclo.
+     * Se llama DESPUÉS de liberar el lease, no antes: si corriera con el lease todavía puesto, el
+     * barrido que dispara la reprogramación volvería a saltear este mismo id y a anotar otra marca,
+     * y ahí sí habría un ciclo.
+     *
+     * 🔴 Y por eso mismo hay una condición que no se puede saltear. El barrido de
+     * schedule_after_lead_inbound() borra TODA sugerencia en 'sugerido' que no sea un seguimiento, y
+     * el lease ya está suelto: si este request dejó una sugerencia esperando revisión humana, el
+     * re-disparo se la lleva puesta. Pasa en dos salidas reales:
+     *
+     *   - El gate de agendamiento del auto-envío (handle_auto_send_agendamiento_gate): notifica a
+     *     los admins por push y por WhatsApp que hay un mensaje esperando aprobación, lo deja en
+     *     'sugerido' y vuelve. El admin abre el panel y no encuentra nada.
+     *   - La regeneración por horario ofrecido caducado: crea una sugerencia nueva y fresca, que el
+     *     re-disparo borra para mandar a generar otra. Una llamada a Claude tirada a la basura.
+     *
+     * La regla, entonces: el re-disparo corre sólo si en ESTE momento no quedó ninguna sugerencia
+     * 'sugerido' no-seguimiento para el lead. Si quedó una, este request la dejó ahí para que la mire
+     * un humano y no hay nada que reprogramar — la sugerencia siguiente ya existe.
+     *
+     * La condición se consulta contra la base acá mismo, escrita a la vista, y NO se delega en
+     * LeadConversationAiState::has_unanswered_lead_messages() ni en has_pending_non_followup_suggestion():
+     * la primera tiene un defecto conocido (cuenta como respuesta un `status = 'aprobado'` que ningún
+     * camino de producción escribe), y las dos esconderían atrás de un nombre el único predicado que
+     * importa acá, que es el MISMO que usa el barrido para elegir qué borrar.
      *
      * @param LeadSuggestionEnvioEnCurso $en_curso
      * @param Lead                       $lead
@@ -584,11 +605,36 @@ class LeadSuggestionSendService
     private function atender_inbound_diferido(LeadSuggestionEnvioEnCurso $en_curso, Lead $lead, int $message_id): void
     {
         try {
-            if (! $en_curso->consumir_inbound_durante_el_envio($message_id)) {
+            if (! $en_curso->hay_inbound_durante_el_envio($message_id)) {
+                return;
+            }
+
+            /* Mismo predicado que clear_stale_pending_suggestions(): lo que el barrido borraría. */
+            $quedo_sugerencia_esperando = LeadMessage::query()
+                ->where('lead_id', (int) $lead->id)
+                ->where('status', 'sugerido')
+                ->where('is_followup', false)
+                ->exists();
+
+            if ($quedo_sugerencia_esperando) {
+                Log::channel('daily')->info('LeadSuggestionSendService: inbound diferido no reprogramado, quedó una sugerencia esperando revisión.', [
+                    'lead_id'    => $lead->id,
+                    'message_id' => $message_id,
+                ]);
+
+                /* La marca se borra igual: este request la atendió —decidió que no correspondía
+                   reprogramar—, y dejarla puesta sólo la haría reaparecer en el envío siguiente. */
+                $en_curso->olvidar_inbound_durante_el_envio($message_id);
+
                 return;
             }
 
             (new LeadAiSuggestionScheduler())->schedule_after_lead_inbound((int) $lead->id);
+
+            /* Recién ahora se borra la marca: leer → actuar → olvidar. Si la reprogramación tira, la
+               marca sigue puesta y el próximo envío de este mensaje la vuelve a atender, en vez de
+               dejar al lead sin respuesta porque un `pull` se la llevó antes de hacer nada. */
+            $en_curso->olvidar_inbound_durante_el_envio($message_id);
         } catch (\Throwable $e) {
             /*
              * 🔴 Este try/catch NO es decorativo y no se puede sacar "porque schedule_after_lead_inbound()
