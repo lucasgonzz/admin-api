@@ -173,8 +173,14 @@ class DemoDinamicaActualIntactaTest extends TestCase
 
     /**
      * El token no sale al serializar el modelo. `Lead` tiene `$guarded = []`, así que sin
-     * `$hidden` cualquier columna nueva viaja a todo lo que serialice el lead entero —incluido
-     * el `broadcastWith()` de LeadSuggestionCreated, que emite sobre un canal público.
+     * `$hidden` cualquier columna nueva viaja a todo lo que serialice el lead entero: las
+     * respuestas de la API, los payloads de los endpoints públicos de la demo, y cualquier
+     * lugar que mañana devuelva un lead sin elegir columnas.
+     *
+     * ⚠️ Hasta el 2/9/2026 esta lista incluía el `broadcastWith()` de LeadSuggestionCreated, que
+     * emitía el lead entero sobre un canal PÚBLICO. Ese evento ahora manda solo el `lead_id`
+     * (ver LosEventosDeBroadcastMandanSoloIdsTest), así que ese sumidero puntual ya no existe —
+     * pero el motivo del `$hidden` no dependía de él y sigue en pie.
      */
     public function test_el_token_de_eventos_no_sale_al_serializar_el_lead(): void
     {
