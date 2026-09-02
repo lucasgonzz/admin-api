@@ -940,6 +940,10 @@ class AgentesSoloLoExplicitoTest extends TestCase
             'source'           => 'whatsapp',
             'whatsapp_phone'   => '+5493416660001',
             'opened_at'        => now()->subHours(2),
+            // Explícito y no heredado de la config global: estos tests miden el gate de respaldo
+            // documental, no el régimen de nacimiento, y el gate solo se ve si la respuesta queda
+            // en borrador. El hook `creating` respeta el valor que se le pase.
+            'requiere_verificacion_mensajes' => true,
         ]);
 
         SupportMessage::create([
