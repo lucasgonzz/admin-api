@@ -283,13 +283,21 @@ class LeadSuggestionSendService
          * responde manualmente).
          */
         /*
-         * El seguimiento por plantilla ya queda protegido contra el borrado en pleno envío sin
-         * necesidad de nada propio: el marcador se toma en send_suggestion() ANTES de bifurcar acá.
+         * Del arreglo de "la sugerencia borrada en pleno envío", este camino hereda UNA mitad y
+         * necesita la otra por su cuenta:
+         *
+         *   - El LEASE sí lo hereda: se toma en send_suggestion() ANTES de bifurcar acá, así que el
+         *     barrido ve el mensaje como "en curso" tanto si sale por texto como si sale por
+         *     plantilla. Eso no se duplica abajo.
+         *   - La REPOSICIÓN no se hereda: la escribe cada salida que dejó un efecto externo, y la
+         *     salida de éxito de send_followup_suggestion_via_template() dejó uno igual de
+         *     irreversible (la plantilla ya salió por WhatsApp). Ahí abajo tiene su propia detección
+         *     de 0 filas, reusando recrear_mensaje_enviado().
          *
          * Hoy, además, clear_stale_pending_suggestions() filtra `is_followup = false`, así que un
          * seguimiento ni siquiera es borrable por ese barrido — pero eso es un detalle del OTRO
-         * archivo, y el día que ese filtro cambie este camino no se entera. Por eso la protección va
-         * arriba de la bifurcación y no duplicada acá abajo.
+         * archivo (y hay otros caminos que borran, como discard_obsolete_suggestion()), y el día que
+         * ese filtro cambie este camino no se entera.
          */
         if ($message->is_followup && ! empty($message->followup_template_id)) {
             return $this->send_followup_suggestion_via_template($message, $lead, $sent_by_admin_id);
@@ -612,43 +620,63 @@ class LeadSuggestionSendService
      * @param LeadMessage $message        Modelo en memoria de la fila borrada (fuente de los campos
      *                                    que no dependen del envío).
      * @param array       $update_payload Payload que el UPDATE no pudo aplicar (estado final).
-     * @param string      $body           Texto que efectivamente salió por WhatsApp.
-     * @param array       $send_result    Resultado de enviar_partes(), para el log técnico.
+     * @param string      $body           Texto (o plantilla) que efectivamente salió por WhatsApp,
+     *                                    para el log técnico.
+     * @param array|null  $send_result    Resultado de enviar_partes(), para el log técnico. Null en
+     *                                    el camino de seguimiento por plantilla, que sale de una y
+     *                                    no tiene reparto en partes que informar.
      *
      * @return LeadMessage Mensaje nuevo, ya en 'enviado'.
      */
-    private function recrear_mensaje_enviado(Lead $lead, LeadMessage $message, array $update_payload, string $body, array $send_result): LeadMessage
+    private function recrear_mensaje_enviado(Lead $lead, LeadMessage $message, array $update_payload, string $body, ?array $send_result = null): LeadMessage
     {
         /*
          * 🔴 Campos enumerados a mano, y NO $message->getAttributes(). getAttributes() devuelve los
-         * valores CRUDOS de la base: pending_actions, horarios_ofrecidos, applied_actions_summary y
-         * actions_override_log volverían como el JSON en string, y al pasarlos de nuevo por los casts
-         * `array` de LeadMessage se codificarían dos veces ("[{\"fecha\"...") — el hilo mostraría un
-         * mensaje que se ve bien y un panel de acciones roto, que es peor que un error visible.
-         * Leyendo por propiedad ($message->pending_actions) los casts ya devolvieron el array y
-         * create() lo vuelve a codificar una sola vez.
+         * valores CRUDOS de la base: pending_actions, horarios_ofrecidos, applied_actions_summary,
+         * actions_override_log y admin_notifications volverían como el JSON en string, y al pasarlos
+         * de nuevo por los casts `array` de LeadMessage se codificarían dos veces ("[{\"fecha\"...")
+         * — el hilo mostraría un mensaje que se ve bien y un panel de acciones roto, que es peor que
+         * un error visible. Leyendo por propiedad ($message->pending_actions) los casts ya
+         * devolvieron el array y create() lo vuelve a codificar una sola vez.
+         *
+         * ⚠️ `calendar_snapshot` es la excepción y por eso va igual pero por otro motivo: es una
+         * columna `text` SIN cast (lo escribe json_encode() a mano en LeadAiService), así que el
+         * valor de la propiedad ya es el string JSON final y se copia tal cual. Si algún día se le
+         * pusiera cast `array`, esta línea sigue siendo correcta; lo que nunca hay que hacer es
+         * mezclarla con un json_encode() propio acá.
+         *
+         * 🔴 La lista tiene que cubrir TODO lo que el hilo renderiza, no sólo el texto: el docblock
+         * promete que la fila repuesta se ve igual que la original, y MessageBubble.vue de admin-spa
+         * pinta también los badges de demo confirmada (marca_demo_ingreso_confirmado,
+         * marca_demo_terminada_confirmada), los avisos de admins notificados (admin_notifications) y
+         * el desplegable de horarios enviados (calendar_snapshot). Un campo que falte acá no rompe
+         * nada visible: simplemente desaparece del hilo, en silencio.
          */
         $atributos = [
-            'lead_id'                 => $message->lead_id,
-            'sender'                  => 'sistema',
-            'content'                 => $message->content,
-            'edited_content'          => isset($update_payload['edited_content'])
-                ? $update_payload['edited_content']
-                : $message->edited_content,
-            'ai_reasoning'            => $message->ai_reasoning,
-            'suggested_lead_status'   => $message->suggested_lead_status,
-            'pending_actions'         => $message->pending_actions,
-            'horarios_ofrecidos'      => $message->horarios_ofrecidos,
-            'applied_actions_summary' => $message->applied_actions_summary,
-            'actions_override_log'    => $message->actions_override_log,
-            'followup_template_id'    => $message->followup_template_id,
-            'is_followup'             => (bool) $message->is_followup,
-            'requiere_verificacion'   => (bool) $message->requiere_verificacion,
-            'sent_via'                => $message->sent_via,
+            'lead_id'                         => $message->lead_id,
+            'sender'                          => 'sistema',
+            'content'                         => $message->content,
+            /* Sin ternario contra $update_payload: el array_merge() de abajo lo pisa igual cuando el
+               setter editó el texto, así que resolverlo acá arriba era una decisión escrita dos veces. */
+            'edited_content'                  => $message->edited_content,
+            'ai_reasoning'                    => $message->ai_reasoning,
+            'suggested_lead_status'           => $message->suggested_lead_status,
+            'pending_actions'                 => $message->pending_actions,
+            'horarios_ofrecidos'              => $message->horarios_ofrecidos,
+            'applied_actions_summary'         => $message->applied_actions_summary,
+            'actions_override_log'            => $message->actions_override_log,
+            'admin_notifications'             => $message->admin_notifications,
+            'calendar_snapshot'               => $message->calendar_snapshot,
+            'followup_template_id'            => $message->followup_template_id,
+            'is_followup'                     => (bool) $message->is_followup,
+            'requiere_verificacion'           => (bool) $message->requiere_verificacion,
+            'marca_demo_ingreso_confirmado'   => (bool) $message->marca_demo_ingreso_confirmado,
+            'marca_demo_terminada_confirmada' => (bool) $message->marca_demo_terminada_confirmada,
+            'sent_via'                        => $message->sent_via,
             /* La fila nueva NO es un evento de estado ni un error: es el mensaje real que el lead
                recibió, y tiene que renderizarse como cualquier otro mensaje del hilo. */
-            'is_status_event'         => false,
-            'is_error'                => false,
+            'is_status_event'                 => false,
+            'is_error'                        => false,
         ];
 
         /* El estado final del envío (status, sent_at, whatsapp_message_id, sent_by_admin_id, los
@@ -661,9 +689,11 @@ class LeadSuggestionSendService
             'lead_id'             => $lead->id,
             'message_id_borrado'  => $message->getKey(),
             'message_id_nuevo'    => $nuevo->id,
-            'whatsapp_message_id' => $send_result['last_message_id'],
-            'partes_enviadas'     => $send_result['sent_parts'],
-            'partes_totales'      => $send_result['total_parts'],
+            /* Sale del payload y no de $send_result: así el dato es el mismo que quedó escrito en la
+               fila, y sirve igual para el camino de plantilla, que no tiene $send_result. */
+            'whatsapp_message_id' => isset($update_payload['whatsapp_message_id']) ? $update_payload['whatsapp_message_id'] : null,
+            'partes_enviadas'     => $send_result !== null ? $send_result['sent_parts'] : null,
+            'partes_totales'      => $send_result !== null ? $send_result['total_parts'] : null,
             'texto_enviado'       => $body,
         ]);
 
@@ -700,9 +730,14 @@ class LeadSuggestionSendService
      * Cuando la fila ya no está, lo más verdadero que se puede devolver es el objeto en memoria:
      * refleja lo que ESTE request hizo, que es exactamente lo que el llamador necesita saber.
      *
-     * Devolver el modelo en memoria NO es tapar el problema: el camino de éxito recrea la fila antes
-     * de llegar acá (ver recrear_mensaje_enviado()) y deja constancia en el hilo y en el log. Esto
-     * cubre las otras seis salidas, donde no hubo efecto externo que reponer.
+     * Devolver el modelo en memoria NO es tapar el problema, y la razón es que este método NUNCA es
+     * la respuesta a un efecto externo perdido. Las DOS salidas de este archivo que dejan algo
+     * irreversible del otro lado —el éxito del envío por texto y el éxito del seguimiento por
+     * plantilla— reponen la fila antes de llegar acá (ver recrear_mensaje_enviado()), con constancia
+     * en el hilo y en el log. Las otras cinco (ventana de 24hs cerrada, fallo real de envío,
+     * seguimiento sin plantilla o sin teléfono, seguimiento que Kapso rechazó, y el gate de
+     * agendamiento del auto-envío) no enviaron nada: ahí no hay nada que reponer, y el objeto en
+     * memoria es la descripción fiel de lo que pasó.
      *
      * @param LeadMessage $message
      *
@@ -1058,13 +1093,50 @@ class LeadSuggestionSendService
             return $this->fresh_o_en_memoria($message);
         }
 
-        $message->update([
+        $update_payload = [
             'status'              => 'enviado',
             'sent_at'             => now(),
             'whatsapp_message_id' => $whatsapp_message_id,
             // Admin que aprobó este seguimiento desde el panel (null si fue el respaldo automático, prompt 403).
             'sent_by_admin_id'    => $sent_by_admin_id,
-        ]);
+        ];
+
+        /*
+         * 🔴 Misma detección de 0 filas que el camino principal, y por el mismo motivo: acá arriba la
+         * PLANTILLA YA SALIÓ por WhatsApp. El efecto externo es idéntico al del otro camino —el lead
+         * tiene el mensaje en el teléfono— y es igual de irreversible, así que un `$message->update()`
+         * mudo (Model::performUpdate() tira el rowCount y devuelve `true` fijo) deja al hilo sin el
+         * mensaje que la persona recibió, y al setter mandándolo de nuevo.
+         *
+         * Arreglar sólo la salida que el incidente nombró y dejar a esta —que es su gemela— con el
+         * update mudo es exactamente "arreglar las instancias que el stack trace nombró, y no la
+         * familia", que este proyecto ya tiene escrito como clase de error.
+         */
+        $filas_afectadas = LeadMessage::query()->whereKey($message->getKey())->update($update_payload);
+
+        /* El exists() no sobra aunque $filas_afectadas ya sea 0: sin PDO::MYSQL_ATTR_FOUND_ROWS
+           —que esta conexión no define— rowCount() cuenta filas CAMBIADAS, no encontradas. El
+           razonamiento completo está en el camino principal, arriba. */
+        $fila_desaparecida = $filas_afectadas === 0
+            && ! LeadMessage::query()->whereKey($message->getKey())->exists();
+
+        if ($fila_desaparecida) {
+            /* La reposición vive en UN solo lugar: es el mismo recrear_mensaje_enviado() del camino
+               principal, con el mismo aviso en el hilo y la misma marca de revisión. Lo único propio
+               de acá es qué salió —una plantilla de Meta con sus variables, no el content del
+               mensaje— y que no hay reparto en partes que informar. */
+            $message = $this->recrear_mensaje_enviado(
+                $lead,
+                $message,
+                $update_payload,
+                'Plantilla "'.$template->template_name.'" con variables: '.implode(' | ', $variables)
+            );
+        } else {
+            /* El UPDATE salió por query builder, así que el objeto en memoria quedó con los valores
+               viejos, y apply_suggested_pipeline_status() y el broadcast de abajo leen de ESTE objeto. */
+            $message->forceFill($update_payload);
+            $message->syncOriginal();
+        }
 
         /* Un seguimiento normalmente no cambia el pipeline, pero respetamos suggested_lead_status si existe. */
         $this->apply_suggested_pipeline_status($lead, $message);
