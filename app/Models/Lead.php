@@ -572,9 +572,11 @@ class Lead extends Model
     /**
      * Leads que ameritan revisión, en SQL puro (gemelo de LeadPendingReviewService::lead_requiere_revision()).
      *
-     * Razón A: mensajes del lead sin responder tras el último saliente (misma definición que
-     * LeadConversationAiState::has_unanswered_lead_messages(); la relación `messages` está ordenada
-     * por id, así que "posterior en el bucle" es "id mayor").
+     * Razón A: mensajes del lead sin responder tras el último saliente **que le llegó**. Qué cuenta
+     * como respuesta lo define {@see LeadMessage::is_reply_to_lead()} y su gemelo en SQL
+     * {@see LeadMessage::apply_reply_to_lead_conditions()} — una sugerencia de la IA esperando
+     * verificación no contesta nada, y un envío que nunca salió tampoco. La relación `messages` está
+     * ordenada por id, así que "posterior en el bucle" es "id mayor".
      * Razón B: el hilo termina en un error sin actividad real posterior.
      *
      * 🔴 **Por qué el segundo parámetro existe, y por qué su default es `false`.**
@@ -633,16 +635,10 @@ class Lead extends Model
                         $outbound->selectRaw('1')
                             ->from('lead_messages as outbound')
                             ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
-                            ->whereColumn('outbound.id', '>', 'lead_messages.id')
-                            ->where(function ($tipos) {
-                                $tipos->where(function ($setter) {
-                                    $setter->where('outbound.sender', 'setter')
-                                        ->whereIn('outbound.status', ['enviado', 'aprobado']);
-                                })->orWhere(function ($sistema) {
-                                    $sistema->where('outbound.sender', 'sistema')
-                                        ->where('outbound.status', 'aprobado');
-                                });
-                            });
+                            ->whereColumn('outbound.id', '>', 'lead_messages.id');
+                        /* Gemelo en SQL de LeadMessage::is_reply_to_lead(). No lo vuelvas a
+                           escribir a mano acá: eran tres copias y se separaron. */
+                        LeadMessage::apply_reply_to_lead_conditions($outbound, 'outbound');
                     });
             })
             // Razón B: último error sin actividad real posterior.

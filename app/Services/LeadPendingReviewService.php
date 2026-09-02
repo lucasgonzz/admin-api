@@ -82,9 +82,10 @@ class LeadPendingReviewService
      */
     public function lead_requiere_revision(Lead $lead): bool
     {
-        /* Razón A: mensajes del lead sin responder (definición existente del sistema). También cubre
-           las sugerencias de Claude cuyo envío falló: al fallar quedan 'rechazado' y el mensaje del
-           lead sigue contando como sin responder. */
+        /* Razón A: mensajes del lead sin responder. Cuenta como respuesta solo un saliente que
+           efectivamente salió por WhatsApp (ver LeadMessage::is_reply_to_lead), así que también
+           cubre los dos casos en que el sistema generó algo que el lead nunca vio: la sugerencia
+           que espera verificación, y el envío que falló. */
         if (LeadConversationAiState::has_unanswered_lead_messages($lead)) {
             return true;
         }
