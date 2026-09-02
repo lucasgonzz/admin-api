@@ -3355,18 +3355,9 @@ class LeadController extends Controller
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (\Throwable $exception) {
-            Log::error('LeadController@approve_message_json: '.$exception->getMessage(), [
-                'message_id' => $message_id,
-            ]);
+            $this->registrar_aprobacion_fallada((int) $message->lead_id, 'LeadController@approve_message_json', $message_id, $exception);
 
-            // Registrar el fallo de envío en la conversación del lead.
-            (new LeadConversationErrorLogger())->log(
-                (int) $message->lead_id,
-                'No se pudo enviar la sugerencia por WhatsApp',
-                $exception->getMessage()
-            );
-
-            return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp.'], 422);
+            return response()->json(['message' => 'No se pudo completar la aprobación. Revisá la conversación antes de reintentar.'], 422);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
@@ -3398,18 +3389,9 @@ class LeadController extends Controller
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (\Throwable $exception) {
-            Log::error('LeadController@approve_message_with_edit_json: '.$exception->getMessage(), [
-                'message_id' => $message_id,
-            ]);
+            $this->registrar_aprobacion_fallada((int) $message->lead_id, 'LeadController@approve_message_with_edit_json', $message_id, $exception);
 
-            // Registrar el fallo de envío en la conversación del lead.
-            (new LeadConversationErrorLogger())->log(
-                (int) $message->lead_id,
-                'No se pudo enviar la sugerencia por WhatsApp',
-                $exception->getMessage()
-            );
-
-            return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp.'], 422);
+            return response()->json(['message' => 'No se pudo completar la aprobación. Revisá la conversación antes de reintentar.'], 422);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
@@ -3454,21 +3436,54 @@ class LeadController extends Controller
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         } catch (\Throwable $exception) {
-            Log::error('LeadController@approve_message_with_actions_json: '.$exception->getMessage(), [
-                'message_id' => $message_id,
-            ]);
+            $this->registrar_aprobacion_fallada((int) $message->lead_id, 'LeadController@approve_message_with_actions_json', $message_id, $exception);
 
-            // Registrar el fallo de envío en la conversación del lead.
-            (new LeadConversationErrorLogger())->log(
-                (int) $message->lead_id,
-                'No se pudo enviar la sugerencia por WhatsApp',
-                $exception->getMessage()
-            );
-
-            return response()->json(['message' => 'No se pudo enviar el mensaje por WhatsApp.'], 422);
+            return response()->json(['message' => 'No se pudo completar la aprobación. Revisá la conversación antes de reintentar.'], 422);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $message->lead_id)], 200);
+    }
+
+    /**
+     * Deja constancia de una excepción INESPERADA de un endpoint de aprobación de sugerencias.
+     *
+     * 🔴 Este bloque NO puede decir "No se pudo enviar la sugerencia por WhatsApp", que es lo que
+     * decía hasta el 2/9/2026. Los fallos de envío REALES —ventana de 24hs cerrada, Kapso caído,
+     * lead sin teléfono, envío parcial— los registra LeadSuggestionSendService con su propio bloque
+     * y con el motivo verdadero ANTES de volver acá. Todo lo que llega a este catch es otra cosa:
+     * una excepción que subió, con el mensaje posiblemente YA ENTREGADO al lead. Afirmar que no se
+     * envió es tomar una señal parcial ("saltó una excepción") como prueba de un hecho más fuerte
+     * ("el lead no recibió nada"), y el setter termina mandando el mensaje dos veces.
+     *
+     * El detalle técnico va al Log y NO al hilo: el hilo lo lee un setter, y $exception->getMessage()
+     * ahí era literalmente "Return value of ... must be an instance of App\Models\LeadMessage".
+     *
+     * Los tres endpoints de aprobación comparten este método en vez de tener una copia cada uno: tres
+     * bloques idénticos es exactamente el caldo de cultivo que este repo ya conoce (por eso
+     * LeadSuggestionSendService::enviar_partes() es pública y compartida), y el copy de este aviso ya
+     * se corrigió una vez en tres lugares a la vez.
+     *
+     * @param int        $lead_id
+     * @param string     $endpoint   Nombre del endpoint para el log (ej. "LeadController@approve_message_json").
+     * @param int|string $message_id Id del mensaje tal como llegó por la ruta.
+     * @param \Throwable $exception
+     *
+     * @return void
+     */
+    private function registrar_aprobacion_fallada(int $lead_id, string $endpoint, $message_id, \Throwable $exception): void
+    {
+        Log::error($endpoint.': '.$exception->getMessage(), [
+            'message_id' => $message_id,
+            'lead_id'    => $lead_id,
+            'excepcion'  => get_class($exception),
+            'archivo'    => $exception->getFile().':'.$exception->getLine(),
+        ]);
+
+        (new LeadConversationErrorLogger())->log(
+            $lead_id,
+            'Hubo un problema al aprobar la sugerencia',
+            'El sistema falló mientras procesaba la aprobación. Puede que el mensaje haya salido igual: revisá la conversación antes de mandarlo de nuevo. El detalle técnico quedó guardado en el registro del sistema.'
+        );
     }
 
     /**
