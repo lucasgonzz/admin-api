@@ -425,11 +425,38 @@ class DemoExperienciaController extends Controller
     }
 
     /**
-     * Segundos desde que arrancó el armado de la instancia, o null si todavía no arrancó.
+     * Estados de `demo_setup_status` en los que puede haber una corrida VIVA, o sea los únicos en
+     * los que un contador de espera dice algo cierto.
+     *
+     * `ejecutandose` es el caso obvio. `sin_confirmar` entra a propósito y no es un descuido: ese
+     * estado significa que el admin dejó de escuchar (timeout) o que la instancia avisó que ya tenía
+     * una corrida viva (HTTP 409), y en los dos casos la corrida del otro lado puede estar sembrando
+     * la base en este mismo instante — es literalmente lo que dice el docblock de
+     * RunDemoSetupService::ESTADO_SIN_CONFIRMAR. Contar la espera ahí es correcto en las dos
+     * ramas del ambigüedad: si la corrida está viva, el número es el real; si murió, el contador
+     * pasa el estimado y la página cambia sola a "está tardando un poco más de lo normal", que es
+     * exactamente lo que corresponde decirle al lead. Y quien destraba ese estado es otro proceso
+     * (`leads:vencer-demo-setups-colgados`), así que tampoco queda colgado para siempre.
+     *
+     * @var array<int, string>
+     */
+    private const ESTADOS_CON_CORRIDA_VIVA = ['ejecutandose', RunDemoSetupService::ESTADO_SIN_CONFIRMAR];
+
+    /**
+     * Segundos desde que arrancó el armado de la instancia, o null si no hay ninguna corrida viva.
      *
      * Null NO es un caso de borde: es el estado normal de un lead con la demo agendada cuyo setup
      * todavía no disparó (`demo_setup_status` en `pendiente`). La página lo usa para saber que NO
      * tiene que mostrar ningún contador, y cae al texto de siempre.
+     *
+     * 🔴 MIRA EL ESTADO Y NO SÓLO LA COLUMNA DE FECHA, y ese es el arreglo. `demo_setup_last_run_at`
+     * NO se limpia nunca: el reintento automático (`RunDemoSetup::reclamar_reintento()`) devuelve el
+     * lead a `pendiente` y consume un intento, pero deja la marca de la corrida anterior. Contando
+     * sólo contra la columna, el lead veía "faltan 5 minutos" de una corrida que ya estaba muerta, y
+     * cuando el reintento arrancaba de verdad el contador SALTABA PARA ATRÁS — un contador que
+     * retrocede se lee peor que un cartel quieto, que es justo el problema que esta misión vino a
+     * arreglar. Lo mismo con `exitoso` (no hay nada que esperar) y con `fallido` (la página muestra
+     * su propio bloque). Sin corrida viva, no hay contador.
      *
      * El clamp a >= 0 cubre el reloj corrido hacia atrás: un transcurrido negativo haría que el
      * front calcule un porcentaje negativo y dibuje una barra vacía que se lee como rota.
@@ -441,6 +468,11 @@ class DemoExperienciaController extends Controller
     private function setup_iniciado_hace_seg(Lead $lead)
     {
         if ($lead->demo_setup_last_run_at === null) {
+            return null;
+        }
+
+        $estado = (string) ($lead->demo_setup_status ?? 'pendiente');
+        if (! in_array($estado, self::ESTADOS_CON_CORRIDA_VIVA, true)) {
             return null;
         }
 
