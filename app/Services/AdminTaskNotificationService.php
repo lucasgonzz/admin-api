@@ -80,15 +80,11 @@ class AdminTaskNotificationService
             // Broadcast en tiempo real: si Pusher falla no debe romper la creación
             // de la tarea, solo se loguea. El admin la va a ver igual al recargar
             // porque el estado ya quedó persistido arriba.
-            try {
-                event(new AdminTaskNotificationCreated($notification->id));
-            } catch (\Throwable $e) {
-                Log::error('AdminTaskNotificationService: fallo al emitir broadcast.', [
-                    'notification_id' => $notification->id,
-                    'admin_id'        => $admin_id,
-                    'error'           => $e->getMessage(),
-                ]);
-            }
+            //
+            // El try/catch que había acá se movió adentro del propio evento (su `dispatch()`
+            // pasa por App\Support\BroadcastGuard): la protección tiene que ser del evento y
+            // no de este llamador, porque si no cada emisor nuevo nace desprotegido.
+            AdminTaskNotificationCreated::dispatch((int) $notification->id);
 
             // Web Push como refuerzo, también aislado: un fallo acá no debe afectar
             // ni la tarea ni el broadcast ya disparado.

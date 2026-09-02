@@ -3,6 +3,8 @@
 namespace App\Events;
 
 use App\Models\SupportTicket;
+use App\Support\BroadcastGuard;
+use App\Support\BroadcastPayloadBudget;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
@@ -29,6 +31,24 @@ class SupportTicketUpdated implements ShouldBroadcastNow
     public function __construct(int $support_ticket_id)
     {
         $this->support_ticket_id = $support_ticket_id;
+    }
+
+    /**
+     * Emite el evento sin poder voltear a quien lo emitió.
+     *
+     * Sobreescribe el `dispatch()` de {@see \Illuminate\Foundation\Events\Dispatchable} para
+     * que la emisión pase por {@see \App\Support\BroadcastGuard}: el ticket ya quedó guardado
+     * antes de llegar acá, así que una falla de Pusher se loguea y se sigue. El porqué completo
+     * está escrito en esa clase.
+     *
+     * 🔴 Va acá, en el evento, y no en cada sitio de llamada: así queda cubierto todo emisor,
+     * incluidos los que se escriban después.
+     *
+     * @return void
+     */
+    public static function dispatch()
+    {
+        BroadcastGuard::emitir(new static(...func_get_args()));
     }
 
     /**
@@ -60,12 +80,20 @@ class SupportTicketUpdated implements ShouldBroadcastNow
     }
 
     /**
-     * Ticket ligero para la bandeja: sin lista completa de mensajes; incluye last_message para preview.
+     * Payload del evento: el `support_ticket_id` siempre, y el ticket ligero si entra.
      *
      * Pusher Channels limita el body del evento HTTP a ~10 KB; cargar `messages.attachments`
-     * rompía al guardar cabecera (reasignación, nombre, cierre).
+     * rompía al guardar cabecera (reasignación, nombre, cierre). Seleccionar columnas y
+     * relaciones a mano achica el payload pero **no lo acota**: `lastMessage` es texto libre
+     * escrito por un cliente, así que el tamaño lo termina fijando alguien de afuera. Por eso
+     * el payload pasa por {@see \App\Support\BroadcastPayloadBudget}: si no entra, se emite
+     * **sin la clave `ticket`**.
      *
-     * @return array{ticket: \App\Models\SupportTicket|null}
+     * 🔴 Compatible hacia atrás: `ticket` conserva nombre y forma, y `support_ticket_id` se
+     * **suma**. Una admin-spa vieja recibe `ticket` en el caso normal y se comporta igual; la
+     * nueva, cuando no vino, refresca la fila por API con el id.
+     *
+     * @return array{support_ticket_id: int, ticket?: \App\Models\SupportTicket|null}
      */
     public function broadcastWith(): array
     {
@@ -110,8 +138,15 @@ class SupportTicketUpdated implements ShouldBroadcastNow
             ->withUnreadMessagesCount()
             ->first();
 
-        return [
-            'ticket' => $ticket,
-        ];
+        // El id nunca se recorta: es lo que le permite al consumidor reconstruir la fila
+        // por API cuando el ticket no entró en el presupuesto.
+        return BroadcastPayloadBudget::ajustar(
+            [
+                'support_ticket_id' => $this->support_ticket_id,
+                'ticket'            => $ticket,
+            ],
+            'ticket',
+            'SupportTicketUpdated'
+        );
     }
 }

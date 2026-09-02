@@ -334,7 +334,9 @@ class SendSupportAiSuggestion implements ShouldQueue
         ));
 
         /* Emitir actualización de la fila en la bandeja para reflejar escalated_at. */
-        event(new SupportTicketUpdated($ticket->id));
+        // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,
+        // así una falla de Pusher no voltea el trabajo del job, que ya quedó persistido.
+        SupportTicketUpdated::dispatch((int) $ticket->id);
 
         /* Avisar por WhatsApp a los operadores suscritos. El Pusher de arriba solo sirve si
          * alguien tiene el admin abierto en ese momento; el escalado no puede depender de eso.
@@ -410,7 +412,9 @@ class SendSupportAiSuggestion implements ShouldQueue
             'ticket_id' => $ticket->id,
         ]);
 
-        event(new SupportTicketUpdated($ticket->id));
+        // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,
+        // así una falla de Pusher no voltea el trabajo del job, que ya quedó persistido.
+        SupportTicketUpdated::dispatch((int) $ticket->id);
     }
 
     /**

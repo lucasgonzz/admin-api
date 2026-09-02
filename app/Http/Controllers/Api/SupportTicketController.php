@@ -491,7 +491,9 @@ class SupportTicketController extends BaseController
             (new SupportAiSuggestionDraftService())->clear_ticket_pending_state($ticket);
         }
 
-        event(new SupportTicketUpdated((int) $ticket->id));
+        // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,
+        // así una falla de Pusher no voltea un ticket que ya quedó guardado.
+        SupportTicketUpdated::dispatch((int) $ticket->id);
 
         return response()->json([
             'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
@@ -528,7 +530,9 @@ class SupportTicketController extends BaseController
             $ticket->save();
         }
 
-        event(new SupportTicketUpdated((int) $ticket->id));
+        // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,
+        // así una falla de Pusher no voltea un ticket que ya quedó guardado.
+        SupportTicketUpdated::dispatch((int) $ticket->id);
 
         return response()->json([
             'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),
@@ -1068,7 +1072,9 @@ class SupportTicketController extends BaseController
         }
 
         // Notifica a todos los operadores (support.admins) para alinear bandejas tras reasignación u otros cambios.
-        event(new SupportTicketUpdated((int) $ticket->id));
+        // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por BroadcastGuard,
+        // así una falla de Pusher no voltea un ticket que ya quedó guardado.
+        SupportTicketUpdated::dispatch((int) $ticket->id);
 
         return response()->json([
             'model' => $this->ticketQueryForInbox()->where('id', $ticket->id)->first(),

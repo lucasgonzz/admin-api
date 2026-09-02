@@ -3,6 +3,8 @@
 namespace App\Events;
 
 use App\Models\AdminTaskNotification;
+use App\Support\BroadcastGuard;
+use App\Support\BroadcastPayloadBudget;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
@@ -50,6 +52,25 @@ class AdminTaskNotificationCreated implements ShouldBroadcastNow
     }
 
     /**
+     * Emite el evento sin poder voltear a quien lo emitió.
+     *
+     * Sobreescribe el `dispatch()` de {@see \Illuminate\Foundation\Events\Dispatchable} para
+     * que la emisión pase por {@see \App\Support\BroadcastGuard}. La notificación ya está
+     * persistida cuando se llega acá: si Pusher falla, el admin la ve igual al recargar, y una
+     * excepción de Pusher no puede voltear la creación de la tarea. El porqué completo está en
+     * esa clase.
+     *
+     * 🔴 Va acá, en el evento, y no en cada sitio de llamada: así queda cubierto todo emisor,
+     * incluidos los que se escriban después.
+     *
+     * @return void
+     */
+    public static function dispatch()
+    {
+        BroadcastGuard::emitir(new static(...func_get_args()));
+    }
+
+    /**
      * Solo emite si la notificación sigue existiendo (pudo borrarse la tarea entre
      * medio) y si se pudo resolver el admin destinatario.
      *
@@ -84,11 +105,19 @@ class AdminTaskNotificationCreated implements ShouldBroadcastNow
     }
 
     /**
-     * Payload del evento: la notificación con su tarea, sin serializar el `todos`
-     * completo de la tarea para mantenerse bajo el límite de ~10 KB de Pusher Channels
-     * (mismo criterio que LeadSuggestionCreated).
+     * Payload del evento: el `notification_id` siempre, y la notificación con su tarea si entra.
      *
-     * @return array{notification: array<string, mixed>|null}
+     * Se evita serializar el `todos` completo de la tarea para mantenerse bajo el límite de
+     * ~10 KB de Pusher Channels, pero eso solo achica: `title` y `content` son texto libre y
+     * pueden crecer sin techo. Por eso el payload pasa por
+     * {@see \App\Support\BroadcastPayloadBudget} y, si no entra, se emite **sin la clave
+     * `notification`** (mismo criterio que LeadSuggestionCreated y SupportTicketUpdated).
+     *
+     * 🔴 Compatible hacia atrás: `notification` conserva nombre y forma, y `notification_id` se
+     * **suma**. Una admin-spa vieja recibe la notificación en el caso normal; la nueva, cuando
+     * no vino, recarga los avisos pendientes por API.
+     *
+     * @return array{notification_id: int, notification?: array<string, mixed>|null}
      */
     public function broadcastWith(): array
     {
@@ -110,8 +139,15 @@ class AdminTaskNotificationCreated implements ShouldBroadcastNow
             ])
             ->first();
 
-        return [
-            'notification' => $notification,
-        ];
+        // El id nunca se recorta: sin él, un payload recortado sería un aviso que el
+        // consumidor no puede ni identificar ni ir a buscar.
+        return BroadcastPayloadBudget::ajustar(
+            [
+                'notification_id' => $this->notification_id,
+                'notification'    => $notification,
+            ],
+            'notification',
+            'AdminTaskNotificationCreated'
+        );
     }
 }
