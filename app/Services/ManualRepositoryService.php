@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -58,6 +59,64 @@ class ManualRepositoryService
      * Mismo motivo que el de arriba para no tocarlo: arranca con paréntesis a propósito.
      */
     const FALLBACK_SIN_ARCHIVOS = '(No se encontraron archivos .md en el repositorio.)';
+
+    /**
+     * Clave de caché del índice de archivos del manual.
+     */
+    private const CACHE_KEY_INDICE = 'manual_repository:file_list';
+
+    /**
+     * Minutos que vive el índice cacheado.
+     *
+     * 🔴 POR QUÉ 10 MINUTOS Y NO MÁS. El índice es la lista de archivos del manual, y cambia
+     * cuando alguien publica un archivo nuevo al repo de conocimiento. Diez minutos es el tiempo
+     * que estamos dispuestos a que un archivo recién publicado sea invisible para el agente:
+     * corto de sobra para que nadie lo note en una jornada de trabajo, largo de sobra para que
+     * una ráfaga de sugerencias no salga a GitHub una vez por prompt. No se sube sin mirar el
+     * otro lado: un índice viejo hace que el agente no vea un archivo que existe, que es
+     * exactamente la clase de hueco que abrió esta misión.
+     */
+    private const CACHE_MINUTOS_INDICE = 10;
+
+    /**
+     * Índice de archivos del manual, cacheado unos minutos.
+     *
+     * Existe aparte de {@see self::file_list()} y no como su reemplazo a propósito: el agente de
+     * soporte llama al método pelado y su conducta queda byte por byte como estaba (una lectura
+     * por armado de prompt, que es donde el gate de citas mide si el repositorio está caído). El
+     * cacheado lo usa el agente de leads, que arma el bloque del manual en cada system prompt y
+     * lo hace desde cuatro sitios distintos: ahí la lectura era una llamada a GitHub con
+     * `timeout(15)` metida en el camino de generación de una sugerencia.
+     *
+     * 🔴 UN FALLO NO SE CACHEA. Si el índice no se pudo bajar, `file_list()` devuelve su texto
+     * de fallback y acá se devuelve tal cual **sin guardarlo**: cachear el fallback convertiría
+     * un mal minuto de GitHub en diez minutos de agente sin manual, que es un fallo transitorio
+     * ascendido a permanente. Solo se guarda un índice que se leyó de verdad.
+     *
+     * @return string Índice listo para el prompt, o el texto de fallback si no se pudo leer.
+     */
+    public function file_list_cacheada(): string
+    {
+        $cacheado = Cache::get(self::CACHE_KEY_INDICE);
+
+        if (is_string($cacheado) && $cacheado !== '') {
+            return $cacheado;
+        }
+
+        $indice = $this->file_list();
+
+        /* Los dos fallbacks arrancan con paréntesis —es su marca, ver las constantes de arriba—
+         * y son justamente lo que no se guarda. Se compara contra las constantes y no contra el
+         * paréntesis: si mañana el fallback cambia de forma, esto sigue diciendo lo que quiere
+         * decir. */
+        if ($indice === self::FALLBACK_LISTA_NO_DISPONIBLE || $indice === self::FALLBACK_SIN_ARCHIVOS) {
+            return $indice;
+        }
+
+        Cache::put(self::CACHE_KEY_INDICE, $indice, now()->addMinutes(self::CACHE_MINUTOS_INDICE));
+
+        return $indice;
+    }
 
     /**
      * Índice de archivos del manual, formateado para inyectar en un system prompt.

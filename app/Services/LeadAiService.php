@@ -7892,7 +7892,11 @@ TXT;
      */
     private function build_bloque_manual(): string
     {
-        $indice = trim(app(ManualRepositoryService::class)->file_list());
+        /* Cacheado y no pelado: `build_system_prompt()` se llama desde cuatro sitios y cada
+         * llamada bajaba el árbol entero del repo con `timeout(15)`, adentro del camino de
+         * generación de una sugerencia. El índice cambia cuando alguien publica un archivo
+         * nuevo al manual; el TTL y por qué un fallo no se cachea están en el servicio. */
+        $indice = trim(app(ManualRepositoryService::class)->file_list_cacheada());
 
         if ($indice === '' || strpos($indice, '(') === 0) {
             /* file_list() devuelve sus fallbacks entre paréntesis cuando GitHub falla o el árbol
