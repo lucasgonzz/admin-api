@@ -173,6 +173,16 @@ Route::middleware('claude.task.key')
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
 
+        /* Mensaje de TEXTO LIBRE a un lead. Es la contraparte de send-template para el otro lado de
+           la ventana de 24 hs de Meta: adentro de la ventana el texto libre sale y una plantilla
+           queda fría; afuera, el texto libre no sale y lo único que llega es una plantilla aprobada.
+           🔴 El freno que manda no es un cooldown sino la ventana misma, que resuelve
+           WhatsappSessionWindowService (no se recalcula acá), más un mensaje por turno de
+           conversación: respondido el lead una vez, el turno es de él. El porqué de haber
+           descartado el cooldown de 24 hs de send-template está escrito en
+           ClaudeLeadsOutboundController::hay_saliente_en_este_turno(). */
+        Route::post('leads/{id}/message', 'Api\ClaudeLeadsOutboundController@send_message_json');
+
         /* Pipeline de leads: ESCRITURA del estado.
            🔴 Mueven leads REALES. `cerrado_ganado` no se asigna desde acá y un lead ya promovido a
            cliente no se toca: ese tramo es la promoción a Client. Los frenos (dry_run por defecto,

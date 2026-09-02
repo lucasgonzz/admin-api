@@ -9,6 +9,7 @@ use App\Models\LeadMessage;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadConversationErrorLogger;
 use App\Services\WhatsappSendService;
+use App\Services\WhatsappSessionWindowService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
@@ -131,6 +132,16 @@ class ClaudeLeadsOutboundController extends Controller
 
     /** Texto que se guarda cuando el envío no se confirmó y el sender no dejó ningún motivo. */
     const ERROR_GENERICO = 'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).';
+
+    /**
+     * Equivalente de ERROR_GENERICO para el envío de texto libre.
+     *
+     * Separado y no reusado: el motivo que queda escrito en `whatsapp_send_error` es lo primero que
+     * se lee al diagnosticar un envío caído, y decir "por plantilla" cuando salió texto libre manda
+     * a buscar el problema al lado equivocado (la plantilla, su aprobación, sus variables) en vez
+     * de a la conexión.
+     */
+    const ERROR_TEXTO_GENERICO = 'El envío de texto libre no se confirmó (revisar conexión con WhatsApp/Kapso).';
 
     /**
      * Endpoint 7: envía una plantilla Meta a UN lead y registra el mensaje en su conversación.
@@ -622,6 +633,343 @@ class ClaudeLeadsOutboundController extends Controller
             'motivo_corte'  => $motivo_corte,
             'resultados'    => $resultados,
         ], 200);
+    }
+
+    /**
+     * Envía un mensaje de TEXTO LIBRE a un lead, solo si la ventana de 24 hs de Meta está abierta.
+     *
+     * Es la contraparte de `send_template_json()` para el otro lado de la ventana: adentro de las
+     * 24 hs posteriores al último entrante del lead, Meta deja mandar texto libre y una plantilla
+     * queda fría y fuera de lugar; afuera de esa ventana, el texto libre no sale y lo único que
+     * llega es una plantilla aprobada. Hasta ahora `claude/*` solo sabía hacer lo segundo, así que
+     * un lead que estaba conversando en ese momento no podía recibir una respuesta escrita para él.
+     *
+     * 🔴 La ventana NO se calcula acá: la resuelve `WhatsappSessionWindowService`, que ya mira las
+     * tres tablas de entrantes (leads, soporte e implementación) porque la ventana es por par de
+     * números y no por canal. Reimplementar el criterio acá sería una segunda definición de lo
+     * mismo, y la que quedaría vieja es siempre la copia.
+     *
+     * Orden de los frenos, todos ANTES del envío:
+     *   1. `content` vacío → 422.
+     *   2. Lead inexistente → 404. Sin teléfono → 422, sin crear nada.
+     *   3. Lead en `cerrado_ganado` o ya promovido a cliente → 422. Acá NO hay `include_closed`:
+     *      a alguien que ya es cliente no se le manda un mensaje comercial, y no existe la llave
+     *      que lo permita.
+     *   4. Ventana cerrada → 422 con `last_inbound_at`, nombrando el endpoint de plantillas.
+     *   5. Un solo mensaje por turno de conversación (ver `hay_saliente_en_este_turno`).
+     *
+     * @param Request                     $request Body: content (req), context, permitir_varios_por_turno.
+     * @param int|string                  $lead_id Lead destinatario.
+     * @param WhatsappSendService         $sender  Se retiene la instancia para leer su last_send_error.
+     * @param WhatsappSessionWindowService $ventana Resolutor de la ventana de 24 hs de Meta.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function send_message_json(
+        Request $request,
+        $lead_id,
+        WhatsappSendService $sender,
+        WhatsappSessionWindowService $ventana
+    ) {
+        /* En try/catch y no `validate()` pelado, por lo mismo que el resto del controlador: sin
+           header Accept: application/json, Laravel responde un 302 de redirect en vez del 422, y
+           del otro lado eso es indiagnosticable. */
+        try {
+            $request->validate([
+                'content'                   => 'required|string',
+                'context'                   => 'nullable|string|max:500',
+                'permitir_varios_por_turno' => 'nullable|boolean',
+            ], [
+                'content.required' => 'El texto del mensaje es obligatorio.',
+                'content.string'   => 'El texto del mensaje tiene que ser texto.',
+                'permitir_varios_por_turno.boolean' => 'permitir_varios_por_turno tiene que ser true o false.',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'message' => 'Parámetros inválidos. No se envió nada.',
+                'errors'  => $e->errors(),
+            ], 422);
+        }
+
+        $content = trim((string) $request->input('content', ''));
+        if ($content === '') {
+            return response()->json(['message' => 'El texto del mensaje no puede estar vacío.'], 422);
+        }
+
+        /* El valor crudo y no (int): con 'abc' el casteo decía "id 0", que confunde al diagnosticar. */
+        $lead = Lead::query()->find($lead_id);
+        if ($lead === null) {
+            return response()->json([
+                'message' => 'No existe ningún lead con id ' . var_export($lead_id, true) . '.',
+            ], 404);
+        }
+
+        /* Sin teléfono no hay a dónde mandar: 422 y no se crea absolutamente nada. */
+        $phone = trim((string) ($lead->phone ?? ''));
+        if ($phone === '') {
+            return response()->json([
+                'message' => 'El lead #' . (int) $lead->id . ' no tiene teléfono cargado: no se envió nada.',
+            ], 422);
+        }
+
+        /*
+         * Un lead que ya es cliente no recibe mensajes comerciales por esta vía, y a diferencia del
+         * lote NO hay `include_closed` que lo habilite. La asimetría es a propósito: el lote existe
+         * para recuperar pipeline y a veces necesita alcanzar un estado cerrado; este endpoint
+         * existe para responderle a alguien que está escribiendo ahora, y a un cliente se le
+         * responde desde soporte, que tiene su propio hilo y su propia ficha.
+         */
+        if ((string) $lead->status === 'cerrado_ganado' || $lead->promoted_client_id !== null) {
+            return response()->json([
+                'message' => 'El lead #' . (int) $lead->id . ' ya es cliente: no se le manda un mensaje comercial '
+                    . 'por acá. Si hay que contestarle, va por el hilo de soporte.',
+            ], 422);
+        }
+
+        /*
+         * 🔴 El freno que define este endpoint. Fuera de la ventana el texto libre NO SALE: Meta lo
+         * rechaza y el lead no ve nada. Que la respuesta sea 422 no significa que quien llamó se
+         * haya equivocado —es el estado del mundo—, y por eso devuelve el `last_inbound_at` y
+         * nombra el endpoint que sí sirve en ese caso. Una sesión que recibe esto tiene que poder
+         * decidir sola qué hacer, sin volver a preguntar.
+         */
+        $estado_ventana = $ventana->window_state($phone);
+        if (empty($estado_ventana['open'])) {
+            return response()->json([
+                'message' => 'La ventana de 24 hs de Meta está cerrada para el lead #' . (int) $lead->id
+                    . ': un mensaje de texto libre no saldría. Fuera de la ventana va una plantilla '
+                    . 'aprobada, con POST claude/leads/' . (int) $lead->id . '/send-template.',
+                'ventana_abierta' => false,
+                'last_inbound_at' => isset($estado_ventana['last_inbound_at']) ? $estado_ventana['last_inbound_at'] : null,
+            ], 422);
+        }
+
+        /*
+         * Un mensaje por turno de conversación. Ver el comentario de hay_saliente_en_este_turno():
+         * reemplaza al cooldown de 24 hs de send-template, que acá sería contraproducente.
+         */
+        if ($request->boolean('permitir_varios_por_turno') !== true && $this->hay_saliente_en_este_turno($lead)) {
+            return response()->json([
+                'message' => 'Al lead #' . (int) $lead->id . ' ya se le respondió después de su último mensaje: '
+                    . 'el turno es de él. Si de verdad hace falta mandarle otro, repetí la llamada con '
+                    . 'permitir_varios_por_turno=true.',
+                'turno_del_lead' => true,
+            ], 422);
+        }
+
+        $resultado = $this->enviar_texto_libre_al_lead($sender, $lead, [
+            'content' => $content,
+            'context' => trim((string) $request->input('context', '')),
+        ]);
+
+        return response()->json([
+            'enviado'             => $resultado['ok'],
+            'whatsapp_message_id' => $resultado['whatsapp_message_id'],
+            'error'               => $resultado['error'],
+            'lead_message'        => $resultado['lead_message'],
+            'ventana_abierta'     => true,
+            'ventana_expira'      => isset($estado_ventana['expires_at']) ? $estado_ventana['expires_at'] : null,
+        ], 200);
+    }
+
+    /**
+     * ¿Ya se le respondió al lead después de su último mensaje entrante?
+     *
+     * 🔴 Este es el freno que reemplaza al cooldown de 24 hs de `send-template`, y la elección no es
+     * cosmética. Copiar el cooldown acá rompería el caso de uso: la ventana abierta significa que
+     * hay una conversación EN CURSO, y bloquear al lead 24 hs después de contestarle una vez deja
+     * muda justo la charla que este endpoint existe para sostener.
+     *
+     * Un tope por hora tampoco sirve: deja pasar N mensajes seguidos sin que el lead haya dicho
+     * nada —que es exactamente el daño que preocupa— y encima frena el segundo mensaje legítimo del
+     * mismo intercambio. Acota el volumen, no el comportamiento malo.
+     *
+     * El turno sí es el criterio correcto, por tres motivos:
+     *   1. Por contenido: este endpoint existe para RESPONDER. Respondido una vez, insistir sin que
+     *      el otro haya contestado es acoso, tenga la frecuencia que tenga.
+     *   2. Da idempotencia gratis: un reintento después de un corte de red no duplica, porque el
+     *      primer mensaje ya quedó registrado después del último entrante. El cooldown daba esto
+     *      mismo; el tope por hora no.
+     *   3. 🔴 No se reimplementa el criterio de "un saliente que efectivamente salió":
+     *      `LeadMessage::apply_reply_to_lead_conditions()` es su definición única. Ese criterio ya
+     *      estuvo escrito TRES veces a mano en este repo y las tres estaban mal hasta el 2/9/2026.
+     *      Escribir una cuarta copia acá sería repetir el error que se acaba de arreglar.
+     *
+     * Sin ningún entrante registrado devuelve false: si no hay turno del lead que respetar, el
+     * freno no tiene qué aplicar. No puede pasar en la práctica —la ventana abierta implica un
+     * entrante—, pero se deja explícito para que el orden de los frenos no sea lo único que lo
+     * sostenga.
+     *
+     * @param Lead $lead
+     *
+     * @return bool true si hay un saliente despachado posterior al último entrante del lead.
+     */
+    protected function hay_saliente_en_este_turno(Lead $lead): bool
+    {
+        /* Último entrante real del lead. Los eventos de estado no cuentan: no son mensajes suyos. */
+        $ultimo_entrante = LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('sender', 'lead')
+            ->where('is_status_event', false)
+            ->max('created_at');
+
+        if ($ultimo_entrante === null) {
+            return false;
+        }
+
+        $salientes = LeadMessage::query()
+            ->from('lead_messages as lm')
+            ->where('lm.lead_id', $lead->id)
+            ->where('lm.created_at', '>', $ultimo_entrante);
+
+        /* La definición única de "salió de verdad": sender setter/sistema, estado despachado y
+           whatsapp_message_id cargado. Una sugerencia sin enviar no ocupa el turno. */
+        LeadMessage::apply_reply_to_lead_conditions($salientes, 'lm');
+
+        return $salientes->exists();
+    }
+
+    /**
+     * Envía el texto libre y registra el LeadMessage, haya salido o no.
+     *
+     * Mismo contrato y misma garantía crítica que `enviar_plantilla_al_lead()`: si el envío se
+     * confirmó, la fila se escribe SÍ O SÍ, y si el insert completo falla se intenta uno mínimo.
+     *
+     * 🔴 El motivo es el mismo y conviene tenerlo presente acá también: el WhatsApp ya salió antes
+     * de la persistencia. Un mensaje que llegó y no dejó fila deja al lead SIN freno de turno, y el
+     * reintento se lo manda de nuevo. Por eso un mensaje que salió se reporta `ok:true` aunque la
+     * fila haya fallado: mentir en la otra dirección es lo que duplica envíos.
+     *
+     * @param WhatsappSendService $sender Instancia retenida: su `last_send_error` es el motivo real del fallo.
+     * @param Lead                $lead   Destinatario ya validado.
+     * @param array               $envio  content, context.
+     *
+     * @return array{ok: bool, whatsapp_message_id: string|null, error: string|null, lead_message: array|null}
+     */
+    protected function enviar_texto_libre_al_lead(WhatsappSendService $sender, Lead $lead, array $envio): array
+    {
+        $content = (string) $envio['content'];
+
+        /* Contexto explícito para el aviso a admins de notify_admins_of_failure(): sin esto, el
+           aviso que le llega a Lucas cuando el envío falla no dice de dónde salió el mensaje. */
+        $context = isset($envio['context']) ? trim((string) $envio['context']) : '';
+        if ($context === '') {
+            $context = 'Mensaje de Claude - Lead #' . (int) $lead->id
+                . ' (' . trim((string) ($lead->contact_name ?? '')) . ')';
+        }
+
+        $whatsapp_message_id = null;
+        $error               = null;
+
+        try {
+            $whatsapp_message_id = $sender->send_text((string) $lead->phone, $content, $context);
+
+            if ($whatsapp_message_id === null) {
+                $error = $sender->last_send_error ? $sender->last_send_error : self::ERROR_TEXTO_GENERICO;
+            }
+        } catch (\Throwable $e) {
+            /* send_text() ya atrapa sus propias excepciones y devuelve null: esto es defensa en
+               profundidad. 🔴 El texto de la excepción va al log, NUNCA a la respuesta: una
+               excepción de PDO trae el INSERT completo con los valores atados, incluido el
+               contenido del mensaje. */
+            $error = self::ERROR_TEXTO_GENERICO;
+            Log::channel('daily')->error('ClaudeLeadsOutboundController: excepción al enviar el texto libre.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
+        $message = null;
+
+        try {
+            $message = $this->persistir_mensaje($lead, [
+                'content'              => $content,
+                'whatsapp_message_id'  => $whatsapp_message_id,
+                'error'                => $error,
+                'followup_template_id' => null,
+            ]);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->error(
+                'ClaudeLeadsOutboundController: 🔴 no se pudo registrar el texto libre DESPUÉS de intentar el envío.',
+                [
+                    'lead_id'             => $lead->id,
+                    'whatsapp_message_id' => $whatsapp_message_id,
+                    'salio_el_mensaje'    => $whatsapp_message_id !== null,
+                    'error'               => $e->getMessage(),
+                ]
+            );
+
+            /* Si el mensaje salió, hace falta una fila igual para que el freno de turno pare el reintento. */
+            if ($whatsapp_message_id !== null) {
+                try {
+                    $message = $this->persistir_mensaje($lead, [
+                        'content'              => $content,
+                        'whatsapp_message_id'  => $whatsapp_message_id,
+                        'error'                => 'El mensaje salió pero no se pudo registrar completo (ver log del día).',
+                        'followup_template_id' => null,
+                    ]);
+                } catch (\Throwable $e2) {
+                    Log::channel('daily')->error(
+                        'ClaudeLeadsOutboundController: 🔴🔴 el texto libre SALIÓ y NO quedó registrado. '
+                            . 'El turno no quedó ocupado: un reintento se lo manda de nuevo.',
+                        [
+                            'lead_id'             => $lead->id,
+                            'whatsapp_message_id' => $whatsapp_message_id,
+                            'error'               => $e2->getMessage(),
+                        ]
+                    );
+                }
+            }
+        }
+
+        if ($message === null) {
+            return [
+                'ok'                  => $whatsapp_message_id !== null,
+                'whatsapp_message_id' => $whatsapp_message_id,
+                'error'               => $whatsapp_message_id !== null
+                    ? '🔴 El mensaje SE ENVIÓ pero no se pudo registrar en la conversación. NO reintentar este lead: '
+                        . 'el turno no quedó ocupado y un reintento se lo manda de nuevo. Ver el log del día.'
+                    : ($error !== null ? $error : self::ERROR_TEXTO_GENERICO),
+                'lead_message'         => null,
+                'persistencia_fallida' => true,
+            ];
+        }
+
+        if ($whatsapp_message_id !== null) {
+            /* Envío confirmado: la SPA actualiza la conversación en vivo. En try/catch porque
+               LeadConversationUpdated es ShouldBroadcastNow —la llamada es SÍNCRONA—: si Pusher se
+               cae, una excepción acá marcaría como fallido un mensaje que sí salió y sí quedó
+               registrado. */
+            try {
+                LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
+            } catch (\Throwable $e) {
+                Log::channel('daily')->warning('ClaudeLeadsOutboundController: falló el broadcast, el envío sí salió.', [
+                    'lead_id'         => $lead->id,
+                    'lead_message_id' => $message->id,
+                    'error'           => $e->getMessage(),
+                ]);
+            }
+        } else {
+            Log::channel('daily')->warning('ClaudeLeadsOutboundController: el envío de texto libre no se confirmó.', [
+                'lead_id'         => $lead->id,
+                'lead_message_id' => $message->id,
+                'error'           => $error,
+            ]);
+
+            /* Bloque rojo en el hilo, igual que el resto del sistema. */
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'No se pudo enviar el mensaje que mandó Claude',
+                $error !== null ? $error : self::ERROR_TEXTO_GENERICO
+            );
+        }
+
+        return [
+            'ok'                  => $whatsapp_message_id !== null,
+            'whatsapp_message_id' => $whatsapp_message_id,
+            'error'               => $error,
+            'lead_message'        => $this->resumen_de_mensaje($message),
+        ];
     }
 
     /**

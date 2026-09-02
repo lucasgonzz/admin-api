@@ -187,6 +187,27 @@ class ClaudeLeadsAnalyticsController extends Controller
                         . 'El request se corta limpio a los ' . ClaudeLeadsOutboundController::PRESUPUESTO_SEGUNDOS
                         . ' s y devuelve `no_procesados` con los que no se intentaron; esos se reintentan sin riesgo.',
                 ],
+                'texto_libre' => [
+                    'ruta' => 'POST claude/leads/{id}/message',
+                    'body' => [
+                        'content' => 'OBLIGATORIO. El texto tal cual lo va a leer el lead. No lleva variables ni plantilla.',
+                        'context' => 'Opcional. Texto del aviso a admins si el envío falla.',
+                        'permitir_varios_por_turno' => 'Default false. Saltea el freno de un mensaje por turno.',
+                    ],
+                    'cuando_usar' => '🔴 ES LO PRIMERO QUE HAY QUE DECIDIR ANTES DE ESCRIBIRLE A UN LEAD, y no se elige '
+                        . 'por gusto: Meta sólo deja mandar texto libre dentro de las 24 hs posteriores al último mensaje '
+                        . 'que ESE número le mandó al negocio. Adentro de la ventana va texto libre —una plantilla ahí '
+                        . 'queda fría y despersonalizada—; afuera, el texto libre NO SALE y lo único que llega es una '
+                        . 'plantilla aprobada (claude/leads/{id}/send-template).',
+                    'ventana_cerrada' => 'Devuelve 422 con `ventana_abierta: false` y `last_inbound_at`, sin llamar al '
+                        . 'sender y sin crear ninguna fila. No es un error de quien llamó: es el estado del mundo. La '
+                        . 'salida correcta ante ese 422 es mandar una plantilla, no reintentar.',
+                    'nota' => 'Un solo mensaje por turno de conversación: si ya hay un saliente que salió después del '
+                        . 'último mensaje del lead, es 422 (se saltea con permitir_varios_por_turno=true). Reemplaza al '
+                        . 'cooldown de ' . ClaudeLeadsOutboundController::COOLDOWN_HORAS . ' hs de send-template, que acá '
+                        . 'dejaría muda la conversación en curso. También es lo que hace seguro reintentar tras un corte '
+                        . 'de red. A un lead ya promovido a cliente no se le manda: va por el hilo de soporte.',
+                ],
             ],
             'estado' => [
                 'un_lead' => [
