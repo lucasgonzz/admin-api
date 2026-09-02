@@ -12,28 +12,22 @@ use Illuminate\Support\Facades\Log;
 /**
  * Genera sugerencias de respuesta de soporte vía Anthropic (Claude) con tool use.
  *
- * Claude puede consultar el repositorio de documentación de ComercioCity
- * (lucasgonzz/comerciocity-manual-sistema) usando la tool `get_manual_file`
- * antes de formular su respuesta. La lista de archivos disponibles se inyecta
- * en el system prompt en cada request.
+ * Claude puede consultar el manual de ComercioCity usando la tool `get_manual_file` antes de
+ * formular su respuesta. La lista de archivos disponibles se inyecta en el system prompt en
+ * cada request.
+ *
+ * 🔴 Corregido el 2/9/2026: hasta hoy este docblock decía que el manual se lee de
+ * `lucasgonzz/comerciocity-manual-sistema` y ERA FALSO. La constante `GITHUB_REPO` (que ahora
+ * vive en `ManualRepositoryService`) es `lucasgonzz/claude-comerciocity`, y el filtro del árbol
+ * exige el prefijo `manual_sistema/`. O sea: el agente lee la FUENTE del manual, no el repo
+ * publicado. Eso importa para entender qué ve el agente y cuándo lo ve — lo que está escrito y
+ * commiteado en la fuente ya le llega, sin esperar el paso de publicación.
+ *
+ * La lectura del repositorio se delega en `ManualRepositoryService`: el agente de leads lee el
+ * mismo manual desde el 2/9/2026 y no puede haber dos copias de la configuración de acceso.
  */
 class SupportAiSuggestionService
 {
-    /**
-     * URL base de la GitHub API (REST v3).
-     */
-    private const GITHUB_API_BASE = 'https://api.github.com';
-
-    /**
-     * Repositorio de documentación de ComercioCity.
-     */
-    private const GITHUB_REPO = 'lucasgonzz/claude-comerciocity';
-
-    /**
-     * Rama del repositorio a consultar.
-     */
-    private const GITHUB_BRANCH = 'main';
-
     /**
      * Máximo de iteraciones del agentic loop para evitar bucles infinitos.
      */
@@ -570,41 +564,22 @@ SYSTEM;
     }
 
     /**
-     * Obtiene desde GitHub la lista de archivos .md del repositorio del manual,
-     * formateada como texto para inyectar en el system prompt.
+     * Obtiene la lista de archivos .md del manual, formateada como texto para inyectar en el
+     * system prompt.
+     *
+     * Delega en `ManualRepositoryService` desde el 2/9/2026. Se conserva el método —y su
+     * visibilidad `protected`— porque `build_system_prompt()` lo llama y porque los tests de
+     * calidad del agente lo sustituyen por herencia para no salir a la red.
+     *
+     * Los dos textos de fallback se mantienen idénticos: el que arranca con paréntesis es lo que
+     * `build_system_prompt()` detecta para llenar `$fallos_repositorio`, que a su vez dispara
+     * `KnowledgeGroundingGate::escalar_por_repositorio_caido()`.
      *
      * @return string Lista con prefijo "- " por línea, o mensaje de fallback si falla la API.
      */
     protected function fetch_manual_file_list(): string
     {
-        try {
-            $url = self::GITHUB_API_BASE.'/repos/'.self::GITHUB_REPO.'/git/trees/'.self::GITHUB_BRANCH.'?recursive=1';
-            $response = $this->build_github_http_client()->get($url);
-
-            if ($response->failed()) {
-                return '(Lista de archivos no disponible temporalmente.)';
-            }
-
-            $tree = $response->json('tree') ?? [];
-            $paths = [];
-
-            foreach ($tree as $node) {
-                if (is_array($node) && ($node['type'] ?? '') === 'blob' && (substr((string) ($node['path'] ?? ''), -3) === '.md') && (strncmp((string) ($node['path'] ?? ''), 'manual_sistema/', 15) === 0)) {
-                    $paths[] = '- '.(string) $node['path'];
-                }
-            }
-
-            return empty($paths)
-                ? '(No se encontraron archivos .md en el repositorio.)'
-                : implode("\n", $paths);
-
-        } catch (\Throwable $e) {
-            Log::warning('SupportAiSuggestionService: no se pudo obtener lista de archivos del manual.', [
-                'error' => $e->getMessage(),
-            ]);
-
-            return '(Lista de archivos no disponible temporalmente.)';
-        }
+        return app(ManualRepositoryService::class)->file_list();
     }
 
     /**
@@ -876,72 +851,26 @@ USER;
     }
 
     /**
-     * Descarga y decodifica el contenido de un archivo del repositorio.
+     * Descarga y decodifica el contenido de un archivo del manual.
      *
-     * @param string $path Ruta relativa dentro del repo.
+     * Delega en `ManualRepositoryService` desde el 2/9/2026, con la misma firma y la misma
+     * conducta: lanza si no pudo leer, para que `execute_tool_calls()` no anote el path en
+     * `$leidas` y la cita del agente no quede respaldada por una lectura que nunca ocurrió.
+     *
+     * Cambia un detalle sin efecto práctico: una ruta fuera de `manual_sistema/` ahora la rechaza
+     * la guarda del servicio en vez de morir en un 404 de GitHub. Los dos casos ya terminaban en
+     * la misma excepción y en el mismo `catch`.
+     *
+     * @param string $path Ruta dentro del repo, con el prefijo `manual_sistema/` incluido.
      *
      * @return string Contenido del archivo en texto plano.
      *
-     * @throws \RuntimeException Si la ruta está vacía o la API responde con error.
+     * @throws \RuntimeException Si la ruta está vacía, cae fuera del manual, o la API responde
+     *                           con error.
      */
     protected function github_get_file(string $path): string
     {
-        $path = trim($path);
-        if ($path === '') {
-            throw new \RuntimeException('La ruta del archivo no puede estar vacía.');
-        }
-
-        $encoded_path = implode('/', array_map('rawurlencode', explode('/', $path)));
-        $url          = self::GITHUB_API_BASE.'/repos/'.self::GITHUB_REPO.'/contents/'.$encoded_path.'?ref='.self::GITHUB_BRANCH;
-
-        $response = $this->build_github_http_client()->get($url);
-
-        if ($response->failed()) {
-            throw new \RuntimeException('GitHub API error '.$response->status().' al leer '.$path.'.');
-        }
-
-        $encoding = (string) ($response->json('encoding') ?? '');
-        $content  = (string) ($response->json('content') ?? '');
-
-        if ($encoding === 'base64') {
-            return base64_decode(str_replace("\n", '', $content));
-        }
-
-        // Fallback: la API puede devolver el texto directo en repos pequeños.
-        return $content;
-    }
-
-    /**
-     * Cliente HTTP para GitHub API con token de autenticación si está configurado.
-     *
-     * @return PendingRequest
-     */
-    protected function build_github_http_client(): PendingRequest
-    {
-        $token = (string) config('services.github.token', '');
-
-        $headers = [
-            'Accept'     => 'application/vnd.github+json',
-            'User-Agent' => 'ComercioCity-Admin/1.0',
-        ];
-
-        if ($token !== '') {
-            $headers['Authorization'] = 'Bearer '.$token;
-        }
-
-        $http = Http::withHeaders($headers)->timeout(15);
-
-        // Misma configuración TLS que Anthropic (WAMP/Windows suele requerir ca_bundle o verify_ssl=false).
-        $verify_ssl = (bool) config('services.anthropic.verify_ssl', true);
-        $ca_bundle  = config('services.anthropic.ca_bundle');
-
-        if (! $verify_ssl) {
-            $http = $http->withoutVerifying();
-        } elseif (is_string($ca_bundle) && $ca_bundle !== '' && is_file($ca_bundle)) {
-            $http = $http->withOptions(['verify' => $ca_bundle]);
-        }
-
-        return $http;
+        return app(ManualRepositoryService::class)->get_file($path);
     }
 
     /**
