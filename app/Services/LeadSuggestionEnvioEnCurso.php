@@ -108,10 +108,17 @@ class LeadSuggestionEnvioEnCurso
      * queda vivo el resto del TTL y en esa ventana el lead no recibe sugerencia nueva. Son ~26s de
      * sobra sobre el techo, contra los 180s de sobra que tenía la primera versión de 300s fijos.
      *
-     * Y el techo ni siquiera rige donde el envío largo es más probable: en producción
-     * `QUEUE_CONNECTION=database`, así que el auto-envío de respaldo corre en un worker de cola —
-     * CLI, sin límite de ejecución—. Los 120s aplican sólo a los tres endpoints de aprobación
-     * humana.
+     * ⚠️ Y NO te apoyes en la cola para relativizar el techo. Es tentador razonar "en producción
+     * `QUEUE_CONNECTION=database`, así que el auto-envío corre en un worker sin límite" — el dato
+     * de la config es cierto y la conclusión es falsa: `LeadAiSuggestionAutoSendScheduler` tiene
+     * `->onConnection('sync')` CABLEADO para el auto-envío inmediato (delay 0), o sea que ignora
+     * `QUEUE_CONNECTION` y corre en el mismo proceso del webhook, con su `max_execution_time`
+     * encima. Y `afterResponse()` no lo salva: el límite es por proceso, y esos callbacks corren
+     * antes de que el proceso termine.
+     *
+     * O sea que el techo alcanza a los tres endpoints de aprobación humana Y al auto-envío
+     * inmediato. La decisión de irse a 146 se sostiene igual, con los dos argumentos de arriba y
+     * sin este tercero.
      *
      * @return int
      */
