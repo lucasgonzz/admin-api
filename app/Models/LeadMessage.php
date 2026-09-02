@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Helpers\AppTime;
 use App\Models\Concerns\UsesVirtualTime;
 use Illuminate\Database\Eloquent\Model;
 
@@ -484,6 +485,211 @@ class LeadMessage extends Model
             }
 
             if (self::horarios_ofrecidos_cubren($horarios, $fecha, $hora)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Cuántos mensajes salientes se miran hacia atrás buscando el último que HABLÓ DE AGENDA.
+     *
+     * El mismo número que usa horario_figura_como_ofrecido(), y por el mismo motivo: la ventana no
+     * está para acotar el permiso (de eso se ocupa el filtro de HOY) sino para que la consulta no
+     * crezca con la conversación. Con 20 alcanza de sobra: entre la apertura flexible y la respuesta
+     * del lead no hay más de un par de mensajes automáticos en el medio.
+     */
+    const MENSAJES_MIRADOS_PARA_OFERTA_FLEXIBLE = 20;
+
+    /**
+     * ¿La última cosa que ESTE lead escuchó del sistema SOBRE LA AGENDA fue una OFERTA FLEXIBLE?
+     *
+     * Una oferta flexible es la apertura "te la dejo lista ahora mismo, o para el horario que te
+     * quede cómodo": ofrece la demo SIN nombrar ninguna hora.
+     *
+     * Es la SEGUNDA fuente del permiso para ignorar el margen mínimo de anticipación (ver
+     * LeadAiService::oferta_vigente_sin_margen()). La primera —horario_figura_como_ofrecido()— no
+     * puede cubrir este caso: cuando el lead contesta "dale, ahora" a una apertura flexible, el
+     * horario que el sistema elige sale de una grilla fresca y nunca se le ofreció a nadie, así que
+     * no figura en ningún `horarios_ofrecidos`. Sin esta segunda fuente, la oferta flexible movería
+     * el bug de caducidad del mensaje de apertura al mensaje que confirma el turno.
+     *
+     * 🔴 POR QUÉ NO ALCANZA CON `horarios_ofrecidos === []` (corregido en la revisión de esta misma
+     * rama). El `[]` NO lo escribe sólo la rama flexible: el prompt le pide SIEMPRE al modelo mandar
+     * `[]` cuando su mensaje no ofrece horarios, y el modelo a veces ofrece un horario EN PROSA y
+     * declara `[]` igual — es exactamente la patología que documenta el warning de
+     * oferta_vigente_sin_margen(). Con el `[]` como única marca, un mensaje que nunca fue una oferta
+     * flexible habilitaba el rescate del margen.
+     *
+     * Tampoco sirve `pending_actions` (que sí trae el `oferta_flexible` crudo del modelo): se limpia
+     * a null en el momento de aplicar las acciones, o sea SIEMPRE antes de que el mensaje quede en
+     * `enviado` (LeadAiService::apply_parsed_response(), rama `$existing_message !== null`). Un
+     * mensaje enviado nunca lo conserva, así que no hay nada que leer ahí. Sin migración, la marca
+     * que sí sobrevive es el TEXTO: se verifica sobre `content` con el mismo detector con el que el
+     * servidor le otorgó la credencial al generarlo (texto_menciona_una_hora()). Si el texto que le
+     * llegó al lead nombra una hora, esa hora se la ofrecimos y el permiso flexible no corresponde.
+     *
+     * Qué se exige, y por qué cada cosa:
+     * - `sender = 'sistema'` y `status = 'enviado'`: mismo criterio que horario_figura_como_ofrecido().
+     *   El permiso es "esto se lo dijimos NOSOTROS y le llegó"; una sugerencia sin aprobar no llegó.
+     * - `is_status_event = false` e `is_error = false`: los eventos internos y los bloques rojos no
+     *   son mensajes que el lead haya leído, y encima traen `horarios_ofrecidos` en null.
+     * - `horarios_ofrecidos` estrictamente `[]` (el cast `array` distingue `[]` de `null`).
+     * - `suggested_lead_status` dentro de $estados_de_agenda: acota el permiso al tramo de agenda.
+     * - Y el texto NO nombra ninguna hora.
+     *
+     * 🔴 SE BUSCA EL ÚLTIMO QUE HABLÓ DE AGENDA, no el último a secas. Mirar sólo el último mensaje
+     * enviado era frágil por el otro lado: cualquier saliente automático en el medio —la respuesta de
+     * credenciales del webhook, un seguimiento por plantilla— mataba un permiso legítimo. Un mensaje
+     * "no habló de agenda" cuando tiene `horarios_ofrecidos` en null Y su `suggested_lead_status`
+     * está fuera del tramo: null es la marca de que ni siquiera pasó por el bloque de disponibilidad.
+     * Esos se saltean; el primero que sí habló decide, y no se sigue mirando atrás.
+     *
+     * 🔴 VENTANA: sólo mensajes creados HOY, contra `created_at` y NO contra `sent_at`. Dos motivos
+     * distintos y los dos importan. (1) `created_at` de este modelo lo estampa el trait
+     * UsesVirtualTime con AppTime::now(), o sea EL MISMO reloj con el que se compara acá; `sent_at`
+     * lo escribe el webhook con el reloj real, y mezclar los dos es el bug que dejó a
+     * horario_figura_como_ofrecido() sin rescatar nada nunca (ver su docblock). (2) `sent_at` es
+     * nullable, así que ordenar por él deja un mensaje sin `sent_at` fuera del "último" para siempre;
+     * por eso acá se ordena por `id` desc, igual que la función hermana. Un día es la ventana
+     * correcta porque el rescate del margen sólo existe para slots de HOY (gate de fecha de
+     * oferta_vigente_sin_margen()): una apertura flexible de ayer no puede justificar nada de hoy.
+     *
+     * ⚠️ Alcance conocido: `suggested_lead_status` se guarda en null cuando el estado sugerido
+     * coincide con el que el lead YA tenía (ver LeadAiService, `$estado !== $previous_status`). O sea
+     * que una SEGUNDA apertura flexible seguida, con el lead ya en `solicita_disponibilidad`, no da
+     * permiso. Es el lado seguro del error —el sistema se comporta como antes de esta misión y el
+     * horario se frena— y cubre el caso real, que es la primera apertura: ahí el lead viene de
+     * `calificado` y el estado sí cambia.
+     *
+     * 🔴 La lista de estados llega POR PARÁMETRO y no se importa de LeadAiService: el modelo no
+     * depende del service (la dependencia va al revés, y ya es fuerte).
+     *
+     * @param int               $lead_id            Lead dueño de la conversación.
+     * @param array<int,string> $estados_de_agenda  Slugs del tramo de agenda
+     *                                              (LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO).
+     *
+     * @return bool true si lo último que el sistema le dijo sobre la agenda fue una oferta flexible.
+     */
+    public static function ultima_oferta_fue_flexible(int $lead_id, array $estados_de_agenda): bool
+    {
+        if ($lead_id <= 0 || empty($estados_de_agenda)) {
+            return false;
+        }
+
+        $mensajes = self::query()
+            ->where('lead_id', $lead_id)
+            ->where('sender', 'sistema')
+            ->where('status', 'enviado')
+            ->where('is_status_event', false)
+            ->where('is_error', false)
+            ->where('created_at', '>=', AppTime::now()->startOfDay())
+            ->orderBy('id', 'desc')
+            ->limit(self::MENSAJES_MIRADOS_PARA_OFERTA_FLEXIBLE)
+            ->get(['id', 'content', 'horarios_ofrecidos', 'suggested_lead_status']);
+
+        foreach ($mensajes as $mensaje) {
+            $horarios  = $mensaje->horarios_ofrecidos;
+            $estado    = (string) $mensaje->suggested_lead_status;
+            $del_tramo = $estado !== '' && in_array($estado, $estados_de_agenda, true);
+
+            /* Este mensaje no habló de agenda: no cuenta ni a favor ni en contra, se sigue atrás. */
+            if ($horarios === null && ! $del_tramo) {
+                continue;
+            }
+
+            /* Y este sí habló: acá se decide y no se mira más atrás. Si declaró horarios, lo último
+             * que le dijimos fue una oferta CON hora y el permiso flexible no corresponde. */
+            if (! is_array($horarios) || $horarios !== [] || ! $del_tramo) {
+                return false;
+            }
+
+            return ! self::texto_menciona_una_hora((string) $mensaje->content);
+        }
+
+        return false;
+    }
+
+    /**
+     * Patrones que cuentan como "este texto nombra una hora".
+     *
+     * Se listan acá, juntos y comentados uno por uno, porque el criterio es UNO SOLO y lo usan las
+     * dos puntas del contrato de la apertura flexible: el servidor cuando decide si le cree al
+     * modelo que su mensaje no nombró ninguna hora (LeadAiService::mensaje_menciona_una_hora()) y
+     * el permiso del margen cuando relee el texto que efectivamente le llegó al lead
+     * (ultima_oferta_fue_flexible(), arriba). Dos implementaciones distintas serían dos criterios.
+     *
+     * 🔴 Estos patrones son PROPIOS y NO son los que detectan el horario que propone el LEAD
+     * (LeadAiService, bloque de $lead_proposed_time). Aquéllos alimentan otro camino, valen para las
+     * dos dinámicas y son estrictos a propósito; endurecerlos para esto les cambiaría el sentido.
+     */
+    private const PATRONES_DE_HORA = [
+        /* "12:30", "12:30 hs", "9:05". La forma canónica. */
+        '/\b(\d{1,2})(?::(\d{2}))\s*(?:hs?|h)?\b/i',
+        /* "12hs", "9 h", "5pm", "8am", "5 p.m.". */
+        '/\b(\d{1,2})\s*(?:hs|h|am|pm|a\.?m\.?|p\.?m\.?)\b/i',
+        /* "13.30": la hora escrita con punto. Los minutos tienen que ser 00-59 y no puede seguir
+           otro dígito, que es lo que deja afuera a los precios ("$15.000", "$1.500"). */
+        '/(?<![\d.,])\b([01]?\d|2[0-3])\.([0-5]\d)\b(?!\d)/',
+        /* "a las 12", "a la 1", "para las 8", "hasta las 18". El "y media"/"y cuarto" que pueda
+           venir después ya queda cubierto por el número. */
+        '/\b(?:a|para|desde|hasta|hacia|sobre|tipo|entre)\s+las?\s+\d{1,2}\b/i',
+        /* Lo mismo con el número escrito en palabras: "a las cinco de la tarde", "a la una". */
+        '/\b(?:a|para|desde|hasta|hacia|sobre|tipo|entre)\s+las?\s+(?:una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\b/i',
+        /* "12 y media", "doce y cuarto", sin preposición adelante. */
+        '/\b(?:\d{1,2}|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s+y\s+(?:media|cuarto)\b/i',
+        /* "al mediodía", "medio día", "a la medianoche". Sin \b alrededor de la palabra acentuada:
+           con /u PHP no activa UCP, así que \b sigue siendo ASCII y la í rompería el límite. */
+        '/medio\s?d[ií]a/iu',
+        '/\bmedianoche\b/i',
+        /* "en 5 minutos", "en cinco minutos", "en unos minutos", "en 10 min". Exige el "en" adelante
+           justamente para no confundir una DURACIÓN ("dura 40 min", "la recorrida son 40 minutos")
+           con un momento. */
+        '/\ben\s+(?:\d{1,3}|un|una|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|quince|veinte|treinta|cuarenta|cincuenta|sesenta|noventa)\s+min(?:\.|utos?\b|\b)/i',
+    ];
+
+    /**
+     * ¿Este texto nombra una hora concreta?
+     *
+     * Sólo se usa para ENDURECER: si devuelve true, un mensaje que se declaró "oferta flexible"
+     * pierde esa credencial y se frena para revisión humana, y el permiso del margen no se otorga.
+     * Nunca al revés.
+     *
+     * QUÉ CUBRE (cada forma tiene su patrón comentado en self::PATRONES_DE_HORA):
+     *   - "12:30", "12:30 hs", "9:05"
+     *   - "12hs", "9 h", "5pm", "8am", "5 p.m."
+     *   - "13.30" (hora con punto)
+     *   - "a las 12", "a la 1", "para las 8", "hasta las 18", con o sin "y media" / "y cuarto"
+     *   - "a las cinco de la tarde" (números escritos en palabras, una…doce, detrás de la preposición)
+     *   - "12 y media", "doce y cuarto"
+     *   - "mediodía", "medio día", "medianoche"
+     *   - "en 5 minutos", "en cinco minutos", "en unos minutos", "en 10 min"
+     *
+     * QUÉ NO CUBRE, a propósito:
+     *   - FRANJAS del día ("a la tarde", "temprano", "después del almuerzo"). Detectarlas es leer
+     *     prosa y da falsos positivos; la prohibición de franjas vive en el prompt y en el `.md`.
+     *   - Un número suelto sin preposición ni sufijo ("nos vemos 5"): es indistinguible de cualquier
+     *     otro número de la conversación.
+     *   - "a eso de las cinco", "cerca de las cinco": la preposición no está pegada al "las".
+     *
+     * ⚠️ QUÉ SÍ DA TRUE aunque no sea una hora, y se deja así a propósito porque el lado seguro es
+     * frenar: "24 hs" o "48 hs" como PLAZO ("te contesto dentro de las 24 hs") entran por el patrón
+     * de sufijo, igual que ya entraban antes de esta misión. Un mensaje de apertura no tiene por qué
+     * mencionar un plazo en horas, y si lo hiciera, el costo es una revisión humana de más.
+     *
+     * @param string $texto Texto a revisar.
+     *
+     * @return bool true si el texto nombra una hora.
+     */
+    public static function texto_menciona_una_hora(string $texto): bool
+    {
+        if (trim($texto) === '') {
+            return false;
+        }
+
+        foreach (self::PATRONES_DE_HORA as $patron) {
+            if (preg_match($patron, $texto) === 1) {
                 return true;
             }
         }
