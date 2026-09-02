@@ -24,24 +24,29 @@ use App\Models\Lead;
  *   3. Escalado a humano -> SIEMPRE a los setters, por el mismo motivo: la conversación vuelve a
  *      manos del que la maneja, no del que va a cerrar.
  *
- * 🔴 EL DISPARO DE LA REGLA 1 SIGUE SIENDO LA CAMPANITA, Y ESO ES DELIBERADO. Si nadie está
- * suscrito a ese lead, for_mensaje_entrante() devuelve vacío y no se notifica a nadie — exactamente
- * como venía funcionando. Pedido explícito de Lucas: "el rol debe notificar solo si hay un mensaje
- * que requiera verificación o hubo un escalamiento". Sin esto, el ruteo por rol convertiría cada
- * mensaje de cada lead del sistema en un push, y el volumen SUBIRÍA en vez de repartirse, que es lo
- * contrario de lo que se pidió. Las reglas 2 y 3 sí disparan solas porque nunca dependieron de la
- * campanita.
+ * 🔴 CUÁNDO DISPARA CADA UNA, que no es lo mismo que a quién le llega:
+ *
+ *   - Regla 1 FUERA del tramo del closer: solo si alguien tiene la campanita prendida en ese lead.
+ *     Es deliberado y es un pedido explícito de Lucas ("el rol debe notificar solo si hay un mensaje
+ *     que requiera verificación o hubo un escalamiento"): sin ese gate, el ruteo convertiría cada
+ *     mensaje de cada lead del sistema en un push y el volumen SUBIRÍA en vez de repartirse.
+ *   - Regla 1 DENTRO del tramo del closer: siempre, haya campanita o no. La campanita se prende a
+ *     mano y el closer no anda prendiéndola lead por lead; con el gate puesto acá, no se enteraba de
+ *     nada. Ver el comentario adentro de for_mensaje_entrante().
+ *   - Reglas 2 y 3: siempre. Nunca dependieron de la campanita y no empiezan ahora.
  *
  * 🔴 LA CAMPANITA PRENDIDA NOTIFICA SIEMPRE, en los tres caminos. lead_admin_notifications es una
  * suscripción explícita a un lead puntual y se SUMA al grupo de rol (unión, sin duplicados): si
  * alguien la prendió es porque quiere seguir ese lead, y ni el rol ni el estado se la pueden sacar.
  * Un admin que sea destinatario por rol Y esté en la campanita recibe UN solo push.
  *
- * FALLBACK ANTI-SILENCIO, y es medio punto de este servicio. Si el grupo de rol que corresponde
- * está vacío —nadie marcó el checkbox de closer, por ejemplo— se cae a los setters; y si tampoco
- * hay setters, queda el que se suscribió por campanita. Hoy siempre le llega a alguien y esto no
- * puede empeorarlo: un mensaje de un lead que no le llega a nadie es peor que uno que le llega a
- * quien no le tocaba.
+ * FALLBACK ANTI-SILENCIO, en dos escalones y con alcances distintos:
+ *
+ *   1. Para los tres caminos: si el rol que corresponde no tiene a nadie marcado —nadie tildó el
+ *      checkbox de closer, por ejemplo— se cae a los setters.
+ *   2. Solo para verificación y escalado: si aun así no quedó nadie, van TODOS los admins. Ver
+ *      con_red_de_ultimo_recurso(), que explica por qué esos dos caminos no pueden quedar en cero
+ *      y el mensaje entrante sí.
  */
 class LeadNotificationAudienceResolver
 {
@@ -63,14 +68,26 @@ class LeadNotificationAudienceResolver
      */
     public static function for_mensaje_entrante(Lead $lead): array
     {
-        $campanita = self::ids_campanita($lead);
+        $campanita     = self::ids_campanita($lead);
+        $es_del_closer = in_array((string) $lead->status, Lead::ESTADOS_DUENO_CLOSER, true);
 
-        if (empty($campanita)) {
+        /* 🔴 El gate de campanita NO se aplica en el tramo del closer (decisión de Lucas, 2/9/2026,
+         * después de que el chequeo mostrara que sin esto el closer no recibía nada).
+         *
+         * La campanita se prende SIEMPRE a mano —no hay una sola línea en el repo que la prenda
+         * sola, ni al crear el lead ni al pasar a closer_activo— y el closer no tiene por qué andar
+         * prendiéndola lead por lead. Si el gate se aplicara acá, un lead que llega, agenda, hace la
+         * demo y pasa a closer_activo le escribiría al closer sin que el closer se entere nunca, que
+         * es exactamente lo contrario de lo que se pidió.
+         *
+         * Fuera de ese tramo el gate sí se mantiene, y ahí está el punto: el volumen del setter no
+         * sube ni un mensaje respecto de antes del ruteo. Lo único que se agregó son los leads que
+         * ya son del closer. */
+        if (! $es_del_closer && empty($campanita)) {
             return [];
         }
 
-        $es_del_closer = in_array((string) $lead->status, Lead::ESTADOS_DUENO_CLOSER, true);
-        $columna       = $es_del_closer ? self::ROL_CLOSER : self::ROL_SETTER;
+        $columna = $es_del_closer ? self::ROL_CLOSER : self::ROL_SETTER;
 
         return self::unir(self::ids_por_rol_con_fallback($columna), $campanita);
     }
@@ -84,10 +101,10 @@ class LeadNotificationAudienceResolver
      */
     public static function for_verificacion(Lead $lead): array
     {
-        return self::unir(
+        return self::con_red_de_ultimo_recurso(self::unir(
             self::ids_por_rol_con_fallback(self::ROL_SETTER),
             self::ids_campanita($lead)
-        );
+        ));
     }
 
     /**
@@ -99,10 +116,46 @@ class LeadNotificationAudienceResolver
      */
     public static function for_escalado(Lead $lead): array
     {
-        return self::unir(
+        return self::con_red_de_ultimo_recurso(self::unir(
             self::ids_por_rol_con_fallback(self::ROL_SETTER),
             self::ids_campanita($lead)
-        );
+        ));
+    }
+
+    /**
+     * Si no quedó ningún destinatario, devuelve todos los admins.
+     *
+     * 🔴 SOLO PARA VERIFICACIÓN Y ESCALADO, nunca para el mensaje entrante.
+     *
+     * Los dos caminos que usan esto son "algo está frenado esperando a una persona": un mensaje que
+     * no sale hasta que alguien lo apruebe, o una conversación que el agente no supo seguir. Que un
+     * aviso así no le llegue a nadie es peor que despertar a quien no le tocaba — el lead queda
+     * esperando una respuesta que nunca va a salir.
+     *
+     * Y sin esto se podía llegar a cero de verdad, no en teoría: la verificación de agendamiento
+     * iba a Admin::all() hasta el 2/9/2026, así que una base sin ningún `es_setter` marcado —el
+     * estado en el que queda cualquier instalación hasta que alguien tilde el checkbox— pasaba de
+     * avisarle a todo el mundo a no avisarle a nadie. Esta red devuelve ese piso.
+     *
+     * @param array<int, int> $ids Destinatarios ya resueltos.
+     *
+     * @return array<int, int>
+     */
+    private static function con_red_de_ultimo_recurso(array $ids): array
+    {
+        if (! empty($ids)) {
+            return $ids;
+        }
+
+        $todos = Admin::pluck('id')
+            ->map(function ($id) {
+                return (int) $id;
+            })
+            ->all();
+
+        sort($todos);
+
+        return $todos;
     }
 
     /**
@@ -168,8 +221,9 @@ class LeadNotificationAudienceResolver
      */
     private static function ids_campanita(Lead $lead): array
     {
-        /* Columna calificada: la pivot también tiene admin_id y sin el prefijo MySQL tira
-         * "Column 'id' in field list is ambiguous". */
+        /* Columna calificada por claridad, no por necesidad: `pluck('id')` sobre un belongsToMany
+         * resuelve bien porque lead_admin_notifications solo tiene lead_id y admin_id, sin columna
+         * `id` propia. Se deja el prefijo para que siga funcionando si mañana la pivot gana un id. */
         return $lead->notification_admins()
             ->pluck('admins.id')
             ->map(function ($id) {

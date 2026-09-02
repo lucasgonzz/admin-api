@@ -58,19 +58,24 @@ class LeadMessageNotificationWhatsappService
     }
 
     /**
-     * Notifica a todos los admins suscritos al lead que llegó un mensaje nuevo.
+     * Notifica por WhatsApp que llegó un mensaje nuevo del lead.
      *
      * Pasos internos:
-     * 1. Carga admins suscritos con phone_number válido desde la tabla pivot.
+     * 1. Carga los admins con phone_number válido: los de la lista si vino, o los suscritos al lead
+     *    si no vino ninguna (ver el comentario del método, la diferencia es importante).
      * 2. Construye las variables de la plantilla (nombre, preview, link).
      * 3. Llama a send_template() por cada admin; los errores individuales se loguean sin romper el flujo.
      *
      * @param Lead            $lead            Lead que envió el mensaje.
      * @param string          $content         Contenido del mensaje (puede ser transcripción de audio, imagen, etc.)
-     * @param array<int, int> $solo_admin_ids  Si viene con elementos, se notifica únicamente a esos admins.
-     *                                         Lo usa LeadMessagePushNotificationService para avisarle solo
-     *                                         a los que no tienen device registrado. Vacío = todos los
-     *                                         suscritos, que es el comportamiento histórico.
+     * @param array<int, int> $solo_admin_ids  Destinatarios ya resueltos: si viene con elementos, se
+     *                                         notifica exactamente a esos admins, sin volver a mirar
+     *                                         la pivot de la campanita. Lo usa
+     *                                         LeadMessagePushNotificationService para avisarle a los
+     *                                         que no tienen device registrado, y desde el ruteo por
+     *                                         rol (2/9/2026) esa lista puede incluir a un setter que
+     *                                         nunca se suscribió a ese lead. Vacío = los suscritos al
+     *                                         lead, que es el comportamiento histórico.
      *
      * @return void
      */

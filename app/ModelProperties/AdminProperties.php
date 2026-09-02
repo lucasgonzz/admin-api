@@ -66,7 +66,7 @@ class AdminProperties
                 'type'  => 'boolean',
                 'value' => false,
                 'show'  => true,
-                'description' => 'Los setters son los dueños del lead hasta que pasa al closer: les llegan las notificaciones de los mensajes de esos leads, la de los mensajes que están esperando que alguien los apruebe y la de las conversaciones que el agente no pudo resolver. Estas dos últimas les llegan siempre, incluso cuando el lead ya es del closer, porque el que aprueba lo que sale es el setter. También reciben automáticamente todas las tareas que nacen de conversaciones de leads: cuando el agente detecta que una conversación necesita que intervenga una persona, la tarea se le asigna a todos los admins marcados como setter, y a cada uno le aparece el aviso en pantalla. Si no hay ningún setter marcado, esas tareas quedan sin asignar y las puede tomar cualquiera, y las notificaciones caen en quien haya activado la campanita del lead.',
+                'description' => 'Los setters son los dueños del lead hasta que pasa al closer: les llegan las notificaciones de los mensajes de esos leads, la de los mensajes que están esperando que alguien los apruebe y la de las conversaciones que el agente no pudo resolver. Estas dos últimas les llegan siempre, incluso cuando el lead ya es del closer, porque el que aprueba lo que sale es el setter. También reciben automáticamente todas las tareas que nacen de conversaciones de leads: cuando el agente detecta que una conversación necesita que intervenga una persona, la tarea se le asigna a todos los admins marcados como setter, y a cada uno le aparece el aviso en pantalla hasta que lo cierra. Si no hay ningún setter marcado, esas tareas quedan sin asignar y las puede tomar cualquiera, y las notificaciones caen en quien haya activado la campanita del lead.',
             ],
             [
                 // Flag para asignación automática al crear nuevas tareas internas manualmente.
@@ -93,7 +93,7 @@ class AdminProperties
                 'type'  => 'boolean',
                 'value' => false,
                 'show'  => true,
-                'description' => 'Recibís un WhatsApp cuando el agente no puede resolver algo solo y necesita que un humano intervenga en la conversación (una pregunta fuera de lo habitual, un pedido inusual, una objeción que requiere criterio). También te llega este mismo aviso cuando un lead confirma que terminó la demo y ya está listo para la llamada del closer — comparte este flag con la escalación general.',
+                'description' => 'Este aviso ya NO gobierna los escalados de conversaciones de leads: desde el ruteo por rol, cuando el agente no puede resolver una conversación el aviso va siempre al setter, esté marcada o no esta casilla. Lo que sí seguís recibiendo por acá es el aviso de que un lead confirmó que terminó la demo y ya está listo para la llamada del closer, el del seguimiento post-demo y el de la llamada agendada. Es la casilla del closer, no la de los escalados.',
             ],
             [
                 // Recibir WhatsApp cuando el agente escala un ticket de SOPORTE (cliente activo).
@@ -140,7 +140,7 @@ class AdminProperties
                 'type'  => 'boolean',
                 'value' => false,
                 'show'  => true,
-                'description' => 'Desde que un lead entra a coordinar la agenda de la demo hasta que llega a closer activo, todo mensaje del agente requiere tu aprobación antes de salir — no porque haya un error, es el proceso normal para ese tramo. Este aviso ya te llega siempre como notificación push y sonido en el navegador (si lo tenés abierto); activá este checkbox si además querés un WhatsApp.',
+                'description' => 'Desde que un lead entra a coordinar la agenda de la demo hasta que llega a closer activo, todo mensaje del agente requiere aprobación antes de salir — no porque haya un error, es el proceso normal para ese tramo. Ese aviso llega como notificación push al setter (y a quien tenga la campanita del lead), no a todo el mundo como antes. Activá esta casilla si además querés un WhatsApp.',
             ],
         ];
     }

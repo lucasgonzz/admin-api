@@ -222,11 +222,17 @@ class BajaDeMartinEnNotificacionesTest extends TestCase
     }
 
     /**
-     * El closer no pierde su rol ni su device: sigue trabajando.
+     * 🔴 Al closer NO se le toca absolutamente nada: ni el rol, ni el device, ni los flags.
+     *
+     * La primera versión del seeder le apagaba `notify_lead_escalation_whatsapp` junto con todos, y
+     * con eso mataba los tres avisos que hoy le llegan y que NO son escalados: "el lead terminó la
+     * demo", el seguimiento post-demo y la llamada agendada. Los tres salen por
+     * LeadEscalationWhatsappService sin lista explícita, o sea filtrando por ese flag. El closer
+     * sigue trabajando y no hay ningún motivo para apagarle nada.
      *
      * @return void
      */
-    public function test_no_le_toca_el_rol_ni_el_device_al_closer()
+    public function test_no_le_toca_nada_al_closer()
     {
         $this->esconder_a_los_lucas_reales();
 
@@ -242,10 +248,115 @@ class BajaDeMartinEnNotificacionesTest extends TestCase
         $closer->refresh();
 
         $this->assertTrue((bool) $closer->is_closer, 'El closer perdió su rol.');
+
+        foreach (BajaDeMartinEnNotificacionesSeeder::COLUMNAS_A_APAGAR as $columna) {
+            $this->assertTrue(
+                (bool) $closer->{$columna},
+                "Se le apagó {$columna} al closer, que sigue trabajando."
+            );
+        }
+
         $this->assertSame(
             1,
             AdminPushSubscription::where('admin_id', $closer->id)->count(),
             'Se le borró el device al closer.'
         );
+    }
+
+    /**
+     * 🔴 Lucas queda con las NUEVE columnas, no con tres.
+     *
+     * La primera versión reponía solo el rol de setter y los dos "por defecto", con el argumento de
+     * que los notify_* son "opt-in de canal". Para varios de ellos eso es falso: son el ÚNICO canal
+     * de ese aviso. Apagarlos en todos dejaba sin destinatario los escalados de tickets de soporte,
+     * la verificación por error, los errores de envío y el ciclo de demo agendada — en todo el
+     * sistema, no solo para Martín.
+     *
+     * @return void
+     */
+    public function test_lucas_queda_con_todas_las_columnas_no_solo_con_el_rol()
+    {
+        $this->esconder_a_los_lucas_reales();
+
+        $lucas = $this->crear_admin_con_todo_prendido('Lucas', 'baja-lucas8@test.local');
+
+        /* Se apagan a mano primero para que el test pruebe que el seeder las prende, y no que
+         * simplemente no las tocó. */
+        foreach (BajaDeMartinEnNotificacionesSeeder::COLUMNAS_A_APAGAR as $columna) {
+            $lucas->{$columna} = false;
+        }
+        $lucas->save();
+
+        $this->seed(BajaDeMartinEnNotificacionesSeeder::class);
+
+        $lucas->refresh();
+
+        foreach (BajaDeMartinEnNotificacionesSeeder::COLUMNAS_A_APAGAR as $columna) {
+            $this->assertTrue((bool) $lucas->{$columna}, "Lucas quedó sin {$columna}: ese aviso no le llega a nadie.");
+        }
+    }
+
+    /**
+     * 🔴 A los dados de baja se les borran también las campanitas de leads.
+     *
+     * Sin esto, borrarle los devices no lo callaba: lo MUDABA de canal. La campanita entra al
+     * conjunto de destinatarios por encima del rol, así que Martín seguía siendo destinatario; sin
+     * device caía en la rama de respaldo, y esa rama —desde el ruteo por rol— ya no filtra por
+     * ningún flag. Le habrían seguido llegando mensajes de leads por WhatsApp a su teléfono.
+     *
+     * @return void
+     */
+    public function test_le_borra_las_campanitas_de_leads_a_los_dados_de_baja()
+    {
+        $this->esconder_a_los_lucas_reales();
+
+        $martin = $this->crear_admin_con_todo_prendido('Martin', 'baja-martin8@test.local');
+        $this->crear_admin_con_todo_prendido('Lucas', 'baja-lucas9@test.local');
+
+        $lead               = new \App\Models\Lead();
+        $lead->uuid         = (string) Str::uuid();
+        $lead->contact_name = 'Juana Pérez';
+        $lead->status       = 'contactado';
+        $lead->save();
+        $lead->notification_admins()->attach($martin->id);
+
+        $this->assertSame(1, $lead->notification_admins()->count());
+
+        $this->seed(BajaDeMartinEnNotificacionesSeeder::class);
+
+        $this->assertSame(
+            0,
+            $lead->notification_admins()->where('admins.id', $martin->id)->count(),
+            'Martín sigue suscrito a un lead: le llegarían los mensajes por WhatsApp.'
+        );
+    }
+
+    /**
+     * 🔴 Con más de un candidato a Lucas, no toca nada.
+     *
+     * `first()` sin orderBy devuelve lo que MySQL quiera. Si los flags aterrizan en una cuenta de
+     * prueba llamada "Lucas", el Lucas real queda sin es_setter y todas las verificaciones y
+     * escalados irían a una cuenta fantasma, con el seeder informando "todo ok".
+     *
+     * @return void
+     */
+    public function test_con_mas_de_un_lucas_no_apaga_nada()
+    {
+        $this->esconder_a_los_lucas_reales();
+
+        $martin = $this->crear_admin_con_todo_prendido('Martin', 'baja-martin9@test.local');
+        $this->crear_admin_con_todo_prendido('Lucas', 'baja-lucas10@test.local');
+        $this->crear_admin_con_todo_prendido('Lucas', 'baja-lucas11@test.local');
+
+        $this->seed(BajaDeMartinEnNotificacionesSeeder::class);
+
+        $martin->refresh();
+
+        foreach (BajaDeMartinEnNotificacionesSeeder::COLUMNAS_A_APAGAR as $columna) {
+            $this->assertTrue(
+                (bool) $martin->{$columna},
+                "Se apagó {$columna} habiendo dos candidatos a Lucas: los flags pudieron ir a la cuenta equivocada."
+            );
+        }
     }
 }

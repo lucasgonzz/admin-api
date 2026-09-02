@@ -104,11 +104,36 @@ class RuteoDePushPorRolTest extends TestCase
         $setter = $this->crear_admin('ruteo-setter@test.local', ['es_setter' => true]);
 
         $lead = $this->crear_lead('closer_activo');
-        $lead->notification_admins()->attach($setter->id);
 
         $ids = LeadNotificationAudienceResolver::for_mensaje_entrante($lead);
 
         $this->assertContains((int) $closer->id, $ids, 'El closer no recibió el mensaje de su lead.');
+        $this->assertNotContains((int) $setter->id, $ids, 'El setter recibió un mensaje de un lead que ya es del closer.');
+    }
+
+    /**
+     * 🔴 El closer recibe los mensajes de sus leads AUNQUE NADIE TENGA LA CAMPANITA.
+     *
+     * Decisión de Lucas del 2/9/2026, tomada después de que el chequeo mostrara que con el gate de
+     * campanita aplicado también acá el closer no se enteraba de nada: la campanita se prende
+     * siempre a mano y no hay una sola línea en el repo que la prenda sola, así que un lead que
+     * llega, agenda, hace la demo y pasa a closer_activo le escribía al closer sin que el closer lo
+     * supiera nunca.
+     *
+     * Si este test se pone en rojo, el closer se quedó sordo: no lo aflojes, revisá el gate de
+     * for_mensaje_entrante().
+     *
+     * @return void
+     */
+    public function test_el_closer_recibe_su_lead_aunque_nadie_tenga_la_campanita()
+    {
+        $closer = $this->crear_admin('ruteo-closer-sin-campanita@test.local', ['is_closer' => true]);
+
+        $lead = $this->crear_lead('closer_activo');
+
+        $ids = LeadNotificationAudienceResolver::for_mensaje_entrante($lead);
+
+        $this->assertSame([(int) $closer->id], $ids);
     }
 
     /**
@@ -152,21 +177,52 @@ class RuteoDePushPorRolTest extends TestCase
     }
 
     /**
-     * 🔴 Sin campanita no se notifica a nadie, aunque haya roles marcados.
+     * 🔴 FUERA del tramo del closer, sin campanita no se notifica a nadie aunque haya setters.
      *
      * Es el pedido explícito de Lucas: el rol reparte, pero NO genera avisos donde antes no había.
-     * Si este test se pone en verde aflojándolo, el volumen de notificaciones se dispara.
+     * Este es el test que protege su volumen de notificaciones — si se afloja, todos los leads del
+     * sistema le empiezan a mandar push por cada mensaje.
+     *
+     * El caso del tramo del closer es al revés y está en
+     * test_el_closer_recibe_su_lead_aunque_nadie_tenga_la_campanita().
      *
      * @return void
      */
-    public function test_sin_campanita_el_mensaje_entrante_no_notifica_a_nadie()
+    public function test_sin_campanita_y_fuera_del_tramo_del_closer_no_se_notifica_a_nadie()
     {
         $this->crear_admin('ruteo-closer4@test.local', ['is_closer' => true]);
         $this->crear_admin('ruteo-setter4@test.local', ['es_setter' => true]);
 
-        $lead = $this->crear_lead('closer_activo');
+        $lead = $this->crear_lead('demo_agendada');
 
         $this->assertSame([], LeadNotificationAudienceResolver::for_mensaje_entrante($lead));
+    }
+
+    /**
+     * La red de último recurso: sin setters ni campanita, la verificación y el escalado van a todos.
+     *
+     * Antes del ruteo la verificación iba a Admin::all(), así que una base sin ningún es_setter
+     * marcado —el estado de cualquier instalación hasta que alguien tilde el checkbox— habría pasado
+     * de avisarle a todo el mundo a no avisarle a nadie. Esto devuelve ese piso.
+     *
+     * @return void
+     */
+    public function test_sin_setters_la_verificacion_y_el_escalado_van_a_todos_los_admins()
+    {
+        $cualquiera = $this->crear_admin('ruteo-sin-rol@test.local');
+
+        $lead = $this->crear_lead('demo_agendada');
+
+        $this->assertContains(
+            (int) $cualquiera->id,
+            LeadNotificationAudienceResolver::for_verificacion($lead),
+            'Una verificación sin setters marcados no le llegaría a nadie.'
+        );
+        $this->assertContains(
+            (int) $cualquiera->id,
+            LeadNotificationAudienceResolver::for_escalado($lead),
+            'Un escalado sin setters marcados no le llegaría a nadie.'
+        );
     }
 
     /* ---------------------------------------------------------------------------------------

@@ -5,36 +5,43 @@ namespace Database\Seeders;
 use App\Models\Admin;
 use App\Models\AdminPushSubscription;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Seeder de producción para dar de baja a Martín de todos los canales de aviso.
  *
  * Martín dejó de trabajar en ComercioCity (confirmado por Lucas el 2/9/2026). Era quien hacía de
- * setter y de atención al cliente; esas tareas las toma Lucas. Este seeder apaga los flags que lo
- * hacen destinatario de algo —el rol de setter, los dos "por defecto" y los seis avisos por
- * WhatsApp— y le borra los devices registrados para Web Push, que es el único canal que le sigue
- * llegando al teléfono aunque no entre nunca más al panel.
+ * setter y de atención al cliente; esas tareas las toma Lucas.
+ *
+ * Deja a los admins que se van sin las TRES cosas que los hacen recibir algo, y hacen falta las
+ * tres —cortar una sola no alcanza, lo único que hace es mudarlos de canal:
+ *   1. Los nueve flags de destinatario (el rol de setter, los dos "por defecto" y los seis
+ *      `notify_*_whatsapp`).
+ *   2. Los devices registrados para Web Push.
+ *   3. Las campanitas de leads (`lead_admin_notifications`), que entran al conjunto de
+ *      destinatarios por encima del rol.
  *
  * 🔴 NO BORRA EL REGISTRO DE ADMIN, y es deliberado: su id cuelga de
  * support_tickets.assigned_admin_id, de lead_messages.sent_by_admin_id y de la pivot
  * admin_task_assignees. Borrarlo dejaría tickets sin dueño, mensajes de la conversación sin autor
- * y tareas históricas rotas. Un admin sin flags y sin devices no recibe nada, que es exactamente
- * el efecto buscado, y sin tocar el historial.
+ * y tareas históricas rotas. Sin flags, sin devices y sin campanitas no recibe nada, que es el
+ * efecto buscado, y sin tocar el historial.
+ *
+ * 🔴 NO TOCA AL CLOSER. Sigue trabajando y sus avisos no son de Martín. Ver apagar_en_los_que_se_van().
  *
  * ⚠️ NO CONFUNDIR CON EL AGENTE. El bot de WhatsApp que le habla a los leads se sigue llamando
  * "Martín" (decisión de Lucas, misma conversación) y su identidad vive en `agent_identities`, otra
  * tabla. Este seeder toca ÚNICAMENTE `admins`.
  *
- * MÉTODO: apagar en todos y prender en Lucas, en vez de buscar a Martín por nombre. Es lo que pidió
- * Lucas y además es más robusto: no depende de acertar cómo está escrito el nombre o el email de
- * alguien que ya no está, y deja exactamente el estado final que se quiere. El precio es que si
- * había un tercer admin con alguno de estos flags a propósito, también se lo saca — asumido.
+ * MÉTODO: apagar en todos los que se van y prender en Lucas, en vez de buscar a Martín por nombre.
+ * Es lo que pidió Lucas y además es más robusto: no depende de acertar cómo está escrito el nombre
+ * o el email de alguien que ya no está, y deja exactamente el estado final que se quiere. El precio
+ * es que si había un tercer admin con alguno de estos flags a propósito, también se lo saca —
+ * asumido, salvo el closer, que está exceptuado.
  *
- * 🔴 SI NO ENCUENTRA A LUCAS, NO APAGA NADA. Es la guarda que importa: apagar los flags de todos y
- * después no poder prendérselos a nadie dejaría el sistema sin ningún setter, y con eso todos los
- * avisos de verificación y de escalado caerían en el fallback de campanita
- * ({@see \App\Services\LeadNotificationAudienceResolver}). Un seeder que corre a medias es peor
- * que uno que no corre.
+ * 🔴 SI NO ENCUENTRA A LUCAS —O SI ENCUENTRA MÁS DE UNO— NO APAGA NADA. Es la guarda que importa:
+ * apagar los flags y después no poder reasignarlos, o reasignarlos a la cuenta equivocada, deja el
+ * sistema sin ningún setter real. Un seeder que corre a medias es peor que uno que no corre.
  *
  * Idempotente: escribe valores fijos y borra filas que la segunda vez ya no existen. Correrlo dos
  * veces da el mismo resultado que correrlo una.
@@ -76,18 +83,27 @@ class BajaDeMartinEnNotificacionesSeeder extends Seeder
     ];
 
     /**
-     * Columnas que quedan encendidas en el admin de Lucas.
+     * Columnas que quedan encendidas en el admin de Lucas: TODAS las que se apagan.
      *
-     * Es el subconjunto de arriba que corresponde a las tareas que absorbe: el rol de setter (que
-     * gobierna el ruteo de avisos y la asignación de tareas de leads) y los dos "por defecto" de
-     * soporte y tareas. Los `notify_*_whatsapp` NO se prenden solos: son opt-in de canal y los
-     * decide Lucas desde la pantalla de Usuarios admin, no un seeder.
+     * 🔴 NO ES UN SUBCONJUNTO, Y ESA FUE LA PRIMERA VERSIÓN EQUIVOCADA. Arrancó reponiendo solo el
+     * rol de setter y los dos "por defecto", con el argumento de que los `notify_*_whatsapp` son
+     * opt-in de canal y los decide Lucas desde la pantalla. El razonamiento es falso para varios de
+     * ellos: NO son un canal extra, son el ÚNICO canal de ese aviso, y apagarlos en todos los
+     * admins dejaba avisos enteros sin ningún destinatario en todo el sistema.
+     *
+     *   - `notify_support_escalation_whatsapp` -> los escalados de tickets de soporte no salen ni
+     *     por push ni por WhatsApp (EscalationPushNotificationService::notificar_ticket los saca de
+     *     este flag). Lucas quedaba de dueño por defecto de tickets de los que no se enteraba.
+     *   - `notify_verificacion_whatsapp` -> la verificación por ERROR (fallback de disponibilidad)
+     *     no tiene push, solo este WhatsApp.
+     *   - `notify_send_errors_whatsapp` -> errores de envío y token de Google Calendar vencido.
+     *   - `notify_demo_scheduled_whatsapp` -> el ciclo entero de la demo agendada.
+     *
+     * Lucas dijo "ahora me voy a ocupar yo de hacer todas esas tareas": si Martín recibía un aviso,
+     * lo tiene que recibir Lucas. Que después decida apagar alguno desde la pantalla es asunto suyo,
+     * pero el estado en el que lo deja el seeder no puede ser "nadie se entera".
      */
-    const COLUMNAS_A_PRENDER_EN_LUCAS = [
-        'es_setter',
-        'is_default_support_owner',
-        'is_default_task_assignee',
-    ];
+    const COLUMNAS_A_PRENDER_EN_LUCAS = self::COLUMNAS_A_APAGAR;
 
     /**
      * Deja los flags de destinatario únicamente en el admin de Lucas.
@@ -96,9 +112,9 @@ class BajaDeMartinEnNotificacionesSeeder extends Seeder
      */
     public function run()
     {
-        $lucas = $this->buscar_a_lucas();
+        $candidatos = $this->buscar_a_lucas();
 
-        if ($lucas === null) {
+        if ($candidatos->isEmpty()) {
             $this->aviso(
                 'warn',
                 'BajaDeMartinEnNotificacionesSeeder: no encontré el admin de Lucas en esta base. '
@@ -109,62 +125,97 @@ class BajaDeMartinEnNotificacionesSeeder extends Seeder
             return;
         }
 
-        $apagados = $this->apagar_en_todos();
+        /* 🔴 Más de un candidato: tampoco se toca nada. `first()` sin orderBy devuelve lo que
+         * MySQL quiera —en la práctica el id más bajo, o sea la cuenta más vieja— y si le
+         * aterrizan los flags a una cuenta de prueba llamada "Lucas", el Lucas real queda SIN
+         * es_setter: todas las verificaciones y escalados irían a una cuenta fantasma sin devices
+         * ni teléfono, y el seeder informaría "todo ok". Prefiero que no corra a que corra mal. */
+        if ($candidatos->count() > 1) {
+            $detalle = $candidatos->map(function ($admin) {
+                return "#{$admin->id} ({$admin->name} / {$admin->email})";
+            })->implode(', ');
+
+            $this->aviso(
+                'warn',
+                'BajaDeMartinEnNotificacionesSeeder: hay más de un admin que matchea a Lucas y no puedo '
+                . "elegir sin adivinar: {$detalle}. NO se apagó ningún flag. Dejá una sola fila que "
+                . 'matchee EMAILS_LUCAS / NOMBRES_LUCAS y volvé a correrlo.'
+            );
+
+            return;
+        }
+
+        $lucas    = $candidatos->first();
+        $apagados = $this->apagar_en_los_que_se_van($lucas);
         $this->prender_en_lucas($lucas);
 
         $this->aviso(
             'info',
-            "BajaDeMartinEnNotificacionesSeeder: {$apagados} admin(s) quedaron sin flags de destinatario; "
-            . "los flags de setter y los dos 'por defecto' quedan en el admin #{$lucas->id} ({$lucas->name}). "
-            . 'Ningún registro de admin fue borrado.'
+            "BajaDeMartinEnNotificacionesSeeder: {$apagados} admin(s) quedaron sin flags de destinatario, "
+            . 'sin devices de push y sin campanitas de leads. Todos los avisos quedan en el admin '
+            . "#{$lucas->id} ({$lucas->name}). El closer no fue tocado y ningún registro de admin fue borrado."
         );
     }
 
     /**
-     * Ubica el admin de Lucas por email o nombre exacto.
+     * Filas de admin que matchean a Lucas por email o nombre exacto.
      *
-     * @return Admin|null
+     * Devuelve la colección entera y no `first()` a propósito: el llamador necesita distinguir
+     * "no está" de "hay varios", y los dos casos frenan el seeder.
+     *
+     * @return \Illuminate\Database\Eloquent\Collection
      */
-    private function buscar_a_lucas(): ?Admin
+    private function buscar_a_lucas()
     {
         return Admin::where(function ($query) {
             $query->whereIn('email', self::EMAILS_LUCAS)
                   ->orWhereIn('name', self::NOMBRES_LUCAS);
-        })->first();
+        })->get();
     }
 
     /**
-     * Apaga las nueve columnas en todos los admins y les borra los devices de push a los que
-     * dejan de ser destinatarios.
+     * Apaga los flags y corta los canales de los admins que dejan de recibir avisos.
      *
-     * @return int Cantidad de admins que tenían al menos un flag encendido.
+     * 🔴 NO TOCA AL CLOSER, y la primera versión de este seeder sí lo hacía. Apagarle
+     * `notify_lead_escalation_whatsapp` al closer mataba los tres avisos que hoy le llegan y que no
+     * son escalados —"llamada agendada", "seguimiento post-demo" y "demo realizada"—, porque los
+     * tres salen por LeadEscalationWhatsappService sin lista explícita, o sea filtrando por ese
+     * flag. El closer sigue trabajando: no hay ningún motivo para apagarle nada.
+     *
+     * @param Admin $lucas Admin que se queda con todo; tampoco se toca.
+     *
+     * @return int Cantidad de admins dados de baja.
      */
-    private function apagar_en_todos(): int
+    private function apagar_en_los_que_se_van(Admin $lucas): int
     {
-        /* Se cuentan ANTES de apagar: después del update la condición no matchea a nadie y el
-         * mensaje final diría siempre 0. */
-        $afectados = Admin::where(function ($query) {
-            foreach (self::COLUMNAS_A_APAGAR as $columna) {
-                $query->orWhere($columna, true);
-            }
-        })->count();
-
-        /* Valores fijos, no toggles: por eso correrlo de nuevo no cambia nada. */
-        Admin::query()->update(array_fill_keys(self::COLUMNAS_A_APAGAR, false));
-
-        /* Los devices de push de los que ya no son destinatarios de nada. Se borran para que a
-         * alguien que se fue no le siga sonando el teléfono: el ruteo por rol ya no lo elegiría,
-         * pero un device vivo es una puerta abierta que no hace falta dejar. Los del closer y los
-         * de Lucas se conservan. */
-        $ids_que_conservan_device = Admin::where('is_closer', true)
-            ->orWhereIn('email', self::EMAILS_LUCAS)
-            ->orWhereIn('name', self::NOMBRES_LUCAS)
+        /* Los que sí se dan de baja: todo el que no sea Lucas ni el closer. */
+        $ids_que_se_van = Admin::where('id', '!=', $lucas->id)
+            ->where(function ($query) {
+                $query->where('is_closer', false)
+                      ->orWhereNull('is_closer');
+            })
             ->pluck('id')
             ->all();
 
-        AdminPushSubscription::whereNotIn('admin_id', $ids_que_conservan_device)->delete();
+        if (empty($ids_que_se_van)) {
+            return 0;
+        }
 
-        return (int) $afectados;
+        /* Valores fijos, no toggles: por eso correrlo de nuevo no cambia nada. */
+        Admin::whereIn('id', $ids_que_se_van)->update(array_fill_keys(self::COLUMNAS_A_APAGAR, false));
+
+        /* Los devices de push: si no, le sigue sonando el teléfono a alguien que se fue. */
+        AdminPushSubscription::whereIn('admin_id', $ids_que_se_van)->delete();
+
+        /* 🔴 Y LAS CAMPANITAS, que es lo que la primera versión se olvidaba y volvía inútil el
+         * borrado de devices. La campanita entra al conjunto de destinatarios SIEMPRE, por encima
+         * del rol. Un admin dado de baja con campanitas viejas seguía siendo destinatario; sin
+         * device caía en la rama de respaldo, y esa rama —desde el ruteo por rol— ya no filtra por
+         * ningún flag. Resultado: borrarle los devices no lo callaba, lo MUDABA a WhatsApp, a su
+         * teléfono personal. Sacarlo de la pivot lo saca del conjunto de verdad. */
+        DB::table('lead_admin_notifications')->whereIn('admin_id', $ids_que_se_van)->delete();
+
+        return count($ids_que_se_van);
     }
 
     /**
