@@ -722,7 +722,13 @@ USER;
                     'properties' => [
                         'path' => [
                             'type'        => 'string',
-                            'description' => 'Ruta del archivo dentro del repo. Ejemplo: "listado/precios.md" o "general/interfaz-tablas-y-formularios.md".',
+                            /* 🔴 Los ejemplos van CON el prefijo `manual_sistema/`. Sin él eran
+                             * rutas que no existen: dan 404 en la API de GitHub y, desde el
+                             * 2/9/2026, las corta antes la guarda de prefijo de
+                             * ManualRepositoryService. El modelo copia la forma del ejemplo, así
+                             * que un ejemplo mal escrito es una tool que falla en el primer
+                             * intento y gasta una iteración del loop. */
+                            'description' => 'Ruta completa del archivo dentro del repo, tal como figura en el índice del system prompt (siempre empieza con "manual_sistema/"). Ejemplo: "manual_sistema/listado/precios.md" o "manual_sistema/general/interfaz-tablas-y-formularios.md".',
                         ],
                     ],
                     'required' => ['path'],
