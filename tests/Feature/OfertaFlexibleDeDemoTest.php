@@ -257,6 +257,32 @@ class OfertaFlexibleDeDemoTest extends TestCase
         $this->assertStringNotContainsString('El mensaje TIENE que decir esa hora.', $prompt);
         $this->assertStringNotContainsString('Ofrecé LA OFERTA PRIMARIA nombrando la hora', $prompt);
         $this->assertStringNotContainsString('PROHIBIDO devolver la pregunta abierta sin haber ofrecido nada', $prompt);
+
+        /* 🔴 Pero las dos PROHIBICIONES sí siguen, reescritas. La primera versión de la rama flexible
+         * las borró junto con las órdenes incompatibles, y no son lo mismo: la apertura flexible
+         * cambió QUÉ se ofrece, no que haya que ofrecer algo. Sin ellas, "hoy a la tarde" y "¿a qué
+         * hora te queda cómodo?" volvían a ser respuestas válidas — que es la forma vieja de agendar
+         * y el mensaje del lead 30, respectivamente. */
+        $this->assertStringContainsString(
+            'PROHIBIDO ofrecer franjas del día.',
+            $prompt,
+            'La rama flexible se quedó sin la prohibición de franjas: "hoy a la tarde" vuelve a ser una respuesta válida.'
+        );
+        $this->assertStringContainsString(
+            'PROHIBIDO devolver SOLO una pregunta abierta',
+            $prompt,
+            'La rama flexible se quedó sin la prohibición de la pregunta abierta: es el mensaje del lead 30.'
+        );
+
+        /* 🔴 El argumento de la computadora aparece UNA sola vez. Estaba duplicado con dos
+         * conclusiones distintas —una decía "que él te diga a qué hora" y la otra "esa es la hora que
+         * se agenda"—, y el modelo obedecía a la que le quedaba más cerca. */
+        $this->assertSame(
+            1,
+            substr_count($prompt, 'La demo se hace desde una COMPUTADORA'),
+            'El argumento de la computadora está repetido: son dos conclusiones distintas para el mismo hecho.'
+        );
+        $this->assertStringContainsString('por eso la apertura NO le pide una hora', $prompt);
     }
 
     /**

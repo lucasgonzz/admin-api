@@ -237,6 +237,125 @@ class AgendarDespuesDeUnaOfertaFlexibleTest extends TestCase
         $this->assertSeFrena($mensaje, $demo, $lead);
     }
 
+    /**
+     * (19) 🔴 ROBUSTEZ. Un saliente automático en el medio NO mata el permiso.
+     *
+     *      Mientras el permiso miraba "el último mensaje enviado" a secas, cualquier cosa que el
+     *      sistema mandara entre la apertura flexible y la respuesta del lead —la contestación de
+     *      credenciales del webhook, un seguimiento por plantilla— lo apagaba, y el lead que había
+     *      dicho "dale, ahora" se comía el 422 igual. Ahora se busca el último mensaje que HABLÓ DE
+     *      AGENDA: los que no dicen nada de agenda (`horarios_ofrecidos` en null y sin estado del
+     *      tramo) no cuentan ni a favor ni en contra.
+     *
+     * @return void
+     */
+    public function test_un_mensaje_automatico_en_el_medio_no_mata_el_permiso_flexible(): void
+    {
+        Carbon::setTestNow($this->momento_de_la_oferta());
+        $this->sembrar_md(true);
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+        $this->apertura_flexible_ya_enviada($lead);
+
+        /* Lo que el sistema manda solo entre medio: no declara horarios (null, no `[]`) y no sugiere
+         * ningún estado del tramo. Es el mensaje que antes apagaba el permiso. */
+        LeadMessage::create([
+            'lead_id'         => $lead->id,
+            'sender'          => 'sistema',
+            'content'         => 'Estos son tus datos de acceso, guardalos.',
+            'status'          => 'enviado',
+            'is_followup'     => false,
+            'is_status_event' => false,
+            'is_error'        => false,
+            'sent_at'         => AppTime::now(),
+        ]);
+
+        $mensaje = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+
+        Carbon::setTestNow($this->momento_de_la_aceptacion());
+
+        $this->service()->apply_pending_actions($mensaje, $this->final_actions_del_panel($demo, self::FECHA, self::HORA));
+
+        $lead->refresh();
+        $this->assertSame(
+            self::HORA,
+            $lead->demo_start_time,
+            'Un mensaje automático en el medio apagó el permiso: el lead que dijo "dale, ahora" queda trabado igual.'
+        );
+    }
+
+    /**
+     * (20) 🔴 PRECISIÓN. `horarios_ofrecidos === []` NO alcanza como marca de oferta flexible.
+     *
+     *      El `[]` no lo escribe sólo la rama flexible: el prompt le pide SIEMPRE al modelo mandar
+     *      `[]` cuando su mensaje no ofrece horarios, y el modelo a veces ofrece un horario EN PROSA
+     *      y declara `[]` igual — está documentado en el warning de oferta_vigente_sin_margen(). Con
+     *      el `[]` como única marca, ESE mensaje habilitaba el rescate del margen sin haber sido
+     *      nunca una oferta flexible.
+     *
+     *      Acá el mensaje enviado tiene el `[]` y el estado del tramo, o sea todo lo que el permiso
+     *      pedía antes — pero su texto nombra una hora, así que no fue una apertura flexible.
+     *
+     * @return void
+     */
+    public function test_un_mensaje_con_horarios_vacios_pero_con_hora_en_el_texto_no_da_permiso(): void
+    {
+        Carbon::setTestNow($this->momento_de_la_oferta());
+        $this->sembrar_md(true);
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+
+        LeadMessage::create([
+            'lead_id'               => $lead->id,
+            'sender'                => 'sistema',
+            'content'               => 'Te la dejo lista para las 17:05, ¿te sirve?',
+            'status'                => 'enviado',
+            'is_followup'           => false,
+            'is_status_event'       => false,
+            'is_error'              => false,
+            'sent_at'               => AppTime::now(),
+            'suggested_lead_status' => 'solicita_disponibilidad',
+            /* El modelo declaró `[]` igual: es la patología conocida, no un caso inventado. */
+            'horarios_ofrecidos'    => [],
+        ]);
+
+        $mensaje = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+
+        Carbon::setTestNow($this->momento_de_la_aceptacion());
+
+        $this->assertSeFrena($mensaje, $demo, $lead);
+    }
+
+    /**
+     * (21) La ventana: una apertura flexible de AYER no justifica saltarse el margen HOY.
+     *
+     *      El rescate del margen sólo existe para slots de hoy, así que un permiso de ayer no puede
+     *      valer para nada. La ventana se mide sobre `created_at` —que este modelo estampa con
+     *      AppTime::now(), o sea el MISMO reloj con el que se compara— y no sobre `sent_at`, que lo
+     *      escribe el webhook con el reloj real y encima es nullable.
+     *
+     * @return void
+     */
+    public function test_una_apertura_flexible_de_ayer_no_da_permiso_hoy(): void
+    {
+        /* La apertura sale ayer a la misma hora. */
+        Carbon::setTestNow($this->momento_de_la_oferta()->copy()->subDay());
+        $this->sembrar_md(true);
+
+        $demo = $this->crear_demo();
+        $lead = $this->crear_lead();
+        $this->apertura_flexible_ya_enviada($lead);
+
+        Carbon::setTestNow($this->momento_de_la_oferta());
+        $mensaje = $this->mensaje_pendiente($lead, $demo, self::FECHA, self::HORA);
+
+        Carbon::setTestNow($this->momento_de_la_aceptacion());
+
+        $this->assertSeFrena($mensaje, $demo, $lead);
+    }
+
     /* ------------------------------------------------------------------ */
     /* Aserciones compartidas                                              */
     /* ------------------------------------------------------------------ */
