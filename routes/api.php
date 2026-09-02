@@ -440,6 +440,9 @@ Route::prefix('admin')->group(function () {
         Route::get('lead/{id}/panel-availability', [LeadController::class, 'panel_availability_json']);
         // Persistencia de toggles de automatización por lead desde el modal de operaciones (prompt 321).
         Route::patch('lead/{id}/automations', [LeadController::class, 'update_lead_automations_json']);
+        /* Marca manual "el lead ya no recibe mensajes": saca sus entregas fallidas del rojo de la
+           grilla, que está reservado para lo que se puede reintentar. Es un toggle. */
+        Route::put('lead/{id}/toggle-no-recibe-mensajes', [LeadController::class, 'toggle_no_recibe_mensajes_json']);
         Route::post('lead/{id}/promote', [LeadController::class, 'store_promote_json']);
         Route::post('lead/{id}/promote-to-client', [LeadController::class, 'promote_to_client_json']);
         Route::post('lead/{id}/run-user-setup', [LeadController::class, 'run_user_setup_json']);
