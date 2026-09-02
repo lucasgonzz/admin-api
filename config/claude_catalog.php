@@ -338,6 +338,27 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'POST api/claude/followup-templates' => [
+            'para_que'     => 'Alta de un lote de plantillas de LEAD (followup_templates), para que aparezcan en GET claude/templates y en el selector del panel. No tienen nada que ver con client-templates, que es el alta de plantillas de SOPORTE (client_templates).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Idempotente por template_name: reenviar la misma plantilla actualiza la fila, nunca crea una segunda.',
+                'Nunca borra las plantillas que no vinieron en el payload.',
+                'No envía nada: sólo deja las plantillas cargadas. El envío real es POST claude/leads/{id}/send-template o el lote.',
+                '🔴 Un `estado` que no es un status real del pipeline (ver GET claude/schema, pipeline_statuses) nunca puede matchear la búsqueda de LeadFollowupService::find_template_for(), así que esa plantilla jamás la dispara el cron automático: queda disponible sólo para envío manual. Es la convención deliberada de las plantillas `manual_*` del chequeo diario.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'templates[]', 'obligatorio' => true, 'validacion' => 'required|array|min:1', 'que_es' => 'El lote de plantillas de LEAD. No son las de soporte.'],
+                ['nombre' => 'templates[].template_name', 'obligatorio' => true, 'validacion' => 'required|string|max:120', 'que_es' => 'Clave natural: es por lo que la carga es idempotente. Tiene que coincidir exacto con el nombre aprobado en Meta.'],
+                ['nombre' => 'templates[].estado', 'obligatorio' => true, 'validacion' => 'required|string|max:40', 'que_es' => '🔴 NO tiene que ser un status del pipeline a propósito cuando la plantilla es de uso manual (prefijo `manual_`, ver el freno de arriba). Si coincidiera con un status real, LeadFollowupService la dispararía sola.'],
+                ['nombre' => 'templates[].dia_numero', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'Orden dentro del estado: qué plantilla corresponde al primer, segundo... seguimiento de ese estado.'],
+                ['nombre' => 'templates[].body_template', 'obligatorio' => true, 'validacion' => 'required|string', 'que_es' => 'Texto exacto aprobado en Meta, con sus {{n}} tal cual. El accessor `variables` del modelo los deriva de acá.'],
+                ['nombre' => 'templates[].language_code', 'obligatorio' => false, 'validacion' => 'nullable|string|max:10', 'que_es' => 'Código de idioma (default es_AR).'],
+                ['nombre' => 'templates[].activa', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Si la plantilla queda disponible para enviar (default true).'],
+                ['nombre' => 'templates[].solo_si_ingreso_confirmado', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Sólo aplica al estado demo_agendada: bifurca el seguimiento automático según si el lead confirmó ingreso a la demo (default false).'],
+            ],
+        ],
 
         /* ---------------------------------------------------------- Leads: envío */
 
