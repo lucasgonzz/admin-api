@@ -13,11 +13,15 @@ use Illuminate\Support\Facades\Log;
  * solicita_disponibilidad..demo_pendiente_de_terminar).
  *
  * Dos canales, independientes:
- *   1. Push a TODOS los admins con suscripción push activa (AdminPushNotificationService ya
- *      hace no-op silencioso si un admin no tiene ningún device registrado). Es el "hacer
- *      ruido" — no depende de ningún flag, si tenés push activado en el navegador lo recibís.
+ *   1. Push a los admins con es_setter = true, más los suscritos por campanita a ese lead
+ *      (LeadNotificationAudienceResolver::for_verificacion). Hasta el 2/9/2026 iba a Admin::all():
+ *      con el closer trabajando en paralelo eso significaba despertarlo por una tarea que no es
+ *      suya. Va a los setters SIEMPRE, incluso con el lead en closer_activo — el que aprueba lo
+ *      que sale es el setter. AdminPushNotificationService ya hace no-op silencioso si un admin
+ *      no tiene ningún device registrado.
  *   2. WhatsApp SOLO a admins con notify_verificacion_agendamiento_whatsapp = true — opcional,
- *      separado de notify_verificacion_whatsapp (que es exclusivo del motivo "error").
+ *      separado de notify_verificacion_whatsapp (que es exclusivo del motivo "error"). Este canal
+ *      no se tocó: es un opt-in explícito y no un rol.
  *
  * Reutiliza la plantilla lead_verificacion_pendiente ya aprobada en Meta (mismo contenido que
  * el aviso de error tiene sentido para el admin: "hay una sugerencia pendiente para el lead X").
@@ -64,12 +68,20 @@ class LeadVerificacionAgendamientoNotificationService
         $admin_spa_url = rtrim((string) config('services.admin_spa.url'), '/');
         $link_lead     = $admin_spa_url . '/leads?lead_id=' . $lead->id;
 
-        /* --- Canal 1: push a todos los admins (no-op silencioso si no tienen device registrado) --- */
-        $todos_los_admins = Admin::all();
-        foreach ($todos_los_admins as $admin) {
+        /* --- Canal 1: push a los setters (ruteo por rol, 2/9/2026) ---
+         *
+         * Antes iba a Admin::all(), que era "que se entere todo el mundo". Ahora va a los setters
+         * SIEMPRE, aunque el lead ya esté en closer_activo: un mensaje que espera aprobación no es
+         * un aviso de "mirá esto", es una tarea, y el que la hace es el setter, no el closer. Los
+         * suscritos por campanita se suman (lo resuelve el resolver).
+         *
+         * send_to_admin() ya es no-op silencioso para el que no tiene device registrado. */
+        $admin_ids = LeadNotificationAudienceResolver::for_verificacion($lead);
+
+        foreach ($admin_ids as $admin_id) {
             try {
-                AdminPushNotificationService::send_to_admin(
-                    (int) $admin->id,
+                $this->send_push(
+                    $admin_id,
                     'Lead coordinando agenda — revisar mensaje',
                     "{$nombre_lead} está coordinando la demo. Hay un mensaje esperando tu aprobación.",
                     ['url' => '/leads?lead_id=' . $lead->id]
@@ -77,7 +89,7 @@ class LeadVerificacionAgendamientoNotificationService
             } catch (\Throwable $e) {
                 Log::error('LeadVerificacionAgendamientoNotificationService: error al enviar push.', [
                     'lead_id'  => $lead->id,
-                    'admin_id' => $admin->id,
+                    'admin_id' => $admin_id,
                     'error'    => $e->getMessage(),
                 ]);
             }
@@ -114,5 +126,25 @@ class LeadVerificacionAgendamientoNotificationService
         }
 
         return $notified;
+    }
+
+    /**
+     * Envío efectivo del push.
+     *
+     * Aislado en su propio método para que los tests puedan sustituirlo: el envío real necesita las
+     * claves VAPID de producción y una llamada de red al push service de Apple o Google, ninguna de
+     * las dos disponible en la suite. Mismo criterio y mismo molde que
+     * {@see LeadMessagePushNotificationService::send_push()} y {@see EscalationPushNotificationService}.
+     *
+     * @param int                  $admin_id
+     * @param string               $titulo
+     * @param string               $cuerpo
+     * @param array<string, mixed> $data
+     *
+     * @return void
+     */
+    protected function send_push(int $admin_id, string $titulo, string $cuerpo, array $data): void
+    {
+        AdminPushNotificationService::send_to_admin($admin_id, $titulo, $cuerpo, $data);
     }
 }

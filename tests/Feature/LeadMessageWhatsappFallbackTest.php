@@ -123,13 +123,22 @@ class LeadMessageWhatsappFallbackTest extends TestCase
     }
 
     /**
-     * Un admin que NO está suscrito al lead no recibe nada, aunque venga en la lista.
+     * Un admin que NO está suscrito al lead SÍ recibe el WhatsApp si viene en la lista explícita.
      *
-     * La lista acota, no agrega: la suscripción al lead sigue mandando.
+     * 🔴 ESTE TEST ESTABA AL REVÉS HASTA EL 2/9/2026, y afirmaba "la lista acota, no agrega".
+     * Se dio vuelta a propósito porque cambió la invariante que describía, no para que pasara.
+     *
+     * Con el ruteo por rol, el destinatario lo elige LeadNotificationAudienceResolver y un setter
+     * puede ser destinatario SIN haber tocado nunca la campanita de ese lead. Si la lista siguiera
+     * acotando sobre la pivot, ese setter quedaría afuera — y encima es alguien que ya sabemos que
+     * no tiene ningún device registrado, porque por eso está en la lista del fallback. Resultado:
+     * ni push ni WhatsApp, silencio total y sin nada que lo denuncie.
+     *
+     * La lista dejó de ser un filtro sobre los suscritos y pasó a SER la decisión de ruteo.
      *
      * @return void
      */
-    public function test_la_lista_no_alcanza_a_un_admin_no_suscrito()
+    public function test_la_lista_alcanza_a_un_admin_no_suscrito()
     {
         $suscrito    = $this->crear_admin('fallback-suscrito@test.local');
         $no_suscrito = $this->crear_admin('fallback-no-suscrito@test.local');
@@ -145,6 +154,7 @@ class LeadMessageWhatsappFallbackTest extends TestCase
 
         $servicio->notify($lead, 'Mensaje del lead', [(int) $no_suscrito->id]);
 
-        $this->assertSame([], $sender->destinatarios);
+        /* Solo el de la lista: el suscrito por campanita no entra porque no fue pedido. */
+        $this->assertSame([$no_suscrito->phone_number], $sender->destinatarios);
     }
 }

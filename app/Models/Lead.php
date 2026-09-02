@@ -67,6 +67,26 @@ class Lead extends Model
         'closer_activo',
     ];
 
+    /**
+     * Estados en los que el lead ya es del closer: mientras esté acá, el mensaje entrante común del
+     * lead le llega a los admins con is_closer = true y no a los setters (decisión de Lucas,
+     * 2/9/2026 — antes le llegaba todo al mismo, porque el único que atendía leads era el setter).
+     *
+     * 🔴 NO gobierna los mensajes que requieren verificación ni el escalado a humano: esos van
+     * SIEMPRE a los setters, esté el lead donde esté, porque el que aprueba lo que sale es el
+     * setter y no el closer. Ver LeadNotificationAudienceResolver, que es el único consumidor.
+     *
+     * Es una lista y no una comparación contra un solo string a propósito: si mañana el tramo del
+     * closer se abre a más estados, se agregan acá y el resolver no se toca.
+     *
+     * No confundir con ESTADOS_VENTANA_VERIFICACION_MENSAJES (arriba): esa describe DÓNDE se
+     * auto-enciende la verificación de mensajes, y closer_activo está en las dos por motivos
+     * distintos. Son conjuntos independientes; cambiar una no implica cambiar la otra.
+     */
+    public const ESTADOS_DUENO_CLOSER = [
+        'closer_activo',
+    ];
+
     /** Dinámica de demo vigente en producción: Mail 1 con credenciales y videos por link. */
     public const EXPERIENCIA_ACTUAL = 'actual';
 

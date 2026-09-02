@@ -39,9 +39,12 @@ class LeadEscalationWhatsappService
     /**
      * Notifica a todos los admins suscritos que una conversación de lead fue escalada.
      *
-     * Solo notifica admins que tengan:
-     *   - notify_lead_escalation_whatsapp = true
-     *   - phone_number cargado y no vacío
+     * A quién le llega depende de si el llamador pasa lista explícita:
+     *   - SIN lista: admins con notify_lead_escalation_whatsapp = true (comportamiento histórico).
+     *   - CON lista: exactamente esos admins, sin mirar el flag — la lista ya es la decisión de
+     *     ruteo, resuelta por rol desde el 2/9/2026. Ver el comentario adentro del método.
+     *
+     * En los dos casos se exige phone_number cargado y no vacío.
      *
      * Si algún envío falla, se loguea el error y se continúa con los demás admins
      * para no perder notificaciones por un único destinatario con problemas.
@@ -62,8 +65,8 @@ class LeadEscalationWhatsappService
      */
     public function notify(Lead $lead, string $motivo, ?array $solo_admin_ids = null): array
     {
-        /* Obtener admins con flag activo y teléfono cargado. */
-        $query = Admin::where('notify_lead_escalation_whatsapp', true)
+        /* Admins con teléfono cargado. A QUIÉN se le manda depende de si vino lista explícita. */
+        $query = Admin::query()
             ->whereNotNull('phone_number')
             ->where('phone_number', '!=', '');
 
@@ -75,7 +78,19 @@ class LeadEscalationWhatsappService
                 return [];
             }
 
+            /* 🔴 La lista YA ES la decisión de ruteo, no un filtro sobre el flag.
+             *
+             * Desde el 2/9/2026 los destinatarios del escalado de un lead los resuelve
+             * LeadNotificationAudienceResolver por rol (los `es_setter`), y un setter puede no
+             * tener marcado notify_lead_escalation_whatsapp — que era la decisión de ruteo del
+             * mundo viejo. Si acá volviéramos a filtrar por ese flag, ese setter perdería el
+             * WhatsApp, y encima es alguien que ya sabemos que NO tiene device (por eso está en
+             * esta lista): se quedaría sin ningún aviso por ningún canal. */
             $query->whereIn('id', $solo_admin_ids);
+        } else {
+            /* Sin lista: comportamiento histórico intacto. Es el que usan los tres avisos al
+             * closer que reciclan esta misma plantilla sin ser escalados. */
+            $query->where('notify_lead_escalation_whatsapp', true);
         }
 
         $admins = $query->get();

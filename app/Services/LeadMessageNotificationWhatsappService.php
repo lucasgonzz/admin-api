@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Admin;
 use App\Models\Lead;
 use Illuminate\Support\Facades\Log;
 
@@ -75,14 +76,22 @@ class LeadMessageNotificationWhatsappService
      */
     public function notify(Lead $lead, string $content, array $solo_admin_ids = []): void
     {
-        /* Admins suscritos al lead que tengan teléfono cargado. */
-        $query = $lead->notification_admins()
-            ->whereNotNull('phone_number')
-            ->where('phone_number', '!=', '');
-
+        /* 🔴 Con lista explícita, LA LISTA ES LA DECISIÓN DE RUTEO y no un filtro sobre la pivot.
+         *
+         * Desde el ruteo por rol (2/9/2026) el destinatario lo elige LeadNotificationAudienceResolver,
+         * y un setter puede ser destinatario SIN haber tocado nunca la campanita de ese lead. Si acá
+         * volviéramos a arrancar la consulta desde notification_admins(), ese setter quedaría afuera
+         * —y encima es alguien que ya sabemos que NO tiene device, porque por eso está en esta lista—:
+         * no recibiría el push ni el WhatsApp. Silencio total, sin que nada lo denuncie.
+         *
+         * Sin lista se mantiene el comportamiento histórico: los suscritos al lead. */
         if (! empty($solo_admin_ids)) {
-            $query->whereIn('admins.id', $solo_admin_ids);
+            $query = Admin::whereIn('id', $solo_admin_ids);
+        } else {
+            $query = $lead->notification_admins();
         }
+
+        $query->whereNotNull('phone_number')->where('phone_number', '!=', '');
 
         $admins = $query->get();
 

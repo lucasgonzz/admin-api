@@ -55,7 +55,7 @@ class AdminProperties
                 'type'  => 'boolean',
                 'value' => false,
                 'show'  => true,
-                'description' => 'Los closers pueden conectar su Google Calendar para bloquear disponibilidad de demos.',
+                'description' => 'Los closers pueden conectar su Google Calendar para bloquear disponibilidad de demos. Además, desde que un lead pasa a "Closer activo", los mensajes que ese lead manda le llegan por notificación al closer en vez de al setter. Los mensajes que hay que aprobar antes de que salgan, y las conversaciones que el agente no pudo resolver, siguen yendo al setter aunque el lead ya sea del closer. Si no hay ningún closer marcado, esos avisos vuelven al setter para que no queden sin avisar.',
             ],
             [
                 // Flag que identifica al admin como setter: las tareas que se generan a partir
@@ -66,7 +66,7 @@ class AdminProperties
                 'type'  => 'boolean',
                 'value' => false,
                 'show'  => true,
-                'description' => 'Los setters reciben automáticamente todas las tareas que nacen de conversaciones de leads: cuando el agente detecta que una conversación necesita que intervenga una persona, la tarea se le asigna a todos los admins marcados como setter, y a cada uno le aparece el aviso en pantalla. Si no hay ningún setter marcado, esas tareas quedan sin asignar y las puede tomar cualquiera.',
+                'description' => 'Los setters son los dueños del lead hasta que pasa al closer: les llegan las notificaciones de los mensajes de esos leads, la de los mensajes que están esperando que alguien los apruebe y la de las conversaciones que el agente no pudo resolver. Estas dos últimas les llegan siempre, incluso cuando el lead ya es del closer, porque el que aprueba lo que sale es el setter. También reciben automáticamente todas las tareas que nacen de conversaciones de leads: cuando el agente detecta que una conversación necesita que intervenga una persona, la tarea se le asigna a todos los admins marcados como setter, y a cada uno le aparece el aviso en pantalla. Si no hay ningún setter marcado, esas tareas quedan sin asignar y las puede tomar cualquiera, y las notificaciones caen en quien haya activado la campanita del lead.',
             ],
             [
                 // Flag para asignación automática al crear nuevas tareas internas manualmente.

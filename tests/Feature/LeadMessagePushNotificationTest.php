@@ -26,6 +26,30 @@ class LeadMessagePushNotificationTest extends TestCase
     use DatabaseTransactions;
 
     /**
+     * Deja la base sin ningún admin con rol antes de cada test.
+     *
+     * 🔴 HACE FALTA DESDE EL RUTEO POR ROL (2/9/2026). Estos tests cuentan destinatarios exactos
+     * (assertCount(1, ...)) y arman su escenario suscribiendo admins por campanita. Desde que el
+     * destinatario también sale del rol, cualquier admin real de la base del slot que tenga
+     * es_setter o is_closer se suma al conjunto y los conteos pasan a depender de qué haya sembrado
+     * en admin_testing_s11 — o sea, dejan de medir lo que dicen medir.
+     *
+     * No es aflojar la aserción: es sacar del medio una variable que el test nunca quiso incluir.
+     * Lo que estos cinco tests prueban es la ELECCIÓN DE CANAL (push vs WhatsApp según haya device),
+     * no el ruteo; el ruteo se prueba en RuteoDePushPorRolTest.
+     *
+     * Corre adentro de la transacción de DatabaseTransactions, así que se revierte al terminar.
+     *
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Admin::query()->update(['es_setter' => false, 'is_closer' => false]);
+    }
+
+    /**
      * Crea un admin con teléfono cargado (condición para el WhatsApp de respaldo).
      *
      * @param string $email

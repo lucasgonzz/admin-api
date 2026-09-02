@@ -27,11 +27,17 @@ use Illuminate\Support\Facades\Log;
  * probado en {@see LeadMessagePushNotificationService}, y se copia a propósito en vez de
  * inventar uno nuevo.
  *
- * SOBRE EL FLAG. Se reutilizan `notify_lead_escalation_whatsapp` y
- * `notify_support_escalation_whatsapp`, que ya existen y significan "quiero enterarme de los
- * escalados". El nombre quedó atado al canal de aquel entonces, pero agregar una columna nueva
- * obligaría a Lucas a volver a marcar en la pantalla de Usuarios admin algo que ya tiene marcado,
- * y el precio de eso es perderse escalados durante la ventana en que nadie la marcó.
+ * SOBRE EL FLAG, y acá los dos casos dejaron de ser el mismo (2/9/2026):
+ *
+ *   - Tickets de soporte: siguen saliendo por `notify_support_escalation_whatsapp`. Un ticket no
+ *     tiene estados de pipeline ni dueño por rol, así que no hay nada que rutear.
+ *   - Leads: pasaron a resolverse por ROL, con LeadNotificationAudienceResolver::for_escalado(),
+ *     que manda siempre a los `es_setter`. `notify_lead_escalation_whatsapp` era una suscripción
+ *     opt-in disfrazada de ruteo: un setter que no marcó ese checkbox no se enteraba de ningún
+ *     escalado, que es exactamente el modo de falla que este servicio existe para evitar. El flag
+ *     no se borró: lo siguen usando los tres avisos al closer que reciclan la plantilla
+ *     `lead_escalacion_humana` sin ser escalados (llamada agendada, seguimiento post-demo, demo
+ *     realizada), y esos no se tocaron.
  *
  * A diferencia del envío por WhatsApp, para el push NO se exige `phone_number` cargado: un device
  * registrado no necesita teléfono, y filtrar por él dejaría sin aviso justo a quien mejor podría
@@ -57,8 +63,10 @@ class EscalationPushNotificationService
             ? trim($motivo)
             : 'El agente no pudo resolver la consulta y pidió revisión humana.';
 
+        /* Los tickets de soporte siguen saliendo por el flag opt-in: no tienen estados de pipeline
+         * ni dueño por rol, así que el ruteo por rol del 2/9/2026 no aplica acá. */
         return $this->notificar(
-            'notify_support_escalation_whatsapp',
+            $this->ids_por_flag('notify_support_escalation_whatsapp'),
             $titulo,
             $cuerpo,
             '/soporte?ticket_id=' . $ticket->id,
@@ -90,8 +98,14 @@ class EscalationPushNotificationService
             ? trim($motivo)
             : 'El agente detectó que la conversación requiere atención humana.';
 
+        /* Ruteo por rol (2/9/2026): el escalado a humano de un lead va SIEMPRE a los setters, esté
+         * el lead donde esté — incluso en closer_activo. Antes salía por
+         * notify_lead_escalation_whatsapp, que es una suscripción opt-in y no un rol: un setter
+         * nuevo que no marcó ese checkbox no se enteraba de ningún escalado. El flag sigue
+         * gobernando los tickets de soporte y los tres avisos al closer que reciclan la misma
+         * plantilla (llamada agendada, seguimiento post-demo, demo realizada), que no son escalados. */
         return $this->notificar(
-            'notify_lead_escalation_whatsapp',
+            LeadNotificationAudienceResolver::for_escalado($lead),
             'Lead: ' . $nombre,
             $cuerpo,
             '/leads?lead_id=' . $lead->id,
@@ -102,21 +116,20 @@ class EscalationPushNotificationService
     /**
      * Reparte el aviso entre push y WhatsApp según qué admins tengan device registrado.
      *
-     * @param string               $flag   Columna de `admins` que marca la suscripción a escalados.
-     * @param string               $titulo Título de la notificación.
-     * @param string               $cuerpo Texto de la notificación.
-     * @param string               $ruta   Ruta dentro del admin, ya con su query param.
-     * @param array<string, mixed> $extra  Datos adicionales del payload.
+     * @param array<int, int>      $admin_ids Destinatarios ya resueltos por el llamador: los tickets
+     *                                        los sacan de un flag opt-in, los leads del rol (ver
+     *                                        LeadNotificationAudienceResolver). Este método no decide
+     *                                        a quién avisar, solo por qué canal.
+     * @param string               $titulo    Título de la notificación.
+     * @param string               $cuerpo    Texto de la notificación.
+     * @param string               $ruta      Ruta dentro del admin, ya con su query param.
+     * @param array<string, mixed> $extra     Datos adicionales del payload.
      *
      * @return array{push: array<int, int>, sin_device: array<int, int>}
      */
-    private function notificar(string $flag, string $titulo, string $cuerpo, string $ruta, array $extra): array
+    private function notificar(array $admin_ids, string $titulo, string $cuerpo, string $ruta, array $extra): array
     {
         $resultado = ['push' => [], 'sin_device' => []];
-
-        $admin_ids = Admin::where($flag, true)->pluck('id')->map(function ($id) {
-            return (int) $id;
-        })->all();
 
         if (empty($admin_ids)) {
             return $resultado;
@@ -190,5 +203,25 @@ class EscalationPushNotificationService
     protected function send_push(int $admin_id, string $titulo, string $cuerpo, array $data): void
     {
         AdminPushNotificationService::send_to_admin($admin_id, $titulo, $cuerpo, $data);
+    }
+
+    /**
+     * Ids de los admins suscritos a un canal de escalado por flag opt-in.
+     *
+     * Quedó como método propio cuando notificar() dejó de resolver destinatarios (2/9/2026): los
+     * leads ahora los saca del rol y los tickets siguen sacándolos de acá.
+     *
+     * @param string $flag Columna de `admins`.
+     *
+     * @return array<int, int>
+     */
+    private function ids_por_flag(string $flag): array
+    {
+        return Admin::where($flag, true)
+            ->pluck('id')
+            ->map(function ($id) {
+                return (int) $id;
+            })
+            ->all();
     }
 }
