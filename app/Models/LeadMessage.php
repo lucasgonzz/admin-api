@@ -492,6 +492,77 @@ class LeadMessage extends Model
     }
 
     /**
+     * ¿El último mensaje que ESTE lead recibió del sistema fue una OFERTA FLEXIBLE?
+     *
+     * Una oferta flexible es la apertura "te la dejo lista ahora mismo, o para el horario que te
+     * quede cómodo": ofrece la demo SIN nombrar ninguna hora. Por definición no declara horarios,
+     * así que `horarios_ofrecidos` queda en `[]` (vacío EXPLÍCITO, que el cast `array` distingue de
+     * `null`: null es "no se declaró nada", y lo escriben la dinámica actual y cualquier mensaje que
+     * ni siquiera pasó por el bloque de disponibilidad).
+     *
+     * Es la SEGUNDA fuente del permiso para ignorar el margen mínimo de anticipación (ver
+     * LeadAiService::oferta_vigente_sin_margen()). La primera —horario_figura_como_ofrecido()— no
+     * puede cubrir este caso: cuando el lead contesta "dale, ahora" a una apertura flexible, el
+     * horario que el sistema elige sale de una grilla fresca y nunca se le ofreció a nadie, así que
+     * no figura en ningún `horarios_ofrecidos`. Sin esta segunda fuente, la oferta flexible movería
+     * el bug de caducidad del mensaje de apertura al mensaje que confirma el turno.
+     *
+     * Qué se exige, y por qué cada cosa:
+     * - `sender = 'sistema'` y `status = 'enviado'`: mismo criterio que horario_figura_como_ofrecido().
+     *   El permiso es "esto se lo dijimos NOSOTROS y le llegó"; una sugerencia sin aprobar no llegó.
+     * - `is_status_event = false` e `is_error = false`: los eventos internos y los bloques rojos no
+     *   son mensajes que el lead haya leído, y encima traen `horarios_ofrecidos` en null.
+     * - `horarios_ofrecidos` estrictamente `[]`: ver arriba.
+     * - `suggested_lead_status` dentro de $estados_de_agenda: acota el permiso al tramo de agenda.
+     *   Un mensaje del sistema sobre cualquier otra cosa no habilita nada.
+     *
+     * ⚠️ Alcance conocido: `suggested_lead_status` se guarda en null cuando el estado sugerido
+     * coincide con el que el lead YA tenía (ver LeadAiService, `$estado !== $previous_status`). O sea
+     * que una SEGUNDA apertura flexible seguida, con el lead ya en `solicita_disponibilidad`, no da
+     * permiso. Es el lado seguro del error —el sistema se comporta como antes de esta misión y el
+     * horario se frena— y cubre el caso real, que es la primera apertura: ahí el lead viene de
+     * `calificado` y el estado sí cambia.
+     *
+     * 🔴 La lista de estados llega POR PARÁMETRO y no se importa de LeadAiService: el modelo no
+     * depende del service (la dependencia va al revés, y ya es fuerte).
+     *
+     * @param int               $lead_id            Lead dueño de la conversación.
+     * @param array<int,string> $estados_de_agenda  Slugs del tramo de agenda
+     *                                              (LeadAiService::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO).
+     *
+     * @return bool true si la última cosa que el sistema le mandó fue una oferta flexible del tramo.
+     */
+    public static function ultima_oferta_fue_flexible(int $lead_id, array $estados_de_agenda): bool
+    {
+        if ($lead_id <= 0 || empty($estados_de_agenda)) {
+            return false;
+        }
+
+        $ultimo = self::query()
+            ->where('lead_id', $lead_id)
+            ->where('sender', 'sistema')
+            ->where('status', 'enviado')
+            ->where('is_status_event', false)
+            ->where('is_error', false)
+            ->orderBy('sent_at', 'desc')
+            ->orderBy('id', 'desc')
+            ->first(['id', 'horarios_ofrecidos', 'suggested_lead_status']);
+
+        if ($ultimo === null) {
+            return false;
+        }
+
+        $horarios = $ultimo->horarios_ofrecidos;
+        if (! is_array($horarios) || $horarios !== []) {
+            return false;
+        }
+
+        $estado = (string) $ultimo->suggested_lead_status;
+
+        return $estado !== '' && in_array($estado, $estados_de_agenda, true);
+    }
+
+    /**
      * Normaliza una hora suelta a "HH:MM", o string vacío si no es legible.
      *
      * Mismo criterio que LeadAiService::descartar_agendamiento_fuera_de_slots() (preg_match de

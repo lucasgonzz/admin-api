@@ -568,6 +568,15 @@ TXT;
         $calendar_snapshot['slots_disponibles'] = $availability_data['demos'] ?? [];
         $calendar_snapshot['closer_config']    = $closer_config;
 
+        /* ¿Está vivo el contrato de APERTURA FLEXIBLE? (ver contrato_oferta_flexible_activo()).
+         *
+         * 🔴 Se resuelve UNA sola vez por generación y queda en esta variable local, que después se
+         * lee en los tres lugares que dependen de ella (el bloque OFERTA PRIMARIA, las INSTRUCCIONES
+         * PARA AGENDAR y la guarda de horarios_ofrecidos). Nunca como propiedad de instancia: el
+         * service se resuelve del contenedor y una propiedad sobrevive entre leads dentro del mismo
+         * worker. */
+        $contrato_flexible_activo = $usa_experiencia_nueva && $this->contrato_oferta_flexible_activo($lead);
+
         /* Bloque OFERTA PRIMARIA (grupo 306, prompt 03): el sistema ya resolvió el primer momento
          * disponible real — el agente solo lo redacta, no elige entre una lista. Va PRIMERO de todo
          * (antes que CALENDARIO y el JSON): lo primero que lee el modelo pesa más que lo último.
@@ -578,9 +587,24 @@ TXT;
             $oferta_primaria = $this->resolve_oferta_primaria($availability_data, $usa_experiencia_nueva);
 
             if ($oferta_primaria['hay_disponibilidad']) {
-                $availability_context .= "OFERTA PRIMARIA (resuelta por el sistema — es LA que tenés que ofrecer, con la hora exacta):"
-                    . "\n- Ofrecé ESTE momento: {$oferta_primaria['texto_referencia']} (demo_id {$oferta_primaria['demo_id']})"
-                    . "\n- El mensaje TIENE que decir esa hora. No la reemplaces por una franja (\"a la tarde\", \"más tarde\", \"mañana\") ni por una pregunta abierta (\"¿a qué hora te queda cómodo?\").";
+                if ($contrato_flexible_activo) {
+                    /* APERTURA FLEXIBLE: el sistema sigue resolviendo el primer momento real —el
+                     * agente no elige nada— pero ese momento pasa a ser MATERIAL DE RESPALDO para el
+                     * turno siguiente. La apertura no nombra hora: le ofrece hacerla ya mismo o
+                     * cuando le quede cómodo. Motivo: un horario puntual en el primer mensaje le pide
+                     * al lead que se comprometa antes de saber qué es la demo, y encima suele
+                     * encontrarlo en el teléfono, cuando la demo se hace desde una computadora. */
+                    $availability_context .= "OFERTA PRIMARIA (resuelta por el sistema — MATERIAL DE RESPALDO, no la nombres en este mensaje):"
+                        . "\n- El primer momento disponible real es {$oferta_primaria['texto_referencia']} (demo_id {$oferta_primaria['demo_id']}). Guardalo: es lo que vas a ofrecer SI el lead te pide ver opciones o te dice que ahora no puede."
+                        . "\n- La apertura de este mensaje es FLEXIBLE: ofrecele hacerla YA MISMO o cuando le quede cómodo, sin nombrar ninguna hora. Tiene que sonar a \"si querés te la dejo lista ahora mismo, o para el horario que te quede cómodo — vos decime\"."
+                        . "\n- PROHIBIDO nombrar una hora puntual en esta apertura: ni \"12:30\", ni \"a las 12\", ni \"en cinco minutos\". La hora aparece recién en el turno siguiente, y sólo si el lead la pide."
+                        . "\n- La demo se hace desde una COMPUTADORA. Si el lead está en el teléfono, la apertura flexible es justamente lo que sirve: que él te diga a qué hora va a poder sentarse frente a la compu."
+                        . "\n- Cuando ofrezcas esta apertura, devolvé \"oferta_flexible\": true y \"horarios_ofrecidos\": [].";
+                } else {
+                    $availability_context .= "OFERTA PRIMARIA (resuelta por el sistema — es LA que tenés que ofrecer, con la hora exacta):"
+                        . "\n- Ofrecé ESTE momento: {$oferta_primaria['texto_referencia']} (demo_id {$oferta_primaria['demo_id']})"
+                        . "\n- El mensaje TIENE que decir esa hora. No la reemplaces por una franja (\"a la tarde\", \"más tarde\", \"mañana\") ni por una pregunta abierta (\"¿a qué hora te queda cómodo?\").";
+                }
 
                 if (! empty($oferta_primaria['oferta_manana']['hay_disponibilidad'])) {
                     $availability_context .= "\n\nGUARDADO PARA EL TURNO SIGUIENTE (NO mencionar en este mensaje):"
@@ -680,9 +704,17 @@ TXT;
         if ($usa_experiencia_nueva) {
             $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
             if ($oferta_primaria['hay_disponibilidad']) {
-                $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA nombrando la hora: el mensaje tiene que sonar a \"si querés te la dejo lista para {$oferta_primaria['texto_referencia']} — ¿te sirve?\". Si el lead te dice que a esa hora no puede, recién ahí ofrecés el momento siguiente, otra vez uno solo y con hora.";
-                $availability_context .= "\n- PROHIBIDO ofrecer franjas del día. \"A la tarde\", \"a la mañana\", \"más tarde\", \"cuando quieras\" no son ofertas: son la forma vieja de agendar. Siempre una hora concreta copiada del JSON.";
-                $availability_context .= "\n- PROHIBIDO devolver la pregunta abierta sin haber ofrecido nada (\"¿a qué hora te queda cómodo?\", \"¿qué día te sirve?\") cuando el bloque OFERTA PRIMARIA trae un momento disponible. Esa pregunta solo vale si el bloque dice que NO hay disponibilidad.";
+                if ($contrato_flexible_activo) {
+                    /* La contracara de la apertura flexible del bloque de arriba. Las tres líneas de
+                     * la rama de abajo son incompatibles con ella (ordenan nombrar la hora y
+                     * prohíben la pregunta abierta), así que se reemplazan enteras — no se apilan. */
+                    $availability_context .= "\n- Ofrecé la apertura FLEXIBLE del bloque de arriba: ahora mismo o cuando le quede cómodo. Un solo mensaje, sin lista y sin hora.";
+                    $availability_context .= "\n- Recién si el lead pide ver opciones, o te dice que ahora no puede: ofrecele UN horario concreto, el de la OFERTA PRIMARIA, copiado del JSON. Ahí sí nombrás la hora y la declarás en horarios_ofrecidos.";
+                } else {
+                    $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA nombrando la hora: el mensaje tiene que sonar a \"si querés te la dejo lista para {$oferta_primaria['texto_referencia']} — ¿te sirve?\". Si el lead te dice que a esa hora no puede, recién ahí ofrecés el momento siguiente, otra vez uno solo y con hora.";
+                    $availability_context .= "\n- PROHIBIDO ofrecer franjas del día. \"A la tarde\", \"a la mañana\", \"más tarde\", \"cuando quieras\" no son ofertas: son la forma vieja de agendar. Siempre una hora concreta copiada del JSON.";
+                    $availability_context .= "\n- PROHIBIDO devolver la pregunta abierta sin haber ofrecido nada (\"¿a qué hora te queda cómodo?\", \"¿qué día te sirve?\") cuando el bloque OFERTA PRIMARIA trae un momento disponible. Esa pregunta solo vale si el bloque dice que NO hay disponibilidad.";
+                }
             } else {
                 $availability_context .= "\n- Ofrecé LA OFERTA PRIMARIA de arriba, no una lista de horarios. El mensaje tiene que sonar a \"si querés, hoy mismo te la preparo para que la pruebes — ¿en qué horario te queda cómodo?\".";
             }
@@ -721,6 +753,11 @@ TXT;
             $availability_context .= "\n- Si la fecha o el horario que querés confirmar no están en el JSON, NO confirmes nada: informale al lead con naturalidad y ofrecé el más cercano que sí figure — uno solo, no una lista.";
             $availability_context .= "\n- El servidor verifica cada agendar_demo contra los slots que te mandó. Un horario que no salga exactamente de esa lista se descarta y el mensaje no sale — no hay forma de forzarlo.";
             $availability_context .= "\n- DECLARÁ en el campo \"horarios_ofrecidos\" del JSON cada horario o rango que tu mensaje MENCIONA (no lo que está disponible en general, solo lo que el texto ofrece). Un ítem por horario: {\"fecha\": \"Y-m-d\", \"desde\": \"HH:MM\", \"hasta\": \"HH:MM\"} (la oferta primaria es un solo ítem con desde igual a hasta). Si tu mensaje no ofrece ningún horario, mandá un array vacío []. Esta declaración NO es opcional cuando el mensaje ofrece horarios: es la única forma que tiene el sistema de saber qué prometiste sin leer prosa, y lo revalida justo antes de enviar.";
+            if ($contrato_flexible_activo) {
+                /* El contrato del campo nuevo y su control viajan en la misma mitad del despliegue:
+                 * el código. Si esta línea existe, la guarda que la verifica también. */
+                $availability_context .= "\n- \"oferta_flexible\": true va SOLO cuando tu mensaje ofrece la demo sin nombrar ninguna hora. Si tu texto nombra una hora, ese campo NO va y la hora se declara en horarios_ofrecidos. El servidor compara las dos cosas: si declarás flexible y el texto igual nombra una hora, el mensaje se frena para revisión humana.";
+            }
         } else {
             $availability_context .= "\n\nINSTRUCCIONES PARA AGENDAR:";
             $availability_context .= "\n- Analizá el historial de la conversación para determinar qué fecha y hora quiere el lead (puede decir \"hoy\", \"mañana\", \"el jueves\", \"a las 16\", etc.).";
@@ -882,24 +919,71 @@ TXT;
          * Sin la condición de hay_disponibilidad, esto marcaría también los mensajes legítimos
          * que preguntan qué día le sirve al lead porque no hay slots.
          */
+        /* 🔴 La excepción de la APERTURA FLEXIBLE, y por qué NO afloja la guarda.
+         *
+         * Una oferta flexible, por definición, no declara horarios: el mensaje no nombra ninguna
+         * hora. Sin esta excepción, la apertura flexible caería siempre acá y todos esos mensajes
+         * quedarían trabados — el escenario exacto que el orden de despliegue prohíbe.
+         *
+         * Pero declararse flexible NO es un salvoconducto: es una AFIRMACIÓN que el servidor
+         * verifica contra el texto. Si el modelo dice "oferta_flexible: true" y su mensaje igual
+         * nombra una hora, la credencial se pierde y el mensaje se frena lo mismo que antes — con
+         * otra nota, porque ese caso es "el modelo pelea con el guion" y no "el modelo se olvidó de
+         * declarar". Y con el contrato apagado el campo se ignora por completo. */
+        $declaro_flexible = $contrato_flexible_activo && ! empty($parsed['oferta_flexible']);
+        /* `is_scalar` antes del cast: `mensaje_sugerido` lo escribe el modelo y llega crudo (misma
+         * clase de error ya registrada en LeadMessage::horarios_ofrecidos_cubren()). */
+        $texto_sugerido   = isset($parsed['mensaje_sugerido']) && is_scalar($parsed['mensaje_sugerido'])
+            ? (string) $parsed['mensaje_sugerido']
+            : '';
+        $flexible_creible = $declaro_flexible && ! $this->mensaje_menciona_una_hora($texto_sugerido);
+
         if ($usa_experiencia_nueva
             && ! empty($oferta_primaria['hay_disponibilidad'])
             && empty($parsed['agendar_demo'])
             && empty($parsed['horarios_ofrecidos'])
+            && ! $flexible_creible
         ) {
             $parsed['requiere_verificacion'] = true;
-            $parsed['nota_para_setter']       = 'El mensaje no ofrece un horario concreto pese a que el sistema '
-                . 'resolvió una oferta primaria disponible (' . $oferta_primaria['texto_referencia'] . '). '
-                . 'Revisá antes de enviar.';
 
-            Log::channel('disponibilidad')->warning(
-                '[DISPONIBILIDAD] Mensaje sin horarios_ofrecidos con oferta primaria disponible: marcado para revisión.',
-                [
-                    'lead_id'           => $lead->id,
-                    'texto_referencia'  => $oferta_primaria['texto_referencia'],
-                    'mensaje_sugerido'  => isset($parsed['mensaje_sugerido']) ? $parsed['mensaje_sugerido'] : '',
-                ]
-            );
+            if ($declaro_flexible) {
+                $parsed['nota_para_setter'] = 'El mensaje se declaró como oferta flexible (sin horario) pero el '
+                    . 'texto nombra una hora, y esa hora no está declarada en horarios_ofrecidos. '
+                    . 'Revisá antes de enviar.';
+
+                Log::channel('disponibilidad')->warning(
+                    '[DISPONIBILIDAD] Oferta flexible declarada pero el texto nombra una hora: marcado para revisión.',
+                    [
+                        'lead_id'          => $lead->id,
+                        'texto_referencia' => $oferta_primaria['texto_referencia'],
+                        'mensaje_sugerido' => $texto_sugerido,
+                    ]
+                );
+            } else {
+                $parsed['nota_para_setter']       = 'El mensaje no ofrece un horario concreto pese a que el sistema '
+                    . 'resolvió una oferta primaria disponible (' . $oferta_primaria['texto_referencia'] . '). '
+                    . 'Revisá antes de enviar.';
+
+                Log::channel('disponibilidad')->warning(
+                    '[DISPONIBILIDAD] Mensaje sin horarios_ofrecidos con oferta primaria disponible: marcado para revisión.',
+                    [
+                        'lead_id'           => $lead->id,
+                        'texto_referencia'  => $oferta_primaria['texto_referencia'],
+                        'mensaje_sugerido'  => isset($parsed['mensaje_sugerido']) ? $parsed['mensaje_sugerido'] : '',
+                    ]
+                );
+            }
+        } elseif ($flexible_creible
+            && ! empty($oferta_primaria['hay_disponibilidad'])
+            && empty($parsed['agendar_demo'])
+            && empty($parsed['horarios_ofrecidos'])
+        ) {
+            /* 🔴 El `[]` lo escribe PHP, no el modelo. Río abajo, el permiso para saltar el margen
+             * de la cadena flexible (ver LeadMessage::ultima_oferta_fue_flexible()) lee justamente
+             * `horarios_ofrecidos === []` de un mensaje enviado, y el cast `array` distingue `[]` de
+             * `null`. Si dependiera de que el modelo mandara el campo, el permiso existiría o no
+             * según el humor de la generación. */
+            $parsed['horarios_ofrecidos'] = [];
         }
 
         return $this->create_message_and_update_lead($lead, $parsed, $is_followup, $calendar_snapshot);
@@ -2238,6 +2322,100 @@ TXT;
     }
 
     /**
+     * Marcador que tiene que aparecer en el recurso `demo_agenda` de la dinámica nueva para que la
+     * APERTURA FLEXIBLE se active.
+     *
+     * Mismo mecanismo, y por el mismo motivo, que KnowledgeGroundingGate::MARCADOR_CONTRATO: las dos
+     * mitades de este cambio llegan a producción a destiempo. Los `.md` del repo de conocimiento
+     * sincronizan solos cada ~10 minutos; el código de `admin-api` sube recién cuando corre el
+     * deploy. Con el código nuevo arriba y el `.md` viejo todavía vivo, el modelo no tiene forma de
+     * saber que le pedimos una apertura sin hora ni el campo `oferta_flexible`: sin este marcador,
+     * el prompt le ordenaría abrir flexible mientras el `.md` le manda nombrar la hora, y la guarda
+     * de `horarios_ofrecidos` trabaría todos esos mensajes.
+     *
+     * Al buscar la cadena en el `.md` que explica el contrato, el código nuevo queda INERTE hasta
+     * que ese documento está de verdad vivo, y se enciende solo cuando llega. El rollback es
+     * simétrico y no necesita deploy: se revierte el commit del `.md`, el marcador desaparece y todo
+     * vuelve al comportamiento anterior en la siguiente sincronización.
+     */
+    const MARCADOR_OFERTA_FLEXIBLE = 'oferta_flexible';
+
+    /**
+     * ¿El `.md` que gobierna la agenda de la dinámica nueva ya trae el contrato de apertura flexible?
+     *
+     * 🔴 El resultado se resuelve UNA VEZ por generación y viaja por parámetro o en una variable
+     * local. NUNCA como propiedad de instancia: el service se resuelve del contenedor y una
+     * propiedad con estado sobrevive entre leads dentro del mismo worker, que es exactamente la
+     * clase de bug intermitente que este archivo ya documenta en oferta_vigente_sin_margen() y en
+     * REAGENDADO_VENTANA_MINUTOS.
+     *
+     * Fail-safe: cualquier problema al leer el recurso (base caída, tabla sin sincronizar) devuelve
+     * false y deja constancia. Un problema de infraestructura no puede cambiarle el guion al agente.
+     *
+     * @param Lead $lead Lead para el que se está generando la sugerencia.
+     *
+     * @return bool true si el contrato de apertura flexible está vivo para ESTE lead.
+     */
+    protected function contrato_oferta_flexible_activo(Lead $lead): bool
+    {
+        /* La apertura flexible es de la dinámica nueva y de ninguna otra. */
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return false;
+        }
+
+        try {
+            $contenido = app(WhatsappProtocolService::class)->getRecurso('demo_agenda', $lead->demo_experiencia_efectiva());
+
+            return strpos($contenido, self::MARCADOR_OFERTA_FLEXIBLE) !== false;
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] No se pudo leer el recurso demo_agenda para decidir la apertura flexible; se sigue con la oferta con hora.',
+                [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]
+            );
+
+            return false;
+        }
+    }
+
+    /**
+     * ¿El texto de un mensaje nombra una hora concreta?
+     *
+     * 🔴 Reutiliza LAS DOS regex que este mismo archivo ya usa para detectar el horario que propone
+     * el lead (ver generate_suggestion_with_availability(), bloque de $lead_proposed_time). No se
+     * inventa una tercera forma de leer una hora: si algún día hay que aflojar o endurecer el
+     * criterio, se toca en un solo lugar conceptual y las dos puntas siguen coincidiendo.
+     *
+     * Sólo sirve para ENDURECER la guarda de `horarios_ofrecidos`, nunca para aflojarla: si devuelve
+     * true, un mensaje que se declaró "oferta flexible" pierde esa credencial y se frena para
+     * revisión humana.
+     *
+     * ⚠️ Alcance declarado a propósito: detecta HORAS ("12:30", "12hs", "5pm", "9 h"), no franjas.
+     * Un "hoy a la tarde" con `oferta_flexible: true` pasaría. Detectar franjas es leer prosa y da
+     * falsos positivos; la prohibición de franjas sigue viviendo en el prompt y en el `.md`.
+     *
+     * @param string $texto Texto del mensaje sugerido por el modelo.
+     *
+     * @return bool true si el texto nombra una hora.
+     */
+    protected function mensaje_menciona_una_hora(string $texto): bool
+    {
+        if (trim($texto) === '') {
+            return false;
+        }
+
+        /* "12:30", "12:30 hs". */
+        if (preg_match('/\b(\d{1,2})(?::(\d{2}))\s*(?:hs?|h)?\b/i', $texto)) {
+            return true;
+        }
+
+        /* "12hs", "9 h", "5pm", "8am". */
+        return (bool) preg_match('/\b(\d{1,2})\s*(?:hs|h|am|pm|a\.?m\.?|p\.?m\.?)\b/i', $texto);
+    }
+
+    /**
      * Resuelve la OFERTA PRIMARIA (grupo 306, prompt 03): el primer momento disponible real, para
      * que el agente solo lo redacte en vez de elegir entre una lista. Solo tiene sentido para leads
      * en la dinámica nueva — se devuelve `hay_disponibilidad: false` si no lo es, como resguardo si
@@ -2569,7 +2747,34 @@ TXT;
             ? $permiso_por_horario
             : $demo_start;
 
-        if (! LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $hora_del_permiso)) {
+        $permiso_por_oferta = LeadMessage::horario_figura_como_ofrecido((int) $lead->id, $demo_date, $hora_del_permiso);
+
+        /* 🔴 SEGUNDA FUENTE DEL PERMISO: la cadena de OFERTA FLEXIBLE.
+         *
+         * Cuando la apertura no nombró ninguna hora ("ahora mismo o cuando te quede cómodo") y el
+         * lead contesta "dale, ahora", el horario que el sistema elige sale de una grilla fresca y
+         * NUNCA se le ofreció a nadie: no figura en ningún `horarios_ofrecidos`, así que la primera
+         * fuente no puede darle permiso y el margen lo frena. Sin esto, la oferta flexible no
+         * arreglaría el problema de caducidad: lo MUDARÍA del mensaje de apertura al que confirma
+         * el turno, y el lead quedaría trabado igual.
+         *
+         * Lo que esta segunda fuente NO afloja, y es todo lo que importa:
+         * - "ya pasó" sigue en pie: la grilla margen-0 de abajo sigue exigiendo que el slot no haya
+         *   arrancado.
+         * - "lo ocupó otro" sigue en pie: esa misma grilla pasa por la capa 1 de bloqueo por demo_id.
+         * - Sólo HOY (gate de fecha, más arriba) y sólo dinámica nueva (gate de dinámica).
+         * - Sólo se renuncia AL MARGEN, que es la misma renuncia ya decidida y documentada en
+         *   revalidar_horarios_ofrecidos().
+         * - No toca el permiso del reagendado: sólo corre cuando $permiso_por_horario es null.
+         * - Se apaga sola con el rollback del `.md` (contrato_oferta_flexible_activo()).
+         */
+        $permiso_por_cadena_flexible = false;
+        if (! $permiso_por_oferta && $permiso_por_horario === null) {
+            $permiso_por_cadena_flexible = $this->contrato_oferta_flexible_activo($lead)
+                && LeadMessage::ultima_oferta_fue_flexible((int) $lead->id, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO);
+        }
+
+        if (! $permiso_por_oferta && ! $permiso_por_cadena_flexible) {
             /* 🔴 Alerta a propósito, y en warning: este es el único camino por el que el rescate
              * NO dispara sin que haya pasado nada raro con el horario. Hay un guard conocido (ver
              * el bloque que exige `horarios_ofrecidos` en el paquete del agente) que existe
@@ -2636,6 +2841,22 @@ TXT;
         /* Se asigna al final y de una sola vez: si el rescate no prosperó, el llamador recibe un
          * array vacío y nunca un mapa a medio llenar (mismo criterio que build_availability_json). */
         $ventanas_sin_margen = ($rescatado && is_array($ventanas_grilla)) ? $ventanas_grilla : [];
+
+        /* La línea que hace medible el rescate por cadena flexible. Va en info y no en warning: acá
+         * no pasó nada raro, es el camino previsto — pero es el único que convierte un "no" del
+         * margen en un "sí" sin que el horario figure en ningún mensaje enviado, así que tiene que
+         * poder verse en el log en vez de deducirse. */
+        if ($rescatado && $permiso_por_cadena_flexible) {
+            Log::channel('disponibilidad')->info(
+                '[DISPONIBILIDAD] Horario rescatado del margen por cadena de oferta flexible.',
+                [
+                    'lead_id'    => $lead->id,
+                    'demo_id'    => $demo_id,
+                    'demo_date'  => $demo_date,
+                    'demo_start' => $demo_start,
+                ]
+            );
+        }
 
         return $rescatado;
     }
