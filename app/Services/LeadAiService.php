@@ -2945,19 +2945,10 @@ TXT;
             $permiso_por_cadena_flexible = $this->contrato_oferta_flexible_activo($lead)
                 && LeadMessage::ultima_oferta_fue_flexible((int) $lead->id, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO);
 
-            if ($permiso_por_cadena_flexible) {
-                /* La línea del criterio A4 de la misión: cuando el rescate salga por esta segunda
-                 * fuente y no por la de siempre, tiene que poder verse en el log sin deducirlo. */
-                Log::channel('disponibilidad')->info(
-                    '[DISPONIBILIDAD] Horario rescatado del margen por cadena de oferta flexible.',
-                    [
-                        'lead_id'    => $lead->id,
-                        'demo_id'    => $demo_id,
-                        'demo_date'  => $demo_date,
-                        'demo_start' => $demo_start,
-                    ]
-                );
-            }
+            /* 🔴 Acá NO se loguea el rescate. Otorgar el permiso no es rescatar: la grilla margen-0
+             * de más abajo todavía puede negar el horario (si ya arrancó, o si lo ocupó otro lead),
+             * y en ese caso una línea que dijera "Horario rescatado" estaría afirmando un hecho que
+             * no ocurrió. La línea sale una sola vez, cuando el rescate se confirma de verdad. */
         }
 
         if (! $permiso_por_oferta && ! $permiso_por_cadena_flexible) {
