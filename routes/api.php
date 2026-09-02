@@ -169,6 +169,12 @@ Route::middleware('claude.task.key')
         Route::get('metrics', 'Api\ClaudeLeadsAnalyticsController@metrics_json');
         Route::get('templates', 'Api\ClaudeLeadsAnalyticsController@templates_json');
 
+        /* Alta en LOTE de plantillas de LEAD (followup_templates). Hermano de escritura de
+           `templates` de arriba, en un controlador aparte porque no es análisis de lectura.
+           No confundir con `client-templates`, que es el alta de plantillas de SOPORTE
+           (client_templates): son dos tablas y dos motores distintos. */
+        Route::post('followup-templates', 'Api\ClaudeFollowupTemplatesController@store_json');
+
         /* Recuperación de leads: envío de plantillas Meta. */
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');

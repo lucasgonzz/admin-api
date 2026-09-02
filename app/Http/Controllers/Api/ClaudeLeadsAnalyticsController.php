@@ -138,6 +138,29 @@ class ClaudeLeadsAnalyticsController extends Controller
                 'filtros' => ['activa' => 'booleano. Opcional.'],
                 'nota'    => 'Sin paginación (son pocas filas). El campo `variables` dice qué significa cada {{n}} de cada '
                     . 'plantilla, así no hay que adivinar al enviar.',
+                /* El alta vive en otro controlador (ClaudeFollowupTemplatesController), igual que
+                   `envio` más abajo describe endpoints que viven en ClaudeLeadsOutboundController.
+                   Sin esto, una sesión nueva no tiene cómo enterarse de que existe un POST para
+                   cargar plantillas de lead: no hay pantalla en el admin para darlas de alta. */
+                'alta' => [
+                    'ruta' => 'POST claude/followup-templates',
+                    'body' => [
+                        'templates[]'                              => 'OBLIGATORIO. El lote de plantillas de LEAD (followup_templates), no de soporte.',
+                        'templates[].template_name'                => 'OBLIGATORIO. Clave natural: reenviarlo actualiza la fila, nunca crea una segunda.',
+                        'templates[].estado'                       => 'OBLIGATORIO. 🔴 Si la plantilla es de uso manual (chequeo diario, no del cron automático), '
+                            . 'usá un valor que NO sea un status real del pipeline (ver pipeline_statuses de este mismo schema) — '
+                            . 'convención: prefijo `manual_`. find_template_for() busca por igualdad exacta contra el status del '
+                            . 'lead, así que un estado inventado nunca matchea y el cron de cada 2 horas jamás la disparó sola.',
+                        'templates[].dia_numero'                   => 'OBLIGATORIO. Orden dentro del estado (1, 2, 3...).',
+                        'templates[].body_template'                => 'OBLIGATORIO. Texto exacto aprobado en Meta, con sus {{n}} tal cual.',
+                        'templates[].language_code'                => 'Opcional, default es_AR.',
+                        'templates[].activa'                       => 'Opcional, default true.',
+                        'templates[].solo_si_ingreso_confirmado'   => 'Opcional, default false. Sólo tiene efecto en el estado demo_agendada.',
+                    ],
+                    'nota' => 'Idempotente y aditivo, mismo criterio que POST claude/client-templates: nunca duplica por '
+                        . 'template_name y nunca borra lo que no vino en el payload. No envía nada: el envío real es '
+                        . 'POST claude/leads/{id}/send-template.',
+                ],
             ],
             /*
              * Los dos endpoints de ESCRITURA se describen acá aunque vivan en el otro controlador.
