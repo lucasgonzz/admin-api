@@ -4,7 +4,6 @@ namespace App\Events;
 
 use App\Models\Lead;
 use App\Support\BroadcastGuard;
-use App\Support\BroadcastPayloadBudget;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
@@ -51,8 +50,16 @@ class LeadSuggestionCreated implements ShouldBroadcastNow
      * «No se pudo generar la sugerencia» sobre una sugerencia que sí se había generado.
      *
      * 🔴 Va acá, en el evento, y no en cada sitio de llamada a propósito: así queda cubierto
-     * todo emisor —los que ya existen y los que se escriban después— sin que nadie se tenga
-     * que acordar de envolver el dispatch.
+     * todo emisor que use `dispatch()` —los que ya existen y los que se escriban después— sin
+     * que nadie se tenga que acordar de envolverlo.
+     *
+     * ⚠️ Lo que este override NO cubre, y conviene saberlo antes de confiar de más: los otros
+     * emisores del trait `Dispatchable` —`dispatchIf()`, `dispatchUnless()` y `broadcast()`—
+     * llaman a `event()` / `broadcast()` por su cuenta y pasan de largo el guard. Hoy no los
+     * usa nadie con este evento (verificado el 2/9/2026), y `broadcast()` además devuelve un
+     * `PendingBroadcast` encadenable, así que taparlo con un guard que se traga la falla le
+     * cambiaría el contrato al llamador. Si algún día hace falta uno de esos, se envuelve el
+     * sitio de llamada o se resuelve acá con el dato en la mano — no se asume cubierto.
      *
      * @return void
      */
@@ -94,49 +101,37 @@ class LeadSuggestionCreated implements ShouldBroadcastNow
     }
 
     /**
-     * Payload del evento: el `lead_id` siempre, y el lead con sus relaciones si entra.
+     * Payload del evento: **solo el id del lead**, y nada más.
      *
-     * 🔴 Lo que decía este docblock hasta el 2/9/2026 —que excluir `messages` alcanzaba para
-     * quedar bajo el límite de ~10 KB de Pusher Channels— **lo desmintió la producción**: el
-     * `Lead` tiene 144 columnas y acá viaja con cinco relaciones, así que el payload crece con
-     * el lead y hay leads que no entran. El broadcast reventó con
-     * «The data content of this event exceeds the allowed maximum (10240 bytes)».
+     * 🔴 ACÁ NO SE VUELVE A METER EL MODELO, y el motivo de fondo no es el tamaño (decisión de
+     * Lucas, 2/9/2026):
      *
-     * Por eso el payload pasa por {@see \App\Support\BroadcastPayloadBudget}: si el JSON no
-     * entra en el presupuesto, se emite **sin la clave `lead`**.
+     * 1. **El canal es público.** `broadcastOn()` devuelve un `Channel`, no un
+     *    `PrivateChannel`, y la clave de Pusher está horneada en el bundle de admin-spa. Ese
+     *    canal lo puede escuchar cualquiera que abra la SPA, sin estar logueado. Mandar el
+     *    `Lead` entero por ahí era publicar teléfono, mail, `notes`, `call_summary` y
+     *    `demo_summary` de cada lead a quien se suscriba. Un payload chico no arregla eso: lo
+     *    único que lo arregla es que el dato no viaje.
+     * 2. **El tamaño.** El `Lead` tiene 144 columnas y viajaba con cinco relaciones. Medido el
+     *    2/9/2026 sobre un lead con la demo resuelta: **23221 bytes** contra los 10240 que
+     *    admite Pusher Channels. El broadcast reventaba entero con «The data content of this
+     *    event exceeds the allowed maximum (10240 bytes)».
+     * 3. **La consulta.** Cargar el modelo era una query por evento para un dato que la SPA
+     *    igual tiene que poder ir a buscar sola.
      *
-     * 🔴 Compatible hacia atrás en las dos direcciones, y por eso `lead` no se renombra ni se
-     * saca del contrato: `lead_id` se **suma**. Una admin-spa vieja contra esta API sigue
-     * recibiendo `lead` en el caso normal y se comporta igual que siempre; en el caso grande
-     * pierde ese refresco puntual —pero hoy, en ese mismo caso, no recibe **nada**, porque el
-     * broadcast entero explota. La admin-spa nueva usa `lead` si vino y, si no, refresca la
-     * fila por API con `lead_id`.
+     * El id alcanza: admin-spa refresca la fila por API, que es el mismo camino que
+     * {@see LeadConversationUpdated} —el evento que más se dispara— usa desde siempre. Y la
+     * API sí verifica quién pide qué; el canal, no.
      *
-     * @return array{lead_id: int, lead?: \App\Models\Lead|null}
+     * 🔴 Un dato que sale por acá sale sin autenticación de ningún tipo. Si alguna vez hace
+     * falta mandar algo más que el id, primero se pasa el canal a privado.
+     *
+     * @return array{lead_id: int}
      */
     public function broadcastWith(): array
     {
-        // Cargar el lead con relaciones necesarias para la tabla, excluyendo messages.
-        $lead = Lead::query()
-            ->where('id', $this->lead_id)
-            ->with([
-                'target_client',
-                'promoted_client',
-                'created_by_admin',
-                'demo',
-                'personalized_demo_videos',
-            ])
-            ->first();
-
-        // El id va primero y nunca se recorta: es el único dato que le garantiza al
-        // consumidor poder reconstruir el resto por API cuando el modelo no entra.
-        return BroadcastPayloadBudget::ajustar(
-            [
-                'lead_id' => $this->lead_id,
-                'lead'    => $lead,
-            ],
-            'lead',
-            'LeadSuggestionCreated'
-        );
+        return [
+            'lead_id' => $this->lead_id,
+        ];
     }
 }

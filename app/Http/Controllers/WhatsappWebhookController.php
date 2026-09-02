@@ -317,7 +317,11 @@ class WhatsappWebhookController extends Controller
             // refresco de badges y fila de grilla en general — solo actualizar el bubble del mensaje).
             // Se pasa además $status como delivery_status: el frontend hace una excepción cuando
             // vale 'fallido' y también refresca la fila del lead en la grilla de leads.
-            event(new \App\Events\LeadConversationUpdated((int) $message->lead_id, (int) $message->id, true, $status));
+            // Vía ::dispatch() y no event(new ...): el dispatch del evento pasa por
+            // App\Support\BroadcastGuard, así una caída de Pusher se loguea como lo que es —una
+            // falla de aviso— en vez de caer en el catch de abajo, que la reporta como «error al
+            // procesar evento de estado de entrega» sobre un estado que sí quedó guardado.
+            \App\Events\LeadConversationUpdated::dispatch((int) $message->lead_id, (int) $message->id, true, $status);
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsApp webhook: error al procesar evento de estado de entrega.', [
                 'event_type' => $event_type,

@@ -4,7 +4,6 @@ namespace App\Events;
 
 use App\Models\AdminTaskNotification;
 use App\Support\BroadcastGuard;
-use App\Support\BroadcastPayloadBudget;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
@@ -60,8 +59,13 @@ class AdminTaskNotificationCreated implements ShouldBroadcastNow
      * excepción de Pusher no puede voltear la creación de la tarea. El porqué completo está en
      * esa clase.
      *
-     * 🔴 Va acá, en el evento, y no en cada sitio de llamada: así queda cubierto todo emisor,
-     * incluidos los que se escriban después.
+     * 🔴 Va acá, en el evento, y no en cada sitio de llamada: así queda cubierto todo emisor
+     * que use `dispatch()`, incluidos los que se escriban después.
+     *
+     * ⚠️ No cubre `dispatchIf()`, `dispatchUnless()` ni `broadcast()` del trait `Dispatchable`:
+     * esos llaman a `event()` / `broadcast()` por su cuenta. Hoy no los usa nadie con este
+     * evento (verificado el 2/9/2026). El detalle largo está en
+     * {@see LeadSuggestionCreated::dispatch()}.
      *
      * @return void
      */
@@ -105,49 +109,29 @@ class AdminTaskNotificationCreated implements ShouldBroadcastNow
     }
 
     /**
-     * Payload del evento: el `notification_id` siempre, y la notificación con su tarea si entra.
+     * Payload del evento: **solo el id de la notificación**, y nada más.
      *
-     * Se evita serializar el `todos` completo de la tarea para mantenerse bajo el límite de
-     * ~10 KB de Pusher Channels, pero eso solo achica: `title` y `content` son texto libre y
-     * pueden crecer sin techo. Por eso el payload pasa por
-     * {@see \App\Support\BroadcastPayloadBudget} y, si no entra, se emite **sin la clave
-     * `notification`** (mismo criterio que LeadSuggestionCreated y SupportTicketUpdated).
+     * Este evento es el único de los tres que viaja por un canal **privado** (`admin.{id}`,
+     * autorizado en routes/channels.php), así que el argumento de exposición que sacó el modelo
+     * de {@see LeadSuggestionCreated} y {@see SupportTicketUpdated} acá pesa menos. Va igual
+     * solo con el id, por decisión de Lucas del 2/9/2026, y por dos razones que sí aplican:
+     * `title` y `content` de la tarea son texto libre sin techo —el límite de 10240 bytes de
+     * Pusher quedaba en manos de quien escribiera la tarea— y cargar el modelo era una consulta
+     * por evento para un dato que admin-spa igual sabe ir a buscar sola.
      *
-     * 🔴 Compatible hacia atrás: `notification` conserva nombre y forma, y `notification_id` se
-     * **suma**. Una admin-spa vieja recibe la notificación en el caso normal; la nueva, cuando
-     * no vino, recarga los avisos pendientes por API.
+     * ⚠️ Sacar la consulta de acá es seguro y conviene decir por qué: ni `broadcastWhen()` ni
+     * `broadcastOn()` dependían de ella. El `admin_id` que arma el nombre del canal se resuelve
+     * en el **constructor**, con su propia consulta, justamente para que el canal exista aunque
+     * la notificación se borre entre medio. Esa consulta se queda.
      *
-     * @return array{notification_id: int, notification?: array<string, mixed>|null}
+     * admin-spa recarga los avisos pendientes con el mismo GET del montaje.
+     *
+     * @return array{notification_id: int}
      */
     public function broadcastWith(): array
     {
-        // Cargar la notificación fresca junto con los datos mínimos de su tarea.
-        $notification = AdminTaskNotification::query()
-            ->where('id', $this->notification_id)
-            ->with([
-                'task' => function ($query) {
-                    $query->select(
-                        'id',
-                        'title',
-                        'content',
-                        'created_via',
-                        'lead_id',
-                        'created_by_admin_id',
-                        'created_at'
-                    )->with('created_by_admin:id,name');
-                },
-            ])
-            ->first();
-
-        // El id nunca se recorta: sin él, un payload recortado sería un aviso que el
-        // consumidor no puede ni identificar ni ir a buscar.
-        return BroadcastPayloadBudget::ajustar(
-            [
-                'notification_id' => $this->notification_id,
-                'notification'    => $notification,
-            ],
-            'notification',
-            'AdminTaskNotificationCreated'
-        );
+        return [
+            'notification_id' => $this->notification_id,
+        ];
     }
 }

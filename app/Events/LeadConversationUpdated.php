@@ -3,6 +3,7 @@
 namespace App\Events;
 
 use App\Models\Lead;
+use App\Support\BroadcastGuard;
 use Illuminate\Broadcasting\Channel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
@@ -60,6 +61,34 @@ class LeadConversationUpdated implements ShouldBroadcastNow
     }
 
     /**
+     * Emite el evento sin poder voltear a quien lo emitió.
+     *
+     * 🔴 POR QUÉ ESTE EVENTO TAMBIÉN, aunque su payload sea chico y nunca haya chocado con el
+     * límite de Pusher: el guard **no protege contra el tamaño, protege contra la emisión**.
+     * Este es el que más se dispara de los cuatro —uno por mensaje— y es `ShouldBroadcastNow`,
+     * o sea que la llamada a Pusher es SÍNCRONA y corre adentro del `try` de quien lo emite.
+     * Si Pusher se cae, la excepción sube y marca como fallido un mensaje que sí salió y sí
+     * quedó registrado. Eso ya lo sabían los dos sitios de `ClaudeLeadsOutboundController`, que
+     * envolvían la llamada en su propio try/catch con el comentario puesto — pero esa
+     * protección vivía en el llamador, así que solo cubría a los llamadores que se acordaron.
+     *
+     * Con el guard acá, la clase entera queda cubierta: un emisor nuevo nace protegido. Los
+     * try/catch de los llamadores se dejan como están —no molestan y documentan el porqué en el
+     * lugar donde se lee—, pero ya no son lo único que separa una caída de Pusher de un mensaje
+     * reportado como fallido.
+     *
+     * ⚠️ Cubre `dispatch()` y nada más: `dispatchIf()`, `dispatchUnless()` y `broadcast()` del
+     * trait `Dispatchable` llaman a `event()` / `broadcast()` por su cuenta. El detalle está en
+     * {@see LeadSuggestionCreated::dispatch()}.
+     *
+     * @return void
+     */
+    public static function dispatch()
+    {
+        BroadcastGuard::emitir(new static(...func_get_args()));
+    }
+
+    /**
      * @return bool
      */
     public function broadcastWhen(): bool
@@ -93,8 +122,13 @@ class LeadConversationUpdated implements ShouldBroadcastNow
      * corto**, ninguno de los cuales crece con el lead ni con lo que escriba un cliente. Un
      * payload es seguro por su forma, no porque a alguien le haya parecido chico: el docblock
      * de `LeadSuggestionCreated` afirmaba que excluir `messages` alcanzaba, y la producción lo
-     * desmintió el 2/9/2026. Si alguna vez se le agrega un modelo acá, tiene que pasar por
-     * {@see \App\Support\BroadcastPayloadBudget} como los otros tres eventos.
+     * desmintió el 2/9/2026 (23221 bytes medidos con un lead con la demo resuelta).
+     *
+     * 🔴 Desde el 2/9/2026 esta forma —solo ids— es la de los cuatro eventos, y no por tamaño
+     * sino porque `leads.admins` es un canal **público**: la clave de Pusher está horneada en el
+     * bundle de admin-spa, así que todo lo que viaje por acá lo puede leer cualquiera que se
+     * suscriba. No se le agrega un modelo a este payload. Si alguna vez hiciera falta, primero
+     * se pasa el canal a privado.
      *
      * El total de no leídos es per-usuario, por lo que NO viaja en el evento (el canal
      * `leads.admins` es compartido): cada cliente hace GET /lead/unread-badges para obtener su
