@@ -39,7 +39,6 @@ use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
 use App\Services\BatchLeadAiRecoveryService;
-use App\Services\LeadPendingReviewService;
 use App\Services\DemoHitosService;
 use App\Services\DemoIngresoTokenService;
 use App\Services\DemoPlanResolver;
@@ -5139,29 +5138,6 @@ class LeadController extends Controller
          * escribía recall_bot_id en el lead, que el webhook nuevo ya no rutea. Se deja como
          * no-op 200 para no romper llamadas viejas del frontend. */
         return response()->json(['ok' => true, 'retired' => true], 200);
-    }
-
-    /**
-     * Marca como pendientes de revisión los leads sin responder o con un error de envío/generación
-     * sin resolver. No envía ni genera nada (reemplaza el recovery masivo viejo). El frontend usa los
-     * contadores para el toast y refresca la grilla para pintar las filas marcadas en rojo.
-     *
-     * @param LeadPendingReviewService $service
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    public function mark_pending_review_json(LeadPendingReviewService $service)
-    {
-        $result = $service->mark_pending_leads();
-
-        Log::channel('daily')->info('mark_pending_review: marcado de pendientes disparado.', $result);
-
-        return response()->json([
-            'message'        => 'Leads marcados para revisión',
-            'marcados'       => $result['marcados'],
-            'ya_marcados'    => $result['ya_marcados'],
-            'sin_pendientes' => $result['sin_pendientes'],
-        ]);
     }
 
     /**

@@ -420,7 +420,6 @@ Route::prefix('admin')->group(function () {
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
         // Ruta de recovery batch: debe ir antes de las rutas con {id} para evitar colisión.
         Route::post('lead/batch-recover-unanswered', [LeadController::class, 'batch_recover_unanswered_json']);
-        Route::post('lead/mark-pending-review', [LeadController::class, 'mark_pending_review_json']);
         // Tarjetas de estado arriba de la grilla: cuántos leads hay en cada estado y cuántos de ellos
         // necesitan revisión (mismo criterio que el botón de revisión: sin responder o con error).
         // 🔴 Va ANTES de lead/{id}: si va después, {id} se come "status-cards".

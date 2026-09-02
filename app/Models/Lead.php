@@ -603,8 +603,10 @@ class Lead extends Model
      *
      * Hay DOS criterios de "error de envío" en el sistema, y no son el mismo conjunto:
      *
-     * - El del **botón de revisión** (`LeadPendingReviewService`): solo `is_error = true`, o sea
-     *   los errores que el propio sistema registró al fallar el envío o la generación.
+     * - El de `LeadPendingReviewService::lead_requiere_revision()` (el gemelo en PHP de este scope,
+     *   y el oráculo del test de paridad): solo `is_error = true`, o sea los errores que el propio
+     *   sistema registró al fallar el envío o la generación. Hasta el 2/9/2026 era además el
+     *   criterio del botón de revisión, que se sacó cuando dejó de pintar colores.
      * - El del **badge amarillo** de la columna "Sin leer" (`failed_send_count`, acá arriba):
      *   `is_error` **o** `whatsapp_delivery_status = 'fallido'`, o sea sumando los rechazos que
      *   Meta avisa por webhook.
@@ -728,12 +730,19 @@ class Lead extends Model
      * No reordenar estas líneas asumiendo que son columnas normales.
      *
      * Prioridad del orden, de mayor a menor:
-     * 1. Solo en modo `atencion`: primero los leads que necesitan atención humana, en el MISMO
-     *    criterio que pinta de color la grilla (`Leads.vue` / `table/body/Index.vue`) — rojo
+     * 1. Solo en modo `atencion`: primero los leads que necesitan atención humana — rojo
      *    (`pendiente_revision_at` no nulo o `failed_send_count > 0`) antes que amarillo
      *    (`row_warning`), y recién después el resto. Rojo va primero porque el amarillo tiene
      *    respaldo automático (`AutoSendLeadAiSuggestionJob` termina enviando la sugerencia si nadie
      *    la confirma) y el rojo no: un envío fallido se queda ahí hasta que un humano lo vea.
+     *
+     *    ⚠️ Desde el 2/9/2026 este orden NO es exactamente el criterio del color. El rojo de la
+     *    grilla dejó de mirar `pendiente_revision_at` (era la marca del botón de revisión, que se
+     *    sacó) y ahora descuenta los leads marcados como "ya no recibe mensajes". Acá se conserva
+     *    `pendiente_revision_at` a propósito: es la ÚNICA superficie que le queda al Caso B de
+     *    `LeadSuggestionSendService` —el respaldo automático que envió sin que nadie lo revisara—,
+     *    que no tiene color propio. Si algún día ese caso gana su propio indicador, esta línea
+     *    tiene que salir de acá y el orden vuelve a espejar el color.
      * 2. Siempre (en los tres modos): fijados primero. Dentro de cada bloque de atención (rojo,
      *    amarillo, resto) se sigue respetando "fijados primero" — el pin ya no le gana a la
      *    atención, pero sigue existiendo un escalón más abajo.
