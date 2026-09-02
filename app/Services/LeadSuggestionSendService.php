@@ -89,6 +89,61 @@ class LeadSuggestionSendService
             throw new \RuntimeException('Lead no encontrado para el mensaje.');
         }
 
+        $message_id = (int) $message->id;
+        $en_curso   = new LeadSuggestionEnvioEnCurso();
+
+        /*
+         * 🔴 El marcador se toma ACÁ y no más abajo, pegado al send_text(). Todo lo que viene
+         * después —revalidar los horarios ofrecidos contra Google, apply_pending_actions() agendando
+         * una demo, y recién al final enviar_partes() con sus pausas de 1200ms y su backoff de hasta
+         * 3500ms— corre con la fila de este mensaje viva y visible para cualquier otro request. El
+         * webhook de un inbound del lead (WhatsappWebhookController) entra a
+         * LeadAiSuggestionScheduler::clear_stale_pending_suggestions(), que hace un DELETE real
+         * (LeadMessage NO usa SoftDeletes) de todo lo que esté en 'sugerido'. La ventana peligrosa
+         * son SEGUNDOS, no milisegundos: el contestador automático de un lead contesta al toque.
+         *
+         * Las dos validaciones de entrada quedan ARRIBA del marcador a propósito: si el mensaje no
+         * es del sistema o no está sugerido no hay ningún envío que proteger, y tomar el marcador
+         * ahí sería marcar algo que este camino nunca va a liberar.
+         */
+        $en_curso->marcar($message_id);
+
+        try {
+            return $this->enviar_sugerencia_aprobada($message, $lead, $edited_content, $final_actions, $is_auto_send, $sent_by_admin_id);
+        } finally {
+            /*
+             * 🔴 finally, y no una liberación al final del cuerpo: TODAS las salidas tienen que
+             * soltar el marcador, incluidas las que no envían nada (ventana de 24hs cerrada,
+             * handle_auto_send_agendamiento_gate(), la regeneración por horario caducado) y las que
+             * salen por excepción (HorarioYaNoDisponibleException de apply_pending_actions()). Un
+             * marcador que no se suelta es una sugerencia que el barrido no limpia nunca más, hasta
+             * que venza el TTL.
+             */
+            $en_curso->liberar($message_id);
+            $this->atender_inbound_diferido($en_curso, $lead, $message_id);
+        }
+    }
+
+    /**
+     * Cuerpo real del envío de una sugerencia aprobada, ya con el marcador de "envío en curso"
+     * tomado por send_suggestion().
+     *
+     * Está separado sólo para que el marcador se libere en un `finally` que envuelva todas las
+     * salidas de este método —incluidas las cuatro que devuelven sin enviar nada y las que salen por
+     * excepción—, sin tener que sembrar la liberación en cada `return`. La firma pública del
+     * servicio no cambió: quien llama sigue viendo send_suggestion().
+     *
+     * @param LeadMessage $message          Mensaje en estado `sugerido`, ya validado.
+     * @param Lead        $lead             Lead dueño del mensaje, ya resuelto.
+     * @param string|null $edited_content   Ver send_suggestion().
+     * @param array|null  $final_actions    Ver send_suggestion().
+     * @param bool        $is_auto_send     Ver send_suggestion().
+     * @param int|null    $sent_by_admin_id Ver send_suggestion().
+     *
+     * @return LeadMessage
+     */
+    private function enviar_sugerencia_aprobada(LeadMessage $message, Lead $lead, ?string $edited_content, ?array $final_actions, bool $is_auto_send, ?int $sent_by_admin_id): LeadMessage
+    {
         /*
          * Revalidación de horarios ofrecidos (grupo 306, prompt 04). La disponibilidad se calculó
          * al GENERAR la sugerencia, pero el mensaje se envía recién después de la aprobación humana
@@ -179,6 +234,15 @@ class LeadSuggestionSendService
          * cerrada y send_text daría 422. La plantilla no admite texto editado, así que $edited_content
          * se ignora en este camino (el setter aprueba o rechaza; para escribir algo propio, rechaza y
          * responde manualmente).
+         */
+        /*
+         * El seguimiento por plantilla ya queda protegido contra el borrado en pleno envío sin
+         * necesidad de nada propio: el marcador se toma en send_suggestion() ANTES de bifurcar acá.
+         *
+         * Hoy, además, clear_stale_pending_suggestions() filtra `is_followup = false`, así que un
+         * seguimiento ni siquiera es borrable por ese barrido — pero eso es un detalle del OTRO
+         * archivo, y el día que ese filtro cambie este camino no se entera. Por eso la protección va
+         * arriba de la bifurcación y no duplicada acá abajo.
          */
         if ($message->is_followup && ! empty($message->followup_template_id)) {
             return $this->send_followup_suggestion_via_template($message, $lead, $sent_by_admin_id);
@@ -280,7 +344,7 @@ class LeadSuggestionSendService
                 'La ventana de 24hs de WhatsApp está cerrada (el lead no escribió en las últimas 24hs).'
             );
 
-            return $message->fresh();
+            return $this->fresh_o_en_memoria($message);
         }
 
         // Resultado real del envío por partes (prompt 366): a diferencia del string|null anterior,
@@ -339,7 +403,7 @@ class LeadSuggestionSendService
                 $error_detail ?: 'El envío no se confirmó (lead sin teléfono o error de conexión con WhatsApp/Kapso).'
             );
 
-            return $message->fresh();
+            return $this->fresh_o_en_memoria($message);
         }
 
         // Caso C (prompt 366, lead #440): salieron algunas partes pero no todas. Ni "rechazado"
@@ -376,7 +440,39 @@ class LeadSuggestionSendService
 
         (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
 
-        $message->update($update_payload);
+        /*
+         * 🔴 NO volver a `$message->update($update_payload)`, por más que sea lo que hace el resto
+         * del archivo. Model::performUpdate() (vendor/laravel/framework/src/Illuminate/Database/
+         * Eloquent/Model.php) tira a la basura el número de filas que devuelve el query builder y
+         * termina con un `return true` fijo: si otro request borró esta fila mientras el mensaje
+         * salía por WhatsApp, el UPDATE toca 0 filas, nadie se entera, y el `fresh()` del final
+         * devuelve null contra una firma que promete LeadMessage.
+         *
+         * Y a esta altura el efecto externo YA OCURRIÓ —el lead tiene el mensaje en el teléfono— y
+         * no se puede deshacer: el sistema tiene que enterarse sí o sí.
+         */
+        $filas_afectadas = LeadMessage::query()->whereKey($message->getKey())->update($update_payload);
+
+        /*
+         * 🔴 El exists() no sobra aunque $filas_afectadas ya sea 0. La conexión mysql de este
+         * proyecto NO define PDO::MYSQL_ATTR_FOUND_ROWS (config/database.php: 'options' sólo trae
+         * MYSQL_ATTR_SSL_CA), y sin esa opción rowCount() cuenta filas CAMBIADAS, no encontradas: un
+         * UPDATE que escribe los mismos valores devuelve 0 con la fila perfectamente presente.
+         * Recrear mirando sólo el contador duplicaría el mensaje en el hilo. La pregunta que decide
+         * la recreación es "¿la fila está?", y se contesta preguntándola.
+         */
+        $fila_desaparecida = $filas_afectadas === 0
+            && ! LeadMessage::query()->whereKey($message->getKey())->exists();
+
+        if ($fila_desaparecida) {
+            $message = $this->recrear_mensaje_enviado($lead, $message, $update_payload, $body, $send_result);
+        } else {
+            /* El UPDATE salió por query builder, así que el objeto en memoria quedó con los valores
+             * viejos. Se sincroniza a mano porque apply_suggested_pipeline_status() y el broadcast de
+             * acá abajo leen de ESTE objeto, no de la base. */
+            $message->forceFill($update_payload);
+            $message->syncOriginal();
+        }
 
         // El estado sugerido se aplica tanto en el envío completo (B) como en el parcial (C): en
         // ambos casos el lead recibió contenido real y avanzó la conversación. Solo el caso A (nada
@@ -407,7 +503,169 @@ class LeadSuggestionSendService
 
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
-        return $message->fresh();
+        return $this->fresh_o_en_memoria($message);
+    }
+
+    /**
+     * Reprograma la sugerencia siguiente si el lead escribió mientras este mensaje se enviaba.
+     *
+     * Cierra la consecuencia directa de proteger la sugerencia en vuelo: como el barrido ya no la
+     * borra, GenerateLeadAiSuggestionJob la ve todavía en 'sugerido'
+     * (LeadConversationAiState::has_pending_non_followup_suggestion) y se omite — el mensaje que el
+     * lead acaba de escribir se quedaría sin respuesta hasta que volviera a escribir. La marca la
+     * dejó clear_stale_pending_suggestions() al saltear este id; acá se consume y se vuelve a
+     * programar, ahora que el mensaje ya pasó a 'enviado' y el guard del job no se dispara.
+     *
+     * Se llama DESPUÉS de liberar el marcador, no antes: si corriera con el marcador todavía puesto,
+     * el barrido que dispara la reprogramación volvería a saltear este mismo id y a anotar otra
+     * marca, y ahí sí habría un ciclo.
+     *
+     * @param LeadSuggestionEnvioEnCurso $en_curso
+     * @param Lead                       $lead
+     * @param int                        $message_id
+     *
+     * @return void
+     */
+    private function atender_inbound_diferido(LeadSuggestionEnvioEnCurso $en_curso, Lead $lead, int $message_id): void
+    {
+        try {
+            if (! $en_curso->consumir_inbound_durante_el_envio($message_id)) {
+                return;
+            }
+
+            (new LeadAiSuggestionScheduler())->schedule_after_lead_inbound((int) $lead->id);
+        } catch (\Throwable $e) {
+            /*
+             * 🔴 Este try/catch NO es decorativo y no se puede sacar "porque schedule_after_lead_inbound()
+             * no tira": esto corre adentro de un `finally`, y una excepción acá REEMPLAZA a la que
+             * venía subiendo —la HorarioYaNoDisponibleException de apply_pending_actions(), por
+             * ejemplo—, con lo cual el llamador termina diagnosticando el síntoma equivocado y el
+             * setter ve un error que no tiene nada que ver con lo que pasó. Nunca tapar: loguear y
+             * seguir, que la excepción original siga su camino.
+             */
+            Log::channel('daily')->error('LeadSuggestionSendService: no se pudo reprogramar la sugerencia tras el envío.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message_id,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Vuelve a crear en el hilo el mensaje que ya salió por WhatsApp, cuando otro request borró su
+     * fila mientras el envío estaba en curso.
+     *
+     * Es la red de seguridad del caso que da nombre a esta misión: el efecto externo ya ocurrió (el
+     * lead tiene el mensaje en el teléfono) y no se puede deshacer, así que la única salida honesta
+     * es reponer en la conversación el estado final que la fila habría tenido si nadie la hubiera
+     * borrado. El hilo queda igual que en el camino normal —mismo texto, mismo badge de "editado",
+     * mismo badge de envío parcial— y el setter no manda el mensaje dos veces.
+     *
+     * @param Lead        $lead
+     * @param LeadMessage $message        Modelo en memoria de la fila borrada (fuente de los campos
+     *                                    que no dependen del envío).
+     * @param array       $update_payload Payload que el UPDATE no pudo aplicar (estado final).
+     * @param string      $body           Texto que efectivamente salió por WhatsApp.
+     * @param array       $send_result    Resultado de enviar_partes(), para el log técnico.
+     *
+     * @return LeadMessage Mensaje nuevo, ya en 'enviado'.
+     */
+    private function recrear_mensaje_enviado(Lead $lead, LeadMessage $message, array $update_payload, string $body, array $send_result): LeadMessage
+    {
+        /*
+         * 🔴 Campos enumerados a mano, y NO $message->getAttributes(). getAttributes() devuelve los
+         * valores CRUDOS de la base: pending_actions, horarios_ofrecidos, applied_actions_summary y
+         * actions_override_log volverían como el JSON en string, y al pasarlos de nuevo por los casts
+         * `array` de LeadMessage se codificarían dos veces ("[{\"fecha\"...") — el hilo mostraría un
+         * mensaje que se ve bien y un panel de acciones roto, que es peor que un error visible.
+         * Leyendo por propiedad ($message->pending_actions) los casts ya devolvieron el array y
+         * create() lo vuelve a codificar una sola vez.
+         */
+        $atributos = [
+            'lead_id'                 => $message->lead_id,
+            'sender'                  => 'sistema',
+            'content'                 => $message->content,
+            'edited_content'          => isset($update_payload['edited_content'])
+                ? $update_payload['edited_content']
+                : $message->edited_content,
+            'ai_reasoning'            => $message->ai_reasoning,
+            'suggested_lead_status'   => $message->suggested_lead_status,
+            'pending_actions'         => $message->pending_actions,
+            'horarios_ofrecidos'      => $message->horarios_ofrecidos,
+            'applied_actions_summary' => $message->applied_actions_summary,
+            'actions_override_log'    => $message->actions_override_log,
+            'followup_template_id'    => $message->followup_template_id,
+            'is_followup'             => (bool) $message->is_followup,
+            'requiere_verificacion'   => (bool) $message->requiere_verificacion,
+            'sent_via'                => $message->sent_via,
+            /* La fila nueva NO es un evento de estado ni un error: es el mensaje real que el lead
+               recibió, y tiene que renderizarse como cualquier otro mensaje del hilo. */
+            'is_status_event'         => false,
+            'is_error'                => false,
+        ];
+
+        /* El estado final del envío (status, sent_at, whatsapp_message_id, sent_by_admin_id, los
+           contadores de partes y partial_send_pending) sale del mismo payload que el UPDATE no pudo
+           aplicar: así la fila recreada y la que habría quedado son la misma cosa, y no hay dos
+           lugares que definan "cómo queda un mensaje enviado". */
+        $nuevo = LeadMessage::create(array_merge($atributos, $update_payload));
+
+        Log::channel('daily')->error('LeadSuggestionSendService: la sugerencia se borró mientras se enviaba; el mensaje se recreó en el hilo.', [
+            'lead_id'             => $lead->id,
+            'message_id_borrado'  => $message->getKey(),
+            'message_id_nuevo'    => $nuevo->id,
+            'whatsapp_message_id' => $send_result['last_message_id'],
+            'partes_enviadas'     => $send_result['sent_parts'],
+            'partes_totales'      => $send_result['total_parts'],
+            'texto_enviado'       => $body,
+        ]);
+
+        /*
+         * Constancia en el hilo por el mismo mecanismo que ya usa "Envío parcial de la sugerencia":
+         * pasó algo anómalo pero no catastrófico, y el setter tiene que entender qué ve sin leer un
+         * log. El detalle técnico va al Log, no acá.
+         *
+         * ⚠️ Este texto NO puede empezar con la frase "Horario ofrecido dejó de estar disponible":
+         * admin-spa (MessageBubble.vue) reconoce ese aviso matcheando el PREFIJO del content con
+         * indexOf(...) === 0, y cualquier otro bloque que arranque igual se renderizaría como si
+         * fuera aquel.
+         */
+        (new LeadConversationErrorLogger())->log(
+            (int) $lead->id,
+            'El mensaje salió, pero la sugerencia se había borrado',
+            'El lead escribió justo mientras se enviaba y el sistema descartó la sugerencia antes de que terminara. El texto ya había salido por WhatsApp, así que se volvió a dejar en la conversación tal como lo recibió el lead. No hay que mandarlo de nuevo.'
+        );
+
+        // Mismo criterio que el envío parcial: pasó algo anómalo, lo mira un humano.
+        $this->mark_lead_pending_review($lead);
+
+        return $nuevo;
+    }
+
+    /**
+     * Devuelve el mensaje recargado de la base, o el que tenemos en memoria si la fila ya no está.
+     *
+     * 🔴 fresh() devuelve null cuando la fila desapareció, y los tres métodos de este archivo que lo
+     * usaban prometen `: LeadMessage`: ese null se convierte en TypeError, el controller lo agarra
+     * con catch(\Throwable) y termina escribiendo "No se pudo enviar la sugerencia por WhatsApp"
+     * arriba de un envío que salió perfecto.
+     *
+     * Cuando la fila ya no está, lo más verdadero que se puede devolver es el objeto en memoria:
+     * refleja lo que ESTE request hizo, que es exactamente lo que el llamador necesita saber.
+     *
+     * Devolver el modelo en memoria NO es tapar el problema: el camino de éxito recrea la fila antes
+     * de llegar acá (ver recrear_mensaje_enviado()) y deja constancia en el hilo y en el log. Esto
+     * cubre las otras seis salidas, donde no hubo efecto externo que reponer.
+     *
+     * @param LeadMessage $message
+     *
+     * @return LeadMessage
+     */
+    private function fresh_o_en_memoria(LeadMessage $message): LeadMessage
+    {
+        $fresco = $message->fresh();
+
+        return $fresco !== null ? $fresco : $message;
     }
 
     /**
@@ -667,7 +925,7 @@ class LeadSuggestionSendService
             $lead->sync_suggestion_flags();
             LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
-            return $message->fresh();
+            return $this->fresh_o_en_memoria($message);
         }
 
         /*
@@ -725,7 +983,7 @@ class LeadSuggestionSendService
                 $this->whatsapp_send_service->last_send_error ?: 'El envío por plantilla no se confirmó (revisar conexión con WhatsApp/Kapso).'
             );
 
-            return $message->fresh();
+            return $this->fresh_o_en_memoria($message);
         }
 
         $message->update([
@@ -741,7 +999,7 @@ class LeadSuggestionSendService
         $lead->sync_suggestion_flags();
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
-        return $message->fresh();
+        return $this->fresh_o_en_memoria($message);
     }
 
     /**
@@ -794,7 +1052,7 @@ class LeadSuggestionSendService
             'message_id' => $message->id,
         ]);
 
-        return $message->fresh();
+        return $this->fresh_o_en_memoria($message);
     }
 
     /**
