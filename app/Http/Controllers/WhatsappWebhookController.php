@@ -283,6 +283,33 @@ class WhatsappWebhookController extends Controller
                     $updates['whatsapp_send_error'] = $reason;
                 }
 
+                /*
+                 * 🔴 Payload crudo del fallo, al log. NO es debug que haya que sacar después.
+                 *
+                 * Medido el 2/9/2026: de las 84 entregas fallidas de toda la historia, CERO tenían
+                 * `whatsapp_send_error` cargado. O sea que extract_delivery_failure_reason() busca
+                 * el array de errores en cuatro lugares y Kapso no lo manda en ninguno de los
+                 * cuatro — pero no sabemos dónde SÍ lo manda, porque nunca guardamos un payload
+                 * entero para mirarlo.
+                 *
+                 * Sin el código de Meta (131026 número inexistente, 131050 el usuario frenó los
+                 * mensajes, etc.) no se puede distinguir un fallo reintentable de un número que
+                 * bloqueó, y esa distinción es justamente lo que decide si la fila va en rojo.
+                 * Tampoco se puede inferir del patrón: 33 de los 54 leads con una entrega fallida
+                 * después recibieron mensajes sin problema.
+                 *
+                 * Con esto, el primer fallo que ocurra deja el payload completo en el log y ahí se
+                 * ve la forma real. Recién con eso se puede ensanchar la extracción y clasificar
+                 * solo. Se loguea únicamente en el fallo (13 en septiembre: no es volumen) y sin
+                 * el teléfono, que no aporta a la forma del payload y es dato de contacto.
+                 */
+                Log::channel('daily')->warning('WhatsApp webhook: entrega fallida, payload crudo para relevar el código de Meta.', [
+                    'lead_id'         => (int) $message->lead_id,
+                    'message_id'      => (int) $message->id,
+                    'motivo_extraido' => $reason !== '' ? $reason : '(no se pudo extraer)',
+                    'payload'         => self::redactar_telefonos($payload),
+                ]);
+
                 $message->update($updates);
             }
 
@@ -419,6 +446,41 @@ class WhatsappWebhookController extends Controller
         }
 
         return '';
+    }
+
+    /**
+     * Reemplaza los teléfonos del payload por un enmascarado, dejando el resto de la estructura tal
+     * cual.
+     *
+     * El payload de un fallo se loguea entero para poder relevar dónde manda Kapso el código de
+     * error de Meta; para eso hace falta la FORMA del payload, no el número del lead. Se recorre en
+     * profundidad porque el teléfono aparece en varios niveles según el evento.
+     *
+     * @param mixed $valor Nodo del payload (array o escalar).
+     *
+     * @return mixed Mismo nodo con los teléfonos enmascarados.
+     */
+    private static function redactar_telefonos($valor)
+    {
+        /* Claves que traen un número de teléfono en los payloads de Kapso/Meta. */
+        $claves_telefono = ['to', 'from', 'wa_id', 'recipient_id', 'phone', 'phone_number', 'display_phone_number'];
+
+        if (! is_array($valor)) {
+            return $valor;
+        }
+
+        $limpio = [];
+        foreach ($valor as $clave => $sub) {
+            if (is_string($clave) && in_array(strtolower($clave), $claves_telefono, true) && is_scalar($sub)) {
+                $texto = (string) $sub;
+                $limpio[$clave] = strlen($texto) > 4 ? str_repeat('*', strlen($texto) - 4) . substr($texto, -4) : '****';
+                continue;
+            }
+
+            $limpio[$clave] = self::redactar_telefonos($sub);
+        }
+
+        return $limpio;
     }
 
     /**

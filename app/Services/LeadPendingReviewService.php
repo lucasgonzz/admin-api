@@ -82,6 +82,14 @@ class LeadPendingReviewService
      */
     public function lead_requiere_revision(Lead $lead): bool
     {
+        /* Gemelo de la guarda de Lead::scopeRequiereRevision(): un lead marcado como "ya no recibe
+           mensajes" no pide atención — no hay nada que reintentar ni a quién contestarle— y no
+           puede contar en la tarjeta sin que la grilla lo pinte, que es el defecto que Lucas
+           reportó el 2/9/2026. */
+        if ($lead->no_recibe_mensajes_at !== null) {
+            return false;
+        }
+
         /* Razón A: mensajes del lead sin responder. Cuenta como respuesta solo un saliente que
            efectivamente salió por WhatsApp (ver LeadMessage::is_reply_to_lead), así que también
            cubre los dos casos en que el sistema generó algo que el lead nunca vio: la sugerencia
