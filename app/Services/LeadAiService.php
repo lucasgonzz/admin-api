@@ -7487,8 +7487,13 @@ TXT;
     }
 
     /**
-     * Define la tool get_protocolo_recurso que Claude puede usar para pedir
-     * secciones del protocolo bajo demanda.
+     * Define las tools que Claude puede usar para pedir conocimiento bajo demanda:
+     * `get_protocolo_recurso` (protocolo de ventas) y `get_manual_file` (manual del sistema).
+     *
+     * `get_manual_file` se llama igual y tiene el mismo esquema de entrada que la tool del
+     * agente de soporte (`SupportAiSuggestionService::build_github_tools()`) a propósito: es la
+     * misma capacidad sobre el mismo repositorio, y un segundo contrato para lo mismo solo
+     * garantiza que dentro de un año los dos estén distintos.
      *
      * @return array<int, array<string, mixed>> Definición de tools para la API de Anthropic.
      */
@@ -7511,6 +7516,27 @@ TXT;
                         ],
                     ],
                     'required'   => ['nombre'],
+                ],
+            ],
+            [
+                'name'        => 'get_manual_file',
+                'description' => 'Lee el contenido de un archivo del manual del sistema de ' .
+                                 'ComercioCity. Usá esta herramienta cuando el lead pregunta ' .
+                                 'CÓMO se hace algo o DÓNDE está (pantalla, menú, pasos): ese ' .
+                                 'detalle operativo solo lo respalda el manual, nunca el ' .
+                                 'protocolo de ventas. El manual está organizado en carpetas ' .
+                                 'por módulo y el índice de archivos disponibles está en tu ' .
+                                 'system prompt.',
+                'input_schema' => [
+                    'type'       => 'object',
+                    'properties' => [
+                        'path' => [
+                            'type'        => 'string',
+                            'description' => 'Ruta completa del archivo tal como figura en el ' .
+                                             'índice. Ejemplo: "manual_sistema/vender/armar-una-venta.md".',
+                        ],
+                    ],
+                    'required'   => ['path'],
                 ],
             ],
         ];
@@ -7536,10 +7562,29 @@ TXT;
      */
     private function execute_tool(string $tool_name, array $tool_input, ?Lead $lead = null, array &$leidas = []): string
     {
-        if ($tool_name !== 'get_protocolo_recurso') {
-            return 'Error: tool desconocida.';
+        if ($tool_name === 'get_protocolo_recurso') {
+            return $this->execute_tool_protocolo_recurso($tool_input, $lead, $leidas);
         }
 
+        if ($tool_name === 'get_manual_file') {
+            return $this->execute_tool_manual_file($tool_input, $leidas);
+        }
+
+        return 'Error: tool desconocida.';
+    }
+
+    /**
+     * Sirve un recurso del protocolo de ventas (tool `get_protocolo_recurso`).
+     *
+     * @param array<string, mixed> $tool_input Parámetros de entrada de la tool.
+     * @param Lead|null            $lead       Lead en curso, para resolver la variante de la
+     *                                         dinámica de demo (grupo 293).
+     * @param array<int, string>   $leidas     Evidencia de lecturas efectivas; ver execute_tool().
+     *
+     * @return string Contenido del recurso, o el texto de recurso caído.
+     */
+    private function execute_tool_protocolo_recurso(array $tool_input, ?Lead $lead, array &$leidas): string
+    {
         /* Validar que el nombre del recurso sea uno de los válidos. */
         $nombre = isset($tool_input['nombre']) ? (string) $tool_input['nombre'] : '';
 
@@ -7564,6 +7609,61 @@ TXT;
 
         /* Recurso servido de verdad: recién acá cuenta como leído. */
         $leidas[] = $nombre;
+
+        return $contenido;
+    }
+
+    /**
+     * Sirve un archivo del manual del sistema (tool `get_manual_file`).
+     *
+     * Es la mitad operativa del conocimiento del agente, y existe por un caso real del
+     * 2/9/2026: al lead Juan, que preguntó cómo cargar artículos desde una imagen, el agente le
+     * contestó "Inventario → Artículos → el botón de + arriba a la derecha". El escaneo de
+     * facturas vive en **Compras**. El agente citó `posicionamiento` —que efectivamente había
+     * leído y que efectivamente dice que el escaneo existe— y el gate lo dejó pasar, porque el
+     * gate verifica que el documento citado se haya LEÍDO, no que DIGA lo que se afirmó. Un
+     * recurso que confirma que una función existe no dice en qué pantalla vive; para eso hace
+     * falta el manual, y hasta hoy el agente de leads no lo tenía.
+     *
+     * @param array<string, mixed> $tool_input Parámetros de entrada de la tool.
+     * @param array<int, string>   $leidas     Evidencia de lecturas efectivas; ver execute_tool().
+     *
+     * @return string Contenido del archivo, o el texto de archivo caído.
+     */
+    private function execute_tool_manual_file(array $tool_input, array &$leidas): string
+    {
+        $path = isset($tool_input['path']) ? trim((string) $tool_input['path']) : '';
+
+        try {
+            /* La guarda de prefijo vive en ManualRepositoryService: acá no se valida la ruta a
+             * mano para no terminar con dos criterios de qué se puede leer. */
+            $contenido = app(ManualRepositoryService::class)->get_file($path);
+        } catch (\Throwable $e) {
+            Log::warning('LeadAiService: no se pudo leer un archivo del manual.', [
+                'path'  => $path,
+                'error' => $e->getMessage(),
+            ]);
+
+            $contenido = '';
+        }
+
+        if (trim($contenido) === '') {
+            /* Mismo criterio que un recurso del protocolo caído (27/8/2026): un archivo que no
+             * se pudo leer no vuelve opcional el respaldo, deja a la respuesta sin fundamento.
+             * Y no se anota en $leidas, así que si el agente lo cita igual, el gate lo agarra. */
+            return "El archivo '{$path}' del manual no está disponible o no existe, así que no "
+                . "podés usarlo como respaldo ni dar por sabido su contenido. Si tu respuesta "
+                . "dependía de él, devolvé requiere_intervencion_humana: true con "
+                . "motivo_intervencion explicando qué información falta. NO improvises ni "
+                . "contestes de memoria en qué pantalla o con qué botón se hace algo.";
+        }
+
+        /* Archivo servido de verdad: recién acá cuenta como leído, y se anota la ruta COMPLETA
+         * (manual_sistema/vender/armar-una-venta.md), que es la que el agente tiene que citar en
+         * fuentes_kb. KnowledgeGroundingGate::normalizar_lista() solo trimea, saca la barra
+         * inicial y baja a minúsculas: conserva carpetas y extensión, así que la ruta funciona
+         * como fuente sin tocarle nada al gate. */
+        $leidas[] = $path;
 
         return $contenido;
     }
@@ -7662,7 +7762,16 @@ TXT;
                     $tool_name  = isset($block['name'])  ? (string) $block['name']  : '';
                     $tool_input = isset($block['input']) && is_array($block['input']) ? $block['input'] : [];
 
-                    $recurso_nombre = isset($tool_input['nombre']) ? $tool_input['nombre'] : '?';
+                    /* `nombre` para get_protocolo_recurso, `path` para get_manual_file: sin esto
+                     * el log de una lectura del manual salía siempre con '?' y no se podía saber
+                     * desde producción qué archivo pidió el agente. */
+                    if (isset($tool_input['nombre'])) {
+                        $recurso_nombre = $tool_input['nombre'];
+                    } elseif (isset($tool_input['path'])) {
+                        $recurso_nombre = $tool_input['path'];
+                    } else {
+                        $recurso_nombre = '?';
+                    }
 
                     /* Variante servida (grupo 293): se loguea para poder verificar desde
                      * producción qué variante recibió cada lead, sin tocar la base. */
@@ -7761,7 +7870,78 @@ TXT;
          */
         $contenido .= "\n\n" . self::PROHIBICION_RANGO_HORARIO_SIN_JSON;
 
+        /* Índice del manual del sistema (2/9/2026). Puede venir vacío a propósito: ver el
+         * comentario dentro de build_bloque_manual() sobre por qué acá no se escala. */
+        $contenido .= $this->build_bloque_manual();
+
         return $contenido;
+    }
+
+    /**
+     * Arma el bloque del manual del sistema para el system prompt: el índice de archivos
+     * disponibles más la regla de cuándo hay que leer uno.
+     *
+     * La regla que este bloque instala separa dos clases de afirmación que hasta el 2/9/2026
+     * estaban mezcladas, y esa mezcla produjo los dos errores del lead Juan en el mismo día:
+     * escalar un descuento por medio de pago que el sistema sí configura, e inventar la pantalla
+     * del escaneo de facturas. `posicionamiento` respalda QUE ALGO EXISTE; solo un archivo de
+     * `manual_sistema/` respalda CÓMO SE HACE o DÓNDE ESTÁ.
+     *
+     * @return string Bloque listo para concatenar al system prompt, o cadena vacía si el índice
+     *                no se pudo cargar.
+     */
+    private function build_bloque_manual(): string
+    {
+        $indice = trim(app(ManualRepositoryService::class)->file_list());
+
+        if ($indice === '' || strpos($indice, '(') === 0) {
+            /* file_list() devuelve sus fallbacks entre paréntesis cuando GitHub falla o el árbol
+             * no trae archivos del manual.
+             *
+             * 🔴 ACÁ EL AGENTE DE LEADS NO ESCALA, y es una diferencia DELIBERADA con
+             * SupportAiSuggestionService, que en este mismo caso llena $fallos_repositorio y
+             * manda a KnowledgeGroundingGate::escalar_por_repositorio_caido(). Los dos agentes
+             * no están en la misma situación: soporte sin manual no tiene absolutamente nada con
+             * qué respaldar una respuesta sobre el sistema, mientras que el de leads conserva
+             * sus 9 recursos de protocolo y sigue pudiendo calificar, coordinar demos y cerrar.
+             * Escalar todo el pipeline comercial porque GitHub tuvo un mal minuto es un costo
+             * mucho más alto que el problema que evita. Se omite el bloque —el agente queda como
+             * estaba antes del 2/9/2026, sin manual— y se loguea. NO "unifiques" esto con el
+             * comportamiento de soporte. */
+            Log::warning(
+                'LeadAiService: no se pudo cargar el índice del manual; el agente sigue con sus recursos de protocolo.',
+                ['respuesta_indice' => $indice]
+            );
+
+            return '';
+        }
+
+        /* Ojo con el identificador del heredoc: desde PHP 7.3 una línea del cuerpo que empiece
+         * con él lo cierra, y la primera línea de este bloque arranca con la palabra "MANUAL". */
+        return "\n\n" . <<<BLOQUE_DEL_MANUAL
+MANUAL DEL SISTEMA (tool get_manual_file)
+
+Además del protocolo de ventas tenés el manual del sistema. Se lee con la tool get_manual_file,
+pasándole la ruta completa tal como figura en el índice de abajo.
+
+CUÁNDO USARLO. La regla no es de tema, es de QUÉ CLASE DE AFIRMACIÓN estás por hacer:
+
+1. QUE ALGO EXISTE (afirmación comercial: "el sistema tiene escaneo de facturas", "maneja
+   descuentos por medio de pago y cuotas") lo respaldan `posicionamiento` y los demás recursos
+   del protocolo. Para eso NO necesitás el manual.
+
+2. CÓMO SE HACE o DÓNDE ESTÁ (en qué pantalla, en qué menú, qué botón, en qué orden van los
+   pasos) lo respalda ÚNICAMENTE un archivo de manual_sistema/. Si el lead pide ese nivel de
+   detalle, leé el archivo del manual que corresponda y citá su ruta completa en fuentes_kb.
+
+PROHIBIDO contestar detalle operativo de memoria o deducido de `posicionamiento`: que un recurso
+confirme que una función existe NO dice en qué pantalla vive. Si leíste el manual y tampoco lo
+dice, no lo inventes: decile al lead que ese paso se lo muestra el asesor en la llamada, y seguí
+con la coordinación de la demo.
+
+ARCHIVOS DISPONIBLES:
+{$indice}
+BLOQUE_DEL_MANUAL;
     }
 
     /**
