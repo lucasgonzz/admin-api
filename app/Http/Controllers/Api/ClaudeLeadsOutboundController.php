@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Helpers\AppTime;
+use App\Helpers\WhatsappNormalizer;
 use App\Http\Controllers\Controller;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -145,13 +146,16 @@ class ClaudeLeadsOutboundController extends Controller
     const ERROR_TEXTO_GENERICO = 'El envío de texto libre no se confirmó (revisar conexión con WhatsApp/Kapso).';
 
     /**
-     * Segundos que dura el lock por lead del envío de texto libre.
+     * Margen, en segundos, que se le suma al peor caso del envío para dimensionar el lock.
      *
-     * 20 y no 5: `send_text()` puede tardar lo suyo (timeout del cliente HTTP más `retry(2, 500)`),
-     * y un lock que vence mientras el envío está en vuelo no protege de nada. Tampoco mucho más
-     * alto: si el proceso muere sin liberar, este es el tiempo que el lead queda sin poder recibir.
+     * 🔴 El lock NO se fija en un número redondo: se deriva de la config real del cliente HTTP
+     * (ver `segundos_de_lock()`). Un lock más corto que el envío que protege no protege nada —vence
+     * en vuelo, entra la segunda llamada, ve el turno libre porque la fila todavía no se escribió,
+     * y manda el segundo WhatsApp: exactamente el caso que el lock existe para atrapar—. Y como el
+     * peor caso sale de `services.client_api.timeout` y `.retries`, que son configurables por
+     * entorno, escribir una constante acá la deja vieja el día que alguien suba el timeout.
      */
-    const LOCK_SEGUNDOS = 20;
+    const LOCK_MARGEN_SEGUNDOS = 15;
 
     /**
      * Tope de caracteres del texto libre.
@@ -820,7 +824,7 @@ class ClaudeLeadsOutboundController extends Controller
          * Si el lock no se puede tomar hay otro envío en vuelo para este mismo lead: se contesta 409
          * sin mandar nada. Es exactamente el caso que el lock existe para atrapar.
          */
-        $lock = Cache::lock('claude-lead-message-' . (int) $lead->id, self::LOCK_SEGUNDOS);
+        $lock = Cache::lock($this->nombre_del_lock($lead), $this->segundos_de_lock());
 
         if (! $lock->get()) {
             return response()->json([
@@ -1017,6 +1021,62 @@ class ClaudeLeadsOutboundController extends Controller
     }
 
     /**
+     * Nombre del lock del envío: por TELÉFONO normalizado, no por id de lead.
+     *
+     * 🔴 Tiene que ser la misma unidad que protege el freno de turno, y el turno se evalúa sobre
+     * todos los leads del mismo número (ver `ids_de_la_conversacion()`). Con la llave armada sobre
+     * `lead->id`, dos requests concurrentes contra dos filas de lead del mismo teléfono tomarían
+     * dos llaves distintas, pasarían las dos y mandarían las dos: sería ensanchar el chequeo y
+     * dejar angosta la llave, que es el mismo defecto que el chequeo por lead_id ya tuvo.
+     *
+     * Sin teléfono cae al id, que no se usa nunca en la práctica: el freno del teléfono corre antes.
+     *
+     * @param Lead $lead
+     *
+     * @return string
+     */
+    protected function nombre_del_lock(Lead $lead): string
+    {
+        $phone = WhatsappNormalizer::normalize(trim((string) ($lead->phone ?? '')));
+
+        if ($phone === '') {
+            return 'claude-lead-message-id-' . (int) $lead->id;
+        }
+
+        return 'claude-lead-message-' . $phone;
+    }
+
+    /**
+     * Cuántos segundos dura el lock, derivado del peor caso real del envío.
+     *
+     * `send_text()` usa `KapsoHttpClient` con `services.client_api.timeout` y le encadena
+     * `retry(services.client_api.retries, 500)`. El peor caso es entonces
+     * `timeout * intentos + las esperas entre reintentos`, y el lock tiene que cubrirlo entero más
+     * un margen. Con los defaults (15 s, 2 intentos) da ~45.
+     *
+     * Se calcula y no se escribe fijo para que subir el timeout por entorno no deje el lock corto
+     * sin que nada lo denuncie.
+     *
+     * @return int
+     */
+    protected function segundos_de_lock(): int
+    {
+        $timeout  = (int) config('services.client_api.timeout', 15);
+        $intentos = (int) config('services.client_api.retries', 2);
+
+        if ($timeout < 1) {
+            $timeout = 15;
+        }
+
+        if ($intentos < 1) {
+            $intentos = 1;
+        }
+
+        /* Las esperas entre reintentos son de 500 ms cada una: se redondean a 1 s por intento. */
+        return ($timeout * $intentos) + $intentos + self::LOCK_MARGEN_SEGUNDOS;
+    }
+
+    /**
      * Ids de TODOS los leads que comparten el teléfono de éste, incluido él mismo.
      *
      * 🔴 Existe porque la conversación de WhatsApp es por NÚMERO y no por fila de lead, y esa
@@ -1028,10 +1088,17 @@ class ClaudeLeadsOutboundController extends Controller
      * libre y dejaba mandar sin tope: tres llamadas seguidas eran tres WhatsApps reales a la misma
      * persona.
      *
-     * La coincidencia es por el string exacto de `phone`, que es como quedan cargados los duplicados
-     * que crea el propio webhook. Un número escrito con otro formato no entra acá — pero ese caso
-     * no abre el agujero: si el entrante está en el lead que se está tocando, el freno lo encuentra
-     * igual por su propio id, que siempre está en la lista.
+     * 🔴 La coincidencia es NORMALIZADA (`WhatsappNormalizer::phones_match`), no por string exacto,
+     * porque el resto del sistema resuelve el número así: tanto la ventana
+     * (`WhatsappSessionWindowService::first_matching_row()`) como el webhook
+     * (`WhatsappWebhookController::find_lead_by_phone()`) comparan normalizado. Con un match exacto,
+     * dos filas del mismo número escrito distinto —`+5493411234567` y `03411234567`— quedarían
+     * separadas justo acá y unidas en todos los demás lados: los entrantes nuevos irían a una y el
+     * turno se evaluaría sobre la otra.
+     *
+     * Se comparan en PHP sobre una proyección de dos columnas y no con un WHERE, por lo mismo que
+     * lo hace el webhook: la normalización no es expresable en SQL. Son dos columnas de una tabla
+     * de cientos de filas, una vez por request.
      *
      * @param Lead $lead
      *
@@ -1046,14 +1113,16 @@ class ClaudeLeadsOutboundController extends Controller
             return $ids;
         }
 
-        $hermanos = Lead::query()
-            ->where('phone', $phone)
+        $candidatos = Lead::query()
+            ->whereNotNull('phone')
+            ->where('phone', '<>', '')
             ->where('id', '<>', $lead->id)
-            ->pluck('id')
-            ->all();
+            ->pluck('phone', 'id');
 
-        foreach ($hermanos as $id) {
-            $ids[] = (int) $id;
+        foreach ($candidatos as $id => $telefono) {
+            if (WhatsappNormalizer::phones_match((string) $telefono, $phone)) {
+                $ids[] = (int) $id;
+            }
         }
 
         return $ids;

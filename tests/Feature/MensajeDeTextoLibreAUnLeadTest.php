@@ -534,9 +534,16 @@ class MensajeDeTextoLibreAUnLeadTest extends TestCase
     {
         $viejo = $this->crear_lead('Duplicado viejo');
 
+        /* Mismo número escrito DISTINTO: es el caso que un match por string exacto se perdería, y
+           el que la ventana y el webhook sí unen porque comparan normalizado. */
         $nuevo        = $this->crear_lead('Duplicado nuevo');
-        $nuevo->phone = $viejo->phone;
+        $nuevo->phone = '0' . substr((string) $viejo->phone, 3);
         $nuevo->save();
+
+        $this->assertTrue(
+            \App\Helpers\WhatsappNormalizer::phones_match((string) $viejo->phone, (string) $nuevo->phone),
+            'El test no sirve si los dos teléfonos no son el mismo número para el normalizador.'
+        );
 
         $espia = $this->espiar_sender();
 
