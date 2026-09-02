@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\HasUuid;
+use App\Services\SupportAiSettings;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
@@ -18,19 +19,22 @@ class SupportTicket extends Model
     protected $guarded = [];
 
     /**
-     * Valores por defecto de los interruptores del agente.
+     * Valor por defecto del interruptor del agente.
      *
-     * Van acá y no solo en la migración porque un `SupportTicket::create()` devuelve el modelo
-     * con lo que se le pasó, no con lo que la base rellenó: sin esto, el código que crea un
-     * ticket y enseguida lee `requiere_verificacion_mensajes` sobre esa misma instancia lee
-     * null, y `(bool) null` es false — o sea, el default se daría vuelta justo en el camino
-     * más peligroso, el de mandarle algo al cliente sin que nadie lo lea.
+     * Va acá y no solo en la migración porque un `SupportTicket::create()` devuelve el modelo con
+     * lo que se le pasó, no con lo que la base rellenó: sin esto, el código que crea un ticket y
+     * enseguida lee el flag sobre esa misma instancia lee null, y `(bool) null` es false — o sea,
+     * el default se daría vuelta justo en el camino más peligroso.
+     *
+     * `requiere_verificacion_mensajes` NO está en esta lista y no es un olvido: su valor dejó de
+     * ser una constante, lo decide la config global de Cuenta en el momento de crear el ticket, y
+     * un array estático de propiedad de clase no puede consultar la base. Lo sella el hook
+     * `creating` de abajo, que escribe SIEMPRE un booleano por exactamente el mismo motivo.
      *
      * @var array<string, mixed>
      */
     protected $attributes = [
         'claude_auto_reply' => true,
-        'requiere_verificacion_mensajes' => true,
     ];
 
     /**
@@ -52,6 +56,38 @@ class SupportTicket extends Model
         'claude_auto_reply' => 'boolean',
         'requiere_verificacion_mensajes' => 'boolean',
     ];
+
+    /**
+     * Sella el régimen de verificación con el que nace cada ticket.
+     *
+     * @return void
+     */
+    protected static function booted()
+    {
+        static::creating(function (SupportTicket $ticket) {
+            // El régimen del ticket se estampa al nacer con lo que diga la config global en ese
+            // momento y no se relee nunca más: si se leyera en runtime, apagar el interruptor en
+            // Cuenta dejaría contestando solos a tickets que un operador ya venía verificando a
+            // mano. Después de nacer, solo lo cambia el botón del encabezado (decisión de Lucas).
+            //
+            // Va acá y no en los cuatro puntos de creación (webhook, inbound del ERP, alta manual
+            // y apertura por WhatsApp) para que el quinto que se agregue no se lo olvide.
+            $atributos = $ticket->getAttributes();
+            if (array_key_exists('requiere_verificacion_mensajes', $atributos)
+                && $atributos['requiere_verificacion_mensajes'] !== null
+            ) {
+                // Quien crea el ticket ya eligió el régimen a mano: la config global no lo pisa.
+                //
+                // Se mira la presencia de la clave en getAttributes() y no isDirty() ni filled():
+                // con la clave sacada de $attributes, que esté presente significa exactamente
+                // "alguien la eligió", mientras que isDirty() daría false cuando el valor pasado
+                // coincide con el default y el hook terminaría pisando una elección explícita.
+                return;
+            }
+
+            $ticket->requiere_verificacion_mensajes = SupportAiSettings::new_ticket_requires_verification();
+        });
+    }
 
     /**
      * Scope estándar para fullModel con relaciones completas.
