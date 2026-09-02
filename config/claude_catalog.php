@@ -409,6 +409,7 @@ return [
                 'El lead tiene que tener teléfono cargado: sin él es 422 y no se crea absolutamente nada.',
                 'El texto no puede venir vacío.',
                 '🔴 Un lead en cerrado_ganado o ya promovido a cliente no recibe nada, y acá NO hay include_closed que lo habilite: a un cliente se le responde por el hilo de soporte.',
+                '🔴 Un lead con no_recibe_mensajes_at cargado no recibe nada, y NINGÚN parámetro lo saltea. Esa marca la pone una persona mirando la conversación y sólo se saca desde el panel.',
                 'El mensaje enviado queda registrado en la conversación del lead: no hay envío sin rastro.',
             ],
             'parametros'   => [

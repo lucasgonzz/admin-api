@@ -749,6 +749,28 @@ class ClaudeLeadsOutboundController extends Controller
         }
 
         /*
+         * 🔴 La marca de "ya no recibe mensajes" (misión del 2/9/2026). La pone una PERSONA mirando
+         * la conversación, porque el código de error de Meta que distinguiría un número muerto de
+         * un fallo reintentable nunca se capturó. O sea: es un juicio humano sobre este número, y
+         * es exactamente lo que este endpoint no puede deducir por su cuenta.
+         *
+         * No hay parámetro que lo saltee, a diferencia del freno de turno. Si alguien se tomó el
+         * trabajo de marcar que a este lead no le llega nada, una sesión automática no está en
+         * posición de contradecirlo: para eso está el botón del panel, que lo desmarca.
+         */
+        if ($lead->no_recibe_mensajes_at !== null) {
+            $motivo = trim((string) ($lead->no_recibe_mensajes_motivo ?? ''));
+
+            return response()->json([
+                'message' => 'El lead #' . (int) $lead->id . ' está marcado como que ya no recibe mensajes'
+                    . ($motivo !== '' ? ' (' . $motivo . ')' : '') . ': no se mandó nada. La marca la puso una '
+                    . 'persona desde el panel y sólo se saca desde ahí.',
+                'no_recibe_mensajes' => true,
+                'motivo'             => $motivo !== '' ? $motivo : null,
+            ], 422);
+        }
+
+        /*
          * 🔴 El freno que define este endpoint. Fuera de la ventana el texto libre NO SALE: Meta lo
          * rechaza y el lead no ve nada. Que la respuesta sea 422 no significa que quien llamó se
          * haya equivocado —es el estado del mundo—, y por eso devuelve el `last_inbound_at` y

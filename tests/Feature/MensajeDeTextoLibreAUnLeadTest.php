@@ -482,6 +482,45 @@ class MensajeDeTextoLibreAUnLeadTest extends TestCase
     }
 
     /**
+     * 🔴 Un lead marcado como "ya no recibe mensajes" no recibe, y no hay parámetro que lo saltee.
+     *
+     * La marca la pone una persona mirando la conversación, porque el código de error de Meta que
+     * distinguiría un número muerto de un fallo reintentable nunca se capturó. Es un juicio humano
+     * sobre ese número: una sesión automática no está en posición de contradecirlo.
+     *
+     * @return void
+     */
+    public function test_un_lead_marcado_como_que_no_recibe_mensajes_no_recibe()
+    {
+        $lead = $this->crear_lead('Inalcanzable');
+        $this->entrante_del_lead($lead, 1);
+
+        $lead->no_recibe_mensajes_at     = now();
+        $lead->no_recibe_mensajes_motivo = 'El número está dado de baja';
+        $lead->save();
+
+        $espia = $this->espiar_sender();
+
+        $respuesta = $this->postJson('/api/claude/leads/' . $lead->id . '/message', [
+            'content' => 'Hola!',
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $respuesta->assertJson(['no_recibe_mensajes' => true]);
+        $this->assertCount(0, $espia->envios);
+        $this->assertSame(0, $this->salientes_de($lead));
+
+        /* Ni siquiera con la válvula del turno: son frenos distintos y éste no tiene salteo. */
+        $forzado = $this->postJson('/api/claude/leads/' . $lead->id . '/message', [
+            'content'                   => 'Hola de nuevo!',
+            'permitir_varios_por_turno' => true,
+        ], $this->headers());
+
+        $forzado->assertStatus(422);
+        $this->assertCount(0, $espia->envios, 'La marca no la puede saltear ningún parámetro.');
+    }
+
+    /**
      * 🔴 Con DOS leads del mismo teléfono, el turno se respeta igual.
      *
      * `leads.phone` no tiene índice único y el webhook engancha los entrantes al lead más reciente,
