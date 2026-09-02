@@ -137,6 +137,12 @@ class ManualRepositoryService
             throw new \RuntimeException('La ruta del archivo no puede estar vacía.');
         }
 
+        /* El modelo escribe la ruta a mano y a veces le pone la barra inicial. Se saca antes de
+         * la guarda —no dentro— para que la guarda siga viendo una sola forma canónica. Es la
+         * misma normalización que hace KnowledgeGroundingGate::normalizar_lista() del otro lado,
+         * así que la ruta que se anota como leída y la que el agente cita coinciden igual. */
+        $path = ltrim($path, '/');
+
         $this->verificar_ruta_del_manual($path);
 
         $encoded_path = implode('/', array_map('rawurlencode', explode('/', $path)));
