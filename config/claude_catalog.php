@@ -394,6 +394,46 @@ return [
             ],
         ],
 
+        /* -------------------------------------------------- Pipeline de leads: escritura del estado */
+
+        'POST api/claude/leads/{id}/status' => [
+            'para_que'     => 'Mueve UN lead de estado del pipeline y deja el evento en su conversación. Es la contraparte de escritura del análisis: sirve para acomodar el estado a la situación real cuando el lead quedó en un tramo que ya no corresponde.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'El slug destino tiene que existir en el catálogo del pipeline: no se inventan estados.',
+                'cerrado_ganado no se puede asignar desde acá: cuelga de la promoción a Client (contrato y alta).',
+                'Un lead ya promovido a cliente, o en cerrado_ganado, no se mueve.',
+                'Si el lead ya estaba en ese estado no se escribe nada ni se registra evento.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|max:80', 'que_es' => 'Slug del estado destino. Los válidos salen de claude/schema (pipeline_statuses).'],
+                ['nombre' => 'motivo', 'obligatorio' => false, 'validacion' => 'nullable|string|max:300', 'que_es' => 'Por qué se mueve. Queda escrito en el evento de la conversación.'],
+                ['nombre' => 'registrar_evento', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT true', 'que_es' => 'Si deja el mensaje is_status_event con el cambio.'],
+            ],
+        ],
+        'POST api/claude/leads/status-batch' => [
+            'para_que'     => 'Mueve un LOTE de leads, cada uno a su propio estado, nombrados uno por uno. Es lo que permite repasar todas las conversaciones y dejar los estados acomodados de una.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'Sólo una lista explícita de {lead_id, status}: el lote NO acepta filtros, así que un filtro mal escrito no puede barrer la tabla.',
+                'dry_run por defecto: si no se pide lo contrario, simula y no escribe nada.',
+                'confirm_count tiene que coincidir exactamente con la cantidad simulada.',
+                'confirm_token con hash_equals: si la lista o algún destino cambió entre la simulación y la confirmación, no pasa.',
+                'Tope MAX_BATCH = 200 leads por llamada.',
+                'Un slug inválido en una sola fila aborta el lote entero: es error de armado, no un lead salteable.',
+                'cerrado_ganado no se asigna, y los leads ganados o ya promovidos a cliente se omiten.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'cambios[]', 'obligatorio' => true, 'validacion' => 'required|array|min:1, cada ítem con lead_id required|integer|min:1 y status required|string|max:80', 'que_es' => '🔴 LISTA de {lead_id, status, motivo}, no un mapa: en un mapa con claves numéricas correlativas el JSON se decodifica como lista y las claves se corren.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO se escribe nada: devuelve qué lead cambiaría y a qué estado.'],
+                ['nombre' => 'confirm_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0 — obligatorio cuando dry_run=false', 'que_es' => 'Tiene que coincidir exacto con el cambiarian que devolvió la simulación.'],
+                ['nombre' => 'confirm_token', 'obligatorio' => false, 'validacion' => 'nullable|string|max:64 — obligatorio cuando dry_run=false', 'que_es' => 'El token que devolvió la simulación. Se compara con hash_equals.'],
+                ['nombre' => 'registrar_evento', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT true', 'que_es' => 'Si deja el mensaje is_status_event en cada lead movido.'],
+            ],
+        ],
+
         /* ---------------------------------------------------------- Clientes y versiones: lectura */
 
         'GET api/claude/clients' => [

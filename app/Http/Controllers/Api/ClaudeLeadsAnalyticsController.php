@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\ClaudeLeadsOutboundController;
+use App\Http\Controllers\Api\ClaudeLeadsPipelineController;
 use App\Http\Controllers\Controller;
 use App\Models\FollowupTemplate;
 use App\Models\LeadPipelineStatus;
@@ -186,6 +187,40 @@ class ClaudeLeadsAnalyticsController extends Controller
                         . 'El request se corta limpio a los ' . ClaudeLeadsOutboundController::PRESUPUESTO_SEGUNDOS
                         . ' s y devuelve `no_procesados` con los que no se intentaron; esos se reintentan sin riesgo.',
                 ],
+            ],
+            'estado' => [
+                'un_lead' => [
+                    'ruta' => 'POST claude/leads/{id}/status',
+                    'body' => [
+                        'status'           => 'OBLIGATORIO. Slug destino, de pipeline_statuses.',
+                        'motivo'           => 'Opcional. Texto que queda en el evento de la conversación.',
+                        'registrar_evento' => 'Default TRUE. Deja un mensaje is_status_event con el cambio.',
+                    ],
+                    'nota' => 'Cambia de una: NO tiene dry_run. Si el lead ya estaba en ese estado devuelve '
+                        . 'cambio=false y no escribe nada.',
+                ],
+                'lote' => [
+                    'ruta' => 'POST claude/leads/status-batch',
+                    'body' => [
+                        'cambios'          => 'OBLIGATORIO. LISTA de {lead_id, status, motivo}, máximo '
+                            . ClaudeLeadsPipelineController::MAX_BATCH . '. 🔴 Lista, no mapa: un mapa con claves '
+                            . 'numéricas correlativas se decodifica como lista y las claves se corren.',
+                        'dry_run'          => 'Default TRUE. Simula sin escribir ningún lead.',
+                        'confirm_count'    => 'OBLIGATORIO cuando dry_run=false. Tiene que coincidir EXACTO con el '
+                            . '`cambiarian` de la simulación.',
+                        'confirm_token'    => 'OBLIGATORIO cuando dry_run=false. El que devolvió la simulación: ata la '
+                            . 'confirmación a los leads y a los destinos exactos que se revisaron.',
+                        'registrar_evento' => 'Default TRUE.',
+                    ],
+                    'protocolo' => 'Son SIEMPRE dos llamadas, igual que el lote de envío: primero la simulación, se '
+                        . 'revisa la lista, después la MISMA llamada con dry_run=false, confirm_count y confirm_token.',
+                ],
+                'frenos' => 'No se puede asignar "' . ClaudeLeadsPipelineController::SLUG_PROHIBIDO . '" ni mover un lead '
+                    . 'que ya esté en ese estado o promovido a cliente: ese tramo cuelga de la promoción a Client. Un slug '
+                    . 'que no existe en el catálogo aborta el lote entero (es error de armado, no un lead salteable).',
+                'efectos' => 'Al pasar a ' . implode(' o ', ClaudeLeadsPipelineController::ESTADOS_TERMINALES)
+                    . ' se apagan requiere_seguimiento, tiene_sugerencia_pendiente y tiene_seguimiento_sin_ver, y se limpia '
+                    . 'pendiente_revision_at — lo mismo que hace el pase automático a En Pausa.',
             ],
             'limites' => [
                 'limit_default' => ClaudeLeadQueryService::LIMIT_DEFAULT,

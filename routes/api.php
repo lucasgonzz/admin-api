@@ -173,6 +173,15 @@ Route::middleware('claude.task.key')
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
 
+        /* Pipeline de leads: ESCRITURA del estado.
+           🔴 Mueven leads REALES. `cerrado_ganado` no se asigna desde acá y un lead ya promovido a
+           cliente no se toca: ese tramo es la promoción a Client. Los frenos (dry_run por defecto,
+           confirm_count exacto y confirm_token del conjunto) están en ClaudeLeadsPipelineController.
+           `leads/status-batch` se declara ANTES que cualquier ruta con {id} de este mismo bloque
+           por la misma razón que `upgrades/preview`: que ninguna la capture. */
+        Route::post('leads/status-batch', 'Api\ClaudeLeadsPipelineController@update_status_batch_json');
+        Route::post('leads/{id}/status', 'Api\ClaudeLeadsPipelineController@update_status_json');
+
         /* Operación de clientes y actualizaciones: LECTURA.
            `ops-schema` describe todo este sub-bloque (filtros, enumeraciones, la máquina de estados
            del deployment y los frenos de escritura). 🔴 No se toca `schema`, que es el de leads. */
