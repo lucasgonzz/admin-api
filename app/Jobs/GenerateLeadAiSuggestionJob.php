@@ -96,7 +96,9 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
             return;
         }
 
-        event(new LeadAiSuggestionGenerating($this->lead_id));
+        // Vía ::dispatch(): la emisión pasa por App\Support\BroadcastGuard, así una caída de
+        // Pusher no voltea el job antes de que llegue a generar nada.
+        LeadAiSuggestionGenerating::dispatch($this->lead_id);
 
         try {
             $suggestion_message = $lead_ai_service->generate_suggestion($lead, false);
@@ -134,7 +136,10 @@ class GenerateLeadAiSuggestionJob implements ShouldQueue
                 $exception->getMessage()
             );
         } finally {
-            event(new LeadAiSuggestionFinished($this->lead_id));
+            /* 🔴 Vía ::dispatch(): esto corre en un `finally`, y una excepción ahí reemplaza
+               lo que el método venía a devolver. Un aviso no puede hacer fallar un job que ya
+               dejó la sugerencia guardada — el guard lo aísla. */
+            LeadAiSuggestionFinished::dispatch($this->lead_id);
         }
     }
 }

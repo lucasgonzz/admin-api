@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Events\AdminTaskNotificationCreated;
+use App\Events\LeadAiSuggestionFinished;
+use App\Events\LeadAiSuggestionGenerating;
 use App\Events\LeadConversationUpdated;
 use App\Events\LeadSuggestionCreated;
 use App\Events\SupportTicketUpdated;
@@ -272,5 +274,36 @@ class LosEventosDeBroadcastMandanSoloIdsTest extends TestCase
         LeadConversationUpdated::dispatch((int) $lead->id, null);
 
         $this->assertTrue(true, 'El mensaje ya salió: una caída de Pusher no puede volver atrás.');
+    }
+
+    /**
+     * Y lo mismo para el par que prende y apaga el spinner de la sugerencia.
+     *
+     * 🔴 `LeadAiSuggestionFinished` es el peor caso de todos y por eso tiene test propio: se
+     * emite adentro de un `finally` —en `LeadController@request_ai_suggestion_json`, en
+     * `@resume_with_claude_json` y en `GenerateLeadAiSuggestionJob`— y una excepción en un
+     * `finally` de PHP **reemplaza el return pendiente**. Sin guard, una caída de Pusher no
+     * informaba mal el resultado: lo cambiaba, convirtiendo en 500 un pedido que había
+     * terminado bien y ya tenía su sugerencia guardada.
+     *
+     * @return void
+     */
+    public function test_los_avisos_del_spinner_de_sugerencia_tampoco_voltean_la_operacion()
+    {
+        Event::listen(LeadAiSuggestionGenerating::class, function () {
+            throw new \RuntimeException('Pusher error: connection refused');
+        });
+        Event::listen(LeadAiSuggestionFinished::class, function () {
+            throw new \RuntimeException('Pusher error: connection refused');
+        });
+
+        $lead = $this->crear_lead_con_datos_personales();
+
+        /* Se emiten como los emite el controlador: primero el de "arrancó", después el del
+         * `finally`. Si cualquiera de los dos propagara, este test no llegaría al assert. */
+        LeadAiSuggestionGenerating::dispatch((int) $lead->id);
+        LeadAiSuggestionFinished::dispatch((int) $lead->id);
+
+        $this->assertTrue(true, 'Un aviso de spinner no puede voltear la generación de la sugerencia.');
     }
 }

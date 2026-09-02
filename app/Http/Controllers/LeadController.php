@@ -3115,7 +3115,9 @@ class LeadController extends Controller
 
         $scheduler->cancel_scheduled_suggestion((int) $lead->id);
 
-        event(new LeadAiSuggestionGenerating((int) $lead->id));
+        // Vía ::dispatch() y no event(new ...): así la emisión pasa por App\Support\BroadcastGuard
+        // y una caída de Pusher no impide generar la sugerencia que el operador pidió.
+        LeadAiSuggestionGenerating::dispatch((int) $lead->id);
 
         try {
             $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
@@ -3155,7 +3157,11 @@ class LeadController extends Controller
                 'model'   => $this->fullModel('lead', $lead->id),
             ], 422);
         } finally {
-            event(new LeadAiSuggestionFinished((int) $lead->id));
+            /* 🔴 Vía ::dispatch() y no event(new ...), y acá importa más que en ningún lado:
+               esto corre en un `finally`, y una excepción en un `finally` REEMPLAZA el return
+               pendiente. Sin el guard de App\Support\BroadcastGuard, una caída de Pusher
+               convierte en 500 un pedido que terminó bien y ya tenía su sugerencia guardada. */
+            LeadAiSuggestionFinished::dispatch((int) $lead->id);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
@@ -3188,7 +3194,9 @@ class LeadController extends Controller
         // Cancelar cualquier debounce pendiente antes de generar en caliente.
         $scheduler->cancel_scheduled_suggestion((int) $lead->id);
 
-        event(new LeadAiSuggestionGenerating((int) $lead->id));
+        // Vía ::dispatch() y no event(new ...): así la emisión pasa por App\Support\BroadcastGuard
+        // y una caída de Pusher no impide generar la sugerencia que el operador pidió.
+        LeadAiSuggestionGenerating::dispatch((int) $lead->id);
 
         try {
             $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
@@ -3228,7 +3236,11 @@ class LeadController extends Controller
                 'model'   => $this->fullModel('lead', $lead->id),
             ], 422);
         } finally {
-            event(new LeadAiSuggestionFinished((int) $lead->id));
+            /* 🔴 Vía ::dispatch() y no event(new ...), y acá importa más que en ningún lado:
+               esto corre en un `finally`, y una excepción en un `finally` REEMPLAZA el return
+               pendiente. Sin el guard de App\Support\BroadcastGuard, una caída de Pusher
+               convierte en 500 un pedido que terminó bien y ya tenía su sugerencia guardada. */
+            LeadAiSuggestionFinished::dispatch((int) $lead->id);
         }
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
