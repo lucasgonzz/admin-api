@@ -10,6 +10,7 @@ use App\Models\AdminTaskNotification;
 use App\Models\Lead;
 use App\Support\BroadcastPayloadBudget;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\Event;
 use Tests\TestCase;
 
 /**
@@ -221,6 +222,35 @@ class PayloadDeBroadcastBajoElLimiteDePusherTest extends TestCase
         );
 
         $this->assertSame(['lead_id' => 7], $grande);
+    }
+
+    /**
+     * Un aviso que falla NO puede voltear la operación que ya terminó.
+     *
+     * Es la segunda mitad del defecto de producción, y la que hizo que la pantalla informara
+     * un error sobre una sugerencia que sí existía: `LeadSuggestionCreated` se dispara al final
+     * de `LeadAiService::generate_suggestion()`, con el mensaje ya persistido, y la excepción
+     * de Pusher subía hasta el `catch` del controlador.
+     *
+     * Acá la falla se fuerza con un listener que tira excepción — la misma vía por la que
+     * `event()` propaga cualquier problema de emisión — y se verifica que `dispatch()` no la
+     * deje salir. 🔴 Si alguien "simplifica" el `dispatch()` del evento sacándole el
+     * BroadcastGuard, este test se pone rojo.
+     *
+     * @return void
+     */
+    public function test_una_falla_al_emitir_no_se_propaga_a_quien_disparo_el_evento()
+    {
+        Event::listen(LeadSuggestionCreated::class, function () {
+            throw new \RuntimeException('Pusher error: The data content of this event exceeds the allowed maximum (10240 bytes)');
+        });
+
+        $lead = $this->crear_lead_pelado();
+
+        LeadSuggestionCreated::dispatch((int) $lead->id);
+
+        /* Llegar hasta acá ya es el resultado: la excepción quedó adentro del guard. */
+        $this->assertTrue(true, 'El dispatch no puede propagar la falla del aviso.');
     }
 
     /**
