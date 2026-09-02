@@ -95,6 +95,25 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
     }
 
     /**
+     * Saliente que efectivamente llego al lead: el `whatsapp_message_id` es lo que Kapso/Meta
+     * devuelve al aceptar el envio, y es la parte que convierte a un saliente en "respuesta".
+     * Sin el, el mensaje existe en la conversacion pero el lead nunca lo vio.
+     *
+     * @param Lead                 $lead   Dueno del hilo.
+     * @param array<string, mixed> $campos Campos a pisar (sender, status, content...).
+     *
+     * @return LeadMessage
+     */
+    private function crear_saliente_entregado(Lead $lead, array $campos = []): LeadMessage
+    {
+        return $this->crear_mensaje($lead, array_merge([
+            'sender'              => 'setter',
+            'content'             => 'Te paso los planes',
+            'whatsapp_message_id' => 'wamid.' . strtoupper(bin2hex(random_bytes(8))),
+        ], $campos));
+    }
+
+    /**
      * Registro de error de sistema, tal cual lo crea `LeadConversationErrorLogger` (siempre con
      * `is_status_event = true`, que es lo que hace que un error no resuelva a otro error).
      *
@@ -140,19 +159,19 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
         // 4. Contestado por el setter con un mensaje pegado a mano (status enviado).
         $lead = $this->crear_lead('Contestado por setter enviado');
         $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
-        $this->crear_mensaje($lead, ['sender' => 'setter', 'content' => 'Te paso los planes']);
+        $this->crear_saliente_entregado($lead);
         $leads['contestado por setter enviado'] = $lead;
 
         // 5. Contestado por el setter con una sugerencia que aprobó (status aprobado).
         $lead = $this->crear_lead('Contestado por setter aprobado');
         $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
-        $this->crear_mensaje($lead, ['sender' => 'setter', 'status' => 'aprobado', 'content' => 'Te paso los planes']);
+        $this->crear_saliente_entregado($lead, ['status' => 'aprobado']);
         $leads['contestado por setter aprobado'] = $lead;
 
         // 6. Contestado por el agente (sistema aprobado = ya salió al lead).
         $lead = $this->crear_lead('Contestado por sistema aprobado');
         $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
-        $this->crear_mensaje($lead, ['sender' => 'sistema', 'status' => 'aprobado', 'content' => 'Te paso los planes']);
+        $this->crear_saliente_entregado($lead, ['sender' => 'sistema', 'status' => 'aprobado']);
         $leads['contestado por sistema aprobado'] = $lead;
 
         // 7. 🔴 Sugerencia del agente todavía SIN aprobar: no contestó nada, el lead sigue esperando.
@@ -163,19 +182,19 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
 
         // 8. Reacción del lead por kind: no es un mensaje a contestar.
         $lead = $this->crear_lead('Reacción por kind');
-        $this->crear_mensaje($lead, ['sender' => 'setter', 'content' => 'Te mando la propuesta']);
+        $this->crear_saliente_entregado($lead, ['content' => 'Te mando la propuesta']);
         $this->crear_mensaje($lead, ['kind' => 'reaction', 'content' => "\u{1F44D}"]);
         $leads['reacción por kind'] = $lead;
 
         // 9. Reacción legada de Kapso (texto plano, sin kind).
         $lead = $this->crear_lead('Reacción legada');
-        $this->crear_mensaje($lead, ['sender' => 'setter', 'content' => 'Te mando la propuesta']);
+        $this->crear_saliente_entregado($lead, ['content' => 'Te mando la propuesta']);
         $this->crear_mensaje($lead, ['content' => 'Reacted with ' . "\u{1F44D}" . ' to message wamid.ABC123']);
         $leads['reacción legada'] = $lead;
 
         // 10. Reacción legada de Kapso, variante "quitó la reacción".
         $lead = $this->crear_lead('Reacción legada quitada');
-        $this->crear_mensaje($lead, ['sender' => 'setter', 'content' => 'Te mando la propuesta']);
+        $this->crear_saliente_entregado($lead, ['content' => 'Te mando la propuesta']);
         $this->crear_mensaje($lead, ['content' => 'Removed reaction from message wamid.ABC123']);
         $leads['reacción legada quitada'] = $lead;
 
@@ -206,7 +225,51 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
         ]);
         $leads['entrega fallida sin is_error'] = $lead;
 
-        // ⚠️ No hay escenario con `kind` NULL a propósito: la columna es NOT NULL con default
+        // 15. 🔴 Contestado por el AGENTE: sender sistema, status enviado y con id de WhatsApp.
+        // Este es el caso que estuvo mal contado hasta el 2/9/2026: como el criterio solo miraba
+        // `setter` y `sistema`+`aprobado`, toda conversacion atendida por la IA figuraba como sin
+        // responder (497 leads en vez de 43).
+        $lead = $this->crear_lead('Contestado por el agente');
+        $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
+        $this->crear_saliente_entregado($lead, ['sender' => 'sistema', 'content' => 'Te paso los planes']);
+        $leads['contestado por el agente'] = $lead;
+
+        // 16. 🔴 Respuesta del agente que NUNCA salio: sin whatsapp_message_id el lead no vio nada.
+        // Es el 131008 de julio/agosto de 2026 y cualquier rechazo de Meta en el momento del envio.
+        $lead = $this->crear_lead('Respuesta del agente que no salio');
+        $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
+        $this->crear_mensaje($lead, ['sender' => 'sistema', 'content' => 'Te paso los planes']);
+        $leads['respuesta del agente que no salio'] = $lead;
+
+        // 17. 🔴 Mensaje del setter cuyo envio fallo: mismo razonamiento que el 16.
+        $lead = $this->crear_lead('Mensaje del setter que no salio');
+        $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
+        $this->crear_mensaje($lead, ['sender' => 'setter', 'content' => 'Te paso los planes']);
+        $leads['mensaje del setter que no salio'] = $lead;
+
+        // 18. 🔴 Sugerencia esperando verificacion: la IA genero una respuesta pero nadie la mando,
+        // asi que el lead sigue esperando. Pedido explicito de Lucas (2/9/2026).
+        $lead = $this->crear_lead('Sugerencia esperando verificacion');
+        $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
+        $this->crear_mensaje($lead, [
+            'sender'                => 'sistema',
+            'status'                => 'sugerido',
+            'content'               => 'Propuesta que agenda una demo',
+            'requiere_verificacion' => true,
+        ]);
+        $leads['sugerencia esperando verificacion'] = $lead;
+
+        // 19. Esa misma sugerencia, ya aprobada y enviada: deja de estar pendiente.
+        $lead = $this->crear_lead('Sugerencia verificada y enviada');
+        $this->crear_mensaje($lead, ['content' => '¿Cuánto sale?']);
+        $this->crear_saliente_entregado($lead, [
+            'sender'                => 'sistema',
+            'content'               => 'Propuesta que agenda una demo',
+            'requiere_verificacion' => true,
+        ]);
+        $leads['sugerencia verificada y enviada'] = $lead;
+
+        // ⚠️ No hay escenario con `kind` NULL a proposito: la columna es NOT NULL con default
         // 'text' (2026_06_02_190000_add_kind_to_lead_messages_table.php), así que un mensaje con
         // kind nulo NO se puede insertar. La rama `whereNull('kind')` del scope y el `?? ''` de
         // LeadConversationAiState son defensa para el día que la columna se vuelva nullable; hoy
@@ -340,5 +403,56 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
         $this->assertSame($sin_sesion, $con_uno, 'El scope no puede cambiar según quién esté logueado.');
         $this->assertSame($sin_sesion, $con_otro, 'El scope no puede cambiar según quién esté logueado.');
         $this->assertNotEmpty($sin_sesion, 'Sin sesión el scope tiene que seguir devolviendo leads.');
+    }
+
+    /**
+     * 🔴 Lo que la paridad NO prueba: que el criterio sea el correcto.
+     *
+     * El test de arriba compara las dos implementaciones entre si, asi que seguiria verde si las
+     * dos estuvieran igual de mal — que es exactamente lo que paso hasta el 2/9/2026. Este fija el
+     * veredicto esperado de los escenarios que definen la regla, en palabras de Lucas: si la IA
+     * genero una respuesta pero esta esperando verificacion, el lead tiene que aparecer como sin
+     * responder; una vez que el mensaje salio de verdad por WhatsApp —lo mande un humano o la IA—
+     * ya no.
+     *
+     * @return void
+     */
+    public function test_solo_un_mensaje_que_salio_de_verdad_cuenta_como_respuesta(): void
+    {
+        $matriz  = $this->armar_matriz();
+        $service = new LeadPendingReviewService();
+
+        /* Escenario => si tiene que figurar como "sin responder". */
+        $esperado = [
+            'sin responder'                     => true,
+            'contestado por setter enviado'     => false,
+            'contestado por sistema aprobado'   => false,
+            'contestado por el agente'          => false,
+            'respuesta del agente que no salio' => true,
+            'mensaje del setter que no salio'   => true,
+            'sugerencia sin aprobar'            => true,
+            'sugerencia esperando verificacion' => true,
+            'sugerencia verificada y enviada'   => false,
+        ];
+
+        $ids_sql = Lead::query()->requiereRevision()->pluck('id')->all();
+
+        foreach ($esperado as $escenario => $requiere) {
+            $lead = $matriz[$escenario];
+
+            $this->assertSame(
+                $requiere,
+                $service->lead_requiere_revision($lead->fresh()->load('messages')),
+                'PHP: el escenario "' . $escenario . '" tendria que ' . ($requiere ? 'SI' : 'NO')
+                . ' figurar como sin responder.'
+            );
+
+            $this->assertSame(
+                $requiere,
+                in_array($lead->id, $ids_sql, false),
+                'SQL: el escenario "' . $escenario . '" tendria que ' . ($requiere ? 'SI' : 'NO')
+                . ' figurar como sin responder.'
+            );
+        }
     }
 }

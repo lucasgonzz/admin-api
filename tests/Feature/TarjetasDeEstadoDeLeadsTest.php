@@ -120,6 +120,24 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
     }
 
     /**
+     * Saliente que efectivamente salio por WhatsApp. El `whatsapp_message_id` es lo que hace que
+     * cuente como respuesta: ver LeadMessage::is_reply_to_lead().
+     *
+     * @param Lead                 $lead   Dueno del hilo.
+     * @param array<string, mixed> $campos Campos a pisar.
+     *
+     * @return LeadMessage
+     */
+    private function crear_saliente_entregado(Lead $lead, array $campos = []): LeadMessage
+    {
+        return $this->crear_mensaje($lead, array_merge([
+            'sender'              => 'setter',
+            'content'             => 'Te paso los planes',
+            'whatsapp_message_id' => 'wamid.' . strtoupper(bin2hex(random_bytes(8))),
+        ], $campos));
+    }
+
+    /**
      * Pega al endpoint y devuelve las tarjetas indexadas por slug.
      *
      * @param string $query_string Query string opcional (para probar que los filtros se ignoran).
@@ -284,20 +302,55 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
     {
         $por_setter = $this->crear_lead('calificado', 'Contestado por el setter');
         $this->crear_mensaje($por_setter, ['content' => '¿Cuánto sale?']);
-        $this->crear_mensaje($por_setter, ['sender' => 'setter', 'content' => 'Te paso los planes']);
+        $this->crear_saliente_entregado($por_setter);
 
-        $por_sistema = $this->crear_lead('calificado', 'Contestado por el agente');
+        $por_sistema = $this->crear_lead('calificado', 'Contestado por el agente aprobado');
         $this->crear_mensaje($por_sistema, ['content' => '¿Cuánto sale?']);
-        $this->crear_mensaje($por_sistema, [
-            'sender'  => 'sistema',
-            'status'  => 'aprobado',
-            'content' => 'Te paso los planes',
-        ]);
+        $this->crear_saliente_entregado($por_sistema, ['sender' => 'sistema', 'status' => 'aprobado']);
+
+        /* El agente contestando como contesta de verdad: sistema + enviado + id de WhatsApp.
+           Hasta el 2/9/2026 este caso NO apagaba la razon A y la tarjeta contaba a casi todos. */
+        $por_agente = $this->crear_lead('calificado', 'Contestado por el agente');
+        $this->crear_mensaje($por_agente, ['content' => '¿Cuánto sale?']);
+        $this->crear_saliente_entregado($por_agente, ['sender' => 'sistema']);
 
         $tarjetas = $this->tarjetas();
 
-        $this->assertSame(2, $tarjetas['calificado']['total']);
+        $this->assertSame(3, $tarjetas['calificado']['total']);
         $this->assertSame(0, $tarjetas['calificado']['sin_responder']);
+    }
+
+    /**
+     * 🔴 El caso que pidio Lucas el 2/9/2026, medido sobre la tarjeta que el mira todos los dias.
+     *
+     * Mientras la respuesta de la IA espera verificacion, ese lead tiene que contar como sin
+     * responder: hay alguien esperando y nadie le contesto. Cuando el mensaje sale de verdad por
+     * WhatsApp, deja de contar. No importa quien lo mando.
+     *
+     * @return void
+     */
+    public function test_una_sugerencia_esperando_verificacion_cuenta_hasta_que_el_mensaje_sale(): void
+    {
+        $lead = $this->crear_lead('calificado', 'Con sugerencia por verificar');
+        $this->crear_mensaje($lead, ['content' => '¿Me pasás un horario para la demo?']);
+        $sugerencia = $this->crear_mensaje($lead, [
+            'sender'                => 'sistema',
+            'status'                => 'sugerido',
+            'content'               => 'Te propongo el jueves a las 14',
+            'requiere_verificacion' => true,
+        ]);
+
+        $tarjetas = $this->tarjetas();
+        $this->assertSame(1, $tarjetas['calificado']['sin_responder'], 'Con la sugerencia esperando verificacion tiene que contar.');
+
+        /* El operador la aprueba y sale: el envio real es lo que deja el whatsapp_message_id. */
+        $sugerencia->update([
+            'status'              => 'enviado',
+            'whatsapp_message_id' => 'wamid.' . strtoupper(bin2hex(random_bytes(8))),
+        ]);
+
+        $tarjetas = $this->tarjetas();
+        $this->assertSame(0, $tarjetas['calificado']['sin_responder'], 'Una vez enviado el mensaje, el lead deja de contar.');
     }
 
     /**
