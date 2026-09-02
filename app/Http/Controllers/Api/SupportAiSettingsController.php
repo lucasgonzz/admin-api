@@ -14,7 +14,7 @@ use Illuminate\Http\Request;
 class SupportAiSettingsController extends Controller
 {
     /**
-     * Devuelve activación, demora antes de consultar a Claude y demora antes del envío automático.
+     * Devuelve activación, las dos demoras y el régimen con el que nacen los tickets nuevos.
      *
      * @return JsonResponse
      */
@@ -24,7 +24,7 @@ class SupportAiSettingsController extends Controller
     }
 
     /**
-     * Persiste activación, debounce previo a Claude y demora antes del envío automático.
+     * Persiste activación, debounce previo a Claude, demora de envío automático y régimen inicial.
      *
      * @param Request $request
      *
@@ -36,6 +36,11 @@ class SupportAiSettingsController extends Controller
             'suggestions_enabled' => 'required|boolean',
             'suggestion_delay'    => 'nullable|integer|min:'.SupportAiSettings::SUGGESTION_DELAY_MIN_SECONDS.'|max:'.SupportAiSettings::SUGGESTION_DELAY_MAX_SECONDS,
             'auto_send_delay'     => 'nullable|integer|min:'.SupportAiSettings::AUTO_SEND_DELAY_MIN_SECONDS.'|max:'.SupportAiSettings::AUTO_SEND_DELAY_MAX_SECONDS,
+            // `nullable` y no `required` a propósito, igual que las dos demoras: un build viejo del
+            // SPA, cacheado en el navegador de un operador, todavía no manda este campo. Con
+            // `required` no podría guardar ni las demoras; con `nullable` guarda lo suyo y el
+            // régimen queda como estaba, en vez de darse vuelta sin que nadie lo haya pedido.
+            'require_verification' => 'nullable|boolean',
         ]);
 
         AdminSetting::set(
@@ -59,10 +64,21 @@ class SupportAiSettingsController extends Controller
             (string) $auto_send_delay
         );
 
+        $require_verification = array_key_exists('require_verification', $validated)
+            && $validated['require_verification'] !== null
+            ? (bool) $validated['require_verification']
+            : SupportAiSettings::new_ticket_requires_verification();
+
+        AdminSetting::set(
+            SupportAiSettings::KEY_REQUIRE_VERIFICATION,
+            $require_verification ? '1' : '0'
+        );
+
         return response()->json([
-            'suggestions_enabled' => (bool) $validated['suggestions_enabled'],
-            'suggestion_delay'    => $suggestion_delay,
-            'auto_send_delay'     => $auto_send_delay,
+            'suggestions_enabled'  => (bool) $validated['suggestions_enabled'],
+            'suggestion_delay'     => $suggestion_delay,
+            'auto_send_delay'      => $auto_send_delay,
+            'require_verification' => $require_verification,
         ], 200);
     }
 }
