@@ -39,7 +39,6 @@ use App\Services\PromoteLeadService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\LeadContractPdfService;
 use App\Services\BatchLeadAiRecoveryService;
-use App\Services\LeadPendingReviewService;
 use App\Services\DemoHitosService;
 use App\Services\DemoIngresoTokenService;
 use App\Services\DemoPlanResolver;
@@ -3552,6 +3551,71 @@ class LeadController extends Controller
     }
 
     /**
+     * Alterna la marca "este lead ya no recibe mensajes" (número bloqueado o dado de baja).
+     *
+     * 🔴 Para qué sirve: el rojo de la grilla existe para lo que se puede REINTENTAR — un error de
+     * envío del sistema o un rechazo de Meta. Un número que bloqueó o que ya no existe no se
+     * reintenta, así que pintarlo de rojo es ruido permanente sobre una fila que nunca se va a
+     * poder resolver. Con la marca puesta, sus entregas fallidas dejan de pintar la fila.
+     *
+     * La pone una persona, no el sistema, y el motivo está en la migración 2026_09_02_150000: hoy
+     * no tenemos el código de error de Meta (nunca se capturó) y el patrón de fallos no alcanza
+     * para deducirlo — 33 de 54 leads con una entrega fallida después recibieron mensajes bien.
+     *
+     * Es un toggle a propósito: un número puede volver a andar (el lead desbloquea, recupera la
+     * línea), y en ese caso la marca se levanta desde el mismo lugar.
+     *
+     * @param Request    $request Body opcional: motivo (texto libre, 200 chars).
+     * @param int|string $id      Id del lead.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function toggle_no_recibe_mensajes_json(Request $request, $id)
+    {
+        /* Lead objetivo de la marca. */
+        $lead = Lead::findOrFail($id);
+
+        /* Alterna: si ya estaba marcado, la marca se levanta (el número volvió a andar). */
+        if ($lead->no_recibe_mensajes_at !== null) {
+            $lead->update([
+                'no_recibe_mensajes_at'     => null,
+                'no_recibe_mensajes_motivo' => null,
+            ]);
+        } else {
+            /* Admin que la puso: queda en el motivo para que se sepa quién lo decidió. */
+            $admin = Auth::user();
+            $motivo = trim((string) $request->input('motivo', ''));
+            if ($motivo === '') {
+                $motivo = 'Marcado a mano' . ($admin ? ' por ' . $admin->name : '') . '.';
+            }
+
+            $lead->update([
+                'no_recibe_mensajes_at'     => now(),
+                'no_recibe_mensajes_motivo' => mb_substr($motivo, 0, 200),
+            ]);
+
+            /* Deja el rastro en la conversación, como cualquier acción administrativa del panel:
+               is_status_event para que no toque last_message_at ni el badge de sin leer. */
+            LeadMessage::create([
+                'lead_id'               => $lead->id,
+                'sender'                => 'sistema',
+                'content'               => 'Marcado como "el lead ya no recibe mensajes"'
+                    . ($admin ? ' por ' . $admin->name : '') . '. '
+                    . 'Sus entregas fallidas dejan de pintar la fila de rojo.',
+                'status'                => 'enviado',
+                'is_followup'           => false,
+                'is_status_event'       => true,
+                'requiere_verificacion' => false,
+                'sent_by_admin_id'      => $admin ? $admin->id : null,
+            ]);
+        }
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
      * Alterna si el mensaje se incluye o excluye del historial enviado a Claude.
      *
      * Los mensajes marcados con deleted_from_context=true siguen siendo visibles
@@ -5089,29 +5153,6 @@ class LeadController extends Controller
          * escribía recall_bot_id en el lead, que el webhook nuevo ya no rutea. Se deja como
          * no-op 200 para no romper llamadas viejas del frontend. */
         return response()->json(['ok' => true, 'retired' => true], 200);
-    }
-
-    /**
-     * Marca como pendientes de revisión los leads sin responder o con un error de envío/generación
-     * sin resolver. No envía ni genera nada (reemplaza el recovery masivo viejo). El frontend usa los
-     * contadores para el toast y refresca la grilla para pintar las filas marcadas en rojo.
-     *
-     * @param LeadPendingReviewService $service
-     *
-     * @return \Illuminate\Http\JsonResponse
-     */
-    public function mark_pending_review_json(LeadPendingReviewService $service)
-    {
-        $result = $service->mark_pending_leads();
-
-        Log::channel('daily')->info('mark_pending_review: marcado de pendientes disparado.', $result);
-
-        return response()->json([
-            'message'        => 'Leads marcados para revisión',
-            'marcados'       => $result['marcados'],
-            'ya_marcados'    => $result['ya_marcados'],
-            'sin_pendientes' => $result['sin_pendientes'],
-        ]);
     }
 
     /**

@@ -37,9 +37,12 @@ class LeadConversationAiState
     }
 
     /**
-     * Indica si hay mensajes del lead sin respuesta del setter tras el último envío saliente.
+     * Indica si hay mensajes del lead sin responder después del último saliente que le llegó.
      *
-     * Considera respuesta: mensaje del setter en estado enviado/aprobado o sugerencia de sistema ya aprobada.
+     * Qué cuenta como respuesta lo decide {@see LeadMessage::is_reply_to_lead()}, que es la única
+     * definición del sistema: un saliente despachado y con `whatsapp_message_id`, o sea que
+     * efectivamente salió por WhatsApp. Una sugerencia de la IA esperando verificación NO contesta
+     * nada, y un envío que falló tampoco.
      *
      * @param Lead $lead Lead con relación `messages` cargada (orden por id).
      *
@@ -56,16 +59,8 @@ class LeadConversationAiState
         $index = 0;
 
         foreach ($messages as $message) {
-            $sender = (string) $message->sender;
-            $status = (string) $message->status;
-
-            /* Respuesta del setter pegada o enviada por WhatsApp. */
-            if ($sender === 'setter' && in_array($status, ['enviado', 'aprobado'], true)) {
-                $last_outbound_index = $index;
-            }
-
-            /* Sugerencia de Claude ya enviada al lead. */
-            if ($sender === 'sistema' && $status === 'aprobado') {
+            /* Respuesta que efectivamente le llegó al lead, sea del setter o del agente. */
+            if (LeadMessage::is_reply_to_lead($message)) {
                 $last_outbound_index = $index;
             }
 

@@ -42,6 +42,83 @@ class LeadMessage extends Model
         "\u{1F64F}",        // 🙏 gracias
     ];
 
+    /**
+     * Estados de un saliente que el sistema dio por despachado.
+     *
+     * `aprobado` es histórico: hoy no lo escribe ningún camino de producción (solo el seeder de
+     * demo), pero quedan filas de mayo/junio de 2026 con ese estado y se siguen respetando.
+     *
+     * @var array<int, string>
+     */
+    public const STATUSES_SALIENTE_DESPACHADO = ['enviado', 'aprobado'];
+
+    /**
+     * 🔴 LA definición de "a este mensaje del lead ya se le contestó", y la única que hay.
+     *
+     * Un saliente cuenta como respuesta **solo si efectivamente salió por WhatsApp**: sender del
+     * setter o del sistema, estado despachado, y `whatsapp_message_id` cargado, que es lo que
+     * Kapso/Meta devuelve cuando acepta el envío. Los eventos de estado no cuentan nunca.
+     *
+     * **Por qué el `whatsapp_message_id` es la parte que importa** (decisión de Lucas, 2/9/2026):
+     * lo que el operador necesita saber es si al lead le llegó algo, no si el sistema generó algo.
+     * De ahí salen los tres casos que antes se contaban mal:
+     *
+     *   - Una **sugerencia de la IA esperando verificación** (`sugerido`) no contestó nada: el lead
+     *     sigue esperando y tiene que aparecer como sin responder hasta que alguien la mande.
+     *   - Un saliente **que nunca salió** (`whatsapp_message_id` null: el 131008 de julio/agosto de
+     *     2026, un rechazo de Meta en el momento del envío, una caída de Kapso) tampoco contestó.
+     *   - Una **respuesta real del agente** (`sistema` + `enviado` + id de WhatsApp) SÍ contesta.
+     *     Hasta el 2/9/2026 solo contaban `setter` y `sistema`+`aprobado`, y como el agente manda
+     *     con `sistema`+`enviado` —10.365 de los 14.532 mensajes del sistema— casi toda
+     *     conversación atendida por la IA figuraba como "sin responder": 497 leads en vez de 43.
+     *
+     * 🔴 Tiene un gemelo en SQL, {@see self::apply_reply_to_lead_conditions()}, porque hidratar el
+     * hilo de todos los leads para contar una tarjeta no es viable. Los dos tienen que decir lo
+     * mismo y hay un test que lo verifica (`RevisionDeLeadsEnSqlYEnPhpCoincidenTest`). Si tocás uno,
+     * tocá el otro.
+     *
+     * @param LeadMessage $message Mensaje del hilo.
+     *
+     * @return bool
+     */
+    public static function is_reply_to_lead(LeadMessage $message): bool
+    {
+        if ($message->is_status_event) {
+            return false;
+        }
+
+        if (! in_array((string) $message->sender, ['setter', 'sistema'], true)) {
+            return false;
+        }
+
+        if (! in_array((string) $message->status, self::STATUSES_SALIENTE_DESPACHADO, true)) {
+            return false;
+        }
+
+        return trim((string) ($message->whatsapp_message_id ?? '')) !== '';
+    }
+
+    /**
+     * Gemelo en SQL de {@see self::is_reply_to_lead()}: aplica las mismas condiciones sobre el
+     * alias de una subconsulta de `lead_messages`.
+     *
+     * Se pasa el alias porque los tres lugares que lo usan lo llaman distinto (`outbound` en dos
+     * subconsultas correlacionadas, y la tabla pelada en otra).
+     *
+     * @param \Illuminate\Database\Query\Builder $query Subconsulta ya apuntada a lead_messages.
+     * @param string                             $alias Alias con el que se referencian las columnas.
+     *
+     * @return void
+     */
+    public static function apply_reply_to_lead_conditions($query, string $alias): void
+    {
+        $query->where($alias . '.is_status_event', false)
+            ->whereIn($alias . '.sender', ['setter', 'sistema'])
+            ->whereIn($alias . '.status', self::STATUSES_SALIENTE_DESPACHADO)
+            ->whereNotNull($alias . '.whatsapp_message_id')
+            ->where($alias . '.whatsapp_message_id', '<>', '');
+    }
+
     protected $guarded = [];
 
     /**
@@ -570,16 +647,10 @@ class LeadMessage extends Model
                         $exists->selectRaw('1')
                             ->from('lead_messages as outbound')
                             ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
-                            ->whereColumn('outbound.id', '>', 'lead_messages.id')
-                            ->where(function ($outbound_wrap) {
-                                $outbound_wrap->where(function ($setter) {
-                                    $setter->where('outbound.sender', 'setter')
-                                        ->whereIn('outbound.status', ['enviado', 'aprobado']);
-                                })->orWhere(function ($sistema) {
-                                    $sistema->where('outbound.sender', 'sistema')
-                                        ->where('outbound.status', 'aprobado');
-                                });
-                            });
+                            ->whereColumn('outbound.id', '>', 'lead_messages.id');
+                        /* Misma definición de "ya se le contestó" que usan el botón de revisión y
+                           las tarjetas. Ver LeadMessage::is_reply_to_lead(). */
+                        self::apply_reply_to_lead_conditions($exists, 'outbound');
                     });
             });
         });

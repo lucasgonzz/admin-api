@@ -3,71 +3,22 @@
 namespace App\Services;
 
 use App\Models\Lead;
-use Illuminate\Support\Facades\Log;
 
 /**
- * Marca leads como "pendientes de revisión" (pendiente_revision_at), sin enviar ni generar nada.
+ * Define, en PHP, cuándo un lead amerita atención humana.
  *
- * Es la lógica del botón de revisión de la barra de leads (reemplaza el recovery masivo viejo).
+ * 🔴 El nombre quedó del botón de revisión que existió hasta el 2/9/2026 — ese botón marcaba
+ * `pendiente_revision_at` para pintar filas de rojo, y se sacó cuando el rojo y el amarillo
+ * pasaron a calcularse en vivo: la marca ya no cambiaba ningún color. Lo que SÍ sigue vivo, y es
+ * el motivo por el que esta clase no se borró con el botón, es
+ * {@see self::lead_requiere_revision()}: es el **gemelo en PHP** de `Lead::scopeRequiereRevision()`
+ * y el oráculo contra el que `RevisionDeLeadsEnSqlYEnPhpCoincidenTest` compara la versión SQL,
+ * lead por lead. Sin él no hay con qué verificar que la tarjeta y la grilla digan lo mismo.
+ *
+ * No marca ni escribe nada: solo decide.
  */
 class LeadPendingReviewService
 {
-    /** Estados en los que no tiene sentido marcar para revisión (lead ya cerrado o pausado). */
-    const ESTADOS_EXCLUIDOS = ['cerrado_ganado', 'cerrado_perdido', 'en_pausa'];
-
-    /**
-     * Setea pendiente_revision_at = now() en cada lead que amerita revisión.
-     *
-     * Razón A: mensajes del lead sin responder (reusa LeadConversationAiState::has_unanswered_lead_messages).
-     * Razón B: el hilo termina en un error sin resolver (is_error posterior a toda actividad real).
-     *
-     * El marcado es idempotente (no pisa una marca previa) y global (recorre todos los leads activos).
-     *
-     * @return array{marcados:int, ya_marcados:int, sin_pendientes:int}
-     */
-    public function mark_pending_leads(): array
-    {
-        // Leads activos (excluye cerrados/en pausa) con sus mensajes cargados para clasificar razón A/B.
-        $leads = Lead::query()
-            ->with('messages')
-            ->whereNotIn('status', self::ESTADOS_EXCLUIDOS)
-            ->get();
-
-        // Contadores devueltos para el toast del frontend (prompt 296).
-        $marcados = 0;
-        $ya_marcados = 0;
-        $sin_pendientes = 0;
-
-        foreach ($leads as $lead) {
-            if (! $this->lead_requiere_revision($lead)) {
-                $sin_pendientes++;
-                continue;
-            }
-
-            /* Idempotente: no pisar una marca previa. */
-            if ($lead->pendiente_revision_at !== null) {
-                $ya_marcados++;
-                continue;
-            }
-
-            $lead->pendiente_revision_at = now();
-            $lead->save();
-            $marcados++;
-        }
-
-        Log::channel('daily')->info('LeadPendingReviewService: marcado de pendientes completado.', [
-            'marcados' => $marcados,
-            'ya_marcados' => $ya_marcados,
-            'sin_pendientes' => $sin_pendientes,
-        ]);
-
-        return [
-            'marcados' => $marcados,
-            'ya_marcados' => $ya_marcados,
-            'sin_pendientes' => $sin_pendientes,
-        ];
-    }
-
     /**
      * Determina si un lead amerita revisión por razón A (mensajes sin responder) o razón B
      * (error sin resolver al final del hilo).
@@ -82,9 +33,18 @@ class LeadPendingReviewService
      */
     public function lead_requiere_revision(Lead $lead): bool
     {
-        /* Razón A: mensajes del lead sin responder (definición existente del sistema). También cubre
-           las sugerencias de Claude cuyo envío falló: al fallar quedan 'rechazado' y el mensaje del
-           lead sigue contando como sin responder. */
+        /* Gemelo de la guarda de Lead::scopeRequiereRevision(): un lead marcado como "ya no recibe
+           mensajes" no pide atención — no hay nada que reintentar ni a quién contestarle— y no
+           puede contar en la tarjeta sin que la grilla lo pinte, que es el defecto que Lucas
+           reportó el 2/9/2026. */
+        if ($lead->no_recibe_mensajes_at !== null) {
+            return false;
+        }
+
+        /* Razón A: mensajes del lead sin responder. Cuenta como respuesta solo un saliente que
+           efectivamente salió por WhatsApp (ver LeadMessage::is_reply_to_lead), así que también
+           cubre los dos casos en que el sistema generó algo que el lead nunca vio: la sugerencia
+           que espera verificación, y el envío que falló. */
         if (LeadConversationAiState::has_unanswered_lead_messages($lead)) {
             return true;
         }

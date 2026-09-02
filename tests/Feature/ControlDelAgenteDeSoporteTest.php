@@ -29,7 +29,7 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     use DatabaseTransactions;
 
     /**
-     * Corta cualquier salida HTTP real.
+     * Corta cualquier salida HTTP real y fija el régimen de nacimiento que esta suite asume.
      *
      * @return void
      */
@@ -38,6 +38,13 @@ class ControlDelAgenteDeSoporteTest extends TestCase
         parent::setUp();
 
         Http::fake();
+
+        // El régimen de un ticket nuevo ahora lo decide la config global. Sin fijarla acá, esta
+        // suite pasaría a depender del estado que tenga `admin_settings` en la base donde se corra:
+        // la base de testing del slot es MySQL persistente y estos tests usan DatabaseTransactions,
+        // no RefreshDatabase, así que una fila en '0' sobrevive a la corrida y deja rojos 13 tests
+        // sin que nadie haya tocado una línea de código.
+        AdminSetting::set(SupportAiSettings::KEY_REQUIRE_VERIFICATION, '1');
     }
 
     /**
@@ -210,7 +217,11 @@ class ControlDelAgenteDeSoporteTest extends TestCase
     }
 
     /**
-     * Un ticket nuevo nace con verificación humana obligatoria.
+     * Con la config global de Cuenta prendida, el ticket nuevo nace exigiendo verificación.
+     *
+     * Antes esto probaba una constante del modelo; ahora prueba que el hook `creating` copie el
+     * valor de la config global —que el setUp() deja en '1'— sobre el ticket recién nacido. El
+     * interruptor del agente sí sigue siendo un default de clase.
      *
      * @return void
      */

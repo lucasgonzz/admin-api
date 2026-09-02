@@ -501,8 +501,9 @@ class SupportTicketController extends BaseController
     /**
      * Prende o apaga la verificación humana obligatoria para un ticket puntual.
      *
-     * Con esto prendido —que es como nace todo ticket— ninguna sugerencia del agente sale sola:
-     * queda como borrador esperando que una persona la mande, con o sin ajustes.
+     * Con esto prendido —que es como nace un ticket si la config global de Cuenta lo pide—
+     * ninguna sugerencia del agente sale sola: queda como borrador esperando que una persona
+     * la mande, con o sin ajustes.
      *
      * @param int|string $id Id del ticket.
      *

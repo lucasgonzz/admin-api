@@ -318,6 +318,12 @@ class Lead extends Model
         // grilla (botón de revisión, prompt 302). Se limpia al abrir la conversación.
         'pendiente_revision_at'        => 'datetime',
 
+        // Marca manual "este lead ya no recibe mensajes" (número bloqueado o dado de baja).
+        // null = recibe con normalidad. Con fecha, sus entregas fallidas dejan de pintar la fila de
+        // rojo: el rojo está para lo que se puede reintentar, y esto no se reintenta.
+        // Ver la migración 2026_09_02_150000 para por qué la pone una persona y no el sistema.
+        'no_recibe_mensajes_at'        => 'datetime',
+
         // Marca manual "no leído" (estilo WhatsApp) del admin autenticado sobre este lead. Calculado
         // per-request en scopeWithUnreadLeadMessagesCount, no es una columna real de `leads`.
         'manually_marked_unread'       => 'boolean',
@@ -538,10 +544,24 @@ class Lead extends Model
             // agente (requiere_verificacion), y (b) todo el tramo de agenda desde solicita_disponibilidad
             // en adelante (los prompts 272/228 fuerzan requiere_verificacion en esos mensajes). Baja solo
             // cuando el mensaje sale de 'sugerido' (aprobado / rechazado / auto-enviado por el respaldo).
+            // Fila AMARILLA de la grilla (definición de Lucas, 2/9/2026): "hay alguien esperando
+            // una respuesta". Dos formas de estarlo, y las dos pintan igual porque piden lo mismo
+            // del operador — que alguien conteste:
+            //   (a) hay un mensaje por verificar listo para salir (requiere_verificacion + sugerido);
+            //   (b) el lead habló último y no le llegó ninguna respuesta (razón A).
+            // 🔴 (b) es la MISMA condición que cuenta la tarjeta "sin responder"
+            // (Lead::apply_condicion_mensaje_sin_responder). Antes el amarillo solo miraba (a), así
+            // que la tarjeta podía decir 2 y la grilla no marcar ninguna fila.
             'row_warning' => \App\Models\LeadMessage::selectRaw('COUNT(*) > 0')
                 ->whereColumn('lead_messages.lead_id', 'leads.id')
-                ->where('lead_messages.requiere_verificacion', true)
-                ->where('lead_messages.status', 'sugerido'),
+                ->where(function ($amarillo) {
+                    $amarillo->where(function ($por_verificar) {
+                        $por_verificar->where('lead_messages.requiere_verificacion', true)
+                            ->where('lead_messages.status', 'sugerido');
+                    })->orWhere(function ($sin_responder) {
+                        self::apply_condicion_mensaje_sin_responder($sin_responder);
+                    });
+                }),
 
             // Badge AMARILLO de la columna "Sin leer": mensajes salientes cuyo envío al lead falló y el
             // error sigue SIN RESOLVER. Global (no per-admin). Dos fuentes de error:
@@ -572,17 +592,21 @@ class Lead extends Model
     /**
      * Leads que ameritan revisión, en SQL puro (gemelo de LeadPendingReviewService::lead_requiere_revision()).
      *
-     * Razón A: mensajes del lead sin responder tras el último saliente (misma definición que
-     * LeadConversationAiState::has_unanswered_lead_messages(); la relación `messages` está ordenada
-     * por id, así que "posterior en el bucle" es "id mayor").
+     * Razón A: mensajes del lead sin responder tras el último saliente **que le llegó**. Qué cuenta
+     * como respuesta lo define {@see LeadMessage::is_reply_to_lead()} y su gemelo en SQL
+     * {@see LeadMessage::apply_reply_to_lead_conditions()} — una sugerencia de la IA esperando
+     * verificación no contesta nada, y un envío que nunca salió tampoco. La relación `messages` está
+     * ordenada por id, así que "posterior en el bucle" es "id mayor".
      * Razón B: el hilo termina en un error sin actividad real posterior.
      *
      * 🔴 **Por qué el segundo parámetro existe, y por qué su default es `false`.**
      *
      * Hay DOS criterios de "error de envío" en el sistema, y no son el mismo conjunto:
      *
-     * - El del **botón de revisión** (`LeadPendingReviewService`): solo `is_error = true`, o sea
-     *   los errores que el propio sistema registró al fallar el envío o la generación.
+     * - El de `LeadPendingReviewService::lead_requiere_revision()` (el gemelo en PHP de este scope,
+     *   y el oráculo del test de paridad): solo `is_error = true`, o sea los errores que el propio
+     *   sistema registró al fallar el envío o la generación. Hasta el 2/9/2026 era además el
+     *   criterio del botón de revisión, que se sacó cuando dejó de pintar colores.
      * - El del **badge amarillo** de la columna "Sin leer" (`failed_send_count`, acá arriba):
      *   `is_error` **o** `whatsapp_delivery_status = 'fallido'`, o sea sumando los rechazos que
      *   Meta avisa por webhook.
@@ -610,40 +634,64 @@ class Lead extends Model
      *
      * @return \Illuminate\Database\Eloquent\Builder
      */
+    /**
+     * 🔴 LA definición en SQL de "este mensaje del lead quedó sin responder", y la única que hay.
+     *
+     * Se aplica sobre una subconsulta YA apuntada a `lead_messages` y correlacionada con el lead.
+     * Un mensaje del lead cuenta como sin responder cuando es suyo, real (no una reacción, ni por
+     * `kind` ni en el formato legado de Kapso en texto plano) y **no hay ningún saliente posterior
+     * que le haya llegado** — eso último lo decide {@see LeadMessage::apply_reply_to_lead_conditions()}.
+     *
+     * La usan las dos cosas que tienen que decir lo mismo: el scope `requiereRevision` (que cuenta
+     * la tarjeta "sin responder") y el flag `row_warning` (que pinta la fila de amarillo). Si
+     * estuvieran escritas por separado, la tarjeta y la grilla volverían a contradecirse — que es
+     * exactamente lo que Lucas reportó el 2/9/2026.
+     *
+     * @param \Illuminate\Database\Query\Builder $query Subconsulta sobre lead_messages, correlacionada.
+     *
+     * @return void
+     */
+    public static function apply_condicion_mensaje_sin_responder($query): void
+    {
+        $query->where('lead_messages.sender', 'lead')
+            ->where('lead_messages.status', 'enviado')
+            ->where(function ($no_reaccion) {
+                $no_reaccion->whereNull('lead_messages.kind')
+                    ->orWhere('lead_messages.kind', '<>', 'reaction');
+            })
+            // Reacciones en formato legado de Kapso (texto plano), ver
+            // LeadWhatsappReactionService::is_legacy_reaction_content(). LIKE y no REGEXP:
+            // el hosting puede estar en MySQL 5.7.
+            ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Reacted % to message wamid.%'")
+            ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Removed reaction from message wamid.%'")
+            ->whereNotExists(function ($outbound) {
+                $outbound->selectRaw('1')
+                    ->from('lead_messages as outbound')
+                    ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
+                    ->whereColumn('outbound.id', '>', 'lead_messages.id');
+                /* Gemelo en SQL de LeadMessage::is_reply_to_lead(). No lo vuelvas a
+                   escribir a mano acá: eran tres copias y se separaron. */
+                LeadMessage::apply_reply_to_lead_conditions($outbound, 'outbound');
+            });
+    }
+
     public function scopeRequiereRevision($query, $incluir_entrega_fallida = false)
     {
+        /* 🔴 Los marcados como "ya no recibe mensajes" quedan afuera de todo.
+           No es un refinamiento: es lo que sostiene la promesa de que el número de la tarjeta y las
+           filas con color son el mismo conjunto. La grilla no los pinta (ver danger_row_ids en
+           Leads.vue), así que si la tarjeta los siguiera contando volvería el defecto que Lucas
+           reportó el 2/9/2026 — "dice 2 y veo una sola fila". Y de fondo: no hay nada que hacer con
+           un lead al que no le llega nada, así que no tiene por qué pedir atención. */
+        $query->whereNull('leads.no_recibe_mensajes_at');
+
         return $query->where(function ($wrap) use ($incluir_entrega_fallida) {
             // Razón A: mensaje del lead (no reacción) sin ningún saliente posterior.
             $wrap->whereExists(function ($sin_responder) {
                 $sin_responder->selectRaw('1')
                     ->from('lead_messages')
-                    ->whereColumn('lead_messages.lead_id', 'leads.id')
-                    ->where('lead_messages.sender', 'lead')
-                    ->where('lead_messages.status', 'enviado')
-                    ->where(function ($no_reaccion) {
-                        $no_reaccion->whereNull('lead_messages.kind')
-                            ->orWhere('lead_messages.kind', '<>', 'reaction');
-                    })
-                    // Reacciones en formato legado de Kapso (texto plano), ver
-                    // LeadWhatsappReactionService::is_legacy_reaction_content(). LIKE y no REGEXP:
-                    // el hosting puede estar en MySQL 5.7.
-                    ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Reacted % to message wamid.%'")
-                    ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Removed reaction from message wamid.%'")
-                    ->whereNotExists(function ($outbound) {
-                        $outbound->selectRaw('1')
-                            ->from('lead_messages as outbound')
-                            ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
-                            ->whereColumn('outbound.id', '>', 'lead_messages.id')
-                            ->where(function ($tipos) {
-                                $tipos->where(function ($setter) {
-                                    $setter->where('outbound.sender', 'setter')
-                                        ->whereIn('outbound.status', ['enviado', 'aprobado']);
-                                })->orWhere(function ($sistema) {
-                                    $sistema->where('outbound.sender', 'sistema')
-                                        ->where('outbound.status', 'aprobado');
-                                });
-                            });
-                    });
+                    ->whereColumn('lead_messages.lead_id', 'leads.id');
+                self::apply_condicion_mensaje_sin_responder($sin_responder);
             })
             // Razón B: último error sin actividad real posterior.
             ->orWhereExists(function ($error) use ($incluir_entrega_fallida) {
@@ -682,12 +730,19 @@ class Lead extends Model
      * No reordenar estas líneas asumiendo que son columnas normales.
      *
      * Prioridad del orden, de mayor a menor:
-     * 1. Solo en modo `atencion`: primero los leads que necesitan atención humana, en el MISMO
-     *    criterio que pinta de color la grilla (`Leads.vue` / `table/body/Index.vue`) — rojo
+     * 1. Solo en modo `atencion`: primero los leads que necesitan atención humana — rojo
      *    (`pendiente_revision_at` no nulo o `failed_send_count > 0`) antes que amarillo
      *    (`row_warning`), y recién después el resto. Rojo va primero porque el amarillo tiene
      *    respaldo automático (`AutoSendLeadAiSuggestionJob` termina enviando la sugerencia si nadie
      *    la confirma) y el rojo no: un envío fallido se queda ahí hasta que un humano lo vea.
+     *
+     *    ⚠️ Desde el 2/9/2026 este orden NO es exactamente el criterio del color. El rojo de la
+     *    grilla dejó de mirar `pendiente_revision_at` (era la marca del botón de revisión, que se
+     *    sacó) y ahora descuenta los leads marcados como "ya no recibe mensajes". Acá se conserva
+     *    `pendiente_revision_at` a propósito: es la ÚNICA superficie que le queda al Caso B de
+     *    `LeadSuggestionSendService` —el respaldo automático que envió sin que nadie lo revisara—,
+     *    que no tiene color propio. Si algún día ese caso gana su propio indicador, esta línea
+     *    tiene que salir de acá y el orden vuelve a espejar el color.
      * 2. Siempre (en los tres modos): fijados primero. Dentro de cada bloque de atención (rojo,
      *    amarillo, resto) se sigue respetando "fijados primero" — el pin ya no le gana a la
      *    atención, pero sigue existiendo un escalón más abajo.

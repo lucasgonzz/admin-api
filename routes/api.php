@@ -173,6 +173,16 @@ Route::middleware('claude.task.key')
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
 
+        /* Mensaje de TEXTO LIBRE a un lead. Es la contraparte de send-template para el otro lado de
+           la ventana de 24 hs de Meta: adentro de la ventana el texto libre sale y una plantilla
+           queda fría; afuera, el texto libre no sale y lo único que llega es una plantilla aprobada.
+           🔴 El freno que manda no es un cooldown sino la ventana misma, que resuelve
+           WhatsappSessionWindowService (no se recalcula acá), más un mensaje por turno de
+           conversación: respondido el lead una vez, el turno es de él. El porqué de haber
+           descartado el cooldown de 24 hs de send-template está escrito en
+           ClaudeLeadsOutboundController::hay_saliente_en_este_turno(). */
+        Route::post('leads/{id}/message', 'Api\ClaudeLeadsOutboundController@send_message_json');
+
         /* Pipeline de leads: ESCRITURA del estado.
            🔴 Mueven leads REALES. `cerrado_ganado` no se asigna desde acá y un lead ya promovido a
            cliente no se toca: ese tramo es la promoción a Client. Los frenos (dry_run por defecto,
@@ -410,7 +420,6 @@ Route::prefix('admin')->group(function () {
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);
         // Ruta de recovery batch: debe ir antes de las rutas con {id} para evitar colisión.
         Route::post('lead/batch-recover-unanswered', [LeadController::class, 'batch_recover_unanswered_json']);
-        Route::post('lead/mark-pending-review', [LeadController::class, 'mark_pending_review_json']);
         // Tarjetas de estado arriba de la grilla: cuántos leads hay en cada estado y cuántos de ellos
         // necesitan revisión (mismo criterio que el botón de revisión: sin responder o con error).
         // 🔴 Va ANTES de lead/{id}: si va después, {id} se come "status-cards".
@@ -430,6 +439,9 @@ Route::prefix('admin')->group(function () {
         Route::get('lead/{id}/panel-availability', [LeadController::class, 'panel_availability_json']);
         // Persistencia de toggles de automatización por lead desde el modal de operaciones (prompt 321).
         Route::patch('lead/{id}/automations', [LeadController::class, 'update_lead_automations_json']);
+        /* Marca manual "el lead ya no recibe mensajes": saca sus entregas fallidas del rojo de la
+           grilla, que está reservado para lo que se puede reintentar. Es un toggle. */
+        Route::put('lead/{id}/toggle-no-recibe-mensajes', [LeadController::class, 'toggle_no_recibe_mensajes_json']);
         Route::post('lead/{id}/promote', [LeadController::class, 'store_promote_json']);
         Route::post('lead/{id}/promote-to-client', [LeadController::class, 'promote_to_client_json']);
         Route::post('lead/{id}/run-user-setup', [LeadController::class, 'run_user_setup_json']);
