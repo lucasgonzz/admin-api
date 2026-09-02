@@ -106,20 +106,63 @@ class LeadSuggestionSendService
          * es del sistema o no está sugerido no hay ningún envío que proteger, y tomar el marcador
          * ahí sería marcar algo que este camino nunca va a liberar.
          */
-        $en_curso->marcar($message_id);
+        $token = $en_curso->marcar($message_id);
+
+        /*
+         * 🔴 El lease se RENUEVA con cada parte que sale, y la renovación llega hasta el bucle de
+         * partes como callback en vez de estar cableada adentro de enviar_partes(). Los dos motivos:
+         *
+         *   1. enviar_partes() es pública y compartida con el mensaje directo que un operador
+         *      escribe en el panel (LeadController@send_direct_message_json), que no tiene ningún
+         *      lease que sostener. Atarla al marcador la obligaría a conocer algo que a ese otro
+         *      llamador no le importa, que es justamente lo que se evitó cuando se sacó afuera.
+         *   2. Un TTL fijo está mal en las dos direcciones (ver la cuenta en la constante de
+         *      LeadSuggestionEnvioEnCurso): corto para un envío de 6 partes con reintentos, y largo
+         *      para un proceso HTTP que muere a los 120s por max_execution_time sin que ningún
+         *      `catch` corra. Renovando, el lease dura lo que dura el envío y ni un segundo más.
+         */
+        $renovar_lease = function () use ($en_curso, $message_id, $token) {
+            try {
+                $en_curso->renovar($message_id, $token);
+            } catch (\Throwable $e) {
+                /* Una renovación que falla no puede cortar un envío que YA está entregando partes al
+                 * lead: lo peor que pasa si el lease se cae es volver al riesgo de la carrera para lo
+                 * que quede del mensaje, y eso es infinitamente menos malo que abortar a mitad. */
+                Log::channel('daily')->warning('LeadSuggestionSendService: no se pudo renovar el lease del envío en curso.', [
+                    'message_id' => $message_id,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
+        };
 
         try {
-            return $this->enviar_sugerencia_aprobada($message, $lead, $edited_content, $final_actions, $is_auto_send, $sent_by_admin_id);
+            return $this->enviar_sugerencia_aprobada($message, $lead, $edited_content, $final_actions, $is_auto_send, $sent_by_admin_id, $renovar_lease);
         } finally {
             /*
              * 🔴 finally, y no una liberación al final del cuerpo: TODAS las salidas tienen que
-             * soltar el marcador, incluidas las que no envían nada (ventana de 24hs cerrada,
+             * soltar el lease, incluidas las que no envían nada (ventana de 24hs cerrada,
              * handle_auto_send_agendamiento_gate(), la regeneración por horario caducado) y las que
              * salen por excepción (HorarioYaNoDisponibleException de apply_pending_actions()). Un
-             * marcador que no se suelta es una sugerencia que el barrido no limpia nunca más, hasta
-             * que venza el TTL.
+             * lease que no se suelta es una sugerencia que el barrido no limpia hasta que venza.
              */
-            $en_curso->liberar($message_id);
+            try {
+                $en_curso->liberar($message_id, $token);
+            } catch (\Throwable $e) {
+                /*
+                 * 🔴 Mismo criterio que atender_inbound_diferido() acá abajo, y por la misma razón:
+                 * esto corre adentro de un `finally`, y una excepción acá REEMPLAZA a la que venía
+                 * subiendo —la HorarioYaNoDisponibleException de apply_pending_actions(), por
+                 * ejemplo—, con lo cual el llamador termina diagnosticando el síntoma equivocado.
+                 * Con el driver `file` es improbable; con uno de red (redis, memcached) es un timeout
+                 * cualquiera. Y si la liberación falla no queda nada colgado para siempre: el lease
+                 * vence solo, que es exactamente la red que tiene.
+                 */
+                Log::channel('daily')->error('LeadSuggestionSendService: no se pudo liberar el lease del envío en curso.', [
+                    'message_id' => $message_id,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
+
             $this->atender_inbound_diferido($en_curso, $lead, $message_id);
         }
     }
@@ -133,16 +176,20 @@ class LeadSuggestionSendService
      * excepción—, sin tener que sembrar la liberación en cada `return`. La firma pública del
      * servicio no cambió: quien llama sigue viendo send_suggestion().
      *
-     * @param LeadMessage $message          Mensaje en estado `sugerido`, ya validado.
-     * @param Lead        $lead             Lead dueño del mensaje, ya resuelto.
-     * @param string|null $edited_content   Ver send_suggestion().
-     * @param array|null  $final_actions    Ver send_suggestion().
-     * @param bool        $is_auto_send     Ver send_suggestion().
-     * @param int|null    $sent_by_admin_id Ver send_suggestion().
+     * @param LeadMessage   $message          Mensaje en estado `sugerido`, ya validado.
+     * @param Lead          $lead             Lead dueño del mensaje, ya resuelto.
+     * @param string|null   $edited_content   Ver send_suggestion().
+     * @param array|null    $final_actions    Ver send_suggestion().
+     * @param bool          $is_auto_send     Ver send_suggestion().
+     * @param int|null      $sent_by_admin_id Ver send_suggestion().
+     * @param callable|null $al_enviar_parte  Se invoca después de cada parte que sale con éxito.
+     *                                        Acá lo único que hace es renovar el lease del marcador
+     *                                        de envío en curso; viaja como parámetro para no atar
+     *                                        enviar_partes() al marcador (ver send_suggestion()).
      *
      * @return LeadMessage
      */
-    private function enviar_sugerencia_aprobada(LeadMessage $message, Lead $lead, ?string $edited_content, ?array $final_actions, bool $is_auto_send, ?int $sent_by_admin_id): LeadMessage
+    private function enviar_sugerencia_aprobada(LeadMessage $message, Lead $lead, ?string $edited_content, ?array $final_actions, bool $is_auto_send, ?int $sent_by_admin_id, ?callable $al_enviar_parte = null): LeadMessage
     {
         /*
          * Revalidación de horarios ofrecidos (grupo 306, prompt 04). La disponibilidad se calculó
@@ -356,7 +403,7 @@ class LeadSuggestionSendService
         $error_detail = null;
 
         if ($phone !== '') {
-            $send_result = $this->send_body($phone, $body, $lead, $message);
+            $send_result = $this->send_body($phone, $body, $lead, $message, $al_enviar_parte);
 
             if ($send_result['sent_parts'] === 0) {
                 $send_failed = true;
@@ -705,10 +752,22 @@ class LeadSuggestionSendService
      *                                                        fallo a admins.
      * @param string             $partes_pendientes_separador Con qué se vuelven a unir las partes que
      *                                                        no salieron.
+     * @param callable|null      $al_enviar_parte             Se invoca, sin argumentos, después de
+     *                                                        CADA parte que sale con éxito.
+     *
+     *                                                        🔴 Existe para que el envío de una
+     *                                                        sugerencia pueda renovar el lease del
+     *                                                        marcador de "envío en curso" mientras
+     *                                                        avanza, sin que este método —que es
+     *                                                        compartido con el mensaje directo del
+     *                                                        panel— tenga que saber que ese marcador
+     *                                                        existe. El mensaje directo no pasa nada
+     *                                                        y no cambia en nada. Es opcional y va
+     *                                                        al final justamente para eso.
      *
      * @return array{sent_parts:int, total_parts:int, last_message_id:string|null, pending_text:string|null, error:string|null}
      */
-    public function enviar_partes(string $phone, array $partes, string $context, string $partes_pendientes_separador = "\n---\n"): array
+    public function enviar_partes(string $phone, array $partes, string $context, string $partes_pendientes_separador = "\n---\n", ?callable $al_enviar_parte = null): array
     {
         $total_parts = count($partes);
 
@@ -765,6 +824,15 @@ class LeadSuggestionSendService
                 ];
             }
 
+            /*
+             * La parte salió: se le avisa al llamador, si pidió que se le avisara. Va ACÁ y no
+             * después de la pausa a propósito — el que renueva un lease necesita hacerlo apenas
+             * confirma que sigue vivo, no después de dormir 1200ms más.
+             */
+            if ($al_enviar_parte !== null) {
+                $al_enviar_parte();
+            }
+
             // Pausa entre partes exitosas (NO después de la última): es la prevención de raíz del
             // 409 de Kapso ("Another message is already in-flight for this conversation"), le da
             // tiempo a liberar el bloqueo de la conversación antes de mandar la siguiente parte.
@@ -791,14 +859,18 @@ class LeadSuggestionSendService
      * es lo único que le pide el prompt) y el contexto con el que se identifica el fallo. El envío
      * en sí vive en `enviar_partes()`, compartido con el mensaje directo del panel.
      *
-     * @param string      $phone
-     * @param string      $body
-     * @param Lead        $lead    Para armar el contexto de la notificación de fallo a admins.
-     * @param LeadMessage $message Para armar el contexto de la notificación de fallo a admins.
+     * @param string        $phone
+     * @param string        $body
+     * @param Lead          $lead            Para armar el contexto de la notificación de fallo a admins.
+     * @param LeadMessage   $message         Para armar el contexto de la notificación de fallo a admins.
+     * @param callable|null $al_enviar_parte Callback que se ejecuta después de cada parte enviada
+     *                                       con éxito. Lo arma send_suggestion() para renovar el
+     *                                       lease del marcador de envío en curso; acá sólo se pasa
+     *                                       de largo hasta enviar_partes().
      *
      * @return array{sent_parts:int, total_parts:int, last_message_id:string|null, pending_text:string|null, error:string|null}
      */
-    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message): array
+    private function send_body(string $phone, string $body, Lead $lead, LeadMessage $message, ?callable $al_enviar_parte = null): array
     {
         // Split idéntico al comportamiento anterior: separador "\n---\n", trim y descarte de partes vacías.
         $parts = array_values(array_filter(
@@ -810,7 +882,7 @@ class LeadSuggestionSendService
             . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '')
             . " (mensaje #{$message->id})";
 
-        return $this->enviar_partes($phone, $parts, $context);
+        return $this->enviar_partes($phone, $parts, $context, "\n---\n", $al_enviar_parte);
     }
 
     /**
