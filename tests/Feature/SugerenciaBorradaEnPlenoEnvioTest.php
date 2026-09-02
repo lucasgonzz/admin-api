@@ -4,13 +4,16 @@ namespace Tests\Feature;
 
 use App\Jobs\GenerateLeadAiSuggestionJob;
 use App\Models\Admin;
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\LeadSuggestionEnvioEnCurso;
 use App\Services\LeadSuggestionSendService;
 use App\Services\WhatsappSendService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -89,8 +92,44 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
     {
         parent::setUp();
 
+        /*
+         * 🔴 LA CACHE SE LIMPIA ACÁ, Y NO ES PROLIJIDAD: ES LA CONDICIÓN PARA QUE ESTE ARCHIVO SIRVA.
+         *
+         * `DatabaseTransactions` revierte la base al terminar cada test, pero NO la cache — y todo
+         * lo que este archivo prueba está apoyado en cache: el lease de "envío en curso", la marca
+         * de inbound diferido y el token de debounce del scheduler. Con un driver que persiste en
+         * disco (`file`, que es lo que dice el `.env.testing` de los slots y lo que corre en
+         * producción), `storage/framework/cache/data` SOBREVIVE a la corrida: un lease que quedó de
+         * la corrida anterior sobre un id que MySQL vuelve a asignar hace que el barrido saltee
+         * cuando el test asume que borra, o que `esta_en_curso()` devuelva true donde el test asume
+         * false. Medido: 1 fallo de 8 corridas del mismo commit, siempre en el escenario central, y
+         * la corrida con cache sucia tardaba 3:28 contra 19s con la cache limpia.
+         *
+         * Un test de condición de carrera que él mismo es inestable no sirve como red: cuando falle
+         * de verdad nadie le va a creer. Por eso se limpia entero y en el setUp, sin depender de qué
+         * driver tenga configurado la máquina donde corra.
+         */
+        Cache::flush();
+
         Http::fake();
         Bus::fake([GenerateLeadAiSuggestionJob::class]);
+    }
+
+    /**
+     * Deja el reloj y la cache como estaban, para el archivo de tests que corra después.
+     *
+     * El reloj se toca en el test del lease (Carbon::setTestNow para saltar el TTL sin dormir dos
+     * minutos) y la cache queda con leases y marcas de este archivo: los dos son estado global que
+     * no revierte `DatabaseTransactions`.
+     *
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+        Cache::flush();
+
+        parent::tearDown();
     }
 
     /**
@@ -230,6 +269,9 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
             /** @var array<int, string> Partes distintas que se intentaron, en orden. */
             public $partes = [];
 
+            /** @var array<int, string> Plantillas Meta que se intentaron enviar, en orden. */
+            public $plantillas = [];
+
             /** @var int Número de parte (contando desde 1) que WhatsApp rechaza. 0 = ninguna. */
             public $falla_en_la_parte = 0;
 
@@ -261,6 +303,22 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
             public function wamid(int $parte): string
             {
                 return $this->prefijo . $parte;
+            }
+
+            /**
+             * Id de Meta que le tocó a esa plantilla.
+             *
+             * Va con un espacio de ids propio ("tpl"), separado del de las partes de texto:
+             * `lead_messages.whatsapp_message_id` tiene índice UNIQUE, y un test que mande texto y
+             * plantilla chocaría contra sí mismo.
+             *
+             * @param int $envio Número de envío de plantilla, contando desde 1.
+             *
+             * @return string
+             */
+            public function wamid_plantilla(int $envio): string
+            {
+                return $this->prefijo . 'tpl' . $envio;
             }
 
             /**
@@ -303,6 +361,33 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
             }
 
             /**
+             * Envío por plantilla Meta (el camino de los seguimientos).
+             *
+             * Respeta el mismo gancho `al_enviar` que send_text(): la carrera se dispara adentro del
+             * envío, tenga la forma que tenga.
+             *
+             * @param string      $to
+             * @param string      $template_name
+             * @param array       $variables
+             * @param string      $language_code
+             * @param string|null $context
+             *
+             * @return string|null
+             */
+            public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
+            {
+                $this->plantillas[] = $template_name;
+
+                if ($this->al_enviar !== null) {
+                    $callback        = $this->al_enviar;
+                    $this->al_enviar = null;
+                    $callback();
+                }
+
+                return $this->wamid_plantilla(count($this->plantillas));
+            }
+
+            /**
              * @return bool
              */
             public function last_send_was_transient(): bool
@@ -321,15 +406,33 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
     /**
      * Aprueba la sugerencia por el endpoint real del panel.
      *
-     * @param Admin       $admin   Quien aprueba.
-     * @param LeadMessage $message Sugerencia pendiente.
+     * 🔴 Acepta el texto editado en vez de tener un helper aparte, y no es una comodidad: el
+     * escenario que originó esta misión, textual de Lucas, es *"aprueba una sugerencia de la IA, LA
+     * EDITA y le da enviar"* — o sea `approve-with-edit`, no `approve` a secas. El panel tiene TRES
+     * endpoints de aprobación (`approve`, `approve-with-edit`, `approve-with-actions`), los tres
+     * llaman al mismo send_suggestion() y los tres pueden perder la fila en pleno envío. Que el
+     * helper cubra el texto editado hace que cualquier test futuro pueda entrar por el endpoint que
+     * corresponda en lugar de escribir el `putJson` a mano y quedarse con el más fácil.
+     *
+     * @param Admin       $admin         Quien aprueba.
+     * @param LeadMessage $message       Sugerencia pendiente.
+     * @param string|null $texto_editado Texto final que escribió el setter. Null (default) aprueba
+     *                                   tal cual lo escribió Claude.
      *
      * @return \Illuminate\Testing\TestResponse
      */
-    private function aprobar(Admin $admin, LeadMessage $message)
+    private function aprobar(Admin $admin, LeadMessage $message, ?string $texto_editado = null)
     {
-        return $this->actingAs($admin, 'sanctum')
-            ->putJson('/api/admin/lead-message/' . $message->id . '/approve');
+        $sesion = $this->actingAs($admin, 'sanctum');
+
+        if ($texto_editado === null) {
+            return $sesion->putJson('/api/admin/lead-message/' . $message->id . '/approve');
+        }
+
+        return $sesion->putJson(
+            '/api/admin/lead-message/' . $message->id . '/approve-with-edit',
+            ['edited_content' => $texto_editado]
+        );
     }
 
     /**
@@ -920,5 +1023,382 @@ class SugerenciaBorradaEnPlenoEnvioTest extends TestCase
             (new LeadSuggestionEnvioEnCurso())->hay_inbound_durante_el_envio((int) $sugerencia->id),
             'La marca de inbound diferido quedó sin atender después del envío.'
         );
+    }
+
+    /**
+     * 🔴 El lease se renueva mientras el envío avanza: un envío más largo que el TTL sigue protegido.
+     *
+     * Es la diferencia entre un lease y un TTL fijo, y por qué el número dejó de ser 300. Un TTL fijo
+     * está mal en las dos direcciones: corto para un envío de varias partes con reintentos (una parte
+     * que sale recién en el 3er intento cuesta ~50s, con 6 partes se pasan los 300s), y largo para un
+     * request HTTP que muere a los 120s por `max_execution_time` sin que ningún `catch` corra,
+     * dejando el marcador vivo y al lead sin respuesta. Renovando con cada parte, el lease dura lo
+     * que dura el envío y ni un segundo más.
+     *
+     * Cómo se modela sin dormir tres minutos: cada parte "tarda" 90 segundos de reloj (menos que el
+     * TTL de 120s, así que la renovación de la parte anterior siempre llega a tiempo — una renovación
+     * NO resucita un lease ya vencido, y en producción tampoco haría falta que lo hiciera). Para
+     * cuando arranca la tercera parte ya pasaron 180 segundos desde `marcar()`: más que el TTL. Con
+     * renovación el lease sigue vivo ahí; sin renovación está muerto hace un minuto.
+     *
+     * @return void
+     */
+    public function test_el_lease_se_renueva_mientras_el_envio_avanza()
+    {
+        $admin = $this->crear_admin('lease-renovado@test.local');
+        $lead  = $this->crear_lead('Delfina');
+        $this->crear_inbound($lead, 'Hola');
+
+        $sugerencia = $this->crear_sugerencia($lead, [
+            'content' => "Primera parte del mensaje.\n---\nSegunda parte del mensaje.\n---\nTercera parte del mensaje.",
+        ]);
+
+        $en_curso = new LeadSuggestionEnvioEnCurso();
+
+        $paso = new \stdClass();
+        $paso->numero                   = 0;
+        $paso->lease_en_la_tercera_parte = null;
+
+        $espia = $this->espiar_sender();
+
+        $gancho = null;
+        $gancho = function () use ($espia, $paso, $en_curso, $sugerencia, &$gancho) {
+            $paso->numero++;
+
+            /* Tercera parte: ya pasaron 180s desde que se tomó el lease, más que su TTL de 120s. */
+            if ($paso->numero >= 3) {
+                $paso->lease_en_la_tercera_parte = $en_curso->esta_en_curso((int) $sugerencia->id);
+
+                return;
+            }
+
+            /* Esta parte "tardó" 90 segundos. Menos que el TTL: la renovación que corre en cuanto la
+               parte sale con éxito todavía encuentra el lease vivo y lo estira otros 120. */
+            Carbon::setTestNow(Carbon::now()->addSeconds(90));
+
+            $espia->al_enviar = $gancho;
+        };
+        $espia->al_enviar = $gancho;
+
+        $this->aprobar($admin, $sugerencia)->assertStatus(200);
+
+        Carbon::setTestNow();
+
+        $this->assertCount(3, $espia->partes, 'El envío no llegó a la tercera parte: no prueba lo que dice probar.');
+        $this->assertTrue(
+            $paso->lease_en_la_tercera_parte,
+            'El lease venció en pleno envío: con un TTL fijo el barrido puede borrar la sugerencia mientras todavía salen partes.'
+        );
+
+        $this->assertFalse($en_curso->esta_en_curso((int) $sugerencia->id), 'El lease quedó puesto después de terminar el envío.');
+        $this->assertSame('enviado', (string) LeadMessage::query()->find($sugerencia->id)->status);
+    }
+
+    /**
+     * 🔴 El lease tiene dueño: un envío que terminó no puede desproteger a otro que sigue mandando.
+     *
+     * No es un caso de laboratorio. Dos envíos del MISMO mensaje son alcanzables de verdad:
+     * AutoSendLeadAiSuggestionJob y una aprobación humana desde el panel entran los dos con
+     * `status = 'sugerido'`, porque el status recién cambia DESPUÉS del POST a Kapso. Sin token, el
+     * primero que llega a su `finally` suelta el marcador del segundo, el barrido lo ve libre y borra
+     * la fila del que todavía está mandando: el incidente completo, otra vez.
+     *
+     * @return void
+     */
+    public function test_un_liberar_con_token_ajeno_no_desprotege_el_envio_en_curso()
+    {
+        $en_curso   = new LeadSuggestionEnvioEnCurso();
+        $message_id = 987654321;
+
+        $token_del_primero = $en_curso->marcar($message_id);
+        /* El segundo envío del mismo mensaje arranca y se lleva el lease. */
+        $token_del_segundo = $en_curso->marcar($message_id);
+
+        $this->assertNotSame($token_del_primero, $token_del_segundo, 'Dos leases del mismo mensaje salieron con el mismo token.');
+
+        $this->assertFalse(
+            $en_curso->liberar($message_id, $token_del_primero),
+            'Un envío que ya terminó soltó el lease de otro que sigue mandando.'
+        );
+        $this->assertTrue(
+            $en_curso->esta_en_curso($message_id),
+            'El mensaje quedó desprotegido con un envío todavía en curso: el barrido puede borrarle la fila.'
+        );
+
+        $this->assertFalse(
+            $en_curso->renovar($message_id, $token_del_primero),
+            'Un token ajeno pudo estirar un lease que no es suyo.'
+        );
+
+        /* El dueño sí puede, y ahí se suelta de verdad. */
+        $this->assertTrue($en_curso->liberar($message_id, $token_del_segundo));
+        $this->assertFalse($en_curso->esta_en_curso($message_id));
+    }
+
+    /**
+     * La misma detección de 0 filas en el camino de seguimiento por plantilla.
+     *
+     * Es la gemela de la salida de éxito principal y tenía el `update()` mudo: ahí arriba la
+     * PLANTILLA YA SALIÓ por WhatsApp, así que el efecto externo es idéntico e igual de irreversible.
+     * Que hoy el barrido filtre `is_followup = false` no alcanza como defensa —es un detalle de otro
+     * archivo, y hay otros caminos que borran esa fila—, y dejar la familia a medio arreglar es la
+     * clase de error que este proyecto ya tiene escrita.
+     *
+     * @return void
+     */
+    public function test_la_deteccion_de_cero_filas_repone_el_seguimiento_por_plantilla()
+    {
+        $admin = $this->crear_admin('seguimiento-repuesto@test.local');
+        $lead  = $this->crear_lead('Federico');
+
+        $plantilla = FollowupTemplate::create([
+            'estado'        => 'contactado',
+            'dia_numero'    => 1,
+            'template_name' => 'seguimiento_test_' . uniqid('', false),
+            'body_template' => 'Hola {{1}}, ¿pudiste ver lo que te mandé?',
+            'language_code' => 'es_AR',
+            'activa'        => true,
+        ]);
+
+        $sugerencia = $this->crear_sugerencia($lead, [
+            'content'              => 'Hola Federico, ¿pudiste ver lo que te mandé?',
+            'is_followup'          => true,
+            'followup_template_id' => $plantilla->id,
+        ]);
+
+        $espia = $this->espiar_sender();
+        $espia->al_enviar = function () use ($sugerencia) {
+            LeadMessage::query()->whereKey($sugerencia->id)->delete();
+        };
+
+        $this->aprobar($admin, $sugerencia)->assertStatus(200);
+
+        $this->assertCount(1, $espia->plantillas, 'La plantilla no salió por WhatsApp: el escenario no prueba nada.');
+        $this->assertNull(LeadMessage::query()->find($sugerencia->id), 'La fila vieja tenía que estar borrada en este escenario.');
+
+        $mensajes = $this->mensajes_del_sistema($lead);
+        $this->assertCount(1, $mensajes, 'El seguimiento que ya había salido por WhatsApp no quedó en el hilo (o quedó duplicado).');
+
+        $repuesto = $mensajes->first();
+        $this->assertSame('enviado', (string) $repuesto->status);
+        $this->assertSame($espia->wamid_plantilla(1), (string) $repuesto->whatsapp_message_id, 'El seguimiento repuesto perdió el id real de WhatsApp.');
+        $this->assertTrue((bool) $repuesto->is_followup, 'El seguimiento se repuso como si fuera un mensaje común.');
+        $this->assertSame((int) $plantilla->id, (int) $repuesto->followup_template_id, 'Se perdió con qué plantilla se mandó.');
+        $this->assertSame((int) $admin->id, (int) $repuesto->sent_by_admin_id);
+        $this->assertNotNull($repuesto->sent_at);
+
+        $this->assertTrue($this->hay_bloque($lead, self::BLOQUE_SUGERENCIA_REPUESTA), 'No quedó constancia en el hilo de que el seguimiento se había borrado.');
+        $this->assertFalse($this->hay_bloque($lead, self::BLOQUE_FALLO_DE_ENVIO), 'El hilo avisa que no salió un seguimiento que el lead recibió.');
+        $this->assertNotNull($lead->fresh()->pendiente_revision_at, 'Pasó algo anómalo y el lead no quedó marcado para revisión.');
+    }
+
+    /**
+     * 🔴 El gate de agendamiento no se queda sin su mensaje.
+     *
+     * El respaldo automático se corta cuando el paquete de acciones agenda o cancela una demo:
+     * notifica a los admins por push y por WhatsApp que hay un mensaje esperando aprobación y lo deja
+     * en `sugerido`. Si el re-disparo del inbound diferido corriera igual, el barrido que dispara se
+     * llevaría puesta esa sugerencia —el lease ya está suelto— y el admin abriría el panel avisado y
+     * no encontraría nada.
+     *
+     * El inbound entra ADENTRO del gate, cuando el mensaje del aviso se escribe en el hilo: ahí el
+     * lease todavía está puesto, así que el barrido lo saltea y deja la marca de inbound diferido.
+     * Sin la condición, el `finally` termina borrando lo que este mismo request acabó de dejar.
+     *
+     * @return void
+     */
+    public function test_el_gate_de_agendamiento_no_se_queda_sin_su_mensaje()
+    {
+        $admin = $this->crear_admin('gate-inbound@test.local');
+        $lead  = $this->crear_lead('Ariel');
+        $this->crear_inbound($lead, 'Hola, quiero la demo');
+
+        $sugerencia = $this->crear_sugerencia($lead, [
+            'pending_actions' => ['agendar_demo' => ['fecha' => '2026-09-10', 'hora' => '15:00']],
+        ]);
+
+        $espia = $this->espiar_sender();
+
+        /* El endpoint de inbound pide sesión, y acá no se entra por el panel: el respaldo automático
+           no tiene endpoint, se llama al servicio derecho. */
+        $this->actingAs($admin, 'sanctum');
+
+        $disparo = new \stdClass();
+        $disparo->hecho = false;
+        LeadMessage::created(function () use ($disparo, $lead) {
+            /* Una sola vez: el propio inbound crea un LeadMessage y volvería a entrar acá. */
+            if ($disparo->hecho) {
+                return;
+            }
+            $disparo->hecho = true;
+
+            $this->simular_inbound($lead, '¿Y si lo hacemos el jueves?');
+        });
+
+        app(LeadSuggestionSendService::class)->send_suggestion($sugerencia, null, null, true, null);
+
+        $this->assertTrue($disparo->hecho, 'El inbound no llegó a correr durante el gate: el escenario no prueba nada.');
+        $this->assertCount(0, $espia->textos, 'El gate de agendamiento envió algo por WhatsApp.');
+
+        $vivo = LeadMessage::query()->find($sugerencia->id);
+        $this->assertNotNull($vivo, 'El re-disparo del inbound diferido borró la sugerencia que el gate dejó esperando aprobación humana.');
+        $this->assertSame('sugerido', (string) $vivo->status, 'El mensaje que espera aprobación cambió de estado.');
+
+        $this->assertTrue($this->hay_bloque($lead, 'Mensaje de agendamiento sin aprobar'), 'Se perdió el aviso del gate en el hilo.');
+
+        /* Y no se gastó una generación de más: la sugerencia siguiente ya existe, es la que quedó
+           esperando revisión. El único despacho es el del barrido del inbound. */
+        $this->assertSame(
+            1,
+            $this->despachos_de_generacion(),
+            'El inbound diferido reprogramó una generación que ya no hacía falta: es una llamada a Claude tirada.'
+        );
+    }
+
+    /**
+     * La fila recreada conserva TODO lo que el hilo renderiza, no sólo el texto.
+     *
+     * `recrear_mensaje_enviado()` enumera los atributos a mano y su docblock promete que el hilo
+     * queda igual que en el camino normal. Un campo que se olvide no rompe nada visible: simplemente
+     * desaparece de la conversación, en silencio. Estos cuatro los pinta MessageBubble.vue de
+     * admin-spa (los dos badges de demo confirmada, los admins notificados y el desplegable de
+     * horarios enviados) y no estaban.
+     *
+     * @return void
+     */
+    public function test_la_fila_recreada_conserva_los_campos_que_el_hilo_renderiza()
+    {
+        $admin = $this->crear_admin('campos-repuestos@test.local');
+        $lead  = $this->crear_lead('Bruno');
+        $this->crear_inbound($lead, 'Hola');
+
+        $notificaciones = [['evento' => 'demo_agendada', 'admins' => ['Lucas', 'Martín']]];
+        /* `calendar_snapshot` es una columna `text` SIN cast: viaja como el string JSON que escribió
+           LeadAiService. El test lo guarda igual que producción para que la copia se pruebe tal cual
+           es, y no contra una versión conveniente. */
+        $snapshot = json_encode(
+            ['closers' => [['admin_id' => 7, 'nombre' => 'Ana', 'estado' => 'ok', 'eventos' => []]]],
+            JSON_UNESCAPED_UNICODE
+        );
+
+        $sugerencia = $this->crear_sugerencia($lead, [
+            'content'                         => 'Te dejo los horarios.',
+            'ai_reasoning'                    => 'El lead pidió horarios concretos.',
+            'marca_demo_ingreso_confirmado'   => true,
+            'marca_demo_terminada_confirmada' => true,
+            'admin_notifications'             => $notificaciones,
+            'calendar_snapshot'               => $snapshot,
+        ]);
+
+        $espia = $this->espiar_sender();
+        $espia->al_enviar = function () use ($sugerencia) {
+            LeadMessage::query()->whereKey($sugerencia->id)->delete();
+        };
+
+        $this->aprobar($admin, $sugerencia)->assertStatus(200);
+
+        $repuesto = $this->mensajes_del_sistema($lead)->first();
+        $this->assertNotNull($repuesto, 'El mensaje no se repuso en el hilo.');
+        $this->assertNotSame((int) $sugerencia->id, (int) $repuesto->id, 'La fila vieja seguía viva: el escenario no probó la recreación.');
+
+        $this->assertTrue((bool) $repuesto->marca_demo_ingreso_confirmado, 'Se perdió el badge "Ingreso a demo confirmado".');
+        $this->assertTrue((bool) $repuesto->marca_demo_terminada_confirmada, 'Se perdió el badge "Demo terminada confirmada".');
+        $this->assertSame($notificaciones, $repuesto->admin_notifications, 'Se perdieron los avisos de admins notificados.');
+        $this->assertSame($snapshot, (string) $repuesto->calendar_snapshot, 'Se perdió el desplegable de horarios enviados.');
+
+        /* Y el snapshot sigue siendo JSON legible: si se hubiera codificado dos veces, el hilo
+           mostraría el desplegable roto en vez de vacío, que es peor. */
+        $this->assertIsArray(json_decode((string) $repuesto->calendar_snapshot, true), 'El calendar_snapshot repuesto dejó de ser JSON parseable.');
+
+        /* Y lo que ya funcionaba sigue estando. */
+        $this->assertSame('El lead pidió horarios concretos.', (string) $repuesto->ai_reasoning);
+        $this->assertSame('Te dejo los horarios.', (string) $repuesto->content);
+    }
+
+    /**
+     * 🔴 EL ESCENARIO DE LUCAS, textual: aprueba la sugerencia, LA EDITA, le da enviar.
+     *
+     * Los tests de arriba entran todos por `approve` a secas, que es el endpoint sin edición. El
+     * incidente que originó la misión pasó por `approve-with-edit`, que es otro controller y otro
+     * argumento a send_suggestion(). Acá se cubre el camino feliz de ese endpoint bajo la carrera: el
+     * lead contesta durante el envío, la fila sobrevive, y lo que salió por WhatsApp es el texto del
+     * setter y no el de Claude.
+     *
+     * @return void
+     */
+    public function test_la_sugerencia_editada_sobrevive_al_inbound_y_manda_el_texto_del_setter()
+    {
+        $admin = $this->crear_admin('editada-en-vuelo@test.local');
+        $lead  = $this->crear_lead('Lucía');
+        $this->crear_inbound($lead, 'Hola, quiero ver el sistema');
+
+        $sugerencia    = $this->crear_sugerencia($lead, ['content' => 'Te cuento cómo funciona el sistema.']);
+        $texto_editado = 'Te cuento cómo funciona, Lucía: arrancamos con una demo de 30 minutos.';
+
+        $espia = $this->espiar_sender();
+
+        $inbound = new \stdClass();
+        $inbound->status = null;
+        $espia->al_enviar = function () use ($lead, $inbound) {
+            $inbound->status = $this->simular_inbound($lead, '¿Y cuánto sale?')->status();
+        };
+
+        $this->aprobar($admin, $sugerencia, $texto_editado)->assertStatus(200);
+
+        $this->assertSame(200, $inbound->status, 'El inbound del lead no llegó a correr durante el envío.');
+        $this->assertSame([$texto_editado], $espia->partes, 'Al lead le llegó el texto de Claude y no el que escribió el setter.');
+
+        $fresco = LeadMessage::query()->find($sugerencia->id);
+        $this->assertNotNull($fresco, 'El barrido borró la sugerencia editada mientras se estaba enviando.');
+        $this->assertSame('enviado', (string) $fresco->status);
+        $this->assertSame($texto_editado, (string) $fresco->edited_content, 'No quedó guardado el texto que el setter escribió.');
+        $this->assertSame('Te cuento cómo funciona el sistema.', (string) $fresco->content, 'Se perdió el texto original de Claude, que es contra lo que se compara la corrección.');
+    }
+
+    /**
+     * 🔴 El mensaje repuesto lleva el texto EDITADO, que es el que el lead tiene en el teléfono.
+     *
+     * Es la línea de `recrear_mensaje_enviado()` que más importa de todas y la que Lucas pidió ver
+     * clavada: cuando la fila desaparece, lo que se repone en el hilo tiene que ser fiel a lo que
+     * SALIÓ, no a lo que Claude había propuesto. Si el hilo mostrara el original, el setter leería un
+     * mensaje que nunca se envió, y su corrección se perdería sin dejar rastro.
+     *
+     * @return void
+     */
+    public function test_el_mensaje_repuesto_lleva_el_texto_editado_por_el_setter()
+    {
+        $admin = $this->crear_admin('editada-repuesta@test.local');
+        $lead  = $this->crear_lead('Ramiro');
+        $this->crear_inbound($lead, 'Hola');
+
+        $sugerencia    = $this->crear_sugerencia($lead, ['content' => 'Te cuento cómo funciona el sistema.']);
+        $texto_editado = 'Mirá Ramiro, te lo resumo: una demo de 30 minutos y lo ves andando.';
+
+        $espia = $this->espiar_sender();
+        $espia->al_enviar = function () use ($sugerencia) {
+            LeadMessage::query()->whereKey($sugerencia->id)->delete();
+        };
+
+        $this->aprobar($admin, $sugerencia, $texto_editado)->assertStatus(200);
+
+        $this->assertSame([$texto_editado], $espia->partes, 'Al lead le llegó el texto de Claude y no el que escribió el setter.');
+        $this->assertNull(LeadMessage::query()->find($sugerencia->id), 'La fila vieja tenía que estar borrada en este escenario.');
+
+        $mensajes = $this->mensajes_del_sistema($lead);
+        $this->assertCount(1, $mensajes, 'El mensaje editado que ya había salido no quedó en el hilo (o quedó duplicado).');
+
+        $repuesto = $mensajes->first();
+        $this->assertSame(
+            $texto_editado,
+            (string) $repuesto->edited_content,
+            'El hilo repuesto no muestra el texto editado: el setter ve un mensaje distinto al que recibió el lead.'
+        );
+        $this->assertSame('Te cuento cómo funciona el sistema.', (string) $repuesto->content, 'Se perdió el original de Claude en la fila repuesta.');
+        $this->assertSame('enviado', (string) $repuesto->status);
+        $this->assertSame($espia->wamid(1), (string) $repuesto->whatsapp_message_id, 'El mensaje repuesto perdió el id real de WhatsApp.');
+        $this->assertSame((int) $admin->id, (int) $repuesto->sent_by_admin_id);
+
+        $this->assertTrue($this->hay_bloque($lead, self::BLOQUE_SUGERENCIA_REPUESTA), 'No quedó constancia en el hilo de que la sugerencia se había borrado.');
+        $this->assertFalse($this->hay_bloque($lead, self::BLOQUE_FALLO_DE_ENVIO), 'El hilo avisa que no se envió un mensaje que el lead recibió.');
     }
 }
