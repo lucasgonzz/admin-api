@@ -1040,13 +1040,45 @@ class DeploymentService
             $transport_error = $e->getMessage();
         }
 
-        // Caso exitoso: empresa-api confirmó el cambio de versión/URL por defecto.
-        if ($response !== null && $response->successful()) {
+        /**
+         * Caso exitoso: empresa-api confirmó el cambio de versión/URL por defecto.
+         *
+         * 🔴 UN 200 NO ALCANZA: hay que ver que el cuerpo sea el del endpoint.
+         *
+         * `UpdateDefaultVersionController::update()` contesta `{"ok": true, ...}`. Si la
+         * `ClientApi.url` estuviera mal cargada y apuntara a la carpeta del SPA en vez de a la del
+         * API, el `.htaccess` de fallback del SPA (`RewriteRule . /index.html [L]`) devuelve **200
+         * con el HTML del index** para cualquier path. Con solo mirar `successful()`, ese caso se
+         * sellaba como `success` —y con `sistema_configurado_at` puesto— mientras
+         * `users.default_version` seguía intacto: o sea, exactamente el bug silencioso que este
+         * paso vino a arreglar, pero disfrazado de éxito en vez de warning, que es peor.
+         *
+         * Lo levantó la verificación independiente de esta misión. El agujero ya existía para los
+         * clientes que sí tienen api_key; lo que hizo el cambio de arriba fue extenderlo a los que
+         * antes ni llegaban hasta acá, así que se cierra en la misma misión.
+         */
+        if ($response !== null && $response->successful() && $response->json('ok')) {
             $body = $response->body();
             $this->log('update_default_version', 'HTTP ' . $response->status() . ': ' . substr($body, 0, 2000));
             $this->upgrade->update([
                 'default_version_sync_status'  => 'success',
                 'default_version_sync_message' => null,
+            ]);
+            return;
+        }
+
+        // 200 pero sin `ok` en el cuerpo: no contestó el endpoint, contestó otra cosa.
+        if ($response !== null && $response->successful()) {
+            $manual_message = 'La URL respondió HTTP ' . $response->status() . ' pero el cuerpo no es '
+                . 'el de update-default-version (falta "ok"), así que el cambio NO se aplicó. Suele '
+                . 'ser que la URL de la ClientApi apunta a la carpeta del SPA en vez de la del API: '
+                . 'revisá que termine en /public. Primeros caracteres de lo que contestó: '
+                . $this->truncate_for_log((string) $response->body(), 300)
+                . $manual_action_suffix;
+            $this->log('update_default_version', $manual_message, 'warning');
+            $this->upgrade->update([
+                'default_version_sync_status'  => 'manual_required',
+                'default_version_sync_message' => $manual_message,
             ]);
             return;
         }

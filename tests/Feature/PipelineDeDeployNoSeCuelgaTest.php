@@ -312,6 +312,40 @@ class PipelineDeDeployNoSeCuelgaTest extends TestCase
         );
     }
 
+    /**
+     * 🔴 Un 200 que NO viene del endpoint no se puede marcar como éxito.
+     *
+     * Lo levantó la verificación independiente. Si la `ClientApi.url` apunta a la carpeta del SPA
+     * en vez de a la del API, el `.htaccess` de fallback del SPA contesta 200 con el HTML del
+     * index para cualquier path. Sellar eso como `success` deja `users.default_version` intacto y
+     * el panel diciendo que está todo bien: el mismo bug silencioso que este paso vino a arreglar,
+     * pero disfrazado de éxito.
+     *
+     * @return void
+     */
+    public function test_un_200_que_no_es_del_endpoint_no_cuenta_como_exito()
+    {
+        Http::fake([
+            '*' => Http::response('<!DOCTYPE html><html><head><title>App</title></head></html>', 200),
+        ]);
+
+        $upgrade = $this->crear_upgrade();
+        $service = new DeploymentService($upgrade->fresh());
+        $this->invocar($service, 'step_update_default_version');
+
+        $upgrade->refresh();
+        $this->assertSame(
+            'manual_required',
+            $upgrade->default_version_sync_status,
+            'Un 200 con HTML del SPA se marcó como éxito: el cambio nunca se aplicó.'
+        );
+        $this->assertStringContainsString(
+            '/public',
+            (string) $upgrade->default_version_sync_message,
+            'El mensaje no orienta sobre la causa más probable (la URL sin /public).'
+        );
+    }
+
     /* ------------------------------------------------------------------ helpers */
 
     /**
