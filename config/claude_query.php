@@ -750,6 +750,210 @@ return [
         ],
 
         /* ---------------------------------------------------------------
+         | lead — la tabla central del pipeline comercial.
+         |
+         | Entra por el MISMO criterio que `client`: tabla grande, con secretos
+         | y con PII, que se publica sin ellos. Hasta el 3/9/2026 estaba entera
+         | en `modelos_excluidos` por dos tokens, y eso dejaba un agujero peor
+         | que el que tapaba: `PATCH claude/leads/{id}` ESCRIBE `notes`,
+         | `business_type`, `meeting_scheduled_at`, `demo_flexible` y las horas
+         | de la demo, y ninguna de esas columnas se podía LEER por ningún lado.
+         | Escribir `notes` a ciegas es peor que no poder escribirlo: esa columna
+         | la llena una persona desde el panel (LeadProperties + extract_data) y
+         | el PATCH hace `update()`, o sea que reemplaza. Sin lectura previa, una
+         | corrida del agente le borra la nota a Lucas sin que nada lo denuncie.
+         |
+         | 🔴 SIN demo_ingreso_token NI demo_eventos_token: son las dos que
+         | motivaron la exclusión original y siguen afuera. Abren la instancia de
+         | demo del lead SIN AUTH, con sólo tener la cadena.
+         | Tampoco entran `demo_ingreso_token_expira_at` ni
+         | `demo_ingreso_token_revocado_at`, que no son secretas pero matchean
+         | `columnas_prohibidas` por el `token` del nombre: nombrarlas devolvería
+         | 422 sobre el modelo entero (fail-closed) y rompería el test del build.
+         |
+         | 🔴 SIN NINGUNA contract_*: son las 17 columnas del desglose comercial y
+         | fiscal del contrato del lead (contract_client_razon_social,
+         | contract_client_cuit, contract_precio_licencia, contract_financiacion,
+         | contract_mensualidad_base, contract_clausulas_particulares y el resto).
+         | Mismo criterio con el que `client` dejó afuera afip_* y los precio_*:
+         | datos fiscales del titular y desglose de precios. `total_a_pagar` SÍ
+         | entra, que es el equivalente de `clients.total_mensualidad` y es lo que
+         | se usa para operar.
+         |
+         | 🔴 SIN recall_bot_id, google_event_id ni closer_hold_event_id: son
+         | identificadores de servicios de terceros (Recall.ai y Google Calendar).
+         | No hay ninguna lectura operativa que los necesite desde acá y sí hay
+         | riesgo de que alguien los use para pegarle a esos servicios. Los de la
+         | llamada se leen en `model=lead_call`, que es la fuente viva.
+         |
+         | `phone`, `email`, `doc_number` y las tres `address_*` son PII: viajan
+         | sólo con include=contacto, mismo criterio que `clients.phone` y que
+         | ClaudeLeadQueryService. Ojo con `email`: el PATCH lo escribe, así que
+         | para leer lo que escribiste hace falta el include.
+         |
+         | `meet_url` va opt-in bajo include=agenda: el link ABRE LA VIDEOLLAMADA
+         | a cualquiera que lo tenga, sin auth. Es el mismo criterio que ya se le
+         | aplicó a `lead_calls.meet_url` en este mismo archivo.
+         |
+         | `call_summary`, `demo_summary` y `demo_summary_structured` van opt-in
+         | bajo include=resumen por volumen: son tres `text` y en una página de
+         | 100 filas pesan más que todo el resto junto.
+         | 🔴 Y OJO CON `call_summary`: la fuente viva del resumen de la llamada
+         | es `lead_calls.call_summary`, NO esta columna. CallSummaryService
+         | escribe sobre `lead_calls` y LeadController lee
+         | `$lead->calls()->whereNotNull('call_summary')`. La de `leads` quedó por
+         | compatibilidad y sólo tiene datos de leads viejos: si está vacía no
+         | significa que no hubo llamada, significa que mires `model=lead_call`.
+         |
+         | Lo demás que no está en `columnas` está en un include por RUIDO, no por
+         | secreto: `automatizaciones` son los interruptores y las marcas de
+         | "ya se envió" del ciclo de demo, `formulario` son las respuestas del
+         | formulario de demo (cómo trabaja el negocio), `plan` el json del plan de
+         | la demo, y `setup` los reintentos y los `*_last_error` de la instalación
+         | y de los mails.
+         --------------------------------------------------------------- */
+        'lead' => [
+            'tabla'           => 'leads',
+            'descripcion'     => 'Leads del pipeline comercial: estado, agenda de la demo, notas del setter, flags de automatización y a qué cliente se promovió. Es la tabla que escribe PATCH claude/leads/{id}.',
+            'columnas'        => [
+                'id', 'uuid', 'contact_name', 'company_name', 'business_type', 'status',
+                'notes', 'created_by_admin_id', 'notify_admin_id', 'welcome_variant_id',
+                'target_client_id', 'promoted_client_id',
+
+                'meeting_scheduled_at', 'demo_id', 'demo_date', 'demo_start_time',
+                'demo_end_time', 'demo_flexible', 'demo_experiencia', 'perfil_lead',
+                'api_url', 'user_name', 'user_id', 'total_a_pagar',
+
+                'demo_ingreso_confirmado', 'demo_ingreso_confirmado_at',
+                'demo_terminada_confirmada', 'demo_terminada_confirmada_at',
+                'demo_setup_status', 'user_setup_status',
+                'demo_summary_generated_at', 'demo_summary_manual',
+                'intro_visto_pct', 'intro_visto_at',
+
+                'closer_called_at', 'closer_notified_at', 'closer_alert_sent_at',
+                'closer_alert_accepted_at', 'closer_delay_message_sent_at',
+                'closer_no_show_rescheduled_at',
+
+                'claude_auto_reply', 'requiere_intervencion_humana',
+                'requiere_verificacion_mensajes', 'requiere_seguimiento',
+                'notificar_mensajes', 'tiene_sugerencia_pendiente',
+                'tiene_seguimiento_sin_ver',
+
+                'first_message_at', 'last_message_at', 'pinned_at',
+                'pendiente_revision_at', 'no_recibe_mensajes_at',
+                'no_recibe_mensajes_motivo',
+
+                'created_at', 'updated_at',
+            ],
+            'columnas_opt_in' => [
+                'contacto'         => ['phone', 'email', 'doc_number', 'address_1', 'address_2', 'address_3'],
+                'agenda'           => ['meet_url'],
+                'resumen'          => ['call_summary', 'demo_summary', 'demo_summary_structured'],
+                'automatizaciones' => [
+                    'automatizaciones_demo_activas', 'auto_recordatorio_demo',
+                    'auto_check_ingreso_demo', 'auto_check_fin_demo', 'auto_resumen_closer',
+                    'recordatorio_demo_enviado', 'recordatorio_manana_enviado',
+                    'recordatorio_demo_enviado_at', 'recordatorio_demo_manual',
+                    'demo_check_ingreso_enviado', 'demo_check_ingreso_enviado_at',
+                    'demo_check_ingreso_manual', 'demo_fin_seguimiento_enviado',
+                    'demo_pendiente_terminar_notificado', 'demo_no_ingreso_notificado',
+                    'demo_fin_check_enviado', 'demo_fin_check_reprogramado_para',
+                    'presentation_mail_sent_at', 'followup_mail_sent_at', 'demo_mail_sent_at',
+                ],
+                'formulario'       => [
+                    'use_deposits', 'use_price_lists', 'price_type_1', 'price_type_2',
+                    'price_type_3', 'iva_included', 'ventas_con_fecha_de_entrega', 'cajas',
+                    'usar_codigos_de_barra', 'codigos_de_barra_por_defecto',
+                    'consultora_de_precios', 'imagenes', 'produccion', 'ask_amount_in_vender',
+                    'redondear_centenas_en_vender', 'omitir_cuentas_corrientes',
+                    'costos_en_dolares', 'descuentos_por_metodo_pago',
+                    'usa_cuentas_corrientes_proveedores', 'usa_presupuestos', 'registra_compras',
+                    'usa_ecommerce', 'demo_form_completado_at', 'demo_form_editado_admin_at',
+                ],
+                'plan'             => ['demo_plan', 'demo_plan_congelado_at'],
+                'setup'            => [
+                    'demo_setup_intentos', 'demo_setup_last_run_at', 'demo_setup_last_run_manual',
+                    'demo_setup_last_error', 'user_setup_last_run_at', 'user_setup_last_error',
+                    'demo_mail_last_error', 'presentation_mail_last_error',
+                    'followup_mail_last_error',
+                ],
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 100,
+            'limite_max'      => 300,
+            'busqueda'        => ['contact_name', 'company_name', 'business_type'],
+            'filtros'         => [
+                /* 🔴 Enumeración REAL, tomada de LeadPipelineStatus::DEFAULT_STATUSES (los 15 slugs
+                   con los que se siembra `lead_pipeline_statuses`), verificada el 3/9/2026 leyendo
+                   la constante, no las migraciones. Es la MISMA lista que declara el filtro
+                   `estado` de followup_rule, y tiene que seguir siéndolo.
+                   ⚠️ La fuente viva es `LeadPipelineStatus::all_slugs()`, que lee la TABLA y sólo
+                   cae a la constante si está vacía, y `ensure_exists()` puede dar de alta un slug
+                   nuevo en runtime con lo que devolvió Claude. Si filtrás por un estado y te vuelve
+                   422, mirá primero `model=lead_pipeline_status`: ésa es la lista del momento.
+                   Ojo con `mail2_enviado`: sigue en el catálogo por historia pero Lucas lo dejó de
+                   usar (SLUGS_HIDDEN_FROM_SELECT), así que filtrar por él devuelve poco y viejo. */
+                'status'                         => ['columna' => 'status',                         'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'ingresando_demo', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
+                'business_type'                  => ['columna' => 'business_type',                  'tipo' => 'texto'],
+                'demo_id'                        => ['columna' => 'demo_id',                        'tipo' => 'entero'],
+                'target_client_id'               => ['columna' => 'target_client_id',               'tipo' => 'entero'],
+                'notify_admin_id'                => ['columna' => 'notify_admin_id',                'tipo' => 'entero'],
+                'demo_desde'                     => ['columna' => 'demo_date',                      'tipo' => 'fecha_desde'],
+                'demo_hasta'                     => ['columna' => 'demo_date',                      'tipo' => 'fecha_hasta'],
+                'sin_demo'                       => ['columna' => 'demo_date',                      'tipo' => 'nulo'],
+                /* 🔴 UN SOLO filtro para las dos puntas de `promoted_client_id`, y es a propósito.
+                   El tipo `nulo` de ClaudeQueryService resuelve `=1` como whereNull y `=0` como
+                   whereNotNull, así que `sin_promover=1` trae los que todavía no se promovieron y
+                   `sin_promover=0` trae los que sí. Un filtro que se llamara `promovido` sería una
+                   trampa: `promovido=1` devolvería justo los NO promovidos. Es la misma forma que
+                   ya usan `sin_agendar` de lead_call y `sin_sincronizar` de client. Para filtrar
+                   por A QUÉ cliente se promovió está `promovido_a`, que es el id. */
+                'sin_promover'                   => ['columna' => 'promoted_client_id',             'tipo' => 'nulo'],
+                'promovido_a'                    => ['columna' => 'promoted_client_id',             'tipo' => 'entero'],
+                /* Misma mecánica: `recibe_mensajes=1` son los que NO tienen la marca de
+                   inalcanzable (no_recibe_mensajes_at en NULL) y `=0` son los que sí la tienen. Esa
+                   marca la pone una persona, y es la guarda que hay que mirar ANTES de proponer
+                   cualquier saliente. */
+                'recibe_mensajes'                => ['columna' => 'no_recibe_mensajes_at',          'tipo' => 'nulo'],
+                'mensaje_desde'                  => ['columna' => 'last_message_at',                'tipo' => 'fecha_desde'],
+                'mensaje_hasta'                  => ['columna' => 'last_message_at',                'tipo' => 'fecha_hasta'],
+                'claude_auto_reply'              => ['columna' => 'claude_auto_reply',              'tipo' => 'booleano'],
+                'requiere_intervencion_humana'   => ['columna' => 'requiere_intervencion_humana',   'tipo' => 'booleano'],
+                'requiere_verificacion_mensajes' => ['columna' => 'requiere_verificacion_mensajes', 'tipo' => 'booleano'],
+                'requiere_seguimiento'           => ['columna' => 'requiere_seguimiento',           'tipo' => 'booleano'],
+                'demo_ingreso_confirmado'        => ['columna' => 'demo_ingreso_confirmado',        'tipo' => 'booleano'],
+                'demo_terminada_confirmada'      => ['columna' => 'demo_terminada_confirmada',      'tipo' => 'booleano'],
+                'ids'                            => ['columna' => 'id',                             'tipo' => 'lista_de_enteros'],
+                'creado_desde'                   => ['columna' => 'created_at',                     'tipo' => 'fecha_desde'],
+                'creado_hasta'                   => ['columna' => 'created_at',                     'tipo' => 'fecha_hasta'],
+            ],
+            'relaciones'      => [
+                'demo' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'demos',
+                    'clave_local' => 'demo_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'uuid', 'nombre', 'erp_spa_url', 'ecommerce_spa_url'],
+                ],
+                'cliente_promovido' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'promoted_client_id', 'clave_externa' => 'id',
+                    /* Sin api_key ni setup_data: una relación filtra tan fácil como la tabla
+                       principal, y es exactamente el criterio de la entrada `client`. */
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'slug', 'is_active'],
+                ],
+                'llamadas' => [
+                    'tipo'        => 'has_many', 'tabla' => 'lead_calls',
+                    'clave_local' => 'id', 'clave_externa' => 'lead_id',
+                    /* Sin meet_url ni call_summary: mismo criterio que la entrada lead_call, donde
+                       los dos van opt-in. */
+                    'columnas'    => ['id', 'estado', 'scheduled_at', 'started_at', 'created_at'],
+                    'limite'      => 10,
+                ],
+            ],
+            'nota' => 'NO reemplaza a GET claude/leads y no se contradicen: aquél es el camino cuando hay algo CALCULADO (include=conteos, demo, contrato), porque resuelve la relación y arma los totales; éste devuelve columnas CRUDAS de `leads` y nada más, incluidas las que aquél no expone. La razón por la que existe: PATCH claude/leads/{id} escribe notes, contact_name, company_name, business_type, email, demo_date, demo_start_time, demo_end_time, demo_flexible y meeting_scheduled_at, y sin este modelo no había forma de leer lo que se estaba por pisar. 🔴 `notes` la llena una persona desde el panel y el PATCH reemplaza el valor entero: leela ANTES de escribirla. Para `email` hace falta include=contacto. El resumen de la llamada del closer NO está acá: está en model=lead_call (leads.call_summary quedó por compatibilidad).',
+        ],
+
+        /* ---------------------------------------------------------------
          | followup_rule — la CADENCIA de los seguimientos automáticos.
          |
          | Entra entera: ocho columnas, ninguna con dato de una persona.
@@ -2101,11 +2305,13 @@ return [
          | esquema fijo. En un listado de 200 filas es volumen; pedido a
          | propósito es lo que alimenta el brief del closer.
          |
-         | 🔴 SIN relación a `leads`: la tabla Lead está excluida entera de este
-         | endpoint por secreto (demo_ingreso_token, demo_eventos_token) y con
-         | `usar: GET claude/leads`. Abrirla de costado por una relación sería
-         | deshacer esa decisión sin que nadie se entere. El lead_id se resuelve
-         | contra GET claude/leads.
+         | SIN relación a `leads`, y ahora el motivo es OTRO: hasta el 3/9/2026 era
+         | que la tabla Lead estaba excluida entera y una relación la habría abierto
+         | de costado. Desde que `lead` entró a `modelos` eso ya no aplica, pero la
+         | relación sigue sin estar por volumen: la entrada `lead` publica más de 50
+         | columnas y repetirlas en cada evento de una demo —que son cientos por
+         | lead— es ruido puro. El lead_id se resuelve con una segunda consulta a
+         | `model=lead&ids=...`, o con GET claude/leads si querés los conteos.
          --------------------------------------------------------------- */
         'demo_evento_recibido' => [
             'tabla'           => 'demo_eventos_recibidos',
@@ -2581,7 +2787,11 @@ return [
         'EnvTemplate'                      => ['motivo' => 'secreto', 'columna' => 'env_templates.value'],
         'EnvChangeBatch'                   => ['motivo' => 'secreto', 'columna' => 'env_change_batches.token'],
         'EnvChangeItem'                    => ['motivo' => 'secreto', 'columna' => 'env_change_items.new_value_encrypted, .new_value_sha256, .old_value_masked (valores del .env de clientes reales)'],
-        'Lead'                             => ['motivo' => 'secreto', 'columna' => 'leads.demo_ingreso_token, leads.demo_eventos_token', 'usar' => 'GET claude/leads'],
+        /* 🔴 NO TIENE MODELO EN app/Models/ —la clase es de Sanctum, vive en vendor—, y por eso
+           figuraba en NINGUNA de las dos listas: ni servible ni denunciado. Se declara igual, que es
+           todo el punto de esta lista: el que amplíe `modelos` mañana tiene que encontrar escrito
+           por qué esta tabla no va, en vez de mirar que "no está" y sumarla sin pensarlo. */
+        'PersonalAccessToken'              => ['motivo' => 'secreto', 'columna' => 'personal_access_tokens.token (el hash del token de Sanctum con el que se autentica el panel; también matchea `columnas_prohibidas`)'],
 
         'SyncedGithubFile'                 => ['motivo' => 'volumen', 'columna' => 'synced_github_files.content (longText con archivos enteros)'],
         'DeploymentLog'                    => ['motivo' => 'volumen', 'columna' => 'deployment_logs.line', 'usar' => 'GET claude/upgrades/{id}/logs'],
@@ -2619,11 +2829,13 @@ return [
      | Lo que hay que saber sobre TODO lo que no está en ninguna de las dos listas
      | de arriba. Se publica tal cual en GET claude/catalog.
      |
-     | 🔴 Los ~43 modelos restantes de app/Models/ NO están excluidos por tener un
-     | secreto conocido: están fuera de esta tanda porque no se verificaron columna
-     | por columna, y meter uno sin verificar es exactamente lo que este archivo
-     | promete que no pasa. Agregar uno son ~10 líneas acá y un DESCRIBE de la
-     | tabla, no una misión.
+     | 🔴 Ya no queda casi nada: al 3/9/2026 son 7 los modelos de app/Models/ que no
+     | figuran en ninguna de las dos listas (81 archivos en app/Models/, 56 en
+     | `modelos` y 18 en `modelos_excluidos`), y están enumerados uno por uno en la
+     | nota de abajo. NO están excluidos por tener un secreto conocido: están fuera
+     | porque no se verificaron columna por columna, y meter uno sin verificar es
+     | exactamente lo que este archivo promete que no pasa. Agregar uno son ~25
+     | líneas acá y un DESCRIBE de la tabla, no una misión.
      */
-    'nota_de_exclusiones' => 'Los modelos que no figuran ni en `modelos` ni en `modelos_excluidos` están fuera de la tanda: sin secreto conocido, pero sin verificar columna por columna. El 3/9/2026 entraron los cinco bloques probables (comercial y agentes, soporte, demos, implementaciones y facturación) y con eso se cerraron las tres advertencias que esta nota tenía escritas: MensualidadInvoice, Implementation y SupportTicket ya están en `modelos`, con `request`/`response`, `form_token` y la PII afuera o en opt-in. Lo que queda es residual y se dejó a propósito: preferencias y marcas de lectura de la SPA (admin_column_preferences, client_notification_reads, lead_manual_unread_marks, lead_message_reads), estado efímero (support_typing_states), notificaciones de tareas (admin_task_notifications), plantillas de tarea (task_templates), bloques de user_id (user_id_blocks) y las tablas pivote de modelos que ya están (admin_task_assignees, client_version_upgrade_versions, version_item_clients). Agregar uno son ~25 líneas acá y un DESCRIBE de la tabla, no una misión.',
+    'nota_de_exclusiones' => 'Los modelos que no figuran ni en `modelos` ni en `modelos_excluidos` están fuera de la tanda: sin secreto conocido, pero sin verificar columna por columna. El 3/9/2026 entraron los cinco bloques probables (comercial y agentes, soporte, demos, implementaciones y facturación) y con eso se cerraron las tres advertencias que esta nota tenía escritas: MensualidadInvoice, Implementation y SupportTicket ya están en `modelos`, con `request`/`response`, `form_token` y la PII afuera o en opt-in. Ese mismo día Lead pasó de `modelos_excluidos` a `modelos`: los dos tokens que lo excluían (demo_ingreso_token, demo_eventos_token) y las 17 contract_* quedan afuera por lista blanca, igual que api_key y afip_* en client, y la PII viaja sólo con include=contacto. Lo que queda sin declarar son SIETE modelos y se dejaron a propósito: marcas de lectura de la SPA (client_notification_reads, lead_manual_unread_marks, lead_message_reads), estado efímero (support_typing_states), notificaciones de tareas (admin_task_notifications), plantillas de tarea (task_templates) y bloques de user_id (user_id_blocks). No cuentan como "sin declarar" las tablas pivote de modelos que ya están (admin_task_assignees, client_version_upgrade_versions, version_item_clients), que no tienen modelo propio, ni las tablas de infraestructura de Laravel (jobs, failed_jobs, migrations), que no son datos del negocio. personal_access_tokens tampoco tiene modelo en app/Models/ —la clase es de Sanctum— pero SÍ está declarada en `modelos_excluidos`, porque guarda el hash del token con el que se autentica el panel y no queremos que el próximo la sume sin pensarlo. Agregar uno son ~25 líneas acá y un DESCRIBE de la tabla, no una misión.',
 ];
