@@ -816,7 +816,7 @@ return [
             'tabla'           => 'leads',
             'descripcion'     => 'Leads del pipeline comercial: estado, agenda de la demo, notas del setter, flags de automatización y a qué cliente se promovió. Es la tabla que escribe PATCH claude/leads/{id}.',
             'columnas'        => [
-                'id', 'uuid', 'contact_name', 'company_name', 'business_type', 'status',
+                'id', 'contact_name', 'company_name', 'business_type', 'status',
                 'notes', 'created_by_admin_id', 'notify_admin_id', 'welcome_variant_id',
                 'target_client_id', 'promoted_client_id',
 
@@ -846,6 +846,21 @@ return [
                 'created_at', 'updated_at',
             ],
             'columnas_opt_in' => [
+                /* 🔴 `uuid` NO ES UN IDENTIFICADOR INTERNO ACÁ: ES UNA CREDENCIAL AL PORTADOR, y por
+                   eso es la única entrada de todo este archivo donde el uuid no va en la proyección
+                   base. `routes/web.php` lo dice con todas las letras arriba de la ruta
+                   (`/demo/{uuid}`): "Landing pública de la demo por lead, sin login, token = uuid
+                   del lead", y `routes/api.php` declara el modelo de seguridad del grupo
+                   `demo-experiencia` como "identificada por el uuid del lead (no enumerable)". Con
+                   ese uuid y sin autenticarse se abre la landing Y se ESCRIBE: `POST {uuid}/formulario`,
+                   `POST {uuid}/ingresar` y `POST {uuid}/intro-progreso`.
+                   La contradicción que lo destapó: `doc_number` está en `contacto` porque es la
+                   contraseña con la que el lead entra a la demo — y el uuid abre la página que le
+                   muestra esa contraseña. Dejar uno detrás de un include y el otro por defecto no
+                   tenía sentido.
+                   Va como grupo propio y no adentro de `contacto` a propósito: no es un dato de la
+                   persona, es una llave, y quien la pide tiene que estar pidiendo una llave. */
+                'acceso'           => ['uuid'],
                 'contacto'         => ['phone', 'email', 'doc_number', 'address_1', 'address_2', 'address_3'],
                 'agenda'           => ['meet_url'],
                 'resumen'          => ['call_summary', 'demo_summary', 'demo_summary_structured'],
