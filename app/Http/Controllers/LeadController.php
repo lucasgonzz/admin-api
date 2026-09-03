@@ -192,15 +192,20 @@ class LeadController extends Controller
     /**
      * Actualización del lead con los mismos campos que el store.
      *
-     * Si la fecha de demo cambia, resetea `recordatorio_demo_enviado` para que el nuevo
-     * horario también reciba su recordatorio automático pre-demo.
+     * Si el TURNO de la demo cambia —fecha, hora de inicio u hora de fin— se resetean los flags
+     * de recordatorio para que el horario nuevo también reciba sus automatizaciones. 🔴 Desde el
+     * 3/9/2026 cuenta también mover SÓLO la hora: antes no reseteaba nada y la demo movida se
+     * quedaba sin recordatorio. Ver el docblock de LeadRescheduleFlagsService.
      */
     public function update(Request $request, $id)
     {
         $lead = Lead::findOrFail($id);
 
-        // Capturar demo_date original (raw string) antes de persistir para detectar cambio.
-        $original_demo_date = $lead->getRawOriginal('demo_date');
+        // Foto de la AGENDA original (fecha + hora de inicio + hora de fin, en crudo) antes de
+        // persistir, para detectar la reagenda. 🔴 Desde el 3/9/2026 son los tres campos y no solo
+        // demo_date: mover una demo de 18:00 a 20:00 del mismo día también es reagendar, y hasta
+        // ese día no reseteaba nada (ver el docblock de LeadRescheduleFlagsService).
+        $agenda_previa = app(LeadRescheduleFlagsService::class)->fotografiar_agenda($lead);
 
         $data = $this->extract_data($request);
         $lead->update($data);
@@ -208,7 +213,7 @@ class LeadController extends Controller
         // Si se reagendó la demo, resetear flags para que el nuevo horario reciba automatizaciones.
         // 🔴 UNA SOLA DEFINICIÓN DEL RESET: ver LeadRescheduleFlagsService, que lo comparten este
         // camino, update_json() y PATCH claude/leads/{id}.
-        app(LeadRescheduleFlagsService::class)->resetear_si_cambio_la_fecha($lead, $original_demo_date);
+        app(LeadRescheduleFlagsService::class)->resetear_si_cambio_la_agenda($lead, $agenda_previa);
 
         return redirect()->route('leads.show', $lead->id)->with('success', 'Lead actualizado.');
     }
@@ -663,8 +668,10 @@ class LeadController extends Controller
     /**
      * Actualiza un lead desde admin-spa.
      *
-     * Si la fecha de demo cambia, resetea `recordatorio_demo_enviado` para que el nuevo
-     * horario también reciba su recordatorio automático pre-demo.
+     * Si el TURNO de la demo cambia —fecha, hora de inicio u hora de fin— se resetean los flags
+     * de recordatorio para que el horario nuevo también reciba sus automatizaciones. 🔴 Desde el
+     * 3/9/2026 cuenta también mover SÓLO la hora: antes no reseteaba nada y la demo movida se
+     * quedaba sin recordatorio. Ver el docblock de LeadRescheduleFlagsService.
      *
      * Y si cambian los checkboxes `use_deposits` / `use_price_lists` —las dos únicas respuestas
      * del formulario de la demo que este endpoint genérico puede escribir—, deja la edición
@@ -680,8 +687,13 @@ class LeadController extends Controller
         // Registro objetivo de edición.
         $lead = Lead::findOrFail($id);
 
-        // Capturar demo_date original (raw string) antes de persistir para detectar cambio.
-        $original_demo_date = $lead->getRawOriginal('demo_date');
+        // Foto de la AGENDA original (fecha + hora de inicio + hora de fin, en crudo) antes de
+        // persistir, para detectar la reagenda. 🔴 Desde el 3/9/2026 son los tres campos y no solo
+        // demo_date: mover una demo de 18:00 a 20:00 del mismo día también es reagendar, y hasta
+        // ese día este guardado dejaba recordatorio_demo_enviado en true (o sea, el recordatorio
+        // del horario nuevo no salía) y demo_fin_check_reprogramado_para apuntando al final viejo.
+        // El porqué completo está en el docblock de LeadRescheduleFlagsService.
+        $agenda_previa = app(LeadRescheduleFlagsService::class)->fotografiar_agenda($lead);
 
         /* Foto de las dos respuestas del formulario que este endpoint puede escribir, tomada
            ANTES de aplicar el request. Se comparan las COLUMNAS y no las respuestas efectivas:
@@ -708,7 +720,7 @@ class LeadController extends Controller
         // 🔴 UNA SOLA DEFINICIÓN DEL RESET: ver LeadRescheduleFlagsService, que lo comparten este
         // camino, update() (Blade) y PATCH claude/leads/{id}.
         $lead->refresh();
-        app(LeadRescheduleFlagsService::class)->resetear_si_cambio_la_fecha($lead, $original_demo_date);
+        app(LeadRescheduleFlagsService::class)->resetear_si_cambio_la_agenda($lead, $agenda_previa);
 
         $this->marcar_edicion_manual_del_formulario($lead, $formulario_previo);
 
