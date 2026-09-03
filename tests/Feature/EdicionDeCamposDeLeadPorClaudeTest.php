@@ -2,8 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Models\AdminSetting;
 use App\Models\Client;
+use App\Models\Demo;
 use App\Models\Lead;
+use App\Services\LeadDemoSettings;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -32,9 +36,28 @@ class EdicionDeCamposDeLeadPorClaudeTest extends TestCase
     /** Clave de ingesta usada en las requests del bloque claude/*. */
     const CLAVE = 'clave-de-prueba-campos-de-lead';
 
+    /** El instante en el que corre todo este archivo. Ver setUp(). */
+    const AHORA = '2026-09-07 09:00:00';
+
     /**
-     * Setea la clave de ingesta: en el `.env.testing` del slot está vacía y el middleware es
-     * fail-closed.
+     * La instancia de demo del pool que usan los leads de este archivo.
+     *
+     * @var Demo|null
+     */
+    private $demo = null;
+
+    /**
+     * Setea la clave de ingesta —en el `.env.testing` del slot está vacía y el middleware es
+     * fail-closed— y fija el reloj y la grilla.
+     *
+     * 🔴 POR QUÉ EL RELOJ Y LA GRILLA SE FIJAN (3/9/2026). Desde esta fecha `PATCH claude/leads/{id}`
+     * valida el turno contra la disponibilidad REAL: rechaza un turno en el pasado y rechaza un
+     * horario que no esté libre en la grilla de la instancia. Con fechas escritas a mano y la
+     * configuración de horarios de producción, este archivo empezaría a dar rojo el día que la fecha
+     * quede atrás o que el horario caiga fuera del horario del closer — o sea, mediría la
+     * configuración en vez de lo que vino a medir. Se congela el instante y se abre la grilla de
+     * punta a punta, igual que hace `ReagendadoAlProximoSlotTest`, para que lo que estos tests
+     * clavan siga siendo la lista blanca y los frenos de confirmación.
      *
      * @return void
      */
@@ -43,6 +66,49 @@ class EdicionDeCamposDeLeadPorClaudeTest extends TestCase
         parent::setUp();
 
         config(['services.claude_task_ingest.key' => self::CLAVE]);
+
+        Carbon::setTestNow(self::AHORA);
+
+        AdminSetting::set(LeadDemoSettings::KEY_CLOSER_HORARIO_LUNES_VIERNES, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_CLOSER_HORARIO_SABADO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_CLOSER_HORARIO_DOMINGO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_LUNES_VIERNES, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_SABADO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_DOMINGO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_FRECUENCIA_SLOTS_MINUTOS, '30');
+        AdminSetting::set(LeadDemoSettings::KEY_DURACION_MINUTOS, '60');
+    }
+
+    /**
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
+
+    /**
+     * La instancia de demo del pool, creada una sola vez por test.
+     *
+     * @return Demo
+     */
+    private function demo(): Demo
+    {
+        if ($this->demo === null) {
+            $demo                    = new Demo();
+            $demo->uuid              = (string) Str::uuid();
+            $demo->erp_spa_url       = 'https://demo-erp.test';
+            $demo->erp_api_url       = 'https://demo-erp-api.test';
+            $demo->ecommerce_spa_url = 'https://demo-tienda.test';
+            $demo->ecommerce_api_url = 'https://demo-tienda-api.test';
+            $demo->save();
+
+            $this->demo = $demo;
+        }
+
+        return $this->demo;
     }
 
     /**
@@ -72,8 +138,12 @@ class EdicionDeCamposDeLeadPorClaudeTest extends TestCase
         $lead->business_type               = 'almacen';
         $lead->phone                       = '+549341' . random_int(1000000, 9999999);
         $lead->status                      = 'calificado';
+        /* 🔴 Con instancia asignada: desde el 3/9/2026 escribir demo_date sin demo_id es 422, y con
+           razón — una demo sin instancia no manda el mail ni emite el token de ingreso. */
+        $lead->demo_id                     = $this->demo()->id;
         $lead->demo_date                   = '2026-09-10';
         $lead->demo_start_time             = '18:00';
+        $lead->demo_end_time               = '19:00';
         $lead->recordatorio_demo_enviado   = true;
         $lead->recordatorio_manana_enviado = true;
         $lead->demo_fin_check_reprogramado_para = '2026-09-10 19:15:00';

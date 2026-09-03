@@ -3,8 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\Admin;
+use App\Models\AdminSetting;
+use App\Models\Demo;
 use App\Models\Lead;
+use App\Services\LeadDemoSettings;
 use App\Services\LeadRescheduleFlagsService;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
@@ -32,6 +36,15 @@ use Tests\TestCase;
  * ⚠️ El test se apoya en `LeadRescheduleFlagsService::flags_reseteados()` como lista de qué
  * comparar, así que agregar un cuarto flag al servicio lo mete solo en la comparación de los dos
  * caminos. Ésa es la propiedad que hace que este test siga sirviendo cuando el reset crezca.
+ *
+ * 🔴 LO QUE SE AGREGÓ EL 3/9/2026: MOVER SÓLO LA HORA TAMBIÉN ES REAGENDAR.
+ * Un verificador adversarial midió que, por los DOS caminos, mover una demo de las 18:00 a las
+ * 20:00 del mismo día dejaba `recordatorio_demo_enviado = true` —o sea que el recordatorio del
+ * horario nuevo no salía— y `demo_fin_check_reprogramado_para` apuntando a las 19:15 de un horario
+ * que ya no existía. El servicio miraba sólo `demo_date`. Ahora mira la agenda entera y
+ * `test_mover_solo_la_hora_resetea_por_los_dos_caminos()` lo clava, comparando los dos caminos
+ * entre sí igual que el test de arriba: es la MISMA propiedad, aplicada a la mitad de la regla que
+ * faltaba.
  */
 class ResetDeReagendaUnicoTest extends TestCase
 {
@@ -40,9 +53,25 @@ class ResetDeReagendaUnicoTest extends TestCase
     /** Clave de ingesta usada en las requests del bloque claude/*. */
     const CLAVE = 'clave-de-prueba-reset-de-reagenda';
 
+    /** El instante en el que corre todo este archivo. Ver setUp(). */
+    const AHORA = '2026-09-07 09:00:00';
+
     /**
-     * Setea la clave de ingesta: en el `.env.testing` del slot está vacía y el middleware es
-     * fail-closed.
+     * La instancia de demo del pool que usan los leads de este archivo.
+     *
+     * @var Demo|null
+     */
+    private $demo = null;
+
+    /**
+     * Setea la clave de ingesta —en el `.env.testing` del slot está vacía y el middleware es
+     * fail-closed— y fija el reloj y la grilla.
+     *
+     * 🔴 El reloj y la grilla se congelan porque desde el 3/9/2026 `PATCH claude/leads/{id}` valida
+     * el turno contra la disponibilidad REAL: rechaza un turno en el pasado y uno que no esté libre
+     * en la grilla de la instancia. Sin congelarlos, este archivo mediría la configuración de
+     * horarios en vez de la unicidad del reset. El camino del panel no valida nada de eso, y ésa es
+     * justamente una diferencia que este test NO compara: lo único que compara son los flags.
      *
      * @return void
      */
@@ -51,29 +80,125 @@ class ResetDeReagendaUnicoTest extends TestCase
         parent::setUp();
 
         config(['services.claude_task_ingest.key' => self::CLAVE]);
+
+        Carbon::setTestNow(self::AHORA);
+
+        AdminSetting::set(LeadDemoSettings::KEY_CLOSER_HORARIO_LUNES_VIERNES, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_CLOSER_HORARIO_SABADO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_CLOSER_HORARIO_DOMINGO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_LUNES_VIERNES, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_SABADO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_HORARIO_DOMINGO, '00:00-23:59');
+        AdminSetting::set(LeadDemoSettings::KEY_FRECUENCIA_SLOTS_MINUTOS, '30');
+        AdminSetting::set(LeadDemoSettings::KEY_DURACION_MINUTOS, '60');
+    }
+
+    /**
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
+    }
+
+    /**
+     * La instancia de demo del pool, creada una sola vez por test.
+     *
+     * @return Demo
+     */
+    private function demo(): Demo
+    {
+        if ($this->demo === null) {
+            $demo                    = new Demo();
+            $demo->uuid              = (string) Str::uuid();
+            $demo->erp_spa_url       = 'https://demo-erp.test';
+            $demo->erp_api_url       = 'https://demo-erp-api.test';
+            $demo->ecommerce_spa_url = 'https://demo-tienda.test';
+            $demo->ecommerce_api_url = 'https://demo-tienda-api.test';
+            $demo->save();
+
+            $this->demo = $demo;
+        }
+
+        return $this->demo;
     }
 
     /**
      * Lead con la demo agendada y los tres flags puestos, o sea el estado real de un lead al que ya
      * le salieron los recordatorios del horario viejo.
      *
+     * 🔴 LA FECHA ES UN PARÁMETRO Y CADA CAMINO USA LA SUYA. Los dos leads de cada test comparten
+     * el mismo closer, y desde el 3/9/2026 el camino de Claude valida el horario contra la grilla
+     * real: si los dos apuntaran al mismo turno, el segundo lo encontraría OCUPADO POR EL PRIMERO y
+     * el test daría rojo por una colisión legítima. Lo que este archivo compara son los FLAGS, que
+     * no dependen de a qué día se movió la demo — así que cada camino se mueve al suyo.
+     *
+     * @param string $fecha Día en el que arranca agendada la demo (Y-m-d).
+     *
      * @return Lead
      */
-    private function crear_lead_con_los_flags_puestos(): Lead
+    private function crear_lead_con_los_flags_puestos(string $fecha = '2026-09-10'): Lead
     {
         $lead                                   = new Lead();
         $lead->uuid                             = (string) Str::uuid();
         $lead->contact_name                     = 'Juana Pérez';
         $lead->status                           = 'demo_agendada';
-        $lead->demo_date                        = '2026-09-10';
+        /* Con instancia asignada: sin demo_id, el camino de Claude rechaza cualquier escritura de
+           demo_date con 422 (una demo sin instancia no manda mail ni emite token). */
+        $lead->demo_id                          = $this->demo()->id;
+        $lead->demo_date                        = $fecha;
         $lead->demo_start_time                  = '18:00';
         $lead->demo_end_time                    = '19:00';
         $lead->recordatorio_demo_enviado        = true;
         $lead->recordatorio_manana_enviado      = true;
-        $lead->demo_fin_check_reprogramado_para = '2026-09-10 19:15:00';
+        $lead->demo_fin_check_reprogramado_para = $fecha . ' 19:15:00';
         $lead->save();
 
         return $lead;
+    }
+
+    /**
+     * Admin autenticado por Sanctum, que es como entra el camino del panel.
+     *
+     * @return void
+     */
+    private function autenticar_admin(): void
+    {
+        $admin           = new Admin();
+        $admin->name     = 'Admin de prueba';
+        $admin->email    = 'admin+' . Str::random(6) . '@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+
+        Sanctum::actingAs($admin);
+    }
+
+    /**
+     * Escribe campos por el camino de Claude, con las dos llamadas del protocolo.
+     *
+     * @param Lead                 $lead   Lead objetivo.
+     * @param array<string, mixed> $campos Campos a escribir.
+     *
+     * @return \Illuminate\Testing\TestResponse La respuesta de la escritura real.
+     */
+    private function escribir_por_claude(Lead $lead, array $campos)
+    {
+        $headers = [
+            'X-Claude-Task-Key' => self::CLAVE,
+            'Accept'            => 'application/json',
+        ];
+
+        $simulacion = $this->withHeaders($headers)
+            ->patchJson('/api/claude/leads/' . $lead->id, ['campos' => $campos]);
+        $simulacion->assertStatus(200);
+
+        return $this->withHeaders($headers)->patchJson('/api/claude/leads/' . $lead->id, [
+            'campos'        => $campos,
+            'dry_run'       => false,
+            'confirm_count' => $simulacion->json('cambiarian'),
+        ]);
     }
 
     /**
@@ -106,14 +231,9 @@ class ResetDeReagendaUnicoTest extends TestCase
     public function test_el_panel_y_claude_dejan_los_mismos_flags_al_reagendar(): void
     {
         /* --- Camino 1: el panel (PUT admin/lead/{id}, autenticado por Sanctum). --- */
-        $admin           = new Admin();
-        $admin->name     = 'Admin de prueba';
-        $admin->email    = 'admin+' . Str::random(6) . '@test.local';
-        $admin->password = bcrypt('secret');
-        $admin->save();
-        Sanctum::actingAs($admin);
+        $this->autenticar_admin();
 
-        $lead_panel = $this->crear_lead_con_los_flags_puestos();
+        $lead_panel = $this->crear_lead_con_los_flags_puestos('2026-09-10');
 
         $this->putJson('/api/admin/lead/' . $lead_panel->id, [
             'demo_date' => '2026-09-17',
@@ -121,25 +241,14 @@ class ResetDeReagendaUnicoTest extends TestCase
 
         $flags_panel = $this->flags_de($lead_panel);
 
-        /* --- Camino 2: Claude (PATCH claude/leads/{id}, con la clave del header). --- */
-        $lead_claude = $this->crear_lead_con_los_flags_puestos();
+        /* --- Camino 2: Claude (PATCH claude/leads/{id}, con la clave del header). Se mueve a OTRO
+               día que el del panel: los dos leads comparten closer y el 17 ya se lo llevó el
+               anterior. Ver el porqué en crear_lead_con_los_flags_puestos(). --- */
+        $lead_claude = $this->crear_lead_con_los_flags_puestos('2026-09-11');
 
-        $simulacion = $this->withHeaders([
-            'X-Claude-Task-Key' => self::CLAVE,
-            'Accept'            => 'application/json',
-        ])->patchJson('/api/claude/leads/' . $lead_claude->id, [
-            'campos' => ['demo_date' => '2026-09-17'],
-        ]);
-        $simulacion->assertStatus(200);
-
-        $this->withHeaders([
-            'X-Claude-Task-Key' => self::CLAVE,
-            'Accept'            => 'application/json',
-        ])->patchJson('/api/claude/leads/' . $lead_claude->id, [
-            'campos'        => ['demo_date' => '2026-09-17'],
-            'dry_run'       => false,
-            'confirm_count' => $simulacion->json('cambiarian'),
-        ])->assertJsonPath('reagendado', true)->assertStatus(200);
+        $this->escribir_por_claude($lead_claude, ['demo_date' => '2026-09-18'])
+            ->assertStatus(200)
+            ->assertJsonPath('reagendado', true);
 
         $flags_claude = $this->flags_de($lead_claude);
 
@@ -157,7 +266,7 @@ class ResetDeReagendaUnicoTest extends TestCase
         $this->assertNull($flags_panel['demo_fin_check_reprogramado_para']);
 
         $this->assertSame('2026-09-17', $lead_panel->fresh()->getRawOriginal('demo_date'));
-        $this->assertSame('2026-09-17', $lead_claude->fresh()->getRawOriginal('demo_date'));
+        $this->assertSame('2026-09-18', $lead_claude->fresh()->getRawOriginal('demo_date'));
     }
 
     /**
@@ -193,5 +302,71 @@ class ResetDeReagendaUnicoTest extends TestCase
 
         $this->assertSame($this->flags_de($lead_panel), $this->flags_de($lead_claude));
         $this->assertTrue($this->flags_de($lead_claude)['recordatorio_demo_enviado'], 'Se reseteó un flag sin reagendar.');
+    }
+
+    /**
+     * 🔴 MOVER SÓLO LA HORA, EL MISMO DÍA, TAMBIÉN ES REAGENDAR — y por los DOS caminos.
+     *
+     * El caso medido el 3/9/2026: la demo pasa de las 18:00 a las 20:00 del mismo día y hasta ese
+     * momento no se reseteaba nada, porque el servicio miraba sólo `demo_date`. Consecuencias
+     * concretas, las dos silenciosas:
+     *   - `recordatorio_demo_enviado` quedaba en true, así que el recordatorio de las 20:00 NUNCA
+     *     salía (el latch ya estaba marcado como enviado por el horario viejo), y
+     *   - `demo_fin_check_reprogramado_para` seguía apuntando a las 19:15, un instante que después
+     *     de mover la demo queda en el pasado y no vuelve a caer nunca en la ventana de ±2 minutos:
+     *     el check de fin trabado para siempre, que es exactamente lo que el docblock del servicio
+     *     venía advirtiendo.
+     *
+     * Se compara panel contra Claude y no contra una constante escrita a mano, por lo mismo que el
+     * primer test de este archivo: un test por camino se puede satisfacer con dos implementaciones
+     * distintas; éste, no.
+     *
+     * @return void
+     */
+    public function test_mover_solo_la_hora_resetea_por_los_dos_caminos(): void
+    {
+        /* --- Camino 1: el panel. --- */
+        $this->autenticar_admin();
+        $lead_panel = $this->crear_lead_con_los_flags_puestos('2026-09-10');
+
+        $this->putJson('/api/admin/lead/' . $lead_panel->id, [
+            'demo_start_time' => '20:00',
+            'demo_end_time'   => '21:00',
+        ])->assertStatus(200);
+
+        $flags_panel = $this->flags_de($lead_panel);
+
+        /* --- Camino 2: Claude, en OTRO día: los dos leads comparten closer y las 20:00 del 10 ya
+               se las llevó el lead del panel. Ver crear_lead_con_los_flags_puestos(). --- */
+        $lead_claude = $this->crear_lead_con_los_flags_puestos('2026-09-11');
+
+        $this->escribir_por_claude($lead_claude, [
+            'demo_start_time' => '20:00',
+            'demo_end_time'   => '21:00',
+        ])->assertStatus(200)->assertJsonPath('reagendado', true);
+
+        $flags_claude = $this->flags_de($lead_claude);
+
+        /* La comparación que fija la extracción, ahora sobre la mitad de la regla que faltaba. */
+        $this->assertSame(
+            $flags_panel,
+            $flags_claude,
+            'Mover sólo la hora dejó flags distintos por el panel y por Claude: se separaron las dos definiciones.'
+        );
+
+        /* Y que el reset efectivamente pasó por los dos lados: sin esto, comparar dos "no hizo
+           nada" también daría igual y el test no probaría nada — que es justo el estado en el que
+           estaba el código antes del arreglo. */
+        $this->assertFalse($flags_panel['recordatorio_demo_enviado'], 'El panel no reseteó al mover sólo la hora.');
+        $this->assertFalse($flags_panel['recordatorio_manana_enviado']);
+        $this->assertNull($flags_panel['demo_fin_check_reprogramado_para']);
+        $this->assertFalse($flags_claude['recordatorio_demo_enviado'], 'Claude no reseteó al mover sólo la hora.');
+        $this->assertNull($flags_claude['demo_fin_check_reprogramado_para']);
+
+        /* Y la fecha no se movió: lo que cambió fue SÓLO la hora. */
+        $this->assertSame('2026-09-10', $lead_panel->fresh()->getRawOriginal('demo_date'));
+        $this->assertSame('2026-09-11', $lead_claude->fresh()->getRawOriginal('demo_date'));
+        $this->assertSame('20:00', $lead_panel->fresh()->demo_start_time);
+        $this->assertSame('20:00', $lead_claude->fresh()->demo_start_time);
     }
 }
