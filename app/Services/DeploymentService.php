@@ -970,16 +970,45 @@ class DeploymentService
             return;
         }
 
-        // Sin api_key del cliente: mismo motivo, problema de configuración del admin, no del deployment.
-        if (empty($client->api_key)) {
-            $manual_message = 'El cliente no tiene api_key (debe coincidir con ADMIN_API_INBOUND_KEY '
-                . 'en empresa-api).' . $manual_action_suffix;
-            $this->log('update_default_version', $manual_message, 'warning');
-            $this->upgrade->update([
-                'default_version_sync_status'  => 'manual_required',
-                'default_version_sync_message' => $manual_message,
-            ]);
-            return;
+        /**
+         * 🔴 LA FALTA DE `api_key` YA NO FRENA EL PUT, Y ES EL ARREGLO MÁS IMPORTANTE DE ESTE PASO.
+         *
+         * Hasta el 3/9/2026 acá había un `return` que degradaba a `manual_required` sin intentar
+         * nada. El problema es que esa precondición no la exige el otro lado: el middleware
+         * `AdminApiKey` de empresa-api arranca con
+         *
+         *     if (! config('services.admin_api.require_api_key', false)) { return $next($request); }
+         *
+         * y ese config sale de `env('ADMIN_SYNC_REQUIRE_API_KEY', false)` (config/services.php:65).
+         * Medido el 3/9/2026: NINGUNO de los 97 .env del shared hosting define esa variable, y en
+         * la instancia de masquito `config()` devuelve `bool(false)`. O sea que el endpoint acepta
+         * el PUT sin ninguna clave, y el admin se estaba auto-bloqueando solo.
+         *
+         * Lo que costaba: 20 de los 44 clientes activos tienen `clients.api_key` vacío. A todos
+         * ellos el deployment les terminaba en `completed` mientras `users.default_version` y
+         * `users.api_url` seguían apuntando a la carpeta VIEJA — o sea, el negocio siguiendo con el
+         * código anterior sobre la base ya migrada. Sin error, sin fallo, solo un warning en un log
+         * que nadie mira. Le pasó a masquito ese mismo día (upgrade 76) y se descubrió de casualidad.
+         *
+         * Desde acá: el header viaja solo si hay clave, el PUT se intenta SIEMPRE, y la degradación
+         * a manual queda para lo que de verdad falló (401/403, otro HTTP de error, o transporte),
+         * con el motivo de ESE intento y no de una precondición.
+         */
+        $headers = [
+            'Accept' => 'application/json',
+        ];
+
+        if (! empty($client->api_key)) {
+            $headers['X-Admin-Api-Key'] = $client->api_key;
+        } else {
+            $this->log(
+                'update_default_version',
+                'El cliente no tiene api_key cargada: se intenta el PUT sin el header '
+                . 'X-Admin-Api-Key. El empresa-api solo lo exige si tiene '
+                . 'ADMIN_SYNC_REQUIRE_API_KEY=true en su .env; si lo exige, contesta 401 y este '
+                . 'paso queda como pendiente manual.',
+                'info'
+            );
         }
 
         $this->log(
@@ -992,10 +1021,7 @@ class DeploymentService
         $transport_error = '';
 
         try {
-            $response = Http::withHeaders([
-                'X-Admin-Api-Key' => $client->api_key,
-                'Accept'          => 'application/json',
-            ])
+            $response = Http::withHeaders($headers)
                 ->timeout((int) config('services.client_api.timeout', 15))
                 ->retry((int) config('services.client_api.retries', 2), 500)
                 ->put($url, [
@@ -1043,8 +1069,16 @@ class DeploymentService
             $manual_message = 'El empresa-api del cliente respondió HTTP ' . $response->status() . ': '
                 . $body;
             if ($response->status() === 401 || $response->status() === 403) {
-                $manual_message .= ' Probablemente la api_key del cliente no coincide con '
-                    . 'ADMIN_API_INBOUND_KEY del empresa-api.';
+                /*
+                 * Con el PUT intentándose siempre (con o sin header), un 401 tiene dos causas
+                 * distintas y conviene nombrar la que corresponde: si el cliente NO tenía api_key
+                 * cargada, es que esa instancia sí exige la clave; si la tenía, es que no coincide.
+                 */
+                $manual_message .= empty($client->api_key)
+                    ? ' Este cliente no tiene api_key cargada en el admin y su empresa-api SÍ la '
+                        . 'exige (tiene ADMIN_SYNC_REQUIRE_API_KEY=true en el .env). Cargá en '
+                        . 'clients.api_key el mismo valor que ADMIN_API_INBOUND_KEY de esa instancia.'
+                    : ' La api_key del cliente no coincide con ADMIN_API_INBOUND_KEY del empresa-api.';
             }
             $manual_message .= $manual_action_suffix;
         } else {
@@ -1555,6 +1589,27 @@ class DeploymentService
     /**
      * Comando shell del seeder (atributo command o derivado de seeder_class).
      *
+     * 🔴 El `--class` va SIEMPRE escapado, y el motivo es una barra invertida.
+     *
+     * Un `seeder_class` con namespace —`Database\Seeders\ExtencionTrackingBuyersSeeder`— se
+     * concatenaba crudo y viajaba por SSH hasta el shell del hosting, que se come la barra
+     * invertida porque para él es un carácter de escape. Del otro lado llegaba
+     * `--class=DatabaseSeedersExtencionTrackingBuyersSeeder` y el seeder moría con
+     * "Target class does not exist".
+     *
+     * Medido el 3/9/2026 actualizando masquito a 4.0.11: el upgrade 75 se cayó ahí, en el
+     * tercero de los trece seeders, con las migraciones ya aplicadas sobre la base del cliente.
+     * Seis de esos trece seeders traían el namespace adelante y los otros siete no, así que el
+     * mismo deployment ejecutaba unos bien y otros no.
+     *
+     * `escapeshellarg()` es la función correcta acá y no la trampa que documenta
+     * APRENDER_NO_PARCHEAR: esto corre en el admin (Linux) y se ejecuta en el hosting (Linux),
+     * las dos puntas POSIX. Donde `escapeshellarg()` no sirve es armando desde Windows un
+     * comando que corre en Linux, porque ahí usa comillas dobles.
+     *
+     * El `command` propio del seeder (la rama de arriba) se deja tal cual: es un comando
+     * completo escrito a mano, no un argumento que estemos componiendo nosotros.
+     *
      * @param  VersionSeeder  $seeder
      * @return string
      */
@@ -1564,7 +1619,7 @@ class DeploymentService
             return $seeder->command;
         }
 
-        return 'php artisan db:seed --class=' . $seeder->seeder_class . ' --force';
+        return 'php artisan db:seed --class=' . escapeshellarg($seeder->seeder_class) . ' --force';
     }
 
     /**
@@ -1635,6 +1690,78 @@ class DeploymentService
      * @param  bool  $must_succeed
      * @return string
      */
+    /**
+     * Envuelve un comando remoto para que su stdin sea /dev/null.
+     *
+     * 🔴 ESTO EXISTE PARA QUE NINGÚN COMANDO PUEDA COLGAR EL PIPELINE ESPERANDO UNA RESPUESTA.
+     *
+     * Una sesión SSH no interactiva deja stdin abierto pero nunca escribe nada. Un comando que
+     * pregunte algo se queda esperando para siempre: no falla, no devuelve, no loguea. El
+     * deployment sigue en `running` hasta que la cola da por agotado el job a los 30 minutos
+     * (`RunDeploymentJob::TIMEOUT_SEGUNDOS`), y recién ahí aparece como `failed` sin decir por qué.
+     *
+     * Medido el 3/9/2026 actualizando masquito a 4.0.11: el upgrade 76 se colgó 31 minutos en
+     * `USER_ID=2700 php artisan migrate` (sin `--force`, con `APP_ENV=production`), que imprimió
+     * el cartel "Application In Production!" y se quedó esperando un `yes`.
+     *
+     * Con stdin en /dev/null ese mismo comando lee EOF, `ConfirmableTrait::confirmToProceed()`
+     * toma el default (`no`) y artisan sale con código 1 en el acto: el paso falla en segundos,
+     * con salida para leer, en vez de consumir la ventana entera del job.
+     *
+     * 🔴 Se ataca acá —el punto único por donde pasa TODO comando remoto— y no agregando
+     * `--force` comando por comando, porque `migrate` fue la instancia, no la familia: cualquier
+     * artisan que pregunte algo tiene el mismo final. Es la clase que APRENDER_NO_PARCHEAR llama
+     * "arreglar las instancias que el stack trace nombró, y no la familia".
+     *
+     * ⚠️ Redirige stdin, NO stdout: los pasos que leen la salida del comando siguen leyéndola
+     * igual. El envoltorio `{ ...; } < /dev/null` cubre la cadena entera —un
+     * `cd X && cmd1 && cmd2` redirige los tres— y no solo el último eslabón, que es lo que
+     * pasaría pegando `< /dev/null` al final.
+     *
+     * @param  string  $command
+     * @return string
+     */
+    /**
+     * Prefijo de diagnóstico cuando un artisan murió por pedir confirmación.
+     *
+     * Con stdin en /dev/null (ver `con_stdin_cerrado()`) un comando que pregunta ya no cuelga:
+     * se cancela solo y sale con 1. Pero "exit 1" a secas manda a buscar el problema en la base
+     * o en el código del cliente, cuando lo que falta es un `--force` en el `version_command`.
+     * Esta línea le ahorra ese rodeo al que lea el log.
+     *
+     * @param  string  $output  Salida cruda del comando remoto.
+     * @return string  Texto a anteponer, o cadena vacía si no fue este caso.
+     */
+    private function diagnostico_de_confirmacion(string $output): string
+    {
+        $pistas = [
+            'Application In Production',
+            'Do you really wish to run this command',
+            'Command Cancelled',
+        ];
+
+        foreach ($pistas as $pista) {
+            if (stripos($output, $pista) !== false) {
+                return 'El comando pidió confirmación y se canceló solo porque el deployment '
+                    . 'corre sin terminal. Al comando de esta versión le falta --force. ';
+            }
+        }
+
+        return '';
+    }
+
+    private function con_stdin_cerrado(string $command): string
+    {
+        $limpio = trim($command);
+
+        if ($limpio === '') {
+            return $command;
+        }
+
+        // El ';' final es necesario adentro de { } cuando el cierre va en la misma línea.
+        return '{ ' . rtrim($limpio, ';') . '; } < /dev/null';
+    }
+
     private function exec_ssh_session(
         SSH2 $ssh,
         string $step,
@@ -1646,8 +1773,11 @@ class DeploymentService
             $ssh->setTimeout(0);
         }
 
+        $comando_a_ejecutar = $this->con_stdin_cerrado($command);
+
+        // Se loguea el comando PEDIDO, sin el envoltorio: el log es para leerlo un humano.
         $this->log($step, '$ ' . $command);
-        $output = $ssh->exec($command);
+        $output = $ssh->exec($comando_a_ejecutar);
         $this->log_remote_output($step, $output);
 
         if ($long_running) {
@@ -1658,6 +1788,7 @@ class DeploymentService
         if ($must_succeed && $exit_status !== 0 && $exit_status !== false) {
             throw new \Exception(
                 'Comando remoto falló (exit ' . $exit_status . '). '
+                . $this->diagnostico_de_confirmacion($output)
                 . $this->truncate_for_log($output, 1200)
             );
         }

@@ -8,6 +8,7 @@ use App\Models\VersionCommand;
 use App\Models\VersionManualTask;
 use App\Models\VersionNotification;
 use App\Models\VersionSeeder;
+use App\Services\VersionItemSanitizer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -105,6 +106,16 @@ class ClaudeVersionItemsIngestController extends Controller
             'client_ids'                 => 'nullable|array',
             'client_ids.*'               => 'integer',
         ]);
+
+        /*
+         * 🔴 Validación de FORMATO, que las reglas de arriba no cubren: son string y largo, y un
+         * `seeder_class` con namespace o un `migrate` sin `--force` pasan las dos sin problema.
+         *
+         * Los dos entraron por acá y quedaron guardados en la versión 4.0.0, y el 3/9/2026
+         * voltearon la actualización de masquito: el seeder con namespace mató al upgrade 75 y el
+         * migrate sin --force colgó al 76 durante 31 minutos. Se rechaza antes de escribir nada.
+         */
+        $this->assert_items_ejecutables($request);
 
         // Id del grupo de claude-comerciocity que origina esta ingesta: es la
         // clave de trazabilidad/idempotencia que se guarda en cada fila.
@@ -309,6 +320,17 @@ class ClaudeVersionItemsIngestController extends Controller
      */
     protected function upsert_seeders(Version $version, array $items, string $source_group_id, array $client_ids): array
     {
+        /*
+         * 🔴 El saneamiento va ACÁ y no adentro del `$data_row_builder`, y el motivo es la
+         * idempotencia: `upsert_items()` calcula la clave natural del PAYLOAD CRUDO
+         * (`$payload[$natural_key_field]`), antes de llamar al builder. Saneando solo en el builder,
+         * el upsert buscaría por el valor sucio —que no existe— y crearía una fila con el valor
+         * limpio en cada publicación, duplicando el ítem una vez por corrida.
+         */
+        $items = $this->sanear_items($items, 'seeder_class', function ($valor) {
+            return VersionItemSanitizer::sanear_seeder_class($valor);
+        });
+
         return $this->upsert_items(
             VersionSeeder::class,
             $version,
@@ -341,6 +363,11 @@ class ClaudeVersionItemsIngestController extends Controller
      */
     protected function upsert_commands(Version $version, array $items, string $source_group_id, array $client_ids): array
     {
+        /* Mismo motivo que en upsert_seeders(): la clave natural sale del payload crudo. */
+        $items = $this->sanear_items($items, 'command', function ($valor) {
+            return VersionItemSanitizer::sanear_comando($valor);
+        });
+
         return $this->upsert_items(
             VersionCommand::class,
             $version,
@@ -417,6 +444,53 @@ class ClaudeVersionItemsIngestController extends Controller
      * @param  callable $data_row_builder   function(array $payload): array — campos de datos a guardar.
      * @return array{creadas: int, actualizadas: int, omitidas_por_carga_manual: int}
      */
+    /**
+     * Corta con 422 si algún seeder o comando del payload no se puede ejecutar sin terminal.
+     *
+     * Se hace ANTES de escribir nada: el endpoint es idempotente pero no borra, así que un ítem
+     * malo guardado hay que sacarlo a mano del admin.
+     *
+     * @param  Request  $request
+     * @return void
+     */
+    protected function assert_items_ejecutables(Request $request): void
+    {
+        foreach ((array) $request->input('seeders', []) as $i => $payload) {
+            $motivo = VersionItemSanitizer::motivo_de_rechazo_de_seeder($payload['seeder_class'] ?? null);
+            if ($motivo !== null) {
+                abort(422, 'seeders.' . $i . '.seeder_class: ' . $motivo);
+            }
+        }
+
+        foreach ((array) $request->input('commands', []) as $i => $payload) {
+            $motivo = VersionItemSanitizer::motivo_de_rechazo_de_comando($payload['command'] ?? null);
+            if ($motivo !== null) {
+                abort(422, 'commands.' . $i . '.command: ' . $motivo);
+            }
+        }
+    }
+
+    /**
+     * Aplica el saneamiento a un campo de cada ítem, dejando el resto del payload intacto.
+     *
+     * @param  array     $items
+     * @param  string    $campo
+     * @param  callable  $sanear
+     * @return array
+     */
+    protected function sanear_items(array $items, string $campo, callable $sanear): array
+    {
+        foreach ($items as $i => $payload) {
+            if (! is_array($payload) || ! array_key_exists($campo, $payload)) {
+                continue;
+            }
+
+            $items[$i][$campo] = $sanear($payload[$campo]);
+        }
+
+        return $items;
+    }
+
     protected function upsert_items(
         string $model_class,
         Version $version,

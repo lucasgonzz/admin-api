@@ -4,18 +4,21 @@ namespace App\Http\Controllers;
 
 use App\Models\Version;
 use App\Models\VersionCommand;
+use App\Services\VersionItemSanitizer;
 use Illuminate\Http\Request;
 
 class VersionCommandController extends Controller
 {
     function store(Request $request, $versionId) {
         $version = Version::findOrFail($versionId);
+        /* Mismo saneamiento que la ingesta de Claude: la regla vive en un solo lugar. */
+        $comando = $this->sanear_comando_o_fallar($request->input('command'));
         $nextOrder = (int) (VersionCommand::query()
             ->where('version_id', $version->id)
             ->max('execution_order') ?? -1) + 1;
         $command = VersionCommand::create([
             'version_id' => $version->id,
-            'command' => $request->input('command'),
+            'command' => $comando,
             'description' => $request->input('description'),
             'execution_order' => $nextOrder,
             'is_required' => $request->boolean('is_required', true),
@@ -29,8 +32,9 @@ class VersionCommandController extends Controller
 
     function update(Request $request, $versionId, $id) {
         $command = VersionCommand::where('version_id', $versionId)->findOrFail($id);
+        $comando = $this->sanear_comando_o_fallar($request->input('command'));
         $command->update([
-            'command' => $request->input('command'),
+            'command' => $comando,
             'description' => $request->input('description'),
             'execution_order' => (int) $request->input('execution_order', 0),
             'is_required' => $request->boolean('is_required', false),
@@ -39,6 +43,25 @@ class VersionCommandController extends Controller
         ]);
         $this->syncRestrictedClientsFromRequest($command, $request);
         return redirect(route('versions.show', $versionId) . '#tab-commands')->with('success', 'Comando actualizado.');
+    }
+
+    /**
+     * Completa el comando con --force si le hace falta, o corta con 422 si es destructivo.
+     *
+     * Un artisan confirmable sin --force cuelga el deployment 30 minutos esperando un "yes" por
+     * stdin: es lo que volteo el upgrade 76 de masquito el 3/9/2026.
+     *
+     * @param  string|null  $valor
+     * @return string
+     */
+    private function sanear_comando_o_fallar($valor): string
+    {
+        $motivo = VersionItemSanitizer::motivo_de_rechazo_de_comando($valor);
+        if ($motivo !== null) {
+            abort(422, $motivo);
+        }
+
+        return VersionItemSanitizer::sanear_comando($valor);
     }
 
     function destroy($versionId, $id) {
