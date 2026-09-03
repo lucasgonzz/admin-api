@@ -128,7 +128,33 @@ class VersionItemSanitizer
             return $limpio;
         }
 
+        /*
+         * 🔴 SOLO SE COMPLETA UN COMANDO SUELTO. Un encadenado NO se toca: se rechaza aparte.
+         *
+         * Pegar ' --force' al final de `php artisan db:seed --class=A && php artisan cache:clear`
+         * se lo agrega a `cache:clear` —que no acepta esa opción y haría fallar el deployment— y
+         * deja al `db:seed` sin el suyo. Y como esto se PERSISTE en la base, el dato quedaría
+         * corrupto, no solo mal ejecutado. Lo levantó la verificación independiente de esta misión.
+         */
+        if (static::es_encadenado($limpio)) {
+            return $limpio;
+        }
+
         return $limpio . ' --force';
+    }
+
+    /**
+     * ¿El comando encadena más de una invocación?
+     *
+     * Con `&&`, `||`, `;` o una tubería no hay "un" comando al que agregarle el flag, así que el
+     * saneamiento automático no aplica y la decisión pasa a ser del que lo carga.
+     *
+     * @param  string  $comando
+     * @return bool
+     */
+    public static function es_encadenado(string $comando): bool
+    {
+        return (bool) preg_match('/(&&|\|\||;|\|)/', $comando);
     }
 
     /**
@@ -150,6 +176,18 @@ class VersionItemSanitizer
             return 'El comando usa "' . $destructivo . '", que borra o revierte datos. Un '
                 . 'despliegue de cliente no corre eso: si de verdad hace falta, se ejecuta a mano '
                 . 'y con respaldo hecho.';
+        }
+
+        /*
+         * Un encadenado que necesita `--force` se rechaza en vez de completarse: agregarle el flag
+         * al final se lo pondría al último eslabón, que no es el que lo necesita (ver
+         * sanear_comando()). Se pide que lo escriban explícito, que además deja claro a cuál de
+         * los comandos aplica.
+         */
+        if (static::es_encadenado($limpio) && static::necesita_force($limpio)) {
+            return 'El comando encadena varias invocaciones y alguna necesita --force. Escribilo '
+                . 'explícito en el comando que lo necesita: agregarlo automáticamente se lo pondría '
+                . 'al último de la cadena, que no es el que lo pide.';
         }
 
         return null;

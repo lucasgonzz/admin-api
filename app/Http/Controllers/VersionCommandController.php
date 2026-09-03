@@ -6,6 +6,7 @@ use App\Models\Version;
 use App\Models\VersionCommand;
 use App\Services\VersionItemSanitizer;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class VersionCommandController extends Controller
 {
@@ -58,7 +59,15 @@ class VersionCommandController extends Controller
     {
         $motivo = VersionItemSanitizer::motivo_de_rechazo_de_comando($valor);
         if ($motivo !== null) {
-            abort(422, $motivo);
+            /*
+             * 🔴 ValidationException y NO abort(422): estas son rutas WEB del panel, que responden
+             * con redirect. Un abort(422) cae en la pagina de error generica de Laravel —admin-api
+             * no tiene vista errors::422— asi que el operador NO ve el motivo, que es justamente
+             * lo unico que esta guarda tiene para darle, y ademas pierde lo que habia cargado en
+             * el formulario. Con esto vuelve al form, con el mensaje y con sus datos.
+             * Lo levanto la verificacion independiente de esta mision.
+             */
+            throw ValidationException::withMessages(['command' => $motivo]);
         }
 
         return VersionItemSanitizer::sanear_comando($valor);

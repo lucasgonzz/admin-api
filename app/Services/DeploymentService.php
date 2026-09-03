@@ -1809,8 +1809,22 @@ class DeploymentService
             return $command;
         }
 
-        // El ';' final es necesario adentro de { } cuando el cierre va en la misma línea.
-        return '{ ' . rtrim($limpio, ';') . '; } < /dev/null';
+        /*
+         * 🔴 EL CIERRE VA CON SALTO DE LÍNEA, NO CON '; }'. Lo levantó la verificación
+         * independiente, midiéndolo contra bash de verdad: la forma `{ <cmd>; } < /dev/null`
+         * convierte en error de sintaxis tres cosas que un comando puede traer legítimamente,
+         * porque el ';' no puede ir detrás de ellas:
+         *
+         *   - un '&' final (segundo plano):  syntax error near unexpected token ';'
+         *   - un comentario '# ...' al final: el ';' queda comentado y el bloque nunca cierra
+         *   - un heredoc (<<EOF ... EOF):     el ';' rompe el terminador
+         *
+         * Con salto de línea las tres andan, y el exit status se preserva igual. Hoy ningún
+         * comando que arme este archivo tiene esas formas — pero `version_commands` es texto
+         * libre que entra por el panel y por la ingesta, y termina ejecutándose contra la
+         * producción de un cliente.
+         */
+        return '{ ' . $limpio . "\n} < /dev/null";
     }
 
     private function exec_ssh_session(

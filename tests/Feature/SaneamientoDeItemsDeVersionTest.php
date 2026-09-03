@@ -147,6 +147,44 @@ class SaneamientoDeItemsDeVersionTest extends TestCase
         $this->assertNull(VersionItemSanitizer::subcomando_destructivo('php artisan migrate'));
     }
 
+    /**
+     * 🔴 Un comando ENCADENADO no se completa con --force: se rechaza.
+     *
+     * Pegar el flag al final de `db:seed --class=A && php artisan cache:clear` se lo agrega a
+     * cache:clear —que no acepta esa opcion y haria fallar el deployment— y deja al db:seed sin el
+     * suyo. Y como el saneamiento se persiste, el dato quedaria corrupto. Lo levanto la
+     * verificacion independiente.
+     *
+     * @return void
+     */
+    public function test_un_comando_encadenado_no_se_completa_se_rechaza()
+    {
+        $encadenado = 'php artisan db:seed --class=A && php artisan cache:clear';
+
+        $this->assertSame(
+            $encadenado,
+            VersionItemSanitizer::sanear_comando($encadenado),
+            'Al comando encadenado se le pego --force al final, en el eslabon equivocado.'
+        );
+
+        $motivo = VersionItemSanitizer::motivo_de_rechazo_de_comando($encadenado);
+        $this->assertNotNull($motivo, 'El encadenado que necesita --force no se rechazo.');
+        $this->assertStringContainsString('escribilo', mb_strtolower($motivo));
+    }
+
+    /**
+     * Y un encadenado que NO necesita --force pasa sin problema: no se rechaza de mas.
+     *
+     * @return void
+     */
+    public function test_un_encadenado_que_no_necesita_force_pasa()
+    {
+        $comando = 'cd /var/www && composer install --no-dev';
+
+        $this->assertNull(VersionItemSanitizer::motivo_de_rechazo_de_comando($comando));
+        $this->assertSame($comando, VersionItemSanitizer::sanear_comando($comando));
+    }
+
     /* ------------------------------------------------------------ puerta 1: la ingesta */
 
     /**

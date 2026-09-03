@@ -6,6 +6,7 @@ use App\Models\Version;
 use App\Models\VersionSeeder;
 use App\Services\VersionItemSanitizer;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class VersionSeederController extends Controller
 {
@@ -56,7 +57,15 @@ class VersionSeederController extends Controller
     {
         $motivo = VersionItemSanitizer::motivo_de_rechazo_de_seeder($valor);
         if ($motivo !== null) {
-            abort(422, $motivo);
+            /*
+             * 🔴 ValidationException y NO abort(422): estas son rutas WEB del panel, que responden
+             * con redirect. Un abort(422) cae en la pagina de error generica de Laravel —admin-api
+             * no tiene vista errors::422— asi que el operador NO ve el motivo, que es justamente
+             * lo unico que esta guarda tiene para darle, y ademas pierde lo que habia cargado en
+             * el formulario. Con esto vuelve al form, con el mensaje y con sus datos.
+             * Lo levanto la verificacion independiente de esta mision.
+             */
+            throw ValidationException::withMessages(['seeder_class' => $motivo]);
         }
 
         return VersionItemSanitizer::sanear_seeder_class($valor);
