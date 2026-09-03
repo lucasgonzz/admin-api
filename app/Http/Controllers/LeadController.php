@@ -4922,11 +4922,13 @@ class LeadController extends Controller
          * pidió el panorama completo de lo que puede llegarle en los próximos días, no solo lo que
          * tiene fecha futura.
          */
-        $agendadas = Lead::withAll()
+        $agendadas_query = Lead::withAll()
             ->whereIn('status', $estados_demo_sin_terminar)
             ->whereDoesntHave('calls', function ($q) {
                 $q->whereNotNull('started_at');
-            })
+            });
+
+        $agendadas = (clone $agendadas_query)
             ->orderBy('demo_date')
             ->orderBy('demo_start_time')
             ->get();
@@ -4940,14 +4942,16 @@ class LeadController extends Controller
          * Se cargan las llamadas porque acá ya puede haber una AGENDADA por el agente (grupo 307)
          * y el closer necesita ver el horario acordado y el link de Meet.
          */
-        $para_llamar = Lead::withAll()
-            ->with(['calls' => function ($q) {
-                $q->with('partners')->orderBy('id');
-            }])
+        $para_llamar_query = Lead::withAll()
             ->whereIn('status', ['demo_realizada', 'closer_activo'])
             ->whereDoesntHave('calls', function ($q) {
                 $q->whereNotNull('started_at');
-            })
+            });
+
+        $para_llamar = (clone $para_llamar_query)
+            ->with(['calls' => function ($q) {
+                $q->with('partners')->orderBy('id');
+            }])
             ->orderBy('demo_date', 'desc')
             ->orderBy('demo_start_time', 'desc')
             ->get();
@@ -4958,21 +4962,63 @@ class LeadController extends Controller
          * no perder un lead que quedó con un estado raro después de la llamada: el criterio del
          * pedido es "tuvo la llamada y todavía no está cerrado ganado".
          */
-        $seguimiento = Lead::withAll()
-            ->with(['calls' => function ($q) {
-                $q->with('partners')->orderBy('id');
-            }])
+        $seguimiento_query = Lead::withAll()
             ->whereHas('calls', function ($q) {
                 $q->whereNotNull('started_at');
             })
-            ->whereNotIn('status', $estados_cerrados)
+            ->whereNotIn('status', $estados_cerrados);
+
+        $seguimiento = (clone $seguimiento_query)
+            ->with(['calls' => function ($q) {
+                $q->with('partners')->orderBy('id');
+            }])
             ->orderBy('closer_called_at', 'desc')
             ->get();
+
+        /*
+         * Tarjetas de resumen (total + "sin responder") de las tres columnas, para el rediseño del
+         * panel. Se clona cada query ANTES de haberle pegado el ->get(): así el ->count() nunca
+         * ejecuta ni pisa la colección que ya se armó arriba, y el resultado de agendadas/
+         * para_llamar/seguimiento no cambia en nada.
+         *
+         * `requiereRevision(true)` es el mismo scope que usa LeadStatusCardsService para el módulo
+         * de Leads, con el `true` que suma los rechazos de Meta (decisión de Lucas del 1/9/2026):
+         * sin eso la tarjeta mostraría 0 arriba de un lead al que no se le pudo entregar el mensaje.
+         */
+        $cards = [
+            [
+                'value'         => 'agendadas',
+                'text'          => 'Demos agendadas',
+                'color'         => LeadPipelineStatus::color_for('demo_agendada'),
+                'group'         => null,
+                'total'         => (clone $agendadas_query)->count(),
+                'sin_responder' => (clone $agendadas_query)->requiereRevision(true)->count(),
+            ],
+            [
+                'value'         => 'para_llamar',
+                'text'          => 'Listos para la llamada',
+                /* Verde curado a mano (bootstrap-success): esta columna mezcla demo_realizada +
+                 * closer_activo y no hay un slug 1:1 en el catálogo para pedirle el color. */
+                'color'         => '#198754',
+                'group'         => null,
+                'total'         => (clone $para_llamar_query)->count(),
+                'sin_responder' => (clone $para_llamar_query)->requiereRevision(true)->count(),
+            ],
+            [
+                'value'         => 'seguimiento',
+                'text'          => 'En seguimiento',
+                'color'         => LeadPipelineStatus::color_for('closer_activo'),
+                'group'         => null,
+                'total'         => (clone $seguimiento_query)->count(),
+                'sin_responder' => (clone $seguimiento_query)->requiereRevision(true)->count(),
+            ],
+        ];
 
         return response()->json([
             'agendadas'   => $agendadas,
             'para_llamar' => $para_llamar,
             'seguimiento' => $seguimiento,
+            'cards'       => $cards,
             'settings'    => [
                 'alert_delay_minutes'   => (int) AdminSetting::get('closer_alert_delay_minutes', 5),
                 'alert_abandon_minutes' => (int) AdminSetting::get('closer_alert_abandon_minutes', 20),
