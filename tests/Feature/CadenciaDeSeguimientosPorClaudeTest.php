@@ -24,8 +24,21 @@ use Tests\TestCase;
  *  3. La idempotencia por `estado`, que además es la única forma de que reenviar el lote no explote
  *     contra el índice único de la tabla.
  *  4. Que sea ADITIVO: un lote parcial no puede llevarse puestas las reglas que ya estaban.
- *  5. Los dos rangos: `horas_espera` mínimo 1 (un 0 convierte el cron de cada dos horas en un
- *     martilleo) y `max_followups` máximo 10.
+ *  5. 🔴 QUE LOS RANGOS DE `horas_espera` ESTÉN ATADOS AL CRON Y NO A UN GUSTO. El mínimo es 3
+ *     porque `leads:check-followups` corre `everyTwoHours()`: con 1 o con 2, cada corrida cumple
+ *     la condición de `process_lead()` y la cadencia real pasa a ser un mensaje cada dos horas. El
+ *     máximo es 720 horas, y el caso que lo justifica no es el 500 de `4294967296` sino el
+ *     `4294967295`, que entra en la columna y deja una regla activa, visible en el panel, esperando
+ *     490.000 años.
+ *  6. 🔴 QUE APAGAR LA ÚLTIMA REGLA ACTIVA NO SALGA GRATIS. Un lote de baja deja el motor mudo y
+ *     nada lo denuncia: la simulación y la respuesta lo dicen, y aplicarlo exige un flag aparte.
+ *  7. 🔴 QUE LA SIMULACIÓN DIGA A CUÁNTOS LES DISPARA YA. Prender una regla en un estado con leads
+ *     parados no empieza una cadencia: les manda un WhatsApp a todos dentro de las dos horas,
+ *     porque `last_message_at()` cae a `created_at` cuando el lead no tiene mensajes.
+ *  8. 🔴 QUE EL `confirm_token` CUBRA LA POBLACIÓN, que es justo el número que la nota pide mirar.
+ *  9. 🔴 QUE `activa` SEA EXPLÍCITO, igual que en el protocolo. La asimetría estaba al revés del
+ *     riesgo: una entrada de protocolo la lee una persona, una regla hace que el cron escriba.
+ * 10. ⚠️ Que el reintento que el docblock declara seguro devuelva 200 y no 422.
  */
 class CadenciaDeSeguimientosPorClaudeTest extends TestCase
 {
@@ -101,9 +114,37 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
     private function dos_reglas(): array
     {
         return [
-            ['estado' => 'solicita_disponibilidad', 'horas_espera' => 6, 'max_followups' => 3, 'descripcion' => 'Dijo que sí y no cerró horario.'],
-            ['estado' => 'closer_activo', 'horas_espera' => 48, 'max_followups' => 2, 'descripcion' => 'El closer lo tiene y no avanza.'],
+            ['estado' => 'solicita_disponibilidad', 'horas_espera' => 6, 'max_followups' => 3, 'activa' => true, 'descripcion' => 'Dijo que sí y no cerró horario.'],
+            ['estado' => 'closer_activo', 'horas_espera' => 48, 'max_followups' => 2, 'activa' => true, 'descripcion' => 'El closer lo tiene y no avanza.'],
         ];
+    }
+
+    /**
+     * Apaga TODAS las reglas activas que haya hoy en la base, con el flag explícito. Sirve para
+     * dejar el motor en un estado conocido antes de medir el conteo de reglas activas.
+     *
+     * @return void
+     */
+    private function apagar_todo_lo_activo(): void
+    {
+        $activas = FollowupRule::where('activa', true)->get();
+        if ($activas->isEmpty()) {
+            return;
+        }
+
+        $reglas = [];
+        foreach ($activas as $regla) {
+            $reglas[] = ['estado' => $regla->estado, 'activa' => false];
+        }
+
+        $simulacion = $this->pegar(['reglas' => $reglas]);
+        $this->pegar([
+            'reglas'                 => $reglas,
+            'dry_run'                => false,
+            'confirm_count'          => $simulacion->json('cambiarian'),
+            'confirm_token'          => $simulacion->json('confirm_token'),
+            'confirm_apagar_todas'   => true,
+        ])->assertStatus(200);
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -203,7 +244,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
         $this->simular_y_aplicar($this->dos_reglas())->assertStatus(200);
 
         $this->simular_y_aplicar([
-            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 3],
+            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true],
         ])->assertStatus(200);
 
         $this->assertSame(1, FollowupRule::where('estado', 'solicita_disponibilidad')->count(), 'Un lote de una regla borró las otras.');
@@ -275,7 +316,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
         }
 
         $response = $this->pegar(['reglas' => [
-            ['estado' => $estado, 'horas_espera' => 6, 'max_followups' => 3],
+            ['estado' => $estado, 'horas_espera' => 6, 'max_followups' => 3, 'activa' => true],
         ]]);
 
         $response->assertStatus(200);
@@ -347,7 +388,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
     public function test_un_estado_que_no_es_del_pipeline_es_422_con_la_lista_de_los_validos(): void
     {
         $response = $this->pegar(['reglas' => [
-            ['estado' => 'manual_coordinacion', 'horas_espera' => 24, 'max_followups' => 3],
+            ['estado' => 'manual_coordinacion', 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true],
         ]]);
 
         $response->assertStatus(422);
@@ -373,7 +414,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
         $this->assertNotContains($estado, LeadPipelineStatus::all_slugs(), 'El estado de prueba dejó de ser inexistente.');
 
         $this->pegar(['reglas' => [
-            ['estado' => $estado, 'horas_espera' => 24, 'max_followups' => 3],
+            ['estado' => $estado, 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true],
         ]])->assertStatus(422);
 
         $this->withHeaders($this->headers())->postJson('/api/claude/followup-templates', [
@@ -394,7 +435,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
     public function test_horas_espera_en_cero_es_422(): void
     {
         $response = $this->pegar(['reglas' => [
-            ['estado' => 'calificado', 'horas_espera' => 0, 'max_followups' => 3],
+            ['estado' => 'calificado', 'horas_espera' => 0, 'max_followups' => 3, 'activa' => true],
         ]]);
 
         $response->assertStatus(422);
@@ -409,7 +450,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
     public function test_max_followups_arriba_de_diez_es_422(): void
     {
         $response = $this->pegar(['reglas' => [
-            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 11],
+            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 11, 'activa' => true],
         ]]);
 
         $response->assertStatus(422);
@@ -441,8 +482,8 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
     public function test_un_estado_repetido_en_el_lote_es_422(): void
     {
         $response = $this->pegar(['reglas' => [
-            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 3],
-            ['estado' => 'calificado', 'horas_espera' => 48, 'max_followups' => 1],
+            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true],
+            ['estado' => 'calificado', 'horas_espera' => 48, 'max_followups' => 1, 'activa' => true],
         ]]);
 
         $response->assertStatus(422);
@@ -457,7 +498,7 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
     public function test_la_simulacion_avisa_si_el_estado_es_uno_que_el_cron_nunca_procesa(): void
     {
         $response = $this->pegar(['reglas' => [
-            ['estado' => 'en_pausa', 'horas_espera' => 24, 'max_followups' => 3],
+            ['estado' => 'en_pausa', 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true],
         ]]);
 
         $response->assertStatus(200);
@@ -466,5 +507,249 @@ class CadenciaDeSeguimientosPorClaudeTest extends TestCase
             (array) $response->json('cambios.0'),
             'La simulación no avisó que una regla para en_pausa es inerte.'
         );
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Los rangos de `horas_espera`, atados al cron
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * 🔴 `horas_espera` menor a 3 es 422: no frena el martilleo que el mínimo dice frenar.
+     *
+     * `app/Console/Kernel.php` corre `leads:check-followups` con `everyTwoHours()`, y
+     * `LeadFollowupService::process_lead()` compara `$hours < (int) $rule->horas_espera`. Con 1 o
+     * con 2, CADA corrida del cron cumple la condición y la cadencia real pasa a ser "un mensaje
+     * cada dos horas": diez mensajes en veinte horas a una persona real. 3 es el primer valor que
+     * obliga a saltear una corrida.
+     *
+     * @return void
+     */
+    public function test_horas_espera_menor_a_tres_es_422_porque_el_cron_corre_cada_dos_horas(): void
+    {
+        foreach ([1, 2] as $horas) {
+            $response = $this->pegar(['reglas' => [
+                ['estado' => 'calificado', 'horas_espera' => $horas, 'max_followups' => 3, 'activa' => true],
+            ]]);
+
+            $response->assertStatus(422);
+            $this->assertSame(0, FollowupRule::where('estado', 'calificado')->count(), 'Se escribió con horas_espera=' . $horas);
+        }
+    }
+
+    /**
+     * 🔴 Un `horas_espera` que no entra en `int unsigned` es 422 en la simulación, no 500 al
+     * escribir. `4294967296` es `UINT_MAX + 1`: la validación no tenía ningún `max`, así que pasaba
+     * y le explotaba a MySQL en la cara.
+     *
+     * @return void
+     */
+    public function test_horas_espera_que_no_entra_en_la_columna_es_422_y_no_500(): void
+    {
+        $response = $this->pegar(['reglas' => [
+            ['estado' => 'calificado', 'horas_espera' => 4294967296, 'max_followups' => 3, 'activa' => true],
+        ]]);
+
+        $response->assertStatus(422);
+        $this->assertSame(0, FollowupRule::where('estado', 'calificado')->count());
+    }
+
+    /**
+     * 🔴 Y `4294967295`, que SÍ entra en la columna, también es 422: la regla quedaría activa, se
+     * vería en el panel y esperaría 490.000 años. Es el mismo modo de fallo por el que un `estado`
+     * inventado es 422 —"queda cargada pareciendo que anda"—, por el otro campo.
+     *
+     * @return void
+     */
+    public function test_horas_espera_absurdo_pero_que_entra_en_la_columna_tambien_es_422(): void
+    {
+        $response = $this->pegar(['reglas' => [
+            ['estado' => 'calificado', 'horas_espera' => 4294967295, 'max_followups' => 3, 'activa' => true],
+        ]]);
+
+        $response->assertStatus(422);
+        $this->assertSame(0, FollowupRule::where('estado', 'calificado')->count());
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Lo que la simulación tiene que decir antes de que alguien confirme
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * 🔴 `activa` es obligatorio y explícito también acá. La asimetría con `protocol-entries`
+     * estaba al revés del riesgo: una entrada de protocolo es texto que lee una persona, una regla
+     * hace que el cron le escriba a leads reales.
+     *
+     * @return void
+     */
+    public function test_activa_es_obligatorio_al_crear_una_regla(): void
+    {
+        $response = $this->pegar(['reglas' => [
+            ['estado' => 'calificado', 'horas_espera' => 24, 'max_followups' => 3],
+        ]]);
+
+        $response->assertStatus(422);
+        $this->assertSame(0, FollowupRule::where('estado', 'calificado')->count());
+    }
+
+    /**
+     * 🔴 Apagar la ÚLTIMA regla activa deja el motor de seguimientos mudo, y eso hay que decirlo y
+     * confirmarlo aparte: un lote de baja no puede salir tan barato como uno de alta.
+     *
+     * @return void
+     */
+    public function test_apagar_la_ultima_regla_activa_exige_un_flag_explicito(): void
+    {
+        $this->apagar_todo_lo_activo();
+        $this->simular_y_aplicar($this->dos_reglas())->assertStatus(200);
+        $this->assertSame(2, FollowupRule::where('activa', true)->count());
+
+        $apagar = [
+            ['estado' => 'solicita_disponibilidad', 'activa' => false],
+            ['estado' => 'closer_activo', 'activa' => false],
+        ];
+
+        $simulacion = $this->pegar(['reglas' => $apagar]);
+        $simulacion->assertStatus(200);
+        $simulacion->assertJsonPath('motor_de_seguimientos.reglas_activas_hoy', 2);
+        $simulacion->assertJsonPath('motor_de_seguimientos.reglas_activas_despues', 0);
+        $this->assertArrayHasKey(
+            'advertencia',
+            (array) $simulacion->json('motor_de_seguimientos'),
+            'La simulación no avisó que el cron de seguimientos queda sin ninguna regla.'
+        );
+
+        $sin_flag = $this->pegar([
+            'reglas'        => $apagar,
+            'dry_run'       => false,
+            'confirm_count' => $simulacion->json('cambiarian'),
+            'confirm_token' => $simulacion->json('confirm_token'),
+        ]);
+
+        $sin_flag->assertStatus(422);
+        $this->assertSame(2, FollowupRule::where('activa', true)->count(), 'Se apagaron todas las reglas sin el flag.');
+
+        $con_flag = $this->pegar([
+            'reglas'               => $apagar,
+            'dry_run'              => false,
+            'confirm_count'        => $simulacion->json('cambiarian'),
+            'confirm_token'        => $simulacion->json('confirm_token'),
+            'confirm_apagar_todas' => true,
+        ]);
+
+        $con_flag->assertStatus(200);
+        $con_flag->assertJsonPath('motor_de_seguimientos.reglas_activas_despues', 0);
+        $this->assertSame(0, FollowupRule::where('activa', true)->count());
+    }
+
+    /**
+     * 🔴 Prender una regla en un estado con leads parados dispara una tanda INMEDIATA:
+     * `LeadFollowupService::last_message_at()` cae a `$lead->created_at` cuando el lead no tiene
+     * mensajes, así que un lead parado hace meses cumple CUALQUIER `horas_espera`. La simulación
+     * tiene que decir a cuántos les sale el mensaje en la próxima corrida del cron, no sólo cuántos
+     * hay en ese estado.
+     *
+     * @return void
+     */
+    public function test_la_simulacion_dice_a_cuantos_leads_les_dispara_ya_mismo(): void
+    {
+        $estado = 'solicita_disponibilidad';
+
+        $regla = [['estado' => $estado, 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true]];
+
+        $antes = $this->pegar(['reglas' => $regla]);
+        $antes->assertStatus(200);
+        $base_inmediato = (int) $antes->json('cambios.0.disparo_inmediato');
+        $base_en_estado = (int) $antes->json('cambios.0.leads_en_ese_estado');
+
+        for ($i = 0; $i < 3; $i++) {
+            $lead               = new Lead();
+            $lead->uuid         = (string) Str::uuid();
+            $lead->contact_name = 'Lead parado hace meses ' . $i;
+            $lead->status       = $estado;
+            $lead->created_at   = now()->subMonths(6);
+            $lead->save();
+        }
+
+        $despues = $this->pegar(['reglas' => $regla]);
+        $despues->assertStatus(200);
+        $despues->assertJsonPath('cambios.0.leads_en_ese_estado', $base_en_estado + 3);
+        $despues->assertJsonPath('cambios.0.disparo_inmediato', $base_inmediato + 3);
+    }
+
+    /**
+     * 🔴 El `confirm_token` cubre `leads_en_ese_estado` y el disparo inmediato, que son justo los
+     * números que la nota de la simulación pide mirar.
+     *
+     * Medido contra el código anterior: se simulaba con un lead en el estado, se metían cinco más y
+     * se confirmaba con el mismo token y el mismo count — 200, escribía, y la población a la que le
+     * cambiaba la cadencia había pasado de 1 a 6 sin que el token se enterara.
+     *
+     * @return void
+     */
+    public function test_el_confirm_token_cambia_si_cambia_la_poblacion_de_leads(): void
+    {
+        $estado = 'closer_activo';
+        $regla  = [['estado' => $estado, 'horas_espera' => 24, 'max_followups' => 3, 'activa' => true]];
+
+        $simulacion = $this->pegar(['reglas' => $regla]);
+        $simulacion->assertStatus(200);
+
+        for ($i = 0; $i < 5; $i++) {
+            $lead               = new Lead();
+            $lead->uuid         = (string) Str::uuid();
+            $lead->contact_name = 'Lead que entró después de la simulación ' . $i;
+            $lead->status       = $estado;
+            $lead->created_at   = now()->subMonths(6);
+            $lead->save();
+        }
+
+        $segunda = $this->pegar(['reglas' => $regla]);
+        $segunda->assertStatus(200);
+
+        $this->assertNotSame(
+            $simulacion->json('confirm_token'),
+            $segunda->json('confirm_token'),
+            'Entraron cinco leads al estado y el confirm_token no cambió.'
+        );
+
+        $con_token_viejo = $this->pegar([
+            'reglas'        => $regla,
+            'dry_run'       => false,
+            'confirm_count' => $simulacion->json('cambiarian'),
+            'confirm_token' => $simulacion->json('confirm_token'),
+        ]);
+
+        $con_token_viejo->assertStatus(422);
+        $this->assertSame(0, FollowupRule::where('estado', $estado)->count(), 'Escribió con el token de una población vieja.');
+    }
+
+    /**
+     * ⚠️ Reintentar la misma llamada cuando ya no hay nada que cambiar da 200 `sin_cambio`, que es
+     * lo que el docblock del endpoint promete. Ver el test gemelo en
+     * {@see ProtocoloDeVentasPorClaudeTest}.
+     *
+     * @return void
+     */
+    public function test_reintentar_cuando_no_hay_nada_que_cambiar_es_200(): void
+    {
+        $reglas     = $this->dos_reglas();
+        $simulacion = $this->pegar(['reglas' => $reglas]);
+        $simulacion->assertStatus(200);
+
+        $body = [
+            'reglas'        => $reglas,
+            'dry_run'       => false,
+            'confirm_count' => $simulacion->json('cambiarian'),
+            'confirm_token' => $simulacion->json('confirm_token'),
+        ];
+
+        $this->pegar($body)->assertStatus(200);
+
+        $reintento = $this->pegar($body);
+
+        $reintento->assertStatus(200);
+        $reintento->assertJsonPath('resultados.creadas', 0);
+        $reintento->assertJsonPath('resultados.actualizadas', 0);
+        $this->assertSame(1, FollowupRule::where('estado', 'solicita_disponibilidad')->count());
     }
 }

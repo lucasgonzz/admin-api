@@ -24,6 +24,19 @@ use Tests\TestCase;
  *     criterio.
  *  3. 🔴 QUE `dry_run` SEA EL DEFAULT Y NO ESCRIBA NADA.
  *  4. Que sea ADITIVO: un lote parcial no puede llevarse puestas las entradas que ya estaban.
+ *  5. 🔴 QUE LA COMPARACIÓN DE TÍTULOS SEA LA MISMA QUE HACE MYSQL. `protocol_entries.titulo` es
+ *     `utf8mb4_unicode_ci`: la base no distingue mayúsculas ni acentos, y PHP comparando byte a
+ *     byte se desalineaba con eso. De ahí salían los dos agujeros que fijan los dos tests de la
+ *     sección "La colación de MySQL": un lote que decía crear dos entradas y dejaba una sola, y —el
+ *     peor— un título retipeado sin tilde que pisaba la fila existente BORRÁNDOLE los campos que no
+ *     venían en el payload, con un diff que juraba que no pisaba nada. 31 de los 46 títulos reales
+ *     del protocolo llevan acento o eñe.
+ *  6. 🔴 QUE EL `confirm_token` NO SE PUEDA FORJAR desde el contenido. El título es texto libre y
+ *     no se valida contra `:` ni `|`: mientras el token se armó concatenando, un lote de una
+ *     entrada podía fabricar el token de otro lote entero.
+ *  7. 🔴 QUE NADA QUE PASE LA SIMULACIÓN REVIENTE AL ESCRIBIR. Los tres campos de contenido son
+ *     `TEXT`, que son 65.535 BYTES, y el `max` de Laravel cuenta CARACTERES.
+ *  8. ⚠️ Que el reintento que el docblock declara seguro devuelva 200 y no 422.
  */
 class ProtocoloDeVentasPorClaudeTest extends TestCase
 {
@@ -427,5 +440,239 @@ class ProtocoloDeVentasPorClaudeTest extends TestCase
 
         $this->pegar(['entradas' => $entradas])->assertStatus(422);
         $this->assertSame(0, $this->contar_de_prueba());
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | La colación de MySQL: `titulo` es utf8mb4_unicode_ci, o sea que la base compara SIN
+     | distinguir mayúsculas ni acentos. Todo lo que PHP compare byte a byte se desalinea con eso.
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * 🔴 Dos títulos que para MySQL SON EL MISMO no pueden pasar el freno del repetido.
+     *
+     * Medido contra el código anterior a este arreglo: el lote pasaba (`in_array(..., true)` los ve
+     * distintos), la simulación decía `cambiarian=2`, la respuesta decía
+     * `{"creadas":1,"actualizadas":1}` y en la base quedaba UNA fila — la segunda escritura
+     * encontraba a la primera con `where('titulo', ...)` y la pisaba. Es exactamente el modo de
+     * fallo que el 422 del repetido dice impedir.
+     *
+     * @return void
+     */
+    public function test_dos_titulos_que_para_mysql_son_el_mismo_no_pasan_el_lote(): void
+    {
+        $base = $this->dos_de_la_misma_terna();
+
+        $entradas    = $base;
+        $entradas[0]['titulo'] = self::PREFIJO . 'ZZ Objecion de precio';
+        $entradas[1]['titulo'] = self::PREFIJO . 'zz objecion de precio';
+
+        $response = $this->pegar(['entradas' => $entradas]);
+
+        $response->assertStatus(422);
+        $this->assertSame(0, $this->contar_de_prueba(), 'La simulación escribió algo.');
+    }
+
+    /**
+     * 🔴 Y la variante con acento, que es la peligrosa: 31 de los 46 títulos reales del protocolo
+     * llevan tilde o eñe, así que comerse un acento al retipear es el error MÁS probable.
+     *
+     * Medido contra el código anterior: mandar "Como abrir la conversacion" contra la fila
+     * "Cómo abrir la conversación" daba simulación `accion: crear` con `actual` todo en null, y
+     * después `{"creadas":0,"actualizadas":1}`: pisaba la fila existente Y le borraba
+     * `estado_aplicable`, `followup_numero` y `notas_setter`, porque el arrastre de campos ausentes
+     * salía de un `$existente` que el código creía inexistente. O sea: borraba contenido mostrando
+     * un diff que juraba que no pisaba nada.
+     *
+     * @return void
+     */
+    public function test_un_titulo_sin_acentos_actualiza_la_fila_existente_y_no_le_borra_campos(): void
+    {
+        $con_acentos = [[
+            'titulo'           => self::PREFIJO . 'Cómo abrir la conversación',
+            'categoria'        => 'etapa_principal',
+            'estado_aplicable' => 'contactado',
+            'followup_numero'  => 2,
+            'descripcion'      => 'Descripción original.',
+            'mensaje_template' => 'Mensaje original.',
+            'notas_setter'     => 'Notas del setter que no se pueden perder.',
+            'activa'           => true,
+        ]];
+
+        $this->simular_y_aplicar($con_acentos)->assertStatus(200);
+
+        /* Mismo título retipeado sin acentos, y SIN los campos que no se quieren tocar. */
+        $sin_acentos = [[
+            'titulo'           => self::PREFIJO . 'Como abrir la conversacion',
+            'categoria'        => 'etapa_principal',
+            'descripcion'      => 'Descripción corregida.',
+            'mensaje_template' => 'Mensaje original.',
+            'activa'           => true,
+        ]];
+
+        $simulacion = $this->pegar(['entradas' => $sin_acentos]);
+        $simulacion->assertStatus(200);
+        $simulacion->assertJsonPath('cambios.0.accion', 'actualizar');
+        $simulacion->assertJsonPath('cambios.0.actual.notas_setter', 'Notas del setter que no se pueden perder.');
+        $simulacion->assertJsonPath('cambios.0.actual.estado_aplicable', 'contactado');
+        $simulacion->assertJsonPath('cambios.0.titulo_en_base', self::PREFIJO . 'Cómo abrir la conversación');
+
+        $response = $this->simular_y_aplicar($sin_acentos);
+        $response->assertStatus(200);
+        $response->assertJsonPath('resultados.creadas', 0);
+        $response->assertJsonPath('resultados.actualizadas', 1);
+
+        $this->assertSame(1, $this->contar_de_prueba(), 'Quedaron dos filas para lo que la base considera un solo título.');
+
+        $entrada = ProtocolEntry::where('titulo', 'like', self::PREFIJO . '%')->first();
+        $this->assertSame('Descripción corregida.', $entrada->descripcion, 'No se aplicó la corrección.');
+        $this->assertSame('Notas del setter que no se pueden perder.', $entrada->notas_setter, 'Se borraron las notas del setter.');
+        $this->assertSame('contactado', $entrada->estado_aplicable, 'Se borró el estado_aplicable.');
+        $this->assertSame(2, (int) $entrada->followup_numero, 'Se borró el followup_numero.');
+        $this->assertSame(
+            self::PREFIJO . 'Cómo abrir la conversación',
+            $entrada->titulo,
+            'Se reescribió el título de la fila: una tilde comida no puede renombrar una entrada.'
+        );
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | El confirm_token
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * Dos entradas CORTAS. El test de abajo mete el JSON de una propuesta adentro de un título, y
+     * el título tiene 255 caracteres: cuanto más corto el contenido, más margen hay.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function dos_cortas(): array
+    {
+        return [
+            [
+                'titulo'           => self::PREFIJO . 'A',
+                'categoria'        => 'seguimiento',
+                'descripcion'      => 'd',
+                'mensaje_template' => 'm',
+                'activa'           => true,
+            ],
+            [
+                'titulo'           => self::PREFIJO . 'B',
+                'categoria'        => 'seguimiento',
+                'descripcion'      => 'd',
+                'mensaje_template' => 'm',
+                'activa'           => true,
+            ],
+        ];
+    }
+
+    /**
+     * 🔴 El `confirm_token` no se puede forjar metiendo los delimitadores adentro del título.
+     *
+     * `titulo` es texto libre de 255 caracteres y no se valida contra `:` ni `|`. Mientras el token
+     * se armó concatenando `"<titulo>:<json>"` pegados con `|`, un lote de UNA entrada cuyo título
+     * fuera `'<A>:<json de A>|<B>'` producía EXACTAMENTE la misma cadena que el lote de dos
+     * entradas A y B — y por lo tanto el mismo token, con el que se podía escribir un conjunto
+     * distinto del que se revisó.
+     *
+     * @return void
+     */
+    public function test_el_confirm_token_no_se_puede_forjar_metiendo_delimitadores_en_el_titulo(): void
+    {
+        $lote       = $this->dos_cortas();
+        $simulacion = $this->pegar(['entradas' => $lote]);
+        $simulacion->assertStatus(200);
+
+        /* Se reconstruyen las "partes" con las que el token se armaba hasta este arreglo. */
+        $partes = [];
+        foreach ((array) $simulacion->json('cambios') as $cambio) {
+            $partes[] = $cambio['titulo'] . ':' . json_encode($cambio['propuesto']);
+        }
+        sort($partes);
+
+        /* El título forjado es la primera parte ENTERA más el separador y el título de la segunda:
+           así el lote de una sola entrada arma la misma cadena que el de dos. */
+        $forjado = $partes[0] . '|' . $lote[1]['titulo'];
+        $this->assertLessThanOrEqual(
+            255,
+            mb_strlen($forjado),
+            'El título forjado no entra en la columna: achicá el fixture, no el test.'
+        );
+
+        $entrada_forjada           = $lote[1];
+        $entrada_forjada['titulo'] = $forjado;
+
+        $forjada = $this->pegar(['entradas' => [$entrada_forjada]]);
+        $forjada->assertStatus(200);
+
+        $this->assertNotSame(
+            $simulacion->json('confirm_token'),
+            $forjada->json('confirm_token'),
+            'Un título con ":" y "|" adentro fabricó el mismo confirm_token que otro lote: el token se puede forjar.'
+        );
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | El 422 legible, siempre: nada que pase la simulación puede reventar al escribir
+     |------------------------------------------------------------------------------------------ */
+
+    /**
+     * 🔴 Un texto que entra en el `max` de CARACTERES pero no en los BYTES de la columna es 422 en
+     * la simulación, no 500 al escribir.
+     *
+     * `descripcion`, `mensaje_template` y `notas_setter` son `TEXT`, que son 65.535 BYTES. El tope
+     * anterior era `max:20000`, que Laravel cuenta en CARACTERES: 20.000 emoji son 20.000
+     * caracteres y 80.000 bytes, o sea que pasaban la validación y le explotaban a MySQL en la
+     * cara con un 500.
+     *
+     * @return void
+     */
+    public function test_un_texto_que_pasa_el_max_de_caracteres_pero_no_entra_en_bytes_es_422(): void
+    {
+        $entradas = $this->dos_de_la_misma_terna();
+        $entradas = [$entradas[0]];
+        $entradas[0]['descripcion'] = str_repeat('😀', 20000);
+
+        $this->assertSame(20000, mb_strlen($entradas[0]['descripcion']), 'El fixture dejó de tener 20.000 caracteres.');
+        $this->assertGreaterThan(65535, strlen($entradas[0]['descripcion']), 'El fixture dejó de pasarse de bytes.');
+
+        $response = $this->pegar(['entradas' => $entradas]);
+
+        $response->assertStatus(422);
+        $this->assertSame(0, $this->contar_de_prueba());
+    }
+
+    /**
+     * ⚠️ Reintentar la misma llamada cuando ya no hay nada que cambiar da 200 `sin_cambio`, que es
+     * lo que el docblock del endpoint promete.
+     *
+     * Hasta este arreglo la comparación de `confirm_count` corría ANTES del caso "no hay nada que
+     * cambiar", así que un reintento con el mismo body (`confirm_count: 1` contra `cambiarian: 0`)
+     * daba 422. No duplicaba nada —fallaba del lado seguro— pero el reintento que el docblock
+     * declara seguro no era el que devolvía 200.
+     *
+     * @return void
+     */
+    public function test_reintentar_cuando_no_hay_nada_que_cambiar_es_200(): void
+    {
+        $entradas   = $this->dos_de_la_misma_terna();
+        $simulacion = $this->pegar(['entradas' => $entradas]);
+        $simulacion->assertStatus(200);
+
+        $body = [
+            'entradas'      => $entradas,
+            'dry_run'       => false,
+            'confirm_count' => $simulacion->json('cambiarian'),
+            'confirm_token' => $simulacion->json('confirm_token'),
+        ];
+
+        $this->pegar($body)->assertStatus(200);
+
+        /* El reintento: el MISMO body, tal cual. Ya no hay nada que cambiar. */
+        $reintento = $this->pegar($body);
+
+        $reintento->assertStatus(200);
+        $reintento->assertJsonPath('resultados.creadas', 0);
+        $reintento->assertJsonPath('resultados.actualizadas', 0);
+        $this->assertSame(2, $this->contar_de_prueba(), 'El reintento duplicó entradas.');
     }
 }
