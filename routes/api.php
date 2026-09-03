@@ -175,6 +175,33 @@ Route::middleware('claude.task.key')
            (client_templates): son dos tablas y dos motores distintos. */
         Route::post('followup-templates', 'Api\ClaudeFollowupTemplatesController@store_json');
 
+        /* La otra mitad del motor de seguimientos: la CADENCIA (`followup_rules`), o sea cada
+           cuántas horas y cuántas veces se le insiste a un lead según su estado. `followup-templates`
+           es QUÉ texto sale; esto es CUÁNDO y CUÁNTAS VECES.
+           🔴 Una regla gobierna a TODOS los leads de ese estado de una, así que los frenos son más
+           duros que en las plantillas: dry_run por defecto —y la simulación dice cuántos leads hay
+           hoy en ese estado—, confirm_count exacto, confirm_token del conjunto, horas_espera mínimo
+           1 y max_followups máximo 10. Están en ClaudeFollowupRulesController.
+           🔴 ASIMETRÍA DELIBERADA CON `followup-templates`: acá un `estado` que NO es un slug real
+           del pipeline es 422, y allá es válido a propósito (las plantillas `manual_*` del chequeo
+           diario). Una plantilla con estado inexistente queda inerte y disponible para envío
+           manual, que es lo buscado; una REGLA con estado inexistente queda cargada pareciendo que
+           anda y el cron no la levanta nunca. El porqué completo está en el docblock del
+           controlador — leelo antes de "unificar el criterio de los dos". */
+        Route::post('followup-rules', 'Api\ClaudeFollowupRulesController@store_json');
+
+        /* Alta en LOTE de las entradas del PROTOCOLO DE VENTAS (`protocol_entries`). Idempotente
+           por `titulo` —y no por la terna (categoria, estado_aplicable, followup_numero), que
+           medida sobre el protocolo real NO identifica una entrada: 46 filas, 46 títulos distintos
+           y sólo 23 ternas—; nunca borra las que no vinieron en el payload. Frenos: dry_run por
+           defecto con el diff, confirm_count, confirm_token y `activa` explícito, porque una
+           entrada nueva no se activa sola.
+           🔴 `agent_identities` y `ai_system_prompts` NO tienen endpoint de escritura A PROPÓSITO:
+           AgentPromptSyncService las pisa cada 10 minutos desde el repo de conocimiento, así que un
+           POST sobre ellas sería una escritura que desaparece sola. El porqué está en el docblock
+           de ClaudeProtocolEntriesController. */
+        Route::post('protocol-entries', 'Api\ClaudeProtocolEntriesController@store_json');
+
         /* Recuperación de leads: envío de plantillas Meta. */
         Route::post('leads/{id}/send-template', 'Api\ClaudeLeadsOutboundController@send_template_json');
         Route::post('send-template-batch', 'Api\ClaudeLeadsOutboundController@send_template_batch_json');
@@ -197,6 +224,23 @@ Route::middleware('claude.task.key')
            por la misma razón que `upgrades/preview`: que ninguna la capture. */
         Route::post('leads/status-batch', 'Api\ClaudeLeadsPipelineController@update_status_batch_json');
         Route::post('leads/{id}/status', 'Api\ClaudeLeadsPipelineController@update_status_json');
+
+        /* Campos descriptivos y de agenda de UN lead, por LISTA BLANCA CERRADA (nombre, empresa,
+           rubro, notas, mail y los cuatro de la demo, más meeting_scheduled_at). Es lo que permite
+           AGENDAR una demo desde afuera, que es el objetivo del chequeo diario de leads.
+           🔴 `status` NO está en la lista: para eso está `leads/{id}/status`, acá arriba, que tiene
+           sus propios frenos. Tampoco `phone`, los `contract_*`, `promoted_client_id`, `user_id`,
+           los tokens de demo ni los flags de automatización — cada uno con su motivo escrito en el
+           cuerpo del 422. Los frenos (dry_run por defecto con el diff campo por campo,
+           confirm_count, lead promovido a cliente bloqueado y `sin_cambio` que no cuenta como
+           escritura) están en ClaudeLeadsFieldsController.
+           🔴 Reagendar (cambiar `demo_date`) resetea los flags de recordatorio por la MISMA
+           definición que usa el panel: App\Services\LeadRescheduleFlagsService.
+           `{id}` va DESPUÉS de toda ruta de segmento fijo de `leads/*`, por lo mismo que
+           `upgrades/preview` y `leads/status-batch`: hoy es el único PATCH del sub-bloque y no hay
+           nada que capturar, pero el día que se agregue un `PATCH claude/leads/algo-fijo` tiene que
+           quedar arriba de ésta o nunca se alcanza. */
+        Route::patch('leads/{id}', 'Api\ClaudeLeadsFieldsController@update_json');
 
         /* Operación de clientes y actualizaciones: LECTURA.
            `ops-schema` describe todo este sub-bloque (filtros, enumeraciones, la máquina de estados
