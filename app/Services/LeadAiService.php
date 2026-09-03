@@ -6032,6 +6032,90 @@ TXT;
                     $lead->demo_date       = $demo_date;
                     $lead->demo_start_time = $demo_start;
                     $lead->demo_end_time   = $demo_end;
+
+                    /*
+                     * El TOKEN de ingreso acompaña al reagendado, igual que ya hace
+                     * LeadController::update_demo_end_time_json() con la edición manual desde el
+                     * panel (mismo servicio, mismo criterio de extender/acortar, mismo piso de
+                     * `now + gracia`). Sin esto, un lead que reagenda por WhatsApp —el camino más
+                     * común— se queda con el vencimiento calculado contra el turno VIEJO: el gate
+                     * público (`DemoExperienciaController::evaluar_ingreso()`) lo deja pasar porque
+                     * lee la hora en vivo, pero el login real contra la instancia
+                     * (`DemoIngresoController::store()`) rechaza el token vencido y el lead nunca
+                     * entra, sin ningún error visible para nadie (bug medido en producción el
+                     * 3/9/2026, lead 594).
+                     *
+                     * Igual que el panel: sólo si hay un token emitido y no revocado (uno revocado
+                     * se revocó a propósito, extenderlo acá lo reviviría; sin token todavía no hay
+                     * nada que ajustar — lo resuelve calcular_expiracion() cuando se emita).
+                     *
+                     * Timezone explícito en el Carbon::parse(), NO vía
+                     * DemoIngresoTokenService::calcular_expiracion() (esa parsea sin timezone
+                     * explícito): se replica el cálculo que ya usa update_demo_end_time_json y no
+                     * el otro, que es el que arrastra el riesgo.
+                     *
+                     * Si el aviso a la instancia falla, a propósito NO se revierte el reagendado
+                     * (a diferencia del panel, que sí revierte): acá el agente ya le confirmó al
+                     * lead el horario nuevo por WhatsApp, y revertir dejaría al lead creyendo que
+                     * tiene un turno que el sistema deshizo. Queda logueado; si el token no se pudo
+                     * ajustar, el lead va a repetir el mismo síntoma de hoy y se resuelve a mano con
+                     * "Reemitir" desde el panel.
+                     *
+                     * 🔴 SE LE PASA AL SERVICIO UNA INSTANCIA APARTE de Lead, no `$lead`. Adentro,
+                     * extender_vencimiento()/acortar_vencimiento() hacen `$lead->update([...])`, que
+                     * persiste TODOS los atributos sucios del modelo en ese momento — y acá `$lead`
+                     * todavía tiene en memoria `demo_flexible`, `status` y todo lo que el resto de
+                     * apply_parsed_response() (otras ~1000 líneas: intervención humana, mensaje,
+                     * flags de notificación) va a seguir mutando antes de EL ÚNICO `$lead->save()`
+                     * del método (documentado como tal en varios puntos de este archivo). Guardar acá
+                     * a través de `$lead` dejaría, ante cualquier excepción posterior sin catch, el
+                     * reagendado y el token persistidos a medias sin el resto de los flags — exactamente
+                     * el estado "a medias" que este archivo evita a propósito en otros lugares (ver
+                     * el `Lead::query()->whereKey()->update()` de más abajo en el método). Una
+                     * instancia recién traída de la base no tiene ninguna otra mutación pendiente, así
+                     * que su propio `update()` toca únicamente la columna del token (y `demo_id`, si
+                     * hiciera falta fijarlo para resolver la demo correcta — ver abajo).
+                     */
+                    if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
+                        try {
+                            $gracia_token = LeadDemoSettings::get_gracia_minutos_post();
+                            $fin_token_datetime = Carbon::parse(
+                                $lead->demo_date->format('Y-m-d') . ' ' . $demo_end,
+                                'America/Argentina/Buenos_Aires'
+                            );
+                            $expira_nueva_token = $fin_token_datetime->copy()->addMinutes($gracia_token);
+                            $token_service_reagendado = new \App\Services\DemoIngresoTokenService();
+
+                            /* Instancia aparte (ver docblock de arriba). demo_id se fija explícito
+                             * por si el reagendado cambió también de instancia de demo: sin esto,
+                             * loadMissing('demo') adentro del servicio resolvería la demo VIEJA. */
+                            $lead_para_token = Lead::find($lead->id);
+                            if ($lead_para_token !== null) {
+                                $lead_para_token->demo_id = $demo_id;
+
+                                if ($lead->demo_ingreso_token_expira_at === null
+                                    || $lead->demo_ingreso_token_expira_at->lt($expira_nueva_token)) {
+                                    $token_service_reagendado->extender_vencimiento($lead_para_token, $expira_nueva_token);
+                                } else {
+                                    /* Piso del acorte: nunca un vencimiento en el pasado. */
+                                    $ahora_para_token = AppTime::now();
+                                    $piso_token       = $ahora_para_token->copy()->addMinutes($gracia_token);
+                                    $expira_objetivo_token = $expira_nueva_token->lt($piso_token) ? $piso_token : $expira_nueva_token;
+                                    $token_service_reagendado->acortar_vencimiento($lead_para_token, $expira_objetivo_token);
+                                }
+                            }
+                        } catch (\Throwable $e) {
+                            Log::error('LeadAiService: no se pudo ajustar el token de ingreso al reagendar la demo por WhatsApp.', [
+                                'lead_id'       => $lead->id,
+                                'demo_id'       => $demo_id,
+                                'demo_date'     => $demo_date,
+                                'demo_end'      => $demo_end,
+                                'is_reagendado' => $es_reagendado,
+                                'error'         => $e->getMessage(),
+                            ]);
+                        }
+                    }
+
                     /* La modalidad se escribe siempre que el lead sea de la dinámica NUEVA, no solo
                      * cuando es true: un reagendamiento de un lead que antes tenía ventana extendida
                      * a un turno normal tiene que apagar la columna, o quedaría fuera de los relojes
