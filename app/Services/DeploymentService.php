@@ -1602,10 +1602,12 @@ class DeploymentService
      * Seis de esos trece seeders traían el namespace adelante y los otros siete no, así que el
      * mismo deployment ejecutaba unos bien y otros no.
      *
-     * `escapeshellarg()` es la función correcta acá y no la trampa que documenta
-     * APRENDER_NO_PARCHEAR: esto corre en el admin (Linux) y se ejecuta en el hosting (Linux),
-     * las dos puntas POSIX. Donde `escapeshellarg()` no sirve es armando desde Windows un
-     * comando que corre en Linux, porque ahí usa comillas dobles.
+     * 🔴 NO se usa `escapeshellarg()`, y el test que lo probó es el que lo dejó a la vista:
+     * esa función escapa según el SO donde corre PHP, no según dónde se ejecuta el comando. En
+     * Windows devuelve comillas DOBLES (`--class="Database\Seeders\Xxx"`), y adentro de comillas
+     * dobles bash sí interpreta algunas barras invertidas. El comando de acá siempre termina
+     * corriendo en el hosting (Linux), así que el escapado tiene que ser POSIX siempre, sin
+     * depender de dónde esté hosteado el admin. Va `escapar_argumento_posix()`.
      *
      * El `command` propio del seeder (la rama de arriba) se deja tal cual: es un comando
      * completo escrito a mano, no un argumento que estemos componiendo nosotros.
@@ -1619,7 +1621,24 @@ class DeploymentService
             return $seeder->command;
         }
 
-        return 'php artisan db:seed --class=' . escapeshellarg($seeder->seeder_class) . ' --force';
+        return 'php artisan db:seed --class='
+            . $this->escapar_argumento_posix((string) $seeder->seeder_class)
+            . ' --force';
+    }
+
+    /**
+     * Escapa un argumento para un shell POSIX, corra donde corra este PHP.
+     *
+     * Comillas simples: adentro de ellas el shell no interpreta NADA, ni la barra invertida ni el
+     * `$`. Lo único que hay que resolver es la propia comilla simple, que se cierra, se escapa
+     * afuera y se vuelve a abrir — el clásico `'\''`.
+     *
+     * @param  string  $argumento
+     * @return string
+     */
+    private function escapar_argumento_posix(string $argumento): string
+    {
+        return "'" . str_replace("'", "'\\''", $argumento) . "'";
     }
 
     /**
