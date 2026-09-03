@@ -56,6 +56,16 @@ return [
      |   - media: escribe filas que gobiernan un deployment, pero no lo arranca.
      |   - alta: arranca o modifica un pipeline que corre por SSH sobre el hosting de un negocio.
      |
+     | 🔴 LA ESCALA MIDE EL DAÑO SOBRE EL SISTEMA DE UN CLIENTE, Y ESO DEJA UN EJE AFUERA: el
+     | daño sobre una PERSONA. `POST claude/leads/{id}/send-template`, `POST claude/leads/{id}/message`
+     | y `POST claude/followup-rules` son todas `baja` con toda razón —escriben filas del admin y
+     | ningún negocio se entera— y las tres terminan en un WhatsApp a alguien real; la última, sin
+     | que nadie apriete nada, porque cambia la cadencia con la que el cron le escribe a TODOS los
+     | leads de un estado. No se agregó un nivel nuevo para no reetiquetar rutas que ya están en
+     | uso y que ninguna sesión leería de nuevo: lo que gobierna ese riesgo son los `frenos`, que
+     | en esas tres son los más duros del bloque. Si algún día se le suma un eje a la escala,
+     | éste es el que falta.
+     |
      | 🔴 `frenos` NO puede estar vacío en una ruta con `escribe => true`. Hay un test que lo
      | afirma: una escritura sin ningún freno declarado es o un error de este archivo o un
      | endpoint que hay que revisar.
@@ -359,6 +369,82 @@ return [
                 ['nombre' => 'templates[].solo_si_ingreso_confirmado', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Sólo aplica al estado demo_agendada: bifurca el seguimiento automático según si el lead confirmó ingreso a la demo (default false).'],
             ],
         ],
+        'POST api/claude/followup-rules' => [
+            'para_que'     => 'La otra mitad del motor de seguimientos: la CADENCIA por estado (followup_rules). Cada cuántas horas se insiste y cuántas veces antes de pasar el lead a En Pausa. followup-templates es QUÉ texto sale; esto es CUÁNDO y CUÁNTAS VECES.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Idempotente por estado, que es la clave real de la tabla (índice único en followup_rules.estado, y LeadFollowupService la indexa con keyBy(\'estado\')): reenviar la misma regla actualiza la fila, nunca crea una segunda.',
+                'Nunca borra las reglas que no vinieron en el payload. Para apagar una se manda con activa=false, que es reversible.',
+                'dry_run por defecto: si no se pide lo contrario, simula y no escribe nada. La simulación devuelve, por cada regla, el valor actual, el propuesto y CUÁNTOS LEADS hay hoy en ese estado — que es a cuánta gente real le cambia la cadencia.',
+                'confirm_count tiene que coincidir exactamente con la cantidad simulada.',
+                'confirm_token con hash_equals: si alguna regla cambió entre la simulación y la confirmación, no pasa.',
+                '🔴 Un `estado` que no es un slug real del pipeline es 422 con la lista de los válidos. Es la ASIMETRÍA DELIBERADA con POST claude/followup-templates: allá un estado inexistente es válido a propósito (las plantillas manual_* quedan inertes y disponibles para envío manual), acá no, porque una regla con estado inexistente queda cargada pareciendo que anda y el cron no la levanta nunca.',
+                '🔴 horas_espera entre 3 y 720, y los dos números salen del cron, no de un gusto. El mínimo de 1 que había NO frenaba el martilleo que decía frenar: leads:check-followups corre everyTwoHours() (Kernel.php ~23) y process_lead() (~224) compara $hours < horas_espera, así que con 1 o con 2 cada corrida cumple la condición y la cadencia real pasa a ser un mensaje cada dos horas — diez mensajes en veinte horas a una persona. 3 es el primer valor que obliga a saltear una corrida. El máximo de 720 (30 días) es por 4294967295: entra en la columna int unsigned, así que la regla quedaba activa y visible en el panel esperando 490.000 años, el mismo modo de fallo que un estado inventado. Y 4294967296 no entra: pasaba la simulación con 200 y reventaba con 500 al escribir.',
+                '🔴 El rango de horas_espera se chequea sobre el valor RESUELTO, no sobre el que vino: una regla vieja por debajo del mínimo no se puede dejar prendida editándole otro campo, porque el arrastre traería el valor viejo. Si la regla queda con activa=false se deja pasar a propósito: apagar una regla rota tiene que ser siempre posible.',
+                '🔴 activa es OBLIGATORIO y explícito (era nullable con default true). La asimetría con protocol-entries estaba al revés del riesgo: una entrada de protocolo es texto que lee una persona, una regla hace que el cron le escriba por WhatsApp a leads reales.',
+                '🔴 La simulación devuelve, además de leads_en_ese_estado, un disparo_inmediato por regla: cuántos de esos leads reciben el seguimiento en la PRÓXIMA corrida del cron (dentro de las 2 horas), no dentro de las horas_espera. LeadFollowupService::last_message_at() cae a lead.created_at cuando el lead no tiene mensajes, así que prender una regla en un estado con leads parados hace meses les manda a todos ya.',
+                '🔴 Apagar la ÚLTIMA regla activa deja el motor de seguimientos mudo: la simulación y la respuesta lo dicen en motor_de_seguimientos (reglas_activas_hoy / reglas_activas_despues / advertencia), y aplicarlo exige confirm_apagar_todas=true además del confirm_token. Un lote de baja no puede salir tan barato como uno de alta.',
+                '🔴 El confirm_token cubre también leads_en_ese_estado, disparo_inmediato y el conteo de reglas activas: si entra gente al estado entre la simulación y la confirmación, el token no coincide. Antes se podía simular con 1 lead en el estado, meter 5 más y escribir con el mismo token.',
+                'El confirm_token se arma sobre una estructura serializada entera (json_encode), no concatenando con separadores. Acá el estado es un slug normalizado a [a-z0-9_] y no se podía forjar, pero el criterio quedó igual que en protocol-entries, donde sí se podía y está medido.',
+                '⚠️ Reintentar la misma llamada cuando ya no hay nada que cambiar da 200 sin escribir: el caso cambiarian=0 se resuelve ANTES de comparar confirm_count. Antes ese reintento daba 422.',
+                'max_followups máximo 10.',
+                'Al CREAR una regla, horas_espera y max_followups son obligatorios: una cadencia a medias no es una cadencia. Al editar se pueden omitir y se arrastra lo que había.',
+                'Un estado repetido dentro del mismo lote es 422: dos filas para el mismo estado se pisarían sin que se sepa cuál ganó.',
+                'Tope MAX_BATCH = 50 reglas por llamada.',
+                'La simulación avisa si el estado es cerrado_ganado, cerrado_perdido o en_pausa: LeadFollowupService::process_all_active_leads() los saltea siempre, así que una regla para esos estados es inerte.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'reglas[]', 'obligatorio' => true, 'validacion' => 'required|array|min:1', 'que_es' => 'El lote de reglas de cadencia. Una por estado del pipeline.'],
+                ['nombre' => 'reglas[].estado', 'obligatorio' => true, 'validacion' => 'required|string|max:40', 'que_es' => '🔴 Clave natural: es por lo que la carga es idempotente. Tiene que ser un slug REAL del pipeline (ver GET claude/schema, pipeline_statuses); un slug inventado es 422.'],
+                ['nombre' => 'reglas[].horas_espera', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:3|max:720 — obligatorio al crear la regla', 'que_es' => 'Horas sin respuesta antes de disparar el seguimiento siguiente. Mínimo 3 porque el cron corre cada 2 horas: con 1 o con 2 manda en cada corrida. Máximo 720 (30 días): más que eso la regla queda activa y visible pero no dispara nunca. El rango se valida sobre el valor resuelto, así que el arrastre no lo saltea.'],
+                ['nombre' => 'reglas[].max_followups', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1|max:10 — obligatorio al crear la regla', 'que_es' => 'Cuántos seguimientos se mandan antes de pasar el lead a En Pausa. Máximo 10.'],
+                ['nombre' => 'reglas[].activa', 'obligatorio' => true, 'validacion' => 'required|boolean', 'que_es' => '🔴 Obligatorio y explícito: una regla NO se prende sola, porque prenderla hace que el cron le escriba a leads reales. Apagarla (false) es la forma de sacar un estado del seguimiento automático sin borrar la fila.'],
+                ['nombre' => 'reglas[].descripcion', 'obligatorio' => false, 'validacion' => 'nullable|string|max:2000', 'que_es' => 'Para qué es esta cadencia. No la lee ningún motor: es para el que la mire después.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO se escribe nada: devuelve el diff por regla, cuántos leads hay en cada estado, a cuántos de ésos les dispara YA (disparo_inmediato) y cómo queda el motor de seguimientos.'],
+                ['nombre' => 'confirm_apagar_todas', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT false', 'que_es' => '🔴 Hace falta SÓLO cuando el lote apaga la última regla activa. Sin él ese lote es 422: el cron seguiría corriendo cada dos horas sin mandarle un seguimiento a nadie y nada lo avisaría.'],
+                ['nombre' => 'confirm_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0 — obligatorio cuando dry_run=false', 'que_es' => 'Tiene que coincidir exacto con el cambiarian que devolvió la simulación.'],
+                ['nombre' => 'confirm_token', 'obligatorio' => false, 'validacion' => 'nullable|string|max:64 — obligatorio cuando dry_run=false', 'que_es' => 'El token que devolvió la simulación. Se compara con hash_equals.'],
+            ],
+        ],
+        'POST api/claude/protocol-entries' => [
+            'para_que'     => 'Alta y edición en lote de las entradas del PROTOCOLO DE VENTAS (protocol_entries): las etapas, los seguimientos y las situaciones frecuentes que el panel le muestra al setter y contra las que se arma una respuesta.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 Idempotente por `titulo`, y la clave está MEDIDA, no elegida: sobre el protocolo real son 46 filas con 46 títulos distintos y sólo 23 ternas (categoria, estado_aplicable, followup_numero) distintas — hay cuatro entradas con (etapa_principal, contactado, null). Usar la terna como clave haría que cargar "Etapa 2B" pisara "Etapa 2A" en silencio.',
+                '⚠️ No hay índice único en protocol_entries.titulo (verificado con SHOW INDEX: la columna no tiene NINGÚN índice). Adentro de una misma llamada está cubierto: la escritura resuelve cada fila con la comparación de MySQL y lockForUpdate(), y da vuelta el lote entero con 422 si dos títulos del payload caen en la misma fila. Lo que NO cubre nada es la concurrencia entre dos llamadas: dos altas simultáneas del mismo título crean dos filas. El arreglo que corresponde es un índice UNIQUE sobre titulo con la colación de la columna, y no se hizo porque esta misión no lleva migraciones. followup_rules.estado sí lo tiene, y por eso a la cadencia esto no le pasa.',
+                '🔴 descripcion, mensaje_template y notas_setter se validan en BYTES contra el largo real de la columna (TEXT = 65.535 bytes), no en caracteres. El max:20000 anterior lo cuenta Laravel en caracteres: 20.000 emoji son 20.000 caracteres y 80.000 bytes, así que pasaban la validación y devolvían 500 al escribir. (titulo no entra en esta cuenta: un varchar(N) de MySQL cuenta caracteres, así que ahí el max:255 mide lo mismo que la columna.)',
+                'El confirm_token se arma sobre una estructura serializada entera (json_encode), no concatenando con separadores: titulo es texto libre de 255 caracteres y no se valida contra ":" ni "|", así que un lote de UNA entrada con el título forjado fabricaba el mismo token que otro lote de dos y escribía con él. Está medido.',
+                '⚠️ Reintentar la misma llamada cuando ya no hay nada que cambiar da 200 sin escribir: el caso cambiarian=0 se resuelve ANTES de comparar confirm_count. Antes ese reintento daba 422.',
+                'Nunca borra las entradas que no vinieron en el payload. Para sacar una de circulación se manda con activa=false.',
+                'dry_run por defecto: si no se pide lo contrario, simula y devuelve el diff entrada por entrada sin escribir nada.',
+                'confirm_count tiene que coincidir exactamente con la cantidad simulada.',
+                'confirm_token con hash_equals: si alguna entrada cambió entre la simulación y la confirmación, no pasa.',
+                '🔴 `activa` es obligatorio y explícito: una entrada nueva NO se activa sola. LeadSuggestionSendService::record_setter_correction() crea entradas con activa=false justamente porque son correcciones pendientes de revisión, y un default true acá le pisaría el criterio.',
+                'La `categoria` tiene que ser una de las tres reales (etapa_principal, seguimiento, situacion_frecuente): con otra, la entrada queda invisible en el panel.',
+                '`estado_aplicable` tiene que ser un slug real del pipeline o venir vacío (= aplica a todos). Un slug inventado no le aplica a ningún lead.',
+                'Al CREAR una entrada, descripcion y mensaje_template son obligatorios (las dos columnas son NOT NULL). Al editar se pueden omitir y se arrastra lo que había.',
+                '🔴 Un título repetido dentro del mismo lote es 422, y "repetido" es lo que considera repetido MYSQL, no PHP: protocol_entries.titulo es utf8mb4_unicode_ci, o sea que no distingue mayúsculas ni acentos. Medido: un lote con "ZZ Objecion de precio" y "zz objecion de precio" decía cambiarian=2, contestaba {"creadas":1,"actualizadas":1} y dejaba UNA sola fila en la base.',
+                '🔴 Un título retipeado sin acentos ACTUALIZA la fila que ya existe, no crea una nueva: para MySQL son el mismo título. La simulación lo dice en titulo_en_base y en una advertencia, y el título guardado NO se reescribe (renombrar por una tilde comida sería indistinguible de un error de tipeo; para renombrar, el ABM del panel). 31 de los 46 títulos reales del protocolo llevan tilde o eñe. Antes de este arreglo ese caso daba simulación accion=crear con actual todo en null y después pisaba la fila BORRÁNDOLE estado_aplicable, followup_numero y notas_setter.',
+                'Tope MAX_BATCH = 100 entradas por llamada.',
+                '🔴 NO existe el endpoint hermano para agent_identities ni ai_system_prompts, y es a propósito: AgentPromptSyncService los pisa cada 10 minutos desde agentes/lead/identidad.md y agentes/lead/instrucciones_operativas.md del repo de conocimiento. Un POST sobre ellos sería una escritura que desaparece sola. Esas dos se leen por GET claude/query y se escriben commiteando al repo.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'entradas[]', 'obligatorio' => true, 'validacion' => 'required|array|min:1', 'que_es' => 'El lote de entradas del protocolo.'],
+                ['nombre' => 'entradas[].titulo', 'obligatorio' => true, 'validacion' => 'required|string|max:255 (la columna es varchar(255) y MySQL cuenta caracteres, así que el max mide lo mismo)', 'que_es' => '🔴 Clave natural: es por lo que la carga es idempotente, y es lo que el ABM del panel muestra como identidad de la entrada. Se compara COMO LA COMPARA MYSQL (utf8mb4_unicode_ci): sin distinguir mayúsculas ni acentos. Mandar el mismo título sin tildes actualiza la fila que ya existe y no crea una segunda; la simulación lo avisa en titulo_en_base.'],
+                ['nombre' => 'entradas[].categoria', 'obligatorio' => true, 'validacion' => 'required|string|max:40, una de: etapa_principal | seguimiento | situacion_frecuente', 'que_es' => 'Dónde entra la entrada en el protocolo. Otra categoría es 422: el panel no la mostraría.'],
+                ['nombre' => 'entradas[].activa', 'obligatorio' => true, 'validacion' => 'required|boolean', 'que_es' => '🔴 Obligatorio y explícito: una entrada nueva no se activa sola.'],
+                ['nombre' => 'entradas[].estado_aplicable', 'obligatorio' => false, 'validacion' => 'nullable|string|max:40, slug real del pipeline', 'que_es' => 'Estado del lead al que aplica. Vacío = a todos. Un slug inventado es 422.'],
+                ['nombre' => 'entradas[].followup_numero', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1|max:255', 'que_es' => 'Qué seguimiento de ese estado es. Vacío = no es un seguimiento numerado.'],
+                ['nombre' => 'entradas[].descripcion', 'obligatorio' => false, 'validacion' => 'nullable|string, tope real 65.535 BYTES (la columna es TEXT) — obligatorio al crear', 'que_es' => 'Cuándo se usa esta entrada. Columna NOT NULL. El límite es en bytes: un emoji ocupa cuatro.'],
+                ['nombre' => 'entradas[].mensaje_template', 'obligatorio' => false, 'validacion' => 'nullable|string, tope real 65.535 BYTES (la columna es TEXT) — obligatorio al crear', 'que_es' => 'El texto sugerido. Columna NOT NULL. El límite es en bytes: un emoji ocupa cuatro.'],
+                ['nombre' => 'entradas[].notas_setter', 'obligatorio' => false, 'validacion' => 'nullable|string, tope real 65.535 BYTES (la columna es TEXT)', 'que_es' => 'Nota para el setter que va a usar la entrada. Mandarla en null la vacía. El límite es en bytes.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO se escribe nada: devuelve el diff por entrada.'],
+                ['nombre' => 'confirm_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0 — obligatorio cuando dry_run=false', 'que_es' => 'Tiene que coincidir exacto con el cambiarian que devolvió la simulación.'],
+                ['nombre' => 'confirm_token', 'obligatorio' => false, 'validacion' => 'nullable|string|max:64 — obligatorio cuando dry_run=false', 'que_es' => 'El token que devolvió la simulación. Se compara con hash_equals.'],
+            ],
+        ],
 
         /* ---------------------------------------------------------- Leads: envío */
 
@@ -478,6 +564,78 @@ return [
                 ['nombre' => 'confirm_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0 — obligatorio cuando dry_run=false', 'que_es' => 'Tiene que coincidir exacto con el cambiarian que devolvió la simulación.'],
                 ['nombre' => 'confirm_token', 'obligatorio' => false, 'validacion' => 'nullable|string|max:64 — obligatorio cuando dry_run=false', 'que_es' => 'El token que devolvió la simulación. Se compara con hash_equals.'],
                 ['nombre' => 'registrar_evento', 'obligatorio' => false, 'validacion' => 'nullable|boolean — DEFAULT true', 'que_es' => 'Si deja el mensaje is_status_event en cada lead movido.'],
+            ],
+        ],
+
+        /* --------------------------------------------- Leads: agenda (lectura) y evento del closer */
+
+        'GET api/claude/leads/{id}/availability' => [
+            'para_que'     => 'Las instancias de demo del pool y los horarios LIBRES de cada una, por fecha, con el turno del propio lead excluido del bloqueo contra sí mismo. 🔴 Es lo primero que hay que pedir antes de agendar: PATCH claude/leads/{id} rechaza con 422 cualquier horario que no figure acá, y los demo_id válidos salen de la clave `demos` de esta respuesta. Delega en el mismo cálculo que consume el panel (LeadController::panel_availability_json): no hay una segunda definición de "slot válido".',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Lead sobre el que se calcula la disponibilidad. Se excluye su propio turno para que no aparezca bloqueado contra sí mismo.'],
+            ],
+        ],
+        'POST api/claude/leads/{id}/calendar-event' => [
+            'para_que'     => '(Re)crea el evento de Google Calendar del closer para este lead y, con eso, su link de Meet — son la misma operación en Google Calendar. Es lo que hay que llamar DESPUÉS de reagendar: ni el panel ni el PATCH mueven el evento del closer, y hasta el 3/9/2026 el consejo era usar POST admin/lead/{id}/force-calendar-event, que vive detrás de auth:sanctum y una sesión con X-Claude-Task-Key no puede llamar.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 confirmar_reemplazo_del_meet es OBLIGATORIO cuando el lead ya tiene evento: recrearlo borra el anterior y genera un google_event_id y un meet_url NUEVOS, así que el link de Meet que el lead ya recibió (se lo manda CloserAlertService por WhatsApp) deja de servir, y si el lead tiene email cargado Google le manda otra invitación.',
+                'Sin demo_date y demo_start_time cargados es 422: no hay con qué calcular el horario del evento del closer.',
+                'Nunca deja dos eventos para el mismo lead: recreate_event_for_lead() borra el anterior antes de crear el nuevo.',
+                'El lead se nombra por id y el {id} está restringido a dígitos.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Lead cuyo evento del closer se (re)crea.'],
+                ['nombre' => 'confirmar_reemplazo_del_meet', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT false, obligatorio si el lead YA tiene evento', 'que_es' => 'Confirma que se acepta perder el link de Meet actual. Sin esto, un reintento de una llamada cortada le quemaría el link al lead sin haberlo pedido.'],
+            ],
+        ],
+
+        /* --------------------------------------------- Leads: escritura de campos y agenda */
+
+        'PATCH api/claude/leads/{id}' => [
+            'para_que'     => 'Escribe los campos descriptivos y de agenda de UN lead por lista blanca cerrada: contact_name, company_name, business_type, notes, email, demo_id, demo_date, demo_start_time, demo_end_time, demo_flexible y meeting_scheduled_at. Es lo que permite AGENDAR una demo desde afuera y guardar el dolor que el lead contó en la conversación (el lugar de eso es `notes`: NO existe columna `dolor`). 🔴 Antes de agendar, pedí GET claude/leads/{id}/availability: de ahí salen el demo_id y el horario que este endpoint acepta.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 Lista blanca CERRADA: un campo que no está declarado es 422 con la lista de los válidos en el cuerpo, nunca se ignora en silencio. El 422 trae además el motivo de los prohibidos más probables (status, phone, contract_*, promoted_client_id, user_id, los tokens de demo y los flags de automatización), así que dice por dónde va y no sólo "ese no".',
+                'Los campos viajan adentro del objeto `campos`, no sueltos en el body: así dry_run y confirm_count no tienen que excluirse a mano de la lista blanca, y una lista blanca con excepciones deja de ser una lista blanca.',
+                '`status` NO se escribe desde acá: para eso está POST claude/leads/{id}/status, que tiene sus propios frenos (no asigna cerrado_ganado y deja el evento en la conversación).',
+                '`phone` NO se escribe desde acá: cambiarlo redirige TODOS los envíos futuros de ese lead a otro número. Tampoco `doc_number`, que es la contraseña con la que el lead entra a la demo.',
+                'dry_run por defecto: si no se pide lo contrario, devuelve el DIFF campo por campo (actual → propuesto) y no escribe absolutamente nada. 🔴 La simulación corre TODOS los frenos, incluidos los de agenda: un dry_run en 200 que después revienta al aplicar no sirve para nada.',
+                'confirm_count tiene que coincidir exactamente con la cantidad de campos que CAMBIAN según la simulación.',
+                'Un lead ya promovido a cliente (promoted_client_id no nulo) no se toca — mismo criterio que ClaudeLeadsPipelineController.',
+                'Un campo que llega con el valor que ya tiene se reporta en `sin_cambio` y no cuenta como escritura: reintentar la misma llamada es seguro.',
+                'El lead se nombra por id: no hay forma de editarle campos a "los que cumplan un filtro". Y el {id} de la ruta está restringido a dígitos: antes, `leads/26648-borrame` editaba el lead 26648.',
+                '🔴 AGENDAR NO ES ESCRIBIR UNA FECHA. Escribir `demo_date` sin que el lead tenga `demo_id` (ni venga uno en el payload) es 422: sin INSTANCIA asignada no sale el mail de demo (LeadController::send_demo_mail_json lo rechaza) ni hay sobre qué emitir el token de ingreso, así que quedaría una fecha escrita y ninguna demo agendada.',
+                '🔴 EL HORARIO SE VALIDA CONTRA LA GRILLA REAL, adentro del lock `demo_slot_hold_{demo_id}` (el mismo nombre que toma LeadAiService al asignar un turno). El cálculo es el de LeadAiService::build_availability_json() con exclude_lead_id = el propio lead, o sea el mismo que consume el panel: filtra por instancia, por rangos ocupados de otros leads y por el calendario del closer. Sin esto el endpoint podía pisarle el turno a otro lead sobre la misma instancia y nada lo denunciaba. Si el horario no está libre, el 422 trae la lista de los que sí lo están para esa fecha.',
+                '🔴 El turno resultante no puede quedar en el PASADO: sobre un lead en demo_agendada eso desarma la guarda de LeadFollowupService::process_lead() y el cron le manda la tanda de seguimiento por una demo que nunca ocurrió. Se fuerza con permitir_fecha_pasada=true, sólo para corregir un registro viejo.',
+                '🔴 Cambiar el TURNO (demo_date, demo_start_time o demo_end_time) resetea recordatorio_demo_enviado, recordatorio_manana_enviado y demo_fin_check_reprogramado_para, por la MISMA definición que usa el panel (App\\Services\\LeadRescheduleFlagsService). Sin ese reset, la demo nueva no recibiría su recordatorio y el check de fin quedaría trabado en un timestamp del horario viejo. El dry_run muestra qué flags se van a resetear.',
+                '🔴 `notes` REEMPLAZA lo que haya escrito: no agrega ni concatena. Esa columna la llena Lucas a mano desde el panel, así que escribirla sin leerla antes le borra la nota a una persona. Leela primero con GET claude/query?model=lead o con el propio dry_run (la devuelve en diff.notes.actual) y mandá el texto COMPLETO ya integrado. La respuesta trae esa advertencia cuando el lead ya tenía nota.',
+                'Los valores se validan contra la columna REAL: los formatos de fecha son una lista cerrada compartida con GET claude/query (nada de "tomorrow 2026-09-15" ni "2026-09-15 +3 months", que Carbon::parse acepta y guarda otra cosa), meeting_scheduled_at tiene que entrar en el rango de un `timestamp` (1970-2038) y `notes` se mide en BYTES contra los 65.535 de un TEXT. Los tres eran 500 antes del 3/9/2026.',
+                '⚠️ Lo que NO hace, igual que el panel: no mueve el evento de Google Calendar del closer al reagendar (para eso está POST claude/leads/{id}/calendar-event, que SÍ se puede llamar con X-Claude-Task-Key) ni le avisa al lead por WhatsApp del cambio de horario (DemoScheduledWhatsappService sólo dispara desde el flujo del agente).',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, sólo dígitos', 'que_es' => 'Id del lead a editar. Se nombra de a uno: no hay lote.'],
+                ['nombre' => 'campos', 'obligatorio' => true, 'validacion' => 'required|array|min:1', 'que_es' => '🔴 Objeto con los campos a escribir. Cualquier clave que no esté en la lista blanca es 422.'],
+                ['nombre' => 'campos.contact_name', 'obligatorio' => false, 'validacion' => 'texto, máx 150 caracteres', 'que_es' => 'Nombre de la persona, para corregir lo que el lead dijo en la conversación.'],
+                ['nombre' => 'campos.company_name', 'obligatorio' => false, 'validacion' => 'texto, máx 150 caracteres', 'que_es' => 'Nombre del negocio.'],
+                ['nombre' => 'campos.business_type', 'obligatorio' => false, 'validacion' => 'texto, máx 80 caracteres', 'que_es' => 'Rubro.'],
+                ['nombre' => 'campos.notes', 'obligatorio' => false, 'validacion' => 'texto, máx 20000 caracteres Y máx 65535 BYTES (la columna es TEXT y un emoji ocupa cuatro)', 'que_es' => '🔴 El lugar del proyecto para el "dolor detectado": no existe columna `dolor`. 🔴 REEMPLAZA lo que haya: leelo antes de escribirlo (GET claude/query?model=lead, o el dry_run de acá, que lo devuelve en diff.notes.actual) o le borrás la nota a una persona.'],
+                ['nombre' => 'campos.email', 'obligatorio' => false, 'validacion' => 'texto, máx 150, con formato de mail (FILTER_VALIDATE_EMAIL)', 'que_es' => 'Mail del lead, que se carga después de la conversación.'],
+                ['nombre' => 'campos.demo_id', 'obligatorio' => false, 'validacion' => 'id numérico de una instancia de demo existente', 'que_es' => '🔴 La INSTANCIA del pool sobre la que corre la demo. OBLIGATORIA para agendar: sin ella no sale el mail de demo ni hay sobre qué emitir el token de ingreso. Los válidos salen de GET claude/leads/{id}/availability (clave `demos`).'],
+                ['nombre' => 'campos.demo_date', 'obligatorio' => false, 'validacion' => 'fecha absoluta Y-m-d, sin hora y sin expresiones relativas', 'que_es' => '🔴 Cambiarlo es REAGENDAR: dispara el reset de los flags de recordatorio, exige demo_id y valida el horario contra la grilla.'],
+                ['nombre' => 'campos.demo_start_time', 'obligatorio' => false, 'validacion' => 'texto HH:MM o HH:MM:SS en 24 horas', 'que_es' => 'Hora de inicio de la demo. 🔴 Es la que se compara contra la grilla, y cambiarla sola también es reagendar.'],
+                ['nombre' => 'campos.demo_end_time', 'obligatorio' => false, 'validacion' => 'texto HH:MM o HH:MM:SS en 24 horas', 'que_es' => 'Hora de fin de la demo. Cambiarla también es reagendar: el check de fin se calcula contra ella.'],
+                ['nombre' => 'campos.demo_flexible', 'obligatorio' => false, 'validacion' => 'booleano — NO admite null (la columna es NOT NULL)', 'que_es' => 'Si el lead aceptó una franja flexible en vez de un horario fijo.'],
+                ['nombre' => 'campos.meeting_scheduled_at', 'obligatorio' => false, 'validacion' => 'fecha y hora absoluta (Y-m-d H:i y variantes), dentro del rango de un timestamp de MySQL (1970-2038)', 'que_es' => 'La videollamada con el closer.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO se escribe nada: devuelve el diff campo por campo, el turno resultante y las advertencias.'],
+                ['nombre' => 'confirm_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0 — obligatorio cuando dry_run=false', 'que_es' => 'Cantidad de campos que CAMBIAN. Tiene que coincidir exacto con el cambiarian de la simulación.'],
+                ['nombre' => 'permitir_horario_fuera_de_grilla', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT false', 'que_es' => 'Escribe el turno aunque el horario no figure entre los libres, que es lo mismo que hace el panel al forzar. NUNCA saltea el lock de la demo: dos requests sobre la misma instancia se siguen serializando.'],
+                ['nombre' => 'permitir_fecha_pasada', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT false', 'que_es' => 'Deja escribir un turno que ya pasó. Es para corregir un registro viejo, no para agendar: sobre un lead en demo_agendada una fecha pasada dispara la tanda de seguimiento del cron.'],
             ],
         ],
 

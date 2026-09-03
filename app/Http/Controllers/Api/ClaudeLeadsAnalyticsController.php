@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\ClaudeLeadsFieldsController;
 use App\Http\Controllers\Api\ClaudeLeadsOutboundController;
 use App\Http\Controllers\Api\ClaudeLeadsPipelineController;
 use App\Http\Controllers\Controller;
@@ -9,6 +10,7 @@ use App\Models\FollowupTemplate;
 use App\Models\LeadPipelineStatus;
 use App\Services\ClaudeLeadMetricsService;
 use App\Services\ClaudeLeadQueryService;
+use App\Services\LeadAiService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -269,6 +271,115 @@ class ClaudeLeadsAnalyticsController extends Controller
                 'efectos' => 'Al pasar a ' . implode(' o ', ClaudeLeadsPipelineController::ESTADOS_TERMINALES)
                     . ' se apagan requiere_seguimiento, tiene_sugerencia_pendiente y tiene_seguimiento_sin_ver, y se limpia '
                     . 'pendiente_revision_at — lo mismo que hace el pase automático a En Pausa.',
+            ],
+            /*
+             * AGENDAR UNA DEMO, que es el objetivo entero del chequeo diario y son TRES endpoints,
+             * no uno. Van descriptos acá aunque vivan en otros controladores por el mismo motivo que
+             * `envio` y `templates.alta`: la skill /leads arranca por este schema, y lo que no está
+             * acá una sesión nueva no tiene cómo enterarse de que existe. Hasta el 3/9/2026 ninguno
+             * de los tres figuraba: `PATCH claude/leads/{id}` estaba vivo desde antes y sólo se
+             * podía descubrir leyendo GET claude/catalog o el código.
+             */
+            'agenda' => [
+                'protocolo' => '🔴 SON TRES PASOS Y EN ESTE ORDEN. (1) GET claude/leads/{id}/availability para ELEGIR '
+                    . 'instancia y horario; (2) PATCH claude/leads/{id} con demo_id + demo_date + demo_start_time + '
+                    . 'demo_end_time (dos llamadas: simulación y confirmación); (3) si el lead ya tenía demo y se está '
+                    . 'REAGENDANDO, POST claude/leads/{id}/calendar-event para mover el evento del closer, que el paso 2 '
+                    . 'no toca. Saltear el paso 1 hace que el paso 2 conteste 422, porque el horario se valida contra la '
+                    . 'grilla real.',
+                'disponibilidad' => [
+                    'ruta' => 'GET claude/leads/{id}/availability',
+                    'devuelve' => [
+                        'demos' => 'Las instancias del pool: [{demo_id, label}]. De acá salen los demo_id válidos.',
+                        'slots' => 'Los horarios LIBRES por instancia y por fecha: {demo_id: {"Y-m-d": ["HH:MM", ...]}}.',
+                    ],
+                    'nota' => 'El turno que el propio lead ya tiene NO aparece bloqueado contra sí mismo (se pasa '
+                        . 'exclude_lead_id), así que reagendar al mismo horario es visible. La ventana es la fija de '
+                        . LeadAiService::DIAS_DISPONIBILIDAD . ' días corridos, la misma que ve el panel. Delega en el '
+                        . 'mismo cálculo que consume el panel: no hay una segunda definición de "slot válido".',
+                ],
+                'campos' => [
+                    'ruta' => 'PATCH claude/leads/{id}',
+                    'body' => [
+                        'campos'        => 'OBLIGATORIO. Objeto con los campos a escribir. 🔴 Lista blanca CERRADA: '
+                            . implode(', ', array_keys(ClaudeLeadsFieldsController::CAMPOS))
+                            . '. Cualquier otra clave es 422 con la lista de los válidos y el motivo de los prohibidos.',
+                        'dry_run'       => 'Default TRUE. Devuelve el diff campo por campo (actual → propuesto), el '
+                            . 'turno resultante y las advertencias, sin escribir nada. 🔴 La simulación corre TODOS los '
+                            . 'frenos, incluidos los de agenda.',
+                        'confirm_count' => 'OBLIGATORIO cuando dry_run=false. Tiene que coincidir EXACTO con el '
+                            . '`cambiarian` de la simulación.',
+                        'permitir_horario_fuera_de_grilla' => 'Default FALSE. Escribe el turno aunque el horario no '
+                            . 'figure entre los libres, que es lo mismo que hace el panel al forzar. Nunca saltea el lock.',
+                        'permitir_fecha_pasada' => 'Default FALSE. Deja escribir un turno que ya pasó. Es para corregir '
+                            . 'un registro viejo, no para agendar.',
+                    ],
+                    'frenos_de_agenda' => '🔴 Escribir demo_date sin demo_id (ni en el lead ni en el payload) es 422: '
+                        . 'sin INSTANCIA no sale el mail de demo (send_demo_mail_json lo rechaza) ni hay sobre qué emitir '
+                        . 'el token de ingreso. 🔴 El horario se valida contra la grilla real adentro del lock '
+                        . '`demo_slot_hold_{demo_id}`, así que este endpoint no le puede pisar el turno a otro lead sobre '
+                        . 'la misma instancia; si el horario no está libre, el 422 trae los que sí lo están para esa '
+                        . 'fecha. 🔴 Un turno en el pasado es 422: desarma la guarda de LeadFollowupService y el cron le '
+                        . 'manda la tanda de seguimiento al lead por una demo que nunca ocurrió.',
+                    'reagenda' => '🔴 Cambiar demo_date, demo_start_time o demo_end_time resetea '
+                        . 'recordatorio_demo_enviado, recordatorio_manana_enviado y demo_fin_check_reprogramado_para, por '
+                        . 'la MISMA definición que usa el panel. Mover SÓLO la hora también cuenta (arreglado el '
+                        . '3/9/2026: antes no reseteaba nada y la demo movida se quedaba sin recordatorio).',
+                    'notes' => ClaudeLeadsFieldsController::ADVERTENCIA_DE_NOTES,
+                ],
+                'evento_del_closer' => [
+                    'ruta' => 'POST claude/leads/{id}/calendar-event',
+                    'body' => [
+                        'confirmar_reemplazo_del_meet' => 'Default FALSE, y OBLIGATORIO si el lead ya tiene evento. '
+                            . '🔴 Recrear el evento borra el anterior y genera un google_event_id y un meet_url NUEVOS: '
+                            . 'el link de Meet que el lead ya recibió deja de servir y, si tiene email cargado, Google le '
+                            . 'manda otra invitación.',
+                    ],
+                    'cuando_usar' => 'Después de reagendar. Ni el panel ni PATCH claude/leads/{id} mueven el evento de '
+                        . 'Google Calendar del closer, así que sin esta llamada queda en el horario viejo. Hasta el '
+                        . '3/9/2026 el consejo era usar POST admin/lead/{id}/force-calendar-event, que vive detrás de '
+                        . 'auth:sanctum y con X-Claude-Task-Key NO se puede llamar: era inaplicable.',
+                    'nota' => 'Nunca deja dos eventos para el mismo lead. Sin demo_date y demo_start_time cargados es '
+                        . '422: no hay con qué calcular el horario del evento del closer.',
+                ],
+            ],
+            /*
+             * Las dos mitades del MOTOR de seguimientos que no son plantillas. Viven en otros
+             * controladores y se describen acá por lo mismo que todo lo de arriba. El contrato sale
+             * de GET claude/catalog, que es donde está declarado entero.
+             */
+            'cadencia' => [
+                'ruta' => 'POST claude/followup-rules',
+                'body' => [
+                    'reglas'        => 'OBLIGATORIO. Lote de {estado, horas_espera, max_followups, activa, descripcion}, '
+                        . 'una por estado. Idempotente por `estado`, que es la clave real de la tabla: reenviar la misma '
+                        . 'regla actualiza la fila. Nunca borra las que no vinieron.',
+                    'dry_run'       => 'Default TRUE. La simulación dice, por regla, el valor actual, el propuesto y '
+                        . 'CUÁNTOS LEADS hay hoy en ese estado — o sea a cuánta gente real le cambia la cadencia.',
+                    'confirm_count' => 'OBLIGATORIO cuando dry_run=false.',
+                    'confirm_token' => 'OBLIGATORIO cuando dry_run=false. Se compara con hash_equals.',
+                ],
+                'nota' => '`followup-templates` es QUÉ texto sale; esto es CUÁNDO y CUÁNTAS VECES. 🔴 Acá un `estado` '
+                    . 'que no es un slug real del pipeline es 422, al revés que en followup-templates: una regla con '
+                    . 'estado inexistente queda cargada pareciendo que anda y el cron no la levanta nunca. horas_espera '
+                    . 'mínimo 1 y max_followups máximo 10.',
+            ],
+            'protocolo_de_ventas' => [
+                'ruta' => 'POST claude/protocol-entries',
+                'body' => [
+                    'entradas'      => 'OBLIGATORIO. Lote de {titulo, categoria, activa, estado_aplicable, '
+                        . 'followup_numero, descripcion, mensaje_template, notas_setter}. Idempotente por `titulo` y '
+                        . 'nunca borra las que no vinieron.',
+                    'dry_run'       => 'Default TRUE. Devuelve el diff entrada por entrada sin escribir nada.',
+                    'confirm_count' => 'OBLIGATORIO cuando dry_run=false.',
+                    'confirm_token' => 'OBLIGATORIO cuando dry_run=false. Se compara con hash_equals.',
+                ],
+                'nota' => 'Son las etapas, los seguimientos y las situaciones frecuentes que el panel le muestra al '
+                    . 'setter. 🔴 `activa` es obligatorio y explícito: una entrada nueva no se activa sola. La '
+                    . '`categoria` tiene que ser etapa_principal, seguimiento o situacion_frecuente, y '
+                    . '`estado_aplicable` un slug real del pipeline o vacío. 🔴 NO hay endpoint hermano para '
+                    . 'agent_identities ni ai_system_prompts: AgentPromptSyncService los pisa cada 10 minutos desde el '
+                    . 'repo de conocimiento, así que un POST sobre ellos sería una escritura que desaparece sola.',
             ],
             'limites' => [
                 'limit_default' => ClaudeLeadQueryService::LIMIT_DEFAULT,

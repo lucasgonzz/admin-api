@@ -35,6 +35,14 @@ use Illuminate\Support\Facades\Log;
  * `POST claude/leads/{id}/send-template`. Este endpoint NO fuerza el prefijo `manual_`: es un alta
  * genérica para `followup_templates`, y la convención de nombrar así los estados que no son del
  * pipeline es responsabilidad de quien arma el payload, no una regla de este controlador.
+ *
+ * ⚠️ ASIMETRÍA DELIBERADA CON LA OTRA MITAD DEL MOTOR. La CADENCIA vive en `followup_rules` y se
+ * carga por {@see ClaudeFollowupRulesController} (`POST claude/followup-rules`). Ahí un `estado`
+ * que NO es un slug del pipeline es 422, exactamente al revés que acá, y no es una incoherencia:
+ * una plantilla con estado inexistente queda inerte y disponible para envío manual —que es lo que
+ * se busca—, mientras que una REGLA con estado inexistente queda cargada pareciendo que anda y el
+ * cron no la levanta nunca. El porqué completo está escrito en el docblock de ese controlador; si
+ * venís a "unificar el criterio de los dos", leelo primero.
  */
 class ClaudeFollowupTemplatesController extends Controller
 {
