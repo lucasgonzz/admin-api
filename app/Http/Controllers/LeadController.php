@@ -43,6 +43,7 @@ use App\Services\DemoHitosService;
 use App\Services\DemoIngresoTokenService;
 use App\Services\DemoPlanResolver;
 use App\Services\LeadDemoFormMapper;
+use App\Services\LeadRescheduleFlagsService;
 use App\Services\RunDemoSetupService;
 use App\Services\RunUserSetupService;
 use App\Services\CloserGoogleCalendarEventService;
@@ -205,18 +206,9 @@ class LeadController extends Controller
         $lead->update($data);
 
         // Si se reagendó la demo, resetear flags para que el nuevo horario reciba automatizaciones.
-        if ($original_demo_date !== $lead->getRawOriginal('demo_date')) {
-            $lead->update([
-                'recordatorio_demo_enviado'   => false,
-                'recordatorio_manana_enviado' => false,
-                // Reprogramación del check de fin (grupo 307, prompt 01): si quedó seteada de una
-                // conversación viva en el horario viejo, es un timestamp del pasado que nunca más
-                // cae dentro de la ventana de ±2 minutos -- el check de fin quedaría trabado para
-                // siempre. Al reagendar, vuelve a null para que el nuevo horario calcule su propio
-                // objetivo (demo_datetime + duración) como cualquier demo sin reprogramar.
-                'demo_fin_check_reprogramado_para' => null,
-            ]);
-        }
+        // 🔴 UNA SOLA DEFINICIÓN DEL RESET: ver LeadRescheduleFlagsService, que lo comparten este
+        // camino, update_json() y PATCH claude/leads/{id}.
+        app(LeadRescheduleFlagsService::class)->resetear_si_cambio_la_fecha($lead, $original_demo_date);
 
         return redirect()->route('leads.show', $lead->id)->with('success', 'Lead actualizado.');
     }
@@ -713,19 +705,10 @@ class LeadController extends Controller
 
         // Si se reagendó la demo, resetear flags para que el nuevo horario reciba automatizaciones.
         // Recargar el lead desde DB para leer el demo_date ya persistido por set_from_request.
+        // 🔴 UNA SOLA DEFINICIÓN DEL RESET: ver LeadRescheduleFlagsService, que lo comparten este
+        // camino, update() (Blade) y PATCH claude/leads/{id}.
         $lead->refresh();
-        if ($original_demo_date !== $lead->getRawOriginal('demo_date')) {
-            $lead->update([
-                'recordatorio_demo_enviado'   => false,
-                'recordatorio_manana_enviado' => false,
-                // Reprogramación del check de fin (grupo 307, prompt 01): si quedó seteada de una
-                // conversación viva en el horario viejo, es un timestamp del pasado que nunca más
-                // cae dentro de la ventana de ±2 minutos -- el check de fin quedaría trabado para
-                // siempre. Al reagendar, vuelve a null para que el nuevo horario calcule su propio
-                // objetivo (demo_datetime + duración) como cualquier demo sin reprogramar.
-                'demo_fin_check_reprogramado_para' => null,
-            ]);
-        }
+        app(LeadRescheduleFlagsService::class)->resetear_si_cambio_la_fecha($lead, $original_demo_date);
 
         $this->marcar_edicion_manual_del_formulario($lead, $formulario_previo);
 
