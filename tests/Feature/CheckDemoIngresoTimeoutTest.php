@@ -7,6 +7,7 @@ use App\Models\Lead;
 use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -174,5 +175,62 @@ class CheckDemoIngresoTimeoutTest extends TestCase
 
         $lead->refresh();
         $this->assertSame('demo_en_curso', $lead->status);
+    }
+
+    /**
+     * 🔴 La carrera real que arregla esta misión (demo-v2-estados-automaticos, 4/9/2026): el
+     * comando arma sus candidatos en memoria con un solo `->get()`, y recién en el loop hace
+     * llamadas de red (Google Calendar + WhatsApp) que pueden tardar segundos entre un candidato y
+     * el siguiente. Si en el medio llega el evento real `demo.ingreso`
+     * (`DemoEventosController::avanzar_pipeline_por_ingreso_real()`, un request HTTP totalmente
+     * aparte) y avanza a ESTE MISMO lead a `demo_en_curso`, el UPDATE del comando tiene que
+     * detectarlo y saltear el lead -- sin pisarlo de vuelta a `demo_pendiente_de_ingreso` y sin
+     * disparar la notificación de "no ingresó" sobre un lead que sí está adentro.
+     *
+     * Se simula la carrera con un `DB::listen()`: apenas el comando ejecuta el SELECT que arma la
+     * colección de candidatos (el lead todavía en memoria con status `demo_agendada`), pero ANTES
+     * de que el loop llegue a su propio UPDATE, se aplica por fuera el mismo cambio que aplicaría
+     * `avanzar_pipeline_por_ingreso_real()` sobre la fila real. Es la ventana exacta que describe
+     * el bug: la colección en memoria queda vieja, la base ya no.
+     */
+    public function test_carrera_con_ingreso_real_no_pisa_el_avance(): void
+    {
+        $this->fijar_timeout(15);
+        $inicio = Carbon::parse('2026-09-04 10:00:00', 'America/Argentina/Buenos_Aires');
+        $lead   = $this->crear_lead_candidato($inicio);
+        // Experiencia nueva porque es la única que puede llegar a demo_en_curso vía el evento real
+        // demo.ingreso (usa_experiencia_demo_nueva()) -- demo_flexible sigue en false, así que
+        // igual queda dentro de la ventana normal del timeout (no la extendida) y es candidato.
+        $lead->demo_experiencia = Lead::EXPERIENCIA_NUEVA;
+        $lead->save();
+
+        Carbon::setTestNow($inicio->copy()->addMinutes(20));
+
+        $carrera_ya_aplicada = false;
+        DB::listen(function ($query) use ($lead, &$carrera_ya_aplicada) {
+            if ($carrera_ya_aplicada) {
+                return;
+            }
+            $sql = strtolower($query->sql);
+            if (strpos($sql, 'select') !== 0 || strpos($sql, 'from `leads`') === false) {
+                return;
+            }
+
+            // Este es el SELECT de candidatos: el lead ya está en memoria con status
+            // demo_agendada. Antes de que el loop del comando llegue a su UPDATE, otro camino
+            // completamente aparte (el evento real de ingreso) avanza la fila de verdad.
+            $carrera_ya_aplicada = true;
+            DB::table('leads')->where('id', $lead->id)->update([
+                'status'                     => 'demo_en_curso',
+                'demo_ingreso_confirmado'    => true,
+                'demo_ingreso_confirmado_at' => Carbon::now(),
+            ]);
+        });
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $lead->refresh();
+        $this->assertSame('demo_en_curso', $lead->status, 'El comando no puede pisar de vuelta a demo_pendiente_de_ingreso un lead que ya entró de verdad.');
+        $this->assertFalse((bool) $lead->demo_no_ingreso_notificado, 'No corresponde marcar el anti-duplicado de "no ingresó" sobre un lead que sí ingresó.');
     }
 }

@@ -115,13 +115,38 @@ class CheckDemoIngresoTimeout extends Command
             }
 
             /*
-             * Pasar el lead a demo_pendiente_de_ingreso y marcar el flag anti-duplicado.
-             * La notificación a admins se dispara inmediatamente después del update.
+             * Pasar el lead a demo_pendiente_de_ingreso y marcar el flag anti-duplicado -- con un
+             * UPDATE condicionado en la base, no un update() sobre el objeto en memoria. El loop
+             * hace llamadas de red por cada lead (Google Calendar + WhatsApp) y puede tardar
+             * segundos entre candidatos: para cuando le toca el turno a este lead, el evento real
+             * `demo.ingreso` (DemoEventosController::avanzar_pipeline_por_ingreso_real(), que corre
+             * en un request HTTP totalmente aparte) puede haberlo adelantado a demo_en_curso
+             * mientras tanto. Un update() sobre `$lead` -- que sigue teniendo el status viejo en
+             * memoria -- pisaría ese avance real de vuelta a demo_pendiente_de_ingreso.
+             *
+             * Mismo patrón que ya usa este repo para la misma carrera (RunDemoSetupService::
+             * mark_failed()): la condición viaja ADENTRO del UPDATE, y la cantidad de filas
+             * afectadas decide si corresponde seguir con los efectos secundarios.
              */
-            $lead->update([
-                'status'                     => 'demo_pendiente_de_ingreso',
-                'demo_no_ingreso_notificado' => true,
-            ]);
+            $filas_afectadas = Lead::query()
+                ->whereKey($lead->id)
+                ->where('status', 'demo_agendada')
+                ->update([
+                    'status'                     => 'demo_pendiente_de_ingreso',
+                    'demo_no_ingreso_notificado' => true,
+                ]);
+
+            if ($filas_afectadas === 0) {
+                /* El lead ya cambió de estado por otro camino (típicamente el ingreso real)
+                 * mientras este comando procesaba la cola. No es una falla, es la carrera resuelta
+                 * bien: no hay que liberar el hold del closer ni notificar "no ingresó" sobre un
+                 * lead que sí entró. */
+                Log::info('CheckDemoIngresoTimeout: lead cambió de estado mientras se procesaba (carrera con el ingreso real), se saltea.', [
+                    'lead_id' => $lead->id,
+                ]);
+
+                continue;
+            }
 
             /*
              * Liberar la reserva preventiva del closer (grupo 306, prompt 05, correctivo del
