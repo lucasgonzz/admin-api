@@ -302,8 +302,10 @@ class InterruptorGlobalDeVerificacionDeMensajesTest extends TestCase
             'estado_sugerido entra al tramo' => ['calificado', ['estado_sugerido' => 'demo_agendada']],
             'agendar_demo'                  => ['calificado', ['agendar_demo' => true]],
             'cancelar_demo'                 => ['calificado', ['cancelar_demo' => true]],
-            'confirmar_ingreso'             => ['ingresando_demo', ['confirmar_ingreso' => true]],
-            'marcar_no_ingreso'             => ['ingresando_demo', ['marcar_no_ingreso' => true]],
+            // Ambas acciones ahora solo valen desde demo_agendada -- ingresando_demo se sacó del
+            // catálogo en la misión demo-v2-estados-automaticos (4/9/2026).
+            'confirmar_ingreso'             => ['demo_agendada', ['confirmar_ingreso' => true]],
+            'marcar_no_ingreso'             => ['demo_agendada', ['marcar_no_ingreso' => true]],
         ];
     }
 

@@ -83,8 +83,11 @@ class DemoCicloAdminNotificationService
     /**
      * Notifica a los admins suscritos que se envió el check de ingreso al lead.
      *
-     * Evento 3 del ciclo: el comando CheckDemoIngress acaba de enviar el mensaje
-     * de verificación al lead y transitó el estado a ingresando_demo.
+     * 🔴 Sin llamador desde la misión demo-v2-estados-automaticos (4/9/2026): el único que la
+     * invocaba era el comando `CheckDemoIngress`, que se borró (el ingreso real ahora se detecta
+     * solo, sin mandarle ningún mensaje de check al lead). Se deja el método -- no rompe nada
+     * quieto y borrarlo no estaba en el alcance de esa misión -- pero no hay ningún camino vivo
+     * que la dispare hoy.
      *
      * Variables de la plantilla: {{1}} nombre lead, {{2}} hora demo, {{3}} link.
      *

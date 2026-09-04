@@ -4,7 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
+use App\Services\CloserGoogleCalendarBusyService;
+use App\Services\CloserGoogleCalendarEventService;
+use App\Services\DemoCicloAdminNotificationService;
 use App\Services\DemoHitosService;
+use App\Services\GoogleCalendarOAuthService;
+use App\Services\LeadBroadcastService;
+use App\Services\WhatsappSendService;
+use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -163,6 +170,12 @@ class DemoEventosController extends Controller
                 continue;
             }
 
+            // Ingreso real a la demo: además del hito del roadmap (abajo), avanza el pipeline
+            // comercial del lead (misión demo-v2-estados-automaticos, 4/9/2026).
+            if ($evento['nombre'] === DemoHitosService::EVENTO_INGRESO) {
+                $this->avanzar_pipeline_por_ingreso_real($lead);
+            }
+
             // Un evento que no le corresponde a ningún hito del plan queda guardado igual y no
             // rompe nada: el crudo alimenta el brief del closer aunque hoy no lo sepamos leer.
             $movidos += DemoHitosService::aplicar($lead, $evento);
@@ -220,5 +233,95 @@ class DemoEventosController extends Controller
             'demo_setup_status'     => 'exitoso',
             'demo_setup_last_error' => null,
         ]);
+    }
+
+    /**
+     * Estados del pipeline desde los que tiene sentido avanzar a `demo_en_curso` por el ingreso
+     * real. Nunca desde uno más adelantado: el evento `demo.ingreso` NO distingue primera vez de
+     * reentrada (empresa-api emite uno nuevo cada vez que el lead abre el Magic Link, incluida una
+     * demo ya terminada), así que sin esta lista un reingreso tardío podría hacer retroceder a un
+     * lead que ya avanzó.
+     */
+    const ESTADOS_DESDE_LOS_QUE_AVANZA_POR_INGRESO_REAL = ['demo_agendada', 'demo_pendiente_de_ingreso'];
+
+    /**
+     * Avanza el pipeline del lead a `demo_en_curso` cuando la instancia confirma, con el evento
+     * `demo.ingreso`, que entró de verdad (pedido de Lucas, misión demo-v2-estados-automaticos).
+     * Antes esta transición dependía solo de que el lead se lo confirmara al agente por chat
+     * (LeadAiService::confirmar_ingreso) o de que el detector de keywords lo infiriera
+     * (WhatsappWebhookController::handle_demo_confirmation_if_needed) — con la demo v2 conectada, el
+     * mismo evento que ya cierra el hito de ingreso en `completo` es prueba técnica de que el lead
+     * está adentro, sin depender de que escriba nada.
+     *
+     * 🔴 Sin lock (decisión deliberada, misión demo-v2-estados-automaticos): dos eventos casi
+     * simultáneos para el mismo lead (dos pestañas de la instancia, o un reintento del emisor)
+     * pueden leer `demo_ingreso_confirmado = false` los dos antes de que ninguno escriba, y los dos
+     * terminan pegándole a Google Calendar y notificando a admins. El peor caso es notificar dos
+     * veces o duplicar el PATCH del hold (ambos idempotentes en su efecto final: el evento del
+     * closer termina con el mismo contenido), no corromper datos -- el `$lead_fresco->status =
+     * 'demo_en_curso'` final es el mismo valor tanto si corre una vez como dos. No se usa el mismo
+     * `lockForUpdate()` que `DemoHitosService::aplicar_bajo_lock()` porque ese lock protege un
+     * conteo de hitos que si se corrompe rompe el roadmap visible del lead; acá no hay ese riesgo,
+     * solo una notificación de más en un caso de carrera raro (dos pestañas abiertas a la vez).
+     *
+     * @param Lead $lead
+     */
+    protected function avanzar_pipeline_por_ingreso_real(Lead $lead): void
+    {
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return;
+        }
+
+        $lead_fresco = $lead->fresh();
+
+        if (! in_array((string) $lead_fresco->status, self::ESTADOS_DESDE_LOS_QUE_AVANZA_POR_INGRESO_REAL, true)) {
+            return;
+        }
+
+        /* Anti-duplicado: si ya estaba confirmado (p.ej. el lead ya se lo dijo al agente por chat
+         * antes de que llegara este evento), no repetir el timestamp ni renotificar ni volver a
+         * pegarle a Google Calendar. */
+        $ya_confirmado = (bool) $lead_fresco->demo_ingreso_confirmado;
+
+        $lead_fresco->status = 'demo_en_curso';
+        if (! $ya_confirmado) {
+            $lead_fresco->demo_ingreso_confirmado    = true;
+            $lead_fresco->demo_ingreso_confirmado_at = Carbon::now();
+        }
+        $lead_fresco->save();
+
+        LeadBroadcastService::emit_conversation_updated((int) $lead_fresco->id);
+
+        if ($ya_confirmado) {
+            return;
+        }
+
+        /* Mismo efecto secundario que la confirmación conversacional (grupo 306, prompt 07): la
+         * reserva preventiva del closer en Google Calendar pasa a "Demo en curso". Best-effort,
+         * igual que en LeadAiService::apply_parsed_response() — una falla de Google no puede tirar
+         * abajo la ingesta del evento del canal. */
+        try {
+            $google_oauth_service = app(GoogleCalendarOAuthService::class);
+            (new CloserGoogleCalendarEventService(
+                $google_oauth_service,
+                new CloserGoogleCalendarBusyService($google_oauth_service)
+            ))->mark_hold_as_demo_en_curso($lead_fresco);
+        } catch (\Throwable $e) {
+            Log::error('DemoEventosController: error al actualizar la reserva del closer tras el ingreso real.', [
+                'lead_id' => $lead_fresco->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+
+        /* Mismo aviso a admins que ya dispara la confirmación conversacional — el equipo se entera
+         * igual, sin depender de que el lead escriba algo por chat. */
+        try {
+            (new DemoCicloAdminNotificationService(new WhatsappSendService()))->notify_ingreso_confirmado($lead_fresco);
+        } catch (\Throwable $e) {
+            Log::error('DemoEventosController: error al notificar ingreso confirmado a admins.', [
+                'lead_id' => $lead_fresco->id,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 }

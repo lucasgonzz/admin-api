@@ -16,16 +16,20 @@ use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Marca como `demo_pendiente_de_ingreso` a los leads que no confirmaron su ingreso
- * dentro del tiempo límite configurado.
+ * Pasa a demo_pendiente_de_ingreso a los leads que no entraron de verdad a la demo dentro del
+ * tiempo límite, sin mandarles ningún mensaje.
  *
- * Se ejecuta cada minuto. Busca leads en estado `ingresando_demo` que ya recibieron
- * el check de ingreso pero no confirmaron (`demo_ingreso_confirmado = false`) y
- * superaron el timeout de espera (`demo_ingreso_timeout_minutos` desde el último mensaje
- * del lead posterior al inicio, o desde el inicio si el lead no respondió).
+ * Se ejecuta cada minuto. Busca leads en `demo_agendada` (ya no hay un estado intermedio
+ * `ingresando_demo`: se sacó del catálogo porque el ingreso real ahora se detecta solo, vía el
+ * evento `demo.ingreso` que aplica DemoEventosController::avanzar_pipeline_por_ingreso_real() —
+ * ver esa clase, misión demo-v2-estados-automaticos) cuyo `demo_start_time +
+ * demo_ingreso_timeout_minutos` ya pasó y que todavía no tienen `demo_ingreso_confirmado`.
  *
- * No envía mensaje al lead (Claude ya está gestionando la conversación).
- * Solo cambia el estado para que el equipo lo vea y el comando 097 notifique a admins.
+ * Si el lead entró de verdad, ya está en `demo_en_curso` (lo puso el evento) y esta query ni lo
+ * mira: el filtro por `status = 'demo_agendada'` alcanza solo.
+ *
+ * No envía mensaje al lead (Claude ya está gestionando la conversación, si hace falta).
+ * Solo cambia el estado para que el equipo lo vea y notifica a admins.
  */
 class CheckDemoIngresoTimeout extends Command
 {
@@ -41,7 +45,7 @@ class CheckDemoIngresoTimeout extends Command
      *
      * @var string
      */
-    protected $description = 'Pasa a demo_pendiente_de_ingreso los leads que no confirmaron el ingreso en el tiempo límite';
+    protected $description = 'Pasa a demo_pendiente_de_ingreso los leads que no entraron de verdad a la demo en el tiempo límite';
 
     /**
      * Procesa los leads con timeout de ingreso superado.
@@ -50,31 +54,32 @@ class CheckDemoIngresoTimeout extends Command
      */
     public function handle(): int
     {
-        /* Minutos de espera antes de considerar el ingreso fallido (desde último mensaje del lead o inicio). */
+        /* Minutos de espera antes de considerar el ingreso fallido, desde demo_start_time. */
         $timeout_minutos = LeadDemoSettings::get_ingreso_timeout_minutos();
 
         /* Momento actual en timezone Argentina. */
         $now = AppTime::now();
 
-        /* Buscar leads en ingresando_demo que no confirmaron y aún no fueron notificados. */
+        /* Buscar leads en demo_agendada que no confirmaron el ingreso y aún no fueron notificados. */
         $candidates = Lead::query()
-            ->where('status', 'ingresando_demo')
+            ->where('status', 'demo_agendada')
             // Gate del prompt 322: la automatización solo corre si el master y el flag
             // específico de esta operación están activos para el lead (prompt 318).
             ->where('automatizaciones_demo_activas', true)
             ->where('auto_check_ingreso_demo', true)
-            ->where('demo_check_ingreso_enviado', true)
+            // Mismo gate que usaba el extinto CheckDemoIngress (misión demo-v2-estados-automaticos,
+            // 4/9/2026) para no competir con una sugerencia del agente en vuelo. Tiene más sentido
+            // ahora que nunca hay un mensaje de por medio que "reinicie el reloj".
+            ->where('tiene_sugerencia_pendiente', false)
             ->where('demo_ingreso_confirmado', false)
             ->where('demo_no_ingreso_notificado', false)
-            /* Ventana extendida afuera (misión 47), y no alcanza con que CheckDemoIngress ya los
-             * excluya: a `ingresando_demo` también se llega por la vía conversacional
-             * (confirmar_ingreso), así que un flexible puede estar en ese estado sin que este
-             * comando lo haya puesto ahí. El timeout cuelga de demo_start_time y lo mandaría a
-             * demo_pendiente_de_ingreso mientras su ventana sigue abierta.
+            /* Ventana extendida afuera (misión 47): a un lead al que le ofrecimos "de 20:00 a
+             * 23:59, entrá cuando puedas" este comando no puede mandarlo a demo_pendiente_de_ingreso
+             * mientras su ventana sigue abierta.
              *
-             * Las dos condiciones, por el mismo motivo que en CheckDemoIngress: `demo_flexible` es
-             * una columna preexistente que Lucas también marca a mano en leads de la dinámica
-             * actual, y esos tienen que seguir pasando por acá. */
+             * Las dos condiciones, por el mismo motivo de siempre: `demo_flexible` es una columna
+             * preexistente que Lucas también marca a mano en leads de la dinámica actual, y esos
+             * tienen que seguir pasando por acá. */
             ->where(function ($query) {
                 $query->where('demo_flexible', false)
                     ->orWhere(function ($otra_dinamica) {
@@ -100,23 +105,12 @@ class CheckDemoIngresoTimeout extends Command
                 continue;
             }
 
-            /*
-             * Referencia temporal: último mensaje del lead posterior al inicio de la demo.
-             * Si el lead no envió nada desde el check de ingreso, usar el inicio de la demo.
-             */
-            $ultimo_lead_msg = \App\Models\LeadMessage::query()
-                ->where('lead_id', $lead->id)
-                ->where('sender', 'lead')
-                ->where('created_at', '>=', $demo_datetime)
-                ->orderByDesc('created_at')
-                ->first();
-
-            $referencia = $ultimo_lead_msg
-                ? $ultimo_lead_msg->created_at->setTimezone('America/Argentina/Buenos_Aires')
-                : $demo_datetime;
-
-            /* El timeout vence cuando referencia + timeout_minutos ya pasó. */
-            if ($referencia->copy()->addMinutes($timeout_minutos)->gt($now)) {
+            /* El timeout vence cuando demo_start_time + timeout_minutos ya pasó. Ya no se corre la
+             * referencia por el último mensaje del lead (así funcionaba con el check de ingreso
+             * que se mandaba por WhatsApp): esa lógica existía para no interrumpir una conversación
+             * activa sobre un mensaje que ya no se manda, y deja de tener sentido (misión
+             * demo-v2-estados-automaticos, 4/9/2026). */
+            if ($demo_datetime->copy()->addMinutes($timeout_minutos)->gt($now)) {
                 continue;
             }
 
@@ -154,7 +148,7 @@ class CheckDemoIngresoTimeout extends Command
             /* Notificar a admins suscritos vía WhatsApp que el lead no ingresó por timeout. */
             try {
                 $ciclo_service = new DemoCicloAdminNotificationService(new WhatsappSendService());
-                $ciclo_service->notify_no_ingreso($lead->fresh(), 'no respondió al check de ingreso');
+                $ciclo_service->notify_no_ingreso($lead->fresh(), 'no entró a la demo dentro del tiempo límite');
             } catch (\Throwable $e) {
                 Log::error('CheckDemoIngresoTimeout: error al notificar no_ingreso a admins.', [
                     'lead_id' => $lead->id,

@@ -909,7 +909,7 @@ return [
                    422, mirá primero `model=lead_pipeline_status`: ésa es la lista del momento.
                    Ojo con `mail2_enviado`: sigue en el catálogo por historia pero Lucas lo dejó de
                    usar (SLUGS_HIDDEN_FROM_SELECT), así que filtrar por él devuelve poco y viejo. */
-                'status'                         => ['columna' => 'status',                         'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'ingresando_demo', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
+                'status'                         => ['columna' => 'status',                         'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
                 'business_type'                  => ['columna' => 'business_type',                  'tipo' => 'texto'],
                 'demo_id'                        => ['columna' => 'demo_id',                        'tipo' => 'entero'],
                 'target_client_id'               => ['columna' => 'target_client_id',               'tipo' => 'entero'],
@@ -997,7 +997,7 @@ return [
                    a la constante si está vacía, y `ensure_exists()` puede dar de alta un slug nuevo
                    en runtime. Si filtrás por un slug y la respuesta es 422, mirá primero
                    `model=lead_pipeline_status`: ésa es la lista de verdad del momento. */
-                'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'ingresando_demo', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
+                'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
                 'activa'       => ['columna' => 'activa',     'tipo' => 'booleano'],
                 'ids'          => ['columna' => 'id',         'tipo' => 'lista_de_enteros'],
                 'creado_desde' => ['columna' => 'created_at', 'tipo' => 'fecha_desde'],
@@ -1612,7 +1612,7 @@ return [
                    afuera filas que existen.
                    ⚠️ La fuente viva sigue siendo `model=lead_pipeline_status`: ensure_exists() puede
                    dar de alta un slug nuevo en runtime. Si un valor da 422, consultá ahí. */
-                'estado_aplicable' => ['columna' => 'estado_aplicable', 'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'ingresando_demo', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
+                'estado_aplicable' => ['columna' => 'estado_aplicable', 'tipo' => 'en', 'valores' => ['nuevo', 'contactado', 'calificado', 'solicita_disponibilidad', 'demo_agendada', 'demo_en_curso', 'demo_pendiente_de_ingreso', 'demo_pendiente_de_terminar', 'demo_realizada', 'closer_activo', 'mail2_enviado', 'cerrado_ganado', 'cerrado_perdido', 'en_pausa']],
                 /* La columna es nullable y ese null significa "aplica a todos los estados", que es
                    una consulta distinta de filtrar por uno. */
                 'sin_estado'       => ['columna' => 'estado_aplicable', 'tipo' => 'nulo'],

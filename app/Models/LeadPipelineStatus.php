@@ -14,9 +14,13 @@ class LeadPipelineStatus extends Model
      * Slugs por defecto del pipeline (seed y fallback si la tabla está vacía).
      *
      * Orden del ciclo de vida de la demo:
-     *   demo_agendada → ingresando_demo → demo_en_curso → demo_realizada
+     *   demo_agendada → demo_en_curso → demo_realizada
      * Ramas de fallo (sin confirmación de ingreso o de fin):
      *   demo_pendiente_de_ingreso, demo_pendiente_de_terminar
+     *
+     * `ingresando_demo` existió como subestado intermedio hasta la misión
+     * demo-v2-estados-automaticos (4/9/2026): se sacó del catálogo porque el ingreso real ahora
+     * se detecta solo, vía el evento `demo.ingreso` (ver DemoEventosController).
      */
     public const DEFAULT_STATUSES = [
         'nuevo'                        => 'Nuevo',
@@ -24,8 +28,7 @@ class LeadPipelineStatus extends Model
         'calificado'                   => 'Calificado',
         'solicita_disponibilidad'      => 'Solicita disponibilidad',
         'demo_agendada'                => 'Demo agendada',
-        // Subestados del ciclo de vida de la demo (automatizados por el agente).
-        'ingresando_demo'              => 'Ingresando a demo',
+        // Subestado automatizado por el agente.
         'demo_en_curso'                => 'Demo en curso',
         // Ramas de fallo: no respondió al check de ingreso o no confirmó fin.
         'demo_pendiente_de_ingreso'    => 'Demo pendiente de ingreso',
@@ -52,7 +55,6 @@ class LeadPipelineStatus extends Model
         'calificado'                   => '#28a745',
         'solicita_disponibilidad'      => '#0d6efd',
         'demo_agendada'                => '#0a58ca',
-        'ingresando_demo'              => '#dc3545',
         'demo_en_curso'                => '#ffc107',
         'demo_pendiente_de_ingreso'    => '#dc3545',
         'demo_pendiente_de_terminar'   => '#dc3545',
@@ -73,7 +75,6 @@ class LeadPipelineStatus extends Model
         'calificado'                 => 'Calificación',
         'solicita_disponibilidad'    => 'Calificación',
         'demo_agendada'              => 'Demo',
-        'ingresando_demo'            => 'Demo',
         'demo_en_curso'              => 'Demo',
         'demo_pendiente_de_ingreso'  => 'Demo',
         'demo_pendiente_de_terminar' => 'Demo',
@@ -99,9 +100,21 @@ class LeadPipelineStatus extends Model
     public const SLUGS_TARJETAS_ESTADO = [
         'calificado',
         'solicita_disponibilidad',
-        'demo_agendada',
         'closer_activo',
     ];
+
+    /**
+     * Tarjeta "Demo" del módulo de Leads: agrupa tres estados del pipeline bajo un solo total,
+     * porque para el operador son la misma cosa ("el lead está en el trámite de la demo") aunque
+     * el sistema los distinga. Label y color propios, sin slug 1:1 en el catálogo — mismo criterio
+     * que closer_panel_json() usa para su tarjeta "Listos para la llamada". Color rojo: el mismo
+     * que tenía `ingresando_demo` antes de sacarse del catálogo (misión demo-v2-estados-automaticos).
+     */
+    public const TARJETA_DEMO_VALUE = 'demo';
+    public const TARJETA_DEMO_LABEL = 'Demo';
+    public const TARJETA_DEMO_COLOR = '#dc3545';
+    public const TARJETA_DEMO_GRUPO = 'Demo';
+    public const TARJETA_DEMO_SLUGS = ['demo_agendada', 'demo_pendiente_de_ingreso', 'demo_en_curso'];
 
     protected $guarded = [];
 

@@ -1922,7 +1922,6 @@ class LeadController extends Controller
      */
     const ESTADOS_CON_DEMO_EDITABLE = [
         'demo_agendada',
-        'ingresando_demo',
         'demo_en_curso',
         'demo_pendiente_de_ingreso',
         'demo_pendiente_de_terminar',
@@ -4074,9 +4073,19 @@ class LeadController extends Controller
      */
     public function status_cards_json(Request $request)
     {
-        return response()->json([
-            'cards' => LeadStatusCardsService::cards_for_statuses(LeadPipelineStatus::SLUGS_TARJETAS_ESTADO),
-        ], 200);
+        $cards = LeadStatusCardsService::cards_for_statuses(['calificado', 'solicita_disponibilidad']);
+
+        $cards[] = LeadStatusCardsService::card_for_group(
+            LeadPipelineStatus::TARJETA_DEMO_VALUE,
+            LeadPipelineStatus::TARJETA_DEMO_LABEL,
+            LeadPipelineStatus::TARJETA_DEMO_COLOR,
+            LeadPipelineStatus::TARJETA_DEMO_GRUPO,
+            LeadPipelineStatus::TARJETA_DEMO_SLUGS
+        );
+
+        $cards = array_merge($cards, LeadStatusCardsService::cards_for_statuses(['closer_activo']));
+
+        return response()->json(['cards' => $cards], 200);
     }
 
     /**
@@ -4905,7 +4914,6 @@ class LeadController extends Controller
         /* Ciclo de demo sin terminar: agendó y todavía no confirmó que la recorrió. */
         $estados_demo_sin_terminar = [
             'demo_agendada',
-            'ingresando_demo',
             'demo_en_curso',
             'demo_pendiente_de_ingreso',
             'demo_pendiente_de_terminar',

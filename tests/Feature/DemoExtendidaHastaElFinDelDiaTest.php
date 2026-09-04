@@ -394,75 +394,18 @@ class DemoExtendidaHastaElFinDelDiaTest extends TestCase
     }
 
     /**
-     * 7. Lead flexible con turno a las 20:00 y el reloj a las 20:05: `CheckDemoIngress` no lo toca.
-     *    Sin esto le preguntaría si pudo entrar a los cinco minutos de abrirle una ventana de seis
-     *    horas.
-     *
-     * @return void
+     * 7/8/8bis. 🔴 Los tres tests que vivían acá (el flexible fuera del check de ingreso, el no
+     * flexible que lo sigue tomando, y el flag manual de un lead actual que no lo saca del ciclo)
+     * probaban `leads:check-demo-ingress` -- el comando que enviaba el mensaje de WhatsApp
+     * "¿pudiste entrar?" y transicionaba a `ingresando_demo`. Ese comando se borró entero en la
+     * misión demo-v2-estados-automaticos (4/9/2026): el ingreso real ahora se detecta solo, sin
+     * mandarle ningún mensaje al lead (ver DemoEventosController::avanzar_pipeline_por_ingreso_real).
+     * No es un caso de "ajustar una aserción para que pase": es un comportamiento que dejó de
+     * existir. La preocupación de fondo de esos tres tests -- que la ventana extendida (flexible +
+     * dinámica nueva) quede afuera de la automatización de ingreso, y que un flexible manual de la
+     * dinámica actual SÍ siga adentro -- se re-cubre sobre el mecanismo nuevo en
+     * tests/Feature/CheckDemoIngresoTimeoutTest.php.
      */
-    public function test_el_lead_flexible_queda_fuera_del_check_de_ingreso(): void
-    {
-        /* 20:01 y no 20:05: la ventana de CheckDemoIngress es de ±2 minutos alrededor del INICIO
-         * de la demo, no del inicio más un margen. Con el reloj a las 20:05 ninguno de los dos
-         * leads entraba, así que el test del flexible pasaba por la razón equivocada — habría
-         * quedado verde aunque la exclusión no existiera. */
-        Carbon::setTestNow(Carbon::parse('2026-08-20 20:01:00', 'America/Argentina/Buenos_Aires'));
-
-        $lead = $this->crear_lead_para_check(true);
-
-        $this->artisan('leads:check-demo-ingress')->assertExitCode(0);
-
-        $this->assertSame('demo_agendada', $lead->refresh()->status);
-        $this->assertFalse((bool) $lead->demo_check_ingreso_enviado);
-    }
-
-    /**
-     * 8. 🔴 El test que protege producción: el lead NO flexible, en la misma situación, lo toma
-     *    exactamente como antes de esta misión.
-     *
-     * @return void
-     */
-    public function test_el_lead_no_flexible_lo_sigue_tomando_el_check_de_ingreso(): void
-    {
-        /* 20:01 y no 20:05: la ventana de CheckDemoIngress es de ±2 minutos alrededor del INICIO
-         * de la demo, no del inicio más un margen. Con el reloj a las 20:05 ninguno de los dos
-         * leads entraba, así que el test del flexible pasaba por la razón equivocada — habría
-         * quedado verde aunque la exclusión no existiera. */
-        Carbon::setTestNow(Carbon::parse('2026-08-20 20:01:00', 'America/Argentina/Buenos_Aires'));
-
-        $lead = $this->crear_lead_para_check(false);
-
-        $this->artisan('leads:check-demo-ingress')->assertExitCode(0);
-
-        $this->assertTrue((bool) $lead->refresh()->demo_check_ingreso_enviado);
-    }
-
-    /**
-     * 8bis. 🔴 El otro test que protege producción, y el que faltaba: `demo_flexible` es una columna
-     *       PREEXISTENTE (2/7/2026) que significa "no reservar ventana de closer" y que Lucas marca
-     *       a mano desde el panel — ese era su único uso hasta esta misión. Un lead de la dinámica
-     *       ACTUAL con ese checkbox marcado recibe los checks del ciclo hoy, y tiene que seguir
-     *       recibiéndolos: filtrar solo por `demo_flexible` le cambiaba el comportamiento sin que
-     *       nadie lo pidiera.
-     *
-     * @return void
-     */
-    public function test_el_flag_manual_de_un_lead_actual_no_lo_saca_del_ciclo(): void
-    {
-        Carbon::setTestNow(Carbon::parse('2026-08-20 20:01:00', 'America/Argentina/Buenos_Aires'));
-
-        $lead = $this->crear_lead_para_check(true);
-        // Dinámica ACTUAL con el checkbox manual marcado: el caso documentado en la migración.
-        $lead->demo_experiencia = Lead::EXPERIENCIA_ACTUAL;
-        $lead->save();
-
-        $this->artisan('leads:check-demo-ingress')->assertExitCode(0);
-
-        $this->assertTrue(
-            (bool) $lead->refresh()->demo_check_ingreso_enviado,
-            'Un lead de la dinámica actual con demo_flexible manual dejó de recibir el check de ingreso.'
-        );
-    }
 
     /**
      * 8ter. Y por el mismo motivo, agendar por WhatsApp no le puede APAGAR ese checkbox a un lead de
@@ -523,32 +466,6 @@ class DemoExtendidaHastaElFinDelDiaTest extends TestCase
         // 20:00 sí, y hasta el fin del día.
         $this->assertArrayHasKey('20:00', $por_slot);
         $this->assertSame('23:59', $por_slot['20:00']);
-    }
-
-    /**
-     * Lead agendado listo para que lo evalúe CheckDemoIngress.
-     *
-     * @param bool $flexible
-     *
-     * @return Lead
-     */
-    private function crear_lead_para_check(bool $flexible): Lead
-    {
-        $demo = $this->crear_demo();
-        $lead = $this->crear_lead('demo_agendada');
-
-        $lead->demo_id                       = $demo->id;
-        $lead->demo_date                     = '2026-08-20';
-        $lead->demo_start_time               = '20:00';
-        $lead->demo_end_time                 = $flexible ? '23:59' : '21:00';
-        $lead->demo_flexible                 = $flexible;
-        $lead->automatizaciones_demo_activas = true;
-        $lead->auto_check_ingreso_demo       = true;
-        $lead->demo_check_ingreso_enviado    = false;
-        $lead->tiene_sugerencia_pendiente    = false;
-        $lead->save();
-
-        return $lead->refresh();
     }
 
     /**

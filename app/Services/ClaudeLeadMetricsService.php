@@ -46,7 +46,6 @@ class ClaudeLeadMetricsService
      */
     const STATUSES_A_DEMO_AGENDADA = [
         'demo_agendada',
-        'ingresando_demo',
         'demo_en_curso',
         'demo_pendiente_de_ingreso',
         'demo_pendiente_de_terminar',

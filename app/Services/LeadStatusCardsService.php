@@ -104,4 +104,33 @@ class LeadStatusCardsService
 
         return $cards;
     }
+
+    /**
+     * Tarjeta agrupada: mismo criterio que cards_for_statuses(), pero sumando el total y el
+     * "sin_responder" de VARIOS slugs bajo una sola tarjeta con label/color propios (no hay un slug
+     * 1:1 en el catálogo al que pedírselos).
+     *
+     * @param string $value Clave sintética de la tarjeta (no es un status real de ningún lead).
+     * @param string $text
+     * @param string $color
+     * @param string|null $group
+     * @param array<int, string> $slugs Slugs de estado que suman al total de esta tarjeta.
+     *
+     * @return array<string, mixed> {value, text, color, group, slugs, total, sin_responder}.
+     */
+    public static function card_for_group(string $value, string $text, string $color, $group, array $slugs): array
+    {
+        $total = (int) Lead::query()->whereIn('status', $slugs)->count();
+        $sin_responder = (int) Lead::query()->whereIn('status', $slugs)->requiereRevision(true)->count();
+
+        return [
+            'value'         => $value,
+            'text'          => $text,
+            'color'         => $color !== '' ? $color : self::COLOR_FALLBACK,
+            'group'         => $group,
+            'slugs'         => $slugs,
+            'total'         => $total,
+            'sin_responder' => $sin_responder,
+        ];
+    }
 }

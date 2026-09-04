@@ -98,7 +98,6 @@ TXT;
         'solicita_disponibilidad',
         'demo_agendada',
         'demo_pendiente_de_ingreso',
-        'ingresando_demo',
         'demo_en_curso',
         'demo_pendiente_de_terminar',
     ];
@@ -1618,14 +1617,14 @@ TXT;
         }
 
         /*    (b) El lead está en un estado donde la demo ya arrancó o se la está esperando entrar.
-         *        Son los cuatro estados posteriores a `demo_agendada` del pipeline
+         *        Son los tres estados posteriores a `demo_agendada` del pipeline
          *        (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO): demo_pendiente_de_ingreso lo pone
-         *        CheckDemoIngresoTimeout cuando pasó la hora y no confirmó, ingresando_demo y
-         *        demo_en_curso son la demo andando, y demo_pendiente_de_terminar es el tramo final.
-         *        En ninguno de los cuatro "correrle el turno" es una ayuda. */
+         *        CheckDemoIngresoTimeout cuando pasó la hora y no confirmó, demo_en_curso es la
+         *        demo andando (el ingreso real, o la inferencia conversacional/manual — ver
+         *        confirmar_ingreso), y demo_pendiente_de_terminar es el tramo final. En ninguno de
+         *        los tres "correrle el turno" es una ayuda. */
         if (in_array((string) $lead->status, [
             'demo_pendiente_de_ingreso',
-            'ingresando_demo',
             'demo_en_curso',
             'demo_pendiente_de_terminar',
         ], true)) {
@@ -4826,12 +4825,12 @@ TXT;
         $lead_status = (string) $lead->status;
 
         /* confirmar_ingreso fuerza el estado a demo_en_curso (ver apply_parsed_response). */
-        if (! empty($parsed['confirmar_ingreso']) && in_array($lead_status, ['ingresando_demo', 'demo_agendada'], true)) {
+        if (! empty($parsed['confirmar_ingreso']) && $lead_status === 'demo_agendada') {
             return true;
         }
 
         /* marcar_no_ingreso fuerza el estado a demo_pendiente_de_ingreso (ver apply_parsed_response). */
-        if (! empty($parsed['marcar_no_ingreso']) && $lead_status === 'ingresando_demo') {
+        if (! empty($parsed['marcar_no_ingreso']) && $lead_status === 'demo_agendada') {
             return true;
         }
 
@@ -6211,13 +6210,17 @@ TXT;
         $admin_notifications_log = [];
 
         /* Acción: confirmar que el lead ingresó a la demo (inferencia conversacional).
-         * Solo válida si el lead está en ingresando_demo o en demo_agendada (tolerante,
-         * para el caso en que el check se envió pero el estado todavía no actualizó).
+         * Solo válida si el lead está en demo_agendada. Ya no hace falta para los leads con
+         * demo v2 conectada (el ingreso real lo marca automático
+         * DemoEventosController::avanzar_pipeline_por_ingreso_real, misión
+         * demo-v2-estados-automaticos), pero sigue sirviendo como camino de respaldo para leads
+         * en dinámica `actual` (sin Magic Link, sin telemetría) y como confirmación redundante
+         * inofensiva si el lead lo menciona por chat después de haber entrado.
          * Si ya estaba confirmado, no se repite el timestamp ni se re-dispara nada. */
         $confirmar_ingreso = ! empty($parsed['confirmar_ingreso']);
         if ($confirmar_ingreso) {
             /* Estados desde los cuales tiene sentido confirmar el ingreso. */
-            $estados_validos_ingreso = ['ingresando_demo', 'demo_agendada'];
+            $estados_validos_ingreso = ['demo_agendada'];
             if (in_array((string) $lead->status, $estados_validos_ingreso, true)) {
                 /* Anti-duplicado: solo setear la fecha la primera vez que se confirma. */
                 if (! $lead->demo_ingreso_confirmado) {
@@ -6319,9 +6322,9 @@ TXT;
 
         /* Acción: marcar que el lead no va a poder ingresar a la demo.
          * Claude la usa cuando el lead dice explícitamente que no puede o no quiere entrar.
-         * Solo válida si el lead está en ingresando_demo. */
+         * Solo válida si el lead está en demo_agendada. */
         $marcar_no_ingreso = ! empty($parsed['marcar_no_ingreso']);
-        if ($marcar_no_ingreso && (string) $lead->status === 'ingresando_demo') {
+        if ($marcar_no_ingreso && (string) $lead->status === 'demo_agendada') {
             /* Retroceder a demo_pendiente_de_ingreso para que el sistema pueda reintentar el flujo. */
             $estado_raw      = 'demo_pendiente_de_ingreso';
             $pipeline_status = LeadPipelineStatus::ensure_exists($estado_raw);
@@ -6922,7 +6925,6 @@ TXT;
         $lead_ya_agendado = in_array((string) $lead->status, [
             'demo_agendada',
             'demo_pendiente_de_ingreso',
-            'ingresando_demo',
             'demo_en_curso',
             'demo_pendiente_de_terminar',
         ], true);
@@ -8420,10 +8422,13 @@ TXT;
             }
         }
 
-        if ($lead_status_for_context === 'ingresando_demo') {
-            /* El lead está en el momento de intentar entrar al sistema demo. */
+        if ($lead_status_for_context === 'demo_agendada') {
+            /* El lead está en el tramo de la demo agendada, todavía sin confirmar el ingreso real
+             * (con demo v2 conectada, ese ingreso lo detecta solo DemoEventosController apenas
+             * abre el Magic Link -- este bloque cubre el caso en que escribe ANTES de eso, ya sea
+             * porque no puede entrar o porque avisa por chat que ya está adentro). */
             $txt .= "\n\nCONTEXTO DE DEMO - INGRESO:\n"
-                . "El lead tiene la demo en curso de inicio y se le preguntó si pudo ingresar al sistema.\n"
+                . "El lead tiene la demo agendada y todavía no se confirmó que haya podido ingresar al sistema.\n"
                 . "\n"
                 . "Tu objetivo es asegurarte de que entre. Si dice que tuvo un problema para entrar,\n"
                 . "pasale los datos exactos que figuran en DATOS DE ACCESO DEL LEAD (link, usuario y contraseña).\n"

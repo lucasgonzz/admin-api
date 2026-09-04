@@ -59,7 +59,6 @@ class Lead extends Model
     public const ESTADOS_VENTANA_VERIFICACION_MENSAJES = [
         'solicita_disponibilidad',
         'demo_agendada',
-        'ingresando_demo',
         'demo_en_curso',
         'demo_pendiente_de_ingreso',
         'demo_pendiente_de_terminar',

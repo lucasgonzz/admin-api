@@ -65,9 +65,6 @@ class Kernel extends ConsoleKernel
         // habilita este vencimiento tiene que llegar a tiempo para servirle de algo.
         $schedule->command('leads:vencer-demo-setups-colgados')->everyMinute();
 
-        // Envía check de ingreso X minutos después del inicio de la demo.
-        $schedule->command('leads:check-demo-ingress')->everyMinute();
-
         // Genera resumen del lead con Claude X minutos antes del fin de la demo.
         $schedule->command('leads:generate-demo-summary')->everyMinute();
 

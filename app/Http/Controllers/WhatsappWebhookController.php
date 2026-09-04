@@ -1367,7 +1367,7 @@ class WhatsappWebhookController extends Controller
     private function handle_demo_confirmation_if_needed(Lead $lead, string $content): void
     {
         // Estados en los que aplica el procesamiento automático del ciclo de demo.
-        $estados_ciclo = ['demo_agendada', 'ingresando_demo', 'demo_en_curso', 'demo_pendiente_de_terminar'];
+        $estados_ciclo = ['demo_agendada', 'demo_en_curso', 'demo_pendiente_de_terminar'];
         if (! in_array((string) $lead->status, $estados_ciclo, true)) {
             return;
         }
@@ -1375,8 +1375,12 @@ class WhatsappWebhookController extends Controller
         // Normalizar el contenido para la búsqueda de palabras clave.
         $content_lower = mb_strtolower(trim($content));
 
-        // Caso A: check de ingreso enviado, ingreso aún no confirmado.
-        // El lead puede estar en demo_agendada o ingresando_demo en este punto.
+        // Caso A: check de ingreso enviado, ingreso aún no confirmado. Ya no depende de un
+        // scheduler automático (leads:check-demo-ingress se borró en la misión
+        // demo-v2-estados-automaticos): sigue vivo porque el operador puede disparar el mismo
+        // check a mano desde admin-spa (LeadController::check_demo_ingress_json, botón "Check de
+        // ingreso" en extra-props/Index.vue), que también escribe demo_check_ingreso_enviado.
+        // El lead puede estar en demo_agendada o demo_en_curso en este punto.
         if ($lead->demo_check_ingreso_enviado && ! $lead->demo_ingreso_confirmado) {
             if ($this->content_confirms_ingress($content_lower)) {
                 $lead->demo_ingreso_confirmado    = true;

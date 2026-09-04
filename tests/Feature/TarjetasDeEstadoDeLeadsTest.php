@@ -42,11 +42,19 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
 
     /**
      * Los cuatro slugs con tarjeta, en el orden en que tienen que salir.
+     *
+     * 🔴 La tercera cambió de `demo_agendada` a `demo` en la misión demo-v2-estados-automaticos
+     * (4/9/2026): pasó a ser una tarjeta agrupada (demo_agendada + demo_pendiente_de_ingreso +
+     * demo_en_curso bajo un solo total). El detalle de esa agrupación —el `total` es la suma de
+     * los tres sub-estados, el `sin_responder` también, y trae `slugs`— se prueba en
+     * tests/Feature/StatusCardsAgrupadasDemoTest.php; acá solo se ajustan las claves que este
+     * archivo ya usaba para no perder la cobertura de "sin responder"/"total" que sí sigue
+     * siendo responsabilidad de este archivo.
      */
     private const SLUGS_ESPERADOS = [
         'calificado',
         'solicita_disponibilidad',
-        'demo_agendada',
+        'demo',
         'closer_activo',
     ];
 
@@ -206,7 +214,7 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
         $tarjetas = $this->tarjetas();
 
         $this->assertSame(2, $tarjetas['calificado']['total']);
-        $this->assertSame(1, $tarjetas['demo_agendada']['total']);
+        $this->assertSame(1, $tarjetas['demo']['total']);
         $this->assertSame(0, $tarjetas['solicita_disponibilidad']['total']);
         $this->assertSame(0, $tarjetas['closer_activo']['total']);
         $this->assertArrayNotHasKey('nuevo', $tarjetas, 'Solo salen los cuatro estados con tarjeta.');
@@ -267,7 +275,7 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
 
         $tarjetas = $this->tarjetas();
 
-        $this->assertSame(1, $tarjetas['demo_agendada']['sin_responder']);
+        $this->assertSame(1, $tarjetas['demo']['sin_responder']);
     }
 
     /**
@@ -374,8 +382,8 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
 
         $tarjetas = $this->tarjetas();
 
-        $this->assertSame(1, $tarjetas['demo_agendada']['total']);
-        $this->assertSame(0, $tarjetas['demo_agendada']['sin_responder']);
+        $this->assertSame(1, $tarjetas['demo']['total']);
+        $this->assertSame(0, $tarjetas['demo']['sin_responder']);
     }
 
     /**
@@ -497,7 +505,7 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
         $tarjetas = $this->tarjetas($query);
 
         $this->assertSame(2, $tarjetas['calificado']['total'], 'El filtro del operador no toca los conteos.');
-        $this->assertSame(1, $tarjetas['demo_agendada']['total']);
+        $this->assertSame(1, $tarjetas['demo']['total']);
     }
 
     /**
