@@ -432,7 +432,13 @@ class RunDemoSetupService
             'company_name'  => $lead->company_name,
             'doc_number'    => $lead->doc_number,
             'email'         => $lead->email,
-            'online'        => $lead->demo->ecommerce_api_url,
+            // `users.online` es la URL PUBLICA de la tienda, la que ve un comprador, no la de su
+            // API. Hasta el 3/9/2026 aca iba `ecommerce_api_url` y toda demo quedaba apuntando a
+            // `https://api-tienda...`. El sintoma no se veia en la demo: aparece al cobrar con
+            // Mercado Pago, porque `tienda-api/MercadoPagoController@preference` arma los
+            // `back_urls` con este campo, y el comprador terminaba en un dominio donde
+            // `/pago-exitoso` no existe -- el pago salia y el pedido nunca se enteraba.
+            'online'        => $lead->demo->ecommerce_spa_url,
 
             // Tipo de negocio requerido por el helper
             'business_type' => $lead->business_type,
@@ -546,8 +552,10 @@ class RunDemoSetupService
             'doc_number'   => null,
             'email'        => null,
 
-            // Tienda de ESTA demo: es lo que el ERP guarda como su ecommerce.
-            'online'       => $demo->ecommerce_api_url,
+            // Tienda de ESTA demo: es lo que el ERP guarda como su ecommerce. Va la URL PUBLICA
+            // (la que ve un comprador), no la de la API -- ver el comentario extendido en
+            // `build_payload()`, que tenia el mismo error.
+            'online'       => $demo->ecommerce_spa_url,
 
             /* `ferreteria` y no null: es el único valor que hoy sigue cambiando algo del otro lado
              * (DemoSetupHelper::apply_business_type_rules() le agrega la extensión
