@@ -9,8 +9,10 @@ use App\Http\Controllers\UpdateController;
 use App\Jobs\SyncClientScheduleJob;
 use App\Models\Client;
 use App\Models\ClientScheduleDay;
+use App\Models\Version;
 use App\Services\ClientScheduleReplacementService;
 use App\Services\ClientScheduleResolver;
+use App\Services\VersionNumberComparator;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -304,6 +306,28 @@ class ClaudeClientOpsController extends Controller
                     ],
                     'nota' => '🔴 El default es `published` porque la creación de un upgrade rechaza con 422 toda versión '
                         . 'que no lo esté: la lista que ves es la lista de lo que efectivamente podés pedir.',
+                ],
+                'POST claude/versions' => [
+                    'parametros' => [
+                        'version'     => 'Requerido. Código con al menos 3 componentes numéricos separados por puntos '
+                            . '(ej. "4.0.3"), único en toda la tabla.',
+                        'title'       => 'Opcional, máximo 200 caracteres.',
+                        'description' => 'Opcional, máximo 5000 caracteres.',
+                        'status'      => 'Opcional: draft | published | archived. Default draft.',
+                    ],
+                    'nota' => '🔴 `is_hotfix` siempre se autocalcula del código (>3 componentes = hotfix); no hay '
+                        . 'parámetro para forzarlo en el alta, igual que en el panel humano. Sin dry_run ni confirm_*: '
+                        . 'es un insert de una fila sin efectos por fuera de la tabla `versions`.',
+                ],
+                'POST claude/versions/{id}/status' => [
+                    'parametros' => [
+                        'status' => 'Requerido: draft | published | archived.',
+                    ],
+                    'nota' => 'Sin máquina de estados: acepta cualquier transición del enum, igual que el panel '
+                        . 'humano. Al pasar a `published` sin `published_at` previo, lo setea a `now()`; en cualquier '
+                        . 'otra transición no lo toca. Publicar una versión NO la despliega a ningún cliente: solo '
+                        . 'habilita que `POST claude/upgrades` pueda apuntar a ella (rechaza con 422 toda versión que '
+                        . 'no esté `published`).',
                 ],
                 'GET claude/upgrades' => [
                     'filtros' => [
@@ -981,6 +1005,139 @@ class ClaudeClientOpsController extends Controller
             'status_usado' => $status,
             'nota'         => 'Solo se puede crear un upgrade hacia una versión `published`.',
         ], 200);
+    }
+
+    /**
+     * Da de alta una versión nueva.
+     *
+     * 🔴 `is_hotfix` SIEMPRE se autocalcula, igual que en el alta desde el panel humano
+     * (`VersionController::store`/`store_json`). No hay override en el alta a propósito: fue
+     * justamente el override en el alta lo que causó el bug del 18/8/2026 (toda versión creada
+     * desde el SPA quedaba `is_hotfix=false` sin importar el código). Si hace falta forzarlo
+     * distinto del cálculo, se edita después desde el panel — eso `claude/*` no lo expone.
+     *
+     * Sin `dry_run` ni `confirm_*`: es un INSERT de una sola fila, sin SSH, sin cola y sin
+     * observer (`App\Models\Version` no tiene `boot()`, y ningún comando programado actúa solo
+     * sobre versiones `published`) — mismo criterio de riesgo que ya usa
+     * `POST claude/clients/{id}/schedule/sync`.
+     *
+     * @param Request $request Request entrante.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function versions_store_json(Request $request)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'version'     => [
+                'required',
+                'string',
+                'max:30',
+                'unique:versions,version',
+                'regex:' . VersionNumberComparator::VALID_REGEX,
+            ],
+            'title'       => 'nullable|string|max:200',
+            'description' => 'nullable|string|max:5000',
+            'status'      => 'nullable|string|in:draft,published,archived',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $codigo = (string) $request->input('version');
+        $status = $this->texto_con_default($request, 'status', 'draft');
+
+        $data = [
+            'version'     => $codigo,
+            'title'       => $this->texto_o_null($request->input('title')),
+            'description' => $this->texto_o_null($request->input('description')),
+            'status'      => $status,
+            'is_hotfix'   => VersionNumberComparator::isHotfix($codigo),
+        ];
+
+        if ($status === 'published') {
+            $data['published_at'] = now();
+        }
+
+        $version = Version::create($data);
+
+        return response()->json(['model' => $this->version_payload($version)], 201);
+    }
+
+    /**
+     * Cambia el estado de una versión existente (borrador / publicada / archivada).
+     *
+     * Mismo criterio que `VersionController::update_json`: al pasar a `published` sin
+     * `published_at` previo, se setea `now()`; en cualquier otra transición no se toca ese campo.
+     * Sin máquina de estados — el panel humano tampoco la tiene, `update_json` acepta cualquier
+     * valor del enum sin validar la transición —, así que este endpoint no inventa una regla más
+     * estricta que la que ya rige en el panel.
+     *
+     * @param Request    $request Request entrante.
+     * @param int|string $id      Id numérico o uuid de la versión.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function versions_status_json(Request $request, $id)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'status' => 'required|string|in:draft,published,archived',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $version = $this->resolver_version($id);
+        if ($version === null) {
+            return $this->error_404('no existe la versión ' . $id);
+        }
+
+        $version->status = (string) $request->input('status');
+        if ($version->status === 'published' && ! $version->published_at) {
+            $version->published_at = now();
+        }
+        $version->save();
+
+        return response()->json(['model' => $this->version_payload($version)], 200);
+    }
+
+    /**
+     * Proyección flaca de una versión para las respuestas de alta y cambio de estado.
+     *
+     * @param Version $version Versión ya persistida.
+     *
+     * @return array<string, mixed>
+     */
+    private function version_payload(Version $version)
+    {
+        return [
+            'id'           => (int) $version->id,
+            'uuid'         => (string) $version->uuid,
+            'version'      => (string) $version->version,
+            'title'        => $version->title,
+            'description'  => $version->description,
+            'status'       => (string) $version->status,
+            'is_hotfix'    => (bool) $version->is_hotfix,
+            'published_at' => optional($version->published_at)->toIso8601String(),
+            'created_at'   => optional($version->created_at)->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Resuelve una versión por id numérico o uuid de la ruta. Mismo patrón que
+     * `resolver_client_id`/`resolver_upgrade_id`, pero devuelve el modelo entero porque las dos
+     * únicas llamadas necesitan escribirlo, no solo confirmar que existe.
+     *
+     * @param int|string $route_id Segmento de la ruta.
+     *
+     * @return Version|null
+     */
+    private function resolver_version($route_id)
+    {
+        if (is_numeric($route_id)) {
+            return Version::find((int) $route_id);
+        }
+
+        return Version::where('uuid', (string) $route_id)->first();
     }
 
     /**

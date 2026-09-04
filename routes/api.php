@@ -300,6 +300,8 @@ Route::middleware('claude.task.key')
            reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
         Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
+        Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
+        Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');
         Route::get('upgrades', 'Api\ClaudeClientOpsController@upgrades_json');
         Route::get('upgrades/{id}', 'Api\ClaudeClientOpsController@upgrade_json');
         Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');
