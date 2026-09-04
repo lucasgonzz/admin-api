@@ -695,6 +695,37 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'POST api/claude/versions' => [
+            'para_que'     => 'Da de alta una versión nueva (código, título, descripción y estado inicial). Es el alta explícita: no depende de que POST claude/version-items cree una draft de rebote.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Es un INSERT de una sola fila en `versions`: no toca ningún cliente, no arranca SSH, no encola nada. `Version` no tiene observer ni `boot()`, y ningún comando programado actúa solo sobre versiones publicadas.',
+                'El código de versión es único (`versions.version` tiene índice unique) y tiene que matchear el mismo regex que exige el panel humano: al menos 3 componentes numéricos separados por puntos.',
+                '🔴 `is_hotfix` SIEMPRE se autocalcula del código (más de 3 componentes = hotfix); no hay parámetro para forzarlo en el alta, igual que `VersionController@store`. Fue justamente el override en el alta lo que causó el bug del 18/8/2026 (toda versión creada desde el SPA quedaba is_hotfix=false).',
+                'Sin dry_run ni confirm_*: a diferencia de POST claude/upgrades, acá no hay ningún cliente ni deployment involucrado que un id equivocado pueda dañar.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'version', 'obligatorio' => true, 'validacion' => 'required|string|max:30|unique:versions,version|regex de al menos 3 componentes numéricos', 'que_es' => 'Código de la versión, ej. "4.0.3". Tiene que ser único en toda la tabla.'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'nullable|string|max:200', 'que_es' => 'Título visible en el panel.'],
+                ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'nullable|string|max:5000', 'que_es' => 'Descripción larga.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|in:draft,published,archived', 'que_es' => 'Estado inicial. Default draft, igual que el panel humano (VersionProperties).'],
+            ],
+        ],
+        'POST api/claude/versions/{id}/status' => [
+            'para_que'     => 'Cambia el estado de una versión ya existente (borrador / publicada / archivada).',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sin máquina de estados: acepta cualquier transición del enum, igual que VersionController@update_json en el panel humano — no se inventa una regla más estricta que la que ya rige ahí.',
+                'Al pasar a `published` sin `published_at` previo, lo setea a `now()`. En cualquier otra transición no toca ese campo.',
+                '⚠️ Publicar una versión NO la despliega a ningún cliente ni dispara nada por sí sola: sólo habilita que POST claude/upgrades pueda apuntarle (esa ruta rechaza con 422 toda versión que no esté published). Para llevarla a un cliente hace falta esa llamada aparte, con sus propios frenos.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'La versión a la que se le cambia el estado. GET claude/versions la resuelve.'],
+                ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|in:draft,published,archived', 'que_es' => 'El estado nuevo.'],
+            ],
+        ],
         'GET api/claude/upgrades' => [
             /* `ids` y `created_via` son lo que hace poleable un lote de una sola vez: ver la
                respuesta 201 de POST claude/upgrades/batch, que devuelve la llamada ya armada. */
