@@ -109,11 +109,19 @@ class LeadPipelineStatus extends Model
      * el sistema los distinga. Label y color propios, sin slug 1:1 en el catálogo — mismo criterio
      * que closer_panel_json() usa para su tarjeta "Listos para la llamada". Color rojo: el mismo
      * que tenía `ingresando_demo` antes de sacarse del catálogo (misión demo-v2-estados-automaticos).
+     *
+     * 🔴 TARJETA_DEMO_GRUPO es `null` a propósito, NO reusa el string 'Demo' del grupo real de
+     * DEFAULT_STATUS_GROUPS (arreglado en la misión demo-v2-estados-automaticos, 4/9/2026): ese
+     * grupo real agrupa los CINCO sub-estados del ciclo completo de demo en la barra de navegación
+     * de admin-spa, mientras que esta tarjeta agrupa solo TRES para el operador. Son conceptos
+     * distintos que compartían el mismo string por coincidencia, y esa coincidencia hacía que
+     * Leads.vue intentara resaltar el grupo real de 5 al clickear la tarjeta de 3 -- no matcheaba
+     * nada y la tarjeta se apagaba sola. Ver sync_status_nav_from_store() en Leads.vue.
      */
     public const TARJETA_DEMO_VALUE = 'demo';
     public const TARJETA_DEMO_LABEL = 'Demo';
     public const TARJETA_DEMO_COLOR = '#dc3545';
-    public const TARJETA_DEMO_GRUPO = 'Demo';
+    public const TARJETA_DEMO_GRUPO = null;
     public const TARJETA_DEMO_SLUGS = ['demo_agendada', 'demo_pendiente_de_ingreso', 'demo_en_curso'];
 
     protected $guarded = [];
