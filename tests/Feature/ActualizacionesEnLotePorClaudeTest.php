@@ -724,14 +724,21 @@ class ActualizacionesEnLotePorClaudeTest extends TestCase
             $this->assertCount(5, $pasos, 'La respuesta ' . $cual . ' no publica los cinco pasos.');
 
             /* El paso 2 es el que no tiene endpoint y el que hace que ninguna actualización de
-               empresa se complete sola. Si algún día alguien lo suaviza, este assert lo agarra. */
+               empresa se complete sola. Si algún día alguien lo suaviza, este assert lo agarra.
+               🔴 Desde el gate hosting-aware (ananda/ferretotal/san-cayetano con el worker en el
+               frente muerto), el paso describe los DOS caminos: Hostinger para shared_hosting y
+               vps-supervisor.ps1 para VPS. Que desaparezca cualquiera de los dos es la misma
+               regresión de fondo: alguien vuelve a asumir un solo hosting posible. */
             $this->assertStringContainsString('HUMANO', $pasos[1]['quien']);
-            $this->assertStringContainsString('Hostinger', $pasos[1]['accion']);
+            $this->assertStringContainsString('Hostinger', $pasos[1]['que_hace']);
+            $this->assertStringContainsString('vps-supervisor.ps1', $pasos[1]['que_hace']);
             $this->assertStringContainsString('NO HAY ENDPOINT', $pasos[1]['que_hace']);
 
-            /* Y el paso 3 dice que marcar no mueve nada, que es la confusión concreta. */
+            /* Y el paso 3 dice que marcar no mueve nada, que es la confusión concreta — para los
+               dos endpoints posibles, uno por hosting. */
             $this->assertStringContainsString('NO', $pasos[2]['que_hace']);
             $this->assertStringContainsString('mark-crons', $pasos[2]['accion']);
+            $this->assertStringContainsString('mark-vps-supervisor', $pasos[2]['accion']);
 
             $nota = $cuerpo['nota_deployment'];
             $this->assertStringContainsString('MANUAL', $nota);

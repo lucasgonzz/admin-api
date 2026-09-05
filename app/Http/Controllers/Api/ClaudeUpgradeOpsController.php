@@ -465,6 +465,68 @@ class ClaudeUpgradeOpsController extends Controller
         return $this->payload_de_upgrade((int) $upgrade->id, 200);
     }
 
+    /**
+     * Marca (o desmarca) `vps_supervisor_moved_at`: confirma que el worker de supervisor del VPS
+     * ya se mudó al frente (`<slug>` / `<slug>2`) que va a quedar activo.
+     *
+     * Es el equivalente de mark_crons_json() para clientes en VPS, no un paso opcional extra: ahí
+     * no hay panel de Hostinger que mover, hay un `.conf` de supervisor que hay que reapuntar con
+     * `vps-supervisor.ps1 -Accion mudar -Cliente <slug>` (drena la cola vieja antes de mudar la
+     * conf). El gate de deploy_start_post_closure_json() exige este campo en vez de
+     * `crons_supervisor_at` cuando la API destino es VPS — ver el porqué en la migración
+     * `2026_09_05_180841_add_vps_supervisor_moved_at_to_client_version_upgrades`.
+     *
+     * 🔴 Igual que mark-crons: esto SOLO REGISTRA que alguien ya hizo la mudanza, no la hace.
+     * Marcarlo sin haber corrido el script dejaría al cliente con el worker en el frente
+     * equivocado y el post-cierre arrancaría igual, en silencio.
+     *
+     * @param Request    $request Request entrante.
+     * @param int|string $id      Id numérico o uuid del upgrade.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function mark_vps_supervisor_json(Request $request, $id)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'confirm_client_name' => 'required|string|max:190',
+            'unmark'              => 'nullable|boolean',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $upgrade = $this->buscar_upgrade($id);
+        if ($upgrade === null) {
+            return $this->error_404('no existe el upgrade ' . $id);
+        }
+
+        $client = $this->cliente_del_upgrade($upgrade);
+        if ($client === null) {
+            return $this->error_422('El upgrade no tiene cliente asociado.');
+        }
+
+        $rechazo = $this->rechazar_si_el_nombre_no_confirma($request, $client, $upgrade);
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $hosting_type = optional($upgrade->target_client_api)->hosting_type;
+        if ($hosting_type !== 'vps') {
+            return $this->error_422(
+                'La API destino de este upgrade no está en VPS: no hay supervisor que mudar. Para este '
+                    . 'cliente el paso correcto es POST claude/upgrades/' . (int) $upgrade->id . '/mark-crons.'
+            );
+        }
+
+        $desmarcar = $this->pidio_en_true($request, 'unmark');
+
+        $upgrade->update([
+            'vps_supervisor_moved_at' => $desmarcar ? null : now(),
+        ]);
+
+        return $this->payload_de_upgrade((int) $upgrade->id, 200);
+    }
+
     /* ==============================================================================================
      | 13) POST claude/upgrades/{id}/deploy/start-post-closure — con GATE DE HORARIO.
      |============================================================================================= */
@@ -531,7 +593,27 @@ class ClaudeUpgradeOpsController extends Controller
             );
         }
 
-        if (empty($upgrade->crons_supervisor_at)) {
+        /* 🔴 El gate de este paso depende del hosting de la API destino: en shared_hosting hay que
+           mover crons y supervisor a mano en el panel de Hostinger (crons_supervisor_at); en VPS
+           no hay panel que mover, lo que hay es un worker de supervisor que hay que reapuntar al
+           frente activo (vps_supervisor_moved_at, ver mark_vps_supervisor_json()). Confundir los
+           dos gates es exactamente lo que dejó a ananda, ferretotal y san-cayetano con el worker
+           en el frente muerto: el texto de crons_supervisor_at no aplica a VPS y nada más lo
+           verificaba. */
+        $hosting_type = optional($upgrade->target_client_api)->hosting_type;
+
+        if ($hosting_type === 'vps') {
+            if (empty($upgrade->vps_supervisor_moved_at)) {
+                return $this->error_422(
+                    'Falta confirmar que el worker de supervisor del VPS se mudó al frente nuevo. No se encoló nada.',
+                    [
+                        'ayuda' => 'Corré vps-supervisor.ps1 -Accion mudar -Cliente <slug> en el VPS (drena la cola '
+                            . 'vieja antes de mudar la conf) y recién después POST claude/upgrades/' . (int) $upgrade->id
+                            . '/mark-vps-supervisor. Este cliente es VPS: no hay panel de Hostinger involucrado.',
+                    ]
+                );
+            }
+        } elseif (empty($upgrade->crons_supervisor_at)) {
             return $this->error_422(
                 'Falta marcar los crons antes de arrancar las tareas post-cierre. No se encoló nada.',
                 [

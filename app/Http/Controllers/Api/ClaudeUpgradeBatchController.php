@@ -834,18 +834,25 @@ class ClaudeUpgradeBatchController extends Controller
             [
                 'paso'     => 2,
                 'quien'    => '🔴 UN HUMANO, a mano',
-                'accion'   => 'Mover los crons y el supervisor del cliente en el panel de Hostinger',
-                'que_hace' => '🔴 NO HAY ENDPOINT PARA ESTO Y NO LO VA A HABER EN ESTE FLUJO. Hay que entrar al panel '
-                    . 'de Hostinger del cliente y reapuntar los crons y el supervisor a la instancia nueva. Es el paso '
-                    . 'que hace que NINGUNA actualización de empresa se complete sin intervención humana.',
+                'accion'   => 'Reapuntar crons/supervisor a la instancia nueva — el CÓMO depende del hosting de la '
+                    . 'API destino de ESE cliente',
+                'que_hace' => '🔴 NO HAY ENDPOINT PARA ESTO Y NO LO VA A HABER EN ESTE FLUJO. Si la API destino es '
+                    . 'shared_hosting: entrar al panel de Hostinger del cliente y reapuntar los crons y el '
+                    . 'supervisor a la instancia nueva. Si es vps: NO hay panel de Hostinger — correr '
+                    . 'vps-supervisor.ps1 -Accion mudar -Cliente <slug> (drena la cola vieja y muda la conf de '
+                    . 'supervisor al frente activo). Confundir los dos es lo que dejó a ananda, ferretotal y '
+                    . 'san-cayetano con el worker en el frente muerto: mirá GET claude/clients/{client_id} para '
+                    . 'saber el hosting_type de la API destino ANTES de elegir el camino.',
             ],
             [
                 'paso'     => 3,
                 'quien'    => 'claude',
-                'accion'   => 'POST claude/upgrades/' . $id . '/mark-crons',
-                'que_hace' => '⚠️ Sólo REGISTRA que el paso 2 ya se hizo (escribe crons_supervisor_at). Marcarlo NO '
-                    . 'mueve los crons: si se marca sin haberlos movido, el post-cierre arranca igual y el cliente '
-                    . 'queda con los crons apuntando a la instancia vieja.',
+                'accion'   => 'shared_hosting: POST claude/upgrades/' . $id . '/mark-crons — vps: POST '
+                    . 'claude/upgrades/' . $id . '/mark-vps-supervisor',
+                'que_hace' => '⚠️ Sólo REGISTRA que el paso 2 ya se hizo (escribe crons_supervisor_at o '
+                    . 'vps_supervisor_moved_at, según corresponda). Marcarlo NO mueve nada: si se marca sin haberlo '
+                    . 'hecho, el post-cierre arranca igual y el cliente queda con el worker/los crons apuntando a la '
+                    . 'instancia vieja. El endpoint equivocado para el hosting de esta API rechaza con 422.',
             ],
             [
                 'paso'     => 4,

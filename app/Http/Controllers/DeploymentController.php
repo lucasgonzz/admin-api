@@ -104,7 +104,20 @@ class DeploymentController extends BaseController
             ], 422);
         }
 
-        if (empty($upgrade->crons_supervisor_at)) {
+        /* 🔴 Gate hosting-aware: en VPS no hay panel de Hostinger que mover, hay un worker de
+           supervisor que hay que reapuntar al frente activo. Ver el porqué (ananda, ferretotal,
+           san-cayetano con el worker en el frente muerto) en ClaudeUpgradeOpsController::
+           deploy_start_post_closure_json() y en la migración de vps_supervisor_moved_at. */
+        $hosting_type = optional($upgrade->target_client_api)->hosting_type;
+
+        if ($hosting_type === 'vps') {
+            if (empty($upgrade->vps_supervisor_moved_at)) {
+                return response()->json([
+                    'message' => 'Debe confirmar que el worker de supervisor del VPS se mudó al frente nuevo '
+                        . '(vps-supervisor.ps1 -Accion mudar) antes de iniciar las tareas post-cierre.',
+                ], 422);
+            }
+        } elseif (empty($upgrade->crons_supervisor_at)) {
             return response()->json([
                 'message' => 'Debe marcar Crons / Supervisor como hecho antes de iniciar las tareas post-cierre.',
             ], 422);

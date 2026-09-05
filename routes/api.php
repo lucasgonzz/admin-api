@@ -327,6 +327,7 @@ Route::middleware('claude.task.key')
         Route::post('upgrades', 'Api\ClaudeUpgradeOpsController@store_json');
         Route::post('upgrades/{id}/deploy/start', 'Api\ClaudeUpgradeOpsController@deploy_start_json');
         Route::post('upgrades/{id}/mark-crons', 'Api\ClaudeUpgradeOpsController@mark_crons_json');
+        Route::post('upgrades/{id}/mark-vps-supervisor', 'Api\ClaudeUpgradeOpsController@mark_vps_supervisor_json');
         Route::post('upgrades/{id}/deploy/start-post-closure', 'Api\ClaudeUpgradeOpsController@deploy_start_post_closure_json');
         Route::post('upgrades/{id}/deploy/configure-system', 'Api\ClaudeUpgradeOpsController@deploy_configure_system_json');
         /* Reintento de comandos: espejo del botón del panel MÁS el gate de horario, porque

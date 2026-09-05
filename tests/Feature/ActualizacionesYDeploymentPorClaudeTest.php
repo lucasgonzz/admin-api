@@ -839,6 +839,49 @@ class ActualizacionesYDeploymentPorClaudeTest extends TestCase
         $this->assertNull($upgrade->refresh()->crons_supervisor_at);
     }
 
+    /**
+     * mark-vps-supervisor setea `vps_supervisor_moved_at`; con `unmark=true` lo vuelve a null.
+     * Espejo de test_mark_crons_marca_y_desmarca_el_paso(), para el gate de VPS.
+     */
+    public function test_mark_vps_supervisor_marca_y_desmarca_el_paso(): void
+    {
+        $e = $this->armar_escenario();
+        $e['api_destino']->update(['hosting_type' => 'vps']);
+        $upgrade = $this->crear_upgrade($e, ['deployment_status' => 'paused']);
+
+        $this->assertNull($upgrade->vps_supervisor_moved_at);
+
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/mark-vps-supervisor', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(200);
+
+        $this->assertNotNull($upgrade->refresh()->vps_supervisor_moved_at);
+
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/mark-vps-supervisor', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+            'unmark'              => true,
+        ], $this->headers())->assertStatus(200);
+
+        $this->assertNull($upgrade->refresh()->vps_supervisor_moved_at);
+    }
+
+    /**
+     * 🔴 mark-vps-supervisor rechaza si la API destino NO es VPS: ese cliente no tiene worker de
+     * supervisor que mudar, y marcarlo igual dejaría un `vps_supervisor_moved_at` sin sentido que
+     * nunca se le exige (el gate de shared_hosting sigue mirando `crons_supervisor_at`).
+     */
+    public function test_mark_vps_supervisor_rechaza_si_la_api_destino_no_es_vps(): void
+    {
+        $e       = $this->armar_escenario();
+        $upgrade = $this->crear_upgrade($e, ['deployment_status' => 'paused']);
+
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/mark-vps-supervisor', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(422);
+
+        $this->assertNull($upgrade->refresh()->vps_supervisor_moved_at);
+    }
+
     /* ==========================================================================================
      | 38-42) El post-cierre y su gate de horario
      |========================================================================================= */
@@ -1172,6 +1215,60 @@ class ActualizacionesYDeploymentPorClaudeTest extends TestCase
 
         Queue::assertNothingPushed();
         $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+    }
+
+    /**
+     * 🔴 Un cliente en VPS con `crons_supervisor_at` marcado pero SIN `vps_supervisor_moved_at`
+     * tampoco arranca: es el gate agregado tras el incidente de ananda/ferretotal/san-cayetano, y
+     * el punto es exactamente que el gate viejo (crons) NO alcanza para un cliente VPS aunque
+     * alguien lo haya marcado por costumbre.
+     */
+    public function test_el_post_cierre_de_un_cliente_vps_sin_supervisor_mudado_no_encola_nada(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->momento_base());
+
+        $e = $this->armar_escenario();
+        $e['api_destino']->update(['hosting_type' => 'vps']);
+        $this->cargar_dia($e['client'], 'todos', [['09:00', '11:00']]);
+
+        $upgrade = $this->crear_upgrade($e, [
+            'deployment_status'   => 'paused',
+            'crons_supervisor_at' => now(),
+        ]);
+
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(422);
+
+        Queue::assertNothingPushed();
+        $this->assertSame('paused', (string) $upgrade->refresh()->deployment_status);
+    }
+
+    /**
+     * Y en sentido contrario: un cliente en VPS con `vps_supervisor_moved_at` marcado arranca SIN
+     * necesitar `crons_supervisor_at` — ese campo es de shared_hosting y no aplica acá.
+     */
+    public function test_el_post_cierre_de_un_cliente_vps_con_supervisor_mudado_arranca(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow($this->momento_base());
+
+        $e = $this->armar_escenario();
+        $e['api_destino']->update(['hosting_type' => 'vps']);
+        $this->cargar_dia($e['client'], 'todos', [['09:00', '11:00']]);
+
+        $upgrade = $this->crear_upgrade($e, [
+            'deployment_status'       => 'paused',
+            'vps_supervisor_moved_at' => now(),
+        ]);
+
+        $this->postJson('/api/claude/upgrades/' . $upgrade->id . '/deploy/start-post-closure', [
+            'confirm_client_name' => 'Cliente Rioplatense',
+        ], $this->headers())->assertStatus(202);
+
+        Queue::assertPushed(RunDeploymentJob::class);
+        $this->assertSame('running', (string) $upgrade->refresh()->deployment_status);
     }
 
     /** Y desde un estado que no es `paused` tampoco, aunque esté todo lo demás en orden. */

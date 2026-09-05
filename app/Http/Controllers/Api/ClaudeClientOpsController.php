@@ -138,6 +138,7 @@ class ClaudeClientOpsController extends Controller
         'sistema_actualizado_at',
         'migraciones_corridas_at',
         'crons_supervisor_at',
+        'vps_supervisor_moved_at',
         'seeders_ejecutados_at',
         'comandos_ejecutados_at',
         'sistema_configurado_at',

@@ -128,6 +128,7 @@ class ClientVersionUpgrade extends Model
         'sistema_actualizado_at' => 'datetime',
         'migraciones_corridas_at'=> 'datetime',
         'crons_supervisor_at'    => 'datetime',
+        'vps_supervisor_moved_at'=> 'datetime',
         'seeders_ejecutados_at'  => 'datetime',
         'comandos_ejecutados_at' => 'datetime',
         'sistema_configurado_at' => 'datetime',
