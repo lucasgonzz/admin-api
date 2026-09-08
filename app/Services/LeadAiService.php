@@ -54,6 +54,19 @@ class LeadAiService
     const MENSAJE_DE_ESPERA_SIN_RESPALDO = 'Dame un momento que lo verifico bien y te contesto.';
 
     /**
+     * Instrucción que fuerza la intención del turno cuando el operador aprieta el botón
+     * "Ofrecer/agendar demo" del panel (fuera de la conversación normal). Pide la ACCIÓN
+     * nada más — el CÓMO (dos pasos solicita_disponibilidad → agendar_demo, nunca inventar
+     * horarios, oferta primaria de la dinámica nueva, etc.) ya está en build_system_prompt() y
+     * no se duplica acá para no arriesgar que un texto quede desactualizado respecto del otro.
+     */
+    const INTENCION_OFRECER_AGENDAR_DEMO = 'INSTRUCCIÓN DIRECTA DEL OPERADOR (prioridad para este turno): '
+        . 'el operador humano pidió avanzar la demo de este lead ahora mismo. Tu tarea en este mensaje es '
+        . 'exclusivamente esa: si el lead todavía no aceptó un horario, ofrecele la demo siguiendo el '
+        . 'protocolo ya definido; si en la conversación ya aceptó o propuso un horario concreto, confirmalo '
+        . 'y agendalo de verdad. No reabras otros temas en este mensaje.';
+
+    /**
      * Bloque de instrucciones para la IA sobre un WhatsApp Flow (formulario nativo de Meta,
      * externo a ComercioCity). Es la contraparte del texto que hasta el grupo 186 (prompt 02,
      * 22/7/2026) se guardaba tal cual en `lead_messages.content` (ver prompt 252, 3/7/2026) y
@@ -302,7 +315,7 @@ TXT;
      *
      * @return LeadMessage Mensaje creado con status `sugerido` (pendiente de envío por el setter).
      */
-    public function generate_suggestion(Lead $lead, bool $is_followup): LeadMessage
+    public function generate_suggestion(Lead $lead, bool $is_followup, ?string $intencion_forzada = null): LeadMessage
     {
         /* Validar que la API key esté configurada antes de cualquier llamada. */
         $api_key = (string) config('services.anthropic.api_key');
@@ -312,7 +325,7 @@ TXT;
 
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt();
-        $user_content = $this->build_user_content($lead, $is_followup);
+        $user_content = $this->build_user_content($lead, $is_followup, '', $intencion_forzada);
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
@@ -447,7 +460,8 @@ TXT;
                     $lead,
                     $is_followup,
                     $fecha_solicitada !== '' ? $fecha_solicitada : null,
-                    true
+                    true,
+                    $intencion_forzada
                 );
             } catch (\Throwable $e) {
                 Log::error('Error en segunda llamada a Claude (disponibilidad)', [
@@ -490,12 +504,15 @@ TXT;
      * @param string|null $specific_date                   Fecha objetivo en formato Y-m-d, o null para los 3 días por defecto.
      * @param bool        $came_from_availability_request  true cuando esta llamada nació de solicita_disponibilidad
      *                                                      en la primera llamada (ver FIX hueco #1, 6/7/2026, más abajo).
+     * @param string|null $intencion_forzada                Instrucción de intención del operador (botón "Ofrecer/agendar
+     *                                                      demo"), propagada desde generate_suggestion() para que no se
+     *                                                      pierda en la segunda llamada. Ver build_user_content().
      *
      * @throws \RuntimeException Si falla la llamada HTTP o el JSON es inválido.
      *
      * @return LeadMessage Mensaje creado con los horarios sugeridos por Claude.
      */
-    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null, bool $came_from_availability_request = false): LeadMessage
+    protected function generate_suggestion_with_availability(Lead $lead, bool $is_followup, ?string $specific_date = null, bool $came_from_availability_request = false, ?string $intencion_forzada = null): LeadMessage
     {
         /* Dinámica de este lead (grupo 306): decide, y SOLO acá, si la demo usa su franja propia
          * o sigue gobernada por el closer. No leer la setting global en ningún punto de este flujo —
@@ -834,7 +851,7 @@ TXT;
 
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
         $system       = $this->build_system_prompt();
-        $user_content = $this->build_user_content($lead, $is_followup, $availability_context);
+        $user_content = $this->build_user_content($lead, $is_followup, $availability_context, $intencion_forzada);
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
@@ -8273,7 +8290,7 @@ BLOQUE_DEL_MANUAL;
      *
      * @return string Contenido listo para enviar como mensaje user a la API.
      */
-    protected function build_user_content(Lead $lead, bool $is_followup, string $availability_context = ''): string
+    protected function build_user_content(Lead $lead, bool $is_followup, string $availability_context = '', ?string $intencion_forzada = null): string
     {
         $historial = '';
         foreach ($lead->messages as $msg) {
@@ -8350,6 +8367,14 @@ BLOQUE_DEL_MANUAL;
         $extra = $is_followup
             ? "\nATENCIÓN: seguimiento automático por inactividad del lead. Generá un mensaje de seguimiento apropiado.\n"
             : '';
+
+        /* Intención forzada por el operador (botón "Ofrecer/agendar demo", ver
+         * LeadController::offer_demo_json()). Se agrega, no reemplaza: is_followup y la intención
+         * forzada nunca coinciden en la práctica (el botón manual no es un seguimiento automático),
+         * pero si algún día lo hicieran, las dos instrucciones tienen que llegarle al modelo. */
+        if ($intencion_forzada !== null && $intencion_forzada !== '') {
+            $extra .= "\n{$intencion_forzada}\n";
+        }
 
         $demo = $lead->demo_date ? $lead->demo_date->format('Y-m-d') : '';
 

@@ -543,6 +543,7 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/simulate-inbound', [LeadController::class, 'simulate_inbound_json']);
         Route::post('lead/{id}/request-ai-suggestion', [LeadController::class, 'request_ai_suggestion_json']);
         Route::post('lead/{id}/resume-with-claude', [LeadController::class, 'resume_with_claude_json']);
+        Route::post('lead/{id}/offer-demo', [LeadController::class, 'offer_demo_json']);
         Route::post('lead/{id}/cancel-scheduled-ai-suggestion', [LeadController::class, 'cancel_scheduled_ai_suggestion_json']);
         Route::post('lead/{id}/toggle-claude-auto-reply', [LeadController::class, 'toggle_claude_auto_reply_json']);
         Route::post('lead/{id}/toggle-requiere-intervencion-humana', [LeadController::class, 'toggle_requiere_intervencion_humana_json']);

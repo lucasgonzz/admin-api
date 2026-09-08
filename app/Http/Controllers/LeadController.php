@@ -3241,6 +3241,142 @@ class LeadController extends Controller
     }
 
     /**
+     * Botón "Ofrecer/agendar demo" del sidebar: fuerza la intención del turno hacia la demo,
+     * sin esperar a que el lead tenga un mensaje sin responder ni depender de lo que la IA
+     * hubiera elegido responder libremente.
+     *
+     * Calcado de resume_with_claude_json() —mismas guardas laxas, invocable con la conversación
+     * en cualquier estado— con estas diferencias:
+     *   - La intención forzada que viaja a generate_suggestion() (ver
+     *     LeadAiService::INTENCION_OFRECER_AGENDAR_DEMO).
+     *   - Una sugerencia pendiente NO bloquea acá (decisión de Lucas, 8/9/2026): se informa en la
+     *     respuesta para que el sidebar avise, pero el botón genera igual.
+     *   - 🔴 Esa sugerencia vieja SÍ se neutraliza (chequeo independiente, 8/9/2026): no basta con
+     *     avisar y dejarla — un mensaje `requiere_verificacion` sin `agendar_demo`/`cancelar_demo`
+     *     tiene su propio auto-envío de RESPALDO corriendo (ver
+     *     LeadAiSuggestionAutoSendScheduler::schedule_for_suggested_message(), hasta 30 min por
+     *     default). Sin cancelarlo, un operador que ya resolvió la demo con la sugerencia NUEVA
+     *     puede ver que la VIEJA se le manda sola al lead por WhatsApp minutos después —
+     *     potencialmente contradiciendo lo que ya se acordó. cancel_for_message() no toca el
+     *     mensaje en sí (sigue en la conversación, revisable a mano); solo apaga el disparo solo.
+     *   - 🔴 Lock corto por lead (no por demo_id: ese lock, adentro de apply_parsed_response(),
+     *     evita que dos LEADS distintos choquen por el mismo horario — no evita que DOS REQUESTS
+     *     concurrentes a este mismo endpoint, para el MISMO lead, dupliquen la sugerencia. Es un
+     *     check-then-act clásico: la lectura de "hay pendiente" de arriba no alcanza sola contra
+     *     un doble click en dos pestañas o dos operadores mirando el mismo lead a la vez.
+     *
+     * @param int|string                       $lead_id
+     * @param LeadAiService                    $ai_service
+     * @param LeadAiSuggestionScheduler        $scheduler
+     * @param LeadAiSuggestionAutoSendScheduler $auto_send_scheduler
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function offer_demo_json(
+        $lead_id,
+        LeadAiService $ai_service,
+        LeadAiSuggestionScheduler $scheduler,
+        LeadAiSuggestionAutoSendScheduler $auto_send_scheduler
+    ) {
+        $lead = Lead::query()->with('messages')->findOrFail($lead_id);
+
+        // La demo no aplica a un lead en un estado terminal: no hay nada que ofrecer ni agendar.
+        if (in_array((string) $lead->status, ['cerrado_ganado', 'cerrado_perdido'], true)) {
+            return response()->json([
+                'message' => 'La demo no aplica a un lead cerrado.',
+            ], 422);
+        }
+
+        /* Lock corto: si otra request para este mismo lead está en vuelo, se corta acá en vez de
+         * generar una segunda sugerencia en paralelo. block() tira LockTimeoutException si no lo
+         * consigue en el tiempo dado (no devuelve false) — mismo patrón que el lock de agenda en
+         * LeadAiService::apply_parsed_response(). */
+        $lock = \Illuminate\Support\Facades\Cache::lock("offer_demo_lead_{$lead->id}", 20);
+        try {
+            $lock->block(3);
+        } catch (\Illuminate\Contracts\Cache\LockTimeoutException $e) {
+            return response()->json([
+                'message' => 'Ya se está generando una oferta de demo para este lead — esperá un momento y volvé a intentar.',
+            ], 422);
+        }
+
+        try {
+            // No bloquea: solo se informa en la respuesta (ver docblock de arriba).
+            $mensajes_pendientes = LeadMessage::query()
+                ->where('lead_id', $lead->id)
+                ->where('sender', 'sistema')
+                ->where('status', 'sugerido')
+                ->where('is_followup', false)
+                ->get(['id']);
+            $habia_sugerencia_pendiente = $mensajes_pendientes->isNotEmpty();
+
+            // Apagar el auto-envío de respaldo de cualquier sugerencia vieja (ver docblock).
+            foreach ($mensajes_pendientes as $mensaje_pendiente) {
+                $auto_send_scheduler->cancel_for_message((int) $mensaje_pendiente->id);
+            }
+
+            // Cancelar cualquier debounce pendiente antes de generar en caliente.
+            $scheduler->cancel_scheduled_suggestion((int) $lead->id);
+
+            // Vía ::dispatch() y no event(new ...): así la emisión pasa por App\Support\BroadcastGuard
+            // y una caída de Pusher no impide generar la sugerencia que el operador pidió.
+            LeadAiSuggestionGenerating::dispatch((int) $lead->id);
+
+            try {
+                $fresh = Lead::query()->with('messages')->where('id', $lead->id)->first();
+                if (! $fresh) {
+                    return response()->json(['message' => 'Lead no encontrado.'], 404);
+                }
+                $ai_service->generate_suggestion($fresh, false, LeadAiService::INTENCION_OFRECER_AGENDAR_DEMO);
+            } catch (\Throwable $e) {
+                Log::error('LeadController@offer_demo_json AI error: '.$e->getMessage(), ['lead_id' => $lead->id]);
+
+                try {
+                    $lead_identifier = "Lead #{$lead->id}"
+                        . (! empty($lead->contact_name) ? " ({$lead->contact_name})" : '');
+                    $notify_service = new \App\Services\SystemErrorWhatsappService(
+                        new \App\Services\WhatsappSendService()
+                    );
+                    $notify_service->notify_send_error(
+                        "Ofrecer/agendar demo manual ({$lead_identifier})",
+                        $e->getMessage()
+                    );
+                } catch (\Throwable $notify_exception) {
+                    Log::error('LeadController: error al notificar admins de fallo de sugerencia.', [
+                        'lead_id'   => $lead->id,
+                        'exception' => $notify_exception->getMessage(),
+                    ]);
+                }
+
+                // Registrar el error también en la conversación del lead (además del log y del aviso a admins de arriba).
+                (new LeadConversationErrorLogger())->log(
+                    (int) $lead->id,
+                    'No se pudo generar la oferta/agenda de demo',
+                    $e->getMessage()
+                );
+
+                return response()->json([
+                    'message'                    => 'No se pudo generar la oferta de demo: '.$e->getMessage(),
+                    'model'                      => $this->fullModel('lead', $lead->id),
+                    'habia_sugerencia_pendiente' => $habia_sugerencia_pendiente,
+                ], 422);
+            } finally {
+                /* 🔴 Vía ::dispatch() y no event(new ...): ver el mismo comentario en
+                   resume_with_claude_json() -- una excepción en este finally no puede pisar un
+                   return pendiente que ya tenía la sugerencia guardada. */
+                LeadAiSuggestionFinished::dispatch((int) $lead->id);
+            }
+
+            return response()->json([
+                'model'                      => $this->fullModel('lead', $lead->id),
+                'habia_sugerencia_pendiente' => $habia_sugerencia_pendiente,
+            ], 200);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
      * Cancela el job diferido que pediría sugerencia IA a Claude tras el debounce automático.
      *
      * No genera sugerencia ni modifica mensajes; el setter puede responder manualmente o pedir IA después.
