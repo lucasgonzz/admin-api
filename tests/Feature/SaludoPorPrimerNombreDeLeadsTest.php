@@ -17,16 +17,17 @@ use Tests\TestCase;
  * (el botón manual "check de fin de demo" de LeadController, que espeja al scheduler automático
  * CheckDemoFin y crea el mensaje sugerido que revisa el setter antes de que salga).
  *
- * 🔴 NO cubre `LeadFollowupService::send_followup_via_template()` ni `LeadSuggestionSendService`
- * (el envío automático de seguimientos y el que se aprueba desde el panel tras supervisión de
- * agendamiento). Esos dos arman el `{{1}}` de la plantilla a través de
+ * `LeadFollowupService::send_followup_via_template()` y `LeadSuggestionSendService` (el envío
+ * automático de seguimientos y el que se aprueba desde el panel tras supervisión de agendamiento)
+ * NO se cubren acá: arman el `{{1}}` de la plantilla a través de
  * `LeadFollowupService::resolve_contact_name_variable()`, un método centralizado que ya existía
  * antes de esta misión (introducido el 27/8/2026 para el bug de Meta #131008 — ver
- * SeguimientoConVariableVaciaTest) y que hoy sigue leyendo `contact_name` completo, no
- * `contact_first_name`. La misión encontró que el plan original asumía un patrón inline
+ * SeguimientoConVariableVaciaTest). El plan original asumía un patrón inline
  * (`$contact_name = $lead->contact_name ?? '';`) que ya no existe en ese archivo — el código
- * evolucionó a este método compartido después de que se escribiera el plan — y quedó reportado
- * como hallazgo en vez de tocado a ciegas.
+ * evolucionó a este método compartido después de que se escribiera el plan —, así que ese caso
+ * quedó reportado como hallazgo en vez de tocado a ciegas, y se corrigió y probó aparte: ver
+ * `resolve_contact_name_variable()` en `LeadFollowupService.php` (ya usa `contact_first_name`) y
+ * los dos casos de nombre-y-apellido agregados a `SeguimientoConVariableVaciaTest`.
  */
 class SaludoPorPrimerNombreDeLeadsTest extends TestCase
 {
