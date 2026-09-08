@@ -134,7 +134,9 @@ class CheckDemoFinSeguimiento extends Command
             }
 
             /* Texto del seguimiento (prompt 353: plantilla Meta aprobada, no depende de ventana 24hs). */
-            $contact_name = $lead->contact_name ?? 'cliente';
+            // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve
+            // "Hola Guillermo", no "Hola Guillermo González".
+            $contact_name = $lead->contact_first_name ?? 'cliente';
             $content      = "¡Hola {$contact_name}! ¿Pudiste terminar de recorrer la demo?";
 
             /* Enviar por WhatsApp si el lead tiene teléfono. */

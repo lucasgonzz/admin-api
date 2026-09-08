@@ -147,7 +147,9 @@ class SendDemoReminders extends Command
     protected function send_reminder_message(Lead $lead): void
     {
         // Nombre de contacto del lead para personalizar el saludo y la variable {{1}} del template.
-        $contact_name = $lead->contact_name ?? 'Cliente';
+        // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola Guillermo",
+        // no "Hola Guillermo González".
+        $contact_name = $lead->contact_first_name ?? 'Cliente';
 
         // Texto renderizado del template para trazabilidad en la conversación.
         $content = $this->build_reminder_content($contact_name);

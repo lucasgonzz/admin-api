@@ -34,7 +34,12 @@ use Tests\TestCase;
  *   mensajes que haya que contestar;
  * - los registros de error son `is_status_event = true`, así que un error no resuelve a otro error;
  * - la entrega fallida de Kapso (`whatsapp_delivery_status`) NO entra: eso es `failed_send_count`,
- *   que es un criterio más ancho y vive en otra parte.
+ *   que es un criterio más ancho y vive en otra parte;
+ * - 🔴 desde el 8/9/2026, una reacción NUESTRA (del panel, `admin_reaction_emoji`) sobre el mensaje
+ *   del lead también cuenta como respuesta — decisión de Lucas, igual de válida que un saliente de
+ *   texto. Es distinta de las anteriores porque no es un saliente con `id` propio: vive en las
+ *   columnas `admin_reaction_*` de la MISMA fila del mensaje del lead, así que solo resuelve ESE
+ *   mensaje puntual (ver el escenario 20 de la matriz).
  */
 class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
 {
@@ -269,6 +274,28 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
         ]);
         $leads['sugerencia verificada y enviada'] = $lead;
 
+        // 20. 🔴 Reaccionado desde el panel, sin ningún saliente: para Lucas la reacción YA es la
+        // respuesta (pedido explícito, 8/9/2026). No hace falta que además haya salido un texto.
+        $lead = $this->crear_lead('Reaccionado desde el panel');
+        $this->crear_mensaje($lead, [
+            'content'              => '¿Cuánto sale?',
+            'admin_reaction_emoji' => "\u{1F44D}",
+            'admin_reaction_at'    => now(),
+        ]);
+        $leads['reaccionado desde el panel'] = $lead;
+
+        // 21. 🔴 La reacción resuelve SOLO el mensaje al que se aplicó, no toda la conversación: un
+        // mensaje del lead posterior, sin reacción ni saliente, sigue sin responder. Confirma que
+        // el fix no "blanquea" el hilo entero por una reacción vieja.
+        $lead = $this->crear_lead('Reaccionado y despues escribio de nuevo');
+        $this->crear_mensaje($lead, [
+            'content'              => '¿Cuánto sale?',
+            'admin_reaction_emoji' => "\u{1F44D}",
+            'admin_reaction_at'    => now(),
+        ]);
+        $this->crear_mensaje($lead, ['content' => 'Otra consulta más']);
+        $leads['reaccionado y despues escribio de nuevo'] = $lead;
+
         // ⚠️ No hay escenario con `kind` NULL a proposito: la columna es NOT NULL con default
         // 'text' (2026_06_02_190000_add_kind_to_lead_messages_table.php), así que un mensaje con
         // kind nulo NO se puede insertar. La rama `whereNull('kind')` del scope y el `?? ''` de
@@ -424,15 +451,17 @@ class RevisionDeLeadsEnSqlYEnPhpCoincidenTest extends TestCase
 
         /* Escenario => si tiene que figurar como "sin responder". */
         $esperado = [
-            'sin responder'                     => true,
-            'contestado por setter enviado'     => false,
-            'contestado por sistema aprobado'   => false,
-            'contestado por el agente'          => false,
-            'respuesta del agente que no salio' => true,
-            'mensaje del setter que no salio'   => true,
-            'sugerencia sin aprobar'            => true,
-            'sugerencia esperando verificacion' => true,
-            'sugerencia verificada y enviada'   => false,
+            'sin responder'                            => true,
+            'contestado por setter enviado'            => false,
+            'contestado por sistema aprobado'          => false,
+            'contestado por el agente'                 => false,
+            'respuesta del agente que no salio'        => true,
+            'mensaje del setter que no salio'          => true,
+            'sugerencia sin aprobar'                   => true,
+            'sugerencia esperando verificacion'        => true,
+            'sugerencia verificada y enviada'          => false,
+            'reaccionado desde el panel'                => false,
+            'reaccionado y despues escribio de nuevo'   => true,
         ];
 
         $ids_sql = Lead::query()->requiereRevision()->pluck('id')->all();
