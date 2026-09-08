@@ -74,7 +74,9 @@ class CloserAbandonRescheduleJob implements ShouldQueue
         }
 
         // Construir saludo personalizado con el nombre del lead si está disponible.
-        $name = trim((string) ($lead->contact_name ?? ''));
+        // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve ", Guillermo",
+        // no ", Guillermo González".
+        $name = trim((string) ($lead->contact_first_name ?? ''));
         $saludo = $name !== '' ? ", {$name}" : '';
 
         // Mensaje de disculpa y reagendado enviado al lead por WhatsApp.

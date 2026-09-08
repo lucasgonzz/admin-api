@@ -4251,7 +4251,9 @@ class LeadController extends Controller
         }
 
         /* Nombre del contacto con fallback para evitar saludo vacío. */
-        $contact_name = $lead->contact_name ?? 'Cliente';
+        /* Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola
+           Guillermo", no "Hola Guillermo González". */
+        $contact_name = $lead->contact_first_name ?? 'Cliente';
         /* Hora formateada para incluir en el razonamiento del mensaje. */
         $demo_hour = $demo_datetime->format('H:i');
 
@@ -4299,7 +4301,9 @@ class LeadController extends Controller
         $lead = Lead::with('messages')->findOrFail($id);
 
         /* Nombre del contacto con fallback para saludo personalizado. */
-        $contact_name = $lead->contact_name ?? 'Cliente';
+        /* Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola
+           Guillermo", no "Hola Guillermo González". */
+        $contact_name = $lead->contact_first_name ?? 'Cliente';
 
         /* Crear mensaje sugerido de check de ingreso para el setter. */
         \App\Models\LeadMessage::create([
@@ -4339,7 +4343,9 @@ class LeadController extends Controller
         $lead = Lead::findOrFail($id);
 
         /* Nombre del contacto con fallback para el saludo personalizado. */
-        $contact_name = $lead->contact_name ?? 'cliente';
+        /* Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola
+           Guillermo", no "Hola Guillermo González". */
+        $contact_name = $lead->contact_first_name ?? 'cliente';
 
         /* Crear mensaje sugerido de check de fin de demo para el setter. */
         \App\Models\LeadMessage::create([

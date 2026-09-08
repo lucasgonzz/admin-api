@@ -199,6 +199,26 @@ class SeguimientoConVariableVaciaTest extends TestCase
     }
 
     /**
+     * 🔴 Con nombre y apellido, `{{1}}` lleva SOLO el primer nombre (decisión de Lucas, 8/9/2026):
+     * saludar con el apellido de un lead quedaba poco personalizado. Ningún otro test de esta suite
+     * ejercita un nombre de dos palabras — todos usan "Marina" — así que sin este caso el cambio de
+     * `resolve_contact_name_variable()` a `contact_first_name` quedaba sin cubrir en el camino
+     * automático directo.
+     *
+     * @return void
+     */
+    public function test_un_lead_con_nombre_y_apellido_manda_solo_el_primer_nombre()
+    {
+        $espia    = $this->espiar_sender();
+        $lead     = $this->crear_lead('Guillermo González');
+        $template = $this->crear_plantilla('Hola {{1}}! Te escribo de ComercioCity.');
+
+        app(LeadFollowupService::class)->send_followup_via_template($lead, $template, 1);
+
+        $this->assertSame(['Guillermo'], $espia->envios[0]['variables']);
+    }
+
+    /**
      * Plantilla sin {{1}}: no viaja ninguna variable, así send_template() no arma el componente
      * `body` para una plantilla que no lo pide (Meta rechaza el envío si sobra un parámetro).
      *
@@ -366,5 +386,34 @@ class SeguimientoConVariableVaciaTest extends TestCase
         (new LeadSuggestionSendService($espia))->send_suggestion($message);
 
         $this->assertSame(['Marina'], $espia->envios[0]['variables']);
+    }
+
+    /**
+     * Mismo caso que el de arriba pero por el camino de supervisión de agendamiento: con nombre y
+     * apellido, `{{1}}` lleva solo el primer nombre. Este camino usa `build_template_variables()`
+     * de `LeadFollowupService` (no `send_followup_via_template()`), así que necesita su propio caso
+     * de dos palabras — es exactamente el que este archivo documenta que se había arreglado aparte
+     * una vez (comentario de `send_followup_suggestion_via_template()`, 27/8/2026).
+     *
+     * @return void
+     */
+    public function test_el_seguimiento_aprobado_desde_el_panel_manda_solo_el_primer_nombre()
+    {
+        $espia    = $this->espiar_sender();
+        $lead     = $this->crear_lead('Guillermo González');
+        $template = $this->crear_plantilla('Hola {{1}}! Te escribo de ComercioCity.');
+
+        $message                       = new LeadMessage();
+        $message->lead_id              = $lead->id;
+        $message->sender               = 'sistema';
+        $message->status               = 'sugerido';
+        $message->is_followup          = true;
+        $message->followup_template_id = $template->id;
+        $message->content              = 'Hola Guillermo! Te escribo de ComercioCity.';
+        $message->save();
+
+        (new LeadSuggestionSendService($espia))->send_suggestion($message);
+
+        $this->assertSame(['Guillermo'], $espia->envios[0]['variables']);
     }
 }

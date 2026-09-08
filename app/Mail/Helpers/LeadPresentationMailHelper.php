@@ -102,8 +102,10 @@ class LeadPresentationMailHelper
      */
     private static function pick_display_name(Lead $lead)
     {
-        if (!empty($lead->contact_name)) {
-            return trim($lead->contact_name);
+        // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola
+        // Guillermo", no "Hola Guillermo González".
+        if (!empty($lead->contact_first_name)) {
+            return trim($lead->contact_first_name);
         }
         if (!empty($lead->company_name)) {
             return trim($lead->company_name);
