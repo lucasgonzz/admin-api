@@ -19,6 +19,27 @@ class StatusCardsAgrupadasDemoTest extends TestCase
     use DatabaseTransactions;
 
     /**
+     * Deja la base sin leads para que los conteos (que son globales) sean determinísticos. Mismo
+     * criterio que TarjetasDeEstadoDeLeadsTest y PaginadoDelListadoDeLeadsTest.
+     *
+     * 🔴 Agregado en la misión tarjeta-otros-leads (8/9/2026): sin esto, `test_el_total_de_la_
+     * tarjeta_demo_suma_los_tres_sub_estados` daba rojo por leads residuales de otra corrida que
+     * quedaron commiteados en `admin_testing_s11` (2 en `demo_agendada`, fuera de cualquier
+     * transacción de test) -- la base de testing no se limpia sola entre sesiones. La cuenta en sí
+     * no tenía ningún error: el total daba 6 en vez de 4 porque sumaba esos 2 leads que no creó
+     * este test. Este archivo era el único de los tres de este módulo sin este `setUp()`.
+     *
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        LeadMessage::query()->delete();
+        Lead::query()->delete();
+    }
+
+    /**
      * @return Admin
      */
     private function admin_autenticado(): Admin
@@ -47,9 +68,11 @@ class StatusCardsAgrupadasDemoTest extends TestCase
     }
 
     /**
-     * Las 4 tarjetas, en orden, con la del medio agrupada.
+     * Las 5 tarjetas, en orden, con la de demo agrupada. La primera ("otros") se agregó en la
+     * misión tarjeta-otros-leads (8/9/2026) y corrió un lugar a cada una de las demás; su detalle
+     * se prueba en StatusCardsAgrupadaOtrosTest.php.
      */
-    public function test_devuelve_cuatro_tarjetas_en_orden_con_la_demo_agrupada(): void
+    public function test_devuelve_cinco_tarjetas_en_orden_con_la_demo_agrupada(): void
     {
         $response = $this->actingAs($this->admin_autenticado(), 'sanctum')
             ->getJson('/api/admin/lead/status-cards')
@@ -57,17 +80,18 @@ class StatusCardsAgrupadasDemoTest extends TestCase
 
         $cards = $response->json('cards');
 
-        $this->assertCount(4, $cards);
-        $this->assertSame('calificado', $cards[0]['value']);
-        $this->assertSame('solicita_disponibilidad', $cards[1]['value']);
-        $this->assertSame('demo', $cards[2]['value']);
-        $this->assertSame('closer_activo', $cards[3]['value']);
+        $this->assertCount(5, $cards);
+        $this->assertSame('otros', $cards[0]['value']);
+        $this->assertSame('calificado', $cards[1]['value']);
+        $this->assertSame('solicita_disponibilidad', $cards[2]['value']);
+        $this->assertSame('demo', $cards[3]['value']);
+        $this->assertSame('closer_activo', $cards[4]['value']);
 
-        $this->assertSame('Demo', $cards[2]['text']);
-        $this->assertSame('#dc3545', $cards[2]['color']);
+        $this->assertSame('Demo', $cards[3]['text']);
+        $this->assertSame('#dc3545', $cards[3]['color']);
         $this->assertSame(
             ['demo_agendada', 'demo_pendiente_de_ingreso', 'demo_en_curso'],
-            $cards[2]['slugs']
+            $cards[3]['slugs']
         );
     }
 

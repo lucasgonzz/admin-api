@@ -10,7 +10,7 @@ use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Tests\TestCase;
 
 /**
- * Las cuatro tarjetas de estado que van arriba de la grilla de leads (GET /admin/lead/status-cards).
+ * Las tarjetas de estado que van arriba de la grilla de leads (GET /admin/lead/status-cards).
  *
  * Lo que se protege acá son tres definiciones que se rompen solas en el primer refactor:
  *
@@ -33,7 +33,7 @@ use Tests\TestCase;
  *    Mismo criterio que los badges de no leídos de la barra de estados. Si alguien "aprovecha" el
  *    request para filtrarlos, la tarjeta deja de coincidir con el total del paginador.
  *
- * Y una de forma: siempre las cuatro claves, siempre en el mismo orden, aunque den cero. El SPA no
+ * Y una de forma: siempre las cinco claves, siempre en el mismo orden, aunque den cero. El SPA no
  * inventa tarjetas ni las ordena.
  */
 class TarjetasDeEstadoDeLeadsTest extends TestCase
@@ -41,7 +41,7 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
     use DatabaseTransactions;
 
     /**
-     * Los cuatro slugs con tarjeta, en el orden en que tienen que salir.
+     * Los cinco slugs con tarjeta, en el orden en que tienen que salir.
      *
      * 🔴 La tercera cambió de `demo_agendada` a `demo` en la misión demo-v2-estados-automaticos
      * (4/9/2026): pasó a ser una tarjeta agrupada (demo_agendada + demo_pendiente_de_ingreso +
@@ -50,8 +50,16 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
      * tests/Feature/StatusCardsAgrupadasDemoTest.php; acá solo se ajustan las claves que este
      * archivo ya usaba para no perder la cobertura de "sin responder"/"total" que sí sigue
      * siendo responsabilidad de este archivo.
+     *
+     * 🔴 `otros` se agregó primera en la misión tarjeta-otros-leads (8/9/2026): tarjeta catch-all
+     * para todo estado del catálogo que no tiene tarjeta propia
+     * (`LeadPipelineStatus::slugs_tarjeta_otros()`, calculado dinámicamente contra `all_slugs()`,
+     * no una lista fija). El detalle de esa tarjeta —qué slugs trae, y que un estado nuevo del
+     * catálogo cae ahí solo, sin tocar código— se prueba en
+     * tests/Feature/StatusCardsAgrupadaOtrosTest.php.
      */
     private const SLUGS_ESPERADOS = [
+        'otros',
         'calificado',
         'solicita_disponibilidad',
         'demo',
@@ -168,11 +176,11 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
     }
 
     /**
-     * Las cuatro tarjetas salen siempre, en orden, aunque no haya un solo lead.
+     * Las tarjetas salen siempre, en orden, aunque no haya un solo lead.
      *
      * @return void
      */
-    public function test_devuelve_las_cuatro_tarjetas_en_orden_con_ceros(): void
+    public function test_devuelve_las_tarjetas_en_orden_con_ceros(): void
     {
         $response = $this->actingAs($this->admin_autenticado(), 'sanctum')
             ->getJson('/api/admin/lead/status-cards');
@@ -181,7 +189,7 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
 
         $cards = $response->json('cards');
 
-        $this->assertCount(4, $cards, 'Tienen que salir las cuatro tarjetas siempre.');
+        $this->assertCount(5, $cards, 'Tienen que salir las cinco tarjetas siempre.');
 
         $slugs = array_map(function ($card) {
             return $card['value'];
@@ -208,7 +216,8 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
         $this->crear_lead('calificado', 'Calificado 1');
         $this->crear_lead('calificado', 'Calificado 2');
         $this->crear_lead('demo_agendada', 'Con demo');
-        // Estado sin tarjeta: no tiene que aparecer ni sumar en ninguna.
+        // Estado sin tarjeta propia: no tiene que sumar a calificado/solicita_disponibilidad/demo/
+        // closer_activo, pero sí cae dentro de "otros" (para eso existe esa tarjeta).
         $this->crear_lead('nuevo', 'Recién entrado');
 
         $tarjetas = $this->tarjetas();
@@ -217,7 +226,8 @@ class TarjetasDeEstadoDeLeadsTest extends TestCase
         $this->assertSame(1, $tarjetas['demo']['total']);
         $this->assertSame(0, $tarjetas['solicita_disponibilidad']['total']);
         $this->assertSame(0, $tarjetas['closer_activo']['total']);
-        $this->assertArrayNotHasKey('nuevo', $tarjetas, 'Solo salen los cuatro estados con tarjeta.');
+        $this->assertArrayNotHasKey('nuevo', $tarjetas, 'No hay tarjeta con value "nuevo": ese estado cae dentro de "otros", no tiene clave propia.');
+        $this->assertSame(1, $tarjetas['otros']['total'], 'El lead en "nuevo" cae en Otros.');
     }
 
     /**

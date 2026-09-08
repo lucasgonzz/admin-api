@@ -4073,7 +4073,17 @@ class LeadController extends Controller
      */
     public function status_cards_json(Request $request)
     {
-        $cards = LeadStatusCardsService::cards_for_statuses(['calificado', 'solicita_disponibilidad']);
+        $cards = [
+            LeadStatusCardsService::card_for_group(
+                LeadPipelineStatus::TARJETA_OTROS_VALUE,
+                LeadPipelineStatus::TARJETA_OTROS_LABEL,
+                LeadPipelineStatus::TARJETA_OTROS_COLOR,
+                LeadPipelineStatus::TARJETA_OTROS_GRUPO,
+                LeadPipelineStatus::slugs_tarjeta_otros()
+            ),
+        ];
+
+        $cards = array_merge($cards, LeadStatusCardsService::cards_for_statuses(['calificado', 'solicita_disponibilidad']));
 
         $cards[] = LeadStatusCardsService::card_for_group(
             LeadPipelineStatus::TARJETA_DEMO_VALUE,

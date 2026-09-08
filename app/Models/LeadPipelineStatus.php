@@ -124,6 +124,33 @@ class LeadPipelineStatus extends Model
     public const TARJETA_DEMO_GRUPO = null;
     public const TARJETA_DEMO_SLUGS = ['demo_agendada', 'demo_pendiente_de_ingreso', 'demo_en_curso'];
 
+    /**
+     * Tarjeta "Otros" del módulo de Leads: catch-all para todo estado del pipeline que no tiene
+     * tarjeta propia. Va primera, antes de "Calificado". Gris neutro (mismo criterio de color que
+     * los estados de baja prioridad visual en DEFAULT_COLORS), sin slug 1:1 en el catálogo, igual
+     * que la tarjeta "Demo".
+     */
+    public const TARJETA_OTROS_VALUE = 'otros';
+    public const TARJETA_OTROS_LABEL = 'Otros';
+    public const TARJETA_OTROS_COLOR = '#6c757d';
+    public const TARJETA_OTROS_GRUPO = null;
+
+    /**
+     * Slugs que NO tienen tarjeta propia todavía: todo el catálogo real (`all_slugs()`) menos los
+     * 6 que ya cuentan las otras 4 tarjetas (SLUGS_TARJETAS_ESTADO + TARJETA_DEMO_SLUGS). Dinámico
+     * a propósito: si aparece un slug nuevo en el catálogo (uno que Claude cree al vuelo, o un
+     * resabio de un estado retirado en una base que todavía no corrió su backfill), cae acá solo,
+     * sin que haga falta tocar código.
+     *
+     * @return array<int, string>
+     */
+    public static function slugs_tarjeta_otros(): array
+    {
+        $cubiertos = array_merge(static::SLUGS_TARJETAS_ESTADO, static::TARJETA_DEMO_SLUGS);
+
+        return array_values(array_diff(static::all_slugs(), $cubiertos));
+    }
+
     protected $guarded = [];
 
     /**
