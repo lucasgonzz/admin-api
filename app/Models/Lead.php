@@ -1086,6 +1086,29 @@ class Lead extends Model
     }
 
     /**
+     * Primer nombre del contacto, derivado de contact_name (primera palabra por espacios).
+     * Se usa en los saludos de WhatsApp/mail al lead: "Hola {nombre}" en vez del nombre
+     * completo con apellido (decisión de Lucas, 8/9/2026). Refleja la misma nulabilidad que
+     * contact_name (null → null, vacío → vacío) para no cambiar el comportamiento de los
+     * `?? 'fallback'` que ya consumen contact_name en los call sites existentes.
+     *
+     * @return string|null
+     */
+    public function getContactFirstNameAttribute(): ?string
+    {
+        if ($this->contact_name === null) {
+            return null;
+        }
+        $trimmed = trim((string) $this->contact_name);
+        if ($trimmed === '') {
+            return $trimmed;
+        }
+        $words = preg_split('/\s+/', $trimmed);
+
+        return ($words[0] ?? '') !== '' ? $words[0] : $trimmed;
+    }
+
+    /**
      * Estado completo de la tarjeta "Respuestas del formulario de la demo" del modal del lead
      * (misión del 27/8/2026): las nueve respuestas efectivas más de dónde salieron.
      *
