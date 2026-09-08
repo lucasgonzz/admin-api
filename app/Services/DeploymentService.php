@@ -1548,6 +1548,94 @@ class DeploymentService
         // El resto de step_run_migrations sigue con run_command() sobre la sesión SSH: se reconecta
         // por las dudas, igual que después de cada operación SFTP larga del resto del pipeline.
         $this->reconnect_hosting_ssh();
+
+        $this->fix_afip_directory_ownership_en_vps($step, $api_path);
+    }
+
+    /**
+     * En VPS, provision() (arriba) crea storage/app/afip/ y sus subcarpetas por SFTP con la
+     * credencial raíz compartida del VPS ('vps' en client_ssh_credentials, la misma para los ~15
+     * clientes ahí migrados), así que cualquier carpeta NUEVA que cree queda dueña de root en vez
+     * del usuario propio del sitio (api-{vps_path}, el mismo con el que corre PHP-FPM para ese
+     * dominio). En shared_hosting esto no puede pasar porque esa credencial YA es la cuenta única
+     * del sitio.
+     *
+     * Mientras la carpeta quede así no se nota nada: recién revienta la primera vez que ese
+     * cliente intenta facturar, porque AfipWSAAHelper::define() (empresa-api) hace mkdir() sobre
+     * storage/app/afip/wsaa/{ws_name}/ para cachear el token de WSAA, y el usuario del sitio no
+     * tiene permiso de escritura sobre el padre. El síntoma en el cliente es "no puedo facturar",
+     * sin ninguna pista de que el problema es de permisos de archivo y no de AFIP en sí — se
+     * encontró así en arfren el 8/9/2026 (la venta 843 fallaba antes de mandar nada a ARCA) y en
+     * ananda con el mismo cuadro exacto. Detalle completo:
+     * informes/20260908-permisos-afip-vps-provisioning.md.
+     *
+     * El arreglo es un chown -R por SSH, no por SFTP: el protocolo SFTP solo permite chown por
+     * uid/gid numérico, no por nombre de usuario, y acá no conviene resolver ese número. Se corre
+     * sobre la sesión SSH2 que ya está reconectada arriba.
+     *
+     * Idempotente y barato: correrlo sobre una carpeta que ya es del dueño correcto no cambia
+     * nada, así que no hace falta condicionarlo a que provision() haya instalado algo en esta
+     * corrida — de paso corrige el arrastre de una carpeta que quedó mal en un deploy anterior a
+     * este fix, que es exactamente el caso de arfren y ananda. Nunca aborta el deploy: mismo
+     * criterio que el resto de este bloque AFIP.
+     *
+     * @param  string  $step
+     * @param  string  $api_path  Directorio raíz de la API del cliente (ya resuelto)
+     * @return void
+     */
+    private function fix_afip_directory_ownership_en_vps(string $step, string $api_path): void
+    {
+        if ($this->get_hosting_credential_type() !== 'vps') {
+            return;
+        }
+
+        $vps_path = trim((string) ($this->target_api->vps_path ?? ''));
+        if ($vps_path === '') {
+            return;
+        }
+
+        $command = $this->build_afip_ownership_fix_command($api_path, $vps_path);
+        $output = $this->run_command($step, $command, false);
+
+        if (strpos($output, 'AFIP_OWNERSHIP_FIX_OK') !== false) {
+            $this->log($step, 'Dueño de storage/app/afip corregido al usuario propio del sitio.', 'success');
+        } elseif (strpos($output, 'AFIP_OWNERSHIP_FIX_SKIP_NO_DIR') !== false) {
+            $this->log($step, 'storage/app/afip todavía no existe en el cliente — nada que corregir.', 'info');
+        } else {
+            $this->log(
+                $step,
+                'No se pudo confirmar la corrección de dueño de storage/app/afip. Si el cliente no '
+                . 'puede facturar, revisar el permiso a mano (tiene que ser api-' . $vps_path . ').',
+                'warning'
+            );
+        }
+    }
+
+    /**
+     * Arma el comando remoto que corrige el dueño de storage/app/afip/ al usuario propio del
+     * sitio VPS. Solo actúa si el directorio existe (un cliente al que provision() nunca le tocó
+     * nada porque no hay nada cargado en el admin no tiene qué corregir), y usa chown -R por
+     * nombre de usuario:grupo.
+     *
+     * 🔴 El usuario del sitio en VPS lleva el prefijo `api-` (`api-{vps_path}`, no `{vps_path}` a
+     * secas) — es la misma convención que ClientApiPathResolver::resolve() ya usa para el path
+     * (`/home/api-{vps_path}/empresa-api`) y la que arma el pool de PHP-FPM de cada sitio
+     * (`/etc/php/7.4/fpm/pool.d/api-{vps_path}.comerciocity.com.conf`, `user = api-{vps_path}`).
+     * Un chown sin el prefijo apunta a un usuario que no es el que corre PHP y no arregla nada.
+     *
+     * @param  string  $api_path   Directorio raíz de la API del cliente
+     * @param  string  $vps_path   Slug del sitio en el VPS, SIN el prefijo (ej: "arfren")
+     * @return string
+     */
+    private function build_afip_ownership_fix_command(string $api_path, string $vps_path): string
+    {
+        $owner = 'api-' . $vps_path . ':api-' . $vps_path;
+        $afip_dir = $api_path . '/storage/app/afip';
+
+        return 'if [ -d ' . escapeshellarg($afip_dir) . ' ]; then chown -R '
+            . escapeshellarg($owner) . ' ' . escapeshellarg($afip_dir)
+            . ' && echo AFIP_OWNERSHIP_FIX_OK; '
+            . 'else echo AFIP_OWNERSHIP_FIX_SKIP_NO_DIR; fi';
     }
 
     /**
