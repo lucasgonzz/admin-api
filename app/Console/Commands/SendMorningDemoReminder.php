@@ -193,7 +193,9 @@ class SendMorningDemoReminder extends Command
     protected function send_morning_reminder(Lead $lead): void
     {
         // Nombre del contacto para personalizar el saludo y la variable {{1}} del template.
-        $contact_name = $lead->contact_name ?? 'Cliente';
+        // Primer nombre, no el completo (decisión de Lucas, 8/9/2026): el lead ve "Hola Guillermo",
+        // no "Hola Guillermo González".
+        $contact_name = $lead->contact_first_name ?? 'Cliente';
 
         // Hora de inicio de la demo para la variable {{2}} del template (ej: "10:00").
         $demo_start_time = $lead->demo_start_time ?? '';
