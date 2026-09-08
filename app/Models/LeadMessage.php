@@ -120,6 +120,59 @@ class LeadMessage extends Model
             ->where($alias . '.whatsapp_message_id', '<>', '');
     }
 
+    /**
+     * 🔴 LA definición de "nosotros ya le reaccionamos a este mensaje desde el panel", y la única
+     * que hay.
+     *
+     * Decisión de Lucas, 8/9/2026: una reacción del panel sobre un mensaje del lead cuenta como
+     * respuesta, igual que un texto que efectivamente salió (ver {@see self::is_reply_to_lead()}).
+     * `admin_reaction_emoji` se limpia a `null` (nunca queda en `''`) tanto al quitar la reacción
+     * como cuando el webhook de Meta la rechaza después
+     * (`WhatsappWebhookController::handle_failed_admin_reaction_status()`), así que alcanza con
+     * mirar si quedó algo cargado — no hace falta mirar `admin_reaction_whatsapp_message_id` aparte.
+     *
+     * Tiene un gemelo en SQL, {@see self::apply_sin_reaccion_admin_conditions()}: los dos tienen que
+     * decir lo mismo. Antes de este método el chequeo se repetía a mano en tres lugares (dos SQL con
+     * `whereNull()->orWhere('', '')` y este bucle con `trim() === ''`) — mismo error de método que ya
+     * pasó una vez con `is_reply_to_lead()` y su gemelo. No lo vuelvas a escribir a mano: usá este
+     * método (o su gemelo SQL) en cualquier lugar nuevo que necesite la misma pregunta.
+     *
+     * @param LeadMessage $message Mensaje del hilo.
+     *
+     * @return bool
+     */
+    public static function tiene_reaccion_admin(LeadMessage $message): bool
+    {
+        return trim((string) ($message->admin_reaction_emoji ?? '')) !== '';
+    }
+
+    /**
+     * Gemelo en SQL de {@see self::tiene_reaccion_admin()}: aplica la condición "SIN reacción de
+     * admin" sobre una subconsulta ya apuntada a `lead_messages`.
+     *
+     * Sin parámetro de alias, a diferencia de {@see self::apply_reply_to_lead_conditions()}: los dos
+     * call-sites de hoy ({@see \App\Models\Lead::apply_condicion_mensaje_sin_responder()} y
+     * {@see self::scopeForListNotifications()}) consultan la tabla directo, sin alias de subconsulta
+     * correlacionada — si algún día hiciera falta un alias, se agrega entonces, igual que se hizo
+     * con el otro método el día que un tercer call-site lo necesitó.
+     *
+     * `TRIM()` en el SQL espeja el `trim()` del lado PHP: un valor de solo espacios (nada en el
+     * schema lo impide, aunque hoy ningún camino de producción lo escribe) tiene que contar igual de
+     * los dos lados, o el test de paridad podría divergir sin que nada lo avise.
+     *
+     * @param \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder $query Query o
+     *                                                                                          subconsulta ya apuntada a lead_messages.
+     *
+     * @return void
+     */
+    public static function apply_sin_reaccion_admin_conditions($query): void
+    {
+        $query->where(function ($sin_reaccion_admin) {
+            $sin_reaccion_admin->whereNull('admin_reaction_emoji')
+                ->orWhereRaw("TRIM(admin_reaction_emoji) = ''");
+        });
+    }
+
     protected $guarded = [];
 
     /**
@@ -848,16 +901,19 @@ class LeadMessage extends Model
                 $sub->where('sender', 'sistema')->where('status', 'sugerido');
             })->orWhere(function ($sub) {
                 $sub->where('sender', 'lead')
-                    ->where('status', 'enviado')
-                    ->whereNotExists(function ($exists) {
-                        $exists->selectRaw('1')
-                            ->from('lead_messages as outbound')
-                            ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
-                            ->whereColumn('outbound.id', '>', 'lead_messages.id');
-                        /* Misma definición de "ya se le contestó" que usan el botón de revisión y
-                           las tarjetas. Ver LeadMessage::is_reply_to_lead(). */
-                        self::apply_reply_to_lead_conditions($exists, 'outbound');
-                    });
+                    ->where('status', 'enviado');
+                // Nosotros ya le reaccionamos desde el panel: mismo criterio que
+                // Lead::apply_condicion_mensaje_sin_responder() (decisión de Lucas, 8/9/2026).
+                self::apply_sin_reaccion_admin_conditions($sub);
+                $sub->whereNotExists(function ($exists) {
+                    $exists->selectRaw('1')
+                        ->from('lead_messages as outbound')
+                        ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
+                        ->whereColumn('outbound.id', '>', 'lead_messages.id');
+                    /* Misma definición de "ya se le contestó" que usan el botón de revisión y
+                       las tarjetas. Ver LeadMessage::is_reply_to_lead(). */
+                    self::apply_reply_to_lead_conditions($exists, 'outbound');
+                });
             });
         });
     }

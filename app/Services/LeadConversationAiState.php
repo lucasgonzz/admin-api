@@ -40,9 +40,14 @@ class LeadConversationAiState
      * Indica si hay mensajes del lead sin responder después del último saliente que le llegó.
      *
      * Qué cuenta como respuesta lo decide {@see LeadMessage::is_reply_to_lead()}, que es la única
-     * definición del sistema: un saliente despachado y con `whatsapp_message_id`, o sea que
-     * efectivamente salió por WhatsApp. Una sugerencia de la IA esperando verificación NO contesta
-     * nada, y un envío que falló tampoco.
+     * definición del sistema para un SALIENTE: un mensaje despachado y con `whatsapp_message_id`, o
+     * sea que efectivamente salió por WhatsApp. Una sugerencia de la IA esperando verificación NO
+     * contesta nada, y un envío que falló tampoco.
+     *
+     * Además, y por fuera de esa función (una reacción no es un saliente, ver el porqué en
+     * {@see Lead::apply_condicion_mensaje_sin_responder()}), un mensaje del lead con
+     * {@see LeadMessage::tiene_reaccion_admin()} tampoco cuenta como sin responder: decisión de
+     * Lucas del 8/9/2026, reaccionarle desde el panel es una forma de respuesta.
      *
      * @param Lead $lead Lead con relación `messages` cargada (orden por id).
      *
@@ -75,7 +80,8 @@ class LeadConversationAiState
             if ((string) $candidate->sender === 'lead'
                 && (string) $candidate->status === 'enviado'
                 && (string) ($candidate->kind ?? '') !== 'reaction'
-                && ! LeadWhatsappReactionService::is_legacy_reaction_content((string) $candidate->content)) {
+                && ! LeadWhatsappReactionService::is_legacy_reaction_content((string) $candidate->content)
+                && ! LeadMessage::tiene_reaccion_admin($candidate)) {
                 return true;
             }
             $cursor++;

@@ -658,8 +658,19 @@ class Lead extends Model
      *
      * Se aplica sobre una subconsulta YA apuntada a `lead_messages` y correlacionada con el lead.
      * Un mensaje del lead cuenta como sin responder cuando es suyo, real (no una reacción, ni por
-     * `kind` ni en el formato legado de Kapso en texto plano) y **no hay ningún saliente posterior
-     * que le haya llegado** — eso último lo decide {@see LeadMessage::apply_reply_to_lead_conditions()}.
+     * `kind` ni en el formato legado de Kapso en texto plano), **nosotros no le reaccionamos desde
+     * el panel** — eso lo decide {@see LeadMessage::apply_sin_reaccion_admin_conditions()} (decisión
+     * de Lucas del 8/9/2026: una reacción nuestra sobre el mensaje cuenta como respuesta, igual que
+     * un texto) — y **no hay ningún saliente posterior que le haya llegado** — eso último lo decide
+     * {@see LeadMessage::apply_reply_to_lead_conditions()}.
+     *
+     * 🔴 Por qué la reacción se mira sobre EL PROPIO mensaje candidato y no como un saliente más:
+     * la reacción del panel no crea una fila nueva en `lead_messages` — se guarda como columnas
+     * `admin_reaction_*` sobre la MISMA fila del mensaje del lead al que se reacciona (ver migración
+     * `2026_09_01_100000_add_admin_reaction_to_lead_messages_table`). No tiene `id` propio, así que
+     * no puede jugar el rol de "saliente posterior" del `whereNotExists` de abajo: si el mensaje
+     * reaccionado no es el último del hilo, un mensaje posterior del lead sigue sin responder aunque
+     * este quede resuelto por la reacción.
      *
      * La usan las dos cosas que tienen que decir lo mismo: el scope `requiereRevision` (que cuenta
      * la tarjeta "sin responder") y el flag `row_warning` (que pinta la fila de amarillo). Si
@@ -682,16 +693,22 @@ class Lead extends Model
             // LeadWhatsappReactionService::is_legacy_reaction_content(). LIKE y no REGEXP:
             // el hosting puede estar en MySQL 5.7.
             ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Reacted % to message wamid.%'")
-            ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Removed reaction from message wamid.%'")
-            ->whereNotExists(function ($outbound) {
-                $outbound->selectRaw('1')
-                    ->from('lead_messages as outbound')
-                    ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
-                    ->whereColumn('outbound.id', '>', 'lead_messages.id');
-                /* Gemelo en SQL de LeadMessage::is_reply_to_lead(). No lo vuelvas a
-                   escribir a mano acá: eran tres copias y se separaron. */
-                LeadMessage::apply_reply_to_lead_conditions($outbound, 'outbound');
-            });
+            ->whereRaw("TRIM(lead_messages.content) NOT LIKE 'Removed reaction from message wamid.%'");
+
+        /* Nosotros ya le reaccionamos desde el panel: para Lucas eso es una respuesta.
+           Gemelo en SQL de LeadMessage::tiene_reaccion_admin(). No lo vuelvas a escribir a
+           mano acá: es la misma lección de abajo, para un predicado distinto. */
+        LeadMessage::apply_sin_reaccion_admin_conditions($query);
+
+        $query->whereNotExists(function ($outbound) {
+            $outbound->selectRaw('1')
+                ->from('lead_messages as outbound')
+                ->whereColumn('outbound.lead_id', 'lead_messages.lead_id')
+                ->whereColumn('outbound.id', '>', 'lead_messages.id');
+            /* Gemelo en SQL de LeadMessage::is_reply_to_lead(). No lo vuelvas a
+               escribir a mano acá: eran tres copias y se separaron. */
+            LeadMessage::apply_reply_to_lead_conditions($outbound, 'outbound');
+        });
     }
 
     public function scopeRequiereRevision($query, $incluir_entrega_fallida = false)

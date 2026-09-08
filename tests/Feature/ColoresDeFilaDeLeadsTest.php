@@ -161,6 +161,41 @@ class ColoresDeFilaDeLeadsTest extends TestCase
     }
 
     /**
+     * 🔴 El pedido de Lucas del 8/9/2026: reaccionar desde el panel al último mensaje del lead
+     * cuenta como respuesta y apaga el amarillo, aunque nunca haya salido un texto.
+     *
+     * @return void
+     */
+    public function test_reaccionar_al_ultimo_mensaje_del_lead_apaga_el_amarillo(): void
+    {
+        $lead = $this->crear_lead('Reaccionado');
+        $this->crear_mensaje($lead, [
+            'admin_reaction_emoji' => "\u{1F44D}",
+            'admin_reaction_at'    => now(),
+        ]);
+
+        $this->assertFalse((bool) $this->fila($lead)['row_warning']);
+    }
+
+    /**
+     * La reacción resuelve el mensaje puntual, no la conversación entera: si el lead escribe de
+     * nuevo después, ese mensaje nuevo (sin reacción ni respuesta) vuelve a encender el amarillo.
+     *
+     * @return void
+     */
+    public function test_reaccionar_no_apaga_un_mensaje_posterior_del_lead(): void
+    {
+        $lead = $this->crear_lead('Reaccionado y volvio a escribir');
+        $this->crear_mensaje($lead, [
+            'admin_reaction_emoji' => "\u{1F44D}",
+            'admin_reaction_at'    => now(),
+        ]);
+        $this->crear_mensaje($lead, ['content' => 'Otra consulta más']);
+
+        $this->assertTrue((bool) $this->fila($lead)['row_warning']);
+    }
+
+    /**
      * La otra mitad del amarillo, que ya existía: hay un mensaje por verificar esperando salir.
      *
      * @return void
