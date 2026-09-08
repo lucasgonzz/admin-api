@@ -733,13 +733,19 @@ class LeadFollowupService
      * resolviera por su cuenta, la conversación mostraría un texto distinto del que recibió el lead
      * y el arreglo valdría para un camino y no para el otro.
      *
+     * 🔴 Usa `contact_first_name` (primer nombre, sin apellido) y no `contact_name` desde el
+     * 8/9/2026 (decisión de Lucas): saludar con el nombre completo quedaba muy poco personalizado
+     * ("Hola Guillermo González"). `Lead::getContactFirstNameAttribute()` refleja la misma
+     * nulabilidad que `contact_name`, así que el `trim()` de acá sigue cubriendo el mismo agujero
+     * de siempre (string vacío o de espacios, que `??` no atrapa) sin reabrir el 131008.
+     *
      * @param Lead $lead Lead destinatario.
      *
      * @return string Nombre del contacto, o {@see self::NOMBRE_GENERICO}.
      */
     public function resolve_contact_name_variable(Lead $lead): string
     {
-        $contact_name = trim((string) ($lead->contact_name ?? ''));
+        $contact_name = trim((string) ($lead->contact_first_name ?? ''));
 
         return $contact_name !== '' ? $contact_name : self::NOMBRE_GENERICO;
     }
