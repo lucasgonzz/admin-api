@@ -58,6 +58,17 @@ return [
         'demo_setup_timeout' => env('CLIENT_API_DEMO_SETUP_TIMEOUT', 900),
     ],
 
+    /*
+     * URL pública de la PROPIA API del admin, para las URLs que el admin le entrega a otro sistema
+     * para que le pegue (hoy: el canal de eventos de la demo, `demo_eventos_url` del payload del
+     * demo setup). En producción es `https://api-admin.comerciocity.com/public` — con `/public`,
+     * que `APP_URL` no lleva. Sin la variable, App\Helpers\AdminApiPublicUrl deduce el `/public`
+     * cuando el proyecto corre bajo `public_html/`. Ver el docblock de esa clase (9/9/2026).
+     */
+    'admin_api' => [
+        'public_url' => env('ADMIN_API_PUBLIC_URL'),
+    ],
+
     // Integración inbound desde empresa-api (rutas /api/inbound/*).
     // require_api_key: si es false, no se valida X-Admin-Api-Key; el Client se infiere del body (client_uuid)
     // o del ticket/mensaje. Solo uso temporal; en producción debe ser true.

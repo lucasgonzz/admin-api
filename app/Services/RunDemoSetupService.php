@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Helpers\AdminApiPublicUrl;
 use App\Helpers\AppTime;
 use App\Models\Demo;
 use App\Models\DemoMedia;
@@ -726,7 +727,13 @@ class RunDemoSetupService
              * precedente (google_custom_search_api_key) y se reescribe entero en cada
              * migrate:fresh, así que no queda ningún paso manual por instancia que pueda faltar. */
             'demo_eventos_token' => $lead->demo_eventos_token,
-            'demo_eventos_url'   => rtrim((string) config('app.url'), '/') . '/api/demo-eventos',
+            /* 🔴 NO `config('app.url') . '/api/demo-eventos'`, que era lo que decía acá hasta el
+             * 9/9/2026. En el shared hosting `APP_URL` no lleva `/public` y la API sí responde bajo
+             * `/public/api/...`: la instancia recibía 404 en cada push y el seguimiento de la demo
+             * no llegó nunca al admin en producción (23 eventos varados en demo1 y demo2, cero
+             * filas en `demo_eventos_recibidos`). La URL pública hacia el propio admin se resuelve
+             * en un solo lugar: {@see \App\Helpers\AdminApiPublicUrl}. */
+            'demo_eventos_url'   => AdminApiPublicUrl::api('demo-eventos'),
 
             // El plan congelado, para el panel lateral y el roadmap de la instancia (misión 51).
             'demo_plan' => $lead->demo_plan,

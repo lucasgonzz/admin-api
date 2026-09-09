@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Helpers\AdminApiPublicUrl;
 use App\Models\WhatsappConfig;
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
@@ -97,12 +98,12 @@ class MetaWebhookTokenCommand extends Command
      */
     private function mostrar_url(string $token): void
     {
-        /* APP_URL es la base pública del admin-api; el prefijo /api lo pone RouteServiceProvider. */
-        $base = rtrim((string) config('app.url'), '/');
-
+        /* La base pública del admin-api NO es `APP_URL` a secas: en el shared hosting la API vive
+         * bajo `/public`. Misma clase de error que la URL del canal de eventos de la demo (9/9/2026);
+         * la resuelve en un solo lugar AdminApiPublicUrl, que también pone el prefijo `/api`. */
         $this->newLine();
         $this->info('URL para el webhook `kind: meta` en el panel de Kapso:');
-        $this->line($base . '/api/webhook/meta-raw/' . $token);
+        $this->line(AdminApiPublicUrl::api('webhook/meta-raw/' . $token));
         $this->newLine();
         $this->comment('El token también se acepta por la cabecera X-CC-Webhook-Token, si preferís no ponerlo en la URL.');
     }
