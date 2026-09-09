@@ -56,7 +56,7 @@ class Kernel extends ConsoleKernel
          * concurrentes no puedan tomar el mismo lead, que es la única carrera que importa. Y sin
          * `runInBackground()` los procesos se apilaban IGUAL (un `schedule:run` clavado por tick);
          * la diferencia es que además se llevaban puesto el resto del scheduler. */
-        $schedule->command('leads:run-demo-setup')->everyMinute()->runInBackground();
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('leads:run-demo-setup'))->everyMinute()->runInBackground();
 
         // Saca del limbo los setups que quedaron en `ejecutandose` o en `sin_confirmar` y nunca
         // reportaron (misión 60; `sin_confirmar` desde la misión cruzada del 25/8/2026 — un estado
@@ -123,9 +123,40 @@ class Kernel extends ConsoleKernel
          * Y NO `withoutOverlapping()`: eso serializaría toda la conexión, y un deployment de treinta
          * minutos dejaría sin worker a los `RunDemoSetupJob`, que sí tienen un turno que cumplir.
          * Es exactamente el daño que costó tres demos mudas. */
-        $schedule->command('queue:work database --stop-when-empty')
+        $schedule->exec(self::artisan_sin_el_lock_del_cron('queue:work database --stop-when-empty'))
             ->everyMinute()
             ->runInBackground();
+    }
+
+    /**
+     * Comando de artisan para correr en segundo plano SIN heredar el candado del cron.
+     *
+     * 🔴 Medido en producción el 9/9/2026, y es lo que dejaba al scheduler del admin muerto por
+     * ratos: el cron de Hostinger lanza `flock -n /tmp/schedule-admin.lock php artisan schedule:run`,
+     * y `flock` deja el archivo del candado abierto en el descriptor 3 del proceso que ejecuta.
+     * `runInBackground()` arma `(php artisan ... ) &`, y ese subshell —y el worker que arranca—
+     * HEREDAN el descriptor. Resultado: mientras vive un `queue:work` lanzado desde acá (17 minutos
+     * de una actualización de demo, 30 de un deployment, 3 de un demo setup), el candado sigue
+     * tomado, el `flock -n` del minuto siguiente falla en silencio y **no corre ningún comando del
+     * scheduler**: ni un `queue:work` nuevo, ni `leads:run-demo-setup`, ni los recordatorios, ni
+     * los vencimientos. Se vio con `ls -l /proc/<pid del worker>/fd`: `3 -> /tmp/schedule-admin.lock`.
+     * Un `RunDemoSetupJob` despachado a las 01:55 esperó 10 minutos en la cola con el único worker
+     * vivo ocupado en una actualización de demo, y en el caso real de Gino (8/9) la cola le sumó 3
+     * minutos al armado por el mismo motivo.
+     *
+     * `exec 3>&- ... 9>&-` cierra en el subshell los descriptores heredados antes de arrancar php:
+     * el candado queda libre apenas `schedule:run` termina, que es lo que el cron espera. Cerrar un
+     * descriptor que no está abierto no es error en `sh`. Se usa `$schedule->exec()` en vez de
+     * `command()` porque `command()` no deja anteponer nada al binario.
+     *
+     * @param string $artisan Comando de artisan con sus opciones, ej. `queue:work database --stop-when-empty`.
+     *
+     * @return string Línea de shell lista para el scheduler.
+     */
+    protected static function artisan_sin_el_lock_del_cron(string $artisan): string
+    {
+        return 'exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-; '
+            . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(base_path('artisan')) . ' ' . $artisan;
     }
 
     /**
