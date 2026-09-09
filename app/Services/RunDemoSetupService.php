@@ -47,15 +47,20 @@ class RunDemoSetupService
     /**
      * Cuánto tarda un demo setup, para contarle la espera al lead en la página de experiencia.
      *
-     * Sale de una corrida real medida: 565,7 s. Se redondea PARA ARRIBA, a 600, porque el número
-     * se usa para decirle al lead cuánto le falta y prometer de menos es peor que prometer de más:
-     * un contador que llega a cero y no pasa nada se lee como que algo se rompió.
+     * Hasta el 9/9/2026 eran 600: salían de una corrida medida en 565,7 s el 25/8 (12 meses de
+     * siembra por el camino real del sistema, en un slot local). Ese día se midió en la instancia
+     * demo3 del VPS, por etapa: 167 s con 12 meses, y con la siembra recortada al último trimestre
+     * (`config('semilla.meses_atras')` = 3 en empresa-api) el armado queda en ~100 s. A eso se le
+     * suma la cola del admin (`queue:work` cada minuto, hasta 60 s). 240 es eso redondeado PARA
+     * ARRIBA, porque el número se usa para decirle al lead cuánto le falta y prometer de menos es
+     * peor que prometer de más: un contador que llega a cero y no pasa nada se lee como que algo
+     * se rompió.
      *
      * 🔴 Es un ESTIMADO de presentación, no gobierna ninguna puerta. Quien decide si el lead entra
      * es `DemoExperienciaController::evaluar_ingreso()`, y sigue siendo `demo_setup_status` +
      * el gate del video. Si algún día esto empieza a decidir algo, dejó de ser este número.
      */
-    const DURACION_ESTIMADA_SEGUNDOS = 600;
+    const DURACION_ESTIMADA_SEGUNDOS = 240;
 
     /**
      * Estado de `demo_setup_status` para una corrida cuyo desenlace NO se conoce.
