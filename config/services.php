@@ -132,9 +132,16 @@ return [
         ],
     ],
 
-    // GitHub API: token para acceder al repositorio de documentación de ComercioCity.
+    // GitHub API: token para acceder al repositorio de documentación de ComercioCity y a los
+    // releases de empresa-spa / empresa-api (misión actualizar-sin-el-vps, 9/9/2026).
     'github' => [
         'token' => env('GITHUB_PROTOCOL_TOKEN'),
+        // Owner de `empresa-spa` y `empresa-api` en GitHub. App\Services\ReleaseArtifactService busca
+        // en /repos/{owner}/{repo}/releases/tags/v{version} los zips que GitHub Actions publica al
+        // hacer el release y que reemplazan al build en el VPS de builds. 🔴 El token de arriba tiene
+        // que poder LEER esos dos repos (son privados): si no puede, GitHub responde 404 y el deploy
+        // cae a la vía vieja sin avisar de otra forma que por el log de la etapa.
+        'releases_owner' => env('GITHUB_RELEASES_OWNER', 'lucasgonzz'),
     ],
 
     // API Anthropic (Claude) para sugerencias de mensajes en conversaciones de leads.
