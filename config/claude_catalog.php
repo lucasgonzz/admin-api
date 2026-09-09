@@ -726,6 +726,59 @@ return [
                 ['nombre' => 'status', 'obligatorio' => true, 'validacion' => 'required|string|in:draft,published,archived', 'que_es' => 'El estado nuevo.'],
             ],
         ],
+        'PATCH api/claude/versions/{id}' => [
+            'para_que'     => 'Edita el código, el título, la descripción y/o el estado de una versión ya existente.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Todos los campos son `sometimes`: si no mandás ninguno, 422 (nada que actualizar).',
+                'El código de versión respeta el mismo regex que el alta y es único excluyendo esta misma versión — '
+                    . 'salvo que el código que mandás sea IDÉNTICO al ya persistido, en cuyo caso no se exige el regex '
+                    . '(mismo criterio que VersionController::validate_version_payload en el panel humano, para no '
+                    . 'bloquear la edición de una versión legacy con formato viejo, ej. "3.3").',
+                '🔴 `is_hotfix` se recalcula SOLO si `version` cambia, y SIN override: a diferencia del panel humano, '
+                    . 'claude/* nunca permite forzarlo distinto del cálculo automático.',
+                'Al pasar `status` a `published` sin `published_at` previo, se setea `now()`; cualquier otra '
+                    . 'transición no lo toca.',
+                'Sin dry_run ni confirm_*: es un UPDATE de una sola fila, sin cascada ni efecto en otras tablas — '
+                    . 'mismo criterio de riesgo que el alta.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'La versión a editar. GET claude/versions la resuelve.'],
+                ['nombre' => 'version', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|max:30, regex si cambia, único excluyendo esta versión', 'que_es' => 'Código nuevo de la versión, ej. "4.0.3".'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:200', 'que_es' => 'Título visible en el panel.'],
+                ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:5000', 'que_es' => 'Descripción larga.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|in:draft,published,archived', 'que_es' => 'Estado nuevo.'],
+            ],
+        ],
+        'DELETE api/claude/versions/{id}' => [
+            'para_que'     => 'Borra una versión, con el mismo mecanismo (y las mismas cascadas) que ya usa el panel humano.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'dry_run por defecto TRUE: sin dry_run=false explícito no borra nada, y devuelve el impacto real medido '
+                    . 'contra la base (clientes que quedarían con current_version_id null, upgrades que se borrarían '
+                    . 'en cascada como destino, upgrades que quedarían con from_version_id null, y los conteos propios '
+                    . 'de notifications/seeders/commands/manual_tasks).',
+                'confirm_version_code obligatorio cuando dry_run=false: tiene que coincidir con el CÓDIGO de la '
+                    . 'versión (ej. "4.0.3"), no con el id ni el uuid — es lo que un humano reconoce. El rechazo no '
+                    . 'revela el código correcto.',
+                'confirm_borra_historial obligatorio (=== true) SOLO cuando el impacto mide algún '
+                    . 'client_version_upgrades con esta versión como destino (los que se BORRAN en cascada por la FK '
+                    . 'to_version_id). Sin upgrades asociados este flag no hace falta.',
+                '🔴 El borrado es EN CASCADA por las FK ya definidas en la base: client_version_upgrades.to_version_id '
+                    . 'es ON DELETE CASCADE (se pierden esas filas), from_version_id y clients.current_version_id son '
+                    . 'ON DELETE SET NULL. Este endpoint no inventa el comportamiento: hereda el que ya tiene '
+                    . 'VersionController::destroy_json() del panel humano, con los frenos que un proceso automático '
+                    . 'necesita y una pantalla no.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'La versión a borrar. GET claude/versions la resuelve.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO borra nada. Con dry_run devuelve el impacto medido.'],
+                ['nombre' => 'confirm_version_code', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30 — obligatorio cuando dry_run=false', 'que_es' => 'El código exacto de la versión (ej. "4.0.3"), no el id ni el uuid. El rechazo NO revela el código correcto.'],
+                ['nombre' => 'confirm_borra_historial', 'obligatorio' => false, 'validacion' => 'nullable|boolean — obligatorio (=== true) solo si hay upgrades apuntando a esta versión como destino', 'que_es' => 'Confirma que sabés que se borra historial real de actualizaciones de clientes, no solo la fila de versions.'],
+            ],
+        ],
         'GET api/claude/upgrades' => [
             /* `ids` y `created_via` son lo que hace poleable un lote de una sola vez: ver la
                respuesta 201 de POST claude/upgrades/batch, que devuelve la llamada ya armada. */

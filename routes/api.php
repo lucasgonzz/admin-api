@@ -302,6 +302,14 @@ Route::middleware('claude.task.key')
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
         Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');
+        /* Edición completa (código, título, descripción, estado) y borrado — misión
+           "editar-eliminar-versiones", 9/9/2026. El PATCH es un UPDATE de una fila sin frenos
+           (mismo criterio de riesgo que el alta); el DELETE hereda las cascadas que ya tiene
+           VersionController::destroy_json() del panel humano y por eso lleva dry_run +
+           confirm_version_code + confirm_borra_historial. Los dos están en
+           ClaudeClientOpsController, documentados en ops_schema_json() y en claude_catalog.php. */
+        Route::patch('versions/{id}', 'Api\ClaudeClientOpsController@versions_update_json');
+        Route::delete('versions/{id}', 'Api\ClaudeClientOpsController@versions_destroy_json');
         Route::get('upgrades', 'Api\ClaudeClientOpsController@upgrades_json');
         Route::get('upgrades/{id}', 'Api\ClaudeClientOpsController@upgrade_json');
         Route::get('upgrades/{id}/logs', 'Api\ClaudeClientOpsController@upgrade_logs_json');

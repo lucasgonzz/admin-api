@@ -330,6 +330,42 @@ class ClaudeClientOpsController extends Controller
                         . 'habilita que `POST claude/upgrades` pueda apuntar a ella (rechaza con 422 toda versión que '
                         . 'no esté `published`).',
                 ],
+                'PATCH claude/versions/{id}' => [
+                    'parametros' => [
+                        'version'     => 'Opcional (sometimes). Mismo regex que el alta (al menos 3 componentes numéricos), '
+                            . 'único excluyendo esta misma versión. Excepción: si el código que mandás es IDÉNTICO al ya '
+                            . 'persistido, no se exige el regex — para no bloquear la edición de título/descripción/estado '
+                            . 'de una versión legacy con formato viejo (ej. "3.3").',
+                        'title'       => 'Opcional (sometimes), nullable, máximo 200 caracteres.',
+                        'description' => 'Opcional (sometimes), nullable, máximo 5000 caracteres.',
+                        'status'      => 'Opcional (sometimes): draft | published | archived.',
+                    ],
+                    'nota' => '🔴 `is_hotfix` se RECALCULA solo si `version` cambia, con el mismo cálculo automático del '
+                        . 'alta (más de 3 componentes = hotfix). Sin override: a diferencia del panel humano, `claude/*` '
+                        . 'nunca permite forzarlo distinto del cálculo. Al pasar `status` a `published` sin `published_at` '
+                        . 'previo, se setea `now()`; cualquier otra transición no lo toca. Si no mandás NINGÚN campo, 422. '
+                        . 'Sin dry_run ni confirm_*: es un UPDATE de una sola fila, sin cascada ni efecto en otras tablas.',
+                ],
+                'DELETE claude/versions/{id}' => [
+                    'parametros' => [
+                        'dry_run'                 => 'Booleano. Default TRUE: no borra nada, devuelve la versión y el `impacto` '
+                            . 'medido contra la base.',
+                        'confirm_version_code'    => 'Obligatorio cuando dry_run es false. Tiene que coincidir con el CÓDIGO de '
+                            . 'la versión (ej. "4.0.3"), no con el id ni el uuid. El error no revela el código correcto.',
+                        'confirm_borra_historial' => 'Booleano, obligatorio (=== true) SOLO si el impacto mide algún '
+                            . '`client_version_upgrades` con esta versión como destino. Sin upgrades asociados no hace falta.',
+                    ],
+                    'nota' => '🔴 EL BORRADO ES EN CASCADA, Y NO LO INVENTA ESTE ENDPOINT: hereda el mismo comportamiento que ya '
+                        . 'tiene `VersionController::destroy_json()` en el panel humano. `client_version_upgrades.to_version_id` '
+                        . 'tiene FK ON DELETE CASCADE (se BORRAN las filas que apuntan a esta versión como destino — historial '
+                        . 'real de actualizaciones de clientes), `from_version_id` tiene ON DELETE SET NULL (los que la tenían '
+                        . 'como origen quedan con ese campo en null), y `clients.current_version_id` también SET NULL (un '
+                        . 'cliente con esta versión como actual queda con current_version_id null). Las notificaciones, '
+                        . 'seeders, comandos y tareas manuales PROPIOS de la versión se borran en cascada también, pero eso NO '
+                        . 'amerita freno: es contenido de la versión, no historial de otra tabla. El `impacto` que devuelve '
+                        . 'el dry_run mide los siete conteos antes de tocar nada, y la respuesta del borrado real devuelve el '
+                        . 'mismo resumen ya aplicado.',
+                ],
                 'GET claude/upgrades' => [
                     'filtros' => [
                         'client_id'           => 'Id del cliente.',
@@ -1099,6 +1135,291 @@ class ClaudeClientOpsController extends Controller
         $version->save();
 
         return response()->json(['model' => $this->version_payload($version)], 200);
+    }
+
+    /**
+     * Edita los campos de una versión existente: código, título, descripción y/o estado.
+     *
+     * Misión "editar-eliminar-versiones" (9/9/2026). Todos los parámetros son `sometimes`: se
+     * puede tocar uno solo (por ejemplo, sólo el `title` de una versión ya publicada) sin tener
+     * que reenviar el resto.
+     *
+     * 🔴 EXCEPCIÓN DEL CÓDIGO IGUAL A LA DEL PANEL HUMANO
+     * (`VersionController::validate_version_payload()`): si `version` viene pero es IDÉNTICO al
+     * ya persistido, no se exige el regex de `VersionNumberComparator::VALID_REGEX`. Sin esto,
+     * una versión legacy con formato viejo (ej. `"3.3"`, cargada antes de que existiera esa
+     * validación) quedaría bloqueada para siempre en título/descripción/estado, aunque nadie
+     * esté tocando el código. Si el código SÍ cambia, el regex se aplica igual que en el alta, y
+     * además se valida único excluyendo esta misma fila.
+     *
+     * 🔴 `is_hotfix` se recalcula SOLO cuando el código cambia de verdad (mismo cálculo que el
+     * alta, `VersionNumberComparator::isHotfix()`). Sin override: a diferencia de
+     * `VersionController::update`/`update_json` —que sí dejan forzarlo con un checkbox—,
+     * `claude/*` nunca expone esa palanca. Mismo criterio ya documentado en `versions_store_json()`.
+     *
+     * `status` sigue el mismo criterio que `versions_status_json()`: al pasar a `published` sin
+     * `published_at` previo, se setea `now()`; cualquier otra transición no lo toca.
+     *
+     * Sin `dry_run` ni `confirm_*`: es un `UPDATE` de una sola fila, sin cascada ni efecto en
+     * otras tablas — mismo criterio de riesgo que el alta y el cambio de estado.
+     *
+     * @param Request    $request Request entrante.
+     * @param int|string $id      Id numérico o uuid de la versión.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function versions_update_json(Request $request, $id)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'version'     => 'sometimes|required|string|max:30',
+            'title'       => 'sometimes|nullable|string|max:200',
+            'description' => 'sometimes|nullable|string|max:5000',
+            'status'      => 'sometimes|required|string|in:draft,published,archived',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        if (! $request->hasAny(['version', 'title', 'description', 'status'])) {
+            return $this->error_422('No se mandó ningún campo para actualizar.', [
+                'ayuda' => 'Mandá al menos uno de: version, title, description, status.',
+            ]);
+        }
+
+        $version = $this->resolver_version($id);
+        if ($version === null) {
+            return $this->error_404('no existe la versión ' . $id);
+        }
+
+        $codigo_cambia = false;
+        $codigo_nuevo  = null;
+
+        if ($request->has('version')) {
+            $codigo_nuevo  = (string) $request->input('version');
+            $codigo_cambia = $codigo_nuevo !== (string) $version->version;
+
+            if ($codigo_cambia) {
+                if (! preg_match(VersionNumberComparator::VALID_REGEX, $codigo_nuevo)) {
+                    return $this->error_422(
+                        'El código de versión debe tener al menos 3 componentes numéricos separados por puntos '
+                            . '(ej. 3.3.1 o 3.3.1.2).',
+                        ['parametro' => 'version']
+                    );
+                }
+
+                $duplicado = Version::where('version', $codigo_nuevo)
+                    ->where('id', '!=', $version->id)
+                    ->exists();
+                if ($duplicado) {
+                    return $this->error_422(
+                        'Ya existe otra versión con el código "' . $codigo_nuevo . '".',
+                        ['parametro' => 'version']
+                    );
+                }
+            }
+        }
+
+        if ($request->has('version')) {
+            $version->version = $codigo_nuevo;
+            if ($codigo_cambia) {
+                $version->is_hotfix = VersionNumberComparator::isHotfix($codigo_nuevo);
+            }
+        }
+
+        if ($request->has('title')) {
+            $version->title = $this->texto_o_null($request->input('title'));
+        }
+
+        if ($request->has('description')) {
+            $version->description = $this->texto_o_null($request->input('description'));
+        }
+
+        if ($request->has('status')) {
+            $version->status = (string) $request->input('status');
+            if ($version->status === 'published' && ! $version->published_at) {
+                $version->published_at = now();
+            }
+        }
+
+        $version->save();
+
+        return response()->json(['model' => $this->version_payload($version)], 200);
+    }
+
+    /**
+     * Borra una versión, con los dos frenos que un proceso automático necesita y una pantalla no.
+     *
+     * Misión "editar-eliminar-versiones" (9/9/2026). `VersionController::destroy_json()` (el del
+     * panel humano) hace `Version::findOrFail($id)->delete()` sin ningún chequeo, y las FK ya
+     * definidas en la base disparan cascadas reales: `client_version_upgrades.to_version_id` es
+     * `ON DELETE CASCADE` (se BORRA el historial de upgrades que apuntan a esta versión como
+     * destino), `from_version_id` y `clients.current_version_id` son `ON DELETE SET NULL`. Esto
+     * YA es el comportamiento del sistema — este endpoint no lo inventa —, pero un endpoint que un
+     * proceso automático puede llamar sin que nadie mire la pantalla necesita el mismo criterio de
+     * frenos que ya usa el resto del bloque `claude/*` para operaciones destructivas.
+     *
+     * 🔴 DOS FRENOS, Y EL SEGUNDO SÓLO CUANDO IMPORTA:
+     *  1. `dry_run`, default `true`. Con `dry_run` no borra nada: mide el impacto real contra la
+     *     base (`calcular_impacto_de_borrado()`) y lo devuelve junto con la versión.
+     *  2. `confirm_version_code`, obligatorio cuando `dry_run=false`. Tiene que coincidir con
+     *     `version.version` (el código, ej. "4.0.3") — es lo que un humano reconoce, no un id ni
+     *     un uuid. Ver `rechazar_si_el_codigo_de_version_no_confirma()`.
+     *  3. `confirm_borra_historial`, obligatorio (`=== true`) SÓLO si el impacto mide algún
+     *     `client_version_upgrades` con esta versión como destino: es el caso que de verdad
+     *     importa distinto, "borrar historial real de actualizaciones de clientes" y no sólo
+     *     "pisar un dato". Sin upgrades asociados, este flag no hace falta.
+     *
+     * Con los dos frenos satisfechos: borra (`$version->delete()`, mismo mecanismo que el panel,
+     * las cascadas las resuelve la base) y devuelve 200 con el mismo resumen de impacto YA
+     * aplicado — se mide antes de borrar porque después de la cascada esos conteos darían todos
+     * cero y la respuesta mentiría sobre lo que en verdad pasó.
+     *
+     * @param Request    $request Request entrante.
+     * @param int|string $id      Id numérico o uuid de la versión.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function versions_destroy_json(Request $request, $id)
+    {
+        $invalido = $this->validar_o_422($request, [
+            'dry_run'                 => 'nullable|boolean',
+            'confirm_version_code'    => 'nullable|string|max:30',
+            'confirm_borra_historial' => 'nullable|boolean',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $version = $this->resolver_version($id);
+        if ($version === null) {
+            return $this->error_404('no existe la versión ' . $id);
+        }
+
+        $impacto = $this->calcular_impacto_de_borrado($version);
+
+        $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
+        if ($dry_run) {
+            return response()->json([
+                'dry_run' => true,
+                'borro'   => false,
+                'model'   => $this->version_payload($version),
+                'impacto' => $impacto,
+                'nota' => 'No se borró NADA. Para borrar de verdad, repetí la misma llamada con dry_run=false y '
+                    . 'confirm_version_code igual al código de esta versión (mirá "model.version" en esta misma '
+                    . 'respuesta). ' . ($impacto['upgrades_hacia_esta_version'] > 0
+                        ? '🔴 Además hace falta confirm_borra_historial=true, porque hay '
+                            . $impacto['upgrades_hacia_esta_version'] . ' client_version_upgrades que se '
+                            . 'BORRARÍAN en cascada al borrar esta versión.'
+                        : 'No hay upgrades apuntando a esta versión como destino, así que confirm_borra_historial '
+                            . 'no hace falta.'),
+            ], 200);
+        }
+
+        $rechazo_codigo = $this->rechazar_si_el_codigo_de_version_no_confirma($request, $version);
+        if ($rechazo_codigo !== null) {
+            return $rechazo_codigo;
+        }
+
+        if ($impacto['upgrades_hacia_esta_version'] > 0) {
+            $confirmo_historial = $request->filled('confirm_borra_historial') && $request->boolean('confirm_borra_historial');
+            if (! $confirmo_historial) {
+                return $this->error_422(
+                    'Esta versión es destino de ' . $impacto['upgrades_hacia_esta_version'] . ' client_version_upgrades: '
+                        . 'borrarla se lleva puesto ese historial en cascada. Hace falta confirm_borra_historial=true '
+                        . 'explícito. No se borró nada.',
+                    [
+                        'version_id' => (int) $version->id,
+                        'impacto'    => $impacto,
+                        'ayuda'      => 'Repetí la misma llamada agregando confirm_borra_historial=true si es a propósito.',
+                    ]
+                );
+            }
+        }
+
+        $payload_antes = $this->version_payload($version);
+        $version->delete();
+
+        return response()->json([
+            'dry_run' => false,
+            'borro'   => true,
+            'model'   => $payload_antes,
+            'impacto' => $impacto,
+            'nota'    => 'Se borró la versión. El `impacto` de arriba es el que se APLICÓ: los client_version_upgrades '
+                . 'que la tenían como destino se borraron en cascada, los que la tenían como origen quedaron con '
+                . 'from_version_id null, y los clientes que la tenían como actual quedaron con current_version_id null.',
+        ], 200);
+    }
+
+    /**
+     * Mide, SIN borrar nada, el impacto real de borrar una versión: qué se pone en null y qué se
+     * borra en cascada por las FK ya definidas en la base (ver docblock de
+     * `versions_destroy_json()`), más los conteos de contenido propio de la versión.
+     *
+     * 🔴 Se calcula por consulta directa a la base (no por `count()` sobre relaciones Eloquent
+     * cargadas) para que el número sea exacto en el instante del borrado, incluida la respuesta
+     * que se devuelve DESPUÉS de borrar: ahí las relaciones del modelo ya están viejas.
+     *
+     * @param Version $version Versión a medir.
+     *
+     * @return array<string, int>
+     */
+    private function calcular_impacto_de_borrado(Version $version)
+    {
+        return [
+            'clientes_con_esta_como_actual' => (int) DB::table('clients')
+                ->where('current_version_id', $version->id)
+                ->count(),
+            'upgrades_hacia_esta_version' => (int) DB::table('client_version_upgrades')
+                ->where('to_version_id', $version->id)
+                ->count(),
+            'upgrades_desde_esta_version' => (int) DB::table('client_version_upgrades')
+                ->where('from_version_id', $version->id)
+                ->count(),
+            'notifications' => (int) DB::table('version_notifications')->where('version_id', $version->id)->count(),
+            'seeders'       => (int) DB::table('version_seeders')->where('version_id', $version->id)->count(),
+            'commands'      => (int) DB::table('version_commands')->where('version_id', $version->id)->count(),
+            'manual_tasks'  => (int) DB::table('version_manual_tasks')->where('version_id', $version->id)->count(),
+        ];
+    }
+
+    /**
+     * Freno de borrado: `confirm_version_code` tiene que coincidir con `version.version` (el
+     * código, ej. "4.0.3"). Mismo patrón que `rechazar_si_el_nombre_del_cliente_no_confirma()`
+     * del trait compartido, pero sobre el código de la versión — es lo que un humano reconoce, no
+     * un id ni un uuid.
+     *
+     * 🔴 Vive ACÁ y no en `RespuestasParaClaude`: es específico de este único endpoint, y meterlo
+     * en el trait lo haría parecer compartido cuando no lo es.
+     *
+     * 🔴 El error NO revela el código correcto, por el mismo motivo que el freno del nombre del
+     * cliente: si lo revelara dejaría de ser un freno y sería un formulario a completar. (El
+     * código SÍ es visible en la respuesta del `dry_run` — eso no es un secreto, es la versión que
+     * se está por borrar. El freno es no dejarlo pasar sin repetirlo a propósito.)
+     *
+     * @param Request $request Request entrante.
+     * @param Version $version Versión que se está por borrar.
+     *
+     * @return \Illuminate\Http\JsonResponse|null Null si confirma bien.
+     */
+    private function rechazar_si_el_codigo_de_version_no_confirma(Request $request, Version $version)
+    {
+        $recibido = trim((string) $request->input('confirm_version_code'));
+        $real     = trim((string) $version->version);
+
+        if ($recibido !== '' && $recibido === $real) {
+            return null;
+        }
+
+        return $this->error_422(
+            'confirm_version_code no coincide con el código de la versión que se está por borrar. No se borró nada.',
+            [
+                'version_id'   => (int) $version->id,
+                'version_uuid' => (string) $version->uuid,
+                'ayuda' => 'Consultá GET claude/versions?status=all para ver el código exacto, o repetí esta misma '
+                    . 'llamada con dry_run=true y mirá `model.version` en la respuesta. La respuesta de este error '
+                    . 'no dice el código a propósito: es un freno, no un formulario a completar.',
+            ]
+        );
     }
 
     /**
