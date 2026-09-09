@@ -901,12 +901,14 @@ return [
                 'Exige target_client_api_id cargado en el upgrade: sin API destino no arranca y devuelve 422 sin encolar nada.',
                 'allow_deploy_to_active_api: si la API destino es la que está en producción, hay que pedirlo explícito.',
                 'Encola con onConnection("database"): nunca corre el pipeline SSH adentro del request.',
-                '⚠️ BORRA los logs del intento anterior, igual que el botón del panel. Si querés el log de un intento fallido, leelo ANTES de reintentar.',
+                '⚠️ BORRA los logs del intento anterior, igual que el botón del panel — SALVO que mandes resume_from_step, que justamente los conserva. Si querés el log de un intento fallido, leelo ANTES de reintentar sin resume_from_step.',
+                '🔴 Desde la 4.0.23 el SPA y la API se BAJAN del release de GitHub (assets empresa-spa-v{version}-dist.zip y empresa-api-v{version}.zip). Si el asset no está, la etapa FALLA: ya NO se compila en el VPS de builds (decisión de Lucas, 9/9/2026). El mensaje del error dice qué archivo buscó y en qué tag. La salida de emergencia es DEPLOY_PERMITIR_BUILD_EN_VPS=true en el .env del admin, y se saca después.',
             ],
             'parametros'   => [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade a arrancar.'],
                 ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente del upgrade. El rechazo NO revela cuál era el correcto.'],
                 ['nombre' => 'allow_deploy_to_active_api', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Sólo hace falta si la API destino ES la activa en producción (pasa cuando el cliente tiene una sola ClientApi). Sin esto, ese caso es 422.'],
+                ['nombre' => 'resume_from_step', 'obligatorio' => false, 'validacion' => 'nullable|in:compile_spa,upload_spa,upload_api,run_migrations — 422 si el valor no está en esa lista, y 422 si el deployment anterior NO quedó failed', 'que_es' => 'REANUDA un pre-cierre fallado desde esa etapa en vez de rehacerlo entero, y CONSERVA los logs del intento anterior. Sirve cuando el corte fue de una etapa sola (el release todavía no tenía su asset, se cayó el SSH al escribir config.js): reanudar por la etapa equivocada vuelve a bajar y desplegar el SPA por nada. La respuesta trae desde_etapa. Nunca llega al post-cierre: el pipeline corta igual en pause_for_crons.'],
             ],
         ],
         'POST api/claude/upgrades/{id}/mark-crons' => [

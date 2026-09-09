@@ -237,12 +237,13 @@ class DeploymentService
      *     `storage/app/deployments/dist_<uuid>.zip` y la etapa termina ahí: NO se toca el VPS de
      *     builds. Las variables por frente ya no van cocinadas en el bundle: las escribe
      *     step_upload_spa() en `config.js` y la SPA las lee en runtime (SpaRuntimeConfig).
-     *  2. **VPS de builds.** Si no hay artefacto (versión publicada antes de esta misión, o release
-     *     sin el asset), el código de siempre: checkout del tag, `.env` por frente, `npm ci`,
-     *     `npm run build`, y el `dist/` queda en el VPS para que la etapa siguiente lo empaquete.
+     *  2. **VPS de builds, APAGADA.** El código de siempre —checkout del tag, `.env` por frente,
+     *     `npm ci`, `npm run build`— sigue acá, pero 🔴 **no corre salvo que alguien prenda
+     *     `DEPLOY_PERMITIR_BUILD_EN_VPS`** (decisión de Lucas, 9/9/2026). Sin artefacto, la etapa
+     *     FALLA: ver assert_build_en_vps_permitido().
      *
-     * 🔴 Si GitHub falla de otra forma (token vencido, 500, sin red) la etapa FALLA en vez de caer a
-     * la vía 2: mandar el build al VPS en silencio es exactamente lo que se vino a sacar, y con
+     * 🔴 Lo mismo si GitHub falla de otra forma (token vencido, 500, sin red): la etapa falla en vez
+     * de mandar el build al VPS en silencio, que es exactamente lo que se vino a sacar. Con
      * `resume_from_step=compile_spa` se reanuda desde acá cuando se arregle.
      *
      * 🔴 El zip local que pudiera haber quedado de un intento anterior se borra ANTES de decidir:
@@ -280,10 +281,12 @@ class DeploymentService
             return;
         }
 
+        $this->assert_build_en_vps_permitido('compile_spa', $asset_name, $tag, 'empresa-spa');
+
         $this->log(
             'compile_spa',
-            "Sin artefacto {$asset_name} en el release {$tag} de empresa-spa (no hay release o no trae el asset): "
-            . 'se compila en el VPS de builds'
+            "Sin artefacto {$asset_name} en el release {$tag} de empresa-spa, y DEPLOY_PERMITIR_BUILD_EN_VPS "
+            . 'esta prendida: se compila en el VPS de builds'
         );
 
         $this->connect_build_vps();
@@ -462,11 +465,13 @@ class DeploymentService
      *     `empresa-api-v{version}.zip` (el repo en la raíz, CON `vendor/`, sin `.git`/`.env`/
      *     `storage`/`public`/`tests`), se baja a `storage/app/deployments/api_<uuid>.zip` y NO se
      *     toca el VPS de builds: ni checkout, ni `composer install` allá, ni el zip de 759 MB.
-     *  2. **VPS de builds.** Si no hay artefacto, el código de siempre: checkout del tag, composer
-     *     sin scripts, zip con las exclusiones, descarga por SFTP, y al final la limpieza allá.
+     *  2. **VPS de builds, APAGADA.** El código de siempre —checkout del tag, composer sin scripts,
+     *     zip con las exclusiones, descarga por SFTP y limpieza allá— sigue acá, pero 🔴 **no corre
+     *     salvo que alguien prenda `DEPLOY_PERMITIR_BUILD_EN_VPS`**. Sin artefacto, la etapa FALLA:
+     *     ver assert_build_en_vps_permitido().
      *
-     * 🔴 Igual que en step_compile_spa(): un error de GitHub distinto de "no hay release/asset"
-     * hace fallar la etapa, no la manda al VPS en silencio.
+     * 🔴 Igual que en step_compile_spa(): tampoco un error de GitHub distinto de "no hay
+     * release/asset" manda el build al VPS en silencio.
      *
      * @return void
      */
@@ -495,10 +500,12 @@ class DeploymentService
             return;
         }
 
+        $this->assert_build_en_vps_permitido('upload_api', $asset_name, $tag, 'empresa-api');
+
         $this->log(
             'upload_api',
-            "Sin artefacto {$asset_name} en el release {$tag} de empresa-api (no hay release o no trae el asset): "
-            . 'se empaqueta en el VPS de builds'
+            "Sin artefacto {$asset_name} en el release {$tag} de empresa-api, y DEPLOY_PERMITIR_BUILD_EN_VPS "
+            . 'esta prendida: se empaqueta en el VPS de builds'
         );
 
         $this->connect_build_vps();
@@ -1435,6 +1442,37 @@ class DeploymentService
     }
 
     /**
+     * URL de la API destino para el `config.js`, exigiendo que no venga vacia.
+     *
+     * 🔴 Existe por una asimetria que dejo la mision: `spa_url_for_env()` valida y esta no. Y desde
+     * la 4.0.23 esta es la que mas importa, porque la SPA la compila GitHub Actions SIN `.env`:
+     * `config.js` pasa a ser la UNICA fuente de la URL de la API. Con la via vieja un `''` quedaba
+     * horneado en el bundle y el sintoma era el mismo, pero ahora ademas `write_spa_runtime_config()`
+     * loguearia 'success' con `- API: ` vacio: el frente queda arriba, sin poder pegarle a nada, y
+     * el deployment dice que salio bien. Cortar acá convierte eso en un upgrade fallado, que se ve.
+     *
+     * `normalize_api_base_url()` del resolver devuelve `''` tanto si la ClientApi no tiene url como
+     * si la tiene mal formada, asi que las dos terminan acá.
+     *
+     * @return string
+     *
+     * @throws \RuntimeException  Si la ClientApi destino no tiene una URL usable.
+     */
+    private function api_url_for_env(): string
+    {
+        $api_url = trim((string) $this->get_api_url_for_env());
+        if ($api_url === '') {
+            throw new \RuntimeException(
+                'La API destino (target_client_api) no tiene una api_url usable, asi que el config.js '
+                . 'del SPA saldria sin VUE_APP_API_URL y el frente no podria pegarle a su API. '
+                . 'Configurela en el cliente (ClientApi) y reanude con resume_from_step=upload_spa.'
+            );
+        }
+
+        return $api_url;
+    }
+
+    /**
      * Escribe `config.js` en el directorio del SPA del cliente, con las variables por frente.
      *
      * Es la mitad del admin del contrato con `empresa-spa` (misión `actualizar-sin-el-vps`,
@@ -1453,7 +1491,7 @@ class DeploymentService
     private function write_spa_runtime_config(string $step): void
     {
         $spa_dir = $this->get_spa_hosting_dir();
-        $api_url = $this->get_api_url_for_env();
+        $api_url = $this->api_url_for_env();
         $spa_url = $this->spa_url_for_env();
 
         $config_js = SpaRuntimeConfig::render($this->build_spa_env_vars($api_url, $spa_url));
@@ -2668,6 +2706,80 @@ class DeploymentService
     private function version_tag(): string
     {
         return 'v' . $this->upgrade->to_version->version;
+    }
+
+    /**
+     * Corta la etapa cuando falta el artefacto del release, en vez de mandar el build al VPS.
+     *
+     * 🔴 Decision de Lucas, 9/9/2026: "no quiero que se vuelva a usar mas el VPS para actualizar
+     * clientes". Antes, un asset ausente hacia caer a la via vieja con una linea de log; el
+     * problema es que ese camino no duele en el momento -el upgrade termina bien- y clava un
+     * nucleo de la maquina donde viven los 12 clientes del VPS durante 5-10 minutos por frente.
+     *
+     * Y lo que el 404 de GitHub esconde es de verdad ambiguo: puede ser un release sin el asset,
+     * un Action que fallo, la version escrita distinto en el commit ([release:X.Y.Z]) que en el
+     * admin (to_version->version), o un GITHUB_PROTOCOL_TOKEN que perdio acceso al repo. Ninguno
+     * de esos casos se arregla compilando en produccion: los cuatro son un error que hay que ver.
+     *
+     * El mensaje nombra el archivo exacto y el tag, que es lo que hace falta para saber cual de
+     * los cuatro es. La salida de emergencia es DEPLOY_PERMITIR_BUILD_EN_VPS=true.
+     *
+     * @param  string $step        Etapa que corta, para el log.
+     * @param  string $asset_name  Nombre exacto del asset que se busco.
+     * @param  string $tag         Tag del release donde se lo busco.
+     * @param  string $repo        Repo de GitHub donde se lo busco.
+     * @return void
+     *
+     * @throws \RuntimeException  Siempre, salvo que la salida de emergencia este prendida.
+     */
+    private function assert_build_en_vps_permitido(string $step, string $asset_name, string $tag, string $repo): void
+    {
+        if ($this->build_en_vps_permitido()) {
+            return;
+        }
+
+        $mensaje = $this->mensaje_sin_artefacto($step, $asset_name, $tag, $repo);
+
+        $this->log($step, $mensaje, 'error');
+
+        throw new \RuntimeException($mensaje);
+    }
+
+    /**
+     * Si esta corrida tiene permitido compilar en el VPS de builds.
+     *
+     * 🔴 El default es false y asi tiene que quedarse. Vive en un metodo propio para que un test
+     * pueda afirmar exactamente eso: el dia que alguien invierta el default, el test se pone rojo
+     * antes de que un upgrade se lleve puesta la CPU de los 12 clientes del VPS.
+     *
+     * @return bool
+     */
+    private function build_en_vps_permitido(): bool
+    {
+        return (bool) config('services.deploy.permitir_build_en_vps');
+    }
+
+    /**
+     * El mensaje con el que se corta cuando falta el artefacto.
+     *
+     * Tiene que nombrar el archivo exacto, el tag y el repo: son los tres datos con los que se
+     * distingue un Action que fallo de una version escrita distinta en el commit y en el admin, y
+     * sin ellos el error obliga a ir a buscarlos a mano. Y dice con que reanudar, porque cuando el
+     * release se arregla no hay que rehacer las etapas anteriores.
+     *
+     * @param  string $step        Etapa que corta.
+     * @param  string $asset_name  Nombre exacto del asset que se busco.
+     * @param  string $tag         Tag del release donde se lo busco.
+     * @param  string $repo        Repo de GitHub donde se lo busco.
+     * @return string
+     */
+    private function mensaje_sin_artefacto(string $step, string $asset_name, string $tag, string $repo): string
+    {
+        return "No esta el artefacto {$asset_name} en el release {$tag} de {$repo}. "
+            . 'No se compila en el VPS: revisa que el release exista, que el workflow haya terminado '
+            . 'verde y que la version del tag sea la misma que la del admin. Cuando este publicado, '
+            . "reanuda con resume_from_step={$step}. Para forzar el build en el VPS de builds, "
+            . 'DEPLOY_PERMITIR_BUILD_EN_VPS=true en el .env del admin.';
     }
 
     /**

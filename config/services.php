@@ -79,6 +79,29 @@ return [
 
     // Deployment automatizado (VPS de builds + hosting compartido).
     'deploy' => [
+        /*
+         * 🔴 Salida de emergencia, apagada a proposito (decision de Lucas, 9/9/2026: "no quiero
+         * que se vuelva a usar mas el VPS para actualizar clientes").
+         *
+         * Desde la 4.0.23 el zip de la SPA y el de la API los compila GitHub Actions al hacer el
+         * release y el admin los baja (ReleaseArtifactService). Cuando el asset NO esta, la etapa
+         * FALLA en vez de compilar en el VPS de builds. Parece mas duro y es al reves: un upgrade
+         * fallado se reintenta en dos minutos, y uno que se fue callado al VPS clava la maquina de
+         * los 12 clientes que viven ahi durante 5-10 minutos por frente.
+         *
+         * Y "no esta el asset" no siempre significa lo que parece: la version sale de dos fuentes
+         * que nadie cruza -Actions la saca del mensaje del commit [release:X.Y.Z] y el admin de
+         * to_version->version-, y ademas un GITHUB_PROTOCOL_TOKEN sin acceso al repo hace que
+         * GitHub responda 404, indistinguible de "el release no trae el asset". Los dos casos son
+         * un error que hay que ver, no un motivo para compilar en produccion.
+         *
+         * Poner DEPLOY_PERMITIR_BUILD_EN_VPS=true solo para desbloquear un cliente puntual cuando
+         * el release esta roto y no se puede rehacer, y sacarlo despues.
+         */
+        'permitir_build_en_vps' => filter_var(
+            env('DEPLOY_PERMITIR_BUILD_EN_VPS', false),
+            FILTER_VALIDATE_BOOLEAN
+        ),
         'builds_spa_path' => env('DEPLOY_BUILDS_SPA_PATH', '/home/builds/empresa-spa'),
         'builds_api_path' => env('DEPLOY_BUILDS_API_PATH', '/home/builds/empresa-api'),
         // bash -lic carga .bashrc (nvm suele estar ahí); desactivar solo si rompe el shell remoto.
