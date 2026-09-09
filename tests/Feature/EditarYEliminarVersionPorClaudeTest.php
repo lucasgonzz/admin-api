@@ -16,15 +16,20 @@ use Tests\TestCase;
  *
  * Lo que estos tests protegen, en orden de importancia:
  *
- *  1. 🔴 El borrado hereda las cascadas REALES de la base (`client_version_upgrades.to_version_id`
- *     ON DELETE CASCADE, `from_version_id` y `clients.current_version_id` ON DELETE SET NULL) y
- *     los dos frenos —`confirm_version_code` siempre, `confirm_borra_historial` sólo cuando hay
- *     upgrades apuntando a esta versión como destino— tienen que impedir un borrado accidental
- *     sin impedir uno real.
- *  2. La misma excepción del panel humano en la edición: un código IDÉNTICO al ya persistido no
+ *  1. 🔴 Una versión con filas en `demo_updates` NO SE PUEDE BORRAR: esa FK se declaró sin
+ *     `onDelete`, o sea RESTRICT, y sin este bloqueo el endpoint devolvía un 500 crudo con stack
+ *     trace después de un dry_run que decía que el borrado era inocuo.
+ *  2. 🔴 El borrado hereda las cascadas REALES de la base (`client_version_upgrades.to_version_id`
+ *     ON DELETE CASCADE, `from_version_id` y `clients.current_version_id` ON DELETE SET NULL),
+ *     incluidas las de SEGUNDO orden (`update_seeders`, `update_commands`,
+ *     `client_notification_reads`), y los dos frenos —`confirm_version_code` siempre,
+ *     `confirm_borra_historial` cuando hay historial de terceros de CUALQUIERA de esas cuatro
+ *     tablas— tienen que impedir un borrado accidental sin impedir uno real.
+ *  3. La misma excepción del panel humano en la edición: un código IDÉNTICO al ya persistido no
  *     exige el regex, para no bloquear la edición de una versión legacy con formato viejo.
- *  3. `is_hotfix` se recalcula en la edición SOLO cuando el código cambia de verdad, y nunca por
- *     override explícito (a diferencia del panel humano, que sí lo permite).
+ *  4. `is_hotfix` se recalcula en la edición SOLO cuando el código cambia de verdad, y nunca por
+ *     override explícito (a diferencia del panel humano, que sí lo permite) — un override humano
+ *     ya puesto en la base sobrevive a un PATCH que no toca el código.
  */
 class EditarYEliminarVersionPorClaudeTest extends TestCase
 {
@@ -135,6 +140,156 @@ class EditarYEliminarVersionPorClaudeTest extends TestCase
             'status'         => 'pendiente',
             'scheduled_date' => now()->toDateString(),
         ], $atributos));
+    }
+
+    /**
+     * Una demo y una actualización de demo apuntando a esta versión. Es el caso que la base NO deja
+     * borrar: `demo_updates.version_id` se declaró sin `onDelete`, o sea RESTRICT.
+     *
+     * @param Version $version Versión destino de la actualización de demo.
+     *
+     * @return int Id de la fila de demo_updates.
+     */
+    private function crear_demo_update(Version $version): int
+    {
+        $demo_id = DB::table('demos')->insertGetId([
+            'uuid'              => (string) Str::uuid(),
+            'erp_spa_url'       => 'https://demo-' . Str::random(6) . '.test',
+            'erp_api_url'       => 'https://api-demo-' . Str::random(6) . '.test',
+            'ecommerce_spa_url' => 'https://tienda-' . Str::random(6) . '.test',
+            'ecommerce_api_url' => 'https://api-tienda-' . Str::random(6) . '.test',
+            'created_at'        => now(),
+            'updated_at'        => now(),
+        ]);
+
+        return (int) DB::table('demo_updates')->insertGetId([
+            'uuid'       => (string) Str::uuid(),
+            'demo_id'    => $demo_id,
+            'version_id' => $version->id,
+            'status'     => 'completado',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    /**
+     * Notificación de una versión.
+     *
+     * @param Version $version Versión dueña.
+     *
+     * @return int Id de version_notifications.
+     */
+    private function crear_notificacion(Version $version): int
+    {
+        return (int) DB::table('version_notifications')->insertGetId([
+            'uuid'       => (string) Str::uuid(),
+            'version_id' => $version->id,
+            'title'      => 'Novedad ' . Str::random(6),
+            'body'       => 'Cuerpo de la novedad.',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    /**
+     * Lectura de una notificación por un usuario de un cliente: cascada de SEGUNDO orden, cuelga de
+     * `version_notifications` y no tiene ninguna FK contra `versions`.
+     *
+     * @param int    $notification_id Id de version_notifications.
+     * @param Client $client          Cliente que la leyó.
+     *
+     * @return void
+     */
+    private function crear_lectura_de_notificacion(int $notification_id, Client $client): void
+    {
+        DB::table('client_notification_reads')->insert([
+            'uuid'                    => (string) Str::uuid(),
+            'client_id'               => $client->id,
+            'version_notification_id' => $notification_id,
+            'client_user_id'          => random_int(1, 999999),
+            'client_user_name'        => 'Usuario de prueba',
+            'read_at'                 => now(),
+            'created_at'              => now(),
+            'updated_at'              => now(),
+        ]);
+    }
+
+    /**
+     * Seeder declarado en una versión.
+     *
+     * @param Version $version Versión dueña.
+     *
+     * @return int Id de version_seeders.
+     */
+    private function crear_version_seeder(Version $version): int
+    {
+        return (int) DB::table('version_seeders')->insertGetId([
+            'uuid'         => (string) Str::uuid(),
+            'version_id'   => $version->id,
+            'seeder_class' => 'SeederDePrueba' . Str::random(6),
+            'created_at'   => now(),
+            'updated_at'   => now(),
+        ]);
+    }
+
+    /**
+     * Comando declarado en una versión.
+     *
+     * @param Version $version Versión dueña.
+     *
+     * @return int Id de version_commands.
+     */
+    private function crear_version_command(Version $version): int
+    {
+        return (int) DB::table('version_commands')->insertGetId([
+            'uuid'       => (string) Str::uuid(),
+            'version_id' => $version->id,
+            'command'    => 'php artisan prueba:' . Str::random(6),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    /**
+     * Registro de ejecución de un seeder en una actualización concreta de un cliente: cascada de
+     * SEGUNDO orden por DOS rutas (el `version_seeder` de la versión, y el upgrade que la tiene
+     * como destino).
+     *
+     * @param ClientVersionUpgrade $upgrade          Actualización dueña.
+     * @param int                  $version_seeder_id Seeder ejecutado.
+     *
+     * @return void
+     */
+    private function crear_update_seeder(ClientVersionUpgrade $upgrade, int $version_seeder_id): void
+    {
+        DB::table('update_seeders')->insert([
+            'uuid'                      => (string) Str::uuid(),
+            'client_version_upgrade_id' => $upgrade->id,
+            'version_seeder_id'         => $version_seeder_id,
+            'status'                    => 'exitoso',
+            'created_at'                => now(),
+            'updated_at'                => now(),
+        ]);
+    }
+
+    /**
+     * Igual que `crear_update_seeder()`, para comandos.
+     *
+     * @param ClientVersionUpgrade $upgrade            Actualización dueña.
+     * @param int                  $version_command_id Comando ejecutado.
+     *
+     * @return void
+     */
+    private function crear_update_command(ClientVersionUpgrade $upgrade, int $version_command_id): void
+    {
+        DB::table('update_commands')->insert([
+            'uuid'                      => (string) Str::uuid(),
+            'client_version_upgrade_id' => $upgrade->id,
+            'version_command_id'        => $version_command_id,
+            'status'                    => 'exitoso',
+            'created_at'                => now(),
+            'updated_at'                => now(),
+        ]);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -249,6 +404,85 @@ class EditarYEliminarVersionPorClaudeTest extends TestCase
         $response->assertStatus(200);
         $response->assertJsonPath('model.status', 'published');
         $this->assertNotNull($response->json('model.published_at'));
+
+        /* 🔴 El valor se verifica en la BASE, no sólo en la respuesta: un `published_at` que sale
+           bien en el JSON pero nunca se persiste es exactamente el defecto que este test tiene que
+           agarrar, y la respuesta lo esconde porque se arma del mismo modelo en memoria. */
+        $persistida = Version::find($version->id);
+        $this->assertSame('published', $persistida->status);
+        $this->assertNotNull($persistida->published_at);
+        $this->assertLessThanOrEqual(60, abs(now()->diffInSeconds($persistida->published_at)));
+    }
+
+    public function test_edicion_acepta_published_at_explicito_y_le_gana_al_now_automatico()
+    {
+        $version = $this->crear_version($this->codigo_unico(), 'draft');
+        $this->assertNull($version->published_at);
+
+        /* Una versión ya publicada a la que hay que corregirle la fecha: sin este parámetro, el
+           `now()` que estampó el pase a published quedaba congelado para siempre. */
+        $response = $this->patchJson('/api/claude/versions/' . $version->id, [
+            'status'       => 'published',
+            'published_at' => '2026-01-15 10:30:00',
+        ], $this->headers());
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('model.status', 'published');
+        $this->assertStringStartsWith('2026-01-15T10:30:00', (string) $response->json('model.published_at'));
+
+        $this->assertDatabaseHas('versions', [
+            'id'           => $version->id,
+            'published_at' => '2026-01-15 10:30:00',
+        ]);
+
+        /* Y se puede volver a corregir sobre una versión que ya tenía fecha, sin tocar el status. */
+        $segunda = $this->patchJson('/api/claude/versions/' . $version->id, [
+            'published_at' => '2026-02-20 08:00:00',
+        ], $this->headers());
+
+        $segunda->assertStatus(200);
+        $this->assertDatabaseHas('versions', [
+            'id'           => $version->id,
+            'published_at' => '2026-02-20 08:00:00',
+        ]);
+    }
+
+    public function test_edicion_no_recalcula_is_hotfix_si_el_codigo_no_cambia()
+    {
+        /* Versión de 3 componentes: por cálculo automático, is_hotfix daría FALSE. */
+        $codigo  = $this->codigo_unico();
+        $version = $this->crear_version($codigo, 'draft', false);
+
+        /* Override humano puesto a mano en la base, como el checkbox del panel: el panel humano SÍ
+           deja forzarlo, y `claude/*` no tiene por qué pisarlo al editar otra cosa. */
+        DB::table('versions')->where('id', $version->id)->update(['is_hotfix' => true]);
+
+        $response = $this->patchJson('/api/claude/versions/' . $version->id, [
+            'title' => 'Título nuevo sin tocar el código',
+        ], $this->headers());
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('model.is_hotfix', true);
+        $this->assertTrue((bool) Version::find($version->id)->is_hotfix);
+
+        /* Mandar el MISMO código tampoco es un cambio: tampoco recalcula. */
+        $segunda = $this->patchJson('/api/claude/versions/' . $version->id, [
+            'version' => $codigo,
+            'title'   => 'Otro título más',
+        ], $this->headers());
+
+        $segunda->assertStatus(200);
+        $segunda->assertJsonPath('model.is_hotfix', true);
+        $this->assertTrue((bool) Version::find($version->id)->is_hotfix);
+    }
+
+    public function test_edicion_de_version_inexistente_con_cuerpo_vacio_da_404_no_422()
+    {
+        /* 🔴 El id manda sobre el cuerpo: contestar 422 ("no mandaste campos") sobre un id que no
+           existe manda a corregir el cuerpo cuando el problema es la fila que no está. */
+        $response = $this->patchJson('/api/claude/versions/999999999', [], $this->headers());
+
+        $response->assertStatus(404);
     }
 
     public function test_edicion_a_otra_transicion_no_pisa_published_at_existente()
@@ -365,6 +599,8 @@ class EditarYEliminarVersionPorClaudeTest extends TestCase
         $response->assertJsonPath('impacto.seeders', 1);
         $response->assertJsonPath('impacto.commands', 1);
         $response->assertJsonPath('impacto.manual_tasks', 1);
+        $response->assertJsonPath('impacto.demo_updates', 0);
+        $response->assertJsonPath('se_puede_borrar', true);
 
         $this->assertDatabaseHas('versions', ['id' => $version_destino->id]);
 
@@ -498,5 +734,184 @@ class EditarYEliminarVersionPorClaudeTest extends TestCase
         $response = $this->deleteJson('/api/claude/versions/' . $version->id, [], ['Accept' => 'application/json']);
 
         $response->assertStatus(401);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // El bloqueo duro y las cascadas de segundo orden
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * 🔴 EL CASO QUE TIRABA UN 500 CRUDO. `demo_updates.version_id` se declaró sin `onDelete`, o sea
+     * RESTRICT: el `delete()` moría con una QueryException 1451 y la respuesta salía con stack trace
+     * y rutas del disco. Y antes de eso, el dry_run reportaba los siete conteos en cero y decía que
+     * `confirm_borra_historial` no hacía falta: un proceso automático leía "esto es inocuo" y se
+     * comía el 500 en la llamada siguiente.
+     *
+     * @return void
+     */
+    public function test_borrado_de_version_con_demo_updates_se_bloquea_en_dry_run_y_en_el_borrado_real()
+    {
+        $version = $this->crear_version($this->codigo_unico(), 'published');
+        $this->crear_demo_update($version);
+
+        /* El dry_run tiene que ser honesto: no se puede borrar, y lo dice. */
+        $dry_run = $this->deleteJson('/api/claude/versions/' . $version->id, [], $this->headers());
+
+        $dry_run->assertStatus(200);
+        $dry_run->assertJsonPath('dry_run', true);
+        $dry_run->assertJsonPath('borro', false);
+        $dry_run->assertJsonPath('se_puede_borrar', false);
+        $dry_run->assertJsonPath('impacto.demo_updates', 1);
+        $this->assertStringContainsString('demo_updates', (string) $dry_run->json('nota'));
+        $this->assertStringContainsString('NO SE PUEDE BORRAR', (string) $dry_run->json('nota'));
+
+        /* Y el borrado real rechaza con 422 ANTES de tocar la base, aun con los dos frenos
+           satisfechos: no hay confirmación que destrabe una FK RESTRICT. */
+        $real = $this->deleteJson('/api/claude/versions/' . $version->id, [
+            'dry_run'                 => false,
+            'confirm_version_code'    => $version->version,
+            'confirm_borra_historial' => true,
+        ], $this->headers());
+
+        $real->assertStatus(422);
+        $real->assertJsonPath('impacto.demo_updates', 1);
+
+        $this->assertDatabaseHas('versions', ['id' => $version->id]);
+        $this->assertDatabaseHas('demo_updates', ['version_id' => $version->id]);
+    }
+
+    /**
+     * El `impacto` mide las cascadas de SEGUNDO orden —las que no tienen ninguna FK contra
+     * `versions` y desaparecen igual— más la tabla puente sin FK, que se informa y nada más.
+     *
+     * `update_seeders`/`update_commands` entran por DOS rutas y este test arma una de cada una: un
+     * registro de ejecución que cuelga de un seeder/comando DE ESTA VERSIÓN (aunque la actualización
+     * sea de otra), y otro que cuelga de una actualización que tiene a ESTA VERSIÓN como destino
+     * (aunque el seeder/comando sea de otra). El conteo es uno solo por tabla: 2 y 2.
+     *
+     * @return void
+     */
+    public function test_el_impacto_incluye_las_cascadas_de_segundo_orden_y_la_tabla_puente_sin_fk()
+    {
+        $version = $this->crear_version($this->codigo_unico(), 'published');
+        $otra    = $this->crear_version($this->codigo_unico(), 'published');
+        $cliente = $this->crear_cliente();
+
+        /* Ruta A: upgrade hacia ESTA versión (se borra en cascada, y con él sus update_*). */
+        $upgrade_hacia = $this->crear_upgrade($cliente, ['to_version_id' => $version->id]);
+        /* Ruta B: upgrade ajeno, que ejecutó un seeder/comando DE ESTA versión. */
+        $upgrade_ajeno = $this->crear_upgrade($cliente, ['to_version_id' => $otra->id]);
+
+        $seeder_propio = $this->crear_version_seeder($version);
+        $seeder_ajeno  = $this->crear_version_seeder($otra);
+        $this->crear_update_seeder($upgrade_ajeno, $seeder_propio);
+        $this->crear_update_seeder($upgrade_hacia, $seeder_ajeno);
+
+        $command_propio = $this->crear_version_command($version);
+        $command_ajeno  = $this->crear_version_command($otra);
+        $this->crear_update_command($upgrade_ajeno, $command_propio);
+        $this->crear_update_command($upgrade_hacia, $command_ajeno);
+
+        $notificacion = $this->crear_notificacion($version);
+        $this->crear_lectura_de_notificacion($notificacion, $cliente);
+
+        DB::table('client_version_upgrade_versions')->insert([
+            'client_version_upgrade_id' => $upgrade_ajeno->id,
+            'version_id'                => $version->id,
+        ]);
+
+        $response = $this->deleteJson('/api/claude/versions/' . $version->id, [], $this->headers());
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('impacto.update_seeders', 2);
+        $response->assertJsonPath('impacto.update_commands', 2);
+        $response->assertJsonPath('impacto.client_notification_reads', 1);
+        $response->assertJsonPath('impacto.client_version_upgrade_versions', 1);
+        $response->assertJsonPath('impacto.demo_updates', 0);
+
+        /* La nota del dry_run nombra los motivos, no sólo los upgrades. */
+        $nota = (string) $response->json('nota');
+        $this->assertStringContainsString('update_seeders', $nota);
+        $this->assertStringContainsString('update_commands', $nota);
+        $this->assertStringContainsString('client_notification_reads', $nota);
+    }
+
+    /**
+     * 🔴 EL AGUJERO DEL FRENO. El disparador de `confirm_borra_historial` estaba atado a
+     * `upgrades_hacia_esta_version`, que es la tabla equivocada: una versión que sólo es ORIGEN de
+     * upgrades (cero upgrades hacia ella) pero que sí tiene lecturas de sus notificaciones borraba
+     * historial real de clientes sin que nadie lo confirmara.
+     *
+     * @return void
+     */
+    public function test_confirm_borra_historial_se_exige_por_lecturas_de_notificacion_sin_upgrades_hacia_la_version()
+    {
+        $version = $this->crear_version($this->codigo_unico(), 'published');
+        $otra    = $this->crear_version($this->codigo_unico(), 'published');
+        $cliente = $this->crear_cliente();
+
+        /* Sólo como ORIGEN: upgrades_hacia_esta_version queda en cero. */
+        $this->crear_upgrade($cliente, [
+            'from_version_id' => $version->id,
+            'to_version_id'   => $otra->id,
+        ]);
+
+        $notificacion = $this->crear_notificacion($version);
+        $this->crear_lectura_de_notificacion($notificacion, $cliente);
+
+        $dry_run = $this->deleteJson('/api/claude/versions/' . $version->id, [], $this->headers());
+
+        $dry_run->assertStatus(200);
+        $dry_run->assertJsonPath('impacto.upgrades_hacia_esta_version', 0);
+        $dry_run->assertJsonPath('impacto.client_notification_reads', 1);
+        $this->assertStringContainsString('confirm_borra_historial=true', (string) $dry_run->json('nota'));
+
+        /* Con el código confirmado pero sin confirm_borra_historial: rechaza igual. */
+        $sin_confirmar = $this->deleteJson('/api/claude/versions/' . $version->id, [
+            'dry_run'              => false,
+            'confirm_version_code' => $version->version,
+        ], $this->headers());
+
+        $sin_confirmar->assertStatus(422);
+        $this->assertDatabaseHas('versions', ['id' => $version->id]);
+        $this->assertDatabaseHas('client_notification_reads', ['version_notification_id' => $notificacion]);
+
+        /* Con el flag: borra, y las lecturas se van con la notificación. */
+        $con_confirmacion = $this->deleteJson('/api/claude/versions/' . $version->id, [
+            'dry_run'                 => false,
+            'confirm_version_code'    => $version->version,
+            'confirm_borra_historial' => true,
+        ], $this->headers());
+
+        $con_confirmacion->assertStatus(200);
+        $con_confirmacion->assertJsonPath('borro', true);
+        $this->assertDatabaseMissing('versions', ['id' => $version->id]);
+        $this->assertDatabaseMissing('client_notification_reads', ['version_notification_id' => $notificacion]);
+    }
+
+    /**
+     * El mismo agujero, por la otra punta: registros de ejecución de seeders/comandos sin ningún
+     * upgrade hacia esta versión.
+     *
+     * @return void
+     */
+    public function test_confirm_borra_historial_se_exige_por_update_seeders_sin_upgrades_hacia_la_version()
+    {
+        $version = $this->crear_version($this->codigo_unico(), 'published');
+        $otra    = $this->crear_version($this->codigo_unico(), 'published');
+        $cliente = $this->crear_cliente();
+
+        $upgrade_ajeno = $this->crear_upgrade($cliente, ['to_version_id' => $otra->id]);
+        $this->crear_update_seeder($upgrade_ajeno, $this->crear_version_seeder($version));
+
+        $sin_confirmar = $this->deleteJson('/api/claude/versions/' . $version->id, [
+            'dry_run'              => false,
+            'confirm_version_code' => $version->version,
+        ], $this->headers());
+
+        $sin_confirmar->assertStatus(422);
+        $sin_confirmar->assertJsonPath('impacto.upgrades_hacia_esta_version', 0);
+        $sin_confirmar->assertJsonPath('impacto.update_seeders', 1);
+        $this->assertDatabaseHas('versions', ['id' => $version->id]);
     }
 }

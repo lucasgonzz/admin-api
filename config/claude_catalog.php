@@ -738,8 +738,13 @@ return [
                     . 'bloquear la edición de una versión legacy con formato viejo, ej. "3.3").',
                 '🔴 `is_hotfix` se recalcula SOLO si `version` cambia, y SIN override: a diferencia del panel humano, '
                     . 'claude/* nunca permite forzarlo distinto del cálculo automático.',
-                'Al pasar `status` a `published` sin `published_at` previo, se setea `now()`; cualquier otra '
-                    . 'transición no lo toca.',
+                'Al pasar `status` a `published` sin `published_at` previo ni `published_at` explícito en la misma '
+                    . 'llamada, se setea `now()`; cualquier otra transición no lo toca. Un `published_at` explícito '
+                    . 'con valor se usa TAL CUAL y le gana al now() automático — mismo criterio que '
+                    . 'VersionController::extract_data() en el panel humano, y la única forma de corregir esa fecha '
+                    . 'una vez estampada.',
+                'La versión se resuelve ANTES de exigir que haya algún campo: un PATCH con cuerpo vacío sobre un id '
+                    . 'inexistente contesta 404, no 422.',
                 'Sin dry_run ni confirm_*: es un UPDATE de una sola fila, sin cascada ni efecto en otras tablas — '
                     . 'mismo criterio de riesgo que el alta.',
             ],
@@ -749,6 +754,7 @@ return [
                 ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:200', 'que_es' => 'Título visible en el panel.'],
                 ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:5000', 'que_es' => 'Descripción larga.'],
                 ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|in:draft,published,archived', 'que_es' => 'Estado nuevo.'],
+                ['nombre' => 'published_at', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date', 'que_es' => 'Fecha de publicación. Con valor se usa tal cual; sin ella y con status=published sin fecha previa, se setea now().'],
             ],
         ],
         'DELETE api/claude/versions/{id}' => [
@@ -756,27 +762,42 @@ return [
             'escribe'      => true,
             'peligrosidad' => 'alta',
             'frenos'       => [
+                '🔴 BLOQUEO DURO, SIN FLAG QUE LO DESTRABE: si la versión tiene filas en `demo_updates`, NO SE BORRA. '
+                    . 'Esa FK se declaró sin onDelete, o sea RESTRICT: el delete moriría con una QueryException 1451 y '
+                    . 'un 500 crudo. Se rechaza con 422 tanto en el dry_run (que además lo dice en `se_puede_borrar`) '
+                    . 'como en el borrado real, antes de tocar la base. La versión se puede archivar, no borrar.',
                 'dry_run por defecto TRUE: sin dry_run=false explícito no borra nada, y devuelve el impacto real medido '
-                    . 'contra la base (clientes que quedarían con current_version_id null, upgrades que se borrarían '
-                    . 'en cascada como destino, upgrades que quedarían con from_version_id null, y los conteos propios '
-                    . 'de notifications/seeders/commands/manual_tasks).',
+                    . 'contra la base — clientes que quedarían con current_version_id null; upgrades que se borrarían '
+                    . 'en cascada como destino; upgrades que quedarían con from_version_id null; los conteos propios '
+                    . 'de notifications/seeders/commands/manual_tasks; las cascadas de SEGUNDO orden '
+                    . '(update_seeders y update_commands, que cuelgan de los seeders/comandos de esta versión y de los '
+                    . 'upgrades que la tienen como destino, y client_notification_reads, que cuelgan de sus '
+                    . 'notificaciones); el bloqueante demo_updates; y, sólo informativo, '
+                    . 'client_version_upgrade_versions.',
                 'confirm_version_code obligatorio cuando dry_run=false: tiene que coincidir con el CÓDIGO de la '
                     . 'versión (ej. "4.0.3"), no con el id ni el uuid — es lo que un humano reconoce. El rechazo no '
                     . 'revela el código correcto.',
-                'confirm_borra_historial obligatorio (=== true) SOLO cuando el impacto mide algún '
-                    . 'client_version_upgrades con esta versión como destino (los que se BORRAN en cascada por la FK '
-                    . 'to_version_id). Sin upgrades asociados este flag no hace falta.',
+                'confirm_borra_historial (booleano true/1) obligatorio SOLO cuando el borrado se lleva puesto '
+                    . 'HISTORIAL DE TERCEROS, o sea si CUALQUIERA de estos es mayor que cero: '
+                    . 'upgrades_hacia_esta_version, update_seeders, update_commands o client_notification_reads. '
+                    . 'Atarlo a una sola tabla dejaba pasar sin confirmar una versión que no es destino de ningún '
+                    . 'upgrade pero sí tiene lecturas de sus notificaciones. Los conteos PROPIOS de la versión '
+                    . '(notifications, seeders, commands, manual_tasks) no disparan el freno: son contenido de la '
+                    . 'versión, no historial de clientes.',
                 '🔴 El borrado es EN CASCADA por las FK ya definidas en la base: client_version_upgrades.to_version_id '
-                    . 'es ON DELETE CASCADE (se pierden esas filas), from_version_id y clients.current_version_id son '
-                    . 'ON DELETE SET NULL. Este endpoint no inventa el comportamiento: hereda el que ya tiene '
-                    . 'VersionController::destroy_json() del panel humano, con los frenos que un proceso automático '
-                    . 'necesita y una pantalla no.',
+                    . 'es ON DELETE CASCADE (se pierden esas filas, y con ellas sus update_seeders/update_commands), '
+                    . 'from_version_id y clients.current_version_id son ON DELETE SET NULL. Este endpoint no inventa '
+                    . 'el comportamiento: hereda el que ya tiene VersionController::destroy_json() del panel humano, '
+                    . 'con los frenos que un proceso automático necesita y una pantalla no.',
+                '⚠️ client_version_upgrade_versions se INFORMA pero no frena ni se limpia: esa tabla puente no tiene '
+                    . 'ninguna clave foránea, así que sus filas quedan huérfanas apuntando a un version_id que ya no '
+                    . 'existe. Se cuenta para que el borrado no lo esconda; resolverlo es otra misión.',
             ],
             'parametros'   => [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'La versión a borrar. GET claude/versions la resuelve.'],
-                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO borra nada. Con dry_run devuelve el impacto medido.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO borra nada. Con dry_run devuelve el impacto medido y se_puede_borrar.'],
                 ['nombre' => 'confirm_version_code', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30 — obligatorio cuando dry_run=false', 'que_es' => 'El código exacto de la versión (ej. "4.0.3"), no el id ni el uuid. El rechazo NO revela el código correcto.'],
-                ['nombre' => 'confirm_borra_historial', 'obligatorio' => false, 'validacion' => 'nullable|boolean — obligatorio (=== true) solo si hay upgrades apuntando a esta versión como destino', 'que_es' => 'Confirma que sabés que se borra historial real de actualizaciones de clientes, no solo la fila de versions.'],
+                ['nombre' => 'confirm_borra_historial', 'obligatorio' => false, 'validacion' => 'nullable|boolean (true/1) — obligatorio solo si hay historial de terceros: upgrades hacia esta versión, update_seeders, update_commands o client_notification_reads', 'que_es' => 'Confirma que sabés que se borra historial real de clientes (qué actualización corrió qué, y quién leyó qué notificación), no solo la fila de versions.'],
             ],
         ],
         'GET api/claude/upgrades' => [

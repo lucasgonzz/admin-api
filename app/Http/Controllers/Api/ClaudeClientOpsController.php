@@ -332,39 +332,50 @@ class ClaudeClientOpsController extends Controller
                 ],
                 'PATCH claude/versions/{id}' => [
                     'parametros' => [
-                        'version'     => 'Opcional (sometimes). Mismo regex que el alta (al menos 3 componentes numéricos), '
+                        'version'      => 'Opcional (sometimes). Mismo regex que el alta (al menos 3 componentes numéricos), '
                             . 'único excluyendo esta misma versión. Excepción: si el código que mandás es IDÉNTICO al ya '
                             . 'persistido, no se exige el regex — para no bloquear la edición de título/descripción/estado '
                             . 'de una versión legacy con formato viejo (ej. "3.3").',
-                        'title'       => 'Opcional (sometimes), nullable, máximo 200 caracteres.',
-                        'description' => 'Opcional (sometimes), nullable, máximo 5000 caracteres.',
-                        'status'      => 'Opcional (sometimes): draft | published | archived.',
+                        'title'        => 'Opcional (sometimes), nullable, máximo 200 caracteres.',
+                        'description'  => 'Opcional (sometimes), nullable, máximo 5000 caracteres.',
+                        'status'       => 'Opcional (sometimes): draft | published | archived.',
+                        'published_at' => 'Opcional (sometimes), nullable, fecha-hora. Si viene con valor se usa TAL CUAL y le '
+                            . 'gana al now() automático — es la única forma de corregir la fecha de publicación después.',
                     ],
                     'nota' => '🔴 `is_hotfix` se RECALCULA solo si `version` cambia, con el mismo cálculo automático del '
                         . 'alta (más de 3 componentes = hotfix). Sin override: a diferencia del panel humano, `claude/*` '
                         . 'nunca permite forzarlo distinto del cálculo. Al pasar `status` a `published` sin `published_at` '
-                        . 'previo, se setea `now()`; cualquier otra transición no lo toca. Si no mandás NINGÚN campo, 422. '
-                        . 'Sin dry_run ni confirm_*: es un UPDATE de una sola fila, sin cascada ni efecto en otras tablas.',
+                        . 'previo ni `published_at` explícito en esta misma llamada, se setea `now()`; cualquier otra '
+                        . 'transición no lo toca. Si no mandás NINGÚN campo, 422 — pero si además la versión no existe, '
+                        . 'primero es 404. Sin dry_run ni confirm_*: es un UPDATE de una sola fila, sin cascada ni efecto '
+                        . 'en otras tablas.',
                 ],
                 'DELETE claude/versions/{id}' => [
                     'parametros' => [
-                        'dry_run'                 => 'Booleano. Default TRUE: no borra nada, devuelve la versión y el `impacto` '
-                            . 'medido contra la base.',
+                        'dry_run'                 => 'Booleano. Default TRUE: no borra nada, devuelve la versión, el `impacto` '
+                            . 'medido contra la base y `se_puede_borrar`.',
                         'confirm_version_code'    => 'Obligatorio cuando dry_run es false. Tiene que coincidir con el CÓDIGO de '
                             . 'la versión (ej. "4.0.3"), no con el id ni el uuid. El error no revela el código correcto.',
-                        'confirm_borra_historial' => 'Booleano, obligatorio (=== true) SOLO si el impacto mide algún '
-                            . '`client_version_upgrades` con esta versión como destino. Sin upgrades asociados no hace falta.',
+                        'confirm_borra_historial' => 'Booleano (true/1), obligatorio SOLO si el impacto mide historial de '
+                            . 'terceros: upgrades hacia esta versión, update_seeders, update_commands o '
+                            . 'client_notification_reads. Sin nada de eso no hace falta.',
                     ],
-                    'nota' => '🔴 EL BORRADO ES EN CASCADA, Y NO LO INVENTA ESTE ENDPOINT: hereda el mismo comportamiento que ya '
-                        . 'tiene `VersionController::destroy_json()` en el panel humano. `client_version_upgrades.to_version_id` '
-                        . 'tiene FK ON DELETE CASCADE (se BORRAN las filas que apuntan a esta versión como destino — historial '
-                        . 'real de actualizaciones de clientes), `from_version_id` tiene ON DELETE SET NULL (los que la tenían '
-                        . 'como origen quedan con ese campo en null), y `clients.current_version_id` también SET NULL (un '
-                        . 'cliente con esta versión como actual queda con current_version_id null). Las notificaciones, '
-                        . 'seeders, comandos y tareas manuales PROPIOS de la versión se borran en cascada también, pero eso NO '
-                        . 'amerita freno: es contenido de la versión, no historial de otra tabla. El `impacto` que devuelve '
-                        . 'el dry_run mide los siete conteos antes de tocar nada, y la respuesta del borrado real devuelve el '
-                        . 'mismo resumen ya aplicado.',
+                    'nota' => '🔴 HAY UN CASO QUE NO SE PUEDE BORRAR NI CONFIRMANDO: si la versión tiene filas en '
+                        . '`demo_updates`, la FK es RESTRICT (se declaró sin onDelete) y el borrado se rechaza con 422, '
+                        . 'tanto en dry_run (que lo avisa en `se_puede_borrar` y en la nota) como en el borrado real. '
+                        . '🔴 EL RESTO DEL BORRADO ES EN CASCADA, Y NO LO INVENTA ESTE ENDPOINT: hereda el mismo '
+                        . 'comportamiento que ya tiene `VersionController::destroy_json()` en el panel humano. '
+                        . '`client_version_upgrades.to_version_id` tiene FK ON DELETE CASCADE (se BORRAN las filas que '
+                        . 'apuntan a esta versión como destino — historial real de actualizaciones de clientes, y con '
+                        . 'ellas sus `update_seeders`/`update_commands`), `from_version_id` tiene ON DELETE SET NULL (los '
+                        . 'que la tenían como origen quedan con ese campo en null), y `clients.current_version_id` también '
+                        . 'SET NULL. Las notificaciones, seeders, comandos y tareas manuales PROPIOS de la versión se '
+                        . 'borran en cascada también, pero eso NO amerita freno: es contenido de la versión, no historial '
+                        . 'de otra tabla — sí lo ameritan las `client_notification_reads` que cuelgan de esas '
+                        . 'notificaciones, porque son de clientes reales. ⚠️ `client_version_upgrade_versions` se informa '
+                        . 'pero no frena ni se borra: esa tabla puente no tiene ninguna FK, así que sus filas quedan '
+                        . 'huérfanas. El `impacto` mide los doce conteos antes de tocar nada, y la respuesta del borrado '
+                        . 'real devuelve el mismo resumen ya aplicado.',
                 ],
                 'GET claude/upgrades' => [
                     'filtros' => [
@@ -1160,8 +1171,19 @@ class ClaudeClientOpsController extends Controller
      * `status` sigue el mismo criterio que `versions_status_json()`: al pasar a `published` sin
      * `published_at` previo, se setea `now()`; cualquier otra transición no lo toca.
      *
+     * 🔴 `published_at` SÍ se puede mandar explícito, con el mismo criterio del panel humano
+     * (`VersionController::extract_data()`): si viene con valor, se usa tal cual y le gana al
+     * `now()` automático; si no viene (o viene vacío) y el estado pasa a `published` sin fecha
+     * previa, se setea `now()`. Sin esto, la fecha que Claude estampa al publicar una versión
+     * quedaba congelada para siempre: ningún parámetro de este endpoint podía corregirla.
+     *
      * Sin `dry_run` ni `confirm_*`: es un `UPDATE` de una sola fila, sin cascada ni efecto en
      * otras tablas — mismo criterio de riesgo que el alta y el cambio de estado.
+     *
+     * 🔴 LA VERSIÓN SE RESUELVE ANTES DE EXIGIR QUE HAYA ALGÚN CAMPO. Un `PATCH` con cuerpo vacío
+     * sobre un id inexistente tiene que decir 404 ("esa versión no existe"), no 422 ("no mandaste
+     * campos"): el 422 manda a quien llama a corregir el cuerpo cuando el problema real es el id, y
+     * lo deja reintentando contra una fila que no está.
      *
      * @param Request    $request Request entrante.
      * @param int|string $id      Id numérico o uuid de la versión.
@@ -1171,24 +1193,25 @@ class ClaudeClientOpsController extends Controller
     public function versions_update_json(Request $request, $id)
     {
         $invalido = $this->validar_o_422($request, [
-            'version'     => 'sometimes|required|string|max:30',
-            'title'       => 'sometimes|nullable|string|max:200',
-            'description' => 'sometimes|nullable|string|max:5000',
-            'status'      => 'sometimes|required|string|in:draft,published,archived',
+            'version'      => 'sometimes|required|string|max:30',
+            'title'        => 'sometimes|nullable|string|max:200',
+            'description'  => 'sometimes|nullable|string|max:5000',
+            'status'       => 'sometimes|required|string|in:draft,published,archived',
+            'published_at' => 'sometimes|nullable|date',
         ]);
         if ($invalido !== null) {
             return $invalido;
         }
 
-        if (! $request->hasAny(['version', 'title', 'description', 'status'])) {
-            return $this->error_422('No se mandó ningún campo para actualizar.', [
-                'ayuda' => 'Mandá al menos uno de: version, title, description, status.',
-            ]);
-        }
-
         $version = $this->resolver_version($id);
         if ($version === null) {
             return $this->error_404('no existe la versión ' . $id);
+        }
+
+        if (! $request->hasAny(['version', 'title', 'description', 'status', 'published_at'])) {
+            return $this->error_422('No se mandó ningún campo para actualizar.', [
+                'ayuda' => 'Mandá al menos uno de: version, title, description, status, published_at.',
+            ]);
         }
 
         $codigo_cambia = false;
@@ -1234,6 +1257,13 @@ class ClaudeClientOpsController extends Controller
             $version->description = $this->texto_o_null($request->input('description'));
         }
 
+        /* Va ANTES del bloque de `status`: una fecha explícita le gana al `now()` automático, que
+           abajo sólo entra si en este punto la versión sigue sin `published_at`. Mismo orden que
+           `VersionController::extract_data()` del panel humano. */
+        if ($request->has('published_at')) {
+            $version->published_at = $this->parsear_o_null($request->input('published_at'));
+        }
+
         if ($request->has('status')) {
             $version->status = (string) $request->input('status');
             if ($version->status === 'published' && ! $version->published_at) {
@@ -1258,21 +1288,33 @@ class ClaudeClientOpsController extends Controller
      * proceso automático puede llamar sin que nadie mire la pantalla necesita el mismo criterio de
      * frenos que ya usa el resto del bloque `claude/*` para operaciones destructivas.
      *
-     * 🔴 DOS FRENOS, Y EL SEGUNDO SÓLO CUANDO IMPORTA:
+     * 🔴 UN BLOQUEO DURO Y DOS FRENOS, Y EL SEGUNDO FRENO SÓLO CUANDO IMPORTA:
+     *  0. `demo_updates` > 0 ⇒ NO SE BORRA, y no hay flag que lo destrabe. La FK
+     *     `demo_updates.version_id` se declaró SIN `onDelete` (ver
+     *     `2026_06_10_100000_create_demo_updates_table.php`), así que MySQL usa RESTRICT: el
+     *     `delete()` moriría con una `QueryException` 1451 y este bloque devolvería un 500 crudo
+     *     con stack trace y rutas del disco — exactamente lo que `RespuestasParaClaude` existe
+     *     para evitar. Se rechaza con 422 ANTES de intentar el borrado, y el `dry_run` lo dice
+     *     también: un impacto que reporta siete ceros sobre una versión que la base no deja borrar
+     *     es un impacto que miente. En producción hay 46 filas de `demo_updates` apuntando a 18 de
+     *     las 69 versiones, así que no es un caso teórico.
      *  1. `dry_run`, default `true`. Con `dry_run` no borra nada: mide el impacto real contra la
      *     base (`calcular_impacto_de_borrado()`) y lo devuelve junto con la versión.
      *  2. `confirm_version_code`, obligatorio cuando `dry_run=false`. Tiene que coincidir con
      *     `version.version` (el código, ej. "4.0.3") — es lo que un humano reconoce, no un id ni
      *     un uuid. Ver `rechazar_si_el_codigo_de_version_no_confirma()`.
-     *  3. `confirm_borra_historial`, obligatorio (`=== true`) SÓLO si el impacto mide algún
-     *     `client_version_upgrades` con esta versión como destino: es el caso que de verdad
-     *     importa distinto, "borrar historial real de actualizaciones de clientes" y no sólo
-     *     "pisar un dato". Sin upgrades asociados, este flag no hace falta.
+     *  3. `confirm_borra_historial`, booleano (`true`/`1`), obligatorio SÓLO si el borrado se
+     *     lleva puesto HISTORIAL DE TERCEROS: upgrades hacia esta versión, las filas de
+     *     `update_seeders`/`update_commands` que registran qué corrió en cada actualización, o las
+     *     lecturas de `client_notification_reads`. Ver
+     *     `motivos_de_historial_de_terceros()`, que es la lista única que usan el `dry_run` y el
+     *     freno — atarlo a una sola tabla dejaba pasar sin confirmación una versión que no es
+     *     destino de ningún upgrade pero sí tiene lecturas de sus notificaciones.
      *
-     * Con los dos frenos satisfechos: borra (`$version->delete()`, mismo mecanismo que el panel,
-     * las cascadas las resuelve la base) y devuelve 200 con el mismo resumen de impacto YA
-     * aplicado — se mide antes de borrar porque después de la cascada esos conteos darían todos
-     * cero y la respuesta mentiría sobre lo que en verdad pasó.
+     * Con el bloqueo despejado y los dos frenos satisfechos: borra (`$version->delete()`, mismo
+     * mecanismo que el panel, las cascadas las resuelve la base) y devuelve 200 con el mismo
+     * resumen de impacto YA aplicado — se mide antes de borrar porque después de la cascada esos
+     * conteos darían todos cero y la respuesta mentiría sobre lo que en verdad pasó.
      *
      * @param Request    $request Request entrante.
      * @param int|string $id      Id numérico o uuid de la versión.
@@ -1295,24 +1337,41 @@ class ClaudeClientOpsController extends Controller
             return $this->error_404('no existe la versión ' . $id);
         }
 
-        $impacto = $this->calcular_impacto_de_borrado($version);
+        $impacto  = $this->calcular_impacto_de_borrado($version);
+        $bloqueos = $impacto['demo_updates'] > 0;
+        $motivos  = $this->motivos_de_historial_de_terceros($impacto);
 
         $dry_run = $request->filled('dry_run') ? $request->boolean('dry_run') : true;
         if ($dry_run) {
             return response()->json([
-                'dry_run' => true,
-                'borro'   => false,
-                'model'   => $this->version_payload($version),
-                'impacto' => $impacto,
-                'nota' => 'No se borró NADA. Para borrar de verdad, repetí la misma llamada con dry_run=false y '
-                    . 'confirm_version_code igual al código de esta versión (mirá "model.version" en esta misma '
-                    . 'respuesta). ' . ($impacto['upgrades_hacia_esta_version'] > 0
-                        ? '🔴 Además hace falta confirm_borra_historial=true, porque hay '
-                            . $impacto['upgrades_hacia_esta_version'] . ' client_version_upgrades que se '
-                            . 'BORRARÍAN en cascada al borrar esta versión.'
-                        : 'No hay upgrades apuntando a esta versión como destino, así que confirm_borra_historial '
-                            . 'no hace falta.'),
+                'dry_run'         => true,
+                'borro'           => false,
+                'se_puede_borrar' => ! $bloqueos,
+                'model'           => $this->version_payload($version),
+                'impacto'         => $impacto,
+                'nota'            => $this->nota_del_dry_run_de_borrado($impacto, $motivos),
             ], 200);
+        }
+
+        /* 🔴 El bloqueo duro va PRIMERO, antes incluso de mirar confirm_version_code: no hay
+           confirmación que lo destrabe, así que contestar "el código no coincide" mandaría a quien
+           llama a reintentar con el código bien contra un borrado que la base va a rechazar igual.
+           El dry_run ya publica estos mismos números sin pedir confirmación de nada, así que
+           adelantarlos acá no afloja ningún freno. */
+        if ($bloqueos) {
+            return $this->error_422(
+                'Esta versión NO se puede borrar mientras tenga actualizaciones de demo asociadas: hay '
+                    . $impacto['demo_updates'] . ' fila(s) en `demo_updates` que la referencian y esa clave foránea '
+                    . 'es RESTRICT (no borra en cascada ni pone null). No se borró nada, y no hay ningún flag de '
+                    . 'confirmación que destrabe esto.',
+                [
+                    'version_id' => (int) $version->id,
+                    'impacto'    => $impacto,
+                    'ayuda'      => 'Consultá GET claude/query?model=demo_update&filters[version_id]=' . $version->id
+                        . ' para ver qué demos la usaron. Mientras esas filas existan, la versión se puede archivar '
+                        . '(PATCH claude/versions/{id} con status=archived) pero no borrar.',
+                ]
+            );
         }
 
         $rechazo_codigo = $this->rechazar_si_el_codigo_de_version_no_confirma($request, $version);
@@ -1320,13 +1379,12 @@ class ClaudeClientOpsController extends Controller
             return $rechazo_codigo;
         }
 
-        if ($impacto['upgrades_hacia_esta_version'] > 0) {
+        if (! empty($motivos)) {
             $confirmo_historial = $request->filled('confirm_borra_historial') && $request->boolean('confirm_borra_historial');
             if (! $confirmo_historial) {
                 return $this->error_422(
-                    'Esta versión es destino de ' . $impacto['upgrades_hacia_esta_version'] . ' client_version_upgrades: '
-                        . 'borrarla se lleva puesto ese historial en cascada. Hace falta confirm_borra_historial=true '
-                        . 'explícito. No se borró nada.',
+                    'Borrar esta versión se lleva puesto historial de terceros en cascada: ' . implode('; ', $motivos)
+                        . '. Hace falta confirm_borra_historial=true explícito. No se borró nada.',
                     [
                         'version_id' => (int) $version->id,
                         'impacto'    => $impacto,
@@ -1345,15 +1403,116 @@ class ClaudeClientOpsController extends Controller
             'model'   => $payload_antes,
             'impacto' => $impacto,
             'nota'    => 'Se borró la versión. El `impacto` de arriba es el que se APLICÓ: los client_version_upgrades '
-                . 'que la tenían como destino se borraron en cascada, los que la tenían como origen quedaron con '
-                . 'from_version_id null, y los clientes que la tenían como actual quedaron con current_version_id null.',
+                . 'que la tenían como destino se borraron en cascada (y con ellos sus update_seeders y update_commands), '
+                . 'los que la tenían como origen quedaron con from_version_id null, los clientes que la tenían como '
+                . 'actual quedaron con current_version_id null, y las notificaciones/seeders/comandos/tareas manuales '
+                . 'propios se borraron junto con las client_notification_reads que colgaban de esas notificaciones. '
+                . '⚠️ `client_version_upgrade_versions` NO tiene FK: esas filas quedaron huérfanas apuntando a un '
+                . 'version_id que ya no existe.',
         ], 200);
     }
 
     /**
-     * Mide, SIN borrar nada, el impacto real de borrar una versión: qué se pone en null y qué se
+     * Arma la nota del `dry_run`: qué pasa si se borra, qué falta mandar para borrar de verdad, y —
+     * si la base directamente no lo permite— por qué no se va a poder.
+     *
+     * 🔴 Existe para que la nota NO se desincronice del freno. Antes el texto repetía a mano la
+     * condición de `confirm_borra_historial` mirando una sola tabla, mientras el freno miraba otra
+     * cosa: el dry_run decía "no hace falta" y el borrado real contestaba 422. Los dos leen ahora la
+     * misma lista de `motivos_de_historial_de_terceros()`.
+     *
+     * @param array<string, int> $impacto Conteos ya medidos.
+     * @param array<int, string> $motivos Motivos que exigen `confirm_borra_historial`.
+     *
+     * @return string
+     */
+    private function nota_del_dry_run_de_borrado(array $impacto, array $motivos)
+    {
+        if ($impacto['demo_updates'] > 0) {
+            return 'No se borró NADA, y esta versión NO SE PUEDE BORRAR: hay ' . $impacto['demo_updates']
+                . ' fila(s) en `demo_updates` que la referencian, con una clave foránea RESTRICT (no cascadea ni '
+                . 'pone null). Un dry_run que no dijera esto estaría prometiendo un borrado que la base rechaza. '
+                . 'Mientras esas filas existan, la versión se puede archivar (PATCH claude/versions/{id} con '
+                . 'status=archived) pero no borrar.';
+        }
+
+        $nota = 'No se borró NADA. Para borrar de verdad, repetí la misma llamada con dry_run=false y '
+            . 'confirm_version_code igual al código de esta versión (mirá "model.version" en esta misma respuesta). ';
+
+        if (! empty($motivos)) {
+            return $nota . '🔴 Además hace falta confirm_borra_historial=true, porque el borrado se lleva puesto '
+                . 'historial de terceros: ' . implode('; ', $motivos) . '.';
+        }
+
+        return $nota . 'No hay historial de terceros colgando de esta versión, así que confirm_borra_historial no '
+            . 'hace falta.';
+    }
+
+    /**
+     * Lista, en castellano, los motivos por los que borrar esta versión se lleva puesto historial
+     * que NO es contenido propio de la versión. Vacía = `confirm_borra_historial` no hace falta.
+     *
+     * 🔴 EL DISPARADOR NO ES UNA SOLA TABLA. Antes era sólo `upgrades_hacia_esta_version`, y eso
+     * dejaba pasar sin confirmación el caso de una versión que no es destino de ningún upgrade pero
+     * sí tiene `client_notification_reads` de sus notificaciones: se borraba el registro de quién
+     * leyó qué sin que nadie lo confirmara. El criterio es "historial de terceros" (lo que pasó con
+     * clientes reales), no "filas de tal tabla".
+     *
+     * Los conteos PROPIOS de la versión (`notifications`, `seeders`, `commands`, `manual_tasks`) no
+     * entran a propósito: es contenido de la versión misma, se informa pero no frena.
+     *
+     * @param array<string, int> $impacto Conteos ya medidos.
+     *
+     * @return array<int, string>
+     */
+    private function motivos_de_historial_de_terceros(array $impacto)
+    {
+        $motivos = [];
+
+        if ($impacto['upgrades_hacia_esta_version'] > 0) {
+            $motivos[] = $impacto['upgrades_hacia_esta_version']
+                . ' client_version_upgrades con esta versión como destino (se BORRAN en cascada)';
+        }
+
+        if ($impacto['update_seeders'] > 0) {
+            $motivos[] = $impacto['update_seeders']
+                . ' update_seeders (el registro por cliente de qué seeder corrió en cada actualización)';
+        }
+
+        if ($impacto['update_commands'] > 0) {
+            $motivos[] = $impacto['update_commands']
+                . ' update_commands (el registro por cliente de qué comando corrió en cada actualización)';
+        }
+
+        if ($impacto['client_notification_reads'] > 0) {
+            $motivos[] = $impacto['client_notification_reads']
+                . ' client_notification_reads (quién leyó las notificaciones de esta versión)';
+        }
+
+        return $motivos;
+    }
+
+    /**
+     * Mide, SIN borrar nada, el impacto real de borrar una versión: qué se pone en null, qué se
      * borra en cascada por las FK ya definidas en la base (ver docblock de
-     * `versions_destroy_json()`), más los conteos de contenido propio de la versión.
+     * `versions_destroy_json()`), qué la base directamente NO deja borrar, y los conteos de
+     * contenido propio de la versión.
+     *
+     * 🔴 MIDE LAS CASCADAS DE SEGUNDO ORDEN, NO SÓLO EL PRIMER NIVEL. `update_seeders`,
+     * `update_commands` y `client_notification_reads` no tienen ninguna FK contra `versions`, así
+     * que un conteo directo por `version_id` no existe: cuelgan de la versión por dos saltos y
+     * desaparecen igual. Medir sólo el primer nivel hacía que el `impacto` reportara cero mientras
+     * la base se llevaba puesto el registro por cliente de qué corrió en cada actualización y quién
+     * leyó cada notificación.
+     *
+     * 🔴 `demo_updates` es el único conteo que BLOQUEA en vez de informar: su FK se declaró sin
+     * `onDelete`, o sea RESTRICT. Ver `versions_destroy_json()`.
+     *
+     * ⚠️ `client_version_upgrade_versions` es INFORMATIVO y nada más: esa tabla puente no tiene
+     * ninguna clave foránea (ver `2026_08_18_120100_create_client_version_upgrade_versions_table.php`,
+     * que sólo define índice y primaria), así que sus filas no se borran ni frenan el borrado —
+     * quedan huérfanas apuntando a un `version_id` que ya no existe. Resolverlas es otra misión;
+     * lo que este conteo hace es que el borrado no las esconda.
      *
      * 🔴 Se calcula por consulta directa a la base (no por `count()` sobre relaciones Eloquent
      * cargadas) para que el número sea exacto en el instante del borrado, incluida la respuesta
@@ -1365,20 +1524,59 @@ class ClaudeClientOpsController extends Controller
      */
     private function calcular_impacto_de_borrado(Version $version)
     {
+        $version_id = (int) $version->id;
+
+        /* Subconsulta reutilizada por los dos conteos de segundo orden que pasan por upgrades: los
+           update_seeders/update_commands de un upgrade que se borra en cascada se van con él. */
+        $upgrades_destino = function ($query) use ($version_id) {
+            $query->select('id')->from('client_version_upgrades')->where('to_version_id', $version_id);
+        };
+
         return [
             'clientes_con_esta_como_actual' => (int) DB::table('clients')
-                ->where('current_version_id', $version->id)
+                ->where('current_version_id', $version_id)
                 ->count(),
             'upgrades_hacia_esta_version' => (int) DB::table('client_version_upgrades')
-                ->where('to_version_id', $version->id)
+                ->where('to_version_id', $version_id)
                 ->count(),
             'upgrades_desde_esta_version' => (int) DB::table('client_version_upgrades')
-                ->where('from_version_id', $version->id)
+                ->where('from_version_id', $version_id)
                 ->count(),
-            'notifications' => (int) DB::table('version_notifications')->where('version_id', $version->id)->count(),
-            'seeders'       => (int) DB::table('version_seeders')->where('version_id', $version->id)->count(),
-            'commands'      => (int) DB::table('version_commands')->where('version_id', $version->id)->count(),
-            'manual_tasks'  => (int) DB::table('version_manual_tasks')->where('version_id', $version->id)->count(),
+            'notifications' => (int) DB::table('version_notifications')->where('version_id', $version_id)->count(),
+            'seeders'       => (int) DB::table('version_seeders')->where('version_id', $version_id)->count(),
+            'commands'      => (int) DB::table('version_commands')->where('version_id', $version_id)->count(),
+            'manual_tasks'  => (int) DB::table('version_manual_tasks')->where('version_id', $version_id)->count(),
+
+            /* Segundo orden: por los seeders/comandos propios de la versión Y por los upgrades que
+               la tienen como destino. Es UN solo count sobre la tabla, así que una fila que entra
+               por las dos rutas se cuenta una vez sola. */
+            'update_seeders' => (int) DB::table('update_seeders')
+                ->where(function ($sub) use ($version_id, $upgrades_destino) {
+                    $sub->whereIn('version_seeder_id', function ($query) use ($version_id) {
+                        $query->select('id')->from('version_seeders')->where('version_id', $version_id);
+                    })->orWhereIn('client_version_upgrade_id', $upgrades_destino);
+                })
+                ->count(),
+            'update_commands' => (int) DB::table('update_commands')
+                ->where(function ($sub) use ($version_id, $upgrades_destino) {
+                    $sub->whereIn('version_command_id', function ($query) use ($version_id) {
+                        $query->select('id')->from('version_commands')->where('version_id', $version_id);
+                    })->orWhereIn('client_version_upgrade_id', $upgrades_destino);
+                })
+                ->count(),
+            'client_notification_reads' => (int) DB::table('client_notification_reads')
+                ->whereIn('version_notification_id', function ($query) use ($version_id) {
+                    $query->select('id')->from('version_notifications')->where('version_id', $version_id);
+                })
+                ->count(),
+
+            /* 🔴 Bloquea el borrado: FK sin onDelete = RESTRICT. */
+            'demo_updates' => (int) DB::table('demo_updates')->where('version_id', $version_id)->count(),
+
+            /* ⚠️ Sólo informativo: esta tabla puente no tiene FK, estas filas quedan huérfanas. */
+            'client_version_upgrade_versions' => (int) DB::table('client_version_upgrade_versions')
+                ->where('version_id', $version_id)
+                ->count(),
         ];
     }
 
