@@ -410,8 +410,57 @@ class LeadSuggestionSendService
         // Motivo real del fallo (prompt 336): se completa recién si send_failed queda en true.
         $error_detail = null;
 
+        /*
+         * 🔴 Misión "sugerencia huérfana post-envío" (lead 618, Hugo Aguero, 9/9/2026): este
+         * callback hace DOS cosas, no una. $al_enviar_parte —el que recibe este método por
+         * parámetro— sólo sabe renovar el lease (ver su docblock en send_suggestion()); acá se
+         * envuelve para que TAMBIÉN grabe el progreso real del envío en la fila del mensaje,
+         * apenas Kapso confirma cada parte.
+         *
+         * Por qué hace falta esto y el lease no alcanza: el lease protege la fila mientras sigue
+         * vivo, pero si el proceso PHP muere (fatal por max_execution_time, que ningún
+         * catch/finally agarra) después de que salió al menos una parte, nadie vuelve a renovarlo
+         * y el lease queda zombie hasta que vence su TTL. En esa ventana el barrido salteaba la
+         * fila (correcto), pero como el proceso que iba a hacer el UPDATE final ya no existe,
+         * nada más lo iba a hacer jamás: la fila quedaba en 'sugerido' para siempre. Y una vez que
+         * el lease vencía, un inbound posterior SÍ la borraba —sin la red de seguridad de
+         * recrear_mensaje_enviado(), que sólo se dispara cuando es este mismo proceso el que ve 0
+         * filas afectadas en SU propio UPDATE—, y el mensaje desaparecía del hilo sin dejar
+         * rastro.
+         *
+         * La solución: no depender del UPDATE final. Apenas una parte sale, la fila pasa a
+         * 'enviado' con su whatsapp_message_id y los contadores de partes —la misma forma que ya
+         * tiene el Caso C (envío parcial) más abajo, reusada a propósito: un envío cortado a mitad
+         * por un fatal es indistinguible, para cualquiera que mire el hilo después, de un envío
+         * parcial "normal" (el que corta porque Kapso rechazó una parte tras agotar reintentos).
+         * Las dos cosas son ciertas de la misma manera: "esto es lo que llegó, esto es lo que
+         * falta". Con el status ya afuera de 'sugerido', clear_stale_pending_suggestions() —que
+         * sólo borra ese status— deja de poder tocar la fila, sin que haga falta que el lease
+         * siga vivo.
+         *
+         * Si el envío termina bien (sin fatal), el UPDATE final de más abajo (línea ~509) vuelve a
+         * escribir sobre esta misma fila con los valores definitivos (sent_by_admin_id,
+         * edited_content si lo hubo, el whatsapp_send_error si terminó en envío parcial de
+         * verdad): una escritura de más, sin efecto visible, no una carrera.
+         */
+        $al_enviar_parte_con_progreso = function (int $sent_parts, int $total_parts, ?string $last_message_id, ?string $partes_pendientes) use ($al_enviar_parte, $message, $sent_by_admin_id) {
+            if ($al_enviar_parte !== null) {
+                $al_enviar_parte();
+            }
+
+            $this->persistir_progreso_envio((int) $message->getKey(), [
+                'status'                => 'enviado',
+                'sent_at'               => now(),
+                'whatsapp_message_id'   => $last_message_id,
+                'sent_by_admin_id'      => $sent_by_admin_id,
+                'sent_parts_count'      => $sent_parts,
+                'total_parts_count'     => $total_parts,
+                'partial_send_pending'  => $partes_pendientes,
+            ]);
+        };
+
         if ($phone !== '') {
-            $send_result = $this->send_body($phone, $body, $lead, $message, $al_enviar_parte);
+            $send_result = $this->send_body($phone, $body, $lead, $message, $al_enviar_parte_con_progreso);
 
             if ($send_result['sent_parts'] === 0) {
                 $send_failed = true;
@@ -660,6 +709,55 @@ class LeadSuggestionSendService
     }
 
     /**
+     * Graba el progreso real de un envío apenas hay evidencia de que salió — no espera a que el
+     * método completo termine.
+     *
+     * Misión "sugerencia huérfana post-envío" (lead 618, Hugo Aguero, 9/9/2026). La usan los dos
+     * callers de este archivo que dejan un efecto externo irreversible ANTES de llegar a su propio
+     * UPDATE de cierre: el callback que enviar_partes() invoca tras cada parte de texto (armado en
+     * enviar_sugerencia_aprobada(), ver el comentario grande ahí) y send_followup_suggestion_via_template()
+     * apenas Kapso confirma la plantilla. En los dos casos, si el proceso muere entre esta escritura
+     * y el UPDATE de cierre de más abajo, la fila ya no está en 'sugerido' y
+     * clear_stale_pending_suggestions() (que sólo borra ese status) no la puede tocar — sin
+     * necesitar que el lease de LeadSuggestionEnvioEnCurso siga vivo para protegerla.
+     *
+     * 🔴 Falla en silencio (log y listo), a propósito, igual que $renovar_lease en
+     * send_suggestion(): esto puede correr ADENTRO del bucle de partes de enviar_partes(), que es
+     * compartido con el mensaje directo del panel. Si tirara, cortaría un envío que ya le está
+     * entregando partes reales al lead por un problema de infraestructura ajeno (deadlock, timeout
+     * de red) — exactamente la clase de error que ese mismo criterio ya evita unas líneas más
+     * arriba. Si esta escritura puntual falla, el peor caso es volver al riesgo original (la fila
+     * puede quedar en 'sugerido' si el proceso muere después), no uno nuevo: no reemplaza a
+     * LeadSuggestionEnvioEnCurso, lo complementa.
+     *
+     * No hace la comprobación de "0 filas afectadas ⇒ ¿la fila existe?" que sí hace el UPDATE de
+     * cierre (línea ~509 y su gemela en send_followup_suggestion_via_template()): mientras ESTE
+     * proceso sigue vivo para ejecutar este método, su propio lease está fresco (recién tomado o
+     * recién renovado) y clear_stale_pending_suggestions() lo saltea entero sin mirar el status —
+     * la fila no puede haber desaparecido por esa vía. Repetir acá la reposición de
+     * recrear_mensaje_enviado() sería además incorrecto: ese método crea una fila NUEVA, y el resto
+     * de enviar_sugerencia_aprobada() sigue operando sobre el objeto $message viejo después de este
+     * callback — crear una fila nueva a mitad del bucle de partes dejaría dos mensajes por un solo
+     * envío.
+     *
+     * @param int   $message_id
+     * @param array $payload
+     *
+     * @return void
+     */
+    private function persistir_progreso_envio(int $message_id, array $payload): void
+    {
+        try {
+            LeadMessage::query()->whereKey($message_id)->update($payload);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->error('LeadSuggestionSendService: no se pudo persistir el progreso del envío en curso.', [
+                'message_id' => $message_id,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
      * Vuelve a crear en el hilo el mensaje que ya salió por WhatsApp, cuando otro request borró su
      * fila mientras el envío estaba en curso.
      *
@@ -840,18 +938,40 @@ class LeadSuggestionSendService
      *                                                        fallo a admins.
      * @param string             $partes_pendientes_separador Con qué se vuelven a unir las partes que
      *                                                        no salieron.
-     * @param callable|null      $al_enviar_parte             Se invoca, sin argumentos, después de
-     *                                                        CADA parte que sale con éxito.
+     * @param callable|null      $al_enviar_parte             Se invoca después de CADA parte que
+     *                                                        sale con éxito, con cuatro argumentos:
+     *                                                        (int $sent_parts, int $total_parts,
+     *                                                        ?string $last_message_id, ?string
+     *                                                        $partes_no_intentadas). Los últimos
+     *                                                        dos describen el progreso hasta ESA
+     *                                                        parte: el id de Meta que le tocó y el
+     *                                                        texto (ya unido con
+     *                                                        $partes_pendientes_separador) de lo que
+     *                                                        todavía no se intentó — null cuando esa
+     *                                                        parte era la última.
      *
      *                                                        🔴 Existe para que el envío de una
-     *                                                        sugerencia pueda renovar el lease del
-     *                                                        marcador de "envío en curso" mientras
-     *                                                        avanza, sin que este método —que es
-     *                                                        compartido con el mensaje directo del
-     *                                                        panel— tenga que saber que ese marcador
-     *                                                        existe. El mensaje directo no pasa nada
-     *                                                        y no cambia en nada. Es opcional y va
-     *                                                        al final justamente para eso.
+     *                                                        sugerencia pueda, en el mismo punto:
+     *                                                        renovar el lease del marcador de "envío
+     *                                                        en curso" (motivo original, prompt
+     *                                                        366/2/9) Y grabar el progreso real en
+     *                                                        la fila del mensaje apenas Kapso lo
+     *                                                        confirma (misión "sugerencia huérfana
+     *                                                        post-envío", 9/9/2026) — sin que este
+     *                                                        método, que es compartido con el
+     *                                                        mensaje directo del panel, tenga que
+     *                                                        saber que ninguna de las dos cosas
+     *                                                        existe. Los cuatro argumentos son los
+     *                                                        únicos que un llamador necesitaría para
+     *                                                        persistir ese progreso por su cuenta;
+     *                                                        un callback que no los declara (como el
+     *                                                        que renueva el lease) los recibe igual
+     *                                                        y los ignora, PHP no exige que un
+     *                                                        closure declare todos los parámetros
+     *                                                        con los que se lo invoca. El mensaje
+     *                                                        directo del panel no pasa callback y no
+     *                                                        cambia en nada. Es opcional y va al
+     *                                                        final justamente para eso.
      *
      * @return array{sent_parts:int, total_parts:int, last_message_id:string|null, pending_text:string|null, error:string|null}
      */
@@ -915,10 +1035,19 @@ class LeadSuggestionSendService
             /*
              * La parte salió: se le avisa al llamador, si pidió que se le avisara. Va ACÁ y no
              * después de la pausa a propósito — el que renueva un lease necesita hacerlo apenas
-             * confirma que sigue vivo, no después de dormir 1200ms más.
+             * confirma que sigue vivo, no después de dormir 1200ms más. Y el que persiste el
+             * progreso (misión "sugerencia huérfana post-envío") necesita lo mismo, por el mismo
+             * motivo: cuanto antes quede grabado, más chica la ventana en la que un fatal puede
+             * matar el proceso sin que la fila se entere de que esta parte salió.
              */
             if ($al_enviar_parte !== null) {
-                $al_enviar_parte();
+                // Texto de las partes que TODAVÍA no se intentaron (no incluye la que acaba de
+                // salir). Null cuando esta era la última: no queda nada pendiente que describir.
+                $partes_no_intentadas = $index < $total_parts - 1
+                    ? implode($partes_pendientes_separador, array_slice($partes, $index + 1))
+                    : null;
+
+                $al_enviar_parte($sent_parts, $total_parts, $last_message_id, $partes_no_intentadas);
             }
 
             // Pausa entre partes exitosas (NO después de la última): es la prevención de raíz del
@@ -1115,6 +1244,26 @@ class LeadSuggestionSendService
             $template->language_code,
             $context
         );
+
+        /*
+         * 🔴 Misión "sugerencia huérfana post-envío" (9/9/2026): esto va ACÁ, antes de cualquier
+         * otra cosa —incluido cancel_for_message(), que hasta acá corría primero—, y no más abajo
+         * junto al resto del cierre. La plantilla YA salió por WhatsApp en la línea de arriba: es
+         * el mismo criterio que en el camino de texto (ver el comentario grande en
+         * enviar_sugerencia_aprobada()), llevado al extremo porque acá no hay partes ni bucle que
+         * den una segunda oportunidad de grabar el progreso — hay un solo `send_template()`, así
+         * que el punto MÁS temprano posible para dejar de depender del UPDATE de cierre es
+         * literalmente la primera línea después de confirmarlo. Ver el docblock completo de
+         * persistir_progreso_envio().
+         */
+        if ($whatsapp_message_id !== null) {
+            $this->persistir_progreso_envio((int) $message->getKey(), [
+                'status'              => 'enviado',
+                'sent_at'             => now(),
+                'whatsapp_message_id' => $whatsapp_message_id,
+                'sent_by_admin_id'    => $sent_by_admin_id,
+            ]);
+        }
 
         (new LeadAiSuggestionAutoSendScheduler())->cancel_for_message((int) $message->id);
 
