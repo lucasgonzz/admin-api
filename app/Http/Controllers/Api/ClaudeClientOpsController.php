@@ -1173,9 +1173,17 @@ class ClaudeClientOpsController extends Controller
      *
      * 🔴 `published_at` SÍ se puede mandar explícito, con el mismo criterio del panel humano
      * (`VersionController::extract_data()`): si viene con valor, se usa tal cual y le gana al
-     * `now()` automático; si no viene (o viene vacío) y el estado pasa a `published` sin fecha
-     * previa, se setea `now()`. Sin esto, la fecha que Claude estampa al publicar una versión
-     * quedaba congelada para siempre: ningún parámetro de este endpoint podía corregirla.
+     * `now()` automático; si no viene (o viene vacío/null) y el estado pasa a `published` sin
+     * fecha previa, se setea `now()`. Sin esto, la fecha que Claude estampa al publicar una
+     * versión quedaba congelada para siempre: ningún parámetro de este endpoint podía corregirla.
+     *
+     * 🔴 UN `published_at` VACÍO O NULL SE IGNORA, NUNCA BORRA LA FECHA. Se lee con `filled()` y
+     * no con `has()`: en el panel humano (`extract_data()`) es imposible mandar `published_at`
+     * vacío y que eso limpie el campo, porque el form no tiene forma de mandar esa clave sin
+     * valor. Leerlo con `has()` acá abría una asimetría que el panel no tiene: `{"published_at":
+     * null}` sin `status` dejaría una versión `published` con la fecha en NULL, silenciosamente,
+     * y eso rompe el orden de `resolve_next_version_string()` (ordena por `published_at DESC`) y
+     * el "-" que muestra el panel donde debería haber una fecha real.
      *
      * Sin `dry_run` ni `confirm_*`: es un `UPDATE` de una sola fila, sin cascada ni efecto en
      * otras tablas — mismo criterio de riesgo que el alta y el cambio de estado.
@@ -1259,8 +1267,11 @@ class ClaudeClientOpsController extends Controller
 
         /* Va ANTES del bloque de `status`: una fecha explícita le gana al `now()` automático, que
            abajo sólo entra si en este punto la versión sigue sin `published_at`. Mismo orden que
-           `VersionController::extract_data()` del panel humano. */
-        if ($request->has('published_at')) {
+           `VersionController::extract_data()` del panel humano.
+           🔴 `filled()` y no `has()`: un `published_at` vacío o null se IGNORA, nunca borra la
+           fecha ya guardada — mismo comportamiento que el panel humano, que no tiene forma de
+           mandar la clave sin valor. */
+        if ($request->filled('published_at')) {
             $version->published_at = $this->parsear_o_null($request->input('published_at'));
         }
 

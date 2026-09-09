@@ -754,7 +754,7 @@ return [
                 ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:200', 'que_es' => 'Título visible en el panel.'],
                 ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:5000', 'que_es' => 'Descripción larga.'],
                 ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|in:draft,published,archived', 'que_es' => 'Estado nuevo.'],
-                ['nombre' => 'published_at', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date', 'que_es' => 'Fecha de publicación. Con valor se usa tal cual; sin ella y con status=published sin fecha previa, se setea now().'],
+                ['nombre' => 'published_at', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|date', 'que_es' => 'Fecha de publicación. Con valor se usa tal cual; sin ella y con status=published sin fecha previa, se setea now(). Vacío o null se IGNORA (nunca borra la fecha ya guardada), igual que el panel humano.'],
             ],
         ],
         'DELETE api/claude/versions/{id}' => [

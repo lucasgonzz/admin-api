@@ -447,6 +447,42 @@ class EditarYEliminarVersionPorClaudeTest extends TestCase
         ]);
     }
 
+    public function test_edicion_con_published_at_vacio_o_null_no_borra_la_fecha_existente()
+    {
+        /* 🔴 El hueco que encontró la segunda ronda de chequeo: `published_at: null` (o vacío) SIN
+           `status` no puede limpiar la fecha de una versión ya publicada — el panel humano no
+           tiene forma de mandar esa clave sin valor, así que `claude/*` tampoco puede tener ese
+           poder de rebote de leer con `has()` en vez de `filled()`. */
+        $fecha   = now()->subDays(5);
+        $version = Version::create([
+            'version'      => $this->codigo_unico(),
+            'status'       => 'published',
+            'published_at' => $fecha,
+            'is_hotfix'    => false,
+        ]);
+
+        $con_null = $this->patchJson('/api/claude/versions/' . $version->id, [
+            'published_at' => null,
+            'title'        => 'Título nuevo, sin tocar la fecha',
+        ], $this->headers());
+
+        $con_null->assertStatus(200);
+        $this->assertNotNull($con_null->json('model.published_at'));
+        $this->assertDatabaseHas('versions', [
+            'id'     => $version->id,
+            'status' => 'published',
+        ]);
+        $this->assertNotNull(Version::find($version->id)->published_at);
+
+        $con_vacio = $this->patchJson('/api/claude/versions/' . $version->id, [
+            'published_at' => '',
+            'description'  => 'Otra edición que tampoco toca la fecha',
+        ], $this->headers());
+
+        $con_vacio->assertStatus(200);
+        $this->assertNotNull(Version::find($version->id)->published_at);
+    }
+
     public function test_edicion_no_recalcula_is_hotfix_si_el_codigo_no_cambia()
     {
         /* Versión de 3 componentes: por cálculo automático, is_hotfix daría FALSE. */
