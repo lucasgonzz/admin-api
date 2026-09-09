@@ -87,6 +87,15 @@ class DeploymentService
     private $run_command_resolver;
 
     /**
+     * Cliente de los artefactos publicados en los releases de GitHub (misión
+     * `actualizar-sin-el-vps`, 9/9/2026). Se crea perezosamente en release_artifacts(): el
+     * constructor no lo necesita y las etapas que no lo usan no tienen por qué tenerlo.
+     *
+     * @var ReleaseArtifactService|null
+     */
+    private $release_artifacts = null;
+
+    /**
      * Carga upgrade, API destino y credencial SSH según hosting_type de la API destino.
      * La credencial se carga en connect() de forma dinámica según hosting_type.
      *
@@ -219,18 +228,68 @@ class DeploymentService
     }
 
     /**
-     * Etapa: checkout del tag en VPS de builds y compilación del SPA (npm ci + npm run build).
-     * Genera el directorio dist/ en el VPS listo para ser empaquetado y subido en step_upload_spa().
+     * Etapa: deja listo el `dist/` compilado de la SPA para que step_upload_spa() lo despliegue.
+     *
+     * Dos vías, y la primera es la nueva (misión `actualizar-sin-el-vps`, 9/9/2026):
+     *
+     *  1. **Artefacto del release.** Si el release `v{version}` de `empresa-spa` trae
+     *     `empresa-spa-v{version}-dist.zip` (lo publica GitHub Actions al crear el tag), se baja a
+     *     `storage/app/deployments/dist_<uuid>.zip` y la etapa termina ahí: NO se toca el VPS de
+     *     builds. Las variables por frente ya no van cocinadas en el bundle: las escribe
+     *     step_upload_spa() en `config.js` y la SPA las lee en runtime (SpaRuntimeConfig).
+     *  2. **VPS de builds.** Si no hay artefacto (versión publicada antes de esta misión, o release
+     *     sin el asset), el código de siempre: checkout del tag, `.env` por frente, `npm ci`,
+     *     `npm run build`, y el `dist/` queda en el VPS para que la etapa siguiente lo empaquete.
+     *
+     * 🔴 Si GitHub falla de otra forma (token vencido, 500, sin red) la etapa FALLA en vez de caer a
+     * la vía 2: mandar el build al VPS en silencio es exactamente lo que se vino a sacar, y con
+     * `resume_from_step=compile_spa` se reanuda desde acá cuando se arregle.
+     *
+     * 🔴 El zip local que pudiera haber quedado de un intento anterior se borra ANTES de decidir:
+     * step_upload_spa() toma "hay zip local" como "vino del artefacto", y un zip viejo no puede
+     * pasar por nuevo.
      *
      * @return void
      */
     private function step_compile_spa()
     {
+        $local_zip = $this->local_spa_zip_path();
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
+
+        $tag        = $this->version_tag();
+        $asset_name = "empresa-spa-{$tag}-dist.zip";
+        $asset      = $this->release_artifacts()->find_asset('empresa-spa', $tag, $asset_name);
+
+        if ($asset !== null) {
+            /* La URL del SPA se usa recién en step_upload_spa() (config.js), pero se valida acá,
+               antes de bajar nada: es la misma condición con la que la vía 2 frena antes de compilar. */
+            $this->spa_url_for_env();
+
+            $this->ensure_local_deployments_dir();
+            $bytes = $this->release_artifacts()->download_asset($asset, $local_zip);
+            $this->assert_local_zip_file($local_zip, $bytes, 'compile_spa');
+            $this->assert_zip_contains_root_file($local_zip, 'index.html', 'compile_spa');
+            $this->log(
+                'compile_spa',
+                "Artefacto {$asset_name} bajado de GitHub ({$bytes} bytes): no se compila en el VPS de builds",
+                'success'
+            );
+
+            return;
+        }
+
+        $this->log(
+            'compile_spa',
+            "Sin artefacto {$asset_name} en el release {$tag} de empresa-spa (no hay release o no trae el asset): "
+            . 'se compila en el VPS de builds'
+        );
+
         $this->connect_build_vps();
         $this->log('compile_spa', 'Conectado al VPS de builds');
 
         $spa_build_path = $this->builds_spa_path();
-        $tag = 'v' . $this->upgrade->to_version->version;
         $this->exec_build_ssh(
             'compile_spa',
             'cd ' . escapeshellarg($spa_build_path) . ' && git fetch --tags 2>&1'
@@ -242,13 +301,7 @@ class DeploymentService
         $this->log('compile_spa', "Checkout {$tag}: " . $this->truncate_for_log($checkout_output));
 
         $api_url = $this->get_api_url_for_env();
-        $spa_url = trim((string) $this->target_api->spa_url);
-        if ($spa_url === '') {
-            throw new \RuntimeException(
-                'La API destino (target_client_api) no tiene spa_url. '
-                . 'Configúrela en el cliente (ClientApi) antes de compilar empresa-spa.'
-            );
-        }
+        $spa_url = $this->spa_url_for_env();
         $env_content = $this->build_spa_env_file_content($api_url, $spa_url);
         $env_escaped = str_replace("'", "'\\''", $env_content);
         $env_file = $spa_build_path . '/.env';
@@ -303,41 +356,64 @@ class DeploymentService
     }
 
     /**
-     * Etapa: empaquetado del dist/ compilado y despliegue en hosting compartido.
-     * Depende de que step_compile_spa() haya generado el dist/ en el VPS de builds.
+     * Etapa: despliegue del `dist/` de la SPA en el hosting del cliente, más `config.js`.
+     *
+     * Dos vías para conseguir el zip (misión `actualizar-sin-el-vps`, 9/9/2026), una sola para
+     * desplegarlo:
+     *
+     *  - si `storage/app/deployments/dist_<uuid>.zip` ya existe, lo dejó step_compile_spa() al bajar
+     *    el artefacto del release (en este job, o en uno anterior de este mismo upgrade reanudado
+     *    con `resume_from_step=upload_spa`): NO se toca el VPS de builds;
+     *  - si no, la vía vieja: se empaqueta el `dist/` del VPS de builds y se baja por SFTP.
+     *
+     * Después, para las dos: subir el zip al hosting, vaciar el directorio del SPA y descomprimir
+     * (build_spa_hosting_deploy_shell()), y escribir `config.js` con las variables por frente
+     * (write_spa_runtime_config()).
+     *
+     * 🔴 `config.js` va DESPUÉS del deploy shell, que vacía el directorio: antes, se lo llevaría el
+     * `find -delete`. Y se escribe en las dos vías: una SPA compilada en el VPS con el `.env`
+     * cocinado lo ignora (tiene los valores en el bundle), y una compilada por GitHub Actions lo
+     * necesita para saber a qué API pegarle.
      *
      * @return void
      */
     private function step_upload_spa()
     {
-        // Asegura conexión activa al VPS de builds (restablece si fue cerrada entre etapas).
-        $this->connect_build_vps();
+        $local_zip          = $this->local_spa_zip_path();
+        $spa_build_path     = $this->builds_spa_path();
+        $vino_del_artefacto = is_file($local_zip);
 
-        $spa_build_path = $this->builds_spa_path();
-        $spa_output_dir = $this->spa_output_dir_name();
+        if ($vino_del_artefacto) {
+            $this->assert_local_zip_file($local_zip, 0, 'upload_spa');
+            $this->log(
+                'upload_spa',
+                'Se usa el artefacto del release ya bajado (' . basename($local_zip) . '): no se toca el VPS de builds'
+            );
+        } else {
+            // Asegura conexión activa al VPS de builds (restablece si fue cerrada entre etapas).
+            $this->connect_build_vps();
 
-        // ZIP con index.html en la raíz del archivo (contenido de dist/, no la carpeta dist/).
-        $spa_zip_remote = $spa_build_path . '/dist.zip';
-        $dist_dir = $spa_build_path . '/' . $spa_output_dir;
-        $this->exec_build_ssh(
-            'upload_spa',
-            'cd ' . escapeshellarg($dist_dir)
-            . ' && rm -f ../dist.zip && zip -r ../dist.zip . 2>&1',
-            true,
-            true
-        );
-        $spa_zip_bytes = $this->verify_zip_on_vps($spa_zip_remote, 'upload_spa');
-        $this->log('upload_spa', "{$spa_output_dir}/ comprimido ({$spa_zip_bytes} bytes en VPS)");
+            $spa_output_dir = $this->spa_output_dir_name();
 
-        $deployments_dir = storage_path('app/deployments');
-        if (! is_dir($deployments_dir)) {
-            mkdir($deployments_dir, 0755, true);
+            // ZIP con index.html en la raíz del archivo (contenido de dist/, no la carpeta dist/).
+            $spa_zip_remote = $spa_build_path . '/dist.zip';
+            $dist_dir = $spa_build_path . '/' . $spa_output_dir;
+            $this->exec_build_ssh(
+                'upload_spa',
+                'cd ' . escapeshellarg($dist_dir)
+                . ' && rm -f ../dist.zip && zip -r ../dist.zip . 2>&1',
+                true,
+                true
+            );
+            $spa_zip_bytes = $this->verify_zip_on_vps($spa_zip_remote, 'upload_spa');
+            $this->log('upload_spa', "{$spa_output_dir}/ comprimido ({$spa_zip_bytes} bytes en VPS)");
+
+            $this->ensure_local_deployments_dir();
+
+            $sftp_build = $this->open_sftp_session('vps');
+            $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
+            $this->log('upload_spa', 'ZIP descargado al servidor de admin');
         }
-
-        $local_zip = storage_path('app/deployments/dist_' . $this->upgrade->uuid . '.zip');
-        $sftp_build = $this->open_sftp_session('vps');
-        $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
-        $this->log('upload_spa', 'ZIP descargado al servidor de admin');
 
         /* Construir el path destino del ZIP según hosting_type */
         $hosting_type = $this->target_api->hosting_type ?? 'shared_hosting';
@@ -360,28 +436,74 @@ class DeploymentService
         );
         $this->log('upload_spa', 'SPA desplegado en public_html (contenido anterior reemplazado)', 'success');
 
+        $this->write_spa_runtime_config('upload_spa');
+
         if (is_file($local_zip)) {
             unlink($local_zip);
         }
 
-        $this->reconnect_build_vps();
-        $this->exec_build_ssh(
-            'upload_spa',
-            'rm -f ' . escapeshellarg($spa_build_path . '/dist.zip')
-        );
+        /* La limpieza del zip remoto es sólo de la vía vieja: con el artefacto no hay nada en el VPS. */
+        if (! $vino_del_artefacto) {
+            $this->reconnect_build_vps();
+            $this->exec_build_ssh(
+                'upload_spa',
+                'rm -f ' . escapeshellarg($spa_build_path . '/dist.zip')
+            );
+        }
     }
 
     /**
-     * Etapa: checkout en VPS, empaquetado y despliegue del API en hosting compartido.
+     * Etapa: despliegue de la API en el hosting del cliente.
+     *
+     * Dos vías para conseguir el zip (misión `actualizar-sin-el-vps`, 9/9/2026), una sola para
+     * desplegarlo (deploy_api_zip_to_hosting()):
+     *
+     *  1. **Artefacto del release.** Si el release `v{version}` de `empresa-api` trae
+     *     `empresa-api-v{version}.zip` (el repo en la raíz, CON `vendor/`, sin `.git`/`.env`/
+     *     `storage`/`public`/`tests`), se baja a `storage/app/deployments/api_<uuid>.zip` y NO se
+     *     toca el VPS de builds: ni checkout, ni `composer install` allá, ni el zip de 759 MB.
+     *  2. **VPS de builds.** Si no hay artefacto, el código de siempre: checkout del tag, composer
+     *     sin scripts, zip con las exclusiones, descarga por SFTP, y al final la limpieza allá.
+     *
+     * 🔴 Igual que en step_compile_spa(): un error de GitHub distinto de "no hay release/asset"
+     * hace fallar la etapa, no la manda al VPS en silencio.
      *
      * @return void
      */
     private function step_upload_api()
     {
+        $tag        = $this->version_tag();
+        $zip_name   = 'api_' . $this->upgrade->uuid . '.zip';
+        $local_zip  = $this->local_api_zip_path();
+        $asset_name = "empresa-api-{$tag}.zip";
+
+        $asset = $this->release_artifacts()->find_asset('empresa-api', $tag, $asset_name);
+
+        if ($asset !== null) {
+            $this->ensure_local_deployments_dir();
+            $bytes = $this->release_artifacts()->download_asset($asset, $local_zip);
+            $this->assert_local_zip_file($local_zip, $bytes, 'upload_api');
+            $this->assert_zip_contains_root_file($local_zip, 'artisan', 'upload_api');
+            $this->log(
+                'upload_api',
+                "Artefacto {$asset_name} bajado de GitHub ({$bytes} bytes): no se empaqueta en el VPS de builds",
+                'success'
+            );
+
+            $this->deploy_api_zip_to_hosting($local_zip, $zip_name);
+
+            return;
+        }
+
+        $this->log(
+            'upload_api',
+            "Sin artefacto {$asset_name} en el release {$tag} de empresa-api (no hay release o no trae el asset): "
+            . 'se empaqueta en el VPS de builds'
+        );
+
         $this->connect_build_vps();
 
         $api_build_path = $this->builds_api_path();
-        $tag = 'v' . $this->upgrade->to_version->version;
         $this->log('upload_api', "Preparando versión {$tag} en VPS de builds");
         $this->exec_build_ssh(
             'upload_api',
@@ -401,7 +523,6 @@ class DeploymentService
         );
         $this->log('upload_api', 'composer install en VPS completado', 'success');
 
-        $zip_name = 'api_' . $this->upgrade->uuid . '.zip';
         $api_zip_remote = $api_build_path . '/' . $zip_name;
         $this->reconnect_build_vps();
         $zip_command = 'cd ' . escapeshellarg($api_build_path)
@@ -416,47 +537,13 @@ class DeploymentService
         $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
         $this->log('upload_api', "API empaquetada ({$api_zip_bytes} bytes en VPS)");
 
-        $deployments_dir = storage_path('app/deployments');
-        if (! is_dir($deployments_dir)) {
-            mkdir($deployments_dir, 0755, true);
-        }
+        $this->ensure_local_deployments_dir();
 
-        $local_zip = storage_path('app/deployments/api_' . $this->upgrade->uuid . '.zip');
         $sftp_build = $this->open_sftp_session('vps');
         $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
         $this->log('upload_api', 'ZIP descargado al servidor de admin');
 
-        $api_path = $this->get_api_path();
-        $remote_zip = "{$api_path}/{$zip_name}";
-        /* Usar la credencial correcta según hosting_type (shared_hosting o vps) */
-        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
-        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
-        $this->log('upload_api', 'ZIP subido al hosting');
-
-        // Reconecta SSH al hosting (sesión inicial puede estar inactiva tras operaciones largas en VPS/SFTP).
-        $this->reconnect_hosting_ssh();
-        $this->exec_hosting_ssh(
-            'upload_api',
-            "cd {$api_path} && unzip -o {$zip_name} && rm {$zip_name}",
-            true,
-            true
-        );
-        $this->log('upload_api', 'API descomprimida en el hosting');
-
-        $this->log('upload_api', 'Corriendo composer install en hosting...');
-        // Cierra canal SSH previo (phpseclib: "Please close the channel before trying to open it again").
-        $this->reconnect_hosting_ssh();
-        $this->exec_hosting_ssh(
-            'upload_api',
-            $this->build_composer_install_command($api_path, false),
-            true,
-            true
-        );
-        $this->log('upload_api', 'API lista en el hosting', 'success');
-
-        if (is_file($local_zip)) {
-            unlink($local_zip);
-        }
+        $this->deploy_api_zip_to_hosting($local_zip, $zip_name);
 
         $this->reconnect_build_vps();
         $this->exec_build_ssh(
@@ -1271,13 +1358,22 @@ class DeploymentService
     }
 
     /**
-     * Contenido del .env de empresa-spa en el VPS antes de npm run build.
+     * Variables por frente de `empresa-spa`: las dos que cambian por cliente (API y SPA), la key y
+     * el cluster de Pusher, y las fijas de `services.deploy.spa_build_env`.
+     *
+     * 🔴 ES LA ÚNICA FUENTE de ese conjunto. De acá salen el `.env` con el que se compila en el VPS
+     * de builds (build_spa_env_file_content()) y el `config.js` que se escribe en el hosting para
+     * la SPA compilada por GitHub Actions (write_spa_runtime_config()). Si las dos listas vivieran
+     * separadas, un frente podría compilarse con una variable y desplegarse sin ella.
+     *
+     * El orden es contrato: primero las dos por frente, después Pusher, después las fijas. Y el
+     * merge es el de siempre: una clave de `spa_build_env` PISA a las calculadas.
      *
      * @param  string  $api_url  VUE_APP_API_URL
      * @param  string  $spa_url  VUE_APP_APP_URL
-     * @return string
+     * @return array<string, string>
      */
-    private function build_spa_env_file_content(string $api_url, string $spa_url): string
+    private function build_spa_env_vars(string $api_url, string $spa_url): array
     {
         $env_vars = [
             'VUE_APP_API_URL' => $api_url,
@@ -1293,8 +1389,20 @@ class DeploymentService
             }
         }
 
+        return $env_vars;
+    }
+
+    /**
+     * Contenido del .env de empresa-spa en el VPS antes de npm run build.
+     *
+     * @param  string  $api_url  VUE_APP_API_URL
+     * @param  string  $spa_url  VUE_APP_APP_URL
+     * @return string
+     */
+    private function build_spa_env_file_content(string $api_url, string $spa_url): string
+    {
         $lines = [];
-        foreach ($env_vars as $env_key => $env_value) {
+        foreach ($this->build_spa_env_vars($api_url, $spa_url) as $env_key => $env_value) {
             // Valores con espacios requieren comillas para que dotenv/vue-cli los interprete bien.
             if (preg_match('/\s/', $env_value) !== 0) {
                 $escaped_value = str_replace('"', '\\"', $env_value);
@@ -1305,6 +1413,82 @@ class DeploymentService
         }
 
         return implode("\n", $lines);
+    }
+
+    /**
+     * URL pública del SPA destino (VUE_APP_APP_URL), validada.
+     *
+     * @return string
+     * @throws \RuntimeException Si la ClientApi destino no tiene spa_url.
+     */
+    private function spa_url_for_env(): string
+    {
+        $spa_url = trim((string) $this->target_api->spa_url);
+        if ($spa_url === '') {
+            throw new \RuntimeException(
+                'La API destino (target_client_api) no tiene spa_url. '
+                . 'Configúrela en el cliente (ClientApi) antes de compilar empresa-spa.'
+            );
+        }
+
+        return $spa_url;
+    }
+
+    /**
+     * Escribe `config.js` en el directorio del SPA del cliente, con las variables por frente.
+     *
+     * Es la mitad del admin del contrato con `empresa-spa` (misión `actualizar-sin-el-vps`,
+     * 9/9/2026): `index.html` carga `<BASE_URL>config.js` síncrono antes de cualquier otro script y
+     * `src/runtime_config.js` lee `window.__CC_CONFIG__[key]`, cayendo a `process.env` si no está.
+     * El formato exacto lo fija SpaRuntimeConfig; las variables, build_spa_env_vars().
+     *
+     * Se escribe con `printf '%s'` y el mismo escapado de comillas simples que usa
+     * step_compile_spa() para el `.env` del VPS. El directorio es el mismo que vacía y rellena
+     * build_spa_hosting_deploy_shell(): relativo al home del usuario SSH en el hosting compartido,
+     * absoluto en VPS.
+     *
+     * @param  string  $step  Etapa de log.
+     * @return void
+     */
+    private function write_spa_runtime_config(string $step): void
+    {
+        $spa_dir = $this->get_spa_hosting_dir();
+        $api_url = $this->get_api_url_for_env();
+        $spa_url = $this->spa_url_for_env();
+
+        $config_js = SpaRuntimeConfig::render($this->build_spa_env_vars($api_url, $spa_url));
+
+        $this->exec_hosting_ssh($step, $this->build_spa_config_js_write_command($spa_dir, $config_js));
+        $this->log($step, "config.js escrito en {$spa_dir} — API: {$api_url}", 'success');
+    }
+
+    /**
+     * Comando remoto que escribe `config.js` en el directorio del SPA.
+     *
+     * Las comillas simples van escapadas a mano (`'\''`) tanto en el contenido como en la ruta, y no
+     * con escapeshellarg(): en Windows esa función envuelve con comillas dobles, y este comando lo
+     * ejecuta un shell POSIX del otro lado del SSH. Así el comando es el mismo se arme donde se arme.
+     *
+     * @param  string  $spa_dir    Directorio del SPA en el hosting (sin barra final).
+     * @param  string  $config_js  Contenido completo del archivo (SpaRuntimeConfig::render()).
+     * @return string
+     */
+    private function build_spa_config_js_write_command(string $spa_dir, string $config_js): string
+    {
+        $destino = rtrim($spa_dir, '/') . '/config.js';
+
+        return "printf '%s' " . $this->posix_single_quote($config_js) . ' > ' . $this->posix_single_quote($destino);
+    }
+
+    /**
+     * Entrecomilla un texto para un shell POSIX: comillas simples, con las del texto como `'\''`.
+     *
+     * @param  string  $texto
+     * @return string
+     */
+    private function posix_single_quote(string $texto): string
+    {
+        return "'" . str_replace("'", "'\\''", $texto) . "'";
     }
 
     /**
@@ -2473,6 +2657,160 @@ class DeploymentService
     {
         $this->upgrade->$field = now();
         $this->upgrade->save();
+    }
+
+    /**
+     * Tag del release de la versión destino: el mismo con el que GitHub Actions publica los
+     * artefactos y el que el VPS de builds hace checkout.
+     *
+     * @return string  Ej: `v4.0.23`
+     */
+    private function version_tag(): string
+    {
+        return 'v' . $this->upgrade->to_version->version;
+    }
+
+    /**
+     * Cliente de artefactos de release, creado la primera vez que se pide.
+     *
+     * @return ReleaseArtifactService
+     */
+    private function release_artifacts(): ReleaseArtifactService
+    {
+        if ($this->release_artifacts === null) {
+            $this->release_artifacts = new ReleaseArtifactService();
+        }
+
+        return $this->release_artifacts;
+    }
+
+    /**
+     * Ruta local del zip del `dist/` de la SPA de este upgrade.
+     *
+     * 🔴 Es la misma en step_compile_spa() (que lo deja al bajar el artefacto) y en
+     * step_upload_spa() (que decide la vía por su existencia): por eso sale de acá y no se arma
+     * inline en cada etapa.
+     *
+     * @return string
+     */
+    private function local_spa_zip_path(): string
+    {
+        return storage_path('app/deployments/dist_' . $this->upgrade->uuid . '.zip');
+    }
+
+    /**
+     * Ruta local del zip de la API de este upgrade.
+     *
+     * @return string
+     */
+    private function local_api_zip_path(): string
+    {
+        return storage_path('app/deployments/api_' . $this->upgrade->uuid . '.zip');
+    }
+
+    /**
+     * Crea `storage/app/deployments` si no existe.
+     *
+     * @return void
+     */
+    private function ensure_local_deployments_dir(): void
+    {
+        $deployments_dir = storage_path('app/deployments');
+        if (! is_dir($deployments_dir)) {
+            mkdir($deployments_dir, 0755, true);
+        }
+    }
+
+    /**
+     * Comprueba que un zip local traiga un archivo dado EN LA RAÍZ (no adentro de una carpeta).
+     *
+     * Es la guarda contra un release mal empaquetado: un `dist.zip` con `dist/index.html` adentro
+     * pasaría la verificación de ZipArchive, y build_spa_hosting_deploy_shell() vaciaría el
+     * directorio del SPA y descomprimiría una carpeta que el servidor web no sirve. Mejor cortar
+     * acá, antes de tocar el hosting.
+     *
+     * @param  string  $local_zip
+     * @param  string  $archivo  Nombre del archivo esperado en la raíz (ej: `index.html`, `artisan`).
+     * @param  string  $step
+     * @return void
+     * @throws \RuntimeException Si el zip no trae el archivo en la raíz.
+     */
+    private function assert_zip_contains_root_file(string $local_zip, string $archivo, string $step): void
+    {
+        if (! class_exists(\ZipArchive::class)) {
+            $this->log(
+                $step,
+                "ZipArchive no está disponible: no se pudo verificar que el artefacto traiga {$archivo} en la raíz",
+                'warning'
+            );
+
+            return;
+        }
+
+        $zip_archive = new \ZipArchive();
+        if ($zip_archive->open($local_zip) !== true) {
+            throw new \RuntimeException("ZipArchive no pudo abrir el artefacto {$local_zip}.");
+        }
+
+        $encontrado = $zip_archive->locateName($archivo) !== false
+            || $zip_archive->locateName('./' . $archivo) !== false;
+        $zip_archive->close();
+
+        if (! $encontrado) {
+            throw new \RuntimeException(
+                'El artefacto ' . basename($local_zip) . " no trae {$archivo} en la raíz del zip: "
+                . 'el release está mal empaquetado y no se despliega.'
+            );
+        }
+
+        $this->log($step, "Verificado {$archivo} en la raíz del artefacto", 'success');
+    }
+
+    /**
+     * Segunda mitad de step_upload_api(), común a las dos vías: sube el zip al hosting, lo
+     * descomprime encima de la API destino, borra el zip remoto, corre `composer install` en el
+     * hosting y borra el zip local.
+     *
+     * Con el `vendor/` del artefacto adentro del zip, ese `composer install` es un no-op rápido;
+     * sin él (vía vieja, que lo excluye), instala como siempre.
+     *
+     * @param  string  $local_zip  Zip local ya verificado.
+     * @param  string  $zip_name   Nombre del zip en el hosting (`api_<uuid>.zip`).
+     * @return void
+     */
+    private function deploy_api_zip_to_hosting(string $local_zip, string $zip_name): void
+    {
+        $api_path = $this->get_api_path();
+        $remote_zip = "{$api_path}/{$zip_name}";
+        /* Usar la credencial correcta según hosting_type (shared_hosting o vps) */
+        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
+        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
+        $this->log('upload_api', 'ZIP subido al hosting');
+
+        // Reconecta SSH al hosting (sesión inicial puede estar inactiva tras operaciones largas en VPS/SFTP).
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh(
+            'upload_api',
+            "cd {$api_path} && unzip -o {$zip_name} && rm {$zip_name}",
+            true,
+            true
+        );
+        $this->log('upload_api', 'API descomprimida en el hosting');
+
+        $this->log('upload_api', 'Corriendo composer install en hosting...');
+        // Cierra canal SSH previo (phpseclib: "Please close the channel before trying to open it again").
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh(
+            'upload_api',
+            $this->build_composer_install_command($api_path, false),
+            true,
+            true
+        );
+        $this->log('upload_api', 'API lista en el hosting', 'success');
+
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
     }
 
     /**
