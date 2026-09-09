@@ -202,6 +202,16 @@ class SugerenciaHuerfanaPostEnvioTest extends TestCase
             /** @var callable|null Se ejecuta justo antes de explotar, con la parte anterior ya confirmada. */
             public $al_explotar = null;
 
+            /**
+             * @var callable|null Se ejecuta con CADA parte que sale con éxito (no con las que
+             *                    explotan), justo antes de devolver su wamid — recibe el número de
+             *                    parte (contando desde 1). Ajuste 2 del chequeo independiente
+             *                    (9/9/2026): sirve para simular "la fila desaparece por otra vía
+             *                    mientras el envío por partes sigue en curso", sin necesidad de tirar
+             *                    ninguna excepción — al revés de $al_explotar, que sí la tira.
+             */
+            public $al_confirmar_parte = null;
+
             /** @var string Prefijo del id de Meta que devuelve este espía (único por instancia, ver el otro archivo de tests). */
             public $prefijo = 'wamid.';
 
@@ -237,6 +247,10 @@ class SugerenciaHuerfanaPostEnvioTest extends TestCase
                     }
 
                     throw new \RuntimeException('Simulado: el proceso murió a mitad del envío (test de la sugerencia huérfana post-envío).');
+                }
+
+                if ($this->al_confirmar_parte !== null) {
+                    ($this->al_confirmar_parte)($parte);
                 }
 
                 return $this->wamid($parte);
@@ -492,5 +506,79 @@ class SugerenciaHuerfanaPostEnvioTest extends TestCase
         $this->assertNotSame('sugerido', (string) $sobrevivio->status);
         $this->assertSame($espia->wamid(1), (string) $sobrevivio->whatsapp_message_id);
         $this->assertNotNull($sobrevivio->sent_at);
+    }
+
+    /**
+     * 🔴 EL TERCER ESCENARIO (ajuste del chequeo independiente de esta misma misión, 9/9/2026): la
+     * fila puede desaparecer por OTRA vía —no por el barrido, no en el UPDATE de cierre— justo
+     * DURANTE `persistir_progreso_envio()` de una parte INTERMEDIA (acá, la 1ra de 3), sin que nada
+     * explote. Antes de este ajuste esa escritura era fire-and-forget: si el UPDATE tocaba 0 filas,
+     * nadie se enteraba. Con el ajuste, la detecta y la deja asentada en el log, pero A PROPÓSITO no
+     * recrea ahí mismo (ver el comentario grande de persistir_progreso_envio() sobre por qué
+     * recrear a mitad del bucle de partes sería más riesgoso que el problema que resuelve) — el
+     * envío de las partes 2 y 3 tiene que seguir su curso normal, y recién el UPDATE de cierre
+     * (que ya sabía recrear desde antes de esta misión) repone la fila una sola vez, con el estado
+     * final completo.
+     *
+     * Lo que este test prueba: que la desaparición a mitad de camino NO corta el envío de las partes
+     * que faltan, y que al final queda UNA sola fila (no cero, no duplicada) con las tres partes
+     * contabilizadas.
+     *
+     * @return void
+     */
+    public function test_la_fila_desaparece_en_pleno_envio_por_partes_y_no_se_pierde_el_mensaje()
+    {
+        $admin = $this->crear_admin('huerfana-parte-intermedia@test.local');
+        $lead  = $this->crear_lead('Ariel');
+        $this->crear_inbound($lead, 'Hola, quiero ver el sistema');
+
+        $contenido  = "Primera parte del mensaje.\n---\nSegunda parte del mensaje.\n---\nTercera parte del mensaje.";
+        $sugerencia = $this->crear_sugerencia($lead, ['content' => $contenido]);
+
+        $espia = $this->espia_que_revienta();
+
+        // explota_en_la_parte queda en 0 (nunca explota): acá no hace falta ningún fatal, alcanza con
+        // que la fila desaparezca por otra vía justo cuando la parte 1 (intermedia, no la última) ya
+        // se confirmó y persistir_progreso_envio() va a intentar su UPDATE.
+        $espia->al_confirmar_parte = function (int $parte) use ($sugerencia) {
+            if ($parte === 1) {
+                LeadMessage::query()->whereKey($sugerencia->id)->delete();
+            }
+        };
+
+        $respuesta = $this->aprobar($admin, $sugerencia);
+
+        // Nada explota en este escenario: el envío entero se completa y el controller responde 200,
+        // al revés de los dos tests de arriba (que sí simulan un fatal real).
+        $respuesta->assertStatus(200);
+
+        $this->assertCount(3, $espia->partes, 'No se intentaron las tres partes: la desaparición de la fila cortó el envío antes de tiempo.');
+
+        $this->assertNull(LeadMessage::query()->find($sugerencia->id), 'La fila vieja tenía que estar borrada en este escenario.');
+
+        $mensajes = LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('sender', 'sistema')
+            ->where('is_error', false)
+            ->where('is_status_event', false)
+            ->orderBy('id')
+            ->get();
+
+        $this->assertCount(1, $mensajes, 'El mensaje que salió por WhatsApp no quedó en el hilo, o quedó duplicado por más de una recreación.');
+
+        $repuesto = $mensajes->first();
+        $this->assertSame($contenido, (string) $repuesto->content, 'El texto repuesto no es el que recibió el lead.');
+        $this->assertSame('enviado', (string) $repuesto->status);
+        $this->assertSame($espia->wamid(3), (string) $repuesto->whatsapp_message_id, 'El id guardado no es el de la última parte enviada.');
+        $this->assertNotNull($repuesto->sent_at);
+        $this->assertSame((int) $admin->id, (int) $repuesto->sent_by_admin_id);
+
+        // Las tres partes realmente salieron (espia->partes lo confirmó arriba): el estado final
+        // repuesto tiene que contabilizarlas todas, no sólo la que sobrevivió hasta el cierre.
+        $this->assertSame(3, (int) $repuesto->sent_parts_count, 'No quedaron registradas las tres partes que realmente salieron.');
+        $this->assertSame(3, (int) $repuesto->total_parts_count);
+        $this->assertNull($repuesto->partial_send_pending, 'Salieron las tres partes y quedó marcado como pendiente de todos modos.');
+
+        $this->assertSame('interesado', (string) $lead->fresh()->status, 'El estado sugerido no se aplicó cuando el mensaje se repuso en pleno envío por partes.');
     }
 }

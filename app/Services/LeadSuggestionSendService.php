@@ -444,10 +444,21 @@ class LeadSuggestionSendService
          * verdad): una escritura de más, sin efecto visible, no una carrera.
          */
         $al_enviar_parte_con_progreso = function (int $sent_parts, int $total_parts, ?string $last_message_id, ?string $partes_pendientes) use ($al_enviar_parte, $message, $sent_by_admin_id) {
-            if ($al_enviar_parte !== null) {
-                $al_enviar_parte();
-            }
-
+            /*
+             * 🔴 Orden invertido a propósito (ajuste del chequeo independiente de esta misma misión,
+             * 9/9/2026): primero la escritura PROTECTORA (persistir_progreso_envio(), la que saca a
+             * la fila de 'sugerido' y la pone a salvo de clear_stale_pending_suggestions()), recién
+             * después la renovación del lease.
+             *
+             * Antes estaba al revés (primero $al_enviar_parte(), después persistir_progreso_envio()),
+             * y eso dejaba la escritura que de verdad importa en SEGUNDO lugar: si el proceso moría
+             * justo entre las dos líneas, Kapso ya había confirmado la parte pero la fila seguía en
+             * 'sugerido' sin que nadie lo supiera — exactamente el hueco que esta misión vino a
+             * cerrar. Con el orden nuevo, esa misma muerte a mitad de camino deja la fila ya fuera de
+             * 'sugerido' (protegida) aunque el lease no se haya llegado a renovar; en el peor caso el
+             * lease queda zombie hasta que vence su TTL, y no importa: el barrido saltea la fila por
+             * status, no por lease, así que ya no la puede tocar.
+             */
             $this->persistir_progreso_envio((int) $message->getKey(), [
                 'status'                => 'enviado',
                 'sent_at'               => now(),
@@ -457,6 +468,10 @@ class LeadSuggestionSendService
                 'total_parts_count'     => $total_parts,
                 'partial_send_pending'  => $partes_pendientes,
             ]);
+
+            if ($al_enviar_parte !== null) {
+                $al_enviar_parte();
+            }
         };
 
         if ($phone !== '') {
@@ -730,15 +745,37 @@ class LeadSuggestionSendService
      * puede quedar en 'sugerido' si el proceso muere después), no uno nuevo: no reemplaza a
      * LeadSuggestionEnvioEnCurso, lo complementa.
      *
-     * No hace la comprobación de "0 filas afectadas ⇒ ¿la fila existe?" que sí hace el UPDATE de
-     * cierre (línea ~509 y su gemela en send_followup_suggestion_via_template()): mientras ESTE
-     * proceso sigue vivo para ejecutar este método, su propio lease está fresco (recién tomado o
-     * recién renovado) y clear_stale_pending_suggestions() lo saltea entero sin mirar el status —
-     * la fila no puede haber desaparecido por esa vía. Repetir acá la reposición de
-     * recrear_mensaje_enviado() sería además incorrecto: ese método crea una fila NUEVA, y el resto
-     * de enviar_sugerencia_aprobada() sigue operando sobre el objeto $message viejo después de este
-     * callback — crear una fila nueva a mitad del bucle de partes dejaría dos mensajes por un solo
-     * envío.
+     * 🔴 SÍ hace, desde el ajuste del chequeo independiente de esta misma misión (9/9/2026), la
+     * comprobación de "0 filas afectadas ⇒ ¿la fila existe?" — con una salvedad importante frente al
+     * UPDATE de cierre (línea ~509 y su gemela en send_followup_suggestion_via_template()), que se
+     * explica abajo. El razonamiento original de este párrafo ("mientras ESTE proceso sigue vivo para
+     * ejecutar este método, su propio lease está fresco y clear_stale_pending_suggestions() lo
+     * saltea entero, la fila no puede haber desaparecido por esa vía") sigue siendo cierto PARA ESA
+     * vía puntual, pero no es la única: $renovar_lease en send_suggestion() traga cualquier excepción
+     * y sigue (a propósito, ver su docblock), así que una renovación que falla deja el lease vencido
+     * sin que este proceso se entere — y en esa ventana, un borrado concurrente por OTRO camino
+     * (discard_obsolete_suggestion(), un borrado a mano, el que se escriba mañana) sí puede tocar la
+     * fila mientras el envío sigue en curso.
+     *
+     * Detectado el caso, este método NO recrea la fila acá — a propósito, y es una decisión
+     * consciente, no una omisión. recrear_mensaje_enviado() crea una fila NUEVA, y este método puede
+     * correr varias veces dentro del MISMO bucle de partes (una vez por cada parte que sale): si
+     * recreara en la primera parte que encuentra la fila desaparecida, las llamadas de las partes
+     * siguientes (persistir_progreso_envio() otra vez, más la renovación del lease) tendrían que
+     * enterarse de escribir sobre el id NUEVO en vez del viejo — y el objeto $message que usa el
+     * resto de enviar_sugerencia_aprobada() (incluido su propio UPDATE de cierre) también. Coserlo
+     * bien desde acá adentro es mucho más riesgoso que el problema que resuelve: una recreación mal
+     * propagada dejaría DOS filas por un solo envío, que es peor que el bug original. En cambio,
+     * cuando la fila desaparece acá, se deja constancia FUERTE en el log y se sigue: el envío de las
+     * partes que faltan no se corta por esto, y el UPDATE de cierre —que ya sabe recrear, y corre UNA
+     * sola vez al terminar el bucle— es quien repone la fila, con el payload final completo.
+     *
+     * Esto deja abierta una ventana residual, angosta pero real: si el proceso muere (fatal) DESPUÉS
+     * de que esta escritura detectó la fila desaparecida y ANTES de llegar al UPDATE de cierre, el
+     * mensaje se pierde igual. Es el mismo riesgo que esta escritura protectora busca reducir, no uno
+     * que elimina del todo — pero es muchísimo más angosto que el original (que era "cualquier fatal
+     * después de la primera parte", ahora es "fatal después de una fila borrada por una vía que ya de
+     * por sí no debería pasar mientras el lease sigue vivo").
      *
      * @param int   $message_id
      * @param array $payload
@@ -748,7 +785,17 @@ class LeadSuggestionSendService
     private function persistir_progreso_envio(int $message_id, array $payload): void
     {
         try {
-            LeadMessage::query()->whereKey($message_id)->update($payload);
+            $filas_afectadas = LeadMessage::query()->whereKey($message_id)->update($payload);
+
+            /* Mismo motivo que el UPDATE de cierre: sin PDO::MYSQL_ATTR_FOUND_ROWS, rowCount() cuenta
+               filas CAMBIADAS, no encontradas — un UPDATE con los mismos valores da 0 con la fila
+               perfectamente presente. Por eso el exists() no sobra aunque $filas_afectadas ya sea 0. */
+            if ($filas_afectadas === 0 && ! LeadMessage::query()->whereKey($message_id)->exists()) {
+                Log::channel('daily')->error('LeadSuggestionSendService: la fila desapareció en pleno envío por partes (no en el cierre); no se recrea desde acá, queda a cargo del UPDATE de cierre.', [
+                    'message_id' => $message_id,
+                    'payload'    => $payload,
+                ]);
+            }
         } catch (\Throwable $e) {
             Log::channel('daily')->error('LeadSuggestionSendService: no se pudo persistir el progreso del envío en curso.', [
                 'message_id' => $message_id,
