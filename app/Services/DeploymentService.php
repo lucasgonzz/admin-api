@@ -1531,6 +1531,7 @@ class DeploymentService
      */
     private function provision_afip_certificates(string $step): void
     {
+        $api_path = $this->get_api_path();
         $service = new AfipCertificateProvisionService();
 
         $log = function (string $linea, string $nivel) use ($step) {
@@ -1541,7 +1542,7 @@ class DeploymentService
             function () {
                 return $this->open_sftp_session($this->get_hosting_credential_type());
             },
-            $this->get_api_path(),
+            $api_path,
             $log
         );
 
