@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Console\Commands\VencerDeploymentsColgados;
+use App\Events\DeploymentLogCreated;
 use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Jobs\RunDeploymentJob;
 use App\Models\Client;
 use App\Models\ClientVersionUpgrade;
+use App\Models\DeploymentLog;
 use App\Models\Version;
 use App\Services\ClientScheduleResolver;
 use App\Services\ClientVersionUpgradeCreationService;
@@ -107,6 +109,14 @@ class ClaudeUpgradeOpsController extends Controller
     const ETAPA_PRE_CIERRE       = 'compile_spa';
     const ETAPA_POST_CIERRE      = 'run_seeders';
     const ETAPA_CONFIGURACION    = 'update_default_version';
+
+    /**
+     * Etapas del PRE-CIERRE desde las que `deploy/start` acepta reanudar un deployment `failed`
+     * (`resume_from_step`), en el orden del pipeline. Son exactamente las que corren sobre la API
+     * DESTINO, que no atiende: las que siguen (`run_seeders` en adelante) tocan el sistema en uso y
+     * entran sólo por `start-post-closure` y `retry-commands`, con su gate de horario.
+     */
+    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'run_migrations'];
 
     /**
      * Etapa del reintento de comandos. Mismo string que despacha el botón del panel en
@@ -322,8 +332,17 @@ class ClaudeUpgradeOpsController extends Controller
      * Poner un gate sería impedir el uso normal. Sí se informa el horario del cliente, como
      * contexto.
      *
-     * ⚠️ Borra los logs del intento anterior, igual que el botón del panel: si querés el log de un
-     * intento fallido, leelo ANTES de reintentar.
+     * Dos modos, según venga o no `resume_from_step` (misión `actualizar-sin-el-vps`, 9/9/2026):
+     *
+     *  - **Sin `resume_from_step`** (el de siempre): arranque limpio desde `compile_spa`. ⚠️ Borra
+     *    los logs del intento anterior, igual que el botón del panel: si querés el log de un intento
+     *    fallido, leelo ANTES de reintentar.
+     *  - **Con `resume_from_step`** (`compile_spa` | `upload_spa` | `upload_api` |
+     *    `run_migrations`): reanuda un deployment que quedó `failed` desde esa etapa, sin repetir
+     *    las anteriores. 🔴 Sólo se acepta sobre `failed` —sobre cualquier otro estado es 422 sin
+     *    escribir nada— y sólo las etapas del pre-cierre. En este modo los logs NO se borran: el
+     *    motivo del fallo es justo lo que hace falta para decidir desde dónde reanudar, y se agrega
+     *    una línea que declara la reanudación. `desde_etapa` en la respuesta refleja la etapa real.
      *
      * @param Request    $request Request entrante.
      * @param int|string $id      Id numérico o uuid del upgrade.
@@ -335,6 +354,7 @@ class ClaudeUpgradeOpsController extends Controller
         $invalido = $this->validar_o_422($request, [
             'confirm_client_name'        => 'required|string|max:190',
             'allow_deploy_to_active_api' => 'nullable|boolean',
+            'resume_from_step'           => 'nullable|string|in:' . implode(',', self::ETAPAS_REANUDABLES_DEL_PRE_CIERRE),
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -362,6 +382,24 @@ class ClaudeUpgradeOpsController extends Controller
             ]);
         }
 
+        /* Reanudación: sólo sobre un deployment que quedó `failed`. Reanudar "desde upload_api" un
+           upgrade que nunca arrancó desplegaría la API sin haber subido la SPA. */
+        $etapa_de_reanudacion = $this->texto_o_null($request->input('resume_from_step'));
+
+        if ($etapa_de_reanudacion !== null && $upgrade->deployment_status !== 'failed') {
+            return $this->error_422(
+                'resume_from_step sólo se acepta cuando el deployment anterior quedó en `failed`: reanudar desde una '
+                    . 'etapa intermedia un upgrade que no falló desplegaría a medias. No se encoló nada.',
+                [
+                    'deployment_status'          => $upgrade->deployment_status,
+                    'deployment_status_esperado' => 'failed',
+                    'resume_from_step'           => $etapa_de_reanudacion,
+                    'ayuda'                      => 'Sin resume_from_step el start arranca limpio desde compile_spa (y borra '
+                        . 'los logs del intento anterior). Consultá GET claude/upgrades/' . (int) $upgrade->id . '.',
+                ]
+            );
+        }
+
         if (empty($upgrade->target_client_api_id)) {
             return $this->error_422('El upgrade no tiene API destino configurada (target_client_api_id). No se encoló nada.');
         }
@@ -384,11 +422,17 @@ class ClaudeUpgradeOpsController extends Controller
             );
         }
 
-        /* Reinicio limpio, igual que el panel. */
-        $upgrade->deployment_logs()->delete();
+        if ($etapa_de_reanudacion === null) {
+            /* Reinicio limpio, igual que el panel. */
+            $upgrade->deployment_logs()->delete();
+        } else {
+            /* Reanudación: los logs del intento fallido se conservan y se deja constancia. */
+            $this->registrar_reanudacion($upgrade, $etapa_de_reanudacion);
+        }
 
         /* `deployment_running_since` acompaña SIEMPRE a `deployment_status => 'running'`: es el
-         * ancla con la que `deployments:vencer-colgados` decide si esto está colgado. */
+         * ancla con la que `deployments:vencer-colgados` decide si esto está colgado. También en la
+         * reanudación: con el ancla vieja, el vencimiento lo mataría en el primer tick. */
         $upgrade->update([
             'deployment_status'        => 'running',
             'deployment_started_at'    => now(),
@@ -396,12 +440,18 @@ class ClaudeUpgradeOpsController extends Controller
         ]);
 
         /* 🔴 onConnection('database') explícito: sin esto el pipeline SSH entero correría adentro
-           de este request y lo mataría max_execution_time. */
-        RunDeploymentJob::dispatch($upgrade)->onConnection(self::CONEXION_DE_COLA);
+           de este request y lo mataría max_execution_time. Con `$etapa_de_reanudacion` en null el
+           job arranca desde el principio, que es lo que siempre hizo. */
+        RunDeploymentJob::dispatch($upgrade, $etapa_de_reanudacion)->onConnection(self::CONEXION_DE_COLA);
 
-        $respuesta = $this->respuesta_de_encolado($upgrade, self::ETAPA_PRE_CIERRE);
+        $desde_etapa = $etapa_de_reanudacion === null ? self::ETAPA_PRE_CIERRE : $etapa_de_reanudacion;
+
+        $respuesta = $this->respuesta_de_encolado($upgrade, $desde_etapa);
         $respuesta['horario_cliente'] = $this->horario_del_cliente($client);
-        $respuesta['nota_logs']       = '🔴 Se borraron los logs del intento anterior de este upgrade.';
+        $respuesta['nota_logs']       = $etapa_de_reanudacion === null
+            ? '🔴 Se borraron los logs del intento anterior de este upgrade.'
+            : 'Se conservaron los logs del intento anterior: el pipeline se reanuda desde ' . $etapa_de_reanudacion
+                . ' y lo que sigue se agrega a continuación en GET claude/upgrades/' . (int) $upgrade->id . '/logs.';
 
         if ($es_la_activa) {
             $respuesta['advertencia'] = 'Se desplegó sobre la API ACTIVA en producción porque vino '
@@ -1693,6 +1743,30 @@ class ClaudeUpgradeOpsController extends Controller
      |============================================================================================= */
 
     /**
+     * Deja en `deployment_logs` la constancia de que el pipeline se reanuda desde una etapa, con el
+     * mismo formato y el mismo evento de broadcast que usa `DeploymentService::log()`, para que el
+     * panel la muestre en vivo entre el intento fallido y lo que sigue.
+     *
+     * @param ClientVersionUpgrade $upgrade Upgrade reanudado.
+     * @param string               $etapa   Etapa desde la que se reanuda.
+     *
+     * @return void
+     */
+    private function registrar_reanudacion(ClientVersionUpgrade $upgrade, $etapa)
+    {
+        $deployment_log = DeploymentLog::create([
+            'client_version_upgrade_id' => $upgrade->id,
+            'step'                      => $etapa,
+            'line'                      => 'Reanudando desde ' . $etapa . ' (pedido por claude/upgrades): se conservan '
+                . 'los logs del intento anterior y no se repiten las etapas ya cumplidas.',
+            'level'                     => 'info',
+            'created_at'                => now(),
+        ]);
+
+        event(new DeploymentLogCreated($deployment_log));
+    }
+
+    /**
      * Busca el upgrade por id numérico o uuid, sin lanzar: acá el 404 se arma a mano con un cuerpo
      * JSON legible del otro lado.
      *
@@ -1799,9 +1873,10 @@ class ClaudeUpgradeOpsController extends Controller
      * 🔴 SOBRESCRIBE la del trait `RespuestasParaClaude`. ⚠️ El motivo original ya no vale: el trait
      * no tenía `exists` ni `array` y por eso los endpoints de lote contestaban en inglés, y desde el
      * 28/8/2026 los tiene, con el MISMO texto que estas dos líneas. Lo único que queda distinto es
-     * que esta lista no trae `date` ni `in`, que este controlador no usa. Se borra el día que
-     * alguien verifique endpoint por endpoint que devolver la del trait no cambia ningún mensaje;
-     * mientras tanto queda, porque unificarla es un cambio de contrato y no un refactor.
+     * que esta lista no trae `date`, que este controlador no usa (`in` se agregó el 9/9/2026 para
+     * `resume_from_step`, con el mismo texto que el del trait). Se borra el día que alguien
+     * verifique endpoint por endpoint que devolver la del trait no cambia ningún mensaje; mientras
+     * tanto queda, porque unificarla es un cambio de contrato y no un refactor.
      *
      * @return array<string, string>
      */
@@ -1815,6 +1890,8 @@ class ClaudeUpgradeOpsController extends Controller
             'integer'     => 'El parámetro :attribute tiene que ser un número entero.',
             'boolean'     => 'El parámetro :attribute tiene que ser booleano (1, 0, true o false).',
             'string'      => 'El parámetro :attribute tiene que ser texto.',
+            'in'          => 'El parámetro :attribute tiene un valor que no está permitido. Mirá '
+                . $this->ayuda_del_schema() . ' para ver los válidos.',
             'min'         => 'El parámetro :attribute está por debajo del mínimo permitido.',
             'max'         => 'El parámetro :attribute supera el máximo permitido.',
         ];
