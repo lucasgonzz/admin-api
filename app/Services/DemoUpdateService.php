@@ -7,6 +7,7 @@ use App\Models\Demo;
 use App\Models\DemoUpdate;
 use App\Models\Version;
 use App\Services\Afip\AfipCertificateProvisionService;
+use App\Services\Concerns\ArtefactosDeRelease;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
 use App\Services\ClientEmpresaApiUrlResolver;
@@ -32,6 +33,13 @@ use Illuminate\Support\Facades\Http;
  */
 class DemoUpdateService
 {
+    /*
+     * Bajar los paquetes que GitHub Actions publica en cada release en vez de compilar y empaquetar
+     * en el VPS de builds (misión `instalar-sin-el-vps`, 10/9/2026). Lo mismo que usan
+     * InstallationService y DemoInstallationService.
+     */
+    use ArtefactosDeRelease;
+
     /**
      * Tope de caracteres del campo `log`. Al superarlo se conserva la cola (lo último
      * es siempre lo más relevante para diagnosticar) y se descarta el principio.
@@ -185,19 +193,59 @@ class DemoUpdateService
     // =========================================================================
 
     /**
-     * Etapa 1: Conecta al VPS de builds, hace checkout del tag y compila el SPA
-     * con npm ci + npm run build. Verifica que dist/index.html exista al final.
+     * Etapa 1: deja listo el `dist/` compilado del SPA para que step_upload_spa() lo despliegue.
+     *
+     * Dos vías, y la primera es la nueva (misión `instalar-sin-el-vps`, 10/9/2026):
+     *
+     *  1. **Artefacto del release.** Si el release `v{version}` de `empresa-spa` trae
+     *     `empresa-spa-v{version}-dist.zip` —lo publica GitHub Actions al crear el tag— se baja y
+     *     la etapa termina ahí: NO se toca el VPS de builds. Las variables de esta demo ya no van
+     *     cocinadas en el bundle; las escribe step_upload_spa() en `config.js`.
+     *  2. **VPS de builds, APAGADA.** El código de siempre —checkout, `.env`, `npm ci`,
+     *     `npm run build`— sigue acá abajo, pero 🔴 no corre salvo que alguien prenda
+     *     `DEPLOY_PERMITIR_BUILD_EN_VPS` (decisión de Lucas, 9/9/2026). Sin artefacto la etapa
+     *     FALLA, en vez de mandarle el build al VPS en silencio.
      *
      * @return void
      */
     private function step_compile_spa(): void
     {
+        // Tag de git que coincide con la versión destino (ej: v1.2.3).
+        $tag       = 'v' . $this->version->version;
+        $local_zip = $this->local_spa_zip_path();
+
+        /* 🔴 El zip que pudiera haber quedado de un intento anterior se borra ANTES de decidir:
+           step_upload_spa() toma "hay zip local" como "vino del artefacto", y uno viejo no puede
+           pasar por nuevo. */
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
+
+        /* 🔴 Se llama SIEMPRE, por las dos vías, y no sólo para escribir el `.env` de la vía
+           vieja: acá adentro se asigna $this->compiled_api_url, y step_verify_demo() TIRA si queda
+           vacía. */
+        $this->build_demo_spa_env_vars();
+
+        if ($this->artefacto_bajar_dist_spa($tag, $local_zip, 'compile_spa')) {
+            return;
+        }
+
+        $this->artefacto_frenar_si_no_hay(
+            'compile_spa',
+            'empresa-spa-' . $tag . '-dist.zip',
+            $tag,
+            'empresa-spa'
+        );
+
+        $this->append_log(
+            "[compile_spa] Sin artefacto empresa-spa-{$tag}-dist.zip y con "
+            . 'DEPLOY_PERMITIR_BUILD_EN_VPS prendida: se compila en el VPS de builds'
+        );
+
         $this->connect_build_vps();
         $this->append_log('[compile_spa] Conectado al VPS de builds');
 
         $spa_build_path = $this->builds_spa_path();
-        // Tag de git que coincide con la versión destino (ej: v1.2.3).
-        $tag = 'v' . $this->version->version;
 
         // Actualiza las referencias de tags remotos.
         $this->exec_build_ssh(
@@ -277,35 +325,39 @@ class DemoUpdateService
      */
     private function step_upload_spa(): void
     {
-        $this->connect_build_vps();
+        $local_zip          = $this->local_spa_zip_path();
+        $spa_build_path     = $this->builds_spa_path();
+        $vino_del_artefacto = is_file($local_zip);
 
-        $spa_build_path = $this->builds_spa_path();
-        $spa_output_dir = $this->spa_output_dir_name();
+        if ($vino_del_artefacto) {
+            $this->assert_local_zip_file($local_zip, 0, 'upload_spa');
+            $this->append_log(
+                '[upload_spa] Se usa el artefacto del release ya bajado (' . basename($local_zip)
+                . '): no se toca el VPS de builds'
+            );
+        } else {
+            $this->connect_build_vps();
 
-        // Crea el ZIP con el contenido de dist/ (index.html en raíz).
-        $spa_zip_remote = $spa_build_path . '/dist.zip';
-        $dist_dir       = $spa_build_path . '/' . $spa_output_dir;
-        $this->exec_build_ssh(
-            'upload_spa',
-            'cd ' . escapeshellarg($dist_dir)
-            . ' && rm -f ../dist.zip && zip -r ../dist.zip . 2>&1',
-            true,
-            true
-        );
-        $spa_zip_bytes = $this->verify_zip_on_vps($spa_zip_remote, 'upload_spa');
-        $this->append_log("[upload_spa] dist/ comprimido ({$spa_zip_bytes} bytes en VPS)");
+            $spa_output_dir = $this->spa_output_dir_name();
 
-        // Directorio local temporal para los ZIPs del pipeline.
-        $deployments_dir = storage_path('app/deployments');
-        if (! is_dir($deployments_dir)) {
-            mkdir($deployments_dir, 0755, true);
+            // Crea el ZIP con el contenido de dist/ (index.html en raíz).
+            $spa_zip_remote = $spa_build_path . '/dist.zip';
+            $dist_dir       = $spa_build_path . '/' . $spa_output_dir;
+            $this->exec_build_ssh(
+                'upload_spa',
+                'cd ' . escapeshellarg($dist_dir)
+                . ' && rm -f ../dist.zip && zip -r ../dist.zip . 2>&1',
+                true,
+                true
+            );
+            $spa_zip_bytes = $this->verify_zip_on_vps($spa_zip_remote, 'upload_spa');
+            $this->append_log("[upload_spa] dist/ comprimido ({$spa_zip_bytes} bytes en VPS)");
+
+            // Descarga el ZIP del VPS al servidor de admin.
+            $sftp_build = $this->open_sftp_session('vps');
+            $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
+            $this->append_log('[upload_spa] ZIP descargado al servidor de admin');
         }
-
-        // Descarga el ZIP del VPS al servidor de admin.
-        $local_zip   = storage_path('app/deployments/dist_' . $this->demo_update->uuid . '.zip');
-        $sftp_build  = $this->open_sftp_session('vps');
-        $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
-        $this->append_log('[upload_spa] ZIP descargado al servidor de admin');
 
         /* Path del SPA de la demo en su servidor: relativo al home SSH en hosting compartido,
          * absoluto en el VPS. Lo resuelve DemoPathResolver, que además tira si el path fuera a
@@ -326,31 +378,79 @@ class DemoUpdateService
         );
         $this->append_log('[upload_spa] SPA desplegado en hosting (contenido anterior reemplazado)');
 
+        /* 🔴 DESPUÉS del deploy shell, que vacía el directorio del SPA con un
+           `find . -mindepth 1 -delete`: escrito antes, se lo lleva puesto. Y se escribe por las DOS
+           vías — un bundle compilado en el VPS con el `.env` cocinado lo ignora (tiene los valores
+           adentro) y uno de GitHub Actions lo necesita para saber a qué API pegarle. */
+        $this->artefacto_escribir_config_js(
+            $hosting_spa_dir,
+            $this->build_demo_spa_env_vars(),
+            'upload_spa'
+        );
+
         // Limpieza local.
         if (is_file($local_zip)) {
             unlink($local_zip);
         }
 
-        // Limpieza del ZIP temporal en el VPS.
-        $this->reconnect_build_vps();
-        $this->exec_build_ssh(
-            'upload_spa',
-            'rm -f ' . escapeshellarg($spa_build_path . '/dist.zip')
-        );
+        /* La limpieza del zip remoto es sólo de la vía vieja: con el artefacto no hay nada en el
+           VPS que limpiar. */
+        if (! $vino_del_artefacto) {
+            $this->reconnect_build_vps();
+            $this->exec_build_ssh(
+                'upload_spa',
+                'rm -f ' . escapeshellarg($spa_build_path . '/dist.zip')
+            );
+        }
     }
 
     /**
-     * Etapa 3: Checkout del tag de empresa-api en el VPS, composer install sin scripts,
-     * empaquetado en ZIP, descarga y subida al hosting. Luego composer install en hosting.
+     * Etapa 3: despliegue del código de la API en el servidor de la demo.
+     *
+     * Dos vías (misión `instalar-sin-el-vps`, 10/9/2026):
+     *
+     *  1. **Artefacto del release.** `empresa-api-v{version}.zip` trae el repo en la raíz CON
+     *     `vendor/` y sin `.git`/`.env`/`storage`/`public`/`tests`. Las mismas exclusiones que
+     *     hacía el `zip -r` de la vía vieja, así que el `unzip -o` de este pipeline sigue sin pisar
+     *     `public/` ni `storage/` de la demo. NO se toca el VPS de builds.
+     *  2. **VPS de builds, APAGADA.** El checkout + `composer install` allá + el zip siguen acá
+     *     abajo, detrás de `DEPLOY_PERMITIR_BUILD_EN_VPS`. Sin artefacto la etapa FALLA.
+     *
+     * El `composer install` que corre en la demo va CON scripts en las dos vías: a diferencia de
+     * una instalación de cero, acá el `.env` ya existe.
      *
      * @return void
      */
     private function step_upload_api(): void
     {
+        $tag       = 'v' . $this->version->version;
+        $zip_name  = 'api_' . $this->demo_update->uuid . '.zip';
+        $local_zip = $this->local_zip_path($zip_name);
+        $api_path  = $this->demo_api_path();
+
+        if ($this->artefacto_bajar_api($tag, $local_zip, 'upload_api')) {
+            $this->artefacto_desplegar_zip_api(
+                $local_zip,
+                $api_path,
+                $zip_name,
+                $this->demo_credential_type(),
+                $this->build_composer_install_command($api_path, false),
+                'upload_api'
+            );
+
+            return;
+        }
+
+        $this->artefacto_frenar_si_no_hay('upload_api', 'empresa-api-' . $tag . '.zip', $tag, 'empresa-api');
+
+        $this->append_log(
+            "[upload_api] Sin artefacto empresa-api-{$tag}.zip y con "
+            . 'DEPLOY_PERMITIR_BUILD_EN_VPS prendida: se empaqueta en el VPS de builds'
+        );
+
         $this->connect_build_vps();
 
         $api_build_path = $this->builds_api_path();
-        $tag            = 'v' . $this->version->version;
         $this->append_log("[upload_api] Preparando versión {$tag} en VPS de builds");
 
         // Trae tags remotos y hace checkout de la versión destino.
@@ -373,7 +473,6 @@ class DemoUpdateService
         $this->append_log('[upload_api] composer install en VPS completado');
 
         // Empaqueta empresa-api en ZIP (excluye .env, vendor, storage, public).
-        $zip_name       = 'api_' . $this->demo_update->uuid . '.zip';
         $api_zip_remote = $api_build_path . '/' . $zip_name;
         $this->reconnect_build_vps();
         $zip_command = 'cd ' . escapeshellarg($api_build_path)
@@ -384,21 +483,12 @@ class DemoUpdateService
         $api_zip_bytes = $this->verify_zip_on_vps($api_zip_remote, 'upload_api');
         $this->append_log("[upload_api] API empaquetada ({$api_zip_bytes} bytes en VPS)");
 
-        // Directorio local temporal.
-        $deployments_dir = storage_path('app/deployments');
-        if (! is_dir($deployments_dir)) {
-            mkdir($deployments_dir, 0755, true);
-        }
-
         // Descarga ZIP del VPS al admin.
-        $local_zip   = storage_path('app/deployments/api_' . $this->demo_update->uuid . '.zip');
-        $sftp_build  = $this->open_sftp_session('vps');
+        $sftp_build = $this->open_sftp_session('vps');
         $this->sftp_download_file($sftp_build, $api_zip_remote, $local_zip, $api_zip_bytes, 'upload_api');
         $this->append_log('[upload_api] ZIP descargado al servidor de admin');
 
-        // Path del API de la demo en su servidor (relativo en shared, absoluto en VPS).
-        $api_path    = $this->demo_api_path();
-        $remote_zip  = "{$api_path}/{$zip_name}";
+        $remote_zip = "{$api_path}/{$zip_name}";
 
         // Sube el ZIP al servidor de la demo.
         $sftp_hosting = $this->open_sftp_session($this->demo_credential_type());
@@ -485,7 +575,8 @@ class DemoUpdateService
          * salida vacía sin dar error. */
         $this->provision_afip_certificates('run_migrations');
 
-        // step_upload_api() termina con reconnect_build_vps(), así que la sesión SSH activa
+        // Por la vía vieja, step_upload_api() termina con reconnect_build_vps(), así que la
+        // sesión SSH activa
         // al cerrar esa etapa es la del VPS, no la del hosting: hay que reconectar acá.
         $this->connect_hosting_ssh();
 
@@ -767,6 +858,54 @@ class DemoUpdateService
     // =========================================================================
     // Helpers de log
     // =========================================================================
+
+    /**
+     * Log del trait de artefactos, adaptado al log de esta clase.
+     *
+     * El trait lo declara abstracto porque es lo único que las tres clases hacen distinto: en las
+     * dos instalaciones es `log()` con nivel y una fila por línea; acá es `append_log()`, que
+     * concatena a un campo de texto y lleva la etapa adentro del renglón. El nivel se ignora a
+     * propósito: este log no tiene columna donde guardarlo.
+     *
+     * @param  string  $step   Etapa.
+     * @param  string  $linea  Texto.
+     * @param  string  $nivel  Ignorado acá.
+     * @return void
+     */
+    protected function artefacto_log(string $step, string $linea, string $nivel = 'info'): void
+    {
+        $this->append_log('[' . $step . '] ' . $linea);
+    }
+
+    /**
+     * Ruta local del zip del `dist/` del SPA de esta corrida.
+     *
+     * 🔴 Es la misma en step_compile_spa() —que lo deja al bajar el artefacto— y en
+     * step_upload_spa(), que decide la vía por su existencia: por eso sale de acá y no se arma
+     * inline en cada etapa.
+     *
+     * @return string
+     */
+    private function local_spa_zip_path(): string
+    {
+        return $this->local_zip_path('dist_' . $this->demo_update->uuid . '.zip');
+    }
+
+    /**
+     * Ruta local de un zip temporal del pipeline, con el directorio ya creado.
+     *
+     * @param  string  $basename  Nombre del archivo, único por corrida (lleva el uuid adentro).
+     * @return string
+     */
+    private function local_zip_path(string $basename): string
+    {
+        $deployments_dir = storage_path('app/deployments');
+        if (! is_dir($deployments_dir)) {
+            mkdir($deployments_dir, 0755, true);
+        }
+
+        return $deployments_dir . DIRECTORY_SEPARATOR . $basename;
+    }
 
     /**
      * Agrega una línea al campo log del DemoUpdate con timestamp [H:i:s] y persiste.
@@ -1601,6 +1740,40 @@ class DemoUpdateService
      */
     private function build_demo_spa_env_content(): string
     {
+        $env_vars = $this->build_demo_spa_env_vars();
+
+        $lines = [];
+        foreach ($env_vars as $env_key => $env_value) {
+            // Valores con espacios requieren comillas para que dotenv/vue-cli los interprete bien.
+            if (preg_match('/\s/', $env_value) !== 0) {
+                $escaped_value = str_replace('"', '\\"', $env_value);
+                $lines[]       = $env_key . '="' . $escaped_value . '"';
+            } else {
+                $lines[] = $env_key . '=' . $env_value;
+            }
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Las variables `VUE_APP_*` de ESTA demo, como array.
+     *
+     * 🔴 Es la mitad que consume el `config.js` de runtime, y por eso se separó del `.env` de
+     * la vía vieja (misión `instalar-sin-el-vps`, 10/9/2026): con el bundle que compila GitHub
+     * Actions no hay ningún `.env` en el build, y estas variables son lo único que le dice al frente
+     * a qué API pegarle. Los valores salen siempre como string — `SpaRuntimeConfig` lo exige, y el
+     * código de la SPA compara con `'true'`/`'false'`: un booleano lo rompería en silencio.
+     *
+     * 🔴 Y tiene un efecto de borde que NO es cosmético: acá se asigna
+     * `$this->compiled_api_url`, y step_verify_demo() TIRA si queda vacía. Por eso
+     * step_compile_spa() lo llama SIEMPRE, por las dos vías, aunque con el artefacto no haya ningún
+     * `.env` que escribir.
+     *
+     * @return array<string, string>
+     */
+    private function build_demo_spa_env_vars(): array
+    {
         // API URL ya normalizada (con /public agregado si corresponde, idempotente).
         $api_url = $this->demo_api_base_url();
 
@@ -1649,18 +1822,7 @@ class DemoUpdateService
             (string) config('services.deploy.spa_pusher_cluster', 'sa1')
         );
 
-        $lines = [];
-        foreach ($env_vars as $env_key => $env_value) {
-            // Valores con espacios requieren comillas para que dotenv/vue-cli los interprete bien.
-            if (preg_match('/\s/', $env_value) !== 0) {
-                $escaped_value = str_replace('"', '\\"', $env_value);
-                $lines[]       = $env_key . '="' . $escaped_value . '"';
-            } else {
-                $lines[] = $env_key . '=' . $env_value;
-            }
-        }
-
-        return implode("\n", $lines);
+        return $env_vars;
     }
 
     // =========================================================================
