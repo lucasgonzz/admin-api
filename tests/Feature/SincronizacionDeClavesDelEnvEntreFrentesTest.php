@@ -30,9 +30,12 @@ use Tests\TestCase;
  *  1. Que la etapa exista, esté ENTRE `upload_api` y `run_migrations` (las migraciones bootean con
  *     el `.env` del destino y tienen que encontrarlo completo) y tenga su `case` en el switch: un
  *     paso listado sin `case` no corre nunca y no falla nada.
- *  2. 🔴 La regla de qué se copia y qué no (`claves_a_sincronizar()`): sólo lo que falta en el
- *     destino, nunca lo que ya tiene (aunque el valor difiera), nunca las claves propias de cada
- *     frente (URL, DOMAIN, PREFIX, COOKIE, STATEFUL, APP_NAME) y nunca un valor vacío.
+ *  2. 🔴 La regla de qué se copia y qué no (`claves_a_sincronizar()`): sólo lo que en el destino
+ *     falta o está VACÍO, nunca lo que ya tiene con valor (aunque difiera), nunca las claves
+ *     propias de cada frente (URL, DOMAIN, PREFIX, COOKIE, STATEFUL, APP_NAME — salvo las
+ *     compartidas que el patrón atrapa de más, CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN), nunca un
+ *     valor vacío y nunca un valor que interpola otra variable (`${…}`). Lo que se aparta se
+ *     cuenta por nombre y motivo (`claves_apartadas()`) y va al log.
  *  3. Que `deploy/start` acepte `resume_from_step=sync_env_keys`.
  *  4. 🔴 Que el log nombre las CLAVES y nunca los VALORES: deployment_logs se lee desde el panel y
  *     por `claude/*`, y ahí no puede aparecer una API key.
@@ -434,8 +437,9 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
 
     /**
      * 🔴 El caso de ferretotal, con todo lo que NO tiene que viajar alrededor: lo que el destino ya
-     * tiene (aunque el valor difiera, como APP_KEY; aunque esté vacío, como ANTHROPIC_API_KEY), las
-     * claves propias del frente, y un valor vacío en el origen.
+     * tiene con valor (aunque difiera, como APP_KEY), las claves propias del frente y un valor
+     * vacío en el origen. Y lo que SÍ viaja además de OPENAI_API_KEY: ANTHROPIC_API_KEY, que el
+     * destino tenía VACÍA (la instalación la deja como `ANTHROPIC_API_KEY=` en los dos frentes).
      */
     public function test_claves_a_sincronizar_agrega_solo_lo_que_falta_y_no_es_propio_del_frente(): void
     {
@@ -467,14 +471,180 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
         $resultado = DeploymentService::claves_a_sincronizar($activo, $destino);
 
         $this->assertSame(
-            ['DB_PASSWORD' => 'secreta', 'OPENAI_API_KEY' => 'sk-openai'],
+            ['DB_PASSWORD' => 'secreta', 'OPENAI_API_KEY' => 'sk-openai', 'ANTHROPIC_API_KEY' => 'sk-ant'],
             $resultado,
-            'Sólo lo que falta en el destino y no es propio del frente, en el orden del origen.'
+            'Sólo lo que en el destino falta o está vacío y no es propio del frente, en el orden del origen.'
         );
 
-        $this->assertArrayNotHasKey('APP_KEY', $resultado, 'Una clave que el destino ya tiene se respeta aunque el valor difiera.');
-        $this->assertArrayNotHasKey('ANTHROPIC_API_KEY', $resultado, 'Presente con valor vacío en el destino sigue siendo presente: no se pisa.');
+        $this->assertArrayNotHasKey('APP_KEY', $resultado, 'Una clave que el destino ya tiene con valor se respeta aunque el valor difiera.');
+        $this->assertSame('sk-ant', $resultado['ANTHROPIC_API_KEY'], 'Presente pero VACÍA en el destino cuenta como faltante: se completa con el valor del activo (ajuste después del chequeo, 10/9/2026).');
         $this->assertArrayNotHasKey('MAIL_PASSWORD', $resultado, 'Un valor vacío en el origen no se copia: env() distingue ausente de vacío.');
+    }
+
+    /**
+     * 🔴 Presente pero VACÍA en el destino cuenta como faltante (ajuste después del chequeo). La
+     * instalación escribe TODAS las claves de la plantilla y las nulas quedan como `CLAVE=` en los
+     * dos frentes; si después Lucas carga ANTHROPIC_API_KEY en el activo, con la regla vieja el
+     * destino "la tenía" y el frente nuevo arrancaba sin IA: el mismo síntoma que motivó el paso,
+     * sin aviso. Con valor propio en el destino sigue sin tocarse: completar un placeholder vacío
+     * no es pisar lo distinto.
+     */
+    public function test_una_clave_vacia_en_el_destino_cuenta_como_faltante_y_se_completa(): void
+    {
+        $activo = [
+            'ANTHROPIC_API_KEY' => 'sk-ant-del-activo',
+            'OPENAI_API_KEY'    => 'sk-openai-del-activo',
+            'MAIL_PASSWORD'     => 'correo-del-activo',
+        ];
+
+        $destino = [
+            'ANTHROPIC_API_KEY' => '',
+            'OPENAI_API_KEY'    => '   ',
+            'MAIL_PASSWORD'     => 'correo-del-destino',
+        ];
+
+        $resultado = DeploymentService::claves_a_sincronizar($activo, $destino);
+
+        $this->assertSame(
+            ['ANTHROPIC_API_KEY' => 'sk-ant-del-activo', 'OPENAI_API_KEY' => 'sk-openai-del-activo'],
+            $resultado,
+            'Vacía o sólo espacios en el destino es un placeholder de la instalación: se completa con el valor del activo.'
+        );
+        $this->assertArrayNotHasKey('MAIL_PASSWORD', $resultado, 'Con valor propio en el destino no se toca, sea el que sea.');
+
+        /* Vacía en los dos lados: no hay nada que copiar, y tampoco es una apartada. */
+        $this->assertSame([], DeploymentService::claves_a_sincronizar(['ANTHROPIC_API_KEY' => ''], ['ANTHROPIC_API_KEY' => '']));
+        $this->assertSame([], DeploymentService::claves_apartadas(['ANTHROPIC_API_KEY' => ''], ['ANTHROPIC_API_KEY' => '']));
+    }
+
+    /**
+     * 🔴 Un valor que interpola otra variable no se copia: parse_env_content() descarta el tipo de
+     * comillas y format_env_value() lo envolvería en comillas simples, que phpdotenv NO interpola,
+     * así que el destino recibiría el literal `${APP_NAME}`. Es lo que trae el `.env.example` de
+     * empresa-api en MAIL_FROM_NAME y MIX_PUSHER_*. Queda apartada con su motivo, no en silencio.
+     */
+    public function test_un_valor_con_interpolacion_no_se_copia_y_queda_apartado(): void
+    {
+        $activo = [
+            'MAIL_FROM_NAME'     => '${APP_NAME}',
+            'MIX_PUSHER_APP_KEY' => '${PUSHER_APP_KEY}',
+            'MAIL_FROM_ADDRESS'  => 'hola@ferretotal.com.ar',
+            'OPENAI_API_KEY'     => 'sk-openai',
+        ];
+
+        $this->assertSame(
+            ['MAIL_FROM_ADDRESS' => 'hola@ferretotal.com.ar', 'OPENAI_API_KEY' => 'sk-openai'],
+            DeploymentService::claves_a_sincronizar($activo, [])
+        );
+
+        $this->assertSame(
+            ['MAIL_FROM_NAME' => 'interpolacion', 'MIX_PUSHER_APP_KEY' => 'interpolacion'],
+            DeploymentService::claves_apartadas($activo, [])
+        );
+
+        /* Con el destino ya completo con un valor propio, la interpolada ni se copia ni se aparta. */
+        $destino = ['MAIL_FROM_NAME' => 'Ferretotal'];
+        $this->assertArrayNotHasKey('MAIL_FROM_NAME', DeploymentService::claves_a_sincronizar($activo, $destino));
+        $this->assertArrayNotHasKey('MAIL_FROM_NAME', DeploymentService::claves_apartadas($activo, $destino));
+    }
+
+    /**
+     * El patrón atrapa de más: estas claves tienen URL, DOMAIN o COOKIE en el nombre pero apuntan a
+     * un servicio externo o al admin, no al dominio del frente, y valen lo mismo en las dos
+     * carpetas. Se rescatan por nombre exacto (CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN). Las del frente
+     * —incluidas las dos URL de retorno del OAuth— siguen apartadas.
+     */
+    public function test_las_claves_compartidas_pasan_aunque_matcheen_el_patron(): void
+    {
+        $compartidas = [
+            'ADMIN_API_URL',
+            'DOLAR_API_URL',
+            'MAILGUN_DOMAIN',
+            'LOG_SLACK_WEBHOOK_URL',
+            'SESSION_SECURE_COOKIE',
+            'ZIPPIN_ACCOUNT_URL',
+            'ZIPPIN_AUTHORIZATION_URL',
+            'ZIPPIN_TOKEN_URL',
+        ];
+
+        $this->assertSame($compartidas, DeploymentService::CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN);
+
+        foreach ($compartidas as $compartida) {
+            $this->assertSame(1, preg_match(DeploymentService::CLAVES_PROPIAS_DEL_FRENTE_PATRON, $compartida), "{$compartida} matchea el patrón: la lista existe justamente para eso.");
+            $this->assertFalse(DeploymentService::es_clave_propia_del_frente($compartida), "{$compartida} vale lo mismo en los dos frentes y tiene que copiarse si falta.");
+        }
+
+        foreach (['ZIPPIN_OAUTH_SPA_REDIRECT_URL', 'MP_OAUTH_SPA_REDIRECT_URL', 'APP_URL', 'API_URL', 'APP_IMAGES_URL', 'ASSET_URL'] as $propia) {
+            $this->assertTrue(DeploymentService::es_clave_propia_del_frente($propia), "{$propia} es del frente y sigue apartada.");
+        }
+
+        /* De punta a punta: sobre un destino vacío las compartidas viajan y las del frente no. */
+        $activo = [
+            'ADMIN_API_URL'                 => 'https://api-admin.comerciocity.com/public',
+            'ZIPPIN_OAUTH_SPA_REDIRECT_URL' => 'https://ferretotal.comerciocity.com/abm/integraciones/tienda-online',
+            'SESSION_SECURE_COOKIE'         => 'true',
+            'APP_URL'                       => 'https://api-ferretotal.comerciocity.com',
+        ];
+
+        $this->assertSame(['ADMIN_API_URL', 'SESSION_SECURE_COOKIE'], array_keys(DeploymentService::claves_a_sincronizar($activo, [])));
+        $this->assertSame(
+            ['ZIPPIN_OAUTH_SPA_REDIRECT_URL' => 'propia_del_frente', 'APP_URL' => 'propia_del_frente'],
+            DeploymentService::claves_apartadas($activo, [])
+        );
+    }
+
+    /**
+     * 🔴 Lo que se aparta se cuenta por nombre y con motivo, y sólo lo que de verdad se apartó: lo
+     * que el destino ya tiene con valor no es apartado (no faltaba), lo vacío en el origen tampoco
+     * (no había nada que copiar), y lo que se copió menos. Los valores no viajan nunca: el array
+     * lleva motivos, no valores, y por eso puede ir derecho a deployment_logs.
+     */
+    public function test_claves_apartadas_nombra_lo_que_no_se_copio_y_por_que(): void
+    {
+        $activo = [
+            'APP_NAME'       => 'ferretotal',
+            'APP_KEY'        => 'base64:clave-del-activo',
+            'APP_URL'        => 'https://api-ferretotal.comerciocity.com',
+            'SESSION_DOMAIN' => '.ferretotal.comerciocity.com',
+            'REDIS_PREFIX'   => 'ferretotal_',
+            'MAIL_FROM_NAME' => '${APP_NAME}',
+            'OPENAI_API_KEY' => 'sk-openai',
+            'MAIL_PASSWORD'  => '',
+            'SPA_URL'        => '',
+        ];
+
+        $destino = [
+            'APP_NAME' => 'ferretotal2',
+            'APP_KEY'  => 'base64:otra-clave',
+            'APP_URL'  => 'https://api-ferretotal2.comerciocity.com',
+        ];
+
+        $apartadas = DeploymentService::claves_apartadas($activo, $destino);
+
+        $this->assertSame(
+            [
+                'SESSION_DOMAIN' => 'propia_del_frente',
+                'REDIS_PREFIX'   => 'propia_del_frente',
+                'MAIL_FROM_NAME' => 'interpolacion',
+            ],
+            $apartadas,
+            'Sólo lo que faltaba en el destino y no se copió, en el orden del origen, con su motivo.'
+        );
+
+        foreach (['APP_NAME', 'APP_KEY', 'APP_URL'] as $ya_la_tiene) {
+            $this->assertArrayNotHasKey($ya_la_tiene, $apartadas, "{$ya_la_tiene} está en el destino con valor: no faltaba, no es apartada.");
+        }
+        $this->assertArrayNotHasKey('OPENAI_API_KEY', $apartadas, 'Se copia: no es apartada.');
+        $this->assertArrayNotHasKey('MAIL_PASSWORD', $apartadas, 'Vacía en el origen: no había nada que copiar ni que apartar.');
+        $this->assertArrayNotHasKey('SPA_URL', $apartadas, 'Propia del frente pero vacía en el origen: tampoco.');
+
+        /* Copiadas y apartadas son disjuntas y entre las dos cubren todo lo que faltaba con valor. */
+        $copiadas  = DeploymentService::claves_a_sincronizar($activo, $destino);
+        $cubiertas = array_merge(array_keys($copiadas), array_keys($apartadas));
+        sort($cubiertas);
+
+        $this->assertSame([], array_intersect_key($copiadas, $apartadas));
+        $this->assertSame(['MAIL_FROM_NAME', 'OPENAI_API_KEY', 'REDIS_PREFIX', 'SESSION_DOMAIN'], $cubiertas);
     }
 
     /** Sobre un destino vacío se conservan APP_KEY, OPENAI_API_KEY y las DB_*, y se apartan las propias del frente. */
@@ -614,6 +784,50 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
                 'Toda mención al array de claves faltantes dentro de un log va envuelta en array_keys() o count().'
             );
         }
+    }
+
+    /**
+     * 🔴 La línea de apartadas se arma con nombres y motivos, nunca con valores: el array de
+     * claves_apartadas() no carga valores, describir_claves_apartadas() lo vuelca tal cual, y en el
+     * paso ese array sólo entra a un log envuelto en count() o en describir_claves_apartadas(). Y
+     * es `info`: apartar a propósito no es un problema, es lo que se pidió.
+     */
+    public function test_el_log_de_apartadas_nombra_las_claves_y_su_motivo_y_nunca_los_valores(): void
+    {
+        $descripcion = DeploymentService::describir_claves_apartadas([
+            'SESSION_DOMAIN' => 'propia_del_frente',
+            'MAIL_FROM_NAME' => 'interpolacion',
+        ]);
+
+        $this->assertStringContainsString('SESSION_DOMAIN (propia del frente)', $descripcion);
+        $this->assertStringContainsString('MAIL_FROM_NAME (', $descripcion);
+        $this->assertStringContainsString('${', $descripcion, 'El motivo de interpolación dice de qué se trata.');
+        $this->assertSame('', DeploymentService::describir_claves_apartadas([]));
+
+        $bloque = $this->bloque_del_paso();
+
+        $this->assertStringContainsString(
+            'self::claves_apartadas($env_origen, $env_destino)',
+            $bloque,
+            'El paso calcula lo apartado con la misma regla que lo copiado.'
+        );
+
+        $llamadas = array_values(array_filter($this->llamadas_al_log($bloque), function (string $llamada): bool {
+            return strpos($llamada, '$claves_apartadas') !== false;
+        }));
+        $this->assertCount(1, $llamadas, 'Hay exactamente una línea de log para lo apartado.');
+
+        $llamada = $llamadas[0];
+        $this->assertStringContainsString("'info'", $llamada, 'Lo apartado a propósito es información, no un warning.');
+
+        $menciones = preg_match_all('/\$claves_apartadas/', $llamada);
+        $envueltas = preg_match_all('/(count|describir_claves_apartadas)\(\$claves_apartadas\)/', $llamada);
+
+        $this->assertSame(
+            $menciones,
+            $envueltas,
+            'El array de apartadas sólo entra a un log envuelto en count() o describir_claves_apartadas().'
+        );
     }
 
     /* ==========================================================================================

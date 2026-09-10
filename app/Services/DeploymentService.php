@@ -121,6 +121,12 @@ class DeploymentService
      * DB_*, MAIL_*, PUSHER_*, ANTHROPIC_API_KEY, SANCTUM_EXPIRATION y USER_ID, que son las mismas
      * en las dos carpetas del cliente.
      *
+     * ⚠️ El patrón atrapa de más: hay claves con URL, DOMAIN o COOKIE en el nombre que valen lo
+     * MISMO en los dos frentes porque apuntan a un servicio externo o al admin, no al dominio del
+     * frente. Esas se rescatan por nombre exacto en CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN, que
+     * es_clave_propia_del_frente() mira ANTES que este patrón. Todo lo demás que el patrón aparta
+     * y al destino le falta se nombra en el log del paso (claves_apartadas()), para que se vea.
+     *
      * @var string
      */
     const CLAVES_PROPIAS_DEL_FRENTE_PATRON = '/URL|DOMAIN|PREFIX|COOKIE|STATEFUL/';
@@ -136,6 +142,56 @@ class DeploymentService
      * @var array<int, string>
      */
     const CLAVES_PROPIAS_DEL_FRENTE_EXACTAS = ['APP_NAME'];
+
+    /**
+     * Claves que CLAVES_PROPIAS_DEL_FRENTE_PATRON atrapa por el nombre pero que son COMPARTIDAS
+     * entre los dos frentes, y por eso SÍ se copian si al destino le faltan (ajuste después del
+     * chequeo de la misión `optimizacion-vps-fase1`, 10/9/2026).
+     *
+     * Medidas contra los `env('…')` reales de `empresa-api` (config/ y app/): tienen URL, DOMAIN o
+     * COOKIE en el nombre, pero apuntan a un servicio externo o al admin —no al dominio del
+     * frente— y valen lo mismo en las dos carpetas del cliente:
+     *   - ADMIN_API_URL:           el admin es uno solo para los dos frentes.
+     *   - DOLAR_API_URL:           la cotización es un servicio externo.
+     *   - MAILGUN_DOMAIN:          es el dominio de la cuenta de correo, no el del frente.
+     *   - LOG_SLACK_WEBHOOK_URL:   el webhook de Slack de los logs.
+     *   - SESSION_SECURE_COOKIE:   es un booleano (cookie sólo por https), no el nombre de la cookie.
+     *   - ZIPPIN_ACCOUNT_URL, ZIPPIN_AUTHORIZATION_URL, ZIPPIN_TOKEN_URL: endpoints de Zippin.
+     *
+     * Las que SÍ son del frente y por eso NO están acá aunque se parezcan: APP_URL, API_URL,
+     * APP_IMAGES_URL, ASSET_URL, MP_OAUTH_SPA_REDIRECT_URL y ZIPPIN_OAUTH_SPA_REDIRECT_URL (las dos
+     * últimas son la URL de retorno del OAuth, que vuelve al dominio del frente que lo inició).
+     * Antes de sumar una clave a esta lista hay que poder decir por qué vale lo mismo en los dos
+     * frentes; en la duda se deja apartada: el paso la nombra en el log y se completa a mano.
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN = [
+        'ADMIN_API_URL',
+        'DOLAR_API_URL',
+        'MAILGUN_DOMAIN',
+        'LOG_SLACK_WEBHOOK_URL',
+        'SESSION_SECURE_COOKIE',
+        'ZIPPIN_ACCOUNT_URL',
+        'ZIPPIN_AUTHORIZATION_URL',
+        'ZIPPIN_TOKEN_URL',
+    ];
+
+    /** Motivo de claves_apartadas(): la clave es propia de cada frente (CLAVES_PROPIAS_DEL_FRENTE_*). */
+    const APARTADA_PROPIA_DEL_FRENTE = 'propia_del_frente';
+
+    /** Motivo de claves_apartadas(): el valor del origen interpola otra variable (`${…}`). */
+    const APARTADA_INTERPOLACION = 'interpolacion';
+
+    /**
+     * Texto de cada motivo de claves_apartadas() para la línea de deployment_logs.
+     *
+     * @var array<string, string>
+     */
+    const TEXTO_DEL_MOTIVO_DE_APARTADO = [
+        self::APARTADA_PROPIA_DEL_FRENTE => 'propia del frente',
+        self::APARTADA_INTERPOLACION     => 'el valor interpola otra variable con ${…} y se escribiría literal',
+    ];
 
     /**
      * Carga upgrade, API destino y credencial SSH según hosting_type de la API destino.
@@ -625,12 +681,14 @@ class DeploymentService
      * cola sin un solo error visible para el cliente; el síntoma era "los embeddings no se generan"
      * y el `.env` fue lo último que se miró.
      *
-     * Qué copia y qué no. Se copian las claves que están en el activo y NO existen en el destino
-     * (claves_a_sincronizar()), menos las propias de cada frente (CLAVES_PROPIAS_DEL_FRENTE_*):
-     * esas SÍ tienen que ser distintas entre las dos carpetas, y copiarlas del activo sería romper
-     * el frente nuevo con un valor prestado. Una clave que el destino YA tiene se respeta aunque
-     * tenga otro valor: pisar no es tarea de un upgrade, y quien quiera cambiar un valor tiene el
-     * endpoint de `.env` del admin, que hace backup y verifica.
+     * Qué copia y qué no. Se copian las claves que están en el activo con valor y en el destino
+     * NO existen o están VACÍAS (claves_a_sincronizar()), menos las propias de cada frente
+     * (CLAVES_PROPIAS_DEL_FRENTE_*): esas SÍ tienen que ser distintas entre las dos carpetas, y
+     * copiarlas del activo sería romper el frente nuevo con un valor prestado. Una clave que el
+     * destino YA tiene con valor se respeta aunque sea otro: pisar no es tarea de un upgrade, y
+     * quien quiera cambiar un valor tiene el endpoint de `.env` del admin, que hace backup y
+     * verifica. Lo que queda afuera a propósito (claves_apartadas()) se nombra en el log con su
+     * motivo, para que nadie lea un `success` creyendo que los dos `.env` quedaron iguales.
      *
      * Va ENTRE upload_api y run_migrations, y el orden importa: `migrate`, los seeders y los
      * comandos de la versión bootean Laravel con el `.env` del destino, y una migración o un seeder
@@ -703,6 +761,23 @@ class DeploymentService
             $env_destino = $env_ssh->read_env_for($this->target_api);
 
             $claves_faltantes = self::claves_a_sincronizar($env_origen, $env_destino);
+            $claves_apartadas = self::claves_apartadas($env_origen, $env_destino);
+
+            /* Lo que el activo tiene, al destino le falta y NO se copia a propósito, por nombre y
+               con su motivo. Sin esta línea un `success` se lee como "los dos .env quedaron
+               iguales" y una clave apartada de más (el patrón atrapa por el nombre) pasa
+               inadvertida. claves_apartadas() devuelve [clave => motivo] y no carga el valor, así
+               que acá no hay nada que pueda filtrarse al panel. Va antes de escribir para que quede
+               aunque la escritura termine en warning. */
+            if (count($claves_apartadas) > 0) {
+                $this->log(
+                    'sync_env_keys',
+                    'Claves del frente activo que al destino le faltan y NO se copian a propósito ('
+                    . count($claves_apartadas) . '): ' . self::describir_claves_apartadas($claves_apartadas)
+                    . '. Si alguna hace falta en el frente nuevo, se carga a mano por el endpoint de .env.',
+                    'info'
+                );
+            }
 
             if (count($claves_faltantes) === 0) {
                 $this->log(
@@ -711,13 +786,15 @@ class DeploymentService
                     'success'
                 );
             } else {
-                /* write_env_vars_for() agrega al final del archivo las claves que no existen y
-                   RELEE el .env para confirmar que quedaron: si no quedaron, lanza y cae al catch. */
+                /* write_env_vars_for() agrega al final del archivo las claves que no existen,
+                   reemplaza en su propia línea las que están vacías (`grep '^CLAVE='` + `sed`, así
+                   no queda una CLAVE= duplicada que phpdotenv ignoraría) y RELEE el .env para
+                   confirmar que quedaron: si no quedaron, lanza y cae al catch. */
                 $env_ssh->write_env_vars_for($this->target_api, $claves_faltantes);
 
                 $this->log(
                     'sync_env_keys',
-                    'Claves agregadas al .env del destino desde el frente activo ('
+                    'Claves completadas en el .env del destino desde el frente activo, nuevas o que estaban vacías ('
                     . count($claves_faltantes) . '): ' . implode(', ', array_keys($claves_faltantes)),
                     'success'
                 );
@@ -748,24 +825,41 @@ class DeploymentService
     }
 
     /**
-     * Claves que hay que agregar al `.env` del destino: las que están en el origen, NO existen en
-     * el destino y no son propias del frente.
+     * Claves que hay que completar en el `.env` del destino: las que están en el origen con valor,
+     * en el destino NO existen o están VACÍAS, no son propias del frente y no interpolan.
      *
      * Es estática y pura a propósito —entran dos arrays, sale un array, sin SSH ni modelos— para
      * poder probar la regla de qué se copia y qué no sin levantar un servidor. La lectura y la
-     * escritura viven en step_sync_env_keys().
+     * escritura viven en step_sync_env_keys(); lo que se deja afuera a propósito lo cuenta
+     * claves_apartadas(), con la misma regla (motivo_para_apartar()).
      *
-     * Tres reglas, en este orden:
-     *  1. Una clave que el destino YA tiene se respeta, tenga el valor que tenga (incluso vacío):
-     *     `array_key_exists`, no `isset`/`empty`. "Agregar lo que falta" no es "pisar lo distinto".
-     *  2. Las propias del frente (CLAVES_PROPIAS_DEL_FRENTE_*) no se copian nunca.
-     *  3. Un valor vacío en el origen tampoco se copia: `env('X')` distingue "no está" (null) de
-     *     "está vacía" (''), y una `MAIL_PORT=` copiada le pisaría el default a un
-     *     `env('MAIL_PORT', 587)`. No hay nada que sincronizar en un valor vacío.
+     * Cuatro reglas, en este orden:
+     *  1. Una clave que el destino YA tiene CON VALOR se respeta, sea el valor que sea: "agregar lo
+     *     que falta" no es "pisar lo distinto". Pero presente y VACÍA cuenta como faltante (ajuste
+     *     después del chequeo, 10/9/2026): la instalación escribe TODAS las claves de la plantilla
+     *     y las que no tienen valor quedan como `CLAVE=` en los dos frentes
+     *     (InstallationService, `(string) ($template->value ?? '')`; EnvTemplateSeeder trae
+     *     `ANTHROPIC_API_KEY` con valor null). Si después Lucas carga esa clave en el activo por el
+     *     endpoint de `.env`, con `array_key_exists` a secas el destino "la tenía" y el frente
+     *     nuevo arrancaba sin IA: el mismo síntoma que motivó el paso, sin aviso. Al frente
+     *     inactivo nadie lo edita a mano, así que completar un placeholder vacío con el valor del
+     *     frente que está atendiendo no es pisar nada.
+     *  2. Un valor vacío en el origen no se copia: `env('X')` distingue "no está" (null) de "está
+     *     vacía" (''), y una `MAIL_PORT=` copiada le pisaría el default a un `env('MAIL_PORT', 587)`.
+     *     No hay nada que sincronizar en un valor vacío.
+     *  3. Las propias del frente (CLAVES_PROPIAS_DEL_FRENTE_*, salvo las rescatadas en
+     *     CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN) no se copian nunca.
+     *  4. Un valor que interpola otra variable (`${APP_NAME}`, como trae el `.env.example` de
+     *     empresa-api en MAIL_FROM_NAME y MIX_PUSHER_*) no se copia: EnvSshService::parse_env_content()
+     *     descarta el tipo de comillas y format_env_value() lo envolvería en comillas simples, que
+     *     phpdotenv NO interpola, así que el destino recibiría el literal `${APP_NAME}`.
+     *
+     * Las reglas 3 y 4 son las que dejan una clave con valor sin copiar: esas van a
+     * claves_apartadas() con su motivo, para nombrarlas en el log.
      *
      * @param  array<string, string>  $origen   `.env` del frente activo, ya parseado (KEY => valor).
      * @param  array<string, string>  $destino  `.env` del frente destino, ya parseado.
-     * @return array<string, string>  KEY => valor a agregar, en el orden en que aparecen en el origen.
+     * @return array<string, string>  KEY => valor a completar, en el orden en que aparecen en el origen.
      */
     public static function claves_a_sincronizar(array $origen, array $destino): array
     {
@@ -773,23 +867,114 @@ class DeploymentService
 
         foreach ($origen as $clave => $valor) {
             $clave = (string) $clave;
+            $valor = (string) $valor;
 
-            if (array_key_exists($clave, $destino)) {
+            if (self::destino_la_tiene_con_valor($destino, $clave)) {
                 continue;
             }
 
-            if (self::es_clave_propia_del_frente($clave)) {
+            if (trim($valor) === '') {
                 continue;
             }
 
-            if (trim((string) $valor) === '') {
+            if (self::motivo_para_apartar($clave, $valor) !== null) {
                 continue;
             }
 
-            $faltantes[$clave] = (string) $valor;
+            $faltantes[$clave] = $valor;
         }
 
         return $faltantes;
+    }
+
+    /**
+     * Claves que el origen tiene con valor, al destino le faltan (o las tiene vacías) y NO se
+     * copian a propósito, con el motivo: la contracara exacta de claves_a_sincronizar(). Entre las
+     * dos cubren todo lo que faltaba con valor, y no comparten ninguna clave.
+     *
+     * Existe para el log del paso: sin esto, lo que el patrón aparta de más (ver
+     * CLAVES_PROPIAS_DEL_FRENTE_PATRON) quedaba mudo atrás de un `success`. Devuelve nombres y
+     * motivos, nunca valores, así puede ir derecho a deployment_logs.
+     *
+     * @param  array<string, string>  $origen   `.env` del frente activo, ya parseado.
+     * @param  array<string, string>  $destino  `.env` del frente destino, ya parseado.
+     * @return array<string, string>  KEY => motivo (APARTADA_PROPIA_DEL_FRENTE | APARTADA_INTERPOLACION),
+     *                                en el orden en que aparecen en el origen.
+     */
+    public static function claves_apartadas(array $origen, array $destino): array
+    {
+        $apartadas = [];
+
+        foreach ($origen as $clave => $valor) {
+            $clave = (string) $clave;
+            $valor = (string) $valor;
+
+            if (self::destino_la_tiene_con_valor($destino, $clave) || trim($valor) === '') {
+                continue;
+            }
+
+            $motivo = self::motivo_para_apartar($clave, $valor);
+            if ($motivo !== null) {
+                $apartadas[$clave] = $motivo;
+            }
+        }
+
+        return $apartadas;
+    }
+
+    /**
+     * Texto para el log de lo que claves_apartadas() devolvió: `CLAVE (motivo), CLAVE (motivo)`.
+     * Nombres y motivos, nunca valores: el array de entrada no los carga.
+     *
+     * @param  array<string, string>  $apartadas  KEY => motivo, tal cual sale de claves_apartadas().
+     * @return string
+     */
+    public static function describir_claves_apartadas(array $apartadas): string
+    {
+        $partes = [];
+
+        foreach ($apartadas as $clave => $motivo) {
+            $texto    = self::TEXTO_DEL_MOTIVO_DE_APARTADO[$motivo] ?? (string) $motivo;
+            $partes[] = $clave . ' (' . $texto . ')';
+        }
+
+        return implode(', ', $partes);
+    }
+
+    /**
+     * Si el destino ya tiene esa clave CON valor (regla 1 de claves_a_sincronizar()): sólo en ese
+     * caso se respeta. `array_key_exists` solo no alcanza: `CLAVE=` es un placeholder de la
+     * instalación, no una decisión de alguien.
+     *
+     * @param  array<string, string>  $destino  `.env` del frente destino, ya parseado.
+     * @param  string  $clave
+     * @return bool
+     */
+    private static function destino_la_tiene_con_valor(array $destino, string $clave): bool
+    {
+        return array_key_exists($clave, $destino) && trim((string) $destino[$clave]) !== '';
+    }
+
+    /**
+     * Por qué una clave con valor NO se copia del activo al destino, o null si sí se copia. Es la
+     * única definición de las reglas 3 y 4 de claves_a_sincronizar(): la usan esa función y
+     * claves_apartadas(), así las dos no pueden desacordar.
+     *
+     * @param  string  $clave  Nombre de la variable, tal cual está en el `.env`.
+     * @param  string  $valor  Valor ya parseado (sin comillas) en el origen.
+     * @return string|null  APARTADA_PROPIA_DEL_FRENTE, APARTADA_INTERPOLACION o null.
+     */
+    private static function motivo_para_apartar(string $clave, string $valor): ?string
+    {
+        if (self::es_clave_propia_del_frente($clave)) {
+            return self::APARTADA_PROPIA_DEL_FRENTE;
+        }
+
+        if (strpos($valor, '${') !== false) {
+            return self::APARTADA_INTERPOLACION;
+        }
+
+        return null;
     }
 
     /**
@@ -802,6 +987,12 @@ class DeploymentService
     {
         if (in_array($clave, self::CLAVES_PROPIAS_DEL_FRENTE_EXACTAS, true)) {
             return true;
+        }
+
+        /* Rescate por nombre exacto ANTES del patrón: claves con URL/DOMAIN/COOKIE en el nombre
+           que valen lo mismo en los dos frentes (ver la constante). */
+        if (in_array($clave, self::CLAVES_COMPARTIDAS_AUNQUE_MATCHEEN, true)) {
+            return false;
         }
 
         return preg_match(self::CLAVES_PROPIAS_DEL_FRENTE_PATRON, $clave) === 1;
