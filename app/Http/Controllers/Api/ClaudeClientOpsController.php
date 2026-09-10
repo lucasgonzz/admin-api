@@ -117,8 +117,15 @@ class ClaudeClientOpsController extends Controller
      * ⚠️ Se replican a propósito: `$steps` es `private` y ese archivo corre el deployment real.
      * Hacerlo público para que lo lea un endpoint de lectura sería abrir el pipeline por un
      * motivo que no lo justifica.
+     *
+     * El corte entre pre y post cierre es `pause_for_crons`: es la etapa que deja el upgrade en
+     * `paused` y corta la pasada; lo que sigue corre recién con el negocio cerrado. Puesta al día
+     * el 10/9/2026 (misión `optimizacion-vps-fase1`): le faltaban `restart_queue_workers` (en el
+     * pipeline desde el 26/8) y `sync_env_keys` (completa el `.env` del destino desde el frente
+     * activo). Un candado en SincronizacionDeClavesDelEnvEntreFrentesTest compara estas dos
+     * listas contra `$steps` para que la próxima etapa nueva no vuelva a quedar sin replicar.
      */
-    const PIPELINE_PRE_CIERRE  = ['compile_spa', 'upload_spa', 'upload_api', 'run_migrations', 'pause_for_crons'];
+    const PIPELINE_PRE_CIERRE  = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'run_migrations', 'restart_queue_workers', 'pause_for_crons'];
     const PIPELINE_POST_CIERRE = ['run_seeders', 'run_commands', 'update_default_version', 'complete'];
 
     /** Valores válidos de `client_version_upgrades.deployment_status` (null = nunca arrancó). */

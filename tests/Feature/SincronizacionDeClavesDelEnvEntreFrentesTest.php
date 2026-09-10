@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Http\Controllers\Api\ClaudeClientOpsController;
 use App\Jobs\RunDeploymentJob;
 use App\Models\Client;
 use App\Models\ClientApi;
@@ -395,6 +396,36 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
             $fuente,
             'El case existe pero no llama al metodo.'
         );
+    }
+
+    /**
+     * 🔴 `ClaudeClientOpsController::PIPELINE_PRE_CIERRE` + `PIPELINE_POST_CIERRE` se sirven en la
+     * ficha del cliente como las etapas reales del pipeline y se replican a mano de `$steps` (que
+     * es privado a propósito). Estuvieron dos etapas atrás sin que nada lo dijera
+     * (`restart_queue_workers` desde el 26/8 y `sync_env_keys` en esta misión): con este candado
+     * la próxima etapa nueva no puede quedar sin replicar. El corte es `pause_for_crons`, la etapa
+     * que deja el upgrade en `paused` y corta la pasada.
+     */
+    public function test_la_ficha_del_cliente_replica_las_etapas_reales_del_pipeline(): void
+    {
+        $e       = $this->escenario('shared_hosting', 'shared_hosting');
+        $service = new DeploymentService($e['upgrade']);
+
+        $propiedad = new \ReflectionProperty($service, 'steps');
+        $propiedad->setAccessible(true);
+        $steps = $propiedad->getValue($service);
+
+        $pre  = ClaudeClientOpsController::PIPELINE_PRE_CIERRE;
+        $post = ClaudeClientOpsController::PIPELINE_POST_CIERRE;
+
+        $this->assertSame(
+            $steps,
+            array_merge($pre, $post),
+            'PIPELINE_PRE_CIERRE + PIPELINE_POST_CIERRE tienen que ser exactamente $steps, en ese orden.'
+        );
+        $this->assertSame('pause_for_crons', $pre[count($pre) - 1], 'El pre-cierre termina en la pausa por los crons.');
+        $this->assertContains('sync_env_keys', $pre);
+        $this->assertContains('restart_queue_workers', $pre);
     }
 
     /* ==========================================================================================
