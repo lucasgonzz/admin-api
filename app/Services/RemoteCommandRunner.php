@@ -140,7 +140,7 @@ class RemoteCommandRunner
     {
         $this->registrar('$ ' . $this->redactar($command, $secretos));
 
-        $resultado = $this->ejecutar($command);
+        $resultado = $this->ejecutar_con_reintento_de_canal($command, $secretos);
         $salida    = (string) $resultado['salida'];
         $exit      = $resultado['exit'];
 
@@ -170,6 +170,58 @@ class RemoteCommandRunner
         }
 
         return $salida;
+    }
+
+    /**
+     * Corre el comando y, si phpseclib no pudo ni abrir el canal, reconecta y lo intenta UNA vez.
+     *
+     * 🔴 El reintento está acotado a un solo error, y eso importa: *"Please close the channel (N)
+     * before trying to open it again"* lo tira `SSH2::open_channel()`, o sea **antes** de mandar
+     * nada. El comando no llegó a ejecutarse, así que repetirlo no puede duplicar un efecto. Un
+     * reintento general acá sería otra cosa —un comando que se ejecutó a medias y se repite— y por
+     * eso no se hace.
+     *
+     * Aparece cuando una etapa encadena varios comandos largos sobre la misma sesión: medido el
+     * 10/9/2026 instalando `pescamayorista`, donde provision_ssl pide cuatro certificados seguidos
+     * y el segundo se encontraba el canal anterior sin cerrar. La instalación quedaba `fallida` con
+     * ese texto de phpseclib como único motivo —que no le dice nada a nadie— habiendo hecho TODO
+     * bien salvo tres certificados.
+     *
+     * @param  string              $command
+     * @param  array<int, string>  $secretos  Para redactar el mensaje si hay que relanzar.
+     * @return array<string, mixed>  ['salida' => string, 'exit' => int|false]
+     */
+    private function ejecutar_con_reintento_de_canal(string $command, array $secretos): array
+    {
+        try {
+            return $this->ejecutar($command);
+        } catch (\Throwable $excepcion) {
+            if (strpos($excepcion->getMessage(), 'before trying to open it again') === false) {
+                throw $excepcion;
+            }
+
+            $this->registrar(
+                'El canal SSH anterior quedó abierto; se reconecta y se reintenta el comando.'
+            );
+
+            $this->reconectar();
+
+            return $this->ejecutar($command);
+        }
+    }
+
+    /**
+     * Tira la sesión SSH para que la próxima llamada abra una nueva.
+     *
+     * Vive del lado de la costura porque toca el estado de la conexión, pero es una línea: la
+     * decisión de cuándo reconectar está arriba, en ejecutar_con_reintento_de_canal(), que sí queda
+     * cubierta por los tests.
+     *
+     * @return void
+     */
+    protected function reconectar(): void
+    {
+        $this->ssh = null;
     }
 
     /**
