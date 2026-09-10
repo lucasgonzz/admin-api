@@ -31,14 +31,21 @@ use phpseclib3\Net\SSH2;
  * Pipeline de etapas, en orden:
  *
  *   1. prepare_dirs    — crea los directorios de la API y del SPA y el árbol de storage/
- *   2. upload_public   — sube public/ del tag (el ZIP de la API lo excluye)
- *   3. compile_spa     — checkout + npm ci + npm run build en el VPS de builds
- *   4. upload_spa      — zip de dist/ → SFTP → descompresión en el directorio del SPA
- *   5. upload_api      — zip del código de la API → SFTP → descompresión + composer install
+ *   2. upload_public   — public/ del zipball del tag (los assets de la API lo excluyen)
+ *   3. compile_spa     — baja empresa-spa-v{v}-dist.zip del release
+ *   4. upload_spa      — SFTP → descompresión en el directorio del SPA + config.js
+ *   5. upload_api      — baja empresa-api-v{v}.zip → SFTP → descompresión + composer install
  *   6. write_env       — .env desde EnvTemplate (scope empresa) + los valores manuales del modal
  *   7. finalize_api    — los artisan que composer no corrió (no había .env) + symlink de storage
  *   8. run_demo_setup  — POST /api/admin-sync/demo-setup: es lo que deja la demo CON DATOS
  *   9. verify          — la API y el SPA responden por HTTP
+ *
+ * 🔴 Las etapas 2 a 5 dejaron de tocar el VPS de builds el 10/9/2026 (misión
+ * `instalar-sin-el-vps`): bajan lo que GitHub Actions publica en cada release en vez de hacer
+ * checkout, `npm ci` y `npm run build` allá. Lo que la SPA necesitaba cocinado en el bundle ahora
+ * viaja en `config.js` y lo lee en runtime. El código viejo sigue detrás de
+ * `DEPLOY_PERMITIR_BUILD_EN_VPS`, en `false`, y sin artefacto la etapa FALLA en vez de irse al VPS
+ * en silencio.
  *
  * 🔴 LA ETAPA 8 ES DESTRUCTIVA Y POR ESO EXISTE SOLO ACÁ. `run_demo_setup` dispara
  * `DemoSetupHelper::run()` en la instancia, que arranca con un `migrate:fresh`: vacía la base de

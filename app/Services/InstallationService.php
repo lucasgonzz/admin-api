@@ -32,11 +32,19 @@ use phpseclib3\Net\SSH2;
  * instalado — por eso se sacó del pipeline.
  *
  * Pipeline de pasos en orden:
- *   1. compile_spa   — igual a DeploymentService
- *   2. upload_spa    — igual a DeploymentService
- *   3. upload_api    — sin excluir public/ ni storage/ (instalación inicial)
+ *   1. compile_spa   — baja empresa-spa-v{v}-dist.zip del release
+ *   2. upload_spa    — SFTP → descompresión en el directorio del SPA + config.js
+ *   3. upload_api    — baja empresa-api-v{v}.zip MÁS el public/ del zipball del tag
  *   4. write_env     — genera el .env desde la plantilla base + valores manuales
  *   5. finalize_api  — corre los scripts de artisan que composer no ejecutó (ya con .env)
+ *
+ * 🔴 Las tres primeras dejaron de tocar el VPS de builds el 10/9/2026 (misión
+ * `instalar-sin-el-vps`): bajan lo que GitHub Actions publica en cada release en vez de hacer
+ * checkout, `npm ci` y `npm run build` allá. Y son DOS artefactos en la etapa 3, no uno: el asset
+ * de la API excluye `public/` a propósito —en un upgrade esos archivos son del cliente—, así que en
+ * una instalación de cero hay que traerlo aparte, del zipball del tag. Sin `public/index.php` el
+ * sistema responde 404 en todo (lección de `elkioscoverde2`). El código viejo sigue detrás de
+ * `DEPLOY_PERMITIR_BUILD_EN_VPS`, en `false`, y sin artefacto la etapa FALLA.
  *
  * Desde el 24/8/2026 esta misma clase corre un SEGUNDO pipeline, mucho más corto, para las filas
  * con kind='esqueleto': el subdominio secundario del cliente (ver $skeleton_steps). Comparten todo
