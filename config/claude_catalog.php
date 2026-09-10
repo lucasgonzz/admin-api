@@ -890,7 +890,7 @@ return [
             ],
         ],
         'POST api/claude/upgrades/{id}/deploy/start' => [
-            'para_que'     => 'Arranca el pipeline PRE-CIERRE: compila la SPA, la sube, sube la API, completa el .env del frente destino con las claves que le faltan respecto del frente activo (sync_env_keys, 4.0.24: agrega, nunca pisa, y aparta las propias del frente como URL/DOMAIN/PREFIX/COOKIE/STATEFUL/APP_NAME), corre las migraciones y frena esperando los crons. Se puede correr con el negocio abierto porque no toca el sistema en uso.',
+            'para_que'     => 'Arranca el pipeline PRE-CIERRE: compila la SPA, la sube, sube la API, completa el .env del frente destino con las claves que le faltan respecto del frente activo (sync_env_keys, desde el 10/9/2026 y para cualquier versión destino: agrega las que faltan o están vacías, nunca pisa un valor, y aparta las propias del frente como URL/DOMAIN/PREFIX/COOKIE/STATEFUL/APP_NAME salvo las compartidas de la lista explícita; lo apartado se nombra en el log), corre las migraciones y frena esperando los crons. Se puede correr con el negocio abierto porque no toca el sistema en uso.',
             'escribe'      => true,
             'peligrosidad' => 'alta',
             'frenos'       => [
