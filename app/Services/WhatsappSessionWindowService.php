@@ -57,18 +57,43 @@ class WhatsappSessionWindowService
 
         $cutoff = now()->subHours(self::WINDOW_HOURS);
 
-        // Se consultan en orden de probabilidad y se corta apenas una da positivo: para
-        // decidir el canal de envío alcanza con saber que la ventana está abierta.
-        $found = $this->find_support_inbound($phone, $cutoff);
-        if ($found === null) {
-            $found = $this->find_lead_inbound($phone, $cutoff);
-        }
-        if ($found === null) {
-            $found = $this->find_implementation_inbound($phone, $cutoff);
+        /*
+         * 🔴 Se consultan los TRES canales y se elige el entrante MÁS RECIENTE. No se corta en el
+         * primero que da positivo, aunque para el booleano `open` alcanzaría.
+         *
+         * Hasta el 10/9/2026 esto cortaba en el primer canal con algún entrante, y era correcto
+         * para lo único que se consumía entonces: `open`, que es el OR de los tres. Pero
+         * `expires_at` salía del canal que respondió primero, no del último mensaje real — y con
+         * un número que escribió a soporte hace 23 hs y al hilo del lead hace 10 minutos, devolvía
+         * una ventana que vencía en una hora en vez de en veinticuatro.
+         *
+         * Lo destapó la misión de mensajes programados: ahí `expires_at` pasó a ser el TECHO que
+         * decide hasta qué hora se puede programar texto libre, así que un vencimiento corto de
+         * más rechaza envíos que Meta habría aceptado. Errar para el lado de "cerrada" cuesta una
+         * plantilla de más cuando es solo un booleano; cuesta un mensaje que no sale cuando es una
+         * fecha.
+         *
+         * El costo son tres consultas en vez de una en el peor caso — acotado, porque `rows_for()`
+         * las cachea por request y el consumidor que más pega (el endpoint de contactos) pregunta
+         * muchas veces por teléfonos distintos sobre las mismas filas.
+         */
+        $candidatos = [];
+        foreach (['find_support_inbound', 'find_lead_inbound', 'find_implementation_inbound'] as $buscador) {
+            $encontrado = $this->{$buscador}($phone, $cutoff);
+            if ($encontrado !== null) {
+                $candidatos[] = $encontrado;
+            }
         }
 
-        if ($found === null) {
+        if (empty($candidatos)) {
             return $closed;
+        }
+
+        $found = $candidatos[0];
+        foreach ($candidatos as $candidato) {
+            if ($candidato['at']->gt($found['at'])) {
+                $found = $candidato;
+            }
         }
 
         $last_inbound_at = $found['at'];
