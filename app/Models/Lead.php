@@ -189,7 +189,7 @@ class Lead extends Model
             // un borrado extra por llamada acá.
             $lead->calls()->delete();
 
-            /* 🔴 NO se usa la relación scheduled_messages(): está filtrada a pendiente+error, así
+            /* 🔴 NO se usa la relación scheduled_messages(): está filtrada a los estados visibles, así
                que borraría solo una parte y dejaría huérfanas las filas enviadas y canceladas. Acá
                se borran TODAS las del lead.
                Sin esto, un pendiente de un lead borrado lo sigue levantando el comando cada minuto:
@@ -439,8 +439,8 @@ class Lead extends Model
             /* Los mensajes programados viajan con el lead y no por un endpoint propio: la
                conversación ya se rehidrata entera con fullModel('lead') después de cada acción y
                tras cada evento de LeadBroadcastService, así que un endpoint de lectura aparte sería
-               un segundo pedido para el mismo dato — o, peor, un polling. La relación está acotada
-               a pendiente+error (ver scheduled_messages()), que es lo único que se muestra. */
+               
+               a los estados visibles (ver scheduled_messages()), que es lo único que se muestra. */
             'scheduled_messages'
         );
         $query->withUnreadLeadMessagesCount();

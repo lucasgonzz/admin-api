@@ -53,11 +53,12 @@ class LeadScheduledMessage extends Model
     public const STATUS_ERROR = 'error';
 
     /**
-     * Estados que siguen vivos para el operador: los dos que la conversación muestra.
+     * Estados que siguen vivos para el operador: los que la conversación muestra.
      *
      * `error` cuenta como vivo aunque ya no vaya a salir solo — es justamente lo que el operador
-     * tiene que ver para reprogramarlo a mano. Los `enviado` ya son un LeadMessage normal y los
-     * `cancelado` no le sirven a nadie: ninguno de los dos viaja al SPA.
+     * tiene que ver para corregirlo. `enviando` dura segundos pero también viaja: es lo que explica
+     * por qué en ese momento la burbuja no ofrece editar ni cancelar. Los `enviado` ya son un
+     * LeadMessage normal y los `cancelado` no le sirven a nadie: ninguno de los dos va al SPA.
      *
      * @var array<int, string>
      */

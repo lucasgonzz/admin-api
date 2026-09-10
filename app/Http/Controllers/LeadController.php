@@ -5086,7 +5086,7 @@ class LeadController extends Controller
      * Edita un mensaje programado que todavía no salió: su texto, su fecha, su modo o su check.
      *
      * Pasa por los mismos frenos que programarlo de cero, porque editar es volver a decidir si ese
-     * mensaje se puede mandar en esa fecha. Solo se puede sobre un programado `pendiente`.
+     * mensaje se puede mandar en esa fecha. Solo se puede sobre un programado `pendiente` o `error` (corregir uno que no salio lo devuelve a la cola); si se esta enviando en ese momento, 422.
      *
      * @param Request                      $request      Mismo cuerpo que `store_scheduled_message_json()`.
      * @param int|string                   $lead_id

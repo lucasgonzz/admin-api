@@ -140,7 +140,7 @@ class LeadScheduledMessageService
      * respondió después". Dejar el baseline viejo cancelaría el envío por una respuesta que el
      * operador ya leyó y decidió ignorar.
      *
-     * @param LeadScheduledMessage $programado Programado en estado `pendiente`.
+     * @param LeadScheduledMessage $programado Programado en `pendiente` o en `error`.
      * @param array                $datos      Mismos campos que `programar()`.
      *
      * @return array{ok: bool, status: int, message: string|null, ventana: array, scheduled: LeadScheduledMessage|null}
@@ -299,7 +299,7 @@ class LeadScheduledMessageService
      *
      * Es lo único que hace el comando `leads:send-scheduled-messages`, que corre cada minuto.
      *
-     * @return array{despachados: int, enviados: int, cancelados: int, errores: int}
+     * @return array{despachados: int, enviados: int, cancelados: int, errores: int, colgados: int, en_curso: int}
      */
     public function despachar_vencidos(): array
     {
