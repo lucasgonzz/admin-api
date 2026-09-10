@@ -2646,6 +2646,15 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
                 'readlink ' . RemoteCommandRunner::escapar_argumento($docroot),
                 '/home/' . $label . '/empresa-api/public'
             );
+
+            /* 🔴 El dueño del symlink del docroot. nginx corre con `disable_symlinks if_not_owner`,
+               así que un enlace de root adentro del htdocs del sitio hace que responda 403 en todo
+               —empezando por el desafío de Let's Encrypt—. Un VPS sano lo tiene a nombre del
+               usuario del sitio, y eso es lo que este fake simula. */
+            $runner->responder(
+                "stat -c '%U:%G' " . RemoteCommandRunner::escapar_argumento($docroot),
+                $label . ':' . $label
+            );
         }
     }
 

@@ -365,7 +365,41 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
         $runner->run('rmdir ' . $this->escapar($docroot), [], false);
         $runner->run('ln -sfnT ' . $this->escapar($destino) . ' ' . $this->escapar($docroot));
 
+        /*
+         * 🔴 EL DUEÑO DEL SYMLINK NO ES COSMÉTICO: SIN ESTO EL SITIO DEVUELVE 403 EN TODO.
+         *
+         * nginx corre con `disable_symlinks if_not_owner from=/home/` (línea 51 de nginx.conf), o
+         * sea que se NIEGA a seguir un symlink cuyo dueño no coincide con el del directorio que lo
+         * contiene. Como el aprovisionamiento entra al VPS por SSH COMO ROOT, el enlace nacía
+         * `root:root` adentro de un `htdocs` del usuario del sitio, y nginx lo rechazaba.
+         *
+         * El síntoma no se parece a la causa: nginx abre con O_NOFOLLOW, el kernel devuelve ELOOP y
+         * el log dice *"Too many levels of symbolic links"* — que suena a un enlace circular y no a
+         * un problema de permisos. Hacia afuera es un 403, y lo primero que se rompe es el desafío
+         * HTTP-01 de Let's Encrypt, así que el cliente queda sin certificado.
+         *
+         * Medido el 10/9/2026 instalando `pescamayorista`: los symlinks de TODOS los clientes que
+         * andan (golonorte, fenix, ferretotal) son del usuario del sitio; los dos únicos `root:root`
+         * eran los dos que había creado este método.
+         *
+         * `chown -h`, y nunca sin `-h`: sin esa bandera se le cambia el dueño al DESTINO —el
+         * `public/` del cliente— y no al enlace, que es lo que nginx mira.
+         */
+        $runner->run(
+            'chown -h ' . $this->escapar($label . ':' . $label) . ' ' . $this->escapar($docroot)
+        );
+
         $apunta_a = trim($runner->run('readlink ' . $this->escapar($docroot), [], false));
+
+        $dueno = trim($runner->run("stat -c '%U:%G' " . $this->escapar($docroot), [], false));
+        if ($dueno !== $label . ':' . $label) {
+            throw new \RuntimeException(
+                'El docroot ' . $docroot . ' quedó a nombre de "' . $dueno . '" y tiene que ser "'
+                . $label . ':' . $label . '". nginx corre con `disable_symlinks if_not_owner` y no '
+                . 'va a seguir ese enlace: el sitio responde 403 en todo, empezando por el desafío '
+                . 'del certificado.'
+            );
+        }
 
         if ($apunta_a !== $destino) {
             throw new \RuntimeException(

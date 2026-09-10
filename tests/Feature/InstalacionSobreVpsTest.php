@@ -614,6 +614,14 @@ class InstalacionSobreVpsTest extends TestCase
                 'readlink ' . RemoteCommandRunner::escapar_argumento($docroot),
                 '/home/' . $label . '/empresa-api/public'
             );
+
+            /* 🔴 Y el dueño del symlink: nginx corre con `disable_symlinks if_not_owner`, así que un
+               enlace de root adentro del htdocs del sitio hace que el sitio responda 403 en todo. Un
+               VPS sano lo tiene a nombre del usuario del sitio. */
+            $this->runner->responder(
+                "stat -c '%U:%G' " . RemoteCommandRunner::escapar_argumento($docroot),
+                $label . ':' . $label
+            );
         }
     }
 

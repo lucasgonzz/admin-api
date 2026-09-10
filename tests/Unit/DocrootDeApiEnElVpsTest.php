@@ -70,6 +70,66 @@ class DocrootDeApiEnElVpsTest extends TestCase
     }
 
     /**
+     * 🔴 El symlink del docroot tiene que quedar A NOMBRE DEL USUARIO DEL SITIO, no de root.
+     *
+     * nginx corre con `disable_symlinks if_not_owner from=/home/` (línea 51 de su nginx.conf): se
+     * niega a seguir un enlace cuyo dueño no coincide con el del directorio que lo contiene. Y el
+     * aprovisionamiento entra al VPS por SSH COMO ROOT, así que sin un `chown -h` el enlace nace
+     * `root:root` adentro de un `htdocs` del usuario del sitio.
+     *
+     * El síntoma no se parece a la causa: nginx abre con O_NOFOLLOW, el kernel devuelve ELOOP y el
+     * log dice *"Too many levels of symbolic links"*, que suena a un enlace circular. Hacia afuera
+     * es un 403 en todo, y lo primero que se cae es el desafío HTTP-01 de Let's Encrypt.
+     *
+     * Medido el 10/9/2026: los symlinks de golonorte, fenix y ferretotal son del usuario del sitio;
+     * los dos únicos `root:root` del VPS eran los que había creado este método.
+     *
+     * @return void
+     */
+    public function test_el_symlink_del_docroot_queda_a_nombre_del_usuario_del_sitio()
+    {
+        $fuente = $this->fuente_de('enlazar_docroot_de_api');
+
+        $this->assertStringContainsString(
+            'chown -h ',
+            $fuente,
+            'Se perdió el chown del symlink del docroot: nginx no lo va a seguir y el sitio '
+            . 'responde 403 en todo.'
+        );
+
+        /* 🔴 Sin -h se le cambia el dueño al DESTINO (el public/ del cliente) y no al enlace, que
+           es lo que nginx mira. El bug quedaría igual y encima tocando otra cosa. */
+        $this->assertStringNotContainsString(
+            'chown ' . $this->escapado('api-'),
+            $fuente,
+            'Hay un chown sin -h: eso le cambia el dueño al destino, no al symlink.'
+        );
+
+        $chown  = strpos($fuente, 'chown -h ');
+        $enlace = strpos($fuente, 'ln -sfnT ');
+
+        $this->assertNotFalse($enlace);
+        $this->assertLessThan($chown, $enlace, 'El chown tiene que ir DESPUÉS de crear el enlace.');
+
+        /* Y se verifica de verdad contra el servidor, no se asume. */
+        $this->assertStringContainsString('stat -c', $fuente);
+        $this->assertStringContainsString('disable_symlinks', $fuente);
+    }
+
+    /**
+     * Ayuda para el aserto de arriba: no existe un helper de escapado en el test, y lo que importa
+     * es que no aparezca un `chown` pelado seguido del usuario.
+     *
+     * @param string $texto
+     *
+     * @return string
+     */
+    private function escapado(string $texto): string
+    {
+        return "'" . $texto;
+    }
+
+    /**
      * 🔴 `rmdir` y nunca `rm -rf`: es lo que protege al docroot de un cliente en producción.
      *
      * @return void
