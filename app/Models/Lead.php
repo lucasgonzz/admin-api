@@ -427,7 +427,13 @@ class Lead extends Model
             'demo',
             'personalized_demo_videos',
             'messages.attachments',
-            'partners'
+            'partners',
+            /* Los mensajes programados viajan con el lead y no por un endpoint propio: la
+               conversación ya se rehidrata entera con fullModel('lead') después de cada acción y
+               tras cada evento de LeadBroadcastService, así que un endpoint de lectura aparte sería
+               un segundo pedido para el mismo dato — o, peor, un polling. La relación está acotada
+               a pendiente+error (ver scheduled_messages()), que es lo único que se muestra. */
+            'scheduled_messages'
         );
         $query->withUnreadLeadMessagesCount();
     }
@@ -972,6 +978,32 @@ class Lead extends Model
         return $this->hasMany(LeadMessage::class, 'lead_id')
             ->with(['attachments', 'sent_by_admin:id,name', 'admin_reaction_by:id,name'])
             ->orderBy('id');
+    }
+
+    /**
+     * Mensajes de WhatsApp PROGRAMADOS que todavía no salieron.
+     *
+     * 🔴 Filtrada a `pendiente` + `error` a propósito, y no es una optimización cosmética. Los
+     * `enviado` ya existen como `LeadMessage` normal en `messages()` —traerlos también acá los
+     * mostraría dos veces en el hilo— y los `cancelado` no le sirven a nadie. Como esta relación
+     * viaja en `scopeWithAll()`, o sea en cada respuesta que devuelve un lead, dejarla abierta
+     * haría crecer para siempre el peso de todas: un lead con seis meses de programados enviados
+     * arrastraría seis meses de filas muertas en cada request.
+     *
+     * `error` sí entra porque es lo único que el operador tiene que ver para actuar (se le cerró
+     * la ventana antes de salir, Meta lo rechazó): un error invisible es un mensaje que nunca se
+     * mandó y que nadie se enteró de que no se mandó.
+     *
+     * Ordenada por `scheduled_send_at` porque así los muestra la conversación —varios programados
+     * a la vez, en el orden en que van a salir—, que es la decisión de Lucas del 10/9/2026.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function scheduled_messages()
+    {
+        return $this->hasMany(LeadScheduledMessage::class, 'lead_id')
+            ->whereIn('status', LeadScheduledMessage::STATUSES_VISIBLES)
+            ->orderBy('scheduled_send_at');
     }
 
     /**
