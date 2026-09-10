@@ -71,6 +71,21 @@ class Kernel extends ConsoleKernel
         // Envía pregunta de fin de demo al lead en demo_en_curso (al cumplirse la duración).
         $schedule->command('leads:check-demo-fin')->everyMinute();
 
+        /* Manda los mensajes que un operador dejó programados y ya cumplieron su hora.
+         *
+         * Cada minuto y no cada cinco: el operador eligió una hora concreta —"escribile el viernes
+         * a las 10"— y con una corrida cada cinco minutos ese mensaje sale hasta cinco minutos
+         * tarde, que es justo lo que hace que un programado no sirva para coordinar nada. Y hay un
+         * segundo motivo, más duro: el modo `texto_libre` solo vale DENTRO de la ventana de 24 hs
+         * de Meta, así que un programado al filo de la ventana que se atrasa cinco minutos ya no
+         * sale (queda en `error`, ver LeadScheduledMessageService). El minuto es la unidad en la
+         * que el operador piensa, y es la que hay que cumplir.
+         *
+         * Sin `withoutOverlapping()`: la protección contra el envío doble es el lock por
+         * `scheduled_message_id` del propio despacho, que es más fino —bloquea el mensaje, no la
+         * corrida entera— y no deja a todos los demás programados sin salir mientras uno tarda. */
+        $schedule->command('leads:send-scheduled-messages')->everyMinute();
+
         // Pasa a demo_pendiente_de_ingreso si el lead no confirmó el ingreso en el timeout configurado.
         $schedule->command('leads:check-demo-ingreso-timeout')->everyMinute();
 
