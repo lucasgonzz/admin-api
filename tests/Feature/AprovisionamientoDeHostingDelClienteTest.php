@@ -1078,11 +1078,20 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         $this->assertSame([], $this->runner_fake()->crudos_con('rm -rf'));
         $this->assertSame([], $this->runner_fake()->crudos_con('rm -r'));
 
-        /* El symlink es solo de las dos APIs; el docroot del SPA es htdocs/<dominio> tal cual. */
-        $enlaces = $this->runner_fake()->crudos_con('ln -sfn');
+        /* El symlink es solo de las dos APIs; el docroot del SPA es htdocs/<dominio> tal cual.
+         *
+         * 🔴 CAMBIO DE COMPORTAMIENTO A PROPÓSITO (10/9/2026): la bandera pasó de `-sfn` a `-sfnT`.
+         * Este aserto fijaba `-sfn`, y `-sfn` estaba MAL: `-n` (`--no-dereference`) sólo cambia el
+         * trato de un SYMLINK a directorio. Contra el directorio real que crea CloudPanel,
+         * `ln -sfn destino dir` crea el enlace ADENTRO (`dir/public`) y sale con 0 — medido
+         * instalando `pescamayorista`, donde el sitio quedó sirviendo el "Hello World" del panel en
+         * vez del front controller. `-T` (`--no-target-directory`) es la que de verdad se niega.
+         *
+         * Lo que este test protege —rmdir y nunca rm -rf— no se toca: sigue arriba, intacto. */
+        $enlaces = $this->runner_fake()->crudos_con('ln -sfnT');
         $this->assertCount(2, $enlaces);
         $this->assertSame(
-            'ln -sfn ' . RemoteCommandRunner::escapar_argumento('/home/api-' . $slug . '/empresa-api/public')
+            'ln -sfnT ' . RemoteCommandRunner::escapar_argumento('/home/api-' . $slug . '/empresa-api/public')
                 . ' ' . RemoteCommandRunner::escapar_argumento('/home/api-' . $slug . '/htdocs/api-' . $slug . '.comerciocity.com'),
             $enlaces[0]
         );

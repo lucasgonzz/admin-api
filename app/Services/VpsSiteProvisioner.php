@@ -308,10 +308,24 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
     }
 
     /**
+     * Contenido exacto del `index.php` que CloudPanel deja en todo docroot recién creado.
+     *
+     * 🔴 Se compara por CONTENIDO y no por nombre. Un archivo llamado `index.php` en el docroot
+     * de un cliente es su front controller; éste es el "Hello World" del panel. La única forma
+     * segura de distinguirlos es mirar qué dice adentro, y por eso el placeholder se identifica por
+     * su md5 y no por existir.
+     *
+     * Medido el 10/9/2026 en los cuatro sitios de `pescamayorista`, idéntico en los cuatro.
+     *
+     * @var string
+     */
+    const MD5_PLACEHOLDER_DE_CLOUDPANEL = '6841b80f302cc96ee38167688cb5a811';
+
+    /**
      * Deja htdocs/<dominio> apuntando a empresa-api/public.
      *
-     * 🔴 `rmdir` Y NUNCA `rm -rf`. CloudPanel crea htdocs/<dominio> como DIRECTORIO y el symlink no
-     * lo puede reemplazar: hay que sacarlo primero, pero con rmdir, que FALLA si tiene contenido.
+     * 🔴 `rmdir` Y NUNCA `rm -rf`. CloudPanel crea htdocs/<dominio> como DIRECTORIO y el symlink
+     * no lo puede reemplazar: hay que sacarlo primero, pero con rmdir, que FALLA si tiene contenido.
      * En un reintento sobre un sitio ya instalado, un `rm -rf` acá borraría el docroot de un cliente
      * que está sirviendo producción. El rmdir que falla es la señal correcta: "esto ya tiene algo,
      * mirá qué es".
@@ -320,13 +334,18 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
      * en un reintento sobre un docroot que YA es el symlink, el rmdir también falla ("Not a
      * directory") y ahí no hay nada malo. Lo que decide es a dónde apunta el docroot al final.
      *
-     * ⚠️ Qué pasa exactamente si el rmdir no pudo sacar el directorio, porque el comentario que
-     * había acá prometía otra cosa: con `-n` —que es lo que este código usa— GNU `ln` NO crea el
-     * enlace adentro del directorio; se niega con "cannot overwrite directory" y sale con exit ≠ 0,
-     * así que el que corta es el `run()` del `ln`, antes del readlink. (Sin `-n`, y solo sin `-n`,
-     * el enlace se crearía adentro.) El resultado final es el mismo y sigue siendo el correcto
-     * —falla ruidosa, no se borra nada—, pero el error que ve el operador es el del `ln`, no el
-     * mensaje del readlink de más abajo.
+     * 🔴 DOS CORRECCIONES DEL 10/9/2026, medidas instalando `pescamayorista`, y las dos importan
+     * porque juntas hacían que esta etapa **fallara siempre**:
+     *
+     *  1. **El rmdir no podía funcionar nunca.** CloudPanel no deja el docroot vacío: le pone un
+     *     `index.php` con "Hello World". O sea que `rmdir` fallaba en TODA instalación, no en un
+     *     caso de borde. Ahora ese placeholder —y sólo ése, identificado por md5— se saca antes.
+     *  2. **`-n` no protege de un directorio real.** El comentario que había acá prometía que con
+     *     `-n` GNU `ln` se niega con "cannot overwrite directory". Es falso: `-n`
+     *     (`--no-dereference`) sólo cambia el trato de un SYMLINK a directorio. Contra un
+     *     directorio de verdad, `ln -sfn destino dir` crea el enlace ADENTRO (`dir/public`), sale
+     *     con 0, y el readlink de abajo era lo único que lo denunciaba. La bandera que de verdad se
+     *     niega es `-T` (`--no-target-directory`), y es la que va ahora.
      *
      * @param  string  $label
      * @return void
@@ -340,8 +359,11 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
         $runner  = $this->vps('provision_sites');
 
         $runner->run('mkdir -p ' . $this->escapar($home . '/empresa-api'));
+
+        $this->vaciar_docroot_recien_creado($docroot, $destino);
+
         $runner->run('rmdir ' . $this->escapar($docroot), [], false);
-        $runner->run('ln -sfn ' . $this->escapar($destino) . ' ' . $this->escapar($docroot));
+        $runner->run('ln -sfnT ' . $this->escapar($destino) . ' ' . $this->escapar($docroot));
 
         $apunta_a = trim($runner->run('readlink ' . $this->escapar($docroot), [], false));
 
@@ -353,5 +375,95 @@ abstract class VpsSiteProvisioner extends VpsCertificateProvisioner
                 . 'un cliente que está sirviendo producción, borrarlo lo deja caído.'
             );
         }
+    }
+
+    /**
+     * Saca del docroot lo que sabemos que es descartable, para que el `rmdir` pueda con él.
+     *
+     * 🔴 Descartable es una lista CERRADA de dos cosas, y nada más:
+     *
+     *  - el `index.php` "Hello World" de CloudPanel, reconocido por su md5 y no por su nombre;
+     *  - un symlink `public` que apunte exactamente al destino que esta misma etapa quiere crear,
+     *    que es la basura que dejaba la versión anterior de este método al fallar (el `ln` sin `-T`
+     *    lo creaba adentro del directorio). Sacarlo permite reintentar sobre un sitio que quedó a
+     *    medio aprovisionar sin tener que entrar a mano.
+     *
+     * Cualquier otra cosa —un archivo del cliente, un `.htaccess`, un `storage/`— hace que este
+     * método NO borre nada y deje el directorio como está. Ahí el `rmdir` va a fallar y el readlink
+     * de arriba va a cortar la etapa con el mensaje que corresponde, que es el comportamiento que
+     * protege a un cliente que está sirviendo producción.
+     *
+     * @param  string  $docroot  Directorio a vaciar.
+     * @param  string  $destino  Destino legítimo del symlink `public` que pudo quedar de un intento previo.
+     * @return void
+     */
+    private function vaciar_docroot_recien_creado(string $docroot, string $destino): void
+    {
+        $runner = $this->vps('provision_sites');
+
+        /* Si ya es un symlink no hay nada que vaciar: es un reintento sobre un sitio listo. */
+        if (trim($runner->run('readlink ' . $this->escapar($docroot), [], false)) !== '') {
+            return;
+        }
+
+        $listado = trim($runner->run(
+            'ls -A ' . $this->escapar($docroot) . ' 2>/dev/null',
+            [],
+            false
+        ));
+
+        if ($listado === '') {
+            return;
+        }
+
+        $entradas = preg_split('/\r?\n/', $listado);
+        $a_borrar = [];
+
+        foreach ($entradas as $entrada) {
+            $entrada = trim($entrada);
+            if ($entrada === '') {
+                continue;
+            }
+
+            $ruta = $docroot . '/' . $entrada;
+
+            if ($entrada === 'index.php') {
+                $md5 = trim($runner->run(
+                    'md5sum ' . $this->escapar($ruta) . " 2>/dev/null | awk '{print $1}'",
+                    [],
+                    false
+                ));
+                if ($md5 === self::MD5_PLACEHOLDER_DE_CLOUDPANEL) {
+                    $a_borrar[] = $ruta;
+                    continue;
+                }
+            }
+
+            if ($entrada === 'public'
+                && trim($runner->run('readlink ' . $this->escapar($ruta), [], false)) === $destino) {
+                $a_borrar[] = $ruta;
+                continue;
+            }
+
+            /* Apareció algo que no reconocemos: no se toca NADA y se deja fallar más adelante. */
+            $this->log(
+                'provision_sites',
+                'El docroot ' . $docroot . ' tiene contenido que no reconozco (' . $entrada . '). '
+                    . 'No borro nada: miralo a mano antes de seguir.',
+                'warning'
+            );
+
+            return;
+        }
+
+        foreach ($a_borrar as $ruta) {
+            $runner->run('rm -f ' . $this->escapar($ruta));
+        }
+
+        $this->log(
+            'provision_sites',
+            'Docroot ' . $docroot . ' vaciado de lo descartable (' . count($a_borrar) . ' entrada/s): '
+                . 'el placeholder de CloudPanel y, si estaba, el symlink de un intento anterior.'
+        );
     }
 }
