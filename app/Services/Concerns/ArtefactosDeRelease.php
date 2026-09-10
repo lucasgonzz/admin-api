@@ -211,6 +211,116 @@ trait ArtefactosDeRelease
     }
 
     /**
+     * Baja el `public/` del tag y lo deja descomprimido en el directorio de la API destino.
+     *
+     * Es lo mismo para las tres instalaciones —la real de un cliente, el esqueleto de su subdominio
+     * secundario y la de una demo—, así que vive acá y no copiado tres veces.
+     *
+     * 🔴 `$pisar` es la única diferencia entre ellas, y no es cosmética. Una instalación de cero
+     * descomprime con `unzip -o` sobre un directorio virgen. El ESQUELETO va con `-n`: rellena
+     * huecos y nunca pisa un archivo que el cliente ya tiene, porque el subdominio secundario puede
+     * estar sirviendo producción hoy mismo —el blue/green alterna cuál de los dos es la API activa—
+     * y con `-o` un tag más viejo que el instalado le bajaría de versión el `index.php` a un sistema
+     * andando.
+     *
+     * @param  string  $tag         Tag del release.
+     * @param  string  $api_path    Directorio de la API en el servidor destino.
+     * @param  string  $zip_name    Nombre del zip, único por corrida (lleva el uuid adentro).
+     * @param  string  $credencial  Tipo de credencial SFTP (`shared_hosting` | `vps`).
+     * @param  string  $step        Etapa, para el log.
+     * @param  bool    $pisar       `true` para `unzip -o`, `false` para `unzip -n`.
+     * @return void
+     *
+     * @throws \RuntimeException  Si GitHub no tiene el zipball de ese tag.
+     */
+    private function artefacto_desplegar_public(
+        string $tag,
+        string $api_path,
+        string $zip_name,
+        string $credencial,
+        string $step,
+        bool $pisar
+    ): void {
+        $local_zip = storage_path('app/deployments/' . $zip_name);
+
+        if (! $this->artefacto_bajar_public_del_tag($tag, $local_zip, $step)) {
+            $this->artefacto_frenar_sin_public($step, $tag);
+        }
+
+        $sftp = $this->open_sftp_session($credencial);
+        $this->sftp_upload_file($sftp, $local_zip, $api_path . '/' . $zip_name, $step);
+        $this->artefacto_log($step, 'ZIP de public/ subido al servidor destino');
+
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh(
+            $step,
+            'cd ' . $this->artefacto_comillas_posix($api_path)
+            . ' && unzip ' . ($pisar ? '-o' : '-n') . ' ' . $this->artefacto_comillas_posix($zip_name)
+            . ' && rm -f ' . $this->artefacto_comillas_posix($zip_name) . ' 2>&1',
+            true,
+            true
+        );
+        $this->artefacto_log($step, 'public/ descomprimido en el servidor destino', 'success');
+
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
+    }
+
+    /**
+     * Sube el zip de la API al servidor destino, lo descomprime encima y corre `composer install`.
+     *
+     * La segunda mitad de la etapa `upload_api`, común a las dos vías (artefacto del release y VPS de
+     * builds) y a los tres pipelines. Con el `vendor/` del artefacto adentro del zip ese
+     * `composer install` es un no-op rápido; sin él —la vía vieja lo excluye— instala como siempre.
+     *
+     * El comando de composer viaja armado desde afuera porque no es el mismo en todos lados: una
+     * instalación de cero va SIN scripts (el `.env` todavía no existe y el `post-autoload-dump` de
+     * Laravel bootea el framework, que sin entorno revienta) y una actualización de demo puede
+     * correrlos.
+     *
+     * @param  string  $local_zip          Zip local ya verificado.
+     * @param  string  $api_path           Directorio de la API en el servidor destino.
+     * @param  string  $zip_name           Nombre con el que viaja el zip.
+     * @param  string  $credencial         Tipo de credencial SFTP (`shared_hosting` | `vps`).
+     * @param  string  $comando_composer   Comando completo de composer para el servidor destino.
+     * @param  string  $step               Etapa, para el log.
+     * @return void
+     */
+    private function artefacto_desplegar_zip_api(
+        string $local_zip,
+        string $api_path,
+        string $zip_name,
+        string $credencial,
+        string $comando_composer,
+        string $step
+    ): void {
+        $sftp = $this->open_sftp_session($credencial);
+        $this->sftp_upload_file($sftp, $local_zip, $api_path . '/' . $zip_name, $step);
+        $this->artefacto_log($step, 'ZIP de la API subido al servidor destino');
+
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh(
+            $step,
+            'cd ' . $this->artefacto_comillas_posix($api_path)
+            . ' && unzip -o ' . $this->artefacto_comillas_posix($zip_name)
+            . ' && rm -f ' . $this->artefacto_comillas_posix($zip_name) . ' 2>&1',
+            true,
+            true
+        );
+        $this->artefacto_log($step, 'API descomprimida en el servidor destino');
+
+        $this->artefacto_log($step, 'Corriendo composer install en el servidor destino...');
+        $this->reconnect_hosting_ssh();
+        $this->exec_hosting_ssh($step, $comando_composer, true, true);
+        $this->artefacto_log($step, 'API lista en el servidor destino', 'success');
+
+        if (is_file($local_zip)) {
+            unlink($local_zip);
+        }
+    }
+
+    /**
      * Corta cuando el tag no tiene zipball: acá no hay vía vieja a la que caer.
      *
      * 🔴 A diferencia de un asset del release, el zipball GitHub lo arma solo para CUALQUIER tag que
