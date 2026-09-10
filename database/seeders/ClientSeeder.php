@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\Client;
+use App\Models\Version;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Str;
 
@@ -15,13 +16,20 @@ class ClientSeeder extends Seeder
      */
     public function run()
     {
+        /**
+         * current_version_id es nullable y tiene FK contra versions. DatabaseSeeder no
+         * siembra versiones antes de este seeder, así que hardcodear el id 1 rompe la FK
+         * en cualquier base donde `versions` todavía esté vacía.
+         */
+        $version_id = Version::query()->orderBy('id')->value('id');
+
         $models = [
             [
                 'name'                  => 'Fenix',
                 'api_url'               => 'http://empresa.local:8000',
                 'api_key'               => 'apikeydeprueba',
                 'inbound_api_key'       => 'inboundapikeydeprueba',
-                'current_version_id'    => 1,
+                'current_version_id'    => $version_id,
                 'uuid'                  => 'iddeprueba'
             ],
             [
@@ -29,7 +37,7 @@ class ClientSeeder extends Seeder
                 'api_url'               => 'http://empresa.local:8000',
                 'api_key'               => 'apikeydeprueba',
                 'inbound_api_key'       => 'inboundapikeydeprueba',
-                'current_version_id'    => 1,
+                'current_version_id'    => $version_id,
                 'uuid'                  => 'san-blas-de-prueba',
                 'phone'                 => '+543444622139',
             ],
