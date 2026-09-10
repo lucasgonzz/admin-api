@@ -45,6 +45,15 @@ class LeadAiService
     private const MAX_TOOL_ITERATIONS = 10;
 
     /**
+     * Cuántas fuentes citadas se le sirven de una en el segundo intento del gate de respaldo.
+     *
+     * No es un límite de tamaño: es un detector de respuesta rara. Una respuesta normal cita una o
+     * dos fuentes; una que cita cinco no está "recordando mal", está barriendo el índice, y ahí el
+     * escalado del primer intento es la respuesta correcta. Ver generar_paquete_verificado().
+     */
+    private const MAX_FUENTES_A_SERVIR = 4;
+
+    /**
      * Texto que reemplaza al mensaje del agente cuando no pudo respaldarlo con el protocolo.
      *
      * Sigue el criterio que la REGLA 17 del protocolo ya fija para cuando falta un dato: neutro,
@@ -224,10 +233,14 @@ TXT;
      *                                              contrato de fuentes ya está sincronizado.
      * @param array<int, string>   $recursos_leidos Recursos servidos con éxito en esa llamada.
      * @param bool                 $rechazo         Queda en true si el gate frenó el paquete.
+     * @param string               $motivo_gate     Motivo crudo que redactó el gate, sin la
+     *                                              consulta del lead pegada atrás. Lo necesita el
+     *                                              segundo intento para decirle al agente qué
+     *                                              falló; ver generar_paquete_verificado().
      *
      * @return array<string, mixed> El paquete, frenado o intacto.
      */
-    private function aplicar_gate_de_respaldo(Lead $lead, array $parsed, string $system, array $recursos_leidos, bool &$rechazo = false): array
+    private function aplicar_gate_de_respaldo(Lead $lead, array $parsed, string $system, array $recursos_leidos, bool &$rechazo = false, string &$motivo_gate = ''): array
     {
         $gate = app(KnowledgeGroundingGate::class);
 
@@ -241,6 +254,8 @@ TXT;
         if ($veredicto['permitido']) {
             return $parsed;
         }
+
+        $motivo_gate = $veredicto['motivo'];
 
         Log::channel('daily')->warning('LeadAiService: respuesta sin respaldo documental, deriva a intervención humana.', [
             'lead_id'         => $lead->id,
@@ -303,6 +318,385 @@ TXT;
     }
 
     /**
+     * Genera un paquete del agente, le pasa el gate de respaldo y —si el gate lo frenó por citas
+     * sin respaldo— le sirve el material citado y lo hace responder una segunda y última vez.
+     *
+     * EL PROBLEMA QUE RESUELVE (medido en el log de producción del 1/9 al 10/9/2026). El gate
+     * frenó 16 respuestas en 10 días y **12 de ellas tenían `recursos_leidos: []`**: el agente no
+     * pidió ningún recurso y citó `posicionamiento` de memoria. No era un límite de tokens (los
+     * JSON llegaban completos) ni el repositorio caído (el mismo recurso se había servido bien
+     * horas antes en la misma conversación). Era una contradicción entre dos contratos: el gate
+     * exige respaldo leído en ESTA llamada, y el prompt le daba permiso al agente de no releer lo
+     * que ya había pedido "en esta conversación" —una conversación que, del lado de la API, no
+     * existe: cada llamada arranca con $messages en el mensaje inicial y nada más—. Resultado: una
+     * respuesta correcta, frenada, reemplazada por "Dame un momento que lo verifico bien", y un
+     * lead esperando a que una persona apruebe a mano lo que el agente ya había contestado bien.
+     *
+     * CÓMO LO RESUELVE. Antes de escalar, el sistema hace lo que el agente no hizo: **le sirve él
+     * mismo el contenido de los recursos que citó** y le pide la respuesta de nuevo, con ese texto
+     * delante y con el motivo del rechazo escrito. Si la segunda queda respaldada, sigue su curso
+     * normal; si no, escala igual que siempre.
+     *
+     * 🔴 La invariante del gate no se toca: la lista de leídas **la sigue armando el código**. Un
+     * recurso precargado cuenta como leído porque lo sirvió el ejecutor —exactamente igual que si
+     * el modelo lo hubiera pedido con la tool—, y el segundo intento se evalúa con el mismo
+     * criterio que el primero. Lo que cambia no es qué se acepta: es cuántas oportunidades tiene
+     * el agente de conseguir el respaldo antes de que se moleste a una persona.
+     *
+     * 🔴 Un solo reintento, y solo cuando TODO lo citado se puede servir. Si el agente citó un
+     * archivo que no existe, o más fuentes de las que se sirven de una, no se reintenta: eso ya no
+     * es "no releyó", es una cita inventada, y ahí escalar es la respuesta correcta.
+     *
+     * 🔴 Y el reintento no puede ser una puerta. El gate solo exige respaldo cuando el agente
+     * declara `afirmacion_del_sistema`; a este lo estamos llamando después de decirle que su
+     * mensaje no salió, así que reetiquetar la misma afirmación como `conversacional` le
+     * alcanzaría para pasar sin haber conseguido nada. Por eso el reintento se dispara SOLO si el
+     * primer intento afirmaba, y del segundo se aceptan solo dos desenlaces: que vuelva a afirmar
+     * —y el gate le vuelva a exigir respaldo— o que pida intervención humana de verdad. Cualquier
+     * otra cosa deja en pie el escalado del primero.
+     *
+     * @param Lead                             $lead            Lead en curso.
+     * @param array<int, array<string, mixed>> $system_payload  Bloque system con cache_control.
+     * @param string                           $system          Texto del system, para el gate.
+     * @param string                           $user_content    Contenido del mensaje user.
+     * @param int                              $max_tokens      Límite de tokens de la respuesta.
+     * @param PendingRequest                   $http            Cliente HTTP configurado.
+     * @param string                           $model           Modelo de Claude a usar.
+     * @param string                           $etiqueta_log    Prefijo del log de diagnóstico.
+     * @param array<int, string>               $recursos_leidos Queda con lo que se le sirvió en la
+     *                                                          llamada que produjo el paquete que
+     *                                                          se devuelve (la segunda, si hubo).
+     * @param bool                             $gate_rechazo    Queda en true si el paquete que se
+     *                                                          devuelve viene frenado por el gate.
+     *
+     * @return array<string, mixed> Paquete del agente, ya pasado por el gate.
+     */
+    private function generar_paquete_verificado(
+        Lead $lead,
+        array $system_payload,
+        string $system,
+        string $user_content,
+        int $max_tokens,
+        PendingRequest $http,
+        string $model,
+        string $etiqueta_log,
+        array &$recursos_leidos,
+        bool &$gate_rechazo = false
+    ): array {
+        $text = $this->run_with_tools($system_payload, $user_content, $max_tokens, $http, $model, $lead, $recursos_leidos);
+
+        /* Log de diagnóstico: respuesta cruda de Claude. */
+        Log::debug($etiqueta_log . ' - respuesta Claude', [
+            'lead_id'  => $lead->id,
+            'response' => $text,
+        ]);
+
+        $parsed = $this->parse_json_response($text);
+
+        $gate_rechazo = false;
+        $motivo_gate  = '';
+
+        $paquete = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos, $gate_rechazo, $motivo_gate);
+
+        if (! $gate_rechazo) {
+            return $paquete;
+        }
+
+        /* 🔴 El reintento existe para UNA falla: el agente sabía la respuesta y no releyó. Eso
+         * solo se puede diagnosticar si él mismo declaró que estaba afirmando algo del sistema.
+         * Si el gate frenó porque el `tipo_respuesta` faltaba o era inventado, lo que falló fue
+         * el formato, no la lectura: servirle recursos no arregla eso, y darle otra vuelta con
+         * el JSON servido delante sería regalarle la oportunidad de volver con un tipo que el
+         * gate no verifica. Ahí el escalado del primer intento es la respuesta correcta. */
+        $tipo_primero = isset($parsed['tipo_respuesta']) && is_string($parsed['tipo_respuesta'])
+            ? trim($parsed['tipo_respuesta'])
+            : '';
+
+        if ($tipo_primero !== KnowledgeGroundingGate::TIPO_AFIRMACION) {
+            Log::channel('daily')->info('LeadAiService: el gate frenó por el tipo de respuesta, no por la lectura; no se reintenta.', [
+                'lead_id'      => $lead->id,
+                'tipo_primero' => $tipo_primero,
+                'motivo'       => $motivo_gate,
+            ]);
+
+            return $paquete;
+        }
+
+        /* El gate frenó. Antes de escalar, servirle lo que citó y darle una segunda vuelta. */
+        $servidos = [];
+        $respaldo = $this->bloque_de_respaldo_servido($parsed, $lead, $servidos);
+
+        if ($respaldo === '') {
+            /* No hay nada que servir (no citó nada, citó demasiadas fuentes, o alguna no existe):
+             * el escalado del primer intento queda en pie, que es lo que corresponde. */
+            return $paquete;
+        }
+
+        Log::channel('daily')->info('LeadAiService: segundo intento con el respaldo servido por el sistema.', [
+            'lead_id'          => $lead->id,
+            'motivo_primero'   => $motivo_gate,
+            'fuentes_servidas' => $servidos,
+        ]);
+
+        /* Arranca con lo que el sistema le sirvió; si además pide una tool, se suma sola. */
+        $leidos_reintento = $servidos;
+
+        try {
+            $text_reintento = $this->run_with_tools(
+                $system_payload,
+                $user_content . "\n\n" . $this->bloque_de_correccion($motivo_gate, $servidos) . $respaldo,
+                $max_tokens,
+                $http,
+                $model,
+                $lead,
+                $leidos_reintento
+            );
+
+            Log::debug($etiqueta_log . ' [SEGUNDO INTENTO] - respuesta Claude', [
+                'lead_id'  => $lead->id,
+                'response' => $text_reintento,
+            ]);
+
+            $parsed_reintento = $this->parse_json_response($text_reintento);
+        } catch (\Throwable $e) {
+            /* 🔴 El reintento nunca puede dejar al lead peor que el primer intento: si la segunda
+             * llamada falla (HTTP, timeout, JSON inválido), se conserva el paquete frenado del
+             * primero, que ya trae la intervención humana marcada y el mensaje neutro puesto. */
+            Log::channel('daily')->error('LeadAiService: el segundo intento con respaldo servido falló; queda el escalado del primero.', [
+                'lead_id' => $lead->id,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return $paquete;
+        }
+
+        /* 🔴 EL CIERRE QUE HACE QUE EL REINTENTO NO SEA UNA PUERTA. El gate solo exige respaldo
+         * cuando el agente declara `afirmacion_del_sistema`: `aclaracion` y `conversacional`
+         * pasan sin que se les mire una sola fuente. Y a este agente acabamos de decirle, en
+         * mayúsculas, que su mensaje no salió y que tiene una última chance. Sin esta guarda le
+         * queda un camino trivial para pasar sin conseguir el respaldo: mandar el MISMO mensaje
+         * reetiquetado como `conversacional`. No hace falta suponerle mala fe —alcanza con que
+         * ceda a la presión de "esto no salió, arreglalo"—, y el resultado sería peor que antes
+         * del cambio: una afirmación sin respaldo saliendo por una puerta que el escalado del
+         * primer intento ya tenía cerrada.
+         *
+         * Así que el segundo intento se juega en el mismo tablero que el primero: o vuelve a
+         * afirmar y consigue el respaldo, o pide escalar. Bajar el tipo a uno que no se verifica
+         * no cuenta como haberlo conseguido, y el escalado del primero queda en pie. Las dos
+         * salidas legítimas que el bloque de corrección le ofrece siguen abiertas: contestar solo
+         * lo que sí puede respaldar, o devolver requiere_intervencion_humana. */
+        $tipo_reintento = isset($parsed_reintento['tipo_respuesta']) && is_string($parsed_reintento['tipo_respuesta'])
+            ? trim($parsed_reintento['tipo_respuesta'])
+            : '';
+
+        /* Lista BLANCA, no negra: del segundo intento se aceptan exactamente dos desenlaces.
+         *
+         *   - `afirmacion_del_sistema`: vuelve a afirmar y el gate le vuelve a exigir respaldo.
+         *     Es el camino para el que existe el reintento.
+         *   - un paquete que pide intervención humana de verdad: el agente reconoce que no puede
+         *     respaldarlo. Es la otra salida que el bloque de corrección le ofrece explícitamente.
+         *
+         * Todo lo demás —`conversacional`, `aclaracion`, o un `escalado` que en el mismo paquete
+         * trae requiere_intervencion_humana en false— se descarta y queda el escalado del primer
+         * intento. Es lista blanca justamente por ese último caso: el gate deja pasar
+         * `escalado` sin mirar una sola fuente (KnowledgeGroundingGate::evaluar()), así que una
+         * lista negra de tipos lo dejaría entrar con la afirmación intacta adentro. */
+        $reintento_escala = ! empty($parsed_reintento['requiere_intervencion_humana']);
+
+        if ($tipo_reintento !== KnowledgeGroundingGate::TIPO_AFIRMACION && ! $reintento_escala) {
+            Log::channel('daily')->warning('LeadAiService: el segundo intento no volvió a afirmar ni pidió escalar; queda el escalado del primero.', [
+                'lead_id'        => $lead->id,
+                'tipo_primero'   => $tipo_primero,
+                'tipo_reintento' => $tipo_reintento,
+                'motivo_primero' => $motivo_gate,
+            ]);
+
+            return $paquete;
+        }
+
+        $rechazo_reintento = false;
+
+        $paquete_reintento = $this->aplicar_gate_de_respaldo($lead, $parsed_reintento, $system, $leidos_reintento, $rechazo_reintento);
+
+        Log::channel('daily')->info(
+            $rechazo_reintento
+                ? 'LeadAiService: el segundo intento tampoco quedó respaldado; deriva a intervención humana.'
+                : 'LeadAiService: el segundo intento quedó respaldado; el mensaje sigue su curso normal.',
+            [
+                'lead_id'          => $lead->id,
+                'fuentes_servidas' => $servidos,
+            ]
+        );
+
+        $recursos_leidos = $leidos_reintento;
+        $gate_rechazo    = $rechazo_reintento;
+
+        return $paquete_reintento;
+    }
+
+    /**
+     * Arma el bloque con el contenido completo de las fuentes que el agente citó, para servírselo
+     * en el segundo intento.
+     *
+     * Devuelve cadena vacía —o sea, "no hay reintento posible"— en cuanto algo no cierra: no citó
+     * nada, citó más fuentes de las que se sirven juntas, o alguna no se puede resolver. Es
+     * deliberado: el reintento existe para el agente que sabía la respuesta y no releyó, no para
+     * el que citó un archivo que no existe.
+     *
+     * @param array<string, mixed> $parsed   Paquete tal como lo devolvió el agente.
+     * @param Lead                 $lead     Lead en curso, para resolver la variante del recurso.
+     * @param array<int, string>   $servidos Se llena con las fuentes servidas de verdad.
+     *
+     * @return string Bloque listo para concatenar al user content, o '' si no se puede reintentar.
+     */
+    private function bloque_de_respaldo_servido(array $parsed, Lead $lead, array &$servidos): string
+    {
+        $citadas = isset($parsed['fuentes_kb']) ? $parsed['fuentes_kb'] : null;
+
+        /* Un string suelto donde se esperaba un array: misma tolerancia que el gate. */
+        if (is_string($citadas)) {
+            $citadas = [$citadas];
+        }
+
+        if (! is_array($citadas) || empty($citadas)) {
+            return '';
+        }
+
+        /* Normalizar y deduplicar ANTES de contar. El tope busca detectar al que barre el índice,
+         * y citar cinco veces la misma fuente —`precios`, `/precios`, `Precios`— es una sola
+         * fuente escrita con desprolijidad, no un barrido. El gate deduplica igual
+         * (KnowledgeGroundingGate::normalizar_lista()), así que contar el crudo le haría perder
+         * el reintento a alguien que en realidad citó bien. */
+        $normalizadas = [];
+
+        foreach ($citadas as $fuente) {
+            if (! is_string($fuente)) {
+                return '';
+            }
+
+            $nombre = ltrim(trim($fuente), '/');
+
+            if ($nombre === '') {
+                return '';
+            }
+
+            /* Se compara en minúsculas —igual que el gate— pero se conserva el nombre tal cual
+             * vino: las rutas del manual en GitHub son sensibles a mayúsculas. */
+            $normalizadas[mb_strtolower($nombre)] = $nombre;
+        }
+
+        if (count($normalizadas) > self::MAX_FUENTES_A_SERVIR) {
+            Log::channel('daily')->warning('LeadAiService: el agente citó demasiadas fuentes como para servírselas; no se reintenta.', [
+                'lead_id' => $lead->id,
+                'citadas' => array_values($normalizadas),
+            ]);
+
+            return '';
+        }
+
+        $bloques = [];
+
+        /* 🔴 Se acumula en un local y $servidos se asigna recién en el return. Si se llenara el
+         * out-param dentro del loop, cualquiera de las salidas tempranas devolvería '' —"no se
+         * pudo servir nada"— dejando atrás una lista que afirma lo contrario. Hoy el único
+         * llamador la descarta en ese caso, pero un parámetro por referencia que miente es
+         * exactamente lo que alguien loguea o reusa dentro de seis meses. */
+        $anotados = [];
+
+        foreach ($normalizadas as $nombre) {
+            $contenido = $this->servir_fuente_citada($nombre, $lead);
+
+            if (trim($contenido) === '') {
+                Log::channel('daily')->warning('LeadAiService: una fuente citada no se pudo servir; no se reintenta y queda el escalado.', [
+                    'lead_id' => $lead->id,
+                    'fuente'  => $nombre,
+                ]);
+
+                return '';
+            }
+
+            $anotados[] = $nombre;
+            $bloques[]  = '===== ' . $nombre . " =====\n" . $contenido;
+        }
+
+        $servidos = $anotados;
+
+        return "\n\nCONTENIDO COMPLETO DE LO QUE CITASTE (servido por el sistema en ESTA llamada):\n\n"
+            . implode("\n\n", $bloques);
+    }
+
+    /**
+     * Resuelve el contenido de una fuente citada, sea un recurso del protocolo o un archivo del
+     * manual del sistema. Es el mismo material que sirven las tools, por los mismos servicios.
+     *
+     * @param string $nombre Nombre del recurso o ruta del archivo, ya normalizado.
+     * @param Lead   $lead   Lead en curso, para la variante de la dinámica de demo (grupo 293).
+     *
+     * @return string Contenido, o '' si no se pudo servir.
+     */
+    private function servir_fuente_citada(string $nombre, Lead $lead): string
+    {
+        $en_minusculas = mb_strtolower($nombre);
+
+        if (in_array($en_minusculas, self::PROTOCOLO_RECURSOS, true)) {
+            return app(WhatsappProtocolService::class)->getRecurso($en_minusculas, $lead->demo_experiencia_efectiva());
+        }
+
+        if (strpos($en_minusculas, 'manual_sistema/') === 0) {
+            try {
+                /* Con el nombre sin bajar a minúsculas: las rutas de GitHub son sensibles a
+                 * mayúsculas y la guarda de prefijo vive en ManualRepositoryService. */
+                return app(ManualRepositoryService::class)->get_file($nombre);
+            } catch (\Throwable $e) {
+                Log::channel('daily')->warning('LeadAiService: no se pudo servir un archivo del manual para el segundo intento.', [
+                    'path'  => $nombre,
+                    'error' => $e->getMessage(),
+                ]);
+
+                return '';
+            }
+        }
+
+        /* Un nombre que no es ni recurso del protocolo ni ruta del manual: se lo inventó. */
+        return '';
+    }
+
+    /**
+     * Texto que encabeza el segundo intento: qué falló, por qué su memoria no cuenta como
+     * respaldo, y con qué reglas tiene que volver a responder.
+     *
+     * @param string             $motivo   Motivo que redactó el gate en el primer intento.
+     * @param array<int, string> $servidos Fuentes que el sistema le sirvió en esta llamada.
+     *
+     * @return string
+     */
+    private function bloque_de_correccion(string $motivo, array $servidos): string
+    {
+        return "CORRECCIÓN DEL SISTEMA — TU RESPUESTA ANTERIOR NO SALIÓ\n\n"
+            /* El motivo incrusta los nombres de fuente que escribió el propio modelo
+             * (KnowledgeGroundingGate: implode de $sin_respaldo), así que se acota igual que se
+             * acota lo que escribe el lead en motivo_con_la_consulta(). */
+            . 'Motivo: ' . mb_strimwidth($motivo, 0, 400, '…') . "\n\n"
+            . "Cada llamada tuya arranca sin memoria de las anteriores: lo que pediste con una tool "
+            . "en un turno anterior de esta conversación NO cuenta como respaldo acá, por más que "
+            . "recuerdes lo que decía. Para no hacerte perder otra vuelta, abajo tenés el texto "
+            . "completo de lo que citaste, servido por el sistema en esta misma llamada. Cuentan "
+            . "como leídos: " . implode(', ', $servidos) . ".\n\n"
+            . "Volvé a responderle al lead con estas reglas:\n"
+            . "- Afirmá únicamente lo que esté escrito textualmente en los recursos de abajo o en "
+            . "los que pidas ahora con las tools. Combinar dos frases para deducir una tercera es inventar.\n"
+            . "- En fuentes_kb va SOLO lo que tengas delante en esta llamada: los recursos de abajo, "
+            . "más los que pidas ahora.\n"
+            . "- Si lo que querías afirmar no está en ninguno, no lo afirmes: contestá lo que sí "
+            . "podés respaldar, o devolvé requiere_intervencion_humana: true diciendo qué falta.\n"
+            . "- Si tu mensaje sigue afirmando algo sobre ComercioCity, tipo_respuesta sigue "
+            . "siendo afirmacion_del_sistema. Cambiarlo a conversacional o aclaracion para que "
+            . "el mensaje pase es exactamente lo que este control impide, y el sistema lo "
+            . "detecta: el mensaje no sale igual.\n"
+            . "- Devolvé el JSON completo de siempre, con todos sus campos.";
+    }
+
+    /**
      * Genera un mensaje sugerido por IA y actualiza el estado sugerido del lead.
      *
      * Si Claude devuelve `solicita_disponibilidad: true`, se realiza una segunda
@@ -342,21 +736,23 @@ TXT;
          * ejecutor de tools; es la evidencia contra la que el gate verifica sus citas. */
         $recursos_leidos = [];
 
-        $text = $this->run_with_tools($system_payload, $user_content, 1000, $http, $model, $lead, $recursos_leidos);
-
-        /* Log de diagnóstico: respuesta cruda de Claude en la primera llamada. */
-        Log::debug('LeadAiService [PRIMERA LLAMADA] - respuesta Claude', [
-            'lead_id'  => $lead->id,
-            'response' => $text,
-        ]);
-
-        $parsed = $this->parse_json_response($text);
-
-        /* Respaldo documental: si el agente afirmó algo del sistema que no puede citar, el
-         * paquete no sale y se deriva a una persona. Ver aplicar_gate_de_respaldo(). */
+        /* Respaldo documental: si el agente afirmó algo del sistema que no puede citar, el sistema
+         * le sirve lo que citó y lo hace responder una segunda vez; si tampoco queda respaldado, el
+         * paquete no sale y se deriva a una persona. Ver generar_paquete_verificado(). */
         $gate_rechazo = false;
 
-        $parsed = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos, $gate_rechazo);
+        $parsed = $this->generar_paquete_verificado(
+            $lead,
+            $system_payload,
+            $system,
+            $user_content,
+            1000,
+            $http,
+            $model,
+            'LeadAiService [PRIMERA LLAMADA]',
+            $recursos_leidos,
+            $gate_rechazo
+        );
 
         /*
          * Determinar si hay que hacer la segunda llamada con slots disponibles.
@@ -869,17 +1265,8 @@ TXT;
          * usarlo como respaldo acá. */
         $recursos_leidos = [];
 
-        $text = $this->run_with_tools($system_payload, $user_content, 3000, $http, $model, $lead, $recursos_leidos);
-
-        /* Log de diagnóstico: respuesta cruda de Claude en la segunda llamada. */
-        Log::debug('LeadAiService [SEGUNDA LLAMADA - con disponibilidad] - respuesta Claude', [
-            'lead_id'  => $lead->id,
-            'response' => $text,
-        ]);
-
-        $parsed = $this->parse_json_response($text);
-
-        /* Mismo gate que en la primera llamada. Este tramo fuerza revisión humana por estado
+        /* Mismo gate que en la primera llamada, con el mismo segundo intento cuando frena.
+         * Este tramo fuerza revisión humana por estado
          * (ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO) cuando el interruptor global de Cuenta está
          * prendido (condicional desde el 1/9/2026, ver retencion_por_tramo_de_agenda_activa()),
          * pero eso protege el AGENDAMIENTO, no lo que el mensaje afirma: un lead que acepta un
@@ -887,7 +1274,17 @@ TXT;
          * respuesta, y sin esto la segunda mitad saldría sin respaldo documental — con o sin esa
          * otra protección. Coordinar la agenda es `conversacional` y no exige fuentes, así que el
          * camino normal no se toca. */
-        $parsed = $this->aplicar_gate_de_respaldo($lead, $parsed, $system, $recursos_leidos);
+        $parsed = $this->generar_paquete_verificado(
+            $lead,
+            $system_payload,
+            $system,
+            $user_content,
+            3000,
+            $http,
+            $model,
+            'LeadAiService [SEGUNDA LLAMADA - con disponibilidad]',
+            $recursos_leidos
+        );
 
         /*
          * GUARD DURO (lead #12, 13/7/2026): el payload de Claude no es autoritativo sobre el
@@ -7605,9 +8002,20 @@ TXT;
         return [
             [
                 'name'        => 'get_protocolo_recurso',
+                /* 🔴 La descripción anterior decía "usá esta tool cuando la información no está en
+                 * tu contexto actual", y esa cláusula era una invitación a no releer: entre el 1/9
+                 * y el 10/9/2026 el agente citó `posicionamiento` sin haberlo pedido en 11 de 16
+                 * respuestas frenadas por el gate, todas en conversaciones donde ya lo había leído
+                 * en un turno anterior. La API no tiene esa memoria: cada llamada arranca limpia.
+                 * Ver generar_paquete_verificado(). */
                 'description' => 'Devuelve el contenido de un recurso del protocolo de ventas. ' .
-                                 'Usá esta tool cuando necesitás información específica para ' .
-                                 'responder al lead y esa información no está en tu contexto actual.',
+                                 'Pedilo SIEMPRE que vayas a afirmar algo sobre ComercioCity —qué ' .
+                                 'hace, qué no hace, cuánto sale, para qué sirve—, aunque creas que ' .
+                                 'ya sabés la respuesta o la hayas pedido en un turno anterior de ' .
+                                 'esta conversación: cada llamada arranca sin memoria de las ' .
+                                 'anteriores y el sistema verifica que la lectura haya ocurrido en ' .
+                                 'ESTA llamada. Si citás un recurso que no pediste acá, tu mensaje ' .
+                                 'no le llega al lead.',
                 'input_schema' => [
                     'type'       => 'object',
                     'properties' => [
