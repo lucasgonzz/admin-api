@@ -285,6 +285,52 @@ class ReleaseArtifactServiceTest extends TestCase
         });
     }
 
+    /**
+     * 🔴 El ZIPBALL de un tag NO se pide con el Accept de un asset.
+     *
+     * Los dos endpoints se parecen —los dos redirigen a un binario en objects.githubusercontent.com—
+     * pero el del zipball es de la API JSON. Con `application/octet-stream` responde **415**:
+     * *"Unsupported 'Accept' header: 'application/octet-stream'. Must accept 'application/json'"*.
+     *
+     * Medido contra GitHub de verdad el 10/9/2026, instalando `pescamayorista`: con
+     * `application/vnd.github+json` el zipball de `empresa-api` v4.0.23 baja con 200, pesa 9,25 MB
+     * y trae `public/index.php` entre sus 2946 entradas. Con el otro Accept, 415 y 172 bytes de
+     * error. La instalación de un cliente nuevo depende de ese zipball, porque el asset de la API
+     * excluye `public/` a propósito.
+     *
+     * @return void
+     */
+    public function test_el_zipball_se_pide_con_el_accept_de_la_api_y_no_el_de_un_asset(): void
+    {
+        $contenido = $this->contenido(4096);
+        $zipball   = 'https://api.github.com/repos/lucasgonzz/empresa-api/zipball/v4.0.23';
+
+        Http::fake([
+            $zipball => Http::response('', 302, ['Location' => self::URL_S3]),
+            'objects.githubusercontent.com/*' => Http::response($contenido, 200),
+        ]);
+
+        $bytes = (new ReleaseArtifactService())->download_source_zip('empresa-api', 'v4.0.23', $this->destino());
+
+        $this->assertSame(4096, $bytes);
+        $this->assertSame($contenido, file_get_contents($this->destino()));
+
+        Http::assertSent(function (Request $request) use ($zipball) {
+            if ($request->url() !== $zipball) {
+                return false;
+            }
+
+            $this->assertSame(
+                'application/vnd.github+json',
+                $request->header('Accept')[0],
+                'El zipball se pidió con el Accept de un asset: GitHub responde 415 y la instalación '
+                . 'de cualquier cliente nuevo se queda sin public/.'
+            );
+
+            return true;
+        });
+    }
+
     /** Sin redirección (GitHub Enterprise, o un mirror) también funciona: 200 directo con el binario. */
     public function test_download_asset_acepta_un_200_directo(): void
     {

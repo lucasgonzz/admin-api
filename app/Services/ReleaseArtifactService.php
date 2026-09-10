@@ -279,7 +279,7 @@ class ReleaseArtifactService
         $this->borrar_si_existe($local_path);
 
         try {
-            $response = $this->download_client()
+            $response = $this->zipball_client()
                 ->withOptions(['sink' => $local_path])
                 ->get($url);
         } catch (\Throwable $e) {
@@ -353,6 +353,31 @@ class ReleaseArtifactService
      *
      * @return PendingRequest
      */
+    /**
+     * Cliente para el ZIPBALL de un tag, que NO es lo mismo que un asset de release.
+     *
+     * 🔴 El `Accept` cambia, y no es un detalle: con `application/octet-stream` —el que hace falta
+     * para que la URL de un ASSET devuelva el binario en vez de su JSON— el endpoint del zipball
+     * responde **415**: *"Unsupported 'Accept' header: 'application/octet-stream'. Must accept
+     * 'application/json'"*. Medido el 10/9/2026 instalando `pescamayorista`.
+     *
+     * Los dos endpoints se parecen —los dos redirigen a un binario en objects.githubusercontent.com—
+     * pero el del zipball es de la API JSON y quiere el Accept de la API. Lo demás es igual: el
+     * timeout largo de descarga y las redirecciones.
+     *
+     * @return PendingRequest
+     */
+    private function zipball_client(): PendingRequest
+    {
+        return $this->cliente_base(self::ACCEPT_API, self::TIMEOUT_DESCARGA_SEGUNDOS)
+            ->withOptions([
+                'allow_redirects' => [
+                    'max'       => self::MAX_REDIRECCIONES,
+                    'protocols' => ['https'],
+                ],
+            ]);
+    }
+
     private function download_client(): PendingRequest
     {
         return $this->cliente_base(self::ACCEPT_BINARIO, self::TIMEOUT_DESCARGA_SEGUNDOS)
