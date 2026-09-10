@@ -262,18 +262,27 @@ class HostingerApiClient extends HostingerHttpTransport
     }
 
     /**
-     * Pide un snapshot de la zona DNS.
+     * Lista los snapshots que Hostinger tiene de la zona DNS.
      *
-     * Guarda G7: es la única forma de volver atrás de un PUT. Si el snapshot falla, no se escribe.
-     * El id que devuelve se loguea en el panel de operaciones, porque es lo que una persona va a
-     * necesitar tipear en hPanel a las tres de la mañana.
+     * 🔴 ANTES ESTO PEDÍA UN SNAPSHOT CON POST, Y ESE ENDPOINT NO EXISTE. Medido el 10/9/2026
+     * instalando `pescamayorista`: `POST /api/dns/v1/snapshots/comerciocity.com` devuelve **405**,
+     * *"The POST method is not supported for this route. Supported methods: GET, HEAD"*. La guarda
+     * G7 exigía algo que la API nunca ofreció, así que provision_dns fallaba SIEMPRE — igual que el
+     * docroot, esta etapa tampoco había corrido nunca de verdad.
      *
-     * @return array<int|string, mixed>
+     * Lo que sí hace Hostinger es tomar el snapshot **solo, en cada escritura de la zona**. Se ve en
+     * la lista: cada entrada trae `reason` con el pedido que la originó (`Zone records update
+     * request`, `Zone records delete request`) y su `created_at`. O sea que el respaldo del PUT
+     * existe igual; lo que hay que hacer no es pedirlo, es saber identificarlo después.
+     *
+     * @return array<int, array<string, mixed>>  Snapshots, los más nuevos primero.
      * @throws \RuntimeException
      */
-    public function create_dns_snapshot(): array
+    public function list_dns_snapshots(): array
     {
-        return $this->request('POST', '/api/dns/v1/snapshots/' . rawurlencode($this->dominio()));
+        $respuesta = $this->request('GET', '/api/dns/v1/snapshots/' . rawurlencode($this->dominio()));
+
+        return is_array($respuesta) ? array_values($respuesta) : [];
     }
 
     /**

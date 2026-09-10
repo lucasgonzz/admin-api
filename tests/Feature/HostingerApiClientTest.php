@@ -75,7 +75,7 @@ class HostingerApiClientTest extends TestCase
         $fake->create_subdomain('api-lacava', 'lacava/api', false);
         $fake->list_databases();
         $fake->get_dns_zone();
-        $fake->create_dns_snapshot();
+        $fake->list_dns_snapshots();
         $fake->delete_cron('uid con espacio');
 
         $rutas = array_column($fake->llamadas, 'ruta');

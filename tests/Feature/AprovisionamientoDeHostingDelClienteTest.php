@@ -391,7 +391,7 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         foreach ($archivos as $archivo) {
             $fuente = file_get_contents(app_path($archivo));
             $this->assertStringNotContainsString('->put_dns_zone(', $fuente, $archivo);
-            $this->assertStringNotContainsString('->create_dns_snapshot(', $fuente, $archivo);
+            $this->assertStringNotContainsString('->list_dns_snapshots(', $fuente, $archivo);
         }
     }
 
@@ -1388,7 +1388,19 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
                 ['name' => $slug . '2', 'type' => 'A', 'content' => '76.13.171.147'],
             ],
         ], 'GET');
-        $this->hostinger->responder('/api/dns/v1/snapshots/', ['id' => 'snap-123'], 'POST');
+        /* 🔴 CAMBIO DE CONTRATO A PROPÓSITO (10/9/2026): antes esto simulaba un POST a
+         * /snapshots/, y ese endpoint NO EXISTE — la API real devuelve 405 ("Supported methods:
+         * GET, HEAD"), así que provision_dns fallaba siempre y nunca escribió un A record. Hostinger
+         * toma el snapshot SOLO, en cada escritura; lo que se puede hacer es listarlos. */
+        $this->hostinger->responder_secuencia('/api/dns/v1/snapshots/', [
+            /* Antes del PUT. */
+            [['id' => 'snap-viejo', 'reason' => 'Zone records update request']],
+            /* Después: Hostinger tomó el suyo con nuestra escritura. */
+            [
+                ['id' => 'snap-nuevo', 'reason' => 'Zone records update request'],
+                ['id' => 'snap-viejo', 'reason' => 'Zone records update request'],
+            ],
+        ], 'GET');
 
         $datos['proveedor']->provision_dns();
 
@@ -1411,13 +1423,26 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
         sort($esperados);
         $this->assertSame($esperados, $nombres);
 
-        /* 🔴 G7: el snapshot se pidió ANTES del PUT. Sin snapshot no hay vuelta atrás. */
-        $this->assertLessThan(
-            $this->indice_de_llamada('PUT', '/api/dns/v1/zones/'),
-            $this->indice_de_llamada('POST', '/api/dns/v1/snapshots/')
+        /* 🔴 G7, con el respaldo QUE CONTROLAMOS NOSOTROS. Ya no alcanza con confiar en que el
+         * proveedor guardó algo: antes del PUT se escribe la zona entera, tal como vino, en un
+         * archivo del admin. Ese archivo es lo único con lo que se puede reconstruir la zona, porque
+         * lo aplanado que usa la guarda G8 pierde ttl, prioridades y la forma de cada registro. */
+        $respaldos = glob(storage_path('app/dns-zonas/*.json'));
+        $this->assertNotEmpty($respaldos, 'No se escribió el respaldo de la zona antes del PUT.');
+
+        usort($respaldos, function ($a, $b) {
+            return filemtime($b) <=> filemtime($a);
+        });
+        $guardado = json_decode(file_get_contents($respaldos[0]), true);
+
+        $this->assertSame(
+            [['name' => 'otrocliente', 'type' => 'A', 'content' => '1.2.3.4']],
+            $guardado,
+            'El respaldo no tiene la zona TAL COMO ESTABA ANTES del PUT.'
         );
 
-        $this->assertStringContainsString('snap-123', $this->linea_que_contiene('snap-123'));
+        /* Y el id que Hostinger creó con este PUT se informa igual, como atajo de hPanel. */
+        $this->assertStringContainsString('snap-nuevo', $this->linea_que_contiene('snap-nuevo'));
     }
 
     /**
@@ -1487,7 +1512,7 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
                 ['name' => 'api-clienteviejo', 'type' => 'A', 'content' => '1.2.3.4'],
             ],
         ], 'GET');
-        $this->hostinger->responder('/api/dns/v1/snapshots/', ['id' => 'snap-456'], 'POST');
+        $this->hostinger->responder('/api/dns/v1/snapshots/', [['id' => 'snap-456']], 'GET');
 
         $mensaje = $this->mensaje_de_error(function () use ($datos) {
             $datos['proveedor']->provision_dns();
@@ -1495,7 +1520,11 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
 
         $this->assertStringContainsString('PERDIÓ REGISTROS', $mensaje);
         $this->assertStringContainsString('clienteviejo|A', $mensaje);
-        $this->assertStringContainsString('snap-456', $mensaje);
+        /* El mensaje nombra DÓNDE volver. Con la lista de snapshots sin cambios entre el antes y
+         * el después (el stub devuelve lo mismo las dos veces), lo que corresponde nombrar es el
+         * respaldo propio, que es el que de verdad reconstruye la zona. */
+        $this->assertStringContainsString('dns-zonas', $mensaje);
+        $this->assertStringContainsString('VOLVÉ ATRÁS AHORA', $mensaje);
         $this->assertStringContainsString('NO restaura solo', $mensaje);
 
         /* La línea del panel va en nivel error, no info. */
@@ -1549,23 +1578,69 @@ class AprovisionamientoDeHostingDelClienteTest extends TestCase
     }
 
     /**
-     * 🔴 Si el snapshot falla, NO SE ESCRIBE (guarda G7).
+     * 🔴 Guarda G7: sin respaldo de la zona NO SE ESCRIBE.
+     *
+     * CAMBIO DE CONTRATO A PROPÓSITO (10/9/2026). Antes esta guarda dependía de un
+     * `POST /api/dns/v1/snapshots/{dominio}` que NO EXISTE (405 de la API real), así que la etapa
+     * fallaba siempre. Ahora la vuelta atrás la garantiza un respaldo nuestro —la zona entera en un
+     * archivo del admin— y es ÉSE el que, si no se puede escribir, frena el PUT.
+     *
+     * Que la lista de snapshots del proveedor falle ya NO frena: es un atajo para restaurar de un
+     * click en hPanel, no el respaldo. Eso también se fija acá abajo, porque es la parte que se
+     * puede perder de vista.
      */
-    public function test_guarda_g7_sin_snapshot_no_se_escribe_la_zona(): void
+    public function test_guarda_g7_sin_respaldo_no_se_escribe_la_zona(): void
     {
         $datos = $this->preparar_cliente_vps();
 
         $this->hostinger->responder('/api/dns/v1/zones/', [], 'GET');
-        $this->hostinger->fallar_con('/api/dns/v1/snapshots/', 500, 'internal error', 'POST');
 
-        $mensaje = $this->mensaje_de_error(function () use ($datos) {
-            $datos['proveedor']->provision_dns();
-        });
+        /* Se ocupa el lugar del directorio con un ARCHIVO: el mkdir no puede crearlo y el respaldo
+         * no se puede escribir. Es la forma portable de simular "no se pudo guardar". */
+        $directorio = storage_path('app/dns-zonas');
+        if (is_dir($directorio)) {
+            array_map('unlink', (array) glob($directorio . '/*.json'));
+            rmdir($directorio);
+        }
+        file_put_contents($directorio, 'ocupado');
 
-        $this->assertStringContainsString('snapshot', $mensaje);
-        $this->assertStringContainsString('NO se escribe nada', $mensaje);
+        try {
+            $mensaje = $this->mensaje_de_error(function () use ($datos) {
+                $datos['proveedor']->provision_dns();
+            });
 
-        $this->assertSame([], $this->hostinger->llamadas_de('PUT'));
+            $this->assertStringContainsString('respaldar la zona', $mensaje);
+            $this->assertStringContainsString('NO se escribe nada', $mensaje);
+            $this->assertSame([], $this->hostinger->llamadas_de('PUT'));
+        } finally {
+            unlink($directorio);
+        }
+    }
+
+    /**
+     * Que la lista de snapshots del proveedor falle NO frena el PUT: el respaldo es el nuestro.
+     */
+    public function test_si_falla_la_lista_de_snapshots_igual_se_escribe(): void
+    {
+        $datos = $this->preparar_cliente_vps();
+        $slug  = $datos['slug'];
+
+        $this->hostinger->responder_secuencia('/api/dns/v1/zones/', [
+            [['name' => 'otrocliente', 'type' => 'A', 'content' => '1.2.3.4']],
+            [
+                ['name' => 'otrocliente', 'type' => 'A', 'content' => '1.2.3.4'],
+                ['name' => 'api-' . $slug, 'type' => 'A', 'content' => '76.13.171.147'],
+                ['name' => $slug, 'type' => 'A', 'content' => '76.13.171.147'],
+                ['name' => 'api-' . $slug . '2', 'type' => 'A', 'content' => '76.13.171.147'],
+                ['name' => $slug . '2', 'type' => 'A', 'content' => '76.13.171.147'],
+            ],
+        ], 'GET');
+        $this->hostinger->fallar_con('/api/dns/v1/snapshots/', 500, 'internal error', 'GET');
+
+        $datos['proveedor']->provision_dns();
+
+        $this->assertCount(1, $this->hostinger->llamadas_de('PUT'));
+        $this->assertNotEmpty(glob(storage_path('app/dns-zonas/*.json')));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

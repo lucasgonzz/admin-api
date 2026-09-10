@@ -89,7 +89,8 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
         $this->assert_lista_blanca($registros);
         $this->assert_cardinalidad($registros);
 
-        $snapshot = $this->tomar_snapshot();
+        $respaldo    = $this->respaldar_zona($zona_antes);
+        $ultimo_antes = $this->id_del_ultimo_snapshot();
 
         $this->log(
             'provision_dns',
@@ -99,7 +100,7 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
 
         $this->hostinger()->put_dns_zone($registros);
 
-        $this->assert_no_se_perdio_nada($antes, $snapshot);
+        $this->assert_no_se_perdio_nada($antes, $this->donde_volver($respaldo, $ultimo_antes));
 
         foreach ($this->nombres_de($registros) as $nombre) {
             $this->result->creado('a_record', $nombre);
@@ -230,59 +231,124 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
     }
 
     /**
-     * 🔴 GUARDA G7 — snapshot obligatorio, y si falla NO SE ESCRIBE.
+     * 🔴 GUARDA G7 — el respaldo de la zona ANTES del PUT, y de dónde volver si algo sale mal.
      *
-     * Es la única forma de volver atrás de este PUT. El id se loguea en el panel porque es lo que
-     * una persona va a necesitar tipear en hPanel a las tres de la mañana.
+     * Hasta el 10/9/2026 esto pedía un snapshot con `POST /api/dns/v1/snapshots/{dominio}`. Ese
+     * endpoint NO EXISTE: devuelve 405 (*"Supported methods: GET, HEAD"*), así que esta etapa
+     * fallaba SIEMPRE y nunca llegó a escribir un A record. Se midió instalando `pescamayorista`.
      *
-     * @return string  Id del snapshot, o '(sin id)' si la API no lo devolvió.
-     * @throws \RuntimeException Si el snapshot falla.
+     * Lo que Hostinger sí hace es tomar el snapshot **solo, en cada escritura**: la lista trae el
+     * `reason` del pedido que lo originó. O sea que el respaldo del proveedor existe igual. Pero
+     * cuál de esos ids restaura exactamente el estado previo a NUESTRO PUT es semántica de Hostinger
+     * que no podemos verificar desde acá, así que no se apoya todo en eso:
+     *
+     *  - **el respaldo que sí controlamos** es la zona entera, tal como estaba, guardada en disco
+     *    del admin antes de escribir. Son ~468 registros y pesa menos que un logo;
+     *  - **el id de Hostinger** se informa igual, como atajo para restaurar desde hPanel, señalando
+     *    cuál apareció después de nuestro PUT.
+     *
+     * Si el respaldo no se puede escribir, NO se escribe la zona: es la misma regla de antes.
+     *
+     * @param  DnsZoneRecords  $zona  La zona leída antes de tocar nada.
+     * @return string  Ruta del archivo de respaldo.
+     * @throws \RuntimeException Si el respaldo no se pudo guardar.
      */
-    private function tomar_snapshot(): string
+    private function respaldar_zona(DnsZoneRecords $zona): string
     {
-        try {
-            $respuesta = $this->hostinger()->create_dns_snapshot();
-        } catch (\Throwable $excepcion) {
+        $directorio = storage_path('app/dns-zonas');
+        /* La arroba no es descuido: si la ruta está ocupada por un archivo, mkdir tira un
+           warning que el handler de Laravel convierte en excepción y tapa la de acá abajo, que
+           es la que explica por qué NO se escribe la zona. */
+        if (! is_dir($directorio) && ! @mkdir($directorio, 0755, true) && ! is_dir($directorio)) {
             throw new \RuntimeException(
-                'No se pudo tomar el snapshot de la zona de ' . $this->dominio() . ', así que NO se '
-                . 'escribe nada: sin snapshot no hay forma de volver atrás de un PUT sobre la zona '
-                . 'donde viven los subdominios de todos los clientes. Error: '
-                . $excepcion->getMessage()
+                'No se pudo crear ' . $directorio . ' para respaldar la zona DNS, así que NO se '
+                . 'escribe nada: sin respaldo no hay forma de volver atrás de un PUT sobre la zona '
+                . 'donde viven los subdominios de todos los clientes.'
             );
         }
 
-        $id = '';
-        foreach (['id', 'snapshot_id', 'uid'] as $clave) {
-            if (isset($respuesta[$clave]) && (string) $respuesta[$clave] !== '') {
-                $id = (string) $respuesta[$clave];
-                break;
-            }
-        }
+        $archivo = $directorio . '/' . $this->dominio() . '-' . date('Ymd-His') . '.json';
+        $crudo   = json_encode($zona->crudos(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
-        if ($id === '') {
-            /*
-             * El snapshot se tomó (la llamada no falló) pero no sabemos cómo se llama. Se sigue,
-             * porque el respaldo existe igual, pero con un warning: si después hay que restaurar,
-             * hay que buscarlo por fecha en hPanel.
-             */
-            $this->log(
-                'provision_dns',
-                'El snapshot de la zona se tomó pero la API no devolvió su id. Si hay que '
-                    . 'restaurar, buscalo por fecha en hPanel → DNS → Snapshots.',
-                'warning'
+        if ($crudo === false || file_put_contents($archivo, $crudo) === false) {
+            throw new \RuntimeException(
+                'No se pudo guardar el respaldo de la zona en ' . $archivo . ', así que NO se '
+                . 'escribe nada: sin respaldo no hay forma de volver atrás de un PUT sobre la zona '
+                . 'donde viven los subdominios de todos los clientes.'
             );
-
-            return '(sin id)';
         }
 
         $this->log(
             'provision_dns',
-            'Snapshot de la zona tomado antes de escribir. 🔴 Id: ' . $id . ' — es lo que hay que '
-                . 'restaurar en hPanel si algo sale mal.',
+            'Zona respaldada antes de escribir: ' . count($zona->crudos()) . ' registro(s) en '
+                . $archivo . '. 🔴 Es el respaldo que controlamos nosotros.',
             'success'
         );
 
-        return $id;
+        return $archivo;
+    }
+
+    /**
+     * Id del snapshot más nuevo que Hostinger tiene hoy de la zona.
+     *
+     * Sirve de línea de base: el que aparezca DESPUÉS del PUT y no esté en esta foto es el que ese
+     * PUT originó. Que la lista responda es además la señal de que el mecanismo de snapshots del
+     * proveedor está vivo.
+     *
+     * No es fatal si falla: el respaldo que de verdad garantiza la vuelta atrás es el nuestro, y ya
+     * está en disco cuando esto corre.
+     *
+     * @return string  Id, o cadena vacía si no se pudo leer.
+     */
+    private function id_del_ultimo_snapshot(): string
+    {
+        try {
+            $snapshots = $this->hostinger()->list_dns_snapshots();
+        } catch (\Throwable $excepcion) {
+            $this->log(
+                'provision_dns',
+                'No se pudo listar los snapshots de la zona (' . $excepcion->getMessage() . '). Se '
+                    . 'sigue: el respaldo propio ya está guardado.',
+                'warning'
+            );
+
+            return '';
+        }
+
+        if ($snapshots === [] || ! isset($snapshots[0]['id'])) {
+            return '';
+        }
+
+        return (string) $snapshots[0]['id'];
+    }
+
+    /**
+     * La frase que el operador necesita si hay que volver atrás, armada después del PUT.
+     *
+     * Nombra las dos cosas: el archivo con la zona completa previa —que es lo que garantiza la
+     * vuelta— y, si Hostinger creó un snapshot nuevo con nuestro PUT, su id para restaurar desde
+     * hPanel de un click.
+     *
+     * @param  string  $respaldo      Ruta del archivo de respaldo.
+     * @param  string  $ultimo_antes  Id del snapshot más nuevo previo al PUT.
+     * @return string
+     */
+    private function donde_volver(string $respaldo, string $ultimo_antes): string
+    {
+        $nuevo = $this->id_del_ultimo_snapshot();
+
+        if ($nuevo !== '' && $nuevo !== $ultimo_antes) {
+            $this->log(
+                'provision_dns',
+                'Hostinger tomó su propio snapshot con este PUT. 🔴 Id: ' . $nuevo . ' — es lo que '
+                    . 'se restaura en hPanel → DNS → Snapshots si algo salió mal.',
+                'success'
+            );
+
+            return $nuevo . ' (o el respaldo completo en ' . $respaldo . ')';
+        }
+
+        return 'el respaldo completo de la zona en ' . $respaldo;
     }
 
     /**
@@ -301,7 +367,7 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
      * @return void
      * @throws \RuntimeException
      */
-    private function assert_no_se_perdio_nada(array $antes, string $snapshot): void
+    private function assert_no_se_perdio_nada(array $antes, string $donde_volver): void
     {
         /*
          * 🔴 El GET va envuelto, y no por prolijidad. Este método arranca releyendo la zona, y si
@@ -318,8 +384,8 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
                 '🔴 EL PUT SOBRE LA ZONA DE ' . $this->dominio() . ' YA SE EJECUTÓ, y lo que falló '
                 . 'fue la verificación posterior: no se pudo volver a leer la zona para comprobar '
                 . 'que no se perdió ningún registro. NO des por hecho que no se escribió nada. '
-                . 'Entrá a hPanel → DNS y miralo a mano; si algo falta, restaurá el snapshot '
-                . $snapshot . '. Error de la lectura: ' . $excepcion->getMessage()
+                . 'Entrá a hPanel → DNS y miralo a mano. Si algo falta, volvé atrás con: '
+                . $donde_volver . '. Error de la lectura: ' . $excepcion->getMessage()
             );
         }
 
@@ -339,10 +405,9 @@ class VpsHostingProvisioning extends VpsDatabaseProvisioner
         $mensaje = '🔴 LA ZONA DNS DE ' . $this->dominio() . ' PERDIÓ REGISTROS con este PUT. '
             . 'Faltan: ' . ($perdidos === [] ? '(ninguno por nombre, pero bajó la cantidad: '
                 . count($antes) . ' → ' . count($despues) . ')' : implode(', ', $perdidos)) . '. '
-            . 'Restaurá el snapshot ' . $snapshot . ' desde hPanel → DNS → Snapshots AHORA: cada '
-            . 'registro perdido es un cliente que dejó de resolver. El pipeline NO restaura solo, a '
-            . 'propósito: un restore automático sobre una zona a medio arreglar es peor que el '
-            . 'problema.';
+            . 'VOLVÉ ATRÁS AHORA con: ' . $donde_volver . '. Cada registro perdido es un cliente '
+            . 'que dejó de resolver. El pipeline NO restaura solo, a propósito: un restore '
+            . 'automático sobre una zona a medio arreglar es peor que el problema.';
 
         $this->log('provision_dns', $mensaje, 'error');
 

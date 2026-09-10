@@ -35,11 +35,33 @@ class DnsZoneRecords
     private $registros;
 
     /**
+     * La respuesta del GET tal cual vino, sin aplanar.
+     *
+     * 🔴 Se conserva porque es lo ÚNICO con lo que se puede reconstruir la zona si un PUT sale
+     * mal: lo aplanado sirve para comparar (guarda G8) pero pierde ttl, prioridades y la forma
+     * exacta de cada registro. El respaldo previo al PUT de provision_dns() guarda esto.
+     *
+     * @var array<int|string, mixed>
+     */
+    private $crudos;
+
+    /**
      * @param  array<int|string, mixed>  $zona  Respuesta cruda del GET de la zona.
      */
     public function __construct(array $zona)
     {
+        $this->crudos    = $zona;
         $this->registros = $this->aplanar($zona);
+    }
+
+    /**
+     * La zona tal como la devolvió la API, para respaldarla.
+     *
+     * @return array<int|string, mixed>
+     */
+    public function crudos(): array
+    {
+        return $this->crudos;
     }
 
     /**
