@@ -226,6 +226,104 @@ class ReleaseArtifactService
     }
 
     /**
+     * Baja a un archivo local el ZIP del código fuente de un tag (el "zipball" que GitHub arma solo).
+     *
+     * Nace en la misión `instalar-sin-el-vps` (10/9/2026) y es ADITIVO: no toca nada de lo de arriba,
+     * que `DeploymentService` usa en producción desde el 9/9.
+     *
+     * 🔴 Existe por una sola cosa: `public/`. El asset `empresa-api-v{v}.zip` lo excluye a propósito
+     * —en un upgrade esos archivos son del cliente y no se pisan—, pero una instalación de cero sin
+     * `public/index.php` responde 404 en todo. El zipball es la única fuente que sirve para
+     * CUALQUIER tag, incluidos los anteriores a la 4.0.23 y los viejos que puede pedir una demo: un
+     * asset `-public.zip` habría que agregarlo al workflow y no existiría para ninguna versión ya
+     * publicada. Medido el 10/9/2026 en `empresa-api` v4.0.23: 9,25 MB, 2 segundos.
+     *
+     * Adentro, todo cuelga de un directorio raíz con el sha (`lucasgonzz-empresa-api-bc47e4c/`); ese
+     * prefijo lo saca quien re-empaqueta (`ArtefactosDeRelease::artefacto_bajar_public_del_tag()`).
+     *
+     * Mismo cliente HTTP que `download_asset()`: mismo token en el header, mismo `User-Agent`, mismo
+     * `sink` a archivo (nunca a memoria: el admin corre en el shared hosting de Hostinger) y la
+     * misma redirección al servidor de archivos, a la que el token no cruza.
+     *
+     * ⚠️ A diferencia de un asset, el zipball no declara su tamaño en ningún lado: no hay contra qué
+     * comparar los bytes que llegaron. Lo único que se verifica acá es que no haya bajado vacío; que
+     * sea un zip de verdad y traiga lo que tiene que traer lo verifica quien lo abre.
+     *
+     * @param string $repo       Nombre del repo, sin owner (ej: `empresa-api`).
+     * @param string $tag        Tag (ej: `v4.0.23`).
+     * @param string $local_path Ruta local destino; el directorio se crea si no existe.
+     *
+     * @return int|null Bytes escritos, o `null` si GitHub no tiene ese tag (404, que es también lo
+     *                  que responde un repo privado sin token: para este servicio es lo mismo).
+     *
+     * @throws \InvalidArgumentException Si el repo o el tag vienen vacíos.
+     * @throws \RuntimeException         Si GitHub falla de otra manera, o si el archivo bajó vacío.
+     */
+    public function download_source_zip(string $repo, string $tag, string $local_path): ?int
+    {
+        $repo = trim($repo);
+        $tag  = trim($tag);
+
+        if ($repo === '' || $tag === '') {
+            throw new \InvalidArgumentException('Para bajar el zipball hacen falta el repo y el tag.');
+        }
+
+        $url = self::GITHUB_API_BASE . '/repos/' . rawurlencode($this->owner()) . '/' . rawurlencode($repo)
+            . '/zipball/' . rawurlencode($tag);
+
+        $directorio = dirname($local_path);
+        if (! is_dir($directorio) && ! mkdir($directorio, 0755, true) && ! is_dir($directorio)) {
+            throw new \RuntimeException("No se pudo crear el directorio local {$directorio}.");
+        }
+
+        $this->borrar_si_existe($local_path);
+
+        try {
+            $response = $this->download_client()
+                ->withOptions(['sink' => $local_path])
+                ->get($url);
+        } catch (\Throwable $e) {
+            $this->borrar_si_existe($local_path);
+
+            throw new \RuntimeException(
+                "Falló la descarga del zipball {$tag} de {$repo}: " . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+
+        if ($response->status() === 404) {
+            $this->borrar_si_existe($local_path);
+
+            return null;
+        }
+
+        if ($response->failed()) {
+            /* Con `sink`, el cuerpo del error quedó en el archivo: se lee de ahí y se borra. */
+            $cuerpo = is_file($local_path) ? (string) file_get_contents($local_path, false, null, 0, 4096) : '';
+            $this->borrar_si_existe($local_path);
+
+            throw new \RuntimeException(
+                "GitHub respondió {$response->status()} al bajar el zipball {$tag} de {$repo}: "
+                . $this->truncar($cuerpo)
+            );
+        }
+
+        clearstatcache(true, $local_path);
+        $bytes = is_file($local_path) ? (int) filesize($local_path) : 0;
+
+        if ($bytes <= 0) {
+            $this->borrar_si_existe($local_path);
+
+            throw new \RuntimeException(
+                "El zipball {$tag} de {$repo} bajó vacío: no hay de dónde sacar public/."
+            );
+        }
+
+        return $bytes;
+    }
+
+    /**
      * Owner de los repos de los releases.
      *
      * @return string
