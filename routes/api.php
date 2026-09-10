@@ -544,6 +544,13 @@ Route::prefix('admin')->group(function () {
         Route::post('lead/{id}/messages', [LeadController::class, 'store_message_json']);
         Route::post('lead/{id}/send-direct-message', [LeadController::class, 'send_direct_message_json']);
         Route::post('lead/{lead_id}/send-template', [LeadController::class, 'send_template_json']);
+        /* Mensajes PROGRAMADOS: el botón del relojito de la conversación (misión del 10/9/2026).
+           No hay GET: los programados pendientes viajan adentro del lead por la relación
+           scheduled_messages de scopeWithAll(), así que un endpoint de lectura sería un segundo
+           pedido para el mismo dato. Los tres exigen que el {scheduled_id} sea de ese {id}. */
+        Route::post('lead/{id}/scheduled-messages', [LeadController::class, 'store_scheduled_message_json']);
+        Route::put('lead/{id}/scheduled-messages/{scheduled_id}', [LeadController::class, 'update_scheduled_message_json']);
+        Route::delete('lead/{id}/scheduled-messages/{scheduled_id}', [LeadController::class, 'cancel_scheduled_message_json']);
         Route::post('lead/{lead_id}/suggest-recovery-reason', [LeadController::class, 'suggest_recovery_reason_json']);
         Route::post('lead/{id}/send-direct-audio', [LeadController::class, 'send_direct_audio_json']);
         Route::post('lead/{id}/send-direct-image', [LeadController::class, 'send_direct_image_json']);

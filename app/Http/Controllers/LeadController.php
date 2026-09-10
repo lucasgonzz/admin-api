@@ -19,13 +19,16 @@ use App\Models\LeadMessageAttachment;
 use App\Models\LeadPartner;
 use App\Models\LeadPersonalizedDemoVideo;
 use App\Models\LeadPipelineStatus;
+use App\Models\LeadScheduledMessage;
 use App\Models\ProtocolEntry;
 use App\Events\LeadAiSuggestionFinished;
 use App\Events\LeadAiSuggestionGenerating;
 use App\Services\LeadAiService;
 use App\Services\LeadConversationErrorLogger;
 use App\Services\LeadRecoveryReasonService;
+use App\Services\LeadScheduledMessageService;
 use App\Services\WhatsappSendService;
+use App\Services\WhatsappSessionWindowService;
 use App\Services\LeadAiSuggestionAutoSendScheduler;
 use App\Services\LeadAiSuggestionScheduler;
 use App\Services\LeadBroadcastService;
@@ -5025,6 +5028,212 @@ class LeadController extends Controller
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $message->id);
 
         return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Programa el envío de un mensaje de WhatsApp al lead para una fecha y hora futuras.
+     *
+     * El botón del relojito del header de la conversación (misión del 10/9/2026). El mensaje NO se
+     * manda ahora: queda pendiente en `lead_scheduled_messages` y lo despacha el comando
+     * `leads:send-scheduled-messages`, que corre cada minuto.
+     *
+     * 🔴 Los frenos no están acá: viven enteros en {@see LeadScheduledMessageService}, porque los
+     * mismos siete se aplican al programar, al editar y —los que pueden cambiar en el medio— al
+     * despachar. Este método solo traduce el resultado a JSON.
+     *
+     * La respuesta exitosa devuelve el lead completo (`model`) y no el programado suelto: la
+     * conversación de la SPA se rehidrata con el lead entero después de cada acción, y los
+     * programados viajan adentro por la relación `scheduled_messages` de `scopeWithAll()`. Así no
+     * hace falta ningún endpoint de lectura aparte ni ningún polling.
+     *
+     * @param Request                      $request Debe incluir: scheduled_send_at (ISO 8601 con
+     *                                              offset), mode, content, y para plantilla
+     *                                              template_name / template_language /
+     *                                              template_variables. Opcional:
+     *                                              cancel_if_lead_replies.
+     * @param int|string                   $lead_id
+     * @param LeadScheduledMessageService  $service
+     * @param WhatsappSessionWindowService $ventana Solo para informar el estado real de la ventana
+     *                                              en el 422 (la decisión ya la tomó el servicio).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function store_scheduled_message_json(
+        Request $request,
+        $lead_id,
+        LeadScheduledMessageService $service,
+        WhatsappSessionWindowService $ventana
+    ) {
+        $lead = Lead::query()->find($lead_id);
+        if ($lead === null) {
+            return response()->json(['message' => 'Lead no encontrado.'], 404);
+        }
+
+        $resultado = $service->programar(
+            $lead,
+            $this->datos_de_mensaje_programado($request),
+            (int) $request->user()->id
+        );
+
+        if (! $resultado['ok']) {
+            return $this->respuesta_de_freno_programado($resultado, $lead, $ventana);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Edita un mensaje programado que todavía no salió: su texto, su fecha, su modo o su check.
+     *
+     * Pasa por los mismos frenos que programarlo de cero, porque editar es volver a decidir si ese
+     * mensaje se puede mandar en esa fecha. Solo se puede sobre un programado `pendiente`.
+     *
+     * @param Request                      $request      Mismo cuerpo que `store_scheduled_message_json()`.
+     * @param int|string                   $lead_id
+     * @param int|string                   $scheduled_id
+     * @param LeadScheduledMessageService  $service
+     * @param WhatsappSessionWindowService $ventana
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function update_scheduled_message_json(
+        Request $request,
+        $lead_id,
+        $scheduled_id,
+        LeadScheduledMessageService $service,
+        WhatsappSessionWindowService $ventana
+    ) {
+        $lead = Lead::query()->find($lead_id);
+        if ($lead === null) {
+            return response()->json(['message' => 'Lead no encontrado.'], 404);
+        }
+
+        $programado = $this->mensaje_programado_del_lead($lead, $scheduled_id);
+        if ($programado === null) {
+            return response()->json(['message' => 'Ese mensaje programado no existe o no es de este lead.'], 404);
+        }
+
+        $resultado = $service->editar($programado, $this->datos_de_mensaje_programado($request));
+
+        if (! $resultado['ok']) {
+            return $this->respuesta_de_freno_programado($resultado, $lead, $ventana);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Cancela un mensaje programado antes de que salga.
+     *
+     * El motivo queda en `manual`: es una persona la que lo canceló, y eso se distingue de las
+     * cancelaciones que hace solo el despacho (lead promovido, lead que respondió, etc.).
+     *
+     * @param int|string                  $lead_id
+     * @param int|string                  $scheduled_id
+     * @param LeadScheduledMessageService $service
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function cancel_scheduled_message_json($lead_id, $scheduled_id, LeadScheduledMessageService $service)
+    {
+        $lead = Lead::query()->find($lead_id);
+        if ($lead === null) {
+            return response()->json(['message' => 'Lead no encontrado.'], 404);
+        }
+
+        $programado = $this->mensaje_programado_del_lead($lead, $scheduled_id);
+        if ($programado === null) {
+            return response()->json(['message' => 'Ese mensaje programado no existe o no es de este lead.'], 404);
+        }
+
+        $resultado = $service->cancelar($programado, LeadScheduledMessage::CANCELED_MANUAL);
+
+        if (! $resultado['ok']) {
+            return response()->json([
+                'message'           => $resultado['message'],
+                'ventana_abierta'   => false,
+                'ventana_expira_at' => null,
+            ], $resultado['status']);
+        }
+
+        return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+    }
+
+    /**
+     * Campos del cuerpo de la request de un mensaje programado, tal cual llegan.
+     *
+     * No valida nada: la validación entera vive en el servicio, que es el que la comparte con el
+     * despacho. Acá solo se junta lo que la request trajo.
+     *
+     * @param Request $request
+     *
+     * @return array
+     */
+    private function datos_de_mensaje_programado(Request $request): array
+    {
+        return [
+            'scheduled_send_at'      => $request->input('scheduled_send_at'),
+            'mode'                   => $request->input('mode'),
+            'content'                => $request->input('content'),
+            'template_name'          => $request->input('template_name'),
+            'template_language'      => $request->input('template_language'),
+            'template_variables'     => $request->input('template_variables'),
+            'cancel_if_lead_replies' => $request->boolean('cancel_if_lead_replies'),
+        ];
+    }
+
+    /**
+     * Un mensaje programado, exigiendo que sea DE ESTE LEAD.
+     *
+     * El id del programado viaja en la URL, así que sin este chequeo cualquier admin podría editar
+     * o cancelar el programado de otra conversación pasando el id de su lead y el id ajeno.
+     *
+     * @param Lead       $lead
+     * @param int|string $scheduled_id
+     *
+     * @return LeadScheduledMessage|null
+     */
+    private function mensaje_programado_del_lead(Lead $lead, $scheduled_id)
+    {
+        return LeadScheduledMessage::query()
+            ->where('id', $scheduled_id)
+            ->where('lead_id', (int) $lead->id)
+            ->first();
+    }
+
+    /**
+     * Traduce el freno que devolvió el servicio al 422 que la SPA sabe leer.
+     *
+     * 🔴 `ventana_abierta` y `ventana_expira_at` viajan SIEMPRE, no solo cuando el freno fue el de
+     * la ventana. El modal de la SPA los usa para reacomodarse solo —pasar de texto libre a
+     * plantilla, o mostrar hasta qué hora se puede escribir libre— y un campo que a veces está y a
+     * veces no lo obliga a adivinar. Cuando el freno cortó antes de que el servicio mirara la
+     * ventana, se resuelve acá: es una consulta de más en el camino del error, no en el normal.
+     *
+     * @param array                        $resultado Salida del servicio.
+     * @param Lead                         $lead
+     * @param WhatsappSessionWindowService $ventana
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function respuesta_de_freno_programado(array $resultado, Lead $lead, WhatsappSessionWindowService $ventana)
+    {
+        $estado = isset($resultado['ventana']) && is_array($resultado['ventana'])
+            ? $resultado['ventana']
+            : null;
+
+        if ($estado === null) {
+            $phone  = trim((string) ($lead->phone ?? ''));
+            $estado = $phone !== ''
+                ? $ventana->window_state($phone)
+                : ['open' => false, 'expires_at' => null];
+        }
+
+        return response()->json([
+            'message'           => $resultado['message'],
+            'ventana_abierta'   => ! empty($estado['open']),
+            'ventana_expira_at' => ! empty($estado['expires_at']) ? $estado['expires_at'] : null,
+        ], $resultado['status']);
     }
 
     /**
