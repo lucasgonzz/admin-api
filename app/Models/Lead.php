@@ -188,6 +188,14 @@ class Lead extends Model
             // arriba vía partners() y siguen colgando también de lead_id, así que no hace falta
             // un borrado extra por llamada acá.
             $lead->calls()->delete();
+
+            /* 🔴 NO se usa la relación scheduled_messages(): está filtrada a pendiente+error, así
+               que borraría solo una parte y dejaría huérfanas las filas enviadas y canceladas. Acá
+               se borran TODAS las del lead.
+               Sin esto, un pendiente de un lead borrado lo sigue levantando el comando cada minuto:
+               el despacho lo cancela solo al no encontrar el lead, pero con un motivo que no es el
+               real y después de haberlo mirado una vez de más. */
+            LeadScheduledMessage::query()->where('lead_id', $lead->id)->delete();
         });
     }
 
