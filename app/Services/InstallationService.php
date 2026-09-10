@@ -672,36 +672,16 @@ class InstallationService
      */
     private function deploy_api_zip_to_hosting(string $local_zip, string $zip_name): void
     {
-        $api_path     = $this->get_api_path();
-        $remote_zip   = $api_path . '/' . $zip_name;
-        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
-        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, 'upload_api');
-        $this->log('upload_api', 'ZIP subido al hosting');
+        $api_path = $this->get_api_path();
 
-        $this->reconnect_hosting_ssh();
-        $this->exec_hosting_ssh(
-            'upload_api',
-            'cd ' . $this->escape_remote_arg($api_path)
-            . ' && unzip -o ' . $this->escape_remote_arg($zip_name)
-            . ' && rm -f ' . $this->escape_remote_arg($zip_name) . ' 2>&1',
-            true,
-            true
-        );
-        $this->log('upload_api', 'API descomprimida en el hosting');
-
-        $this->log('upload_api', 'Corriendo composer install en hosting (sin scripts; el .env aún no existe)...');
-        $this->reconnect_hosting_ssh();
-        $this->exec_hosting_ssh(
-            'upload_api',
+        $this->artefacto_desplegar_zip_api(
+            $local_zip,
+            $api_path,
+            $zip_name,
+            $this->get_hosting_credential_type(),
             $this->build_hosting_composer_install_command($api_path),
-            true,
-            true
+            'upload_api'
         );
-        $this->log('upload_api', 'API lista en el hosting', 'success');
-
-        if (is_file($local_zip)) {
-            unlink($local_zip);
-        }
     }
 
     /**
@@ -1311,33 +1291,14 @@ class InstallationService
      */
     private function upload_public_del_tag(string $tag, string $step, bool $pisar): void
     {
-        $zip_name  = 'public_' . $this->installation->uuid . '.zip';
-        $local_zip = storage_path('app/deployments/' . $zip_name);
-
-        if (! $this->artefacto_bajar_public_del_tag($tag, $local_zip, $step)) {
-            $this->artefacto_frenar_sin_public($step, $tag);
-        }
-
-        $api_path     = $this->get_api_path();
-        $remote_zip   = $api_path . '/' . $zip_name;
-        $sftp_hosting = $this->open_sftp_session($this->get_hosting_credential_type());
-        $this->sftp_upload_file($sftp_hosting, $local_zip, $remote_zip, $step);
-        $this->log($step, 'ZIP de public/ subido al hosting');
-
-        $this->reconnect_hosting_ssh();
-        $this->exec_hosting_ssh(
+        $this->artefacto_desplegar_public(
+            $tag,
+            $this->get_api_path(),
+            'public_' . $this->installation->uuid . '.zip',
+            $this->get_hosting_credential_type(),
             $step,
-            'cd ' . $this->escape_remote_arg($api_path)
-            . ' && unzip ' . ($pisar ? '-o' : '-n') . ' ' . $this->escape_remote_arg($zip_name)
-            . ' && rm -f ' . $this->escape_remote_arg($zip_name) . ' 2>&1',
-            true,
-            true
+            $pisar
         );
-        $this->log($step, 'public/ descomprimido en el hosting', 'success');
-
-        if (is_file($local_zip)) {
-            unlink($local_zip);
-        }
     }
 
     /**
