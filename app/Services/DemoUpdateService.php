@@ -575,7 +575,8 @@ class DemoUpdateService
          * salida vacía sin dar error. */
         $this->provision_afip_certificates('run_migrations');
 
-        // step_upload_api() termina con reconnect_build_vps(), así que la sesión SSH activa
+        // Por la vía vieja, step_upload_api() termina con reconnect_build_vps(), así que la
+        // sesión SSH activa
         // al cerrar esa etapa es la del VPS, no la del hosting: hay que reconectar acá.
         $this->connect_hosting_ssh();
 

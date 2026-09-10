@@ -64,6 +64,12 @@ class InstallationService
      * Bajar los paquetes que GitHub Actions publica en cada release en vez de compilar y empaquetar
      * en el VPS de builds (misión `instalar-sin-el-vps`, 10/9/2026). Lo mismo que necesitan las dos
      * clases de demo, así que vive en un trait por la misma regla R1 de arriba: mover, no agregar.
+     *
+     * ⚠️ Y aun así este archivo quedó en ~2500 líneas, por encima del techo de 2350: el trait se
+     * llevó lo compartido, pero las etapas ahora tienen DOS caminos y el segundo —el del VPS de
+     * builds— sigue acá aunque no corra salvo que alguien prenda DEPLOY_PERMITIR_BUILD_EN_VPS. Ése
+     * es el próximo bloque a mover, y no antes de que Lucas decida si esa salida de emergencia
+     * sigue haciendo falta: el día que se borre, el archivo vuelve solo abajo del techo.
      */
     use ArtefactosDeRelease;
 
@@ -572,7 +578,7 @@ class InstallationService
         $tag = 'v' . $this->installation->version->version;
 
         $zip_name  = 'api_install_' . $this->installation->uuid . '.zip';
-        $local_zip = storage_path('app/deployments/api_' . $this->installation->uuid . '.zip');
+        $local_zip = $this->local_zip_path('api_' . $this->installation->uuid . '.zip');
 
         if ($this->artefacto_bajar_api($tag, $local_zip, 'upload_api')) {
             /* public/ primero: son 362 KB y, si el tag no lo tuviera, es mejor descubrirlo antes de
@@ -844,10 +850,13 @@ class InstallationService
         $this->reconnect_hosting_ssh();
 
         // Asegurar que el árbol de storage/ existe antes de correr clears.
-        // El ZIP de instalación (step_upload_api) NO excluye storage/ (a diferencia de upgrades),
-        // pero si por algún motivo el árbol llega incompleto (transferencia manual previa,
-        // limpieza a mano en el hosting), view:clear y cache:clear fallan con "path not found",
-        // y realpath() en config/view.php devuelve false.
+        //
+        // 🔴 ESTE mkdir -p ES EL QUE CREA storage/, NO UNA RED DE SEGURIDAD. Hasta el 10/9/2026 el
+        // ZIP de instalación traía storage/ adentro y esto cubría el caso raro de un árbol
+        // incompleto. Desde que el código sale del asset `empresa-api-v{v}.zip` del release, que
+        // excluye `storage/*` a propósito, el árbol llega incompleto SIEMPRE: acá se crea entero por
+        // primera vez. Sin él, view:clear y cache:clear fallan con "path not found" y realpath() en
+        // config/view.php devuelve false — y verify_api_installation() lo exige después.
         //
         // bootstrap/cache/ también se excluye del ZIP para no arrastrar caches del VPS de builds.
         // En una instalación desde cero ninguno de los directorios existe todavía en el hosting,
@@ -2004,7 +2013,30 @@ class InstallationService
      */
     private function local_spa_zip_path(): string
     {
-        return storage_path('app/deployments/dist_' . $this->installation->uuid . '.zip');
+        return $this->local_zip_path('dist_' . $this->installation->uuid . '.zip');
+    }
+
+    /**
+     * Ruta local de un zip temporal de esta corrida, con el directorio ya creado.
+     *
+     * 🔴 El `mkdir` no es de más, y la vía que lo necesita es justo la que no lo tenía. El
+     * camino del artefacto crea el directorio en artefacto_preparar_destino(), pero ese método
+     * corre DESPUÉS de confirmar que el asset existe: si no está, se vuelve con `false` sin haber
+     * creado nada, y la vía vieja se encuentra sin directorio. El síntoma es un
+     * "SFTP get falló al descargar `<ruta remota>`", que nombra el archivo del VPS y no el
+     * directorio local que falta.
+     *
+     * @param  string  $basename  Nombre del archivo, único por corrida (lleva el uuid adentro).
+     * @return string
+     */
+    private function local_zip_path(string $basename): string
+    {
+        $deployments_dir = storage_path('app/deployments');
+        if (! is_dir($deployments_dir)) {
+            mkdir($deployments_dir, 0755, true);
+        }
+
+        return $deployments_dir . DIRECTORY_SEPARATOR . $basename;
     }
 
     /**

@@ -1326,18 +1326,6 @@ class DemoInstallationService
     // =========================================================================
 
     /**
-     * Persiste una línea de log de esta corrida.
-     *
-     * Una fila por línea (ver la migración de demo_installation_logs): el `INSERT` es del tamaño de
-     * la línea, y una línea gigante no puede romper el registro de la corrida como pasaba con el
-     * log en una columna de texto de demo_updates.
-     *
-     * @param  string  $step
-     * @param  string  $line
-     * @param  string  $level  info | success | error | warning
-     * @return DemoInstallationLog
-     */
-    /**
      * Log del trait de artefactos, delegado al log de instalación de siempre.
      *
      * El trait lo declara abstracto porque es lo único que las tres clases hacen distinto: acá y en
@@ -1354,6 +1342,18 @@ class DemoInstallationService
         $this->log($step, $linea, $nivel);
     }
 
+    /**
+     * Persiste una línea de log de esta corrida.
+     *
+     * Una fila por línea (ver la migración de demo_installation_logs): el `INSERT` es del tamaño de
+     * la línea, y una línea gigante no puede romper el registro de la corrida como pasaba con el
+     * log en una columna de texto de demo_updates.
+     *
+     * @param  string  $step
+     * @param  string  $line
+     * @param  string  $level  info | success | error | warning
+     * @return DemoInstallationLog
+     */
     private function log(string $step, string $line, string $level = 'info'): DemoInstallationLog
     {
         return DemoInstallationLog::create([
