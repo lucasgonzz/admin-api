@@ -115,8 +115,14 @@ class ClaudeUpgradeOpsController extends Controller
      * (`resume_from_step`), en el orden del pipeline. Son exactamente las que corren sobre la API
      * DESTINO, que no atiende: las que siguen (`run_seeders` en adelante) tocan el sistema en uso y
      * entran sólo por `start-post-closure` y `retry-commands`, con su gate de horario.
+     *
+     * `sync_env_keys` (misión `optimizacion-vps-fase1`, 10/9/2026) entra por lo mismo: completa el
+     * `.env` del DESTINO con las claves que le faltan respecto del frente activo, y lo hace antes de
+     * `run_migrations` para que las migraciones booteen con el archivo completo. Reanudar desde ahí
+     * sirve cuando `upload_api` ya salió y lo que se quiere es volver a completar el `.env` antes
+     * de migrar (ver DeploymentService::step_sync_env_keys()).
      */
-    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'run_migrations'];
+    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'run_migrations'];
 
     /**
      * Etapa del reintento de comandos. Mismo string que despacha el botón del panel en
@@ -324,8 +330,8 @@ class ClaudeUpgradeOpsController extends Controller
      |============================================================================================= */
 
     /**
-     * Arranca el pipeline PRE-CIERRE: compile_spa → upload_spa → upload_api → run_migrations →
-     * pause_for_crons.
+     * Arranca el pipeline PRE-CIERRE: compile_spa → upload_spa → upload_api → sync_env_keys →
+     * run_migrations → restart_queue_workers → pause_for_crons.
      *
      * 🔴 Acá NO hay gate de horario, y es a propósito: el pre-cierre es exactamente lo que se hace
      * con el negocio abierto, porque sube el código a la API DESTINO, que no es la que atiende.
@@ -337,7 +343,7 @@ class ClaudeUpgradeOpsController extends Controller
      *  - **Sin `resume_from_step`** (el de siempre): arranque limpio desde `compile_spa`. ⚠️ Borra
      *    los logs del intento anterior, igual que el botón del panel: si querés el log de un intento
      *    fallido, leelo ANTES de reintentar.
-     *  - **Con `resume_from_step`** (`compile_spa` | `upload_spa` | `upload_api` |
+     *  - **Con `resume_from_step`** (`compile_spa` | `upload_spa` | `upload_api` | `sync_env_keys` |
      *    `run_migrations`): reanuda un deployment que quedó `failed` desde esa etapa, sin repetir
      *    las anteriores. 🔴 Sólo se acepta sobre `failed` —sobre cualquier otro estado es 422 sin
      *    escribir nada— y sólo las etapas del pre-cierre. En este modo los logs NO se borran: el

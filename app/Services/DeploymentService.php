@@ -61,8 +61,13 @@ class DeploymentService
 
     /**
      * Orden de etapas del pipeline de deployment.
-     * Pre-cierre: compile_spa → upload_spa → upload_api → run_migrations → pause_for_crons
+     * Pre-cierre: compile_spa → upload_spa → upload_api → sync_env_keys → run_migrations →
+     *             restart_queue_workers → pause_for_crons
      * Post-cierre (negocio cerrado): run_seeders → run_commands → update_default_version → complete
+     *
+     * `sync_env_keys` va ENTRE upload_api y run_migrations a propósito: las migraciones, los
+     * seeders y los comandos que siguen bootean Laravel con el `.env` del destino, y tienen que
+     * encontrarlo completo (ver step_sync_env_keys()).
      *
      * @var array<int, string>
      */
@@ -70,6 +75,7 @@ class DeploymentService
         'compile_spa',
         'upload_spa',
         'upload_api',
+        'sync_env_keys',
         'run_migrations',
         'restart_queue_workers',
         'pause_for_crons',
@@ -94,6 +100,42 @@ class DeploymentService
      * @var ReleaseArtifactService|null
      */
     private $release_artifacts = null;
+
+    /**
+     * Patrón de las claves PROPIAS de cada frente, que step_sync_env_keys() NUNCA copia del frente
+     * activo al destino (misión `optimizacion-vps-fase1`, 10/9/2026).
+     *
+     * Se mira el NOMBRE de la clave y no su valor: es lo único que se puede saber sin conocer la
+     * instalación de cada cliente. Cada fragmento tiene un caso real detrás:
+     *   - URL:      APP_URL, SPA_URL, VUE_APP_*_URL — cada frente tiene su propio dominio.
+     *   - DOMAIN:   SESSION_DOMAIN, SANCTUM_STATEFUL_DOMAINS — ídem, es el dominio de ese frente.
+     *   - PREFIX:   REDIS_PREFIX, CACHE_PREFIX — en el VPS cada carpeta tiene su prefijo y por eso
+     *               su propia cola; con el prefijo prestado del otro frente los dos workers
+     *               consumirían la misma cola (medido en ferretotal el 4/9/2026, ver "El cliente son
+     *               DOS carpetas" en migrar-cliente).
+     *   - COOKIE:   SESSION_COOKIE — el nombre de la cookie es lo que separa las dos sesiones.
+     *   - STATEFUL: SANCTUM_STATEFUL_DOMAINS, SANCTUM_STATEFUL_CORS — dominios de ese frente.
+     *
+     * Validado contra las 34 claves del EnvTemplateSeeder (scope empresa): aparta exactamente
+     * APP_URL, SESSION_DOMAIN, SESSION_COOKIE y las dos SANCTUM_STATEFUL_*, y deja pasar APP_KEY,
+     * DB_*, MAIL_*, PUSHER_*, ANTHROPIC_API_KEY, SANCTUM_EXPIRATION y USER_ID, que son las mismas
+     * en las dos carpetas del cliente.
+     *
+     * @var string
+     */
+    const CLAVES_PROPIAS_DEL_FRENTE_PATRON = '/URL|DOMAIN|PREFIX|COOKIE|STATEFUL/';
+
+    /**
+     * Claves propias de cada frente por nombre exacto, para las que el patrón no alcanza.
+     *
+     * `APP_NAME` no nombra ningún fragmento del patrón y sin embargo es de cada frente: Laravel
+     * deriva de él el prefijo por defecto de la caché (`Str::slug(env('APP_NAME'), '_') . '_cache'`
+     * en config/cache.php) y el de Redis (config/database.php), o sea que copiarlo del activo tiene
+     * el mismo efecto que copiar un PREFIX.
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_PROPIAS_DEL_FRENTE_EXACTAS = ['APP_NAME'];
 
     /**
      * Carga upgrade, API destino y credencial SSH según hosting_type de la API destino.
@@ -187,6 +229,11 @@ class DeploymentService
                     $this->step_upload_api();
                     // Marca el paso "Sistema actualizado" una vez que SPA y API están subidos.
                     $this->mark_upgrade_step_timestamp('sistema_actualizado_at');
+                    break;
+                case 'sync_env_keys':
+                    // Sin timestamp propio en el upgrade: es un complemento del `.env` que nunca
+                    // aborta (degrada a warning), no un hito que el panel tenga que mostrar aparte.
+                    $this->step_sync_env_keys();
                     break;
                 case 'run_migrations':
                     $this->step_run_migrations();
@@ -558,6 +605,206 @@ class DeploymentService
             'rm -f ' . escapeshellarg($api_build_path . '/' . $zip_name)
         );
         $this->log('upload_api', 'Archivos temporales eliminados');
+    }
+
+    /**
+     * Etapa: completa el `.env` del frente DESTINO con las claves que el frente ACTIVO tiene y a
+     * él le faltan. Agrega, nunca pisa y nunca borra.
+     *
+     * Por qué existe (misión `optimizacion-vps-fase1`, 10/9/2026). Un cliente son DOS carpetas
+     * que alternan en cada actualización (v1/v2, ver active_client_api_id), cada una con su propio
+     * `.env`. Ese archivo lo escribe la instalación una sola vez y el upgrade NO lo toca nunca: el
+     * zip de la API lo excluye (`--exclude='.env'`, ver step_upload_api) y ninguna etapa lo
+     * escribe. Entonces cada clave que Lucas agrega a mano en el frente que está atendiendo —una
+     * API key nueva, una credencial de correo— queda en ESA carpeta y en la otra no, y al rotar el
+     * frente nuevo arranca sin ella. Es un drift silencioso: no hay error, hay una función que deja
+     * de andar.
+     *
+     * Medido en ferretotal (VPS, 10/9/2026): `api-ferretotal` tenía `OPENAI_API_KEY` y
+     * `api-ferretotal2` —el frente activo— no. Resultado: 35.324 jobs de embeddings fallidos en la
+     * cola sin un solo error visible para el cliente; el síntoma era "los embeddings no se generan"
+     * y el `.env` fue lo último que se miró.
+     *
+     * Qué copia y qué no. Se copian las claves que están en el activo y NO existen en el destino
+     * (claves_a_sincronizar()), menos las propias de cada frente (CLAVES_PROPIAS_DEL_FRENTE_*):
+     * esas SÍ tienen que ser distintas entre las dos carpetas, y copiarlas del activo sería romper
+     * el frente nuevo con un valor prestado. Una clave que el destino YA tiene se respeta aunque
+     * tenga otro valor: pisar no es tarea de un upgrade, y quien quiera cambiar un valor tiene el
+     * endpoint de `.env` del admin, que hace backup y verifica.
+     *
+     * Va ENTRE upload_api y run_migrations, y el orden importa: `migrate`, los seeders y los
+     * comandos de la versión bootean Laravel con el `.env` del destino, y una migración o un seeder
+     * que lea `config('services.x')` tiene que encontrar la clave. Y va antes de pause_for_crons
+     * porque esa etapa hace `return` y corta la pasada.
+     *
+     * 🔴 Nunca aborta el deploy. Mismo criterio que provision_afip_certificates(): llegado acá el
+     * código ya está subido, y una actualización cortada a la mitad por una clave que ya venía
+     * faltando de antes es peor que la clave faltante. Cualquier fallo —SSH rechazado, `.env` que
+     * no existe en alguno de los dos frentes, escritura que no quedó aplicada— se degrada a warning
+     * con el motivo, para que se vea en deployment_logs.
+     *
+     * 🔴 El log nombra las CLAVES agregadas y nunca los valores: deployment_logs se ve desde el
+     * panel y se lee por `claude/*`, y ahí adentro no puede aparecer una API key ni una password.
+     *
+     * @return void
+     */
+    private function step_sync_env_keys()
+    {
+        $client     = $this->upgrade->client;
+        $source_api = $client ? $client->active_client_api : null;
+
+        if ($source_api === null) {
+            $this->log(
+                'sync_env_keys',
+                'Sin ClientApi activa previa: no hay un .env de referencia del que completar el del destino.',
+                'info'
+            );
+
+            return;
+        }
+
+        if ((int) $source_api->id === (int) $this->target_api->id) {
+            $this->log(
+                'sync_env_keys',
+                'La API activa ya es el destino de este deploy: es el mismo .env, nada que completar.',
+                'info'
+            );
+
+            return;
+        }
+
+        $source_hosting_type = $source_api->hosting_type ?: 'shared_hosting';
+        $target_hosting_type = $this->target_api->hosting_type ?: 'shared_hosting';
+
+        /* Origen y destino en servidores distintos (una migración shared_hosting -> vps) es OTRO
+           flujo: ahí el .env del destino lo arma /migrar-cliente a mano y con criterio propio
+           (hosts de base, Redis, rutas). Copiar claves entre dos servidores a ciegas puede llevar un
+           DB_HOST o un REDIS_HOST del servidor viejo al nuevo. Se avisa y sigue, igual que hace
+           sync_afip_certificates() para el mismo caso. */
+        if ($source_hosting_type !== $target_hosting_type) {
+            $this->log(
+                'sync_env_keys',
+                "Origen ({$source_hosting_type}) y destino ({$target_hosting_type}) viven en hostings distintos: "
+                . 'no se completa el .env del destino desde el activo, es una migración y no una rotación de '
+                . 'frente. Revisar a mano que el destino tenga todas las claves que el cliente usa.',
+                'warning'
+            );
+
+            return;
+        }
+
+        $env_ssh = new EnvSshService();
+
+        try {
+            /* EnvSshService abre su propia sesión por hosting_type y la reutiliza entre las dos
+               lecturas y la escritura: ya se comprobó arriba que los dos frentes viven en el mismo
+               servidor. No toca $this->ssh, que sigue siendo la sesión del pipeline. */
+            $env_origen  = $env_ssh->read_env_for($source_api);
+            $env_destino = $env_ssh->read_env_for($this->target_api);
+
+            $claves_faltantes = self::claves_a_sincronizar($env_origen, $env_destino);
+
+            if (count($claves_faltantes) === 0) {
+                $this->log(
+                    'sync_env_keys',
+                    'El .env del destino ya tiene todas las claves del frente activo: nada que agregar.',
+                    'success'
+                );
+            } else {
+                /* write_env_vars_for() agrega al final del archivo las claves que no existen y
+                   RELEE el .env para confirmar que quedaron: si no quedaron, lanza y cae al catch. */
+                $env_ssh->write_env_vars_for($this->target_api, $claves_faltantes);
+
+                $this->log(
+                    'sync_env_keys',
+                    'Claves agregadas al .env del destino desde el frente activo ('
+                    . count($claves_faltantes) . '): ' . implode(', ', array_keys($claves_faltantes)),
+                    'success'
+                );
+            }
+        } catch (\Throwable $e) {
+            /* El mensaje de EnvSshService nombra rutas y claves, nunca valores. */
+            $this->log(
+                'sync_env_keys',
+                'No se pudo completar el .env del destino desde el frente activo. El deploy sigue, pero '
+                . 'una clave que el cliente usa, como una API key o el correo, puede faltar en el frente '
+                . 'nuevo: compará los dos .env a mano antes de rotar. Detalle: '
+                . $this->truncate_for_log($e->getMessage(), 600),
+                'warning'
+            );
+        }
+
+        /* La sesión de EnvSshService es propia y ya no se usa: se cierra para no dejar una conexión
+           colgada durante el resto del pipeline. Cerrarla tampoco puede abortar el deploy. */
+        try {
+            $env_ssh->disconnect();
+        } catch (\Throwable $e) {
+            $this->log(
+                'sync_env_keys',
+                'La sesión SSH del sync de .env no cerró limpia: ' . $this->truncate_for_log($e->getMessage(), 300),
+                'info'
+            );
+        }
+    }
+
+    /**
+     * Claves que hay que agregar al `.env` del destino: las que están en el origen, NO existen en
+     * el destino y no son propias del frente.
+     *
+     * Es estática y pura a propósito —entran dos arrays, sale un array, sin SSH ni modelos— para
+     * poder probar la regla de qué se copia y qué no sin levantar un servidor. La lectura y la
+     * escritura viven en step_sync_env_keys().
+     *
+     * Tres reglas, en este orden:
+     *  1. Una clave que el destino YA tiene se respeta, tenga el valor que tenga (incluso vacío):
+     *     `array_key_exists`, no `isset`/`empty`. "Agregar lo que falta" no es "pisar lo distinto".
+     *  2. Las propias del frente (CLAVES_PROPIAS_DEL_FRENTE_*) no se copian nunca.
+     *  3. Un valor vacío en el origen tampoco se copia: `env('X')` distingue "no está" (null) de
+     *     "está vacía" (''), y una `MAIL_PORT=` copiada le pisaría el default a un
+     *     `env('MAIL_PORT', 587)`. No hay nada que sincronizar en un valor vacío.
+     *
+     * @param  array<string, string>  $origen   `.env` del frente activo, ya parseado (KEY => valor).
+     * @param  array<string, string>  $destino  `.env` del frente destino, ya parseado.
+     * @return array<string, string>  KEY => valor a agregar, en el orden en que aparecen en el origen.
+     */
+    public static function claves_a_sincronizar(array $origen, array $destino): array
+    {
+        $faltantes = [];
+
+        foreach ($origen as $clave => $valor) {
+            $clave = (string) $clave;
+
+            if (array_key_exists($clave, $destino)) {
+                continue;
+            }
+
+            if (self::es_clave_propia_del_frente($clave)) {
+                continue;
+            }
+
+            if (trim((string) $valor) === '') {
+                continue;
+            }
+
+            $faltantes[$clave] = (string) $valor;
+        }
+
+        return $faltantes;
+    }
+
+    /**
+     * Si una clave es propia de cada frente y por eso nunca se copia de un frente al otro.
+     *
+     * @param  string  $clave  Nombre de la variable, tal cual está en el `.env`.
+     * @return bool
+     */
+    public static function es_clave_propia_del_frente(string $clave): bool
+    {
+        if (in_array($clave, self::CLAVES_PROPIAS_DEL_FRENTE_EXACTAS, true)) {
+            return true;
+        }
+
+        return preg_match(self::CLAVES_PROPIAS_DEL_FRENTE_PATRON, $clave) === 1;
     }
 
     /**

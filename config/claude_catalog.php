@@ -890,7 +890,7 @@ return [
             ],
         ],
         'POST api/claude/upgrades/{id}/deploy/start' => [
-            'para_que'     => 'Arranca el pipeline PRE-CIERRE: compila la SPA, la sube, sube la API, corre las migraciones y frena esperando los crons. Se puede correr con el negocio abierto porque no toca el sistema en uso.',
+            'para_que'     => 'Arranca el pipeline PRE-CIERRE: compila la SPA, la sube, sube la API, completa el .env del frente destino con las claves que le faltan respecto del frente activo (sync_env_keys, 4.0.24: agrega, nunca pisa, y aparta las propias del frente como URL/DOMAIN/PREFIX/COOKIE/STATEFUL/APP_NAME), corre las migraciones y frena esperando los crons. Se puede correr con el negocio abierto porque no toca el sistema en uso.',
             'escribe'      => true,
             'peligrosidad' => 'alta',
             'frenos'       => [
@@ -908,7 +908,7 @@ return [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade a arrancar.'],
                 ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente del upgrade. El rechazo NO revela cuál era el correcto.'],
                 ['nombre' => 'allow_deploy_to_active_api', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => '🔴 Sólo hace falta si la API destino ES la activa en producción (pasa cuando el cliente tiene una sola ClientApi). Sin esto, ese caso es 422.'],
-                ['nombre' => 'resume_from_step', 'obligatorio' => false, 'validacion' => 'nullable|in:compile_spa,upload_spa,upload_api,run_migrations — 422 si el valor no está en esa lista, y 422 si el deployment anterior NO quedó failed', 'que_es' => 'REANUDA un pre-cierre fallado desde esa etapa en vez de rehacerlo entero, y CONSERVA los logs del intento anterior. Sirve cuando el corte fue de una etapa sola (el release todavía no tenía su asset, se cayó el SSH al escribir config.js): reanudar por la etapa equivocada vuelve a bajar y desplegar el SPA por nada. La respuesta trae desde_etapa. Nunca llega al post-cierre: el pipeline corta igual en pause_for_crons.'],
+                ['nombre' => 'resume_from_step', 'obligatorio' => false, 'validacion' => 'nullable|in:compile_spa,upload_spa,upload_api,sync_env_keys,run_migrations — 422 si el valor no está en esa lista, y 422 si el deployment anterior NO quedó failed', 'que_es' => 'REANUDA un pre-cierre fallado desde esa etapa en vez de rehacerlo entero, y CONSERVA los logs del intento anterior. Sirve cuando el corte fue de una etapa sola (el release todavía no tenía su asset, se cayó el SSH al escribir config.js): reanudar por la etapa equivocada vuelve a bajar y desplegar el SPA por nada. sync_env_keys es la etapa que completa el .env del destino desde el activo (nunca falla el deploy: si no pudo, deja un warning en el log con el motivo); reanudar desde ahí sirve cuando la API ya está subida y lo que se quiere es volver a completar el .env antes de migrar. La respuesta trae desde_etapa. Nunca llega al post-cierre: el pipeline corta igual en pause_for_crons.'],
             ],
         ],
         'POST api/claude/upgrades/{id}/mark-crons' => [
