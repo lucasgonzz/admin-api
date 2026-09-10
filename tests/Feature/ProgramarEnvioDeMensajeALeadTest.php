@@ -731,6 +731,322 @@ class ProgramarEnvioDeMensajeALeadTest extends TestCase
         );
     }
 
+    /**
+     * (21) 🔴 EL test que faltaba: el mensaje SALE y el registro falla.
+     *
+     * Es el caso más caro del diseño, y estuvo vivo hasta el 10/9/2026: la fila quedaba en
+     * `pendiente` con el mensaje ya entregado, y como `scopeVencidos()` la volvía a levantar, el
+     * comando de cada minuto lo remandaba. Medido: cinco corridas, cinco WhatsApps al mismo lead.
+     *
+     * Lo que este test fija no es el manejo del error —eso es secundario— sino la propiedad que
+     * importa: **una segunda corrida NO vuelve a enviar**.
+     *
+     * @return void
+     */
+    public function test_si_el_envio_sale_pero_el_registro_falla_no_se_reenvia(): void
+    {
+        $admin = $this->crear_admin('registro-falla@test.local');
+        $lead  = $this->crear_lead('Registro falla');
+        $this->entrante_del_lead($lead, 1);
+        $programado = $this->programar($admin, $lead, Carbon::now()->addHours(2), 'Esto sale pero no se registra.');
+
+        $espia = $this->espiar_sender(true);
+
+        /* Se rompe la escritura del LeadMessage sin tocar el servicio: el hook `creating` del
+           modelo tira una excepción, que es exactamente la forma del fallo real (un lock-wait sobre
+           `leads` desde el hook `created`, o la unique de whatsapp_message_id). */
+        LeadMessage::creating(function (LeadMessage $mensaje) {
+            if ((string) $mensaje->sender === 'setter') {
+                throw new \RuntimeException('Falla simulada al escribir el LeadMessage.');
+            }
+        });
+
+        try {
+            Carbon::setTestNow(Carbon::now()->addHours(2)->addMinute());
+            $this->artisan('leads:send-scheduled-messages')->assertExitCode(0);
+
+            $this->assertCount(1, $espia->textos, 'El mensaje salió: eso es justamente el problema.');
+
+            $programado->refresh();
+            $this->assertNotSame(
+                LeadScheduledMessage::STATUS_PENDIENTE,
+                $programado->status,
+                '🔴 Si vuelve a `pendiente`, el comando lo remanda cada minuto para siempre.'
+            );
+            $this->assertSame(LeadScheduledMessage::STATUS_ERROR, $programado->status);
+            $this->assertSame('wamid.programado.1', $programado->whatsapp_message_id, 'El wamid queda para reconstruirlo a mano.');
+
+            /* La propiedad que importa: la corrida siguiente no lo vuelve a mandar. */
+            Carbon::setTestNow(Carbon::now()->addMinute());
+            $this->artisan('leads:send-scheduled-messages')->assertExitCode(0);
+
+            $this->assertCount(1, $espia->textos, '🔴 Segunda corrida: el lead NO puede recibir el mismo mensaje otra vez.');
+        } finally {
+            LeadMessage::flushEventListeners();
+        }
+    }
+
+    /**
+     * (22) Un programado que quedó colgado en `enviando` se destraba solo, y no se reenvía.
+     *
+     * El caso es el proceso muerto entre el envío y el registro: no hay `catch` posible porque el
+     * proceso ya no existe. La corrida siguiente lo pasa a `error` diciendo que NO se sabe si salió
+     * — que es la verdad. Reintentar sería peor: si había salido, el lead lo recibe dos veces.
+     *
+     * @return void
+     */
+    public function test_un_programado_colgado_en_enviando_se_vence_y_no_se_reenvia(): void
+    {
+        $admin = $this->crear_admin('colgado@test.local');
+        $lead  = $this->crear_lead('Colgado');
+        $this->entrante_del_lead($lead, 1);
+        $programado = $this->programar($admin, $lead, Carbon::now()->addHours(2), 'Quedó colgado a mitad.');
+
+        /* Como lo dejaría un proceso muerto: reclamado hace mucho y sin cerrar. */
+        DB::table('lead_scheduled_messages')->where('id', $programado->id)->update([
+            'status'              => LeadScheduledMessage::STATUS_ENVIANDO,
+            'dispatch_started_at' => Carbon::now()->subHours(3),
+        ]);
+
+        $espia = $this->espiar_sender(true);
+        Carbon::setTestNow(Carbon::now()->addHours(2)->addMinute());
+
+        $this->artisan('leads:send-scheduled-messages')->assertExitCode(0);
+
+        $this->assertCount(0, $espia->textos, '🔴 Un colgado NO se reintenta: podría duplicar un mensaje que ya salió.');
+
+        $programado->refresh();
+        $this->assertSame(LeadScheduledMessage::STATUS_ERROR, $programado->status);
+        $this->assertStringContainsString('NO se sabe', (string) $programado->error_text);
+    }
+
+    /**
+     * (23) A un lead `cerrado_perdido` no se le programa, y si se cierra después, no le sale.
+     *
+     * La SPA ya deshabilitaba el botón; el backend no lo miraba en ninguna de las dos puertas, así
+     * que un mensaje programado con el lead vivo salía igual después de marcarlo perdido.
+     *
+     * @return void
+     */
+    public function test_un_lead_cerrado_perdido_frena_en_las_dos_puertas(): void
+    {
+        $admin = $this->crear_admin('perdido@test.local');
+
+        /* Puerta 1: programar. */
+        $perdido = $this->crear_lead('Ya perdido', 'cerrado_perdido');
+        $this->entrante_del_lead($perdido, 1);
+
+        $this->actingAs($admin, 'sanctum')->postJson(
+            '/api/admin/lead/' . $perdido->id . '/scheduled-messages',
+            [
+                'scheduled_send_at'      => Carbon::now()->addHours(2)->toIso8601String(),
+                'mode'                   => 'texto_libre',
+                'content'                => 'A un lead perdido no se le programa.',
+                'cancel_if_lead_replies' => false,
+            ]
+        )->assertStatus(422);
+
+        $this->assertSame(0, LeadScheduledMessage::query()->where('lead_id', $perdido->id)->count());
+
+        /* Puerta 2: despachar. Se programa con el lead vivo y se cierra después. */
+        $vivo = $this->crear_lead('Se pierde después');
+        $this->entrante_del_lead($vivo, 1);
+        $programado = $this->programar($admin, $vivo, Carbon::now()->addHours(2), 'Se cerró en el medio.');
+
+        $vivo->status = 'cerrado_perdido';
+        $vivo->save();
+
+        $espia = $this->espiar_sender(true);
+        Carbon::setTestNow(Carbon::now()->addHours(2)->addMinute());
+
+        $this->artisan('leads:send-scheduled-messages')->assertExitCode(0);
+
+        $this->assertCount(0, $espia->textos, 'A un lead que se cerró entre programar y enviar no le sale nada.');
+
+        $programado->refresh();
+        $this->assertSame(LeadScheduledMessage::STATUS_CANCELADO, $programado->status);
+        $this->assertSame(LeadScheduledMessage::CANCELED_LEAD_CERRADO, $programado->canceled_reason);
+    }
+
+    /**
+     * (24) Pegar un chat exportado NO cancela un programado con el check prendido.
+     *
+     * `store_message_json()` crea mensajes VIEJOS del lead con ids nuevos y sin `sent_at`. Sin la
+     * guarda, importar una conversación histórica descartaba mensajes programados como si el lead
+     * acabara de contestar.
+     *
+     * @return void
+     */
+    public function test_pegar_un_chat_exportado_no_cancela_un_programado(): void
+    {
+        $admin = $this->crear_admin('pegado@test.local');
+        $lead  = $this->crear_lead('Chat pegado');
+        $this->entrante_del_lead($lead, 1);
+        $programado = $this->programar($admin, $lead, Carbon::now()->addHours(2), 'Esto tiene que salir igual.', true);
+
+        /* Como lo deja el pegado del chat exportado: sender lead, id nuevo, SIN sent_at. */
+        $pegado          = new LeadMessage();
+        $pegado->lead_id = $lead->id;
+        $pegado->sender  = 'lead';
+        $pegado->content = 'Mensaje viejo, copiado del export de WhatsApp.';
+        $pegado->status  = 'enviado';
+        $pegado->save();
+
+        $this->assertGreaterThan((int) $programado->baseline_lead_message_id, (int) $pegado->id);
+
+        $espia = $this->espiar_sender(true);
+        Carbon::setTestNow(Carbon::now()->addHours(2)->addMinute());
+
+        $this->artisan('leads:send-scheduled-messages')->assertExitCode(0);
+
+        $this->assertCount(1, $espia->textos, '🔴 Un mensaje pegado a mano no es el lead escribiendo: el envío sale.');
+
+        $programado->refresh();
+        $this->assertSame(LeadScheduledMessage::STATUS_ENVIADO, $programado->status);
+    }
+
+    /**
+     * (25) Cancelar dos veces no pisa el motivo de la primera cancelación.
+     *
+     * Un `lead_respondio` convertido en `manual` le borra al operador la única explicación de por
+     * qué ese mensaje no salió.
+     *
+     * @return void
+     */
+    public function test_cancelar_es_idempotente_y_no_pisa_el_motivo(): void
+    {
+        $admin = $this->crear_admin('idempotente@test.local');
+        $lead  = $this->crear_lead('Idempotente');
+        $this->entrante_del_lead($lead, 1);
+        $programado = $this->programar($admin, $lead, Carbon::now()->addHours(2), 'Se cancela solo primero.');
+
+        DB::table('lead_scheduled_messages')->where('id', $programado->id)->update([
+            'status'          => LeadScheduledMessage::STATUS_CANCELADO,
+            'canceled_reason' => LeadScheduledMessage::CANCELED_LEAD_RESPONDIO,
+        ]);
+
+        $this->actingAs($admin, 'sanctum')
+            ->deleteJson('/api/admin/lead/' . $lead->id . '/scheduled-messages/' . $programado->id)
+            ->assertStatus(200);
+
+        $programado->refresh();
+        $this->assertSame(
+            LeadScheduledMessage::CANCELED_LEAD_RESPONDIO,
+            $programado->canceled_reason,
+            'El motivo original es la única explicación que le queda al operador.'
+        );
+    }
+
+    /**
+     * (26) Un programado en `error` se puede corregir y vuelve a la cola.
+     *
+     * Es el camino que más se va a usar: quedó sin salir porque se cerró la ventana, y lo natural
+     * es corregirle la fecha, no copiar el texto a mano y empezar de cero.
+     *
+     * @return void
+     */
+    public function test_un_programado_en_error_se_puede_editar_y_vuelve_a_pendiente(): void
+    {
+        $admin = $this->crear_admin('reintento@test.local');
+        $lead  = $this->crear_lead('Reintento');
+        $this->entrante_del_lead($lead, 1);
+        $programado = $this->programar($admin, $lead, Carbon::now()->addHours(2), 'Primer intento.');
+
+        DB::table('lead_scheduled_messages')->where('id', $programado->id)->update([
+            'status'     => LeadScheduledMessage::STATUS_ERROR,
+            'error_text' => 'La ventana se cerró antes de que saliera.',
+        ]);
+
+        $this->actingAs($admin, 'sanctum')->putJson(
+            '/api/admin/lead/' . $lead->id . '/scheduled-messages/' . $programado->id,
+            [
+                'scheduled_send_at'      => Carbon::now()->addHours(3)->toIso8601String(),
+                'mode'                   => 'texto_libre',
+                'content'                => 'Segundo intento, corregido.',
+                'cancel_if_lead_replies' => false,
+            ]
+        )->assertStatus(200);
+
+        $programado->refresh();
+        $this->assertSame(LeadScheduledMessage::STATUS_PENDIENTE, $programado->status);
+        $this->assertNull($programado->error_text, 'El motivo viejo no sobrevive a la corrección.');
+        $this->assertSame('Segundo intento, corregido.', (string) $programado->content);
+    }
+
+    /**
+     * (27) Varios vencidos en la misma corrida: salen todos, y uno que falla no aborta a los demás.
+     *
+     * Antes, la primera excepción se llevaba puesta toda la corrida y los que venían atrás se
+     * quedaban sin salir ese minuto — un lead pagaba el problema de otro.
+     *
+     * @return void
+     */
+    public function test_varios_vencidos_salen_todos_en_orden(): void
+    {
+        $admin = $this->crear_admin('varios@test.local');
+        $lead  = $this->crear_lead('Varios');
+        $this->entrante_del_lead($lead, 1);
+
+        $primero = $this->programar($admin, $lead, Carbon::now()->addHours(2), 'Primero.');
+        $segundo = $this->programar($admin, $lead, Carbon::now()->addHours(3), 'Segundo.');
+        $tercero = $this->programar($admin, $lead, Carbon::now()->addHours(4), 'Tercero.');
+
+        $espia = $this->espiar_sender(true);
+        Carbon::setTestNow(Carbon::now()->addHours(5));
+
+        $this->artisan('leads:send-scheduled-messages')->assertExitCode(0);
+
+        $this->assertCount(3, $espia->textos, 'Los tres vencidos salen en la misma corrida.');
+        $this->assertSame('Primero.', $espia->textos[0]['body'], 'Salen en el orden en que el operador los quiso.');
+        $this->assertSame('Segundo.', $espia->textos[1]['body']);
+        $this->assertSame('Tercero.', $espia->textos[2]['body']);
+
+        foreach ([$primero, $segundo, $tercero] as $fila) {
+            $fila->refresh();
+            $this->assertSame(LeadScheduledMessage::STATUS_ENVIADO, $fila->status);
+        }
+    }
+
+    /**
+     * (28) El borde exacto de la ventana: programar PARA el instante del vencimiento se rechaza.
+     *
+     * Es el caso que dictó Lucas —"si el último mensaje del lead fue a las cinco de la tarde, me
+     * dejaría programar con texto libre hasta las cinco de la tarde del próximo día"— y la línea
+     * que más barato se rompe en un refactor.
+     *
+     * @return void
+     */
+    public function test_el_instante_exacto_del_vencimiento_ya_es_fuera_de_ventana(): void
+    {
+        $admin    = $this->crear_admin('borde@test.local');
+        $lead     = $this->crear_lead('Borde');
+        $entrante = $this->entrante_del_lead($lead, 1);
+
+        /* La ventana vence exactamente 24 hs después del entrante. */
+        $vencimiento = Carbon::parse($entrante->created_at)->addHours(24);
+
+        $this->actingAs($admin, 'sanctum')->postJson(
+            '/api/admin/lead/' . $lead->id . '/scheduled-messages',
+            [
+                'scheduled_send_at'      => $vencimiento->toIso8601String(),
+                'mode'                   => 'texto_libre',
+                'content'                => 'Justo en el filo.',
+                'cancel_if_lead_replies' => false,
+            ]
+        )->assertStatus(422);
+
+        /* Un segundo antes sí entra. */
+        $this->actingAs($admin, 'sanctum')->postJson(
+            '/api/admin/lead/' . $lead->id . '/scheduled-messages',
+            [
+                'scheduled_send_at'      => $vencimiento->copy()->subSecond()->toIso8601String(),
+                'mode'                   => 'texto_libre',
+                'content'                => 'Un segundo antes.',
+                'cancel_if_lead_replies' => false,
+            ]
+        )->assertStatus(200);
+    }
+
     /* --------------------------------------------------------------------- */
     /* Ayudantes                                                              */
     /* --------------------------------------------------------------------- */
@@ -779,16 +1095,22 @@ class ProgramarEnvioDeMensajeALeadTest extends TestCase
      */
     private function entrante_del_lead(Lead $lead, int $hace_horas = 1): LeadMessage
     {
+        $momento = Carbon::now()->subHours($hace_horas);
+
         $mensaje          = new LeadMessage();
         $mensaje->lead_id = $lead->id;
         $mensaje->sender  = 'lead';
         $mensaje->content = 'Dale, mañana nos podemos ver.';
         $mensaje->status  = 'enviado';
+        /* 🔴 `sent_at` cargado, como lo deja el webhook real (y el simulador del panel). No es
+           decorado: es lo que distingue un mensaje que el lead mandó de uno que alguien pegó del
+           chat exportado, y `lead_escribio_despues()` se apoya justamente en eso. Un entrante de
+           prueba sin `sent_at` no representa lo que dice representar. */
+        $mensaje->sent_at = $momento;
         $mensaje->save();
 
         /* El created_at se pisa con update() y no con el modelo: LeadMessage tiene timestamps
            automáticos y un booted() que reacciona al guardado. Acá sólo interesa la antigüedad. */
-        $momento = Carbon::now()->subHours($hace_horas);
         DB::table('lead_messages')->where('id', $mensaje->id)->update([
             'created_at' => $momento,
             'updated_at' => $momento,

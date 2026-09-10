@@ -147,37 +147,45 @@ class LeadScheduledMessageService
      */
     public function editar(LeadScheduledMessage $programado, array $datos): array
     {
-        if ((string) $programado->status !== LeadScheduledMessage::STATUS_PENDIENTE) {
-            return $this->freno(
-                'Ese mensaje programado ya no está pendiente (' . (string) $programado->status
-                    . '): no se puede editar. Programá uno nuevo.',
-                422
-            );
-        }
+        return $this->con_el_lock_del_despacho($programado, 'editar', function (LeadScheduledMessage $fresco) use ($datos) {
+            /* `error` también se puede editar, y es el caso que más se va a usar: el mensaje quedó
+               sin salir porque se cerró la ventana o Meta lo rechazó, y lo natural es corregirle la
+               fecha o pasarlo a plantilla, no copiar el texto a mano y empezar de cero. Al guardar
+               vuelve a `pendiente` y el comando lo levanta como cualquier otro. */
+            $editables = [LeadScheduledMessage::STATUS_PENDIENTE, LeadScheduledMessage::STATUS_ERROR];
+            if (! in_array((string) $fresco->status, $editables, true)) {
+                return $this->freno($this->por_que_no_se_puede_tocar($fresco, 'editar'), 422);
+            }
 
-        $lead = $programado->lead;
-        if ($lead === null) {
-            return $this->freno('El lead de ese mensaje programado ya no existe.', 404);
-        }
+            $lead = $fresco->lead;
+            if ($lead === null) {
+                return $this->freno('El lead de ese mensaje programado ya no existe.', 404);
+            }
 
-        $validacion = $this->validar($lead, $datos);
-        if (! $validacion['ok']) {
-            return $validacion;
-        }
+            $validacion = $this->validar($lead, $datos);
+            if (! $validacion['ok']) {
+                return $validacion;
+            }
 
-        $limpio = $validacion['datos'];
+            $limpio = $validacion['datos'];
 
-        $programado->scheduled_send_at        = $limpio['scheduled_send_at'];
-        $programado->mode                     = $limpio['mode'];
-        $programado->content                  = $limpio['content'];
-        $programado->template_name            = $limpio['template_name'];
-        $programado->template_language        = $limpio['template_language'];
-        $programado->template_variables       = $limpio['template_variables'];
-        $programado->cancel_if_lead_replies   = $limpio['cancel_if_lead_replies'];
-        $programado->baseline_lead_message_id = $this->ultimo_mensaje_del_lead($lead);
-        $programado->save();
+            $fresco->scheduled_send_at        = $limpio['scheduled_send_at'];
+            $fresco->mode                     = $limpio['mode'];
+            $fresco->content                  = $limpio['content'];
+            $fresco->template_name            = $limpio['template_name'];
+            $fresco->template_language        = $limpio['template_language'];
+            $fresco->template_variables       = $limpio['template_variables'];
+            $fresco->cancel_if_lead_replies   = $limpio['cancel_if_lead_replies'];
+            $fresco->baseline_lead_message_id = $this->ultimo_mensaje_del_lead($lead);
+            /* Vuelve a la cola limpio: si venía de `error`, el motivo viejo y la marca del despacho
+               que lo dejó ahí no tienen por qué sobrevivir a la corrección. */
+            $fresco->status              = LeadScheduledMessage::STATUS_PENDIENTE;
+            $fresco->error_text          = null;
+            $fresco->dispatch_started_at = null;
+            $fresco->save();
 
-        return $this->exito($programado, $validacion['ventana']);
+            return $this->exito($fresco, $validacion['ventana']);
+        });
     }
 
     /**
@@ -190,19 +198,100 @@ class LeadScheduledMessageService
      */
     public function cancelar(LeadScheduledMessage $programado, string $motivo = LeadScheduledMessage::CANCELED_MANUAL): array
     {
-        if ((string) $programado->status === LeadScheduledMessage::STATUS_ENVIADO) {
+        return $this->con_el_lock_del_despacho($programado, 'cancelar', function (LeadScheduledMessage $fresco) use ($motivo) {
+            /* Ya está cancelado: no se toca. Sin esta guarda, apretar la X sobre una burbuja que ya
+               se había cancelado sola pisaba el motivo — un `lead_respondio` se convertía en
+               `manual` y el operador perdía la única explicación de por qué ese mensaje no salió. */
+            if ((string) $fresco->status === LeadScheduledMessage::STATUS_CANCELADO) {
+                return $this->exito($fresco, null);
+            }
+
+            if ((string) $fresco->status !== LeadScheduledMessage::STATUS_PENDIENTE
+                && (string) $fresco->status !== LeadScheduledMessage::STATUS_ERROR) {
+                return $this->freno($this->por_que_no_se_puede_tocar($fresco, 'cancelar'), 422);
+            }
+
+            $fresco->status          = LeadScheduledMessage::STATUS_CANCELADO;
+            $fresco->canceled_reason = $motivo;
+            $fresco->save();
+
+            return $this->exito($fresco, null);
+        });
+    }
+
+    /**
+     * Corre una operación del panel con el MISMO lock que usa el despacho, sobre la fila releída.
+     *
+     * 🔴 Sin esto, cancelar o editar mientras el comando está mandando ese mismo mensaje respondía
+     * **200** y no frenaba nada: el envío ya estaba en vuelo y terminaba pisando el estado con su
+     * propio resultado. Los dos casos se reprodujeron el 10/9/2026 y los dos dejan al operador
+     * creyendo lo contrario de lo que pasó:
+     *
+     *   - cancelar → la fila terminaba `enviado` + `canceled_reason='manual'` (un estado que la
+     *     máquina no contempla) y el mensaje ya estaba en el teléfono del lead;
+     *   - editar → salía el texto VIEJO y la fila quedaba diciendo que había mandado el nuevo, con
+     *     el `sent_lead_message_id` apuntando a un mensaje cuyo contenido no coincide con su
+     *     propio `content`.
+     *
+     * La espera es corta a propósito: esto lo llama una request del panel, con alguien mirando la
+     * pantalla. Si el envío está en vuelo, es mejor un 422 que explica que un spinner de treinta
+     * segundos.
+     *
+     * @param LeadScheduledMessage $programado
+     * @param string               $operacion  Verbo para el mensaje de error ('editar' | 'cancelar').
+     * @param callable             $hacer      Recibe la fila releída adentro del lock.
+     *
+     * @return array
+     */
+    private function con_el_lock_del_despacho(LeadScheduledMessage $programado, string $operacion, callable $hacer): array
+    {
+        $lock = Cache::lock('lead-scheduled-message-' . (int) $programado->id, $this->segundos_de_lock());
+
+        if (! $lock->get()) {
             return $this->freno(
-                'Ese mensaje ya salió por WhatsApp: no se puede cancelar. Está en la conversación como '
-                    . 'un mensaje enviado más.',
+                'Ese mensaje se está enviando en este momento: no se puede ' . $operacion . '. Esperá unos '
+                    . 'segundos y refrescá la conversación para ver cómo terminó.',
                 422
             );
         }
 
-        $programado->status          = LeadScheduledMessage::STATUS_CANCELADO;
-        $programado->canceled_reason = $motivo;
-        $programado->save();
+        try {
+            $fresco = LeadScheduledMessage::query()->find($programado->id);
+            if ($fresco === null) {
+                return $this->freno('Ese mensaje programado ya no existe.', 404);
+            }
 
-        return $this->exito($programado, null);
+            return $hacer($fresco);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * Por qué una fila no se puede editar ni cancelar, en castellano y nombrando el caso.
+     *
+     * @param LeadScheduledMessage $programado
+     * @param string               $operacion
+     *
+     * @return string
+     */
+    private function por_que_no_se_puede_tocar(LeadScheduledMessage $programado, string $operacion): string
+    {
+        if ((string) $programado->status === LeadScheduledMessage::STATUS_ENVIADO) {
+            return 'Ese mensaje ya salió por WhatsApp: no se puede ' . $operacion . '. Está en la conversación '
+                . 'como un mensaje enviado más.';
+        }
+
+        if ((string) $programado->status === LeadScheduledMessage::STATUS_ENVIANDO) {
+            return 'Ese mensaje se está enviando en este momento: no se puede ' . $operacion . '.';
+        }
+
+        if ((string) $programado->status === LeadScheduledMessage::STATUS_CANCELADO) {
+            return 'Ese mensaje ya está cancelado: no se puede ' . $operacion . '. Programá uno nuevo.';
+        }
+
+        return 'Ese mensaje programado está en estado `' . (string) $programado->status . '` y no se puede '
+            . $operacion . '.';
     }
 
     /**
@@ -219,7 +308,13 @@ class LeadScheduledMessageService
             'enviados'    => 0,
             'cancelados'  => 0,
             'errores'     => 0,
+            'colgados'    => 0,
+            'en_curso'    => 0,
         ];
+
+        /* Primero se destraba lo que quedó de corridas anteriores: si no, esas filas se quedan en
+           `enviando` para siempre y nadie se entera de que ese mensaje no está resuelto. */
+        $resumen['colgados'] = $this->vencer_colgados();
 
         /* orderBy('scheduled_send_at') y no por id: si una corrida se atrasó y hay varios vencidos
            del mismo lead, salen en el orden en que el operador quiso que salieran. */
@@ -230,7 +325,34 @@ class LeadScheduledMessageService
             ->get();
 
         foreach ($vencidos as $programado) {
-            $resultado = $this->despachar_uno($programado);
+            /* 🔴 Cada fila en su propio try. Sin esto, la primera excepción abortaba TODA la
+               corrida y los vencidos que venían atrás se quedaban sin salir ese minuto — un lead
+               pagaba el problema de otro. El estado de la fila que falló ya lo dejó cerrado
+               `enviar_ahora()`; acá solo hay que no llevarse puestas a las demás. */
+            try {
+                $resultado = $this->despachar_uno($programado);
+            } catch (\Throwable $e) {
+                Log::channel('daily')->error(
+                    'LeadScheduledMessageService: excepción despachando un programado; sigue con los demás.',
+                    [
+                        'lead_scheduled_message_id' => (int) $programado->id,
+                        'lead_id'                   => (int) $programado->lead_id,
+                        'error'                     => $e->getMessage(),
+                    ]
+                );
+
+                $resumen['errores']++;
+                continue;
+            }
+
+            /* null = no se pudo tomar el lock: otra corrida lo tiene en vuelo y no se hizo nada.
+               No cuenta como despachado — contarlo daba resúmenes que no cerraban, del tipo
+               "despachados: 3 (enviados: 0, cancelados: 0, con error: 0)". */
+            if ($resultado === null) {
+                $resumen['en_curso']++;
+                continue;
+            }
+
             $resumen['despachados']++;
 
             if ($resultado === LeadScheduledMessage::STATUS_ENVIADO) {
@@ -282,10 +404,63 @@ class LeadScheduledMessageService
                 return null;
             }
 
+            /* 🔴 La fila se RECLAMA acá, antes de tocar WhatsApp, y el cambio se guarda de
+               inmediato. El lock protege contra dos corridas simultáneas, pero no contra el proceso
+               que muere entre "Meta confirmó" y el `save()` final: ahí el lock se libera solo, la
+               fila sigue en `pendiente` y la corrida del minuto siguiente la vuelve a mandar. Con
+               el fallo repitiéndose, no para nunca.
+               Medido el 10/9/2026 antes de este cambio: cinco corridas, cinco WhatsApps al mismo
+               lead, la fila siempre en `pendiente`. Marcarla `enviando` la saca de `scopeVencidos()`
+               para siempre; si queda colgada, la destraba `vencer_colgados()` con un `error` que
+               dice que no se pudo confirmar si salió. */
+            $fresco->status              = LeadScheduledMessage::STATUS_ENVIANDO;
+            $fresco->dispatch_started_at = AppTime::now();
+            $fresco->save();
+
             return $this->enviar_ahora($fresco);
         } finally {
             $lock->release();
         }
+    }
+
+    /**
+     * Pasa a `error` los que quedaron reclamados por una corrida que nunca reportó.
+     *
+     * El caso que atrapa es el proceso muerto entre el envío y el registro: la fila quedó en
+     * `enviando` y no hay ningún `catch` que pueda haberla cerrado, porque el proceso ya no existe.
+     *
+     * 🔴 El texto del error dice que **no se sabe** si el mensaje salió, y eso es a propósito: es la
+     * verdad, y es la única forma de que el operador decida a mano en vez de confiar en una
+     * afirmación inventada. Reintentar automáticamente sería peor — si había salido, el lead
+     * recibiría el mensaje dos veces, que es justo lo que este estado vino a evitar.
+     *
+     * @return int Cuántos se destrabaron.
+     */
+    private function vencer_colgados(): int
+    {
+        $colgados = LeadScheduledMessage::query()
+            ->colgados($this->segundos_de_lock() * 2)
+            ->get();
+
+        foreach ($colgados as $colgado) {
+            Log::channel('daily')->error(
+                'LeadScheduledMessageService: un mensaje programado quedó colgado en `enviando` y se dio por vencido.',
+                [
+                    'lead_scheduled_message_id' => (int) $colgado->id,
+                    'lead_id'                   => (int) $colgado->lead_id,
+                    'dispatch_started_at'       => (string) $colgado->dispatch_started_at,
+                ]
+            );
+
+            $this->marcar_error(
+                $colgado,
+                'La corrida que estaba mandando este mensaje se cortó a mitad y no llegó a reportar. '
+                    . 'NO se sabe si el mensaje le llegó al lead: fijate en la conversación de WhatsApp antes de '
+                    . 'volver a mandarlo, porque si ya salió lo estarías repitiendo.'
+            );
+        }
+
+        return count($colgados);
     }
 
     /**
@@ -303,10 +478,16 @@ class LeadScheduledMessageService
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_MANUAL);
         }
 
-        /* Freno 3, revalidado: el lead pasó a ser cliente entre programar y enviar. A un cliente no
-           se le manda un mensaje comercial; si hay que escribirle, va por soporte. */
+        /* Freno 3, revalidado: el lead se cerró entre programar y enviar. Los dos cierres frenan y
+           por motivos distintos — ganado/promovido pasa a hablarse por soporte, perdido no recibe
+           nada—, así que se guardan con motivos distintos para que el operador entienda de un
+           vistazo por qué ese mensaje no salió. */
         if ((string) $lead->status === 'cerrado_ganado' || $lead->promoted_client_id !== null) {
             return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_LEAD_PROMOVIDO);
+        }
+
+        if (in_array((string) $lead->status, LeadScheduledMessage::STATUSES_DE_LEAD_QUE_FRENAN, true)) {
+            return $this->marcar_cancelado($programado, LeadScheduledMessage::CANCELED_LEAD_CERRADO);
         }
 
         /* Freno 4, revalidado: alguien marcó a mano que a este lead ya no le llega nada. La marca
@@ -410,11 +591,12 @@ class LeadScheduledMessageService
             return $this->marcar_error($programado, $motivo);
         }
 
-        /* 🔴 GARANTÍA: el mensaje ya SALIÓ. De acá para abajo la fila del LeadMessage se escribe sí
-           o sí — un envío que llegó al lead y no quedó registrado deja al agente de IA sin saber
-           que se lo dijimos, y al operador viendo un hilo incompleto. Por eso el LeadMessage se
-           crea ANTES de tocar el programado: si algo revienta en el medio, lo que sobrevive es el
-           registro de lo que efectivamente pasó. */
+        /* 🔴 El mensaje ya SALIÓ, y de acá para abajo NADA puede volver la fila a `pendiente`.
+           Ésa era la falla más cara del diseño original: el `throw` de este bloque dejaba la fila
+           en `pendiente` con el mensaje ya entregado, y como `scopeVencidos()` la volvía a levantar,
+           el comando la remandaba cada minuto. Medido el 10/9/2026: cinco corridas, cinco WhatsApps
+           al mismo lead. Con `enviando` reclamado antes del envío eso ya no puede pasar, y este
+           catch cierra el caso completo dejando la fila en un estado terminal y honesto. */
         try {
             $mensaje = LeadMessage::create([
                 'lead_id'               => (int) $lead->id,
@@ -429,9 +611,22 @@ class LeadScheduledMessageService
                    decir quién lo mandó, igual que en un envío directo. */
                 'sent_by_admin_id'      => $programado->created_by_admin_id,
             ]);
+
+            $programado->status               = LeadScheduledMessage::STATUS_ENVIADO;
+            $programado->sent_lead_message_id = (int) $mensaje->id;
+            $programado->error_text           = null;
+            $programado->save();
+
+            /* Mismo aviso que el resto de los envíos: las conversaciones abiertas en otros
+               navegadores tienen que ver aparecer el mensaje sin recargar. */
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $mensaje->id);
+
+            return LeadScheduledMessage::STATUS_ENVIADO;
         } catch (\Throwable $e) {
-            /* Estado más peligroso posible: salió y no quedó fila. No se puede arreglar solo, pero
-               sí se puede dejar el wamid escrito para poder reconstruirlo a mano. */
+            /* El estado más incómodo que existe acá: al lead LE LLEGÓ el mensaje y de este lado no
+               se pudo dejar constancia. No se arregla solo, así que lo único útil es no repetirlo y
+               contar exactamente lo que pasó: el wamid queda en el log para reconstruirlo a mano, y
+               el operador ve en la conversación que salió pero no quedó registrado. */
             Log::channel('daily')->critical(
                 'LeadScheduledMessageService: el mensaje SALIÓ por WhatsApp y no se pudo registrar en la conversación.',
                 [
@@ -442,19 +637,21 @@ class LeadScheduledMessageService
                 ]
             );
 
-            throw $e;
+            (new LeadConversationErrorLogger())->log(
+                (int) $lead->id,
+                'El mensaje programado SÍ salió por WhatsApp, pero no se pudo registrar en la conversación',
+                $e->getMessage()
+            );
+
+            /* Se guarda el wamid igual: es lo que permite encontrar el mensaje en Meta después. */
+            $programado->whatsapp_message_id = $whatsapp_message_id;
+
+            return $this->marcar_error(
+                $programado,
+                'El mensaje SÍ le llegó al lead, pero no se pudo escribir en la conversación (' . $e->getMessage()
+                    . '). NO lo vuelvas a mandar: ya salió.'
+            );
         }
-
-        $programado->status               = LeadScheduledMessage::STATUS_ENVIADO;
-        $programado->sent_lead_message_id = (int) $mensaje->id;
-        $programado->error_text           = null;
-        $programado->save();
-
-        /* Mismo aviso que el resto de los envíos: las conversaciones abiertas en otros navegadores
-           tienen que ver aparecer el mensaje sin recargar. */
-        LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $mensaje->id);
-
-        return LeadScheduledMessage::STATUS_ENVIADO;
     }
 
     /**
@@ -470,7 +667,18 @@ class LeadScheduledMessageService
     {
         $query = LeadMessage::query()
             ->where('lead_id', (int) $programado->lead_id)
-            ->where('sender', 'lead');
+            ->where('sender', 'lead')
+            /* 🔴 `sent_at` no nulo, y es lo que separa "el lead escribió" de "alguien cargó lo que
+               el lead había escrito". `lead_messages` tiene DOS productores de filas con
+               sender='lead': el webhook (y el simulador del panel), que saben cuándo mandó el lead
+               ese mensaje y lo escriben en `sent_at`; y `LeadController::store_message_json()`, que
+               es pegar un chat exportado y crea mensajes VIEJOS con ids nuevos y sin `sent_at`,
+               porque esa fecha no la tiene nadie.
+               Sin esta condición, pegar una conversación histórica cancelaba todos los programados
+               con el check prendido como si el lead acabara de contestar. El discriminante no puede
+               ser el id (el pegado los tiene nuevos) ni el `created_at` (también es de ahora): es
+               justamente el dato que el pegado no puede inventar. */
+            ->whereNotNull('sent_at');
 
         if ($programado->baseline_lead_message_id !== null) {
             $query->where('id', '>', (int) $programado->baseline_lead_message_id);
@@ -535,12 +743,15 @@ class LeadScheduledMessageService
             );
         }
 
-        /* Freno 3: ya es cliente. Mismo criterio, palabra por palabra, que el envío de texto libre
-           de `claude/*`: a un cliente se le responde desde soporte, que tiene su propio hilo. */
-        if ((string) $lead->status === 'cerrado_ganado' || $lead->promoted_client_id !== null) {
+        /* Freno 3: el lead está cerrado. A un `cerrado_ganado` (o ya promovido) se le responde desde
+           soporte, que tiene su propio hilo; a un `cerrado_perdido` no se le programa nada, que es
+           lo que el botón de la SPA ya hacía y el backend no chequeaba — un mensaje programado con
+           el lead vivo salía igual después de que alguien lo marcara como perdido. */
+        if (in_array((string) $lead->status, LeadScheduledMessage::STATUSES_DE_LEAD_QUE_FRENAN, true)
+            || $lead->promoted_client_id !== null) {
             return $this->freno(
-                'El lead #' . (int) $lead->id . ' ya es cliente: no se le programa un mensaje comercial. '
-                    . 'Si hay que escribirle, va por el hilo de soporte.',
+                'El lead #' . (int) $lead->id . ' está cerrado (' . (string) $lead->status . '): no se le '
+                    . 'programa un mensaje. Si ya es cliente y hay que escribirle, va por el hilo de soporte.',
                 422
             );
         }
@@ -716,6 +927,8 @@ class LeadScheduledMessageService
         $programado->canceled_reason = $motivo;
         $programado->save();
 
+        $this->avisar_a_la_conversacion($programado);
+
         return LeadScheduledMessage::STATUS_CANCELADO;
     }
 
@@ -733,7 +946,30 @@ class LeadScheduledMessageService
         $programado->error_text = $motivo;
         $programado->save();
 
+        $this->avisar_a_la_conversacion($programado);
+
         return LeadScheduledMessage::STATUS_ERROR;
+    }
+
+    /**
+     * Avisa a las conversaciones abiertas que un programado cambió de estado sin intervención.
+     *
+     * 🔴 Hasta el 10/9/2026 esto lo hacía solo el camino de éxito, y era justo al revés de lo que
+     * conviene: cuando el mensaje sale, el operador se entera igual porque aparece la burbuja; el
+     * que pasa desapercibido es el que se canceló o falló. Con la conversación abierta —que es
+     * exactamente lo que está pasando cuando el lead acaba de escribir y se dispara el check— la
+     * burbuja seguía diciendo "Programado — todavía no se envió" sobre algo que ya no iba a salir.
+     *
+     * Va sin id de mensaje: no hay ningún LeadMessage nuevo que mostrar, lo que cambió es la fila
+     * del programado, y el cliente refresca el lead entero al recibirlo.
+     *
+     * @param LeadScheduledMessage $programado
+     *
+     * @return void
+     */
+    private function avisar_a_la_conversacion(LeadScheduledMessage $programado): void
+    {
+        LeadBroadcastService::emit_conversation_updated((int) $programado->lead_id, null);
     }
 
     /**

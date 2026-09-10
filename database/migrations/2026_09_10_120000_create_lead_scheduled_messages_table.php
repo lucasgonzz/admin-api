@@ -45,8 +45,17 @@ class CreateLeadScheduledMessagesTable extends Migration
             $table->unsignedBigInteger('lead_id')->index();
 
             /* Cuándo tiene que salir. Indexada porque el comando que corre cada minuto pregunta
-               justo por esto: pendientes con la hora ya cumplida. */
-            $table->timestamp('scheduled_send_at')->index();
+               justo por esto: pendientes con la hora ya cumplida.
+
+               🔴 `dateTime()` y NO `timestamp()`, aunque semánticamente sea un instante. Ésta sería
+               la primera columna TIMESTAMP NOT NULL de la tabla, y en un motor con
+               `explicit_defaults_for_timestamp` apagado (MariaDB < 10.10, MySQL 5.7) MySQL le
+               agrega solo `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`. Con eso, CADA
+               `save()` sobre la fila —cancelarla, marcarla enviada, marcarla en error— le pisaría
+               la fecha que el operador eligió con el momento del update, y la burbuja del hilo
+               pasaría a mentir sobre cuándo se iba a mandar. No sabemos qué motor corre el admin de
+               producción, así que se cierra sin depender de eso: `datetime` nunca lleva ON UPDATE. */
+            $table->dateTime('scheduled_send_at')->index();
 
             /* 'texto_libre' | 'plantilla'. Lo decide la ventana de 24 hs de Meta al momento de
                programar, y se revalida al despachar: ver LeadScheduledMessageService. */
@@ -73,19 +82,32 @@ class CreateLeadScheduledMessagesTable extends Migration
                informe 20260902-mensaje-libre-a-lead.md). */
             $table->unsignedBigInteger('baseline_lead_message_id')->nullable();
 
-            /* 'pendiente' | 'enviado' | 'cancelado' | 'error'. Indexada por el mismo motivo que
-               scheduled_send_at: es la otra mitad de la consulta del comando. */
+            /* 'pendiente' | 'enviando' | 'enviado' | 'cancelado' | 'error'. Indexada por el mismo
+               motivo que scheduled_send_at: es la otra mitad de la consulta del comando. */
             $table->string('status', 20)->default('pendiente')->index();
+
+            /* Cuándo una corrida del despacho RECLAMÓ esta fila, o sea cuándo pasó a 'enviando'.
+               🔴 Es lo que hace que un mensaje no se mande dos veces. La fila se marca 'enviando'
+               ANTES de tocar WhatsApp, así que si el proceso muere en el medio no vuelve a
+               'pendiente' y el comando del minuto siguiente no la levanta. Esta fecha es la que
+               deja distinguir "se está mandando ahora" de "quedó colgada": ver scopeColgados(). */
+            $table->dateTime('dispatch_started_at')->nullable();
 
             // El LeadMessage que se creó al salir (referencia a lead_messages.id).
             $table->unsignedBigInteger('sent_lead_message_id')->nullable();
 
+            /* Id que devolvió Meta al aceptar el envío. Normalmente vive en el LeadMessage y acá no
+               haría falta — se guarda para el único caso en que ese LeadMessage NO llegó a
+               existir: el mensaje salió y la escritura en la conversación falló. Es lo que después
+               permite encontrar ese mensaje en Meta y reconstruir el hilo a mano. */
+            $table->string('whatsapp_message_id', 191)->nullable();
+
             // Motivo legible cuando quedó en `error` (Meta lo rechazó, la ventana se cerró antes, etc.).
             $table->text('error_text')->nullable();
 
-            /* 'manual' | 'lead_respondio' | 'lead_no_recibe' | 'lead_promovido' | 'sin_telefono'.
-               Se guarda el motivo y no solo el estado: "cancelado" a secas no le dice nada al
-               operador que vuelve a la conversación tres días después. */
+            /* 'manual' | 'lead_respondio' | 'lead_no_recibe' | 'lead_promovido' | 'sin_telefono' |
+               'lead_cerrado'. Se guarda el motivo y no solo el estado: "cancelado" a secas no le
+               dice nada al operador que vuelve a la conversación tres días después. */
             $table->string('canceled_reason', 40)->nullable();
 
             // Admin que lo programó (referencia a admins.id). Hereda al LeadMessage como sent_by_admin_id.

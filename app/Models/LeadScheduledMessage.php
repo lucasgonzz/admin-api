@@ -25,8 +25,23 @@ class LeadScheduledMessage extends Model
        created_at real y la comparación contra scheduled_send_at daría cualquier cosa. */
     use UsesVirtualTime;
 
-    /** Todavía no salió: es el único estado que se puede editar o cancelar. */
+    /** Todavía no salió y nadie lo está mandando ahora mismo. */
     public const STATUS_PENDIENTE = 'pendiente';
+
+    /**
+     * Reclamado por una corrida del despacho, con el envío en vuelo o recién terminado.
+     *
+     * 🔴 Existe para que un mensaje NO se mande dos veces, y es la única defensa contra el caso que
+     * el lock no puede cubrir: el proceso muere entre "Meta confirmó" y el `save()` final. Como
+     * `scopeVencidos()` mira solo `pendiente`, una fila acá adentro no la vuelve a levantar nadie —
+     * y si quedó colgada, la corrida siguiente la pasa a `error` diciendo que no se pudo confirmar
+     * si salió, que es la verdad y es lo que el operador necesita para decidir a mano.
+     *
+     * Medido el 10/9/2026 antes de existir este estado: con un fallo determinista después del
+     * envío, cinco corridas del comando fueron cinco WhatsApps al mismo lead, con la fila siempre
+     * en `pendiente`.
+     */
+    public const STATUS_ENVIANDO = 'enviando';
 
     /** Salió por WhatsApp y quedó su LeadMessage en el hilo. */
     public const STATUS_ENVIADO = 'enviado';
@@ -46,7 +61,7 @@ class LeadScheduledMessage extends Model
      *
      * @var array<int, string>
      */
-    public const STATUSES_VISIBLES = [self::STATUS_PENDIENTE, self::STATUS_ERROR];
+    public const STATUSES_VISIBLES = [self::STATUS_PENDIENTE, self::STATUS_ENVIANDO, self::STATUS_ERROR];
 
     /** Texto escrito a mano por el operador. Solo se puede DENTRO de la ventana de 24 hs de Meta. */
     public const MODE_TEXTO_LIBRE = 'texto_libre';
@@ -72,6 +87,21 @@ class LeadScheduledMessage extends Model
     /** Al lead le sacaron el teléfono entre programar y enviar: no hay a dónde mandar. */
     public const CANCELED_SIN_TELEFONO = 'sin_telefono';
 
+    /** El lead se cerró (ganado o perdido) entre programar y enviar. */
+    public const CANCELED_LEAD_CERRADO = 'lead_cerrado';
+
+    /**
+     * Estados de un lead a los que NO se les programa ni se les manda un mensaje comercial.
+     *
+     * 🔴 Es la MISMA lista para las dos puertas —programar y despachar— a propósito. Hasta el
+     * 10/9/2026 `cerrado_perdido` frenaba solo en el botón de la SPA y no en el backend, así que un
+     * mensaje programado con el lead vivo salía igual después de que alguien lo marcara como
+     * perdido. Un freno que vive en una sola punta no es un freno.
+     *
+     * @var array<int, string>
+     */
+    public const STATUSES_DE_LEAD_QUE_FRENAN = ['cerrado_ganado', 'cerrado_perdido'];
+
     protected $guarded = [];
 
     /**
@@ -79,6 +109,7 @@ class LeadScheduledMessage extends Model
      */
     protected $casts = [
         'scheduled_send_at'        => 'datetime',
+        'dispatch_started_at'      => 'datetime',
         'template_variables'       => 'array',
         'cancel_if_lead_replies'   => 'boolean',
         'lead_id'                  => 'integer',
@@ -122,5 +153,24 @@ class LeadScheduledMessage extends Model
     public function scopeVencidos($query)
     {
         return $query->pendientes()->where('scheduled_send_at', '<=', AppTime::now());
+    }
+
+    /**
+     * Los que quedaron reclamados por una corrida que nunca terminó de reportar.
+     *
+     * Es el equivalente de `deployments:vencer-colgados` y `leads:vencer-demo-setups-colgados` para
+     * esta tabla: un estado intermedio sin nadie que lo destrabe es una fuga, no un estado. El
+     * umbral lo pasa el servicio, derivado del peor caso real del envío.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     * @param int                                   $segundos Antigüedad a partir de la cual se da por colgado.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeColgados($query, int $segundos)
+    {
+        return $query->where('status', self::STATUS_ENVIANDO)
+            ->whereNotNull('dispatch_started_at')
+            ->where('dispatch_started_at', '<=', AppTime::now()->copy()->subSeconds($segundos));
     }
 }
