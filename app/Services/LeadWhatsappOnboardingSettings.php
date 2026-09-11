@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\AdminSetting;
+use App\Models\Lead;
 
 /**
  * Textos y demora de los mensajes automáticos de onboarding WhatsApp para leads nuevos.
@@ -396,16 +397,33 @@ class LeadWhatsappOnboardingSettings
     }
 
     /**
-     * Reemplaza `{nombre}` en la plantilla por el nombre normalizado.
+     * Reemplaza `{nombre}` en la plantilla por el PRIMER nombre del contacto.
      *
-     * @param string $template
-     * @param string $name
+     * Recibe el nombre completo (el del perfil de WhatsApp, que es lo que se guarda en
+     * `contact_name` y NO cambia) y mete en el saludo sólo la primera palabra: "Juan Pérez" →
+     * "¡Hola Juan!". Decisión de Lucas (8/9 y 11/9/2026): al lead se lo trata por su primer
+     * nombre, nunca por nombre y apellido. Se resuelve ACÁ, y no en cada llamador, porque este es
+     * el único punto por el que pasan las tres inyecciones del onboarding —el mensaje automático
+     * inmediato, la presentación de Martín y su variante A/B
+     * (`LeadWhatsappOnboardingService::resolve_welcome_message_body()`)— y una regla repartida en
+     * tres lugares termina difiriendo en alguno.
+     *
+     * Si la primera palabra quedara vacía (no debería: los llamadores ya normalizan) cae al nombre
+     * tal como vino, para no dejar un "¡Hola !" en el mensaje.
+     *
+     * @param string $template Plantilla con el placeholder `{nombre}`.
+     * @param string $name     Nombre completo, ya normalizado (no vacío).
      *
      * @return string
      */
     public static function apply_nombre_placeholder(string $template, string $name): string
     {
-        return str_replace(self::PLACEHOLDER_NOMBRE, $name, $template);
+        $primer_nombre = (string) Lead::primer_nombre_de($name);
+        if ($primer_nombre === '') {
+            $primer_nombre = $name;
+        }
+
+        return str_replace(self::PLACEHOLDER_NOMBRE, $primer_nombre, $template);
     }
 
     /**

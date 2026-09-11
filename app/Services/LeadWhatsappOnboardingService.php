@@ -223,7 +223,12 @@ class LeadWhatsappOnboardingService
     /**
      * Texto del mensaje automático inmediato tras el primer mensaje del lead.
      *
-     * @param string|null $display_name
+     * Recibe el nombre COMPLETO del perfil de WhatsApp (el mismo que se persiste en
+     * `contact_name`) y el saludo lleva sólo el primer nombre: la reducción la hace
+     * `LeadWhatsappOnboardingSettings::apply_nombre_placeholder()`, único punto por el que pasan
+     * las tres inyecciones de `{nombre}` del onboarding (misión experiencia-landing, 11/9/2026).
+     *
+     * @param string|null $display_name Nombre completo tal como lo devolvió resolve_display_name().
      *
      * @return string
      */
@@ -237,13 +242,15 @@ class LeadWhatsappOnboardingService
      *
      * Funciona siempre, independientemente de si el lead tiene nombre de contacto.
      * Si hay variante asignada:
-     *   - Con nombre: reemplaza el placeholder {nombre} con el nombre real.
+     *   - Con nombre: reemplaza el placeholder {nombre} con el PRIMER nombre del contacto (la
+     *     reducción vive en LeadWhatsappOnboardingSettings::apply_nombre_placeholder(), misión
+     *     experiencia-landing, 11/9/2026: "Juan Pérez" saluda como "Juan").
      *   - Sin nombre: elimina el placeholder {nombre} y recorta espacios sobrantes.
      * Si no hay variantes activas del tipo 'welcome', hace fallback al mensaje
      * configurado en admin_settings.
      *
      * @param Lead        $lead
-     * @param string|null $display_name Nombre del contacto (puede ser null).
+     * @param string|null $display_name Nombre completo del contacto (puede ser null).
      *
      * @return string Cuerpo del mensaje listo para enviar.
      */
@@ -328,7 +335,10 @@ class LeadWhatsappOnboardingService
     /**
      * Texto del mensaje de bienvenida / presentación de ComercioCity.
      *
-     * @param string|null $display_name
+     * Mismo criterio que build_auto_message_body(): entra el nombre completo, el saludo lleva el
+     * primer nombre.
+     *
+     * @param string|null $display_name Nombre completo tal como lo devolvió resolve_display_name().
      *
      * @return string
      */

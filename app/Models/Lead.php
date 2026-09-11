@@ -413,6 +413,13 @@ class Lead extends Model
         'intro_visto_pct'                    => 'integer',
         'intro_visto_at'                     => 'datetime',
 
+        // Marca de un solo disparo del seguimiento de página (misión experiencia-landing,
+        // 11/9/2026): cuándo `leads:check-pagina-sin-demo` le mandó "vi que le pegaste una mirada
+        // a tu página". Null = todavía no salió. Es fecha y no booleano porque también se estampa
+        // cuando el envío FALLA (para no reintentar en loop), y la fecha es lo único que después
+        // permite distinguir "salió" de "se intentó" cruzando con lead_messages.
+        'pagina_seguimiento_enviado_at'      => 'datetime',
+
         // Plan de demo congelado (misión 48): qué secciones y qué clips le tocan a este lead. Es
         // una foto, no una vista: se resuelve una sola vez con DemoPlanResolver y no se recalcula
         // al leer, porque el catálogo se sincroniza a producción sin deploy y le cambiaría el
@@ -1246,14 +1253,38 @@ class Lead extends Model
      * contact_name (null → null, vacío → vacío) para no cambiar el comportamiento de los
      * `?? 'fallback'` que ya consumen contact_name en los call sites existentes.
      *
+     * Desde la misión experiencia-landing (11/9/2026) delega en `primer_nombre_de()`: la misma
+     * regla la necesita el onboarding ANTES de que exista el lead con su contact_name (recibe el
+     * nombre del perfil de WhatsApp suelto), y dos implementaciones de "primera palabra" terminan
+     * difiriendo en el caso de borde justo cuando nadie las está mirando.
+     *
      * @return string|null
      */
     public function getContactFirstNameAttribute(): ?string
     {
-        if ($this->contact_name === null) {
+        return self::primer_nombre_de($this->contact_name);
+    }
+
+    /**
+     * Primera palabra (por espacios) de un nombre: "Juan Pérez" → "Juan". Es la regla única de
+     * "tratar al lead por su primer nombre, nunca por nombre y apellido" (decisiones de Lucas del
+     * 8/9 y del 11/9/2026), compartida por el accessor `contact_first_name`, el onboarding de
+     * WhatsApp y el contexto del agente.
+     *
+     * Misma nulabilidad que la entrada: null → null, vacío o sólo espacios → '' (no null), para que
+     * los `?? 'fallback'` y los `=== ''` de los consumidores sigan comportándose igual que con el
+     * accessor de antes.
+     *
+     * @param string|null $nombre Nombre completo tal como vino (perfil de WhatsApp, contact_name).
+     *
+     * @return string|null
+     */
+    public static function primer_nombre_de(?string $nombre): ?string
+    {
+        if ($nombre === null) {
             return null;
         }
-        $trimmed = trim((string) $this->contact_name);
+        $trimmed = trim($nombre);
         if ($trimmed === '') {
             return $trimmed;
         }
