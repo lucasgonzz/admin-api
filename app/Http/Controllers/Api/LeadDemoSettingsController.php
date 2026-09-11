@@ -38,6 +38,9 @@ class LeadDemoSettingsController extends Controller
         /* Validar todos los campos que consume persist_from_request (solo pasan las claves listadas). */
         $validated = $request->validate([
             'duracion_minutos'                => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            /* Bloqueo real (11/9/2026): "sometimes" -- el SPA todavia no lo manda hasta que se
+               agregue el campo del panel en este mismo commit; retrocompatible con un front viejo. */
+            'bloqueo_real_minutos'            => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'setup_minutos_antes'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'gracia_minutos_post'             => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'recordatorio_minutos_antes'      => 'required|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,

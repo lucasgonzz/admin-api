@@ -202,4 +202,49 @@ class RelojVirtualYVencimientoDelTokenDeIngresoTest extends TestCase
         $respuesta->assertStatus(409);
         $respuesta->assertJson(['motivo' => 'token_invalido']);
     }
+
+    /**
+     * 🔴 El pedido de Lucas (11/9/2026): con bloqueo_real_minutos=180 (default), un lead con demo de
+     * 10:00 a 11:00 puede volver a entrar a las 12:30 — bien después de que duración+gracia (11:10)
+     * lo hubiera vencido antes de este cambio — porque `build_turno()`, el ÚNICO lugar que decide si
+     * se puede entrar (ver su propio docblock), ahora también respeta inicio + bloqueo_real (13:00).
+     * Antes de este fix, esto daba 409 `vencido` aunque el token siguiera vigente.
+     *
+     * @return void
+     */
+    public function test_bloqueo_real_deja_reingresar_despues_de_duracion_mas_gracia(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-20 12:30:00', RunDemoSetupService::TZ));
+
+        $lead = $this->crear_lead_con_token(
+            Carbon::parse('2026-08-20 13:00:00', RunDemoSetupService::TZ) // token vigente hasta el bloqueo real
+        );
+
+        $respuesta = $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/ingresar');
+
+        $respuesta->assertStatus(200);
+        $this->assertNotEmpty($respuesta->json('url'));
+    }
+
+    /**
+     * Control del caso anterior: pasado el bloqueo real (13:05, después de 10:00 + 180), el turno
+     * vuelve a estar "vencido" en `build_turno()` y bloquea el ingreso SIN llegar a mirar el token
+     * — que acá sigue vigente a propósito (hasta las 14:00), para probar que el gate que corta es el
+     * del turno, no el del token.
+     *
+     * @return void
+     */
+    public function test_pasado_el_bloqueo_real_el_turno_vuelve_a_estar_vencido(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-08-20 13:05:00', RunDemoSetupService::TZ));
+
+        $lead = $this->crear_lead_con_token(
+            Carbon::parse('2026-08-20 14:00:00', RunDemoSetupService::TZ)
+        );
+
+        $respuesta = $this->postJson('/api/demo-experiencia/' . $lead->uuid . '/ingresar');
+
+        $respuesta->assertStatus(409);
+        $respuesta->assertJson(['motivo' => 'vencido']);
+    }
 }

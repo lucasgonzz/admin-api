@@ -2098,8 +2098,12 @@ class LeadController extends Controller
         /* El token acompaña al fin editado. Solo si hay uno emitido y no revocado: un lead sin
          * token todavía no tiene nada que ajustar (cuando se emita, calcular_expiracion() ya lee
          * demo_end_time), y uno revocado se revocó a propósito — extenderlo acá lo reviviría. */
-        $gracia         = \App\Services\LeadDemoSettings::get_gracia_minutos_post();
-        $expira_nueva   = $fin_datetime->copy()->addMinutes($gracia);
+        $gracia = \App\Services\LeadDemoSettings::get_gracia_minutos_post();
+
+        /* Vencimiento objetivo (11/9/2026): delegado a calcular_expiracion(), que ya incluye el
+         * piso de bloqueo_real_minutos además de fin+gracia. $lead->update() de arriba ya dejó
+         * demo_end_time en el valor nuevo, así que calcular_expiracion() lee el turno editado. */
+        $expira_nueva   = $token_service->calcular_expiracion($lead);
         $token_ajustado = false;
         if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
             try {

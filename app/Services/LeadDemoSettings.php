@@ -15,6 +15,24 @@ class LeadDemoSettings
     /** Clave: duración estimada de la demo en minutos. */
     public const KEY_DURACION_MINUTOS = 'demo_duracion_minutos';
 
+    /**
+     * Clave: minutos reales, desde el INICIO del turno, que la instancia queda bloqueada para
+     * otros leads y que el link de reingreso del lead sigue vigente (decisión de Lucas, 11/9/2026).
+     *
+     * Deliberadamente separada de KEY_DURACION_MINUTOS: esta última sigue siendo la única que se
+     * comunica al lead (mensaje de confirmación, fin nominal de la demo) y la que ancla el inicio
+     * de la ventana del closer — el lead tiene que seguir escuchando "una hora" para no relajarse y
+     * entrar tarde a propósito. Esta clave, en cambio, gobierna solo el bloqueo técnico real: cuánto
+     * tarda la instancia en quedar libre para otro lead (`LeadAiService::load_blocked_ranges_by_demo()`,
+     * `DemoDirectaService::fines_solapados()`) y cuánto dura el token de reingreso
+     * (`DemoIngresoTokenService::calcular_expiracion()`). Motivo de Lucas: "siempre pasa que entra
+     * tarde, se retrasa, o después quiere volver a entrar y no puede" — con el bloqueo real todavía
+     * atado a duracion_minutos + gracia (~70 minutos), el link dejaba de servir para canjear una
+     * sesión nueva mucho antes de que el lead terminara, y la única forma de destrabarlo era
+     * extender el vencimiento a mano desde el panel.
+     */
+    public const KEY_BLOQUEO_REAL_MINUTOS = 'demo_bloqueo_real_minutos';
+
     /** Clave: minutos antes del inicio para correr demo setup automático. */
     public const KEY_SETUP_MINUTOS_ANTES = 'demo_setup_minutos_antes';
 
@@ -178,6 +196,13 @@ class LeadDemoSettings
 
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
+
+    /**
+     * Valor por defecto: bloqueo real, en minutos desde el inicio (11/9/2026). 180 = 3 horas: el
+     * número que pidió Lucas para cubrir la demora típica de un lead que entra tarde o quiere
+     * volver a entrar, sin tocar la 1 hora que se le comunica.
+     */
+    private const DEFAULT_BLOQUEO_REAL_MINUTOS = 180;
 
     /** Valor por defecto: setup antes del inicio (minutos). */
     private const DEFAULT_SETUP_MINUTOS_ANTES = 15;
@@ -356,6 +381,7 @@ class LeadDemoSettings
     {
         return [
             'duracion_minutos'                    => self::get_duracion_minutos(),
+            'bloqueo_real_minutos'                => self::get_bloqueo_real_minutos(),
             'setup_minutos_antes'                 => self::get_setup_minutos_antes(),
             'setup_timeout_minutos'               => self::get_setup_timeout_minutos(),
             'demo_minimo_minutos_desde_ahora'     => self::get_demo_minimo_minutos_desde_ahora(),
@@ -400,6 +426,13 @@ class LeadDemoSettings
     public static function persist_from_request(array $data): void
     {
         AdminSetting::set(self::KEY_DURACION_MINUTOS,                (string) self::clamp((int) $data['duracion_minutos']));
+
+        // Bloqueo real (11/9/2026): opcional, mismo criterio que el resto de los campos nuevos de
+        // esta clase -- el SPA todavia no lo manda y una version vieja del front no tiene que
+        // borrar el valor guardado.
+        if (isset($data['bloqueo_real_minutos'])) {
+            AdminSetting::set(self::KEY_BLOQUEO_REAL_MINUTOS, (string) self::clamp((int) $data['bloqueo_real_minutos']));
+        }
         AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES,             (string) self::clamp((int) $data['setup_minutos_antes']));
 
         // Timeout del setup colgado (mision 60): opcional, mismo criterio que los campos de abajo.
@@ -567,6 +600,9 @@ class LeadDemoSettings
         if (AdminSetting::get(self::KEY_DURACION_MINUTOS) === null) {
             AdminSetting::set(self::KEY_DURACION_MINUTOS, (string) self::DEFAULT_DURACION_MINUTOS);
         }
+        if (AdminSetting::get(self::KEY_BLOQUEO_REAL_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_BLOQUEO_REAL_MINUTOS, (string) self::DEFAULT_BLOQUEO_REAL_MINUTOS);
+        }
         if (AdminSetting::get(self::KEY_SETUP_MINUTOS_ANTES) === null) {
             AdminSetting::set(self::KEY_SETUP_MINUTOS_ANTES, (string) self::DEFAULT_SETUP_MINUTOS_ANTES);
         }
@@ -667,6 +703,18 @@ class LeadDemoSettings
     public static function get_duracion_minutos(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_DURACION_MINUTOS, (string) self::DEFAULT_DURACION_MINUTOS));
+    }
+
+    /**
+     * Minutos reales, desde el inicio del turno, que la instancia y el link de reingreso siguen
+     * vigentes para el lead (KEY_BLOQUEO_REAL_MINUTOS). No confundir con get_duracion_minutos():
+     * esa es la que se le comunica al lead: esta es el margen real que le da el sistema.
+     *
+     * @return int
+     */
+    public static function get_bloqueo_real_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_BLOQUEO_REAL_MINUTOS, (string) self::DEFAULT_BLOQUEO_REAL_MINUTOS));
     }
 
     /**

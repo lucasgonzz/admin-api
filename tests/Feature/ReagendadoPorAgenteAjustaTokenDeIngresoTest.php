@@ -228,10 +228,12 @@ class ReagendadoPorAgenteAjustaTokenDeIngresoTest extends TestCase
         $this->assertSame('15:00', $lead->demo_start_time);
         $this->assertSame('16:00', $lead->demo_end_time);
         $this->assertSame($token_antes, $lead->demo_ingreso_token, 'El token cambió de valor: el link que ya tiene el lead quedaría inválido.');
+        // 11/9/2026: ya no es fin(16:00)+gracia(10)=16:10 a secas -- el piso de bloqueo_real_minutos
+        // (180, desde el inicio nuevo 15:00) da 18:00, mayor que 16:10, y gana.
         $this->assertSame(
-            '2026-08-20 16:10:00',
+            '2026-08-20 18:00:00',
             $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'),
-            'El vencimiento del token no acompañó al reagendado (fin nuevo + gracia).'
+            'El vencimiento del token no acompañó al reagendado (calcular_expiracion: fin+gracia vs. inicio+bloqueo_real).'
         );
 
         Http::assertSent(function ($request) use ($token_antes) {
@@ -241,7 +243,7 @@ class ReagendadoPorAgenteAjustaTokenDeIngresoTest extends TestCase
             $data = $request->data();
 
             return isset($data['token']) && $data['token'] === $token_antes
-                && isset($data['expira_at']) && $data['expira_at'] === '2026-08-20 16:10:00';
+                && isset($data['expira_at']) && $data['expira_at'] === '2026-08-20 18:00:00';
         });
     }
 
@@ -271,7 +273,9 @@ class ReagendadoPorAgenteAjustaTokenDeIngresoTest extends TestCase
         $this->assertSame('09:00', $lead->demo_start_time);
         $this->assertSame('10:00', $lead->demo_end_time);
         $this->assertSame($token_antes, $lead->demo_ingreso_token);
-        $this->assertSame('2026-08-20 10:10:00', $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'));
+        // 11/9/2026: ya no es fin(10:00)+gracia(10)=10:10 a secas -- el piso de bloqueo_real_minutos
+        // (180, desde el inicio nuevo 09:00) da 12:00, mayor que 10:10, y gana.
+        $this->assertSame('2026-08-20 12:00:00', $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'));
     }
 
     /**

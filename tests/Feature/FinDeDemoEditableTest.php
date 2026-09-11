@@ -285,7 +285,9 @@ class FinDeDemoEditableTest extends TestCase
         $lead->refresh();
         $this->assertSame('12:00', $lead->demo_end_time);
         $this->assertSame($token_antes, $lead->demo_ingreso_token);
-        $this->assertSame('2026-08-20 12:10:00', $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'));
+        // 11/9/2026: ya no es fin(12:00)+gracia(10)=12:10 a secas -- el piso de bloqueo_real_minutos
+        // (180, desde el inicio 10:00) da 13:00, mayor que 12:10, y gana.
+        $this->assertSame('2026-08-20 13:00:00', $lead->demo_ingreso_token_expira_at->format('Y-m-d H:i:s'));
         $this->assertSame('2026-08-20 12:00:00', $lead->demo_fin_check_reprogramado_para->format('Y-m-d H:i:s'));
     }
 

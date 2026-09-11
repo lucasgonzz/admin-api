@@ -39,11 +39,27 @@ class DemoIngresoTokenService
     /**
      * Calcula la fecha/hora de vencimiento del token de ingreso para el lead dado.
      *
-     * El vencimiento sale de demo_date + demo_end_time + gracia_minutos_post. Como
-     * demo_end_time es un string libre (puede venir vacio o con formato raro), el calculo va
+     * El vencimiento es el mayor entre dos pisos (decisión de Lucas, 11/9/2026):
+     *   1. demo_date + demo_end_time + gracia_minutos_post (respeta un fin manual amplio, ej. una
+     *      demo_flexible con rango de todo el día).
+     *   2. demo_date + demo_start_time + bloqueo_real_minutos (180 minutos por defecto).
+     * Antes solo existía el primero: el link dejaba de servir para canjear una sesión nueva a los
+     * ~70 minutos del inicio (duracion + gracia), aunque al lead se le siga comunicando "una hora"
+     * a propósito (ver LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS). Como demo_end_time y
+     * demo_start_time son strings libres (pueden venir vacíos o con formato raro), el cálculo va
      * envuelto en try/catch con un fallback fijo de 4 horas: la expiracion nunca puede quedar
      * en null, porque es el unico control de seguridad real de este link (viaja por WhatsApp y
      * es inherentemente compartible).
+     *
+     * 🔴 Timezone explícito en los dos `Carbon::parse()` (11/9/2026): antes de este método tener dos
+     * llamadores más (`LeadAiService::ajustar_token_de_ingreso_al_turno()` y
+     * `LeadController::update_demo_end_time_json()`, que delegan acá desde el mismo día), ambos
+     * calculaban su propio `fin + gracia` a mano con timezone explícito, justamente para evitar
+     * depender del timezone POR DEFECTO de PHP en el momento de correr — que hoy coincide con
+     * `America/Argentina/Buenos_Aires` porque `config('app.timezone')` lo fija así en cada bootstrap
+     * de Laravel, pero no hay ninguna garantía de que un script CLI que no pasa por ese bootstrap
+     * respete lo mismo. Con dos llamadores más apoyados en este método, ese riesgo ambiental pasa a
+     * afectar tres lugares en vez de uno: se cierra acá, de una vez, en la fuente.
      *
      * @param Lead $lead Lead sobre el que se calcula la expiracion
      *
@@ -51,16 +67,36 @@ class DemoIngresoTokenService
      */
     public function calcular_expiracion(Lead $lead)
     {
-        // Intentamos calcular el vencimiento real a partir de la fecha/hora de fin de la demo.
-        $expira_at = null;
+        $tz = 'America/Argentina/Buenos_Aires';
+
+        $expira_por_fin     = null;
+        $expira_por_bloqueo = null;
+
         try {
             if (!is_null($lead->demo_date) && !empty($lead->demo_end_time)) {
-                $expira_at = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_end_time)
+                $expira_por_fin = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_end_time, $tz)
                     ->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
             }
         } catch (\Throwable $e) {
-            // demo_end_time vino con formato invalido: seguimos al fallback de abajo, sin excepcion visible.
-            $expira_at = null;
+            // demo_end_time vino con formato invalido: seguimos con el otro piso / el fallback de abajo.
+            $expira_por_fin = null;
+        }
+
+        try {
+            if (!is_null($lead->demo_date) && !empty($lead->demo_start_time)) {
+                $expira_por_bloqueo = Carbon::parse($lead->demo_date->format('Y-m-d') . ' ' . $lead->demo_start_time, $tz)
+                    ->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
+            }
+        } catch (\Throwable $e) {
+            // demo_start_time vino con formato invalido: seguimos con el otro piso / el fallback de abajo.
+            $expira_por_bloqueo = null;
+        }
+
+        // El mayor de los dos pisos disponibles.
+        if ($expira_por_fin !== null && $expira_por_bloqueo !== null) {
+            $expira_at = $expira_por_bloqueo->gt($expira_por_fin) ? $expira_por_bloqueo : $expira_por_fin;
+        } else {
+            $expira_at = $expira_por_fin !== null ? $expira_por_fin : $expira_por_bloqueo;
         }
 
         // Fallback obligatorio: nunca dejar el token sin vencimiento.

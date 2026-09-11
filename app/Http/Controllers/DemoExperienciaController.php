@@ -703,12 +703,20 @@ class DemoExperienciaController extends Controller
             $fin = $inicio->copy()->addMinutes(LeadDemoSettings::get_duracion_minutos());
         }
 
-        // Límite de "activo": fin de la demo + minutos de gracia configurados.
-        $fin_con_gracia = $fin->copy()->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+        // Límite de "activo" (11/9/2026, decisión de Lucas): el mayor entre "fin de la demo +
+        // gracia" (lo que ya había) e "inicio + bloqueo_real_minutos" (180 por defecto). Esta
+        // función es, por su propio docblock, el ÚNICO lugar que decide si el lead puede entrar —
+        // sin este piso, un lead que llega tarde o quiere reingresar veía "vencido" acá mismo, antes
+        // de que el vencimiento del token (ya corregido en DemoIngresoTokenService::
+        // calcular_expiracion()) llegara siquiera a consultarse. `duracion_minutos` sigue siendo la
+        // única que se comunica al lead: este piso es puramente interno.
+        $fin_con_gracia  = $fin->copy()->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+        $fin_con_bloqueo = $inicio->copy()->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
+        $limite_activo   = $fin_con_bloqueo->gt($fin_con_gracia) ? $fin_con_bloqueo : $fin_con_gracia;
 
         if ($now->lt($inicio)) {
             $estado = 'antes';
-        } elseif ($now->lte($fin_con_gracia)) {
+        } elseif ($now->lte($limite_activo)) {
             $estado = 'activo';
         } else {
             $estado = 'vencido';

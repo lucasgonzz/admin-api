@@ -433,8 +433,8 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
     }
 
     /**
-     * 10. Turno vencido (pasado el fin + la gracia): el comando no dispara y `puede_ingresar` es
-     *     false.
+     * 10. Turno vencido (pasado el fin + la gracia, y pasado el bloqueo real): el comando no
+     *     dispara y `puede_ingresar` es false.
      *
      * @return void
      */
@@ -443,11 +443,13 @@ class DemoEnCincoMinutosYGateDelVideoTest extends TestCase
         $ahora = $this->momento_base();
         $this->fijar_reloj($ahora);
 
-        // Turno de 60 minutos que arrancó hace 3 horas: vencido con cualquier gracia razonable.
+        // Turno de 60 minutos que arrancó hace 4 horas: vencido con cualquier gracia razonable Y
+        // más allá del bloqueo real por defecto (180 minutos = 3 horas desde el inicio, 11/9/2026)
+        // -- 3 horas exactas caería justo en el límite del bloqueo real y no sirve para este caso.
         $lead = $this->crear_lead(
             Lead::EXPERIENCIA_NUEVA,
-            $ahora->copy()->subHours(3),
-            $ahora->copy()->subHours(3)
+            $ahora->copy()->subHours(4),
+            $ahora->copy()->subHours(4)
         );
 
         $this->artisan('leads:run-demo-setup')->assertExitCode(0);

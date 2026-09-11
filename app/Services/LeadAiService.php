@@ -3686,10 +3686,12 @@ TXT;
      * se revocó a propósito, extenderlo acá lo reviviría; sin token todavía no hay
      * nada que ajustar — lo resuelve calcular_expiracion() cuando se emita).
      *
-     * Timezone explícito en el Carbon::parse(), NO vía
-     * DemoIngresoTokenService::calcular_expiracion() (esa parsea sin timezone
-     * explícito): se replica el cálculo que ya usa update_demo_end_time_json y no
-     * el otro, que es el que arrastra el riesgo.
+     * 🔴 Desde el 11/9/2026 SÍ delega en DemoIngresoTokenService::calcular_expiracion() (antes este
+     * método evitaba a propósito ese servicio porque parseaba sin timezone explícito, y acá se
+     * replicaba el cálculo de update_demo_end_time_json en su lugar). Dejó de ser necesario:
+     * calcular_expiracion() ahora fija el timezone explícito en sus dos Carbon::parse() y además
+     * agrega el piso de bloqueo_real_minutos (ver LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS), que
+     * duplicar acá a mano hubiera sido la tercera copia de la misma fórmula.
      *
      * Si el aviso a la instancia falla, a propósito NO se revierte el reagendado
      * (a diferencia del panel, que sí revierte): acá el agente ya le confirmó al
@@ -3725,13 +3727,15 @@ TXT;
     {
         if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
             try {
-                $gracia_token = LeadDemoSettings::get_gracia_minutos_post();
-                $fin_token_datetime = Carbon::parse(
-                    $demo_date . ' ' . $demo_end,
-                    'America/Argentina/Buenos_Aires'
-                );
-                $expira_nueva_token = $fin_token_datetime->copy()->addMinutes($gracia_token);
+                $gracia_token             = LeadDemoSettings::get_gracia_minutos_post();
                 $token_service_reagendado = new \App\Services\DemoIngresoTokenService();
+
+                /* Vencimiento del turno NUEVO (11/9/2026): delegado a calcular_expiracion(), que ya
+                 * incluye el piso de bloqueo_real_minutos además de fin+gracia. $lead trae
+                 * demo_date/demo_start_time/demo_end_time YA escritos en memoria con el turno nuevo
+                 * (ver el docblock del parámetro) -- recalcularlo acá con solo fin+gracia, como se
+                 * hacía antes, dejaba el token más corto de lo que la política real pide. */
+                $expira_nueva_token = $token_service_reagendado->calcular_expiracion($lead);
 
                 /* Instancia aparte (ver docblock de arriba). demo_id se fija explícito
                  * por si el reagendado cambió también de instancia de demo: sin esto,
@@ -4385,9 +4389,13 @@ TXT;
             . ')'
         );
 
+        /* Minutos reales de bloqueo desde el inicio (11/9/2026): separado de $duracion, que es lo
+         * que se le comunica al lead. Ver el docblock de LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS. */
+        $bloqueo_real = LeadDemoSettings::get_bloqueo_real_minutos();
+
         /* Rangos bloqueados por demo y rangos de closer ocupado para los días iniciales.
          * Ambas estructuras se construyen en un solo recorrido sobre la misma query de leads. */
-        $load_result     = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post, $exclude_lead_id);
+        $load_result     = $this->load_blocked_ranges_by_demo($demos, $date_strings, $duracion, $setup_antes, $gracia_post, $exclude_lead_id, $bloqueo_real);
         $blocked_by_demo = $load_result['blocked_by_demo'];
         $closer_busy     = $load_result['closer_busy'];
 
@@ -4504,7 +4512,7 @@ TXT;
             $dates_map[$extra_key] = $cursor->copy();
 
             /* Cargar bloqueos del día extra y fusionarlos con los ya existentes. */
-            $extra_result = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post, $exclude_lead_id);
+            $extra_result = $this->load_blocked_ranges_by_demo($demos, [$extra_key], $duracion, $setup_antes, $gracia_post, $exclude_lead_id, $bloqueo_real);
             foreach ($demos as $demo) {
                 $blocked_by_demo[$demo->id][$extra_key] = $extra_result['blocked_by_demo'][$demo->id][$extra_key] ?? [];
             }
@@ -4703,13 +4711,14 @@ TXT;
      * @param int                            $duracion      Duración de la demo en minutos.
      * @param int                            $setup_antes   Margen de setup antes del inicio.
      * @param int                            $gracia_post   Margen de gracia después del fin.
+     * @param int                            $bloqueo_real  Minutos reales de bloqueo desde el inicio (11/9/2026).
      *
      * @return array{
      *   blocked_by_demo: array<int, array<string, array<int, array{0: int, 1: int}>>>,
      *   closer_busy: array<string, array<int, array{0: int, 1: int}>>
      * }
      */
-    protected function load_blocked_ranges_by_demo($demos, array $date_strings, int $duracion, int $setup_antes, int $gracia_post, ?int $exclude_lead_id = null): array
+    protected function load_blocked_ranges_by_demo($demos, array $date_strings, int $duracion, int $setup_antes, int $gracia_post, ?int $exclude_lead_id = null, int $bloqueo_real = 0): array
     {
         /* Inicializar estructura vacía por demo y fecha. */
         $blocked_by_demo = [];
@@ -4800,10 +4809,14 @@ TXT;
             }
 
             /* Bloqueo por demo: impide que dos leads usen el mismo entorno técnico en simultáneo.
-             * Sin cambios: usa $end_minutes (que ya respeta demo_end_time real, incluido un rango
-             * amplio manual) — esto ya bloqueaba correctamente el caso de demo_flexible. */
+             * Fin real del bloqueo (11/9/2026): el mayor entre "fin nominal + gracia" (respeta un
+             * demo_end_time manual amplio, ej. demo_flexible) y "inicio + bloqueo real" (180 min por
+             * defecto). Sin este segundo término la instancia quedaba libre para otro lead a los
+             * ~70 minutos aunque el lead original siguiera adentro o quisiera reingresar. */
+            $bloqueo_fin_minutes = max($end_minutes + $gracia_post, $start_minutes + $bloqueo_real);
+
             if (isset($blocked_by_demo[$demo_id][$date_key])) {
-                $blocked_by_demo[$demo_id][$date_key][] = [$start_minutes - $setup_antes, $end_minutes + $gracia_post];
+                $blocked_by_demo[$demo_id][$date_key][] = [$start_minutes - $setup_antes, $bloqueo_fin_minutes];
             }
 
             /*
@@ -9167,10 +9180,20 @@ BLOQUE_DEL_MANUAL;
         if ($tiene_demo_asignada) {
             $fin_asignada = null;
             try {
-                $fin_asignada = Carbon::parse(
+                /* Mismo piso de bloqueo_real_minutos que el gate real de ingreso (11/9/2026,
+                 * DemoExperienciaController::build_turno()): si el link todavía deja entrar, el
+                 * agente no le puede decir al lead que su demo venció y ofrecerle una instancia
+                 * nueva -- quedaría hablando de dos demos distintas para el mismo turno. */
+                $inicio_asignada = Carbon::parse(
+                    $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_start_time),
+                    DemoDirectaService::TZ
+                );
+                $fin_por_gracia  = Carbon::parse(
                     $lead->demo_date->format('Y-m-d') . ' ' . self::time_string_to_hhmm($lead->demo_end_time),
                     DemoDirectaService::TZ
                 )->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+                $fin_por_bloqueo = $inicio_asignada->copy()->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
+                $fin_asignada    = $fin_por_bloqueo->gt($fin_por_gracia) ? $fin_por_bloqueo : $fin_por_gracia;
             } catch (\Exception $e) {
                 $fin_asignada = null;
             }

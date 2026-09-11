@@ -584,6 +584,58 @@ class DemoDirectaTest extends TestCase
     }
 
     /* ------------------------------------------------------------------ */
+    /* 15 — bloqueo real (11/9/2026)                                         */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * (15) 🔴 El pedido de Lucas: con el bloqueo real en 180 minutos, una instancia sigue ocupada
+     *      mucho después de que "duración + gracia" (70 min con la config de este archivo) ya
+     *      pasaron. Con una sola instancia (`crear_demo(1)`) y un ocupante que arrancó a las 09:00 y
+     *      terminó (nominal) a las 10:00, un pedido a las 11:55 —bajo la lógica vieja ya libre desde
+     *      las 10:10— tiene que seguir sin instancia disponible, porque 09:00 + 180 = 12:00.
+     *
+     * @return void
+     */
+    public function test_bloqueo_real_mantiene_la_instancia_ocupada_mas_alla_de_duracion_mas_gracia(): void
+    {
+        AdminSetting::set(LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS, '180');
+        $demo = $this->crear_demo(1);
+        $this->ocupar_instancia($demo, '2026-09-08', '09:00', '10:00');
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $inicio_pedido = Carbon::parse('2026-09-08 11:55:00', DemoDirectaService::TZ);
+        $fin_pedido    = Carbon::parse('2026-09-08 17:55:00', DemoDirectaService::TZ);
+
+        $libre = (new DemoDirectaService())->instancia_libre($lead, $inicio_pedido, $fin_pedido);
+
+        $this->assertNull($libre, 'A las 11:55 la única instancia tiene que seguir ocupada: 09:00 + bloqueo_real(180) = 12:00.');
+    }
+
+    /**
+     * (15-bis) Control positivo del caso anterior: bien pasado el bloqueo real (12:30, con el
+     * margen del setup de por medio: 12:00 + 15 min de setup), la misma instancia vuelve a estar
+     * libre. Sin este control, (15) no distingue "el bloqueo real frena de verdad" de "esta
+     * instancia nunca se libera".
+     *
+     * @return void
+     */
+    public function test_pasado_el_bloqueo_real_la_instancia_vuelve_a_estar_libre(): void
+    {
+        AdminSetting::set(LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS, '180');
+        $demo = $this->crear_demo(1);
+        $this->ocupar_instancia($demo, '2026-09-08', '09:00', '10:00');
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $inicio_pedido = Carbon::parse('2026-09-08 12:30:00', DemoDirectaService::TZ);
+        $fin_pedido    = Carbon::parse('2026-09-08 18:30:00', DemoDirectaService::TZ);
+
+        $libre = (new DemoDirectaService())->instancia_libre($lead, $inicio_pedido, $fin_pedido);
+
+        $this->assertNotNull($libre, 'A las 12:30 (12:00 del bloqueo real + 15 de setup), la instancia tiene que volver a estar libre.');
+        $this->assertSame($demo->id, $libre['demo']->id);
+    }
+
+    /* ------------------------------------------------------------------ */
     /* helpers                                                              */
     /* ------------------------------------------------------------------ */
 

@@ -639,6 +639,35 @@ class AgendaDeDemoPorClaudeTest extends TestCase
     }
 
     /**
+     * 🔴 Bloqueo real (11/9/2026, pedido de Lucas): un lead agendado a las 15:00 (una hora, 15:00 a
+     * 16:00 con el helper de este archivo) sigue bloqueando esa instancia mucho después de
+     * duración + gracia (16:10) — hasta las 18:00 (15:00 + 180 del bloqueo real por defecto), que es
+     * lo nuevo. Antes de este cambio la instancia quedaba libre para OTRO lead a las 16:10, aunque el
+     * primero siguiera adentro o quisiera reingresar. Se consulta con un SEGUNDO lead (no el dueño
+     * del turno) para no confundir esto con la exclusión de auto-colisión que ya prueba el test de
+     * arriba.
+     *
+     * @return void
+     */
+    public function test_bloqueo_real_deja_la_instancia_ocupada_mas_alla_de_duracion_mas_gracia(): void
+    {
+        AdminSetting::set(LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS, '180');
+
+        $this->crear_lead(true, self::FECHA, '15:00');
+        $otro = $this->crear_lead(false);
+
+        $respuesta = $this->withHeaders($this->headers())
+            ->getJson('/api/claude/leads/' . $otro->id . '/availability');
+
+        $respuesta->assertStatus(200);
+        $slots = (array) $respuesta->json('slots.' . $this->demo()->id . '.' . self::FECHA);
+
+        $this->assertNotContains('16:30', $slots, 'Con bloqueo_real=180 la instancia sigue reservada a las 16:30 (bajo duración + gracia ya estaría libre desde las 16:10).');
+        $this->assertNotContains('17:30', $slots, 'Sigue reservada a las 17:30: recién libera a las 18:00 (15:00 + 180).');
+        $this->assertContains('18:00', $slots, 'A las 18:00 (15:00 + bloqueo_real) la instancia ya tiene que volver a estar libre.');
+    }
+
+    /**
      * 🔴 `POST claude/leads/{id}/calendar-event` no recrea el evento del closer sin confirmar,
      * cuando el lead YA tiene uno.
      *

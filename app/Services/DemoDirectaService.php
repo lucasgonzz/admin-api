@@ -293,9 +293,10 @@ class DemoDirectaService
      */
     private function ocupacion_por_demo(Lead $lead, Carbon $inicio, Carbon $fin): array
     {
-        $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
-        $gracia      = LeadDemoSettings::get_gracia_minutos_post();
-        $duracion    = LeadDemoSettings::get_duracion_minutos();
+        $setup_antes  = LeadDemoSettings::get_setup_minutos_antes();
+        $gracia       = LeadDemoSettings::get_gracia_minutos_post();
+        $duracion     = LeadDemoSettings::get_duracion_minutos();
+        $bloqueo_real = LeadDemoSettings::get_bloqueo_real_minutos();
 
         $pedida_desde = $inicio->copy()->subMinutes($setup_antes);
         $pedida_hasta = $fin->copy()->addMinutes($gracia);
@@ -309,7 +310,7 @@ class DemoDirectaService
             ->where('id', '!=', $lead->id)
             ->get(['id', 'demo_id', 'demo_date', 'demo_start_time', 'demo_end_time']);
 
-        return $this->fines_solapados($ocupantes, $inicio->format('Y-m-d'), $pedida_desde, $pedida_hasta, $setup_antes, $gracia, $duracion);
+        return $this->fines_solapados($ocupantes, $inicio->format('Y-m-d'), $pedida_desde, $pedida_hasta, $setup_antes, $gracia, $duracion, $bloqueo_real);
     }
 
     /**
@@ -322,10 +323,12 @@ class DemoDirectaService
      * @param int        $setup_antes
      * @param int        $gracia
      * @param int        $duracion
+     * @param int        $bloqueo_real Minutos reales de bloqueo desde el inicio (11/9/2026); ver
+     *                                 el docblock de LeadDemoSettings::KEY_BLOQUEO_REAL_MINUTOS.
      *
      * @return array<int, array<int, array{desde: Carbon, hasta: Carbon}>>
      */
-    private function fines_solapados(Collection $ocupantes, string $fecha, Carbon $pedida_desde, Carbon $pedida_hasta, int $setup_antes, int $gracia, int $duracion): array
+    private function fines_solapados(Collection $ocupantes, string $fecha, Carbon $pedida_desde, Carbon $pedida_hasta, int $setup_antes, int $gracia, int $duracion, int $bloqueo_real = 0): array
     {
         $por_demo = [];
 
@@ -340,7 +343,14 @@ class DemoDirectaService
             }
 
             $ocupa_desde = $ocupa_inicio->copy()->subMinutes($setup_antes);
-            $ocupa_hasta = $ocupa_fin->copy()->addMinutes($gracia);
+
+            /* Fin real de la ocupación (11/9/2026): el mayor entre "fin nominal + gracia" y "inicio
+             * + bloqueo real". Mismo criterio que LeadAiService::load_blocked_ranges_by_demo() --
+             * sin este piso, la instancia de una demo directa quedaba libre para otro lead a los
+             * ~70 minutos aunque el lead original siguiera adentro o quisiera reingresar. */
+            $ocupa_hasta_por_gracia  = $ocupa_fin->copy()->addMinutes($gracia);
+            $ocupa_hasta_por_bloqueo = $ocupa_inicio->copy()->addMinutes($bloqueo_real);
+            $ocupa_hasta = $ocupa_hasta_por_bloqueo->gt($ocupa_hasta_por_gracia) ? $ocupa_hasta_por_bloqueo : $ocupa_hasta_por_gracia;
 
             /* Solapamiento de intervalos cerrados: se tocan si ninguno termina antes de que
              * empiece el otro. */

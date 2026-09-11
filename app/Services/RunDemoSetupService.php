@@ -365,14 +365,18 @@ class RunDemoSetupService
 
         /* Corte superior de la dinámica nueva: el turno vencido, no la hora de inicio. El fin sale
          * de demo_end_time y, si está vacío, de la duración configurada — mismo criterio que
-         * DemoExperienciaController::build_turno(). */
+         * DemoExperienciaController::build_turno(), incluido su piso de bloqueo_real_minutos
+         * (11/9/2026): si el lead todavía puede entrar según ESE gate, acá también tiene que valer
+         * la pena intentar el setup, no rendirse a los 70 minutos de un turno que sigue vivo. */
         $fin = $this->parse_turno_datetime($lead->demo_date, (string) $lead->demo_end_time);
         if ($fin === null) {
             $fin = $inicio->copy()->addMinutes(LeadDemoSettings::get_duracion_minutos());
         }
-        $fin_con_gracia = $fin->copy()->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+        $fin_con_gracia  = $fin->copy()->addMinutes(LeadDemoSettings::get_gracia_minutos_post());
+        $fin_con_bloqueo = $inicio->copy()->addMinutes(LeadDemoSettings::get_bloqueo_real_minutos());
+        $limite_vigente  = $fin_con_bloqueo->gt($fin_con_gracia) ? $fin_con_bloqueo : $fin_con_gracia;
 
-        if ($now->gt($fin_con_gracia)) {
+        if ($now->gt($limite_vigente)) {
             return ['disparar' => false, 'motivo' => 'turno_vencido', 'inicio' => $inicio];
         }
 
