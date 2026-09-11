@@ -6297,12 +6297,17 @@ TXT;
                         );
                     }
 
-                    /* Generación sin retención: texto fijo, sin hora inventada, y el lead a una persona. */
+                    /* Generación sin retención: texto fijo, sin hora inventada, y el lead a una persona.
+                     * El paquete se sanea acá mismo (sin agendar_demo, estado = el que ya tenía) para
+                     * que el resumen de acciones de la burbuja cuente lo que pasó de verdad; no se usa
+                     * $agendar_descartado_por_slot_invalido porque ese camino fuerza
+                     * `solicita_disponibilidad`, que en esta dinámica no existe. */
                     $mensaje = $proxima_liberacion !== null
                         ? 'Justo en este momento se me ocupó la demo. A partir de las ' . $proxima_liberacion->format('H:i')
                             . ' te la puedo tener lista: avisame por acá y en diez minutos entrás.'
                         : 'Justo en este momento se me ocupó la demo. En cuanto se libere te aviso por acá y la arrancamos.';
-                    $agendar_descartado_por_slot_invalido = true;
+                    unset($parsed['agendar_demo']);
+                    $parsed['estado_sugerido']               = $previous_status;
                     $parsed['requiere_intervencion_humana'] = true;
                     $parsed['motivo_intervencion']           = 'El lead aceptó la demo directa pero no había ninguna instancia libre al aplicar la acción. Revisar y asignarle una a mano.';
 
