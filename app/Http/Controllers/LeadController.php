@@ -1500,12 +1500,16 @@ class LeadController extends Controller
         $parciales = 0;
         $lista     = [];
 
-        /* 🔴 UNA sola consulta para TODOS los hitos, y va acá afuera del `foreach` a propósito.
-         * Este endpoint se poléa cada diez segundos por cada lead abierto (540 veces por lead y
-         * por sesión, es el mismo motivo por el que arriba se piden tres columnas en vez de un
-         * `select *`): resolver el detalle adentro del bucle serían ~20 queries cada diez
-         * segundos por lead en vez de una. */
-        $detalle_por_clip = $this->detalle_de_recorrido_por_clip($lead->id, $hitos);
+        /* 🔴 UNA sola consulta de eventos para TODO el endpoint, y va acá afuera del `foreach` a
+         * propósito. Este endpoint se poléa cada diez segundos por cada lead abierto (540 veces
+         * por lead y por sesión, es el mismo motivo por el que arriba se piden tres columnas en
+         * vez de un `select *`): resolver el detalle adentro del bucle serían ~20 queries cada
+         * diez segundos por lead en vez de una. Desde la misión experiencia-landing (11/9/2026)
+         * esa misma consulta trae también los eventos de la PÁGINA (abierta, final, CTA): sumar
+         * una segunda ida a la base por ellos era duplicar el costo de la única consulta que este
+         * endpoint paga de más. */
+        $eventos          = $this->eventos_del_recorrido($lead->id, $hitos);
+        $detalle_por_clip = $this->detalle_de_recorrido_por_clip($eventos, $hitos);
 
         foreach ($hitos as $hito) {
             if ($hito->estado === LeadDemoHito::ESTADO_COMPLETO) {
@@ -1570,7 +1574,131 @@ class LeadController extends Controller
             ],
 
             'hitos' => $lista,
+
+            /* Lo que el lead hizo con su página ANTES de tener demo (misión experiencia-landing,
+             * 11/9/2026): la abrió, llegó al final, pidió la demo desde el CTA. Campo AGREGADO y
+             * opcional, mismo criterio que los cinco de detalle: null cuando no hay ningún evento
+             * de página, y el panel viejo —que puede seguir cacheado en el navegador de Lucas— no
+             * lo lee y sigue dibujando igual. Sale de la misma consulta de eventos de arriba. */
+            'pagina' => $this->pagina_de_experiencia_del_lead($eventos),
         ], 200);
+    }
+
+    /**
+     * Los tres eventos que la página de experiencia reporta cuando un lead SIN turno la recorre
+     * como landing (misión experiencia-landing, 11/9/2026). Son las constantes del controller
+     * público que los recibe; se leen de ahí para que la lista no exista dos veces.
+     *
+     * @var array<int, string>
+     */
+    const EVENTOS_PAGINA_EXPERIENCIA = DemoExperienciaController::EVENTOS_PAGINA;
+
+    /** Zona horaria en la que el panel muestra las fechas de la página (la del resto del ciclo de demo). */
+    const TZ_PAGINA_EXPERIENCIA = 'America/Argentina/Buenos_Aires';
+
+    /**
+     * Los eventos crudos que el recorrido necesita, en UNA sola consulta: los de detalle de cada
+     * clip (sólo si el lead tiene hitos de tutorial con clip, ver
+     * {@see self::hito_lleva_detalle_de_recorrido()}) y los de la página de experiencia (siempre).
+     *
+     * 🔴 Los de la página van SIEMPRE, también para el lead sin plan, y eso cambia el costo que
+     * este endpoint tenía hasta la misión experiencia-landing (11/9/2026): antes un lead sin hitos
+     * no consultaba `demo_eventos_recibidos`. Ahora paga esta consulta, y no es un descuido: el
+     * lead sin plan es JUSTAMENTE el que tiene la página como landing (sin demo asignada), así que
+     * es el que tiene algo que mostrar acá. Es una consulta chica sobre el índice de `lead_id`,
+     * acotada por nombre. Lo que NO cambia es que sea una sola: el lead con plan sigue haciendo
+     * una única consulta de eventos, que ahora trae las dos cosas.
+     *
+     * Cuatro columnas y no `select *`: `datos` ya es la columna cara de esta tabla (json de hasta
+     * 4 KB por fila, y un lead que miró toda la demo puede tener un par de cientos de filas de
+     * `clip.progreso`), y `uuid` y los timestamps de la fila no se usan acá. `ocurrido_at` entra
+     * por la página (cuándo la abrió); para el detalle de los clips no se mira.
+     *
+     * @param int                                                     $lead_id
+     * @param \Illuminate\Support\Collection<int, LeadDemoHito>|array $hitos   Hitos ya leídos.
+     *
+     * @return \Illuminate\Support\Collection<int, DemoEventoRecibido>
+     */
+    protected function eventos_del_recorrido($lead_id, $hitos)
+    {
+        $nombres = self::EVENTOS_PAGINA_EXPERIENCIA;
+
+        foreach ($hitos as $hito) {
+            if ($this->hito_lleva_detalle_de_recorrido($hito)) {
+                $nombres = array_merge(self::EVENTOS_DETALLE_RECORRIDO, $nombres);
+
+                break;
+            }
+        }
+
+        return DemoEventoRecibido::select('nombre', 'clip_id', 'ocurrido_at', 'datos')
+            ->where('lead_id', $lead_id)
+            ->whereIn('nombre', $nombres)
+            ->get();
+    }
+
+    /**
+     * La fila "Página de experiencia" del recorrido: cuándo la abrió por primera vez, cuándo llegó
+     * al final, cuándo pidió la demo desde el CTA, y cuántas veces la abrió.
+     *
+     * Se agrega en PHP sobre los eventos ya leídos por {@see self::eventos_del_recorrido()}: un
+     * mínimo y un conteo sobre un puñado de filas es gratis comparado con otra ida a la base.
+     *
+     * Las fechas se devuelven `Y-m-d H:i:s` en hora de Argentina, como el resto de este endpoint.
+     * "Primer" `ocurrido_at` y no el último: lo que se quiere mostrar es cuándo pasó cada cosa por
+     * primera vez; las reaperturas se cuentan en `aperturas`.
+     *
+     * @param \Illuminate\Support\Collection<int, DemoEventoRecibido> $eventos Salida de eventos_del_recorrido().
+     *
+     * @return array{abierta_at: string|null, final_at: string|null, cta_at: string|null, aperturas: int}|null
+     *         Null cuando el lead no tiene ningún evento de página.
+     */
+    protected function pagina_de_experiencia_del_lead($eventos)
+    {
+        $primera   = [];
+        $aperturas = 0;
+
+        foreach ($eventos as $evento) {
+            $nombre = (string) $evento->nombre;
+            if (! in_array($nombre, self::EVENTOS_PAGINA_EXPERIENCIA, true)) {
+                continue;
+            }
+
+            if ($nombre === DemoExperienciaController::EVENTO_PAGINA_ABIERTA) {
+                $aperturas++;
+            }
+
+            /* El cast `datetime` del modelo ya devuelve un Carbon; una fila sin fecha (no debería
+             * existir: el endpoint que las escribe pone el reloj del servidor si falta) no cuenta. */
+            if ($evento->ocurrido_at === null) {
+                continue;
+            }
+
+            if (! isset($primera[$nombre]) || $evento->ocurrido_at->lt($primera[$nombre])) {
+                $primera[$nombre] = $evento->ocurrido_at;
+            }
+        }
+
+        if ($aperturas === 0 && empty($primera)) {
+            return null;
+        }
+
+        $formateada = function (string $nombre) use ($primera) {
+            if (! isset($primera[$nombre])) {
+                return null;
+            }
+
+            return $primera[$nombre]->copy()
+                ->setTimezone(self::TZ_PAGINA_EXPERIENCIA)
+                ->format('Y-m-d H:i:s');
+        };
+
+        return [
+            'abierta_at' => $formateada(DemoExperienciaController::EVENTO_PAGINA_ABIERTA),
+            'final_at'   => $formateada(DemoExperienciaController::EVENTO_PAGINA_FINAL),
+            'cta_at'     => $formateada(DemoExperienciaController::EVENTO_CTA_TOCADO),
+            'aperturas'  => $aperturas,
+        ];
     }
 
     /**
@@ -1653,8 +1781,9 @@ class LeadController extends Controller
      * Agrupa por clip los eventos de UX del recorrido de un lead: cuánto vio de cada video y
      * cuánto hizo del tour de cada clip.
      *
-     * 🔴 UNA sola consulta, con `whereIn` sobre los tres nombres y el índice de `lead_id` que ya
-     * existe. Ver el comentario del llamador: acá el costo se multiplica por 540 por lead.
+     * 🔴 Sin consulta propia: trabaja sobre los eventos que ya trajo {@see self::eventos_del_recorrido()}
+     * en la única ida a la base del endpoint. Ver el comentario del llamador: acá el costo se
+     * multiplica por 540 por lead.
      *
      * El agrupado se hace en PHP y no en SQL porque los tres valores viven adentro del json de
      * `datos`, que no se agrega de forma portable — y porque el máximo por clip sobre un puñado de
@@ -1665,12 +1794,12 @@ class LeadController extends Controller
      * valor se lee como si fuera hostil y NUNCA se divide sin haber comprobado antes que el
      * divisor es un entero positivo.
      *
-     * @param int                                                          $lead_id
-     * @param \Illuminate\Support\Collection<int, LeadDemoHito>|array      $hitos   Hitos ya leídos.
+     * @param \Illuminate\Support\Collection<int, DemoEventoRecibido> $eventos Salida de eventos_del_recorrido().
+     * @param \Illuminate\Support\Collection<int, LeadDemoHito>|array $hitos   Hitos ya leídos.
      *
      * @return array<string, array<string, mixed>> Detalle indexado por `clip_id`.
      */
-    protected function detalle_de_recorrido_por_clip($lead_id, $hitos)
+    protected function detalle_de_recorrido_por_clip($eventos, $hitos)
     {
         $hay_clips = false;
 
@@ -1683,24 +1812,20 @@ class LeadController extends Controller
         }
 
         /* Un lead sin plan —el estado normal de casi todos, y el que más se abre desde el panel—
-         * no tiene ningún hito de tutorial, así que ni se pregunta: el endpoint sigue haciendo las
-         * mismas dos queries que hacía antes de esta misión. */
+         * no tiene ningún hito de tutorial, así que no hay nada que agrupar (y la consulta de
+         * eventos ni pidió los nombres de detalle para él). */
         if (! $hay_clips) {
             return [];
         }
 
-        /* Tres columnas y no `select *`: `datos` ya es la columna cara de esta tabla (json de
-         * hasta 4 KB por fila, y un lead que miró toda la demo puede tener un par de cientos de
-         * filas de `clip.progreso`), y `uuid`, `ocurrido_at` y los timestamps no se usan acá. */
-        $eventos = DemoEventoRecibido::select('nombre', 'clip_id', 'datos')
-            ->where('lead_id', $lead_id)
-            ->whereIn('nombre', self::EVENTOS_DETALLE_RECORRIDO)
-            ->whereNotNull('clip_id')
-            ->get();
-
         $detalle = [];
 
         foreach ($eventos as $evento) {
+            /* Los eventos de la página (sin clip) viajan en la misma colección: acá no cuentan. */
+            if (! in_array((string) $evento->nombre, self::EVENTOS_DETALLE_RECORRIDO, true)) {
+                continue;
+            }
+
             $clip = (string) $evento->clip_id;
 
             if ($clip === '') {

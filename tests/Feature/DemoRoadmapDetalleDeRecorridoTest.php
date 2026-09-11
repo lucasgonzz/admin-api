@@ -551,11 +551,18 @@ class DemoRoadmapDetalleDeRecorridoTest extends TestCase
     }
 
     /**
-     * Y con un lead SIN plan no se consultan los eventos siquiera: es el estado normal de casi
-     * todos los leads y el que más se abre desde el panel, así que ahí el endpoint tiene que
-     * seguir costando exactamente lo mismo que antes de esta misión.
+     * Y con un lead SIN plan se paga UNA sola consulta de eventos, y es la de su página.
+     *
+     * Hasta la misión experiencia-landing (11/9/2026) este test exigía CERO consultas a
+     * `demo_eventos_recibidos` para un lead sin hitos: era el estado normal de casi todos los leads
+     * y el que más se abre desde el panel, así que el endpoint tenía que costar lo mismo que antes
+     * de la misión 49. Ese contrato cambió a propósito, no por descuido: el lead sin plan es
+     * justamente el que tiene su página como LANDING (sin demo asignada), y lo que hizo con ella
+     * —la abrió, llegó al final, pidió la demo desde el botón— sale de esa misma tabla. Lo que se
+     * sigue exigiendo es que sea UNA consulta, acotada a los tres nombres de la página, y no una
+     * por hito ni una por evento. Decisión de la raíz del pool en esa misión; el informe la declara.
      */
-    public function test_un_lead_sin_hitos_no_paga_la_consulta_de_eventos(): void
+    public function test_un_lead_sin_hitos_paga_solo_la_consulta_de_su_pagina(): void
     {
         $this->autenticar();
 
@@ -577,6 +584,18 @@ class DemoRoadmapDetalleDeRecorridoTest extends TestCase
 
         $this->pedir_roadmap($lead);
 
-        $this->assertSame([], $consultas, 'Un lead sin hitos no tiene por qué consultar eventos.');
+        $this->assertCount(
+            1,
+            $consultas,
+            'Un lead sin hitos paga exactamente UNA consulta de eventos (la de su página). Salió: '
+                . implode(' | ', $consultas)
+        );
+
+        /* Y esa consulta es la de la página: acotada por los TRES nombres de evento de la landing y
+         * nada más. Los nombres viajan como bindings (`?`), así que se cuentan los placeholders:
+         * uno del `lead_id` más tres del `whereIn`. Con los del detalle de clips sumados (que sin
+         * hitos no corresponden) serían siete. */
+        $this->assertStringContainsString('`nombre` in (', $consultas[0]);
+        $this->assertSame(4, substr_count($consultas[0], '?'), 'La consulta de página lleva lead_id + 3 nombres. SQL: ' . $consultas[0]);
     }
 }
