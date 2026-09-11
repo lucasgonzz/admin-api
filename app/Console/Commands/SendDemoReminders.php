@@ -279,10 +279,15 @@ class SendDemoReminders extends Command
             return false;
         }
 
+        /* Sin aviso a los admins por cada fallo (cuarto parámetro): este envío se REINTENTA en cada
+         * tick mientras el lead siga elegible, así que un Kapso caído durante una hora mandaría doce
+         * avisos por lead. Queda el warning de abajo; el aviso centralizado lo siguen dando los
+         * envíos que no se reintentan. */
         $whatsapp_message_id = $this->whatsapp_send_service->send_text(
             $phone,
             $content,
-            "Recordatorio demo directa - Lead #{$lead->id} ({$lead->contact_name})"
+            "Recordatorio demo directa - Lead #{$lead->id} ({$lead->contact_name})",
+            true
         );
 
         if ($whatsapp_message_id === null) {
