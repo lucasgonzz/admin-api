@@ -109,6 +109,25 @@ class LeadDemoSettingsController extends Controller
                de configuración de demos actual tiraría 422 al guardar en el intervalo entre el
                deploy de este backend y el del front. */
             'experiencia_tema'                => 'sometimes|nullable|string|in:'.implode(',', LeadDemoSettings::VALID_TEMAS),
+            /* CTA de la página de experiencia (misión experiencia-landing, 11/9/2026). "sometimes"
+               por el mismo motivo que todas las de arriba: el SPA se despliega después que este
+               backend. El número se valida SOBRE LOS DÍGITOS que quedan después de normalizar
+               (sacar `+`, espacios, guiones), no sobre el string crudo: el operador tipea
+               "+54 3444 54-4199" y lo que tiene que dar 422 es que no queden entre 8 y 15 dígitos,
+               no que haya escrito un espacio. Por eso es un closure y no un `regex`. */
+            'whatsapp_numero_leads'           => [
+                'sometimes',
+                'string',
+                'max:40',
+                function ($attribute, $value, $fail) {
+                    $digitos = LeadDemoSettings::normalizar_digitos_whatsapp((string) $value);
+                    if (! LeadDemoSettings::son_digitos_whatsapp_validos($digitos)) {
+                        $fail('El número de WhatsApp tiene que tener entre '.LeadDemoSettings::MIN_DIGITOS_WHATSAPP.' y '.LeadDemoSettings::MAX_DIGITOS_WHATSAPP.' dígitos, con código de país.');
+                    }
+                },
+            ],
+            'cta_whatsapp_texto'              => 'sometimes|string|min:1|max:'.LeadDemoSettings::MAX_CHARS_CTA_TEXTO,
+            'pagina_seguimiento_minutos'      => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
         ]);
 
         /* Persistir todos los valores validados. */

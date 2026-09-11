@@ -4,16 +4,19 @@ namespace App\Http\Controllers;
 
 use App\Helpers\AppTime;
 use App\Jobs\RunDemoSetupJob;
+use App\Models\DemoEventoRecibido;
 use App\Models\DemoMedia;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\DemoHitosService;
 use App\Services\DemoIngresoTokenService;
 use App\Services\DemoPlanResolver;
+use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
 use App\Services\RunDemoSetupService;
 use Carbon\Carbon;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,7 +31,9 @@ use Illuminate\Support\Facades\Log;
  * pidió Lucas—, y siguen aceptando el `uuid` de los links ya enviados. La resolución vive en
  * `Lead::resolver_por_clave_de_experiencia()`, con el porqué de no usar el id numérico (es
  * enumerable). Uno arma el payload completo que consume la página, otro recibe las nueve
- * respuestas del formulario de configuración.
+ * respuestas del formulario de configuración. Desde la misión experiencia-landing (11/9/2026) hay
+ * un quinto, `POST {uuid}/evento`, para lo que la página reporta cuando un lead SIN turno la
+ * recorre como landing (la abrió, llegó al final, tocó el CTA que lo devuelve a WhatsApp).
  *
  * Ninguno de los dos devuelve datos sensibles del lead (email, teléfono, notas, campos del
  * pipeline, `demo_ingreso_token`): son endpoints públicos, solo se expone lo que la página
@@ -36,6 +41,33 @@ use Illuminate\Support\Facades\Log;
  */
 class DemoExperienciaController extends Controller
 {
+    /**
+     * Texto del botón del CTA de la página como landing (misión experiencia-landing, 11/9/2026).
+     * La SPA lo muestra tal cual (`cta.texto_boton`): el copy vive acá para poder cambiarlo sin
+     * desplegar el front.
+     */
+    public const CTA_TEXTO_BOTON = 'Quiero probarlo';
+
+    /**
+     * Eventos que la PÁGINA (no la instancia de demo) reporta cuando el lead la recorre sin turno
+     * (misión experiencia-landing, 11/9/2026). Son los tres nombres del contrato con admin-spa;
+     * cualquier otro nombre en `POST {uuid}/evento` es 422.
+     *
+     *  - `pagina_abierta_sin_turno`: cargó la página siendo un lead sin demo asignada.
+     *  - `pagina_final_sin_turno`: llegó al bloque final (el del CTA).
+     *  - `cta_demo_tocado`: tocó el botón que lo devuelve a WhatsApp para pedir la demo.
+     */
+    public const EVENTO_PAGINA_ABIERTA = 'pagina_abierta_sin_turno';
+    public const EVENTO_PAGINA_FINAL   = 'pagina_final_sin_turno';
+    public const EVENTO_CTA_TOCADO     = 'cta_demo_tocado';
+
+    /** Los tres eventos de página, en la lista que valida el endpoint. */
+    public const EVENTOS_PAGINA = [
+        self::EVENTO_PAGINA_ABIERTA,
+        self::EVENTO_PAGINA_FINAL,
+        self::EVENTO_CTA_TOCADO,
+    ];
+
     /**
      * GET /api/demo-experiencia/{uuid}
      *
@@ -215,6 +247,140 @@ class DemoExperienciaController extends Controller
         }
 
         return response()->json($this->build_payload($lead), 200);
+    }
+
+    /**
+     * POST /api/demo-experiencia/{uuid}/evento
+     *
+     * Recibe los eventos que la PÁGINA emite cuando un lead sin turno la recorre como landing
+     * (misión experiencia-landing, 11/9/2026): la abrió, llegó al final, tocó el CTA. Público como
+     * los otros cuatro endpoints de este controller y con la misma resolución por clave.
+     *
+     * No reusa `POST /demo-eventos` a propósito: ese canal autentica con `X-Demo-Eventos-Key`, que
+     * es el token de la INSTANCIA de demo y sólo existe cuando hay demo asignada; la página sin
+     * turno no tiene ese token ni tiene por qué tenerlo. Sí reusa la tabla
+     * (`demo_eventos_recibidos`, con `clip_id` null) para que el recorrido del lead —adentro y
+     * afuera de la demo— se lea de un solo lugar: de ahí salen la fila "Página de experiencia" del
+     * panel (`LeadController::demo_roadmap_json()`), el estado que ve el agente
+     * (`LeadAiService::build_demo_directa_context()`) y el seguimiento (`CheckPaginaSinDemo`).
+     *
+     * Idempotente por `lead_id + uuid` (el índice único de la tabla): la página dispara y olvida, y
+     * un reintento del navegador no puede duplicar la fila ni el mensaje del hilo.
+     *
+     * @param Request $request Body `{ uuid, nombre, ocurrido_at?, datos? }`.
+     * @param string  $uuid    Clave pública del lead: dígitos de su teléfono o su `uuid`.
+     *
+     * @return JsonResponse 200 `{ok: true}` (con `ignorado` o `duplicado` cuando corresponde),
+     *                      404 si la clave no resuelve, 422 si el nombre no está en la lista.
+     */
+    public function store_evento_json(Request $request, string $uuid): JsonResponse
+    {
+        // Misma resolución (uuid o teléfono) que el resto de los endpoints de este controller.
+        $lead = Lead::resolver_por_clave_de_experiencia($uuid);
+        if (! $lead) {
+            return response()->json(['message' => 'No encontrado.'], 404);
+        }
+
+        /* Lista cerrada de nombres: el contrato con la SPA son estos tres y nada más. Un nombre
+         * desconocido es 422 y no "se guarda igual" como en el canal de la instancia, porque acá
+         * no hay hitos que alimentar con un crudo que hoy no sabemos leer: sólo hay tres lecturas
+         * concretas, y una fila con otro nombre no la vería ninguna. Las reglas de `ocurrido_at` y
+         * `datos` son las mismas que en DemoEventosController, por los mismos motivos (una fecha
+         * ilegible o fuera del rango de TIMESTAMP reventaba el create() con un 500; `max:50` cuenta
+         * elementos y no bytes, el tope real va abajo). */
+        $validated = $request->validate([
+            'uuid'        => 'required|string|min:1|max:64',
+            'nombre'      => 'required|string|in:' . implode(',', self::EVENTOS_PAGINA),
+            'ocurrido_at' => 'nullable|date|after:2020-01-01|before:2038-01-01',
+            'datos'       => 'nullable|array|max:50',
+        ]);
+
+        if (isset($validated['datos'])
+            && strlen((string) json_encode($validated['datos'])) > DemoEventosController::MAX_BYTES_DATOS) {
+            return response()->json([
+                'message' => 'El campo datos supera el tamaño máximo permitido.',
+                'errors'  => ['datos' => ['Máximo ' . DemoEventosController::MAX_BYTES_DATOS . ' bytes.']],
+            ], 422);
+        }
+
+        /* Con turno, estos eventos no significan nada: la página con demo asignada no los emite, y
+         * si llegan igual (una pestaña vieja que quedó abierta desde antes de que se le asignara la
+         * demo) no ensucian el recorrido ni el hilo. 200 y no 4xx: la página dispara y olvida, y
+         * un error acá sólo generaría ruido en la consola del lead. */
+        if ($lead->demo_date !== null) {
+            return response()->json(['ok' => true, 'ignorado' => true], 200);
+        }
+
+        $nombre = (string) $validated['nombre'];
+
+        /* Idempotencia: mismo `exists()` + catch del unique que DemoEventosController, y por los
+         * mismos motivos (el exists() resuelve el caso normal; el catch, la carrera entre dos
+         * requests que leyeron las dos que no existía). Un duplicado responde 200 igual que el
+         * original: para la página es lo mismo. */
+        $ya_recibido = DemoEventoRecibido::where('lead_id', $lead->id)
+            ->where('uuid', $validated['uuid'])
+            ->exists();
+        if ($ya_recibido) {
+            return response()->json(['ok' => true, 'duplicado' => true], 200);
+        }
+
+        /* Si es la primera apertura se decide ANTES de insertar, y sobre el nombre: el mensaje de
+         * sistema "abrió su página" va una sola vez por lead aunque la abra diez veces (las
+         * aperturas se cuentan igual, en `demo_eventos_recibidos`, y el panel las muestra). Sin
+         * lock, igual que el resto de este controller: dos primeras aperturas simultáneas (dos
+         * pestañas a la vez) podrían escribir dos mensajes en el hilo, que es ruido y no un dato
+         * corrupto — el mismo criterio que DemoEventosController::avanzar_pipeline_por_ingreso_real(). */
+        $es_primera_apertura = $nombre === self::EVENTO_PAGINA_ABIERTA
+            && ! DemoEventoRecibido::where('lead_id', $lead->id)->where('nombre', self::EVENTO_PAGINA_ABIERTA)->exists();
+
+        try {
+            DemoEventoRecibido::create([
+                'lead_id'     => $lead->id,
+                'uuid'        => $validated['uuid'],
+                'nombre'      => $nombre,
+                'clip_id'     => null,
+                // Sin `ocurrido_at` del navegador vale el reloj del servidor: para estos eventos el
+                // momento que importa es cuándo nos enteramos, y un reloj de teléfono corrido no
+                // tiene que poder dejar "abierta a las 03:00" en el panel.
+                'ocurrido_at' => isset($validated['ocurrido_at']) ? $validated['ocurrido_at'] : Carbon::now(),
+                'datos'       => isset($validated['datos']) ? $validated['datos'] : null,
+            ]);
+        } catch (QueryException $e) {
+            // 23000 es la clase SQLSTATE de violación de integridad (incluye el 1062 de MySQL).
+            // Cualquier otro error de base sí tiene que subir.
+            if ((string) $e->getCode() !== '23000') {
+                throw $e;
+            }
+
+            return response()->json(['ok' => true, 'duplicado' => true], 200);
+        }
+
+        /* Constancia en el hilo del lead, con el mismo patrón que "completó el formulario" (más
+         * arriba, en store_formulario_json()): evento de estado, sin admin, no cuenta como
+         * actividad del hilo. Sólo dos de los tres eventos dejan constancia —la primera apertura y
+         * cada toque del CTA—: "llegó al final" es dato para el panel y para el agente, no algo que
+         * el setter tenga que ver pasar en la conversación. */
+        $texto_del_hilo = null;
+        if ($es_primera_apertura) {
+            $texto_del_hilo = 'El lead abrió su página de experiencia';
+        } elseif ($nombre === self::EVENTO_CTA_TOCADO) {
+            $texto_del_hilo = 'El lead pidió la demo desde su página (tocó el botón de WhatsApp)';
+        }
+
+        if ($texto_del_hilo !== null) {
+            LeadMessage::create([
+                'lead_id'         => $lead->id,
+                'sender'          => 'sistema',
+                'content'         => $texto_del_hilo,
+                'status'          => 'enviado',
+                'is_followup'     => false,
+                'is_status_event' => true,
+            ]);
+
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+        }
+
+        return response()->json(['ok' => true], 200);
     }
 
     /**
@@ -423,6 +589,19 @@ class DemoExperienciaController extends Controller
             // página inmersiva es pública, el lead no está autenticado, y este payload ya es el
             // único canal por el que le llega la configuración.
             'tema' => LeadDemoSettings::get_experiencia_tema(),
+
+            // CTA "Quiero probarlo" de la página como landing (misión experiencia-landing,
+            // 11/9/2026): el botón vuelve a la conversación de WhatsApp con Martín con el texto
+            // prearmado —NO agenda solo, decisión de Lucas—. Va SIEMPRE en el payload, con o sin
+            // turno: es la página la que decide cuándo dibujarlo (sólo sin turno), y un bloque que
+            // aparece y desaparece según el estado obligaría al front a distinguir "API vieja" de
+            // "lead con turno". `whatsapp_url` null = no hay número configurado = no se dibuja el
+            // botón. El texto del botón viaja desde acá para que un cambio de copy no requiera
+            // tocar el SPA.
+            'cta' => [
+                'whatsapp_url' => LeadDemoSettings::build_cta_whatsapp_url(),
+                'texto_boton'  => self::CTA_TEXTO_BOTON,
+            ],
 
             // 🔴 Mismo interruptor que usa AppTime para el reloj virtual del admin, y por eso es el
             // correcto: producción no corre en `local`, así que el bypass no se puede filtrar por

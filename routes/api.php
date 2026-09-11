@@ -108,6 +108,10 @@ Route::prefix('demo-experiencia')->group(function () {
     Route::post('{uuid}/ingresar', [DemoExperienciaController::class, 'ingresar_json']);
     // Progreso del lead sobre el video de introducción (misión 46). Público como los otros tres.
     Route::post('{uuid}/intro-progreso', [DemoExperienciaController::class, 'store_intro_progreso_json']);
+    // Eventos de la página como landing para un lead SIN turno (misión experiencia-landing,
+    // 11/9/2026): abrió, llegó al final, tocó el CTA. Público como los otros cuatro; no pasa por
+    // `demo.eventos.key` porque ese token es de la instancia de demo y sin turno no existe.
+    Route::post('{uuid}/evento', [DemoExperienciaController::class, 'store_evento_json']);
 });
 
 /*

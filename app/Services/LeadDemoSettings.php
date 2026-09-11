@@ -201,6 +201,30 @@ class LeadDemoSettings
      */
     public const KEY_EXPERIENCIA_TEMA = 'demo_experiencia_tema';
 
+    /**
+     * Clave: número de WhatsApp del canal de leads al que vuelve el CTA "Quiero probarlo" de la
+     * página de experiencia (misión experiencia-landing, 11/9/2026). Se guarda como dígitos
+     * pelados con código de país (`543444544199`), que es lo que `wa.me/<numero>` espera: nada de
+     * `+`, espacios ni guiones. Decisión de Lucas: el CTA NO agenda solo, vuelve a la conversación
+     * de WhatsApp con Martín, y por eso la página necesita saber a qué número mandar al lead.
+     */
+    public const KEY_WHATSAPP_NUMERO_LEADS = 'demo_whatsapp_numero_leads';
+
+    /**
+     * Clave: texto prearmado que el CTA de la página deja escrito en el WhatsApp del lead
+     * (`wa.me/<numero>?text=...`). El agente lo reconoce como aceptación de la demo (ver la regla
+     * en `LeadAiService::build_demo_directa_context()`), así que cambiarlo acá y no avisarle al
+     * agente rompe ese reconocimiento: la regla nombra el texto como ejemplo, no como literal.
+     */
+    public const KEY_CTA_WHATSAPP_TEXTO = 'demo_cta_whatsapp_texto';
+
+    /**
+     * Clave: minutos desde que el lead ABRIÓ su página sin turno hasta que `leads:check-pagina-
+     * sin-demo` le manda el único seguimiento de página ("vi que le pegaste una mirada..."). Sólo
+     * corre si no pidió la demo desde el CTA ni volvió a escribir después de abrirla.
+     */
+    public const KEY_PAGINA_SEGUIMIENTO_MINUTOS = 'demo_pagina_seguimiento_minutos';
+
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
 
@@ -352,6 +376,27 @@ class LeadDemoSettings
     /** Valor por defecto: tema de la página de experiencia — el que ya está en producción hoy. */
     private const DEFAULT_EXPERIENCIA_TEMA = 'oscuro';
 
+    /**
+     * Valor por defecto: número del canal de leads, el mismo `+54 3444 544199` de la web pública
+     * (dato resuelto en el plan de la misión experiencia-landing, 11/9/2026), ya como dígitos.
+     */
+    private const DEFAULT_WHATSAPP_NUMERO_LEADS = '543444544199';
+
+    /** Valor por defecto: texto prearmado del CTA. Es el que el agente reconoce como "sí" a la demo. */
+    private const DEFAULT_CTA_WHATSAPP_TEXTO = 'Hola Martín, quiero hacer la demo de ComercioCity';
+
+    /** Valor por defecto: dos horas entre abrir la página y el seguimiento (decisión de Lucas, 11/9/2026). */
+    private const DEFAULT_PAGINA_SEGUIMIENTO_MINUTOS = 120;
+
+    /** Mínimo de dígitos (con código de país) para dar por válido el número de WhatsApp del canal. */
+    public const MIN_DIGITOS_WHATSAPP = 8;
+
+    /** Máximo de dígitos: E.164 no admite más de 15. */
+    public const MAX_DIGITOS_WHATSAPP = 15;
+
+    /** Largo máximo del texto prearmado del CTA (caracteres, no bytes: lleva tilde). */
+    public const MAX_CHARS_CTA_TEXTO = 200;
+
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
 
@@ -427,6 +472,9 @@ class LeadDemoSettings
             'fin_check_demora_default_minutos'    => self::get_fin_check_demora_default_minutos(),
             'experiencia_default'                 => self::get_experiencia_default(),
             'experiencia_tema'                    => self::get_experiencia_tema(),
+            'whatsapp_numero_leads'               => self::get_whatsapp_numero_leads(),
+            'cta_whatsapp_texto'                  => self::get_cta_whatsapp_texto(),
+            'pagina_seguimiento_minutos'          => self::get_pagina_seguimiento_minutos(),
         ];
     }
 
@@ -611,6 +659,28 @@ class LeadDemoSettings
             if (in_array($tema, self::VALID_TEMAS, true)) {
                 AdminSetting::set(self::KEY_EXPERIENCIA_TEMA, $tema);
             }
+        }
+
+        // CTA de la página de experiencia (misión experiencia-landing, 11/9/2026): mismo "isset"
+        // que experiencia_tema, y por el mismo motivo -- el SPA se despliega después que este
+        // backend y un PUT sin estas claves no puede borrar lo guardado. El número se persiste ya
+        // normalizado a dígitos (la validación del controller garantiza que quedan entre 8 y 15):
+        // lo que se guarda es exactamente lo que va a ir en `wa.me/<numero>`, sin volver a limpiar
+        // en cada lectura.
+        if (isset($data['whatsapp_numero_leads'])) {
+            $digitos = self::normalizar_digitos_whatsapp((string) $data['whatsapp_numero_leads']);
+            if (self::son_digitos_whatsapp_validos($digitos)) {
+                AdminSetting::set(self::KEY_WHATSAPP_NUMERO_LEADS, $digitos);
+            }
+        }
+        if (isset($data['cta_whatsapp_texto'])) {
+            $texto = trim((string) $data['cta_whatsapp_texto']);
+            if ($texto !== '') {
+                AdminSetting::set(self::KEY_CTA_WHATSAPP_TEXTO, mb_substr($texto, 0, self::MAX_CHARS_CTA_TEXTO));
+            }
+        }
+        if (isset($data['pagina_seguimiento_minutos'])) {
+            AdminSetting::set(self::KEY_PAGINA_SEGUIMIENTO_MINUTOS, (string) self::clamp((int) $data['pagina_seguimiento_minutos']));
         }
     }
 
@@ -1188,6 +1258,105 @@ class LeadDemoSettings
         }
 
         return self::DEFAULT_EXPERIENCIA_TEMA;
+    }
+
+    /**
+     * Número de WhatsApp del canal de leads, como dígitos pelados con código de país, listo para
+     * `wa.me/<numero>`.
+     *
+     * Devuelve '' (y NO el default) cuando lo guardado no tiene entre 8 y 15 dígitos: un valor
+     * basura en `admin_settings` no puede terminar mandando al lead a un número que no es el
+     * nuestro. Con '' la página no dibuja el botón (`build_cta_whatsapp_url()` devuelve null), que
+     * es el fallo visible y corregible desde el panel. El default sólo aplica cuando la clave nunca
+     * se configuró.
+     *
+     * @return string
+     */
+    public static function get_whatsapp_numero_leads(): string
+    {
+        $digitos = self::normalizar_digitos_whatsapp(
+            (string) AdminSetting::get(self::KEY_WHATSAPP_NUMERO_LEADS, self::DEFAULT_WHATSAPP_NUMERO_LEADS)
+        );
+
+        return self::son_digitos_whatsapp_validos($digitos) ? $digitos : '';
+    }
+
+    /**
+     * Texto prearmado que el CTA de la página deja escrito en el WhatsApp del lead.
+     *
+     * Vacío guardado → default: un botón que abre WhatsApp sin texto le pide al lead que invente
+     * qué decir, y encima el agente deja de reconocer el "sí" del CTA. Se recorta a
+     * MAX_CHARS_CTA_TEXTO por si el valor entró por otro camino que el PUT validado.
+     *
+     * @return string
+     */
+    public static function get_cta_whatsapp_texto(): string
+    {
+        $texto = trim((string) AdminSetting::get(self::KEY_CTA_WHATSAPP_TEXTO, self::DEFAULT_CTA_WHATSAPP_TEXTO));
+        if ($texto === '') {
+            $texto = self::DEFAULT_CTA_WHATSAPP_TEXTO;
+        }
+
+        return mb_substr($texto, 0, self::MAX_CHARS_CTA_TEXTO);
+    }
+
+    /**
+     * Minutos desde la primera apertura de la página sin turno hasta el seguimiento de página.
+     *
+     * @return int
+     */
+    public static function get_pagina_seguimiento_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_PAGINA_SEGUIMIENTO_MINUTOS, (string) self::DEFAULT_PAGINA_SEGUIMIENTO_MINUTOS));
+    }
+
+    /**
+     * URL del CTA de la página de experiencia: `https://wa.me/<digitos>?text=<texto codificado>`.
+     *
+     * Null cuando no hay número válido configurado: la página lee null como "no dibujar el botón",
+     * que es el contrato con admin-spa (`cta.whatsapp_url`). `rawurlencode` y no `urlencode`: el
+     * texto lleva espacios y una tilde, y `wa.me` espera `%20`, no `+` (con `+` el lead abre el
+     * WhatsApp con los signos de más adentro del mensaje).
+     *
+     * @return string|null
+     */
+    public static function build_cta_whatsapp_url(): ?string
+    {
+        $digitos = self::get_whatsapp_numero_leads();
+        if ($digitos === '') {
+            return null;
+        }
+
+        return 'https://wa.me/' . $digitos . '?text=' . rawurlencode(self::get_cta_whatsapp_texto());
+    }
+
+    /**
+     * Deja un número de WhatsApp como dígitos pelados: saca `+`, espacios, guiones, paréntesis y
+     * cualquier otra cosa que no sea un dígito.
+     *
+     * @param string $raw Como lo tipeó el operador ("+54 3444 54-4199") o como está guardado.
+     *
+     * @return string Sólo dígitos ('' si no había ninguno).
+     */
+    public static function normalizar_digitos_whatsapp(string $raw): string
+    {
+        $digitos = preg_replace('/\D+/', '', $raw);
+
+        return is_string($digitos) ? $digitos : '';
+    }
+
+    /**
+     * ¿Los dígitos alcanzan para un número de WhatsApp con código de país? Entre 8 y 15 (E.164).
+     *
+     * @param string $digitos Salida de normalizar_digitos_whatsapp().
+     *
+     * @return bool
+     */
+    public static function son_digitos_whatsapp_validos(string $digitos): bool
+    {
+        $largo = strlen($digitos);
+
+        return $largo >= self::MIN_DIGITOS_WHATSAPP && $largo <= self::MAX_DIGITOS_WHATSAPP;
     }
 
     /**
