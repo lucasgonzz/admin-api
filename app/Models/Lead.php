@@ -7,6 +7,7 @@ use App\Models\Concerns\HasUuid;
 use App\Models\Concerns\UsesVirtualTime;
 use App\Models\LeadAdminNotification;
 use App\Models\LeadPipelineStatus;
+use App\Helpers\WhatsappNormalizer;
 use App\Services\DemoUrlNormalizer;
 use App\Services\LeadDemoFormMapper;
 use App\Services\LeadDemoSettings;
@@ -1131,7 +1132,8 @@ class Lead extends Model
      */
     public function getDemoExperienciaUrlAttribute()
     {
-        if (empty($this->uuid)) {
+        $clave = $this->demo_experiencia_clave;
+        if ($clave === '') {
             return null;
         }
         $base = rtrim((string) config('services.admin_spa.url'), '/');
@@ -1139,7 +1141,96 @@ class Lead extends Model
             return null;
         }
 
-        return $base . '/experiencia/' . $this->uuid;
+        return $base . '/experiencia/' . $clave;
+    }
+
+    /**
+     * Identificador que va en el link de la página inmersiva (misión demo-agendado-directo,
+     * 10/9/2026): los dígitos del teléfono del lead, y sólo si no tiene teléfono, el uuid.
+     *
+     * Lucas pidió acortar el link y que fuera "más personalizado": el uuid son 36 caracteres
+     * opacos, el teléfono es un número que el lead reconoce como propio. Se descartó el id de la
+     * base porque es enumerable (con `/experiencia/1`, `/2`, `/3` cualquiera recorre el pipeline
+     * comercial entero: nombres, negocios y la puerta de cada demo). El teléfono no se puede
+     * recorrer a ciegas y sólo lo conoce quien ya conoce al lead — el mismo nivel de exposición
+     * que reenviar el link por WhatsApp.
+     *
+     * 🔴 Los links con uuid ya enviados siguen resolviendo: `resolver_por_clave_de_experiencia()`
+     * acepta las dos formas. No se cambia ningún link viejo.
+     *
+     * @return string Dígitos del teléfono (sin `+`), el uuid, o '' si no hay ninguno de los dos.
+     */
+    public function getDemoExperienciaClaveAttribute(): string
+    {
+        $telefono = trim((string) $this->phone);
+        if ($telefono !== '') {
+            $digitos = preg_replace('/\D+/', '', WhatsappNormalizer::normalize($telefono));
+            if (is_string($digitos) && strlen($digitos) >= 8) {
+                return $digitos;
+            }
+        }
+
+        return (string) $this->uuid;
+    }
+
+    /**
+     * Resuelve el lead dueño de una página inmersiva a partir de lo que viene en la URL: un uuid
+     * (links anteriores al 10/9/2026) o los dígitos de su teléfono (links nuevos, ver
+     * getDemoExperienciaClaveAttribute()).
+     *
+     * Con teléfono, si hay varios leads con el mismo número (re-ingresos por otra campaña) gana el
+     * MÁS RECIENTE: es el mismo criterio con el que el webhook de WhatsApp enruta los mensajes
+     * entrantes (WhatsappWebhookController::find_lead_by_phone()), así que la página cae en la
+     * misma conversación en la que el agente le pasó el link.
+     *
+     * La comparación es tolerante a formato (WhatsappNormalizer::phones_match), pero la consulta
+     * se acota primero por LIKE sobre los últimos ocho dígitos: esta ruta es pública y la página la
+     * poleá cada diez segundos, no puede cargar la tabla entera en cada pedido. El repliegue a un
+     * barrido de (id, phone) cubre los teléfonos guardados con espacios o guiones, que el LIKE de
+     * dígitos crudos no encuentra.
+     *
+     * @param string $clave Segmento de la URL: uuid o dígitos de teléfono.
+     *
+     * @return static|null
+     */
+    public static function resolver_por_clave_de_experiencia(string $clave)
+    {
+        $clave = trim($clave);
+        if ($clave === '') {
+            return null;
+        }
+
+        if (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $clave)) {
+            return static::where('uuid', $clave)->first();
+        }
+
+        $digitos = preg_replace('/\D+/', '', $clave);
+        if (! is_string($digitos) || strlen($digitos) < 8) {
+            return null;
+        }
+
+        $candidatos = static::query()
+            ->whereNotNull('phone')
+            ->where('phone', 'like', '%' . substr($digitos, -8) . '%')
+            ->orderBy('id', 'desc')
+            ->get(['id', 'phone']);
+
+        if ($candidatos->isEmpty()) {
+            $candidatos = static::query()
+                ->whereNotNull('phone')
+                ->where('phone', '!=', '')
+                ->orderBy('id', 'desc')
+                ->get(['id', 'phone']);
+        }
+
+        foreach ($candidatos as $candidato) {
+            if (WhatsappNormalizer::phones_match((string) $candidato->phone, $digitos)) {
+                /* Las dos consultas traen sólo (id, phone): se devuelve el modelo completo. */
+                return static::find($candidato->id);
+            }
+        }
+
+        return null;
     }
 
     /**

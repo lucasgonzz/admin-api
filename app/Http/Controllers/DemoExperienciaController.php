@@ -23,10 +23,12 @@ use Illuminate\Support\Facades\Log;
  * Backend de la página inmersiva de demo (grupo 300, prompt 03 —
  * `contexto/demo_experiencia.md` §9, bloque G).
  *
- * Dos endpoints PÚBLICOS (sin auth:sanctum), identificados por el `uuid` del lead (columna
- * única y no enumerable de `leads`, mismo patrón que `DemoLandingController` del grupo 213):
- * uno arma el payload completo que consume la página, el otro recibe las nueve respuestas del
- * formulario de configuración.
+ * Endpoints PÚBLICOS (sin auth:sanctum), identificados por la clave pública del lead: desde el
+ * 10/9/2026 (misión demo-agendado-directo) son los dígitos de su teléfono —el link corto que
+ * pidió Lucas—, y siguen aceptando el `uuid` de los links ya enviados. La resolución vive en
+ * `Lead::resolver_por_clave_de_experiencia()`, con el porqué de no usar el id numérico (es
+ * enumerable). Uno arma el payload completo que consume la página, otro recibe las nueve
+ * respuestas del formulario de configuración.
  *
  * Ninguno de los dos devuelve datos sensibles del lead (email, teléfono, notas, campos del
  * pipeline, `demo_ingreso_token`): son endpoints públicos, solo se expone lo que la página
@@ -40,15 +42,17 @@ class DemoExperienciaController extends Controller
      * Arma el payload completo de la página: datos del lead, estado del turno, respuestas del
      * formulario y multimedia cargada.
      *
-     * @param string $uuid Token público del lead (columna `uuid`, no enumerable).
+     * @param string $uuid Clave pública del lead: dígitos de su teléfono (links desde el 10/9/2026)
+     *                     o su `uuid` (links anteriores). Ver Lead::resolver_por_clave_de_experiencia().
      *
      * @return JsonResponse
      */
     public function show_json(string $uuid): JsonResponse
     {
-        // Búsqueda manual por uuid: HasUuid::getRouteKeyName() devuelve 'id', así que el route
-        // model binding implícito no sirve acá (mismo detalle que DemoLandingController).
-        $lead = Lead::where('uuid', $uuid)->first();
+        // La clave de la URL puede ser el uuid (links viejos) o los dígitos del teléfono (links
+        // nuevos, misión demo-agendado-directo): lo resuelve el modelo, y no el route model binding
+        // (HasUuid::getRouteKeyName() devuelve 'id', mismo detalle que DemoLandingController).
+        $lead = Lead::resolver_por_clave_de_experiencia($uuid);
         if (! $lead) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
@@ -70,14 +74,14 @@ class DemoExperienciaController extends Controller
      * segundos que el lead perdería esperando el próximo tick, sobre un margen total de 5 minutos.
      *
      * @param Request $request Body con las respuestas del formulario (claves opcionales).
-     * @param string  $uuid    Token público del lead (columna `uuid`, no enumerable).
+     * @param string  $uuid    Clave pública del lead: dígitos de su teléfono o su `uuid`.
      *
      * @return JsonResponse Mismo payload que el GET, para refrescar la página con una sola llamada.
      */
     public function store_formulario_json(Request $request, string $uuid): JsonResponse
     {
-        // Búsqueda manual por uuid, igual que en show_json().
-        $lead = Lead::where('uuid', $uuid)->first();
+        // Misma resolución (uuid o teléfono) que show_json().
+        $lead = Lead::resolver_por_clave_de_experiencia($uuid);
         if (! $lead) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
@@ -167,15 +171,15 @@ class DemoExperienciaController extends Controller
      * `intro_visto_at` y deja constancia en el hilo del lead.
      *
      * @param Request $request Body: `{ "pct": 0..100 }`.
-     * @param string  $uuid    Token público del lead (columna `uuid`, no enumerable).
+     * @param string  $uuid    Clave pública del lead: dígitos de su teléfono o su `uuid`.
      *
      * @return JsonResponse Mismo payload que el GET, para que la página refresque con una sola
      *                      llamada y el botón se prenda sin esperar al poleo.
      */
     public function store_intro_progreso_json(Request $request, string $uuid): JsonResponse
     {
-        // Búsqueda manual por uuid, igual que en el resto de los endpoints de este controller.
-        $lead = Lead::where('uuid', $uuid)->first();
+        // Misma resolución (uuid o teléfono) que el resto de los endpoints de este controller.
+        $lead = Lead::resolver_por_clave_de_experiencia($uuid);
         if (! $lead) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
@@ -225,15 +229,16 @@ class DemoExperienciaController extends Controller
      * Idempotente a propósito: el token no es de un solo uso (grupo 233), así que puede llamarse
      * muchas veces durante el turno sin invalidar nada.
      *
-     * @param string $uuid Token público del lead (columna `uuid`, no enumerable).
+     * @param string $uuid Clave pública del lead: dígitos de su teléfono (links desde el 10/9/2026)
+     *                     o su `uuid` (links anteriores). Ver Lead::resolver_por_clave_de_experiencia().
      *
      * @return JsonResponse `{ "url": ... }` en éxito (200), `{ "motivo": ... }` en 409, 404 si no
      *                       existe el lead.
      */
     public function ingresar_json(string $uuid): JsonResponse
     {
-        // Búsqueda manual por uuid, igual que en show_json() y store_formulario_json().
-        $lead = Lead::where('uuid', $uuid)->first();
+        // Misma resolución (uuid o teléfono) que show_json().y store_formulario_json().
+        $lead = Lead::resolver_por_clave_de_experiencia($uuid);
         if (! $lead) {
             return response()->json(['message' => 'No encontrado.'], 404);
         }
