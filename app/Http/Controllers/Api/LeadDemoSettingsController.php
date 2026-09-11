@@ -117,10 +117,11 @@ class LeadDemoSettingsController extends Controller
                no que haya escrito un espacio. Por eso es un closure y no un `regex`. */
             'whatsapp_numero_leads'           => [
                 'sometimes',
-                /* "nullable": el panel manda el campo vacío cuando el operador lo borra, y
-                   ConvertEmptyStringsToNull lo vuelve null antes de validar. Null no se persiste
-                   (persist_from_request usa isset) y el getter cae al default: borrar el campo es
-                   "volver al default", no un 422. */
+                /* "nullable": el panel puede mandar el campo vacío, y ConvertEmptyStringsToNull lo
+                   vuelve null antes de validar. Null NO se persiste (persist_from_request usa
+                   isset): lo guardado queda como estaba y el panel lo vuelve a mostrar. O sea que
+                   un vacío es un no-op, no un 422 y tampoco un "volver al default" — para eso hay
+                   que escribir el default. Mismo criterio que el resto de las claves de este PUT. */
                 'nullable',
                 'string',
                 'max:40',
