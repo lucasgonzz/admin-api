@@ -6361,9 +6361,13 @@ TXT;
                         }
                     }
 
-                    /* Reserva preventiva del closer, igual que cualquier demo de la dinámica nueva
-                     * (se ejecuta en el bloque POST-save, ver más abajo). */
-                    $google_event_create_needed = true;
+                    /* SIN reserva preventiva del closer. La reserva se calcula a partir del FIN del
+                     * turno (fin + gracia), y en la demo directa el fin es el tope de una ventana de
+                     * varias horas, no el momento en que el lead termina: un hueco a las 16:20 en el
+                     * calendario del closer por una demo que empezó a las 10:10 es ruido, no una
+                     * reserva. La llamada se coordina cuando el lead termina (grupo 307), que sin
+                     * hold crea el evento en el horario confirmado. */
+                    $google_event_create_needed = false;
 
                     try {
                         $demo_notify_service = new \App\Services\DemoScheduledWhatsappService(
