@@ -87,6 +87,14 @@ class LeadDemoSettingsController extends Controller
                entre el deploy de este backend y el del front (mismo cuidado que demo_horario_*). */
             'fin_check_silencio_minutos'      => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             'fin_check_demora_default_minutos' => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            /* Hallazgo de paso (11/9/2026): estas tres claves las agregó la misión
+               demo-agendado-directo del 10/9/2026 a LeadDemoSettings y admin-spa ya las manda en el
+               PUT, pero no estaban en esta lista -- Request::validate() descarta en silencio
+               cualquier clave sin regla, así que el panel las mostraba como guardadas sin persistir
+               nada. "sometimes" por el mismo motivo que el resto: un SPA más viejo no las manda. */
+            'recordatorio_silencio_minutos'    => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            'demo_directa_no_show_minutos'     => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
+            'check_ingreso_silencio_minutos'   => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
             /* Dinámica de demo default para leads nuevos (grupo 293, prompt 03). "sometimes" y NO
                "required": el SPA todavía no manda esta clave (la agrega el prompt 04), y con
                "required" el formulario de configuración de demos actual tiraría 422 al guardar en
