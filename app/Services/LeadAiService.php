@@ -12,7 +12,9 @@ use App\Services\GoogleCalendarOAuthService;
 use App\Services\LeadBroadcastService;
 use App\Services\LeadDemoSettings;
 use App\Services\LeadWhatsappOnboardingSettings;
+use App\Http\Controllers\DemoExperienciaController;
 use App\Models\AiSystemPrompt;
+use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\LeadPartner;
@@ -9225,19 +9227,37 @@ BLOQUE_DEL_MANUAL;
             $estado_demo = 'SIN ASIGNAR, y no hay instancias de demo cargadas. No devuelvas agendar_demo: requiere_intervencion_humana: true.';
         }
 
+        /* La página dejó de ser sólo la puerta de la demo: desde la misión experiencia-landing
+         * (11/9/2026) es la landing que Martín le pasa al lead ANTES de ofrecerle la demo, y el
+         * bloque le cuenta al agente qué hizo el lead con ella (la abrió, llegó al final, pidió la
+         * demo desde el botón) para que pueda nombrarlo y para que reconozca el "quiero hacer la
+         * demo" que manda ese botón como un sí. */
+        $estado_pagina = $this->describir_estado_de_la_pagina($lead, $ahora);
+
         $bloque = "\n\nDEMO DIRECTA (dinamica nueva -- la demo se hace AHORA, sin horarios):\n"
-            . "  Pagina de acceso del lead (copiar textual): {$url_pagina}\n"
+            . "  Su pagina (copiar textual; se puede pasar en cualquier momento, es su pagina personal): {$url_pagina}\n"
+            . "  Estado de su pagina: {$estado_pagina}\n"
             . "  Tienda online conectada a su demo (copiar textual): " . ($url_tienda !== '' ? $url_tienda : '(sin tienda disponible: no la menciones)') . "\n"
             . "  Email del lead: " . ($email !== '' ? $email : '(no lo tenemos)') . "\n"
             . "  Carta de acceso por mail: " . ($lead->demo_mail_sent_at ? 'ya enviada (' . $lead->demo_mail_sent_at->copy()->setTimezone(DemoDirectaService::TZ)->format('H:i') . ')' : 'todavia no enviada') . "\n"
             . "  Demo: {$estado_demo}\n"
             . "Reglas de este turno:\n"
+            . "  - En tu PRIMERA respuesta al lead (la que reconoce lo que conto y le pide el nombre), pasale el link de su\n"
+            . "    pagina como mensaje aparte (separado con ---), presentandola como algo para que vaya viendo lo que hacemos.\n"
+            . "    Sin ofrecer la demo todavia, salvo que el lead la pida.\n"
+            . "  - La demo se ofrece cuando el lead ya conto su rubro y su problema (calificado), o antes si el la pide. Si el\n"
+            . "    bloque dice que ya abrio su pagina, podes nombrarlo (\"vi que le pegaste una mirada\").\n"
+            . "  - Si el lead pide la demo (por ejemplo \"" . LeadDemoSettings::get_cta_whatsapp_texto() . "\", que es lo que\n"
+            . "    manda el boton de su pagina, o cualquier frase equivalente), es un SI: en el mismo mensaje confirmale que la\n"
+            . "    haga desde una computadora, en un lugar tranquilo y con una hora disponible, y devolve agendar_demo:\n"
+            . "    {\"ahora\": true} con los dos links y el pedido del mail, como en cualquier aceptacion.\n"
             . "  - Para ofrecerla: \"si queres, te la puedo tener lista en diez minutos\". Sin hora, sin grilla, sin preguntar\n"
             . "    horarios. Si el lead pregunta cuando, la respuesta es ahora mismo (o cuando se siente en la computadora).\n"
             . "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
-            . "    links de arriba (la pagina y la tienda, copiados textuales) y pedile el mail para mandarle las llaves de\n"
-            . "    acceso, que le sirven para abrirla desde la computadora. Si ya tenemos email, no lo pidas. El sistema\n"
-            . "    asigna la instancia libre al enviar y la demo arranca diez minutos despues: no inventes hora ni fecha.\n"
+            . "    links de arriba (la pagina —aunque ya la tenga, se repite: ahi ve el formulario, el video y el boton— y la\n"
+            . "    tienda, copiados textuales) y pedile el mail para mandarle las llaves de acceso, que le sirven para abrirla\n"
+            . "    desde la computadora. Si ya tenemos email, no lo pidas. El sistema asigna la instancia libre al enviar y la\n"
+            . "    demo arranca diez minutos despues: no inventes hora ni fecha.\n"
             . "  - Cuando el lead pasa su mail (en cualquier momento): guardar_email con el correo. El sistema le manda la carta\n"
             . "    de acceso solo; no prometas nada mas que \"te lo mando al mail\".\n"
             . "  - Si dice que ahora no puede: no agendes nada; decile que cuando pueda sentarse te avise y en diez minutos\n"
@@ -9246,6 +9266,79 @@ BLOQUE_DEL_MANUAL;
             . "  - No existen usuario ni contrasena: todo el acceso pasa por el boton de la pagina.";
 
         return $bloque;
+    }
+
+    /**
+     * La línea "Estado de su pagina" del bloque DEMO DIRECTA (misión experiencia-landing,
+     * 11/9/2026): qué hizo el lead con su página como landing, leído de los tres eventos que la
+     * página reporta (`DemoExperienciaController::store_evento_json()`).
+     *
+     * Una de cuatro frases, de la más fuerte a la más débil: pidió la demo desde el botón, llegó al
+     * final, la abrió (con cuántas veces), o todavía no la abrió. UNA sola consulta, agrupada por
+     * nombre: este bloque se arma en cada sugerencia y no puede costar tres idas a la base. Es la
+     * misma lectura que hace la fila "Página de experiencia" del panel
+     * (`LeadController::pagina_de_experiencia_del_lead()`), que la resuelve sobre la consulta de
+     * eventos que el roadmap ya paga.
+     *
+     * Horas en la zona de la demo (`DemoDirectaService::TZ`). Si la apertura no fue hoy se agrega
+     * el día ("el 10/9 a las 14:32"): un "la abrio a las 14:32" pelado de hace tres días haría que
+     * el agente diga "recién" sobre algo viejo.
+     *
+     * @param Lead   $lead
+     * @param Carbon $ahora Reloj del turno, ya en DemoDirectaService::TZ.
+     *
+     * @return string
+     */
+    private function describir_estado_de_la_pagina(Lead $lead, Carbon $ahora): string
+    {
+        $filas = DemoEventoRecibido::query()
+            ->where('lead_id', $lead->id)
+            ->whereIn('nombre', DemoExperienciaController::EVENTOS_PAGINA)
+            ->selectRaw('nombre, MIN(ocurrido_at) as primera, COUNT(*) as cantidad')
+            ->groupBy('nombre')
+            ->get()
+            ->keyBy('nombre');
+
+        $abierta = $filas->get(DemoExperienciaController::EVENTO_PAGINA_ABIERTA);
+        $final   = $filas->get(DemoExperienciaController::EVENTO_PAGINA_FINAL);
+        $cta     = $filas->get(DemoExperienciaController::EVENTO_CTA_TOCADO);
+
+        if ($cta !== null && ! empty($cta->primera)) {
+            return 'pidio la demo desde la pagina ' . $this->momento_de_pagina_legible((string) $cta->primera, $ahora);
+        }
+
+        if ($abierta === null || empty($abierta->primera)) {
+            return 'todavia no la abrio';
+        }
+
+        $cuando = $this->momento_de_pagina_legible((string) $abierta->primera, $ahora);
+
+        if ($final !== null && ! empty($final->primera)) {
+            return 'la abrio ' . $cuando . ' y llego al final';
+        }
+
+        $veces = (int) $abierta->cantidad;
+
+        return 'la abrio ' . $cuando . ' (' . $veces . ($veces === 1 ? ' vez' : ' veces') . ')';
+    }
+
+    /**
+     * "a las 14:32" si fue hoy, "el 10/9 a las 14:32" si no, en la zona de la demo.
+     *
+     * @param string $ocurrido_at Valor crudo de la base (hora de la app, que es la de Argentina).
+     * @param Carbon $ahora       Reloj del turno, ya en DemoDirectaService::TZ.
+     *
+     * @return string
+     */
+    private function momento_de_pagina_legible(string $ocurrido_at, Carbon $ahora): string
+    {
+        $momento = Carbon::parse($ocurrido_at)->setTimezone(DemoDirectaService::TZ);
+
+        if ($momento->isSameDay($ahora)) {
+            return 'a las ' . $momento->format('H:i');
+        }
+
+        return 'el ' . $momento->format('j/n') . ' a las ' . $momento->format('H:i');
     }
 
     /**
@@ -9439,6 +9532,16 @@ BLOQUE_DEL_MANUAL;
             . ' ' . $now_ar->format('d/m/Y')
             . ', ' . $now_ar->format('H:i') . 'hs (hora Argentina)';
 
+        /* Primer nombre para el trato (misión experiencia-landing, 11/9/2026; decisión de Lucas del
+         * 8/9 reiterada el 11/9): `Contacto:` sigue llevando el nombre completo porque es el dato,
+         * pero el modelo saludaba con nombre y apellido ("Hola Juan Pérez") porque era lo único que
+         * veía. La línea va con el salto de línea adentro para que, sin nombre, no quede un renglón
+         * vacío en el prompt. */
+        $primer_nombre       = trim((string) $lead->contact_first_name);
+        $linea_primer_nombre = $primer_nombre !== ''
+            ? "Tratalo por su primer nombre: {$primer_nombre} (nunca por nombre y apellido)\n"
+            : '';
+
         $txt = <<<TXT
 FECHA Y HORA ACTUAL: {$fecha_hoy}
 
@@ -9448,7 +9551,7 @@ Conversación del lead:
 Estado actual: {$lead->status}
 Última actualización lead: {$lead->updated_at}
 Contacto: {$lead->contact_name} | Empresa: {$lead->company_name}
-Teléfono: {$lead->phone} | Email: {$lead->email}
+{$linea_primer_nombre}Teléfono: {$lead->phone} | Email: {$lead->email}
 Rubro/tipo negocio: {$lead->business_type}
 Notas internas: {$lead->notes}
 Demo fecha: {$demo}
