@@ -9,15 +9,28 @@ use App\Services\LeadDemoSettings;
 use App\Services\SystemErrorWhatsappService;
 use App\Helpers\AppTime;
 use App\Services\WhatsappSendService;
+use App\Services\WhatsappSessionWindowService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Envía automáticamente el recordatorio pre-demo por WhatsApp (plantilla Meta).
+ * Envía automáticamente el recordatorio de demo por WhatsApp.
  *
- * Se ejecuta cada 5 minutos. Busca leads con demo agendada en los próximos X minutos
- * (configurable) y envía el template `cc_recordatorio_demo` directamente al lead.
+ * Se ejecuta cada 5 minutos, con dos comportamientos según la dinámica del lead:
+ *
+ * - Dinámica ACTUAL (Mail 1 con credenciales): igual que siempre. Leads con demo agendada en los
+ *   próximos X minutos (configurable) reciben la plantilla Meta `cc_recordatorio_demo_` ("empezá por
+ *   el video introductorio que te mandamos al mail").
+ * - Dinámica NUEVA (demo directa, misión demo-agendado-directo, 10/9/2026): el lead ya tiene los
+ *   links por WhatsApp y —si pasó el mail— la carta de acceso. El recordatorio es un empujón para
+ *   el que todavía no entró: texto libre nuevo (saluda por el nombre de pila, le recuerda que los
+ *   accesos están en el mail, o en el chat si no hay mail, y que escriba por acá cualquier duda),
+ *   elegible desde X minutos antes del inicio hasta que la ventana de la demo vence, y SOLO si no
+ *   hubo mensajes en ninguna dirección en los últimos N minutos (setting, default 30). Es texto
+ *   libre y no plantilla: el lead acaba de escribir, así que la ventana de 24 hs está abierta; si
+ *   no lo está, se saltea sin marcarlo y se reintenta en el próximo tick.
+ *
  * El flag `recordatorio_demo_enviado` evita que se envíe más de un recordatorio por demo.
  */
 class SendDemoReminders extends Command
@@ -92,6 +105,24 @@ class SendDemoReminders extends Command
         // Contador de recordatorios enviados para el log final.
         $sent = 0;
 
+        /*
+         * Último mensaje entrante y saliente por lead, en UNA consulta para todo el lote (misma
+         * técnica que CheckDemoFin): alimenta la ventana de silencio de la dinámica nueva.
+         */
+        $ultimos_mensajes = collect();
+        if ($candidates->isNotEmpty()) {
+            $ultimos_mensajes = LeadMessage::query()
+                ->whereIn('lead_id', $candidates->pluck('id'))
+                ->selectRaw("lead_id, MAX(CASE WHEN sender = 'lead' THEN created_at END) as ultimo_entrante, MAX(CASE WHEN sender != 'lead' THEN created_at END) as ultimo_saliente")
+                ->groupBy('lead_id')
+                ->get()
+                ->keyBy('lead_id');
+        }
+        $silencio_minutos = LeadDemoSettings::get_recordatorio_silencio_minutos();
+        $silencio_limite  = $now->copy()->subMinutes($silencio_minutos);
+        $gracia_minutos   = LeadDemoSettings::get_gracia_minutos_post();
+        $ventana_sesion   = new WhatsappSessionWindowService();
+
         foreach ($candidates as $lead) {
             // Construir el datetime completo de inicio de demo combinando fecha y hora.
             $demo_datetime = $this->parse_demo_datetime(
@@ -109,13 +140,59 @@ class SendDemoReminders extends Command
                 continue;
             }
 
-            // Verificar que la demo esté dentro de la ventana [ahora, ahora + X min].
-            if ($demo_datetime->lt($now) || $demo_datetime->gt($window_end)) {
-                continue;
-            }
+            if ($lead->usa_experiencia_demo_nueva()) {
+                /*
+                 * Dinámica nueva: elegible desde X minutos antes del inicio hasta el fin de la ventana
+                 * (+ gracia). Un lead que ya entró no está acá (el evento demo.ingreso lo movió a
+                 * demo_en_curso), así que el filtro por status alcanza.
+                 */
+                if ($now->lt($demo_datetime->copy()->subMinutes($window_minutes))) {
+                    continue;
+                }
+                $demo_fin = $this->parse_demo_datetime(
+                    $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
+                    (string) $lead->demo_end_time
+                );
+                if ($demo_fin === null) {
+                    $demo_fin = $demo_datetime->copy()->addMinutes(LeadDemoSettings::get_duracion_minutos());
+                }
+                if ($now->gt($demo_fin->copy()->addMinutes($gracia_minutos))) {
+                    continue;
+                }
 
-            // Enviar el recordatorio pre-demo directo por WhatsApp.
-            $this->send_reminder_message($lead);
+                /* Ventana de silencio: cualquier mensaje reciente, entrante o saliente, lo posterga.
+                 * No se marca nada: se vuelve a evaluar en el próximo tick. */
+                $mensajes        = $ultimos_mensajes->get($lead->id);
+                $ultimo_entrante = ($mensajes && $mensajes->ultimo_entrante) ? Carbon::parse($mensajes->ultimo_entrante) : null;
+                $ultimo_saliente = ($mensajes && $mensajes->ultimo_saliente) ? Carbon::parse($mensajes->ultimo_saliente) : null;
+                if (($ultimo_entrante !== null && $ultimo_entrante->gt($silencio_limite))
+                    || ($ultimo_saliente !== null && $ultimo_saliente->gt($silencio_limite))) {
+                    continue;
+                }
+
+                /* Texto libre: exige la ventana de 24 hs de Meta abierta. Cerrada, se saltea sin
+                 * marcar (no hay plantilla aprobada con este texto; la vieja habla de un mail con
+                 * el video introductorio, que en esta dinámica no existe). */
+                if (! $ventana_sesion->is_open((string) $lead->phone)) {
+                    Log::info('SendDemoReminders: recordatorio de la dinámica nueva salteado, ventana de 24 hs cerrada.', [
+                        'lead_id' => $lead->id,
+                    ]);
+
+                    continue;
+                }
+
+                if (! $this->send_reminder_message_directa($lead)) {
+                    continue;
+                }
+            } else {
+                // Verificar que la demo esté dentro de la ventana [ahora, ahora + X min].
+                if ($demo_datetime->lt($now) || $demo_datetime->gt($window_end)) {
+                    continue;
+                }
+
+                // Enviar el recordatorio pre-demo directo por WhatsApp.
+                $this->send_reminder_message($lead);
+            }
 
             // Marcar que ya se envió el recordatorio para esta demo.
             $lead->update(['recordatorio_demo_enviado' => true]);
@@ -180,6 +257,80 @@ class SendDemoReminders extends Command
             'is_followup'         => false,
             'whatsapp_message_id' => $whatsapp_message_id,
         ]);
+    }
+
+    /**
+     * Recordatorio de la dinámica nueva (demo directa): texto libre por send_text().
+     *
+     * @param Lead $lead
+     *
+     * @return bool true si salió (y se persistió el LeadMessage); false si Meta lo rechazó, en cuyo
+     *              caso no se marca `recordatorio_demo_enviado` y se reintenta en el próximo tick.
+     */
+    protected function send_reminder_message_directa(Lead $lead): bool
+    {
+        $contact_name = trim((string) $lead->contact_first_name);
+        $content      = $this->build_reminder_content_directa($contact_name, ! empty($lead->demo_mail_sent_at));
+
+        $phone = trim((string) $lead->phone);
+        if ($phone === '') {
+            Log::warning('SendDemoReminders: lead sin teléfono (dinámica nueva)', ['lead_id' => $lead->id]);
+
+            return false;
+        }
+
+        $whatsapp_message_id = $this->whatsapp_send_service->send_text(
+            $phone,
+            $content,
+            "Recordatorio demo directa - Lead #{$lead->id} ({$lead->contact_name})"
+        );
+
+        if ($whatsapp_message_id === null) {
+            Log::warning('SendDemoReminders: el recordatorio de la dinámica nueva no salió; se reintenta en el próximo tick.', [
+                'lead_id' => $lead->id,
+                'error'   => $this->whatsapp_send_service->last_send_error,
+            ]);
+
+            return false;
+        }
+
+        LeadMessage::create([
+            'lead_id'             => $lead->id,
+            'sender'              => 'sistema',
+            'content'             => $content,
+            'status'              => 'enviado',
+            'is_followup'         => false,
+            'whatsapp_message_id' => $whatsapp_message_id,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Texto del recordatorio de la dinámica nueva. Pedido de Lucas (10/9/2026): saludar por el
+     * nombre de pila, recordar que los links de acceso están en el mail, y que cualquier duda
+     * mientras recorre el sistema la escriba por acá. Si no hay mail enviado (el lead nunca pasó
+     * su correo), los accesos están en el chat y se le ofrece mandárselos por mail.
+     *
+     * @param string $contact_name  Nombre de pila ('' si no lo tenemos).
+     * @param bool   $mail_enviado  true si la carta de acceso ya salió.
+     *
+     * @return string
+     */
+    protected function build_reminder_content_directa(string $contact_name, bool $mail_enviado): string
+    {
+        $saludo = $contact_name !== '' ? "Hola {$contact_name}!" : 'Hola!';
+
+        if ($mail_enviado) {
+            $cuerpo = "Te recuerdo que los accesos a tu demo de ComercioCity están en el mail que te mandamos: "
+                . "ahí tenés el botón para entrar al sistema y el de la tienda online conectada.";
+        } else {
+            $cuerpo = "Te recuerdo que el acceso a tu demo de ComercioCity es el link que te pasé más arriba en este chat. "
+                . "Si querés tenerlo también en el mail para abrirlo desde la computadora, pasame tu correo.";
+        }
+
+        return "{$saludo} {$cuerpo}\n\n"
+            . "Cualquier duda que te surja mientras recorrés el sistema, escribime por acá. 👋";
     }
 
     /**
