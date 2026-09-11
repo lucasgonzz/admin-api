@@ -89,6 +89,10 @@ class Kernel extends ConsoleKernel
         // Pasa a demo_pendiente_de_ingreso si el lead no confirmó el ingreso en el timeout configurado.
         $schedule->command('leads:check-demo-ingreso-timeout')->everyMinute();
 
+        // Dinámica nueva (misión demo-agendado-directo): "¿pudiste entrar?" N minutos después de que
+        // el lead terminó el video de introducción, dentro de la ventana de la demo y con silencio.
+        $schedule->command('leads:check-demo-ingreso-post-video')->everyMinute();
+
         // Envía seguimiento único de fin si el lead no confirmó que terminó (demo_fin_seguimiento_minutos).
         $schedule->command('leads:check-demo-fin-seguimiento')->everyMinute();
 
