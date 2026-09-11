@@ -194,6 +194,13 @@ class LeadDemoSettings
      */
     public const KEY_EXPERIENCIA_DEFAULT = 'demo_experiencia_default';
 
+    /**
+     * Clave: tema visual (oscuro/claro) de la página inmersiva de experiencia (misión
+     * tema-experiencia-configurable, 10/9/2026). Antes era una decisión fija en código, tomada en
+     * la misión `paleta-oscura-experiencia` de esta misma tarde.
+     */
+    public const KEY_EXPERIENCIA_TEMA = 'demo_experiencia_tema';
+
     /** Valor por defecto: duración de la demo (minutos). */
     private const DEFAULT_DURACION_MINUTOS = 60;
 
@@ -342,11 +349,17 @@ class LeadDemoSettings
     /** Valor por defecto: dinámica de demo para leads nuevos (la que hoy funciona en producción). */
     private const DEFAULT_EXPERIENCIA = 'actual';
 
+    /** Valor por defecto: tema de la página de experiencia — el que ya está en producción hoy. */
+    private const DEFAULT_EXPERIENCIA_TEMA = 'oscuro';
+
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
 
     /** Valores válidos para la dinámica de demo (`demo_experiencia` / `demo_experiencia_default`). */
     public const VALID_EXPERIENCIAS = ['actual', 'nueva'];
+
+    /** Valores válidos para el tema de la página de experiencia (`demo_experiencia_tema`). */
+    public const VALID_TEMAS = ['oscuro', 'claro'];
 
     /** Mínimo permitido para todos los parámetros (minutos). */
     public const MIN_MINUTOS = 0;
@@ -413,6 +426,7 @@ class LeadDemoSettings
             'demo_directa_no_show_minutos'        => self::get_demo_directa_no_show_minutos(),
             'fin_check_demora_default_minutos'    => self::get_fin_check_demora_default_minutos(),
             'experiencia_default'                 => self::get_experiencia_default(),
+            'experiencia_tema'                    => self::get_experiencia_tema(),
         ];
     }
 
@@ -586,6 +600,16 @@ class LeadDemoSettings
             $experiencia = (string) $data['experiencia_default'];
             if (in_array($experiencia, self::VALID_EXPERIENCIAS, true)) {
                 AdminSetting::set(self::KEY_EXPERIENCIA_DEFAULT, $experiencia);
+            }
+        }
+
+        // Tema visual de la página de experiencia (misión tema-experiencia-configurable): mismo
+        // criterio que experiencia_default -- "sometimes" porque el SPA todavía no manda este
+        // campo hasta que se despliegue su propia parte.
+        if (isset($data['experiencia_tema'])) {
+            $tema = (string) $data['experiencia_tema'];
+            if (in_array($tema, self::VALID_TEMAS, true)) {
+                AdminSetting::set(self::KEY_EXPERIENCIA_TEMA, $tema);
             }
         }
     }
@@ -1144,6 +1168,26 @@ class LeadDemoSettings
         }
 
         return self::DEFAULT_EXPERIENCIA;
+    }
+
+    /**
+     * Tema visual (oscuro/claro) de la página inmersiva de experiencia.
+     *
+     * Si el valor guardado en `admin_settings` no está en VALID_TEMAS (setting corrupta o nunca
+     * configurada), devuelve 'oscuro': un valor basura acá nunca puede terminar sirviéndole al
+     * lead un tema que no existe.
+     *
+     * @return string
+     */
+    public static function get_experiencia_tema(): string
+    {
+        $stored = (string) AdminSetting::get(self::KEY_EXPERIENCIA_TEMA, self::DEFAULT_EXPERIENCIA_TEMA);
+
+        if (in_array($stored, self::VALID_TEMAS, true)) {
+            return $stored;
+        }
+
+        return self::DEFAULT_EXPERIENCIA_TEMA;
     }
 
     /**

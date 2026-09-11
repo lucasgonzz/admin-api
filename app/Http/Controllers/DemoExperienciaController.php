@@ -416,6 +416,14 @@ class DemoExperienciaController extends Controller
             // Progreso del lead sobre el video de introducción y umbral vigente.
             'intro' => $this->build_intro($lead, $media),
 
+            // Tema visual (oscuro/claro) de la página completa (misión
+            // tema-experiencia-configurable). Top-level y no adentro de "intro" ni de ningún otro
+            // bloque: es un concern de la página entera, no de una pieza. Viaja acá y no en un
+            // endpoint aparte por el mismo motivo que ya vale para intro.velocidad, más arriba: la
+            // página inmersiva es pública, el lead no está autenticado, y este payload ya es el
+            // único canal por el que le llega la configuración.
+            'tema' => LeadDemoSettings::get_experiencia_tema(),
+
             // 🔴 Mismo interruptor que usa AppTime para el reloj virtual del admin, y por eso es el
             // correcto: producción no corre en `local`, así que el bypass no se puede filtrar por
             // accidente. No es un flag de build del front, ni una query string, ni una columna del

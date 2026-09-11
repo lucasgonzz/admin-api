@@ -103,6 +103,12 @@ class LeadDemoSettingsController extends Controller
                "required" el formulario de configuración de demos actual tiraría 422 al guardar en
                el intervalo entre el deploy de este backend y el del front. */
             'experiencia_default'             => 'sometimes|nullable|string|in:actual,nueva',
+            /* Tema visual (oscuro/claro) de la página de experiencia (misión
+               tema-experiencia-configurable). "sometimes" y NO "required": el SPA todavía no manda
+               esta clave hasta que se despliegue su propia parte, y con "required" el formulario
+               de configuración de demos actual tiraría 422 al guardar en el intervalo entre el
+               deploy de este backend y el del front. */
+            'experiencia_tema'                => 'sometimes|nullable|string|in:'.implode(',', LeadDemoSettings::VALID_TEMAS),
         ]);
 
         /* Persistir todos los valores validados. */
