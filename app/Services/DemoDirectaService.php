@@ -46,15 +46,18 @@ class DemoDirectaService
 
     /**
      * Estados en los que un lead ocupa de verdad su instancia. Un lead en cualquier otro estado
-     * (realizada, closer, cerrado, pendiente de ingreso, en pausa) puede seguir teniendo
-     * demo_date/demo_id cargados, pero ya no va a entrar por ese turno: la instancia se considera
-     * libre. Es más laxo que load_blocked_ranges_by_demo() de la grilla vieja (que bloqueaba por
-     * cualquier lead con demo_date, sin mirar el estado) a propósito: con tres instancias y una
-     * ventana de varias horas por lead, un no-show bloquearía media tarde.
+     * (realizada, closer, cerrado, en pausa) puede seguir teniendo demo_date/demo_id cargados,
+     * pero ya no va a entrar por ese turno: la instancia se considera libre.
+     *
+     * `demo_pendiente_de_ingreso` SÍ ocupa mientras conserve su turno: un lead de la dinámica
+     * actual llega ahí por timeout y puede entrar más tarde dentro de su hora (el evento
+     * demo.ingreso lo avanza desde ese estado). Los de la demo directa, en cambio, pierden el turno
+     * al pasar a ese estado (marcar_no_ingreso y el vencimiento por no-show limpian demo_date), así
+     * que no bloquean nada: cuando vuelven, se les asigna de nuevo.
      *
      * @var array<int, string>
      */
-    const ESTADOS_QUE_OCUPAN_LA_INSTANCIA = ['demo_agendada', 'demo_en_curso', 'demo_pendiente_de_terminar'];
+    const ESTADOS_QUE_OCUPAN_LA_INSTANCIA = ['demo_agendada', 'demo_pendiente_de_ingreso', 'demo_en_curso', 'demo_pendiente_de_terminar'];
 
     /**
      * Ventana de la demo directa a partir de un instante.
@@ -64,9 +67,13 @@ class DemoDirectaService
      * inicio —mismos dos clamps que la ventana extendida de la misión 47— sin recortar por otras
      * demos: la instancia se elige libre para toda la ventana, no al revés.
      *
+     * `cabe` es false cuando entre el inicio y las 23:59 no entra ni una demo de la duración
+     * configurada (un "sí" a las 23:30): no se asigna una demo de veinte minutos, se le ofrece
+     * para mañana.
+     *
      * @param Carbon|null $ahora Instante de referencia (AppTime::now() si no viene).
      *
-     * @return array{inicio: Carbon, fin: Carbon}
+     * @return array{inicio: Carbon, fin: Carbon, cabe: bool}
      */
     public function ventana_desde(?Carbon $ahora = null): array
     {
@@ -79,31 +86,68 @@ class DemoDirectaService
             $fin = $tope;
         }
 
-        return ['inicio' => $inicio, 'fin' => $fin];
+        $cabe = $fin->diffInMinutes($inicio, false) <= -LeadDemoSettings::get_duracion_minutos();
+
+        return ['inicio' => $inicio, 'fin' => $fin, 'cabe' => $cabe];
     }
 
     /**
-     * Primera instancia (por id) libre para la ventana pedida, o null si las tres están ocupadas.
+     * Primera instancia (por id) libre para la ventana pedida, con la ventana que de verdad se le
+     * puede dar, o null si ninguna sirve.
      *
      * "Libre" = ningún OTRO lead, en un estado que ocupe la instancia, tiene ese mismo demo_id el
-     * día del inicio con una ventana [inicio - setup, fin + gracia] que se solape con la pedida
-     * (también inflada con setup y gracia: dos setups no pueden pisarse, y la gracia es el rato en
+     * día del inicio con una ventana [inicio - setup, fin + gracia] que cubra el INICIO pedido
+     * (también inflado con setup y gracia: dos setups no pueden pisarse, y la gracia es el rato en
      * que el lead anterior todavía puede estar adentro).
+     *
+     * Si la instancia está libre ahora pero tiene un turno más tarde (una demo de la dinámica
+     * actual a las 15:00, o un lead que dijo "sí" hace un rato y arranca en cinco minutos), la
+     * ventana se RECORTA para terminar antes de ese turno, siempre que quede al menos la duración
+     * configurada. Sin ese recorte, tres instancias vacías con una demo de una hora cada una a la
+     * tarde dejaban a un "sí" de las 10:00 sin lugar, porque la ventana extendida de seis horas no
+     * entraba entera.
      *
      * @param Lead   $lead   Lead al que se le va a asignar (se excluye a sí mismo: reagendar no
      *                       puede chocar contra la propia reserva, misma lección del lead #10).
      * @param Carbon $inicio Inicio de la ventana pedida.
-     * @param Carbon $fin    Fin de la ventana pedida.
+     * @param Carbon $fin    Fin de la ventana pedida (tope de la ventana extendida).
      *
-     * @return Demo|null
+     * @return array{demo: Demo, fin: Carbon}|null
      */
-    public function instancia_libre(Lead $lead, Carbon $inicio, Carbon $fin): ?Demo
+    public function instancia_libre(Lead $lead, Carbon $inicio, Carbon $fin): ?array
     {
-        $ocupadas = $this->ocupacion_por_demo($lead, $inicio, $fin);
+        $ocupadas    = $this->ocupacion_por_demo($lead, $inicio, $fin);
+        $setup_antes = LeadDemoSettings::get_setup_minutos_antes();
+        $gracia      = LeadDemoSettings::get_gracia_minutos_post();
+        $duracion    = LeadDemoSettings::get_duracion_minutos();
 
         foreach (Demo::query()->orderBy('id')->get() as $demo) {
             if (empty($ocupadas[$demo->id])) {
-                return $demo;
+                return ['demo' => $demo, 'fin' => $fin->copy()];
+            }
+
+            /* Hay turnos que se solapan con la ventana pedida: sirve sólo si todos arrancan
+             * después del inicio, y entonces la ventana termina antes del más temprano. */
+            $fin_recortado = $fin->copy();
+            $bloqueada     = false;
+            foreach ($ocupadas[$demo->id] as $intervalo) {
+                /* $intervalo['desde'] ya viene con el setup descontado. Si ese margen cae antes
+                 * de que termine nuestro propio setup (inicio - setup), el turno pisa el arranque. */
+                if ($intervalo['desde']->lte($inicio->copy()->subMinutes($setup_antes))) {
+                    $bloqueada = true;
+                    break;
+                }
+                $tope_por_este = $intervalo['desde']->copy()->subMinutes($gracia + 1);
+                if ($tope_por_este->lt($fin_recortado)) {
+                    $fin_recortado = $tope_por_este;
+                }
+            }
+
+            if ($bloqueada) {
+                continue;
+            }
+            if ($fin_recortado->diffInMinutes($inicio, false) <= -$duracion) {
+                return ['demo' => $demo, 'fin' => $fin_recortado->second(0)];
             }
         }
 
@@ -133,16 +177,20 @@ class DemoDirectaService
             return null;
         }
 
+        if ($this->instancia_libre($lead, $ventana['inicio'], $ventana['fin']) !== null) {
+            return null;
+        }
+
         $mas_temprano = null;
         foreach ($demos as $demo) {
             if (empty($ocupadas[$demo->id])) {
-                return null;
+                continue;
             }
             /* La instancia se libera cuando termina la ÚLTIMA de sus ventanas solapadas. */
             $libera_a = null;
-            foreach ($ocupadas[$demo->id] as $fin_ocupada) {
-                if ($libera_a === null || $fin_ocupada->gt($libera_a)) {
-                    $libera_a = $fin_ocupada;
+            foreach ($ocupadas[$demo->id] as $intervalo) {
+                if ($libera_a === null || $intervalo['hasta']->gt($libera_a)) {
+                    $libera_a = $intervalo['hasta'];
                 }
             }
             if ($mas_temprano === null || $libera_a->lt($mas_temprano)) {
@@ -162,16 +210,22 @@ class DemoDirectaService
      * @param Lead        $lead
      * @param Carbon|null $ahora
      *
-     * @return array{demo: Demo|null, proxima_liberacion: Carbon|null}
+     * @return array{demo: Demo|null, fin: Carbon|null, cabe_hoy: bool, proxima_liberacion: Carbon|null}
      */
     public function elegir_prevista(Lead $lead, ?Carbon $ahora = null): array
     {
         $ventana = $this->ventana_desde($ahora);
-        $demo    = $this->instancia_libre($lead, $ventana['inicio'], $ventana['fin']);
+        if (! $ventana['cabe']) {
+            return ['demo' => null, 'fin' => null, 'cabe_hoy' => false, 'proxima_liberacion' => null];
+        }
+
+        $libre = $this->instancia_libre($lead, $ventana['inicio'], $ventana['fin']);
 
         return [
-            'demo'               => $demo,
-            'proxima_liberacion' => $demo === null ? $this->proxima_liberacion($lead, $ahora) : null,
+            'demo'               => $libre !== null ? $libre['demo'] : null,
+            'fin'                => $libre !== null ? $libre['fin'] : null,
+            'cabe_hoy'           => true,
+            'proxima_liberacion' => $libre === null ? $this->proxima_liberacion($lead, $ahora) : null,
         ];
     }
 
@@ -228,14 +282,14 @@ class DemoDirectaService
     }
 
     /**
-     * Para cada demo, los "fin + gracia" de las ventanas de otros leads que se solapan con la
-     * pedida. Una demo sin entradas está libre.
+     * Para cada demo, los intervalos [desde, hasta] (ya inflados con setup y gracia) de las
+     * ventanas de otros leads que se solapan con la pedida. Una demo sin entradas está libre.
      *
      * @param Lead   $lead
      * @param Carbon $inicio
      * @param Carbon $fin
      *
-     * @return array<int, array<int, Carbon>> demo_id => lista de fines (con gracia) solapados.
+     * @return array<int, array<int, array{desde: Carbon, hasta: Carbon}>> demo_id => intervalos solapados.
      */
     private function ocupacion_por_demo(Lead $lead, Carbon $inicio, Carbon $fin): array
     {
@@ -269,7 +323,7 @@ class DemoDirectaService
      * @param int        $gracia
      * @param int        $duracion
      *
-     * @return array<int, array<int, Carbon>>
+     * @return array<int, array<int, array{desde: Carbon, hasta: Carbon}>>
      */
     private function fines_solapados(Collection $ocupantes, string $fecha, Carbon $pedida_desde, Carbon $pedida_hasta, int $setup_antes, int $gracia, int $duracion): array
     {
@@ -294,7 +348,7 @@ class DemoDirectaService
                 continue;
             }
 
-            $por_demo[(int) $ocupante->demo_id][] = $ocupa_hasta;
+            $por_demo[(int) $ocupante->demo_id][] = ['desde' => $ocupa_desde, 'hasta' => $ocupa_hasta];
         }
 
         return $por_demo;

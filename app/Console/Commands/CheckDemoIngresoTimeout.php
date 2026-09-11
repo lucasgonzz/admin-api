@@ -194,9 +194,109 @@ class CheckDemoIngresoTimeout extends Command
             $processed++;
         }
 
+        $processed += $this->vencer_demos_directas_sin_ingreso($now);
+
         $this->info("Timeouts de ingreso procesados: {$processed}");
 
         return 0;
+    }
+
+    /**
+     * Demo DIRECTA (misión demo-agendado-directo, 10/9/2026): el lead que dijo "sí" y no entró en
+     * N minutos desde el inicio (setting `demo_directa_no_show_minutos`, default 60) pierde el
+     * turno y LIBERA la instancia.
+     *
+     * La ventana extendida de la demo directa dura horas, y sin este vencimiento un "dale" que
+     * nunca entra dejaba la instancia ocupada hasta el fin de la ventana: con tres instancias, tres
+     * no-shows a la tarde dejaban al cuarto lead sin lugar (hallazgo del chequeo adversarial). El
+     * lead pasa a `demo_pendiente_de_ingreso` como el resto de los timeouts, pero además se limpia
+     * el turno y el setup vuelve a `pendiente`: la página deja de habilitar el botón (sin turno no
+     * se entra), otro lead puede tomar la instancia, y cuando este vuelva el agente le ofrece la demo
+     * de nuevo y se le asigna una fresca. No se le manda ningún mensaje.
+     *
+     * Sólo la demo directa (ventana extendida de la dinámica nueva): los flexibles de la dinámica
+     * actual son el checkbox manual de Lucas y no pasan por acá.
+     *
+     * @param Carbon $now
+     *
+     * @return int Leads vencidos.
+     */
+    private function vencer_demos_directas_sin_ingreso(Carbon $now): int
+    {
+        $no_show_minutos = LeadDemoSettings::get_demo_directa_no_show_minutos();
+
+        $candidatas = Lead::query()
+            ->where('status', 'demo_agendada')
+            ->where('demo_experiencia', Lead::EXPERIENCIA_NUEVA)
+            ->where('demo_flexible', true)
+            ->where('automatizaciones_demo_activas', true)
+            ->where('auto_check_ingreso_demo', true)
+            ->where('tiene_sugerencia_pendiente', false)
+            ->where('demo_ingreso_confirmado', false)
+            ->where('demo_no_ingreso_notificado', false)
+            ->whereNotNull('demo_date')
+            ->whereNotNull('demo_start_time')
+            ->get();
+
+        $vencidas = 0;
+
+        foreach ($candidatas as $lead) {
+            $inicio = $this->parse_demo_datetime(
+                $lead->demo_date->setTimezone('America/Argentina/Buenos_Aires')->format('Y-m-d'),
+                (string) $lead->demo_start_time
+            );
+            if ($inicio === null || $inicio->copy()->addMinutes($no_show_minutos)->gt($now)) {
+                continue;
+            }
+
+            /* Mismo UPDATE condicionado que el timeout de arriba, por la misma carrera con el
+             * evento real de ingreso. Acá además se limpia el turno. */
+            $filas_afectadas = Lead::query()
+                ->whereKey($lead->id)
+                ->where('status', 'demo_agendada')
+                ->update([
+                    'status'                     => 'demo_pendiente_de_ingreso',
+                    'demo_no_ingreso_notificado' => true,
+                    'demo_id'                    => null,
+                    'demo_date'                  => null,
+                    'demo_start_time'            => null,
+                    'demo_end_time'              => null,
+                    'demo_flexible'              => false,
+                    'demo_setup_status'          => 'pendiente',
+                ]);
+
+            if ($filas_afectadas === 0) {
+                Log::info('CheckDemoIngresoTimeout: demo directa cambió de estado mientras se procesaba (carrera con el ingreso real), se saltea.', [
+                    'lead_id' => $lead->id,
+                ]);
+
+                continue;
+            }
+
+            try {
+                $ciclo_service = new DemoCicloAdminNotificationService(new WhatsappSendService());
+                $ciclo_service->notify_no_ingreso($lead->fresh(), 'no entró a la demo directa en ' . $no_show_minutos . ' minutos; la instancia quedó libre');
+            } catch (\Throwable $e) {
+                Log::error('CheckDemoIngresoTimeout: error al notificar no_ingreso (demo directa) a admins.', [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+
+            LeadBroadcastService::emit_conversation_updated((int) $lead->id);
+
+            Log::info('CheckDemoIngresoTimeout: demo directa vencida por no-show, instancia liberada', [
+                'lead_id'         => $lead->id,
+                'contact_name'    => $lead->contact_name,
+                'demo_id'         => $lead->demo_id,
+                'inicio'          => $inicio->toDateTimeString(),
+                'no_show_minutos' => $no_show_minutos,
+            ]);
+
+            $vencidas++;
+        }
+
+        return $vencidas;
     }
 
     /**

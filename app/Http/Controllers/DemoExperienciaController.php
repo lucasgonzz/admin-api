@@ -545,6 +545,14 @@ class DemoExperienciaController extends Controller
         if ($turno['estado'] === 'vencido') {
             return ['puede' => false, 'motivo' => 'vencido'];
         }
+        /* Sin turno tampoco se entra (misión demo-agendado-directo, 10/9/2026). Hasta hoy un lead
+         * sin demo_date pasaba de largo por acá y, con el setup de un turno anterior todavía en
+         * `exitoso`, el botón se habilitaba: en la demo directa una asignación cancelada o vencida
+         * libera la instancia para OTRO lead, y este camino lo dejaba entrar a la demo de ese otro.
+         * Mismo motivo que muestra la página para un turno vencido: no hay una cuarta pantalla. */
+        if ($turno['estado'] === 'sin_turno') {
+            return ['puede' => false, 'motivo' => 'vencido'];
+        }
 
         $setup = (string) ($lead->demo_setup_status ?? 'pendiente');
         if ($setup === 'fallido') {

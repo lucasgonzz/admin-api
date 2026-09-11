@@ -43,9 +43,10 @@ class LeadDemoAccesoMailHelper
         // `services.admin_spa.url`; null se trata como vacío.
         $url_experiencia = (string) ($lead->demo_experiencia_url ?? '');
 
-        // Llave 2: la tienda online de la Demo asignada. `loadMissing` para no disparar una
-        // consulta de más si quien llama ya trajo la relación.
-        $lead->loadMissing('demo');
+        // Llave 2: la tienda online de la Demo asignada. `load` y no `loadMissing`: si el mismo
+        // request cargó la relación cuando el lead todavía no tenía demo, quedó cacheada como null
+        // y `loadMissing` no la volvería a leer (hallazgo del chequeo adversarial, 10/9/2026).
+        $lead->load('demo');
         $url_tienda_raw = $lead->demo ? (string) $lead->demo->ecommerce_spa_url : '';
         $url_tienda     = self::normalize_mail_url($url_tienda_raw);
 

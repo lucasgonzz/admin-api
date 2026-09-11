@@ -111,8 +111,14 @@ class SendDemoReminders extends Command
          */
         $ultimos_mensajes = collect();
         if ($candidates->isNotEmpty()) {
+            /* Sin los eventos técnicos del hilo (is_status_event: "completó el formulario", "terminó
+             * el video", bloques de error): no son "hablar con el lead", y contarlos postergaba el
+             * recordatorio treinta minutos por cada hito de la página. */
             $ultimos_mensajes = LeadMessage::query()
                 ->whereIn('lead_id', $candidates->pluck('id'))
+                ->where(function ($query) {
+                    $query->whereNull('is_status_event')->orWhere('is_status_event', false);
+                })
                 ->selectRaw("lead_id, MAX(CASE WHEN sender = 'lead' THEN created_at END) as ultimo_entrante, MAX(CASE WHEN sender != 'lead' THEN created_at END) as ultimo_saliente")
                 ->groupBy('lead_id')
                 ->get()

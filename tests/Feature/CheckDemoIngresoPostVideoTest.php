@@ -143,7 +143,35 @@ class CheckDemoIngresoPostVideoTest extends TestCase
     }
 
     /**
-     * (5) La dinámica actual no recibe este check (no tiene video en una página).
+     * (5) Con la demo todavía preparándose no se pregunta (el botón no se habilita), y los eventos
+     *     técnicos del hilo ("terminó el video") no cuentan como conversación.
+     *
+     * @return void
+     */
+    public function test_setup_pendiente_no_sale_y_los_eventos_tecnicos_no_cuentan_como_hablar(): void
+    {
+        $espia = $this->espiar_whatsapp();
+
+        $preparando = $this->crear_lead(Carbon::now()->subMinutes(15));
+        $preparando->demo_setup_status = 'ejecutandose';
+        $preparando->save();
+        $this->mensaje($preparando, 'lead', Carbon::now()->subMinutes(40));
+
+        $con_evento = $this->crear_lead(Carbon::now()->subMinutes(15), '5493519999994');
+        $this->mensaje($con_evento, 'lead', Carbon::now()->subMinutes(40));
+        $evento = $this->mensaje($con_evento, 'sistema', Carbon::now()->subMinutes(2));
+        $evento->is_status_event = true;
+        $evento->save();
+
+        $this->artisan('leads:check-demo-ingreso-post-video')->assertExitCode(0);
+
+        $this->assertCount(1, $espia->plantillas, 'Sólo el lead con setup exitoso, y el evento técnico no lo posterga.');
+        $this->assertSame('5493519999994', preg_replace('/\D+/', '', $espia->plantillas[0]['to']));
+        $this->assertFalse((bool) $preparando->refresh()->demo_check_ingreso_enviado);
+    }
+
+    /**
+     * (6) La dinámica actual no recibe este check (no tiene video en una página).
      *
      * @return void
      */
@@ -207,6 +235,7 @@ class CheckDemoIngresoPostVideoTest extends TestCase
         $lead->demo_flexible                 = true;
         $lead->intro_visto_pct               = 100;
         $lead->intro_visto_at                = $intro_visto_at;
+        $lead->demo_setup_status             = 'exitoso';
         $lead->automatizaciones_demo_activas = true;
         $lead->auto_check_ingreso_demo       = true;
         $lead->demo_check_ingreso_enviado    = false;

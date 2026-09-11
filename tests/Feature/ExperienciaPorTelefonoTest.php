@@ -76,8 +76,7 @@ class ExperienciaPorTelefonoTest extends TestCase
     }
 
     /**
-     * (4) Un teléfono guardado con espacios y guiones también resuelve (repliegue del LIKE al
-     *     barrido tolerante).
+     * (4) Un teléfono guardado con espacios y guiones también resuelve (la normalización va en SQL).
      *
      * @return void
      */
@@ -86,6 +85,23 @@ class ExperienciaPorTelefonoTest extends TestCase
         $lead = $this->crear_lead('Con formato', '+54 9 351 123-4567');
 
         $this->assertSame($lead->id, Lead::resolver_por_clave_de_experiencia('5493511234567')->id);
+    }
+
+    /**
+     * (5) 🔴 Dos teléfonos de áreas distintas que comparten los últimos ocho dígitos NO se
+     *     confunden: la comparación es por igualdad del número normalizado, no por sufijo (con la
+     *     tolerancia del webhook, el link de Córdoba abría la demo de Mendoza).
+     *
+     * @return void
+     */
+    public function test_un_sufijo_compartido_no_resuelve_al_lead_equivocado(): void
+    {
+        $cordoba = $this->crear_lead('Córdoba', '+5493515551234');
+        $mendoza = $this->crear_lead('Mendoza', '+5492615551234');
+
+        $this->assertSame($cordoba->id, Lead::resolver_por_clave_de_experiencia('5493515551234')->id);
+        $this->assertSame($mendoza->id, Lead::resolver_por_clave_de_experiencia('5492615551234')->id);
+        $this->assertNull(Lead::resolver_por_clave_de_experiencia('5491155551234'));
     }
 
     /**

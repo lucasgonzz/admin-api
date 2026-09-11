@@ -333,7 +333,24 @@ class LeadSuggestionSendService
          * camino de aprobación tira HorarioYaNoDisponibleException y no envía nada
          * (LeadAiService::frenar_por_horario_no_disponible), que es lo que este comentario ya decía.
          */
-        if (! empty($message->pending_actions)) {
+        /*
+         * Demo directa (misión demo-agendado-directo): si la ventana de 24 hs de Meta está cerrada,
+         * el mensaje no va a salir (se rechaza más abajo), así que NO se aplican las acciones: sin
+         * esto se asignaba la instancia "para ahora", salía la carta y se avisaba a los admins por
+         * una demo que el lead nunca iba a recibir —y encima 25 horas después de su "sí". Se
+         * decide acá arriba sólo para este paquete; el resto conserva el orden de siempre.
+         */
+        $paquete_directo_sin_ventana = ! empty($message->pending_actions['agendar_demo']['ahora'])
+            && trim((string) $lead->phone) !== ''
+            && ! $this->is_within_whatsapp_window($lead);
+        if ($paquete_directo_sin_ventana) {
+            Log::channel('daily')->warning('LeadSuggestionSendService: demo directa no asignada, la ventana de 24hs está cerrada.', [
+                'lead_id'    => $lead->id,
+                'message_id' => $message->id,
+            ]);
+        }
+
+        if (! empty($message->pending_actions) && ! $paquete_directo_sin_ventana) {
             if ($is_auto_send) {
                 /*
                  * FIX (prompt 337): Caso B del respaldo automático. Llegar hasta acá ya significa

@@ -1178,16 +1178,22 @@ class Lead extends Model
      * (links anteriores al 10/9/2026) o los dígitos de su teléfono (links nuevos, ver
      * getDemoExperienciaClaveAttribute()).
      *
-     * Con teléfono, si hay varios leads con el mismo número (re-ingresos por otra campaña) gana el
-     * MÁS RECIENTE: es el mismo criterio con el que el webhook de WhatsApp enruta los mensajes
-     * entrantes (WhatsappWebhookController::find_lead_by_phone()), así que la página cae en la
-     * misma conversación en la que el agente le pasó el link.
+     * 🔴 Con teléfono la comparación es por IGUALDAD del número normalizado (E.164), no la
+     * tolerancia por sufijo de WhatsappNormalizer::phones_match(). Esa tolerancia acepta que
+     * coincidan los últimos 8 dígitos, y en Argentina el sufijo de 8 pisa parte del código de área
+     * del interior: 351-555-1234 (Córdoba) y 261-555-1234 (Mendoza) matchean, y el link del
+     * primero abriría la página —y la demo— del segundo (hallazgo del chequeo adversarial de la
+     * misión demo-agendado-directo, reproducido). El webhook puede permitirse esa tolerancia porque
+     * enruta un mensaje del propio número; acá la clave viene de una URL que cualquiera puede tipear.
      *
-     * La comparación es tolerante a formato (WhatsappNormalizer::phones_match), pero la consulta
-     * se acota primero por LIKE sobre los últimos ocho dígitos: esta ruta es pública y la página la
-     * poleá cada diez segundos, no puede cargar la tabla entera en cada pedido. El repliegue a un
-     * barrido de (id, phone) cubre los teléfonos guardados con espacios o guiones, que el LIKE de
-     * dígitos crudos no encuentra.
+     * Si hay varios leads con el mismo número (re-ingresos por otra campaña) gana el MÁS RECIENTE:
+     * es el mismo criterio con el que el webhook enruta los mensajes entrantes, así que la página
+     * cae en la misma conversación en la que el agente le pasó el link.
+     *
+     * La consulta se acota por LIKE sobre los últimos ocho dígitos del teléfono NORMALIZADO EN SQL
+     * (sin espacios, guiones, paréntesis ni `+`): esta ruta es pública y la página la poleá cada
+     * diez segundos, no puede barrer la tabla entera por pedido. Los candidatos se comparan después
+     * en PHP con el normalizador completo, que además inserta el 9 de móvil cuando falta.
      *
      * @param string $clave Segmento de la URL: uuid o dígitos de teléfono.
      *
@@ -1209,23 +1215,23 @@ class Lead extends Model
             return null;
         }
 
+        $buscado = WhatsappNormalizer::normalize($digitos);
+        if ($buscado === '') {
+            return null;
+        }
+
+        /* Sólo dígitos del lado de la base, para que "+54 9 351 123-4567" también sea candidato. */
+        $telefono_sin_formato = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '(', ''), ')', ''), '+', ''), '.', '')";
+
         $candidatos = static::query()
             ->whereNotNull('phone')
-            ->where('phone', 'like', '%' . substr($digitos, -8) . '%')
+            ->whereRaw($telefono_sin_formato . ' LIKE ?', ['%' . substr($digitos, -8) . '%'])
             ->orderBy('id', 'desc')
             ->get(['id', 'phone']);
 
-        if ($candidatos->isEmpty()) {
-            $candidatos = static::query()
-                ->whereNotNull('phone')
-                ->where('phone', '!=', '')
-                ->orderBy('id', 'desc')
-                ->get(['id', 'phone']);
-        }
-
         foreach ($candidatos as $candidato) {
-            if (WhatsappNormalizer::phones_match((string) $candidato->phone, $digitos)) {
-                /* Las dos consultas traen sólo (id, phone): se devuelve el modelo completo. */
+            if (WhatsappNormalizer::normalize((string) $candidato->phone) === $buscado) {
+                /* La consulta trae sólo (id, phone): se devuelve el modelo completo. */
                 return static::find($candidato->id);
             }
         }

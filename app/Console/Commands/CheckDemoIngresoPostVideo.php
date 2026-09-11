@@ -96,6 +96,9 @@ class CheckDemoIngresoPostVideo extends Command
             ->where('demo_check_ingreso_enviado', false)
             ->where('demo_ingreso_confirmado', false)
             ->where('tiene_sugerencia_pendiente', false)
+            /* Si la demo todavía se está preparando (o falló), el botón no se habilita y
+             * preguntarle "¿pudiste entrar?" es preguntarle por algo que no pudo hacer. */
+            ->where('demo_setup_status', 'exitoso')
             ->whereNotNull('intro_visto_at')
             ->where('intro_visto_at', '<=', $now->copy()->subMinutes($demora_minutos))
             ->whereNotNull('demo_date')
@@ -112,8 +115,15 @@ class CheckDemoIngresoPostVideo extends Command
 
         /* Último entrante y último saliente por lead, en una sola consulta (misma técnica que
          * CheckDemoFin): la ventana de silencio se evalúa con esto. */
+        /* Los eventos técnicos del hilo ("completó el formulario", "terminó el video", los bloques
+         * de error) son filas de `sistema` con is_status_event: no son "hablar con el lead" y no
+         * cuentan para el silencio. Sin esta condición, terminar el video postergaba el propio
+         * check que ese hito dispara. */
         $ultimos_mensajes = LeadMessage::query()
             ->whereIn('lead_id', $candidates->pluck('id'))
+            ->where(function ($query) {
+                $query->whereNull('is_status_event')->orWhere('is_status_event', false);
+            })
             ->selectRaw("lead_id, MAX(CASE WHEN sender = 'lead' THEN created_at END) as ultimo_entrante, MAX(CASE WHEN sender != 'lead' THEN created_at END) as ultimo_saliente")
             ->groupBy('lead_id')
             ->get()

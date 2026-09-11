@@ -362,8 +362,258 @@ class DemoDirectaTest extends TestCase
     }
 
     /* ------------------------------------------------------------------ */
+    /* 9 a 14 — lo que encontró el chequeo adversarial                       */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * (9) La instancia que tiene un turno más tarde sirve igual: la ventana se recorta para
+     *     terminar antes de ese turno (15:00 − 15 de setup − 10 de gracia − 1 = 14:34).
+     *
+     * @return void
+     */
+    public function test_la_ventana_se_recorta_antes_del_proximo_turno_de_la_instancia(): void
+    {
+        $demo = $this->crear_demo(1);
+        $this->ocupar_instancia($demo, '2026-09-08', '15:00', '16:00');
+        $lead    = $this->crear_lead_de_la_dinamica_nueva();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead));
+
+        $lead->refresh();
+        $this->assertSame($demo->id, (int) $lead->demo_id);
+        $this->assertSame('10:10', substr((string) $lead->demo_start_time, 0, 5));
+        $this->assertSame('14:34', substr((string) $lead->demo_end_time, 0, 5));
+    }
+
+    /**
+     * (10) Al asignar se resetean los relojes del turno anterior y el setup vuelve a `pendiente`,
+     *      para que la instancia se vuelva a preparar y el recordatorio y el check puedan salir.
+     *
+     * @return void
+     */
+    public function test_al_asignar_se_resetean_los_relojes_y_el_setup(): void
+    {
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $lead->recordatorio_demo_enviado  = true;
+        $lead->demo_check_ingreso_enviado = true;
+        $lead->demo_setup_status          = 'exitoso';
+        $lead->save();
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead));
+
+        $lead->refresh();
+        $this->assertFalse((bool) $lead->recordatorio_demo_enviado);
+        $this->assertFalse((bool) $lead->demo_check_ingreso_enviado);
+        $this->assertSame('pendiente', (string) $lead->demo_setup_status);
+    }
+
+    /**
+     * (11) "No voy a poder entrar" (marcar_no_ingreso) en una demo directa LIBERA la instancia: se
+     *      limpia el turno y el setup, y la página deja de habilitar el botón.
+     *
+     * @return void
+     */
+    public function test_marcar_no_ingreso_libera_la_instancia_y_cierra_la_pagina(): void
+    {
+        config(['services.admin_spa.url' => 'https://admin.test']);
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        $lead->status            = 'demo_agendada';
+        $lead->demo_id           = $demo->id;
+        $lead->demo_date         = '2026-09-08';
+        $lead->demo_start_time   = '09:40';
+        $lead->demo_end_time     = '15:40';
+        $lead->demo_flexible     = true;
+        $lead->demo_setup_status = 'exitoso';
+        $lead->intro_visto_pct   = 100;
+        $lead->save();
+
+        $mensaje                        = new LeadMessage();
+        $mensaje->lead_id               = $lead->id;
+        $mensaje->sender                = 'sistema';
+        $mensaje->status                = 'sugerido';
+        $mensaje->is_followup           = false;
+        $mensaje->requiere_verificacion = true;
+        $mensaje->content               = 'Dale, avisame cuando puedas y en diez minutos la tenés lista.';
+        $mensaje->pending_actions       = [
+            'mensaje_sugerido'  => $mensaje->content,
+            'estado_sugerido'   => 'demo_agendada',
+            'razonamiento'      => '',
+            'marcar_no_ingreso' => true,
+        ];
+        $mensaje->save();
+
+        $mensaje = (new LeadAiService())->apply_pending_actions($mensaje, $this->final_actions_del_panel($lead, ['agendar_demo' => null]));
+
+        /* El cambio de estado se aplica al ENVIAR (apply_suggested_pipeline_status), como con
+         * cualquier acción del ciclo; acá se verifica la decisión y la liberación del turno. */
+        $this->assertSame('demo_pendiente_de_ingreso', $mensaje->suggested_lead_status);
+        $lead->refresh();
+        $this->assertNull($lead->demo_id);
+        $this->assertNull($lead->demo_date);
+        $this->assertSame('pendiente', (string) $lead->demo_setup_status);
+
+        /* Otro lead puede tomar la instancia ahora mismo. */
+        $otro = $this->crear_lead_de_la_dinamica_nueva();
+        $this->assertNotNull((new DemoDirectaService())->elegir_prevista($otro)['demo']);
+
+        /* Y la página del primero ya no habilita el botón. */
+        $this->getJson('/api/demo-experiencia/' . $lead->uuid)
+            ->assertStatus(200)
+            ->assertJsonPath('puede_ingresar', false)
+            ->assertJsonPath('turno.estado', 'sin_turno');
+    }
+
+    /**
+     * (12) 🔴 El no-show: una demo directa cuyo lead no entró en 60 minutos desde el inicio pierde el
+     *      turno (la instancia queda libre) y pasa a demo_pendiente_de_ingreso, sin mensaje.
+     *
+     * @return void
+     */
+    public function test_el_no_show_libera_la_instancia_a_los_sesenta_minutos(): void
+    {
+        AdminSetting::set(LeadDemoSettings::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS, '60');
+        Http::fake(['*' => Http::response(['ok' => true], 200)]);
+        $demo = $this->crear_demo(1);
+
+        $reciente = $this->crear_lead_de_la_dinamica_nueva();
+        $this->dejar_en_demo_directa($reciente, $demo, '09:40', '15:40');
+
+        $vencido = $this->crear_lead_de_la_dinamica_nueva();
+        $vencido->phone = '5493519999998';
+        $vencido->save();
+        $this->dejar_en_demo_directa($vencido, $demo, '08:30', '14:30');
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $reciente->refresh();
+        $this->assertSame('demo_agendada', $reciente->status, 'Arrancó hace 30 minutos: todavía no es no-show.');
+        $this->assertSame($demo->id, (int) $reciente->demo_id);
+
+        $vencido->refresh();
+        $this->assertSame('demo_pendiente_de_ingreso', $vencido->status, 'Arrancó hace 90 minutos sin entrar: pierde el turno.');
+        $this->assertNull($vencido->demo_id);
+        $this->assertNull($vencido->demo_date);
+        $this->assertSame('pendiente', (string) $vencido->demo_setup_status);
+        $this->assertDatabaseMissing('lead_messages', ['lead_id' => $vencido->id, 'sender' => 'sistema', 'status' => 'enviado']);
+    }
+
+    /**
+     * (13) Guardas de generación: el "sí" sin los dos links en el texto, o con una hora escrita, se
+     *      retiene para verificación; y `demo_agendada` sin agendar_demo no mueve el estado.
+     *
+     * @return void
+     */
+    public function test_el_si_sin_links_o_con_hora_se_retiene_y_demo_agendada_sin_agendar_no_mueve(): void
+    {
+        $this->sembrar_entorno_del_agente([
+            'mensaje_sugerido' => 'Dale, te la dejo lista para las 15:30.',
+            'estado_sugerido'  => 'demo_agendada',
+            'razonamiento'     => 'ok',
+            'agendar_demo'     => ['demo_id' => 1, 'demo_date' => '2026-09-08', 'demo_start_time' => '15:30'],
+        ]);
+        $this->sembrar_recurso_demo_agenda_v2($this->md_con_marcador());
+        $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $mensaje = (new LeadAiService())->generate_suggestion($lead, false);
+
+        $pendientes = $mensaje->pending_actions;
+        $this->assertTrue((bool) ($pendientes['agendar_demo']['ahora'] ?? false), 'La forma vieja se normaliza a {ahora: true}.');
+        $this->assertTrue((bool) ($pendientes['requiere_verificacion'] ?? false));
+        $this->assertStringContainsString('horario concreto', (string) $mensaje->ai_reasoning);
+        $this->assertStringContainsString('no trae el link de la página', (string) $mensaje->ai_reasoning);
+        $this->assertStringContainsString('no trae el link de la tienda', (string) $mensaje->ai_reasoning);
+        $this->assertSame([], $pendientes['horarios_ofrecidos']);
+    }
+
+    /**
+     * (13-bis) `estado_sugerido: demo_agendada` sin `agendar_demo` (el lead 30 del 4/8/2026): no se
+     *      mueve el estado y se retiene para verificación. Con grilla lo frenaba la segunda llamada;
+     *      en la demo directa no hay segunda llamada.
+     *
+     * @return void
+     */
+    public function test_demo_agendada_sin_agendar_demo_no_mueve_el_estado(): void
+    {
+        $this->sembrar_entorno_del_agente([
+            'mensaje_sugerido' => 'Genial, en diez minutos entrás.',
+            'estado_sugerido'  => 'demo_agendada',
+            'razonamiento'     => '',
+        ]);
+        $this->sembrar_recurso_demo_agenda_v2($this->md_con_marcador());
+        $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+
+        $mensaje = (new LeadAiService())->generate_suggestion($lead, false);
+
+        $this->assertSame('calificado', $mensaje->pending_actions['estado_sugerido'], 'demo_agendada sin agendar_demo no puede mover al lead.');
+        $this->assertNull($mensaje->suggested_lead_status);
+        $this->assertTrue((bool) ($mensaje->pending_actions['requiere_verificacion'] ?? false));
+        $this->assertStringContainsString('sin devolver agendar_demo', (string) $mensaje->ai_reasoning);
+    }
+
+    /**
+     * (14) Con la ventana de 24 hs de Meta cerrada, aprobar un "sí" viejo NO asigna la demo: el
+     *      mensaje se rechaza sin tocar al lead (antes se asignaba "para ahora" 25 horas después
+     *      del sí, salía la carta y recién después se descubría que no se podía mandar).
+     *
+     * @return void
+     */
+    public function test_con_la_sesion_de_meta_cerrada_no_se_asigna_al_aprobar(): void
+    {
+        $demo = $this->crear_demo(1);
+        $lead = $this->crear_lead_de_la_dinamica_nueva();
+        /* El único entrante del lead fue hace dos días: ventana cerrada. */
+        LeadMessage::query()->where('lead_id', $lead->id)->where('sender', 'lead')->update([
+            'created_at' => Carbon::now()->subDays(2),
+            'updated_at' => Carbon::now()->subDays(2),
+        ]);
+        $mensaje = $this->crear_mensaje_pendiente($lead, $demo);
+
+        (new \App\Services\LeadSuggestionSendService())->send_suggestion($mensaje, null, $this->final_actions_del_panel($lead));
+
+        $lead->refresh();
+        $this->assertNull($lead->demo_id);
+        $this->assertSame('calificado', $lead->status);
+        $this->assertSame('rechazado', $mensaje->fresh()->status);
+        Mail::assertNothingSent();
+    }
+
+    /* ------------------------------------------------------------------ */
     /* helpers                                                              */
     /* ------------------------------------------------------------------ */
+
+    /**
+     * Deja al lead como quedó después de aceptar la demo directa (turno asignado, automatizaciones
+     * prendidas, sin ingreso).
+     *
+     * @param Lead   $lead
+     * @param Demo   $demo
+     * @param string $inicio
+     * @param string $fin
+     *
+     * @return void
+     */
+    private function dejar_en_demo_directa(Lead $lead, Demo $demo, string $inicio, string $fin): void
+    {
+        $lead->status                        = 'demo_agendada';
+        $lead->demo_id                       = $demo->id;
+        $lead->demo_date                     = '2026-09-08';
+        $lead->demo_start_time               = $inicio;
+        $lead->demo_end_time                 = $fin;
+        $lead->demo_flexible                 = true;
+        $lead->demo_setup_status             = 'exitoso';
+        $lead->automatizaciones_demo_activas = true;
+        $lead->auto_check_ingreso_demo       = true;
+        $lead->tiene_sugerencia_pendiente    = false;
+        $lead->demo_ingreso_confirmado       = false;
+        $lead->demo_no_ingreso_notificado    = false;
+        $lead->save();
+    }
 
     /**
      * Fake de la API + cola fakeada + prompt base + system base. Lo que `generate_suggestion()`

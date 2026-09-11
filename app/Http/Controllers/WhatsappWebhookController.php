@@ -1381,7 +1381,19 @@ class WhatsappWebhookController extends Controller
         // check a mano desde admin-spa (LeadController::check_demo_ingress_json, botón "Check de
         // ingreso" en extra-props/Index.vue), que también escribe demo_check_ingreso_enviado.
         // El lead puede estar en demo_agendada o demo_en_curso en este punto.
-        if ($lead->demo_check_ingreso_enviado && ! $lead->demo_ingreso_confirmado) {
+        //
+        // 🔴 SOLO dinámica actual (misión demo-agendado-directo, 10/9/2026). Las dos salidas de
+        // este caso son de esa dinámica: send_demo_access_help() manda "usuario y contraseña =
+        // documento de prueba" y un link fijo, que en la dinámica nueva no existen (el lead
+        // recibiría credenciales vacías y un link ajeno, sin aprobación de nadie), y el detector
+        // de palabras clave toma "no pude" como confirmación de ingreso. En la dinámica nueva el
+        // ingreso real lo detecta el evento demo.ingreso, y lo que el lead conteste a "¿pudiste
+        // entrar?" lo lee el agente de IA con su bloque de contexto de ingreso, que sabe volver a
+        // pasar la página y devolver confirmar_ingreso / marcar_no_ingreso por inferencia. Hasta
+        // hoy demo_check_ingreso_enviado sólo lo escribía el botón manual; desde
+        // CheckDemoIngresoPostVideo lo escribe un comando cada minuto, y esta puerta dejó de ser
+        // teórica.
+        if ($lead->demo_check_ingreso_enviado && ! $lead->demo_ingreso_confirmado && ! $lead->usa_experiencia_demo_nueva()) {
             if ($this->content_confirms_ingress($content_lower)) {
                 $lead->demo_ingreso_confirmado    = true;
                 $lead->demo_ingreso_confirmado_at = now('America/Argentina/Buenos_Aires');

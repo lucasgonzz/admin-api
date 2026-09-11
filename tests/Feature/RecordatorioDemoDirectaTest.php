@@ -150,7 +150,27 @@ class RecordatorioDemoDirectaTest extends TestCase
     }
 
     /**
-     * (5) La dinámica ACTUAL no cambia: plantilla Meta de siempre, sólo dentro de los 15 minutos
+     * (5) Los eventos técnicos del hilo ("completó el formulario", "terminó el video") no cuentan
+     *     como conversación: con uno de hace 2 minutos y el último mensaje real de hace 40, sale.
+     *
+     * @return void
+     */
+    public function test_los_eventos_tecnicos_no_postergan_el_recordatorio(): void
+    {
+        $espia = $this->espiar_whatsapp();
+        $lead  = $this->crear_lead_nueva_con_demo('10:10', '16:10');
+        $this->mensaje($lead, 'lead', Carbon::now()->subMinutes(40));
+        $evento = $this->mensaje($lead, 'sistema', Carbon::now()->subMinutes(2));
+        $evento->is_status_event = true;
+        $evento->save();
+
+        $this->artisan('leads:send-demo-reminders')->assertExitCode(0);
+
+        $this->assertCount(1, $espia->textos);
+    }
+
+    /**
+     * (6) La dinámica ACTUAL no cambia: plantilla Meta de siempre, sólo dentro de los 15 minutos
      *     previos al inicio, sin mirar el silencio.
      *
      * @return void
