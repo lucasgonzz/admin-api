@@ -20,7 +20,8 @@ use Illuminate\Support\Facades\Log;
  *
  * Idempotente y conservador: pisa el valor sólo si es null o exactamente 5 (el default viejo, o
  * sea "nadie lo eligió"). Otro número lo dejó alguien a mano y no se toca. Las dos ventanas de
- * silencio nacen con `seed_defaults_if_missing()` (10 y 30) sólo si no existen.
+ * silencio (10 y 30) y el no-show de la demo directa (60) nacen con `seed_defaults_if_missing()`
+ * sólo si no existen.
  */
 class DemoCheckIngresoDesdeVideoSeeder extends Seeder
 {
@@ -37,7 +38,7 @@ class DemoCheckIngresoDesdeVideoSeeder extends Seeder
      */
     public function run()
     {
-        // Siembra lo que falte (incluidas las dos ventanas de silencio nuevas) sin pisar nada.
+        // Siembra lo que falte (las dos ventanas de silencio y el no-show nuevos) sin pisar nada.
         LeadDemoSettings::seed_defaults_if_missing();
 
         $actual = AdminSetting::get(LeadDemoSettings::KEY_CHECK_INGRESO_MINUTOS_POST, null);
