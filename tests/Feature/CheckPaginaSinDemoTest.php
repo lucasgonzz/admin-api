@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Http\Controllers\DemoExperienciaController;
 use App\Models\AdminSetting;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
@@ -41,6 +42,13 @@ class CheckPaginaSinDemoTest extends TestCase
 
         AdminSetting::set(LeadDemoSettings::KEY_PAGINA_SEGUIMIENTO_MINUTOS, '120');
         AdminSetting::set(LeadDemoSettings::KEY_CHECK_INGRESO_SILENCIO_MINUTOS, '10');
+
+        /* El comando corre contra TODOS los leads de la base, y en admin la base de testing es
+         * la misma que la local del slot (queda lo que otros sembraron a mano). Sin evento de
+         * apertura ningún lead ajeno califica, así que se limpian los eventos de página
+         * preexistentes: son datos de prueba de otras sesiones, no producción. La transacción
+         * del test lo deshace al terminar. */
+        DemoEventoRecibido::whereIn('nombre', DemoExperienciaController::EVENTOS_PAGINA)->delete();
     }
 
     /**
@@ -80,7 +88,7 @@ class CheckPaginaSinDemoTest extends TestCase
             'lead_id'             => $lead->id,
             'sender'              => 'sistema',
             'status'              => 'enviado',
-            'is_followup'         => 1,
+            'is_followup'         => 0,
             'content'             => self::TEXTO_ESPERADO,
             'whatsapp_message_id' => 'wamid.texto.1',
         ]);
@@ -232,7 +240,12 @@ class CheckPaginaSinDemoTest extends TestCase
         $bloqueado->no_recibe_mensajes_at = Carbon::now()->subDay();
         $bloqueado->save();
 
-        foreach ([$con_turno, $nuevo, $actual, $bloqueado] as $lead) {
+        /* El interruptor maestro de automatizaciones del lead, apagado a mano desde el panel. */
+        $apagado                                = $this->crear_lead('5493519999993');
+        $apagado->automatizaciones_demo_activas = false;
+        $apagado->save();
+
+        foreach ([$con_turno, $nuevo, $actual, $bloqueado, $apagado] as $lead) {
             $this->mensaje($lead, 'lead', Carbon::now()->subMinutes(200));
             $this->mensaje($lead, 'sistema', Carbon::now()->subMinutes(190));
             $this->apertura($lead, Carbon::now()->subMinutes(130));
@@ -269,7 +282,7 @@ class CheckPaginaSinDemoTest extends TestCase
         $this->assertDatabaseHas('lead_messages', [
             'lead_id'             => $lead->id,
             'sender'              => 'sistema',
-            'is_followup'         => 1,
+            'is_followup'         => 0,
             'whatsapp_message_id' => null,
         ]);
 

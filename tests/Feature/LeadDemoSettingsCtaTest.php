@@ -72,6 +72,15 @@ class LeadDemoSettingsCtaTest extends TestCase
     {
         $this->autenticar();
 
+        /* En admin la base de testing es la del slot y puede traer las claves ya guardadas (la
+         * verificación de la SPA las dejó): sin esto, el test pasaba porque lo guardado coincidía
+         * con el default, no porque probara el default. */
+        AdminSetting::whereIn('key', [
+            LeadDemoSettings::KEY_WHATSAPP_NUMERO_LEADS,
+            LeadDemoSettings::KEY_CTA_WHATSAPP_TEXTO,
+            LeadDemoSettings::KEY_PAGINA_SEGUIMIENTO_MINUTOS,
+        ])->delete();
+
         $this->getJson('/api/admin/settings/lead-demo')
             ->assertStatus(200)
             ->assertJsonPath('whatsapp_numero_leads', '543444544199')
@@ -132,7 +141,14 @@ class LeadDemoSettingsCtaTest extends TestCase
             ->assertStatus(422)
             ->assertJsonValidationErrors(['whatsapp_numero_leads']);
 
+        /* El texto vacío NO es un 422: el panel manda '' cuando el operador borra el campo, y eso
+         * significa "volver al default" (nullable en la validación, isset en la persistencia). Lo
+         * que sí es inválido es pasarse del largo. */
+        AdminSetting::set(LeadDemoSettings::KEY_CTA_WHATSAPP_TEXTO, 'Texto que queda');
         $this->putJson('/api/admin/settings/lead-demo', $this->payload_valido(['cta_whatsapp_texto' => '']))
+            ->assertStatus(200);
+        $this->assertSame('Texto que queda', AdminSetting::get(LeadDemoSettings::KEY_CTA_WHATSAPP_TEXTO));
+        $this->putJson('/api/admin/settings/lead-demo', $this->payload_valido(['cta_whatsapp_texto' => str_repeat('a', LeadDemoSettings::MAX_CHARS_CTA_TEXTO + 1)]))
             ->assertStatus(422)
             ->assertJsonValidationErrors(['cta_whatsapp_texto']);
         $this->putJson('/api/admin/settings/lead-demo', $this->payload_valido(['cta_whatsapp_texto' => str_repeat('a', 201)]))

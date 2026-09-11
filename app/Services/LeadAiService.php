@@ -9235,7 +9235,7 @@ BLOQUE_DEL_MANUAL;
         $estado_pagina = $this->describir_estado_de_la_pagina($lead, $ahora);
 
         $bloque = "\n\nDEMO DIRECTA (dinamica nueva -- la demo se hace AHORA, sin horarios):\n"
-            . "  Su pagina (copiar textual; se puede pasar en cualquier momento, es su pagina personal): {$url_pagina}\n"
+            . "  Su pagina (copiar textual; se puede pasar en cualquier momento): {$url_pagina}\n"
             . "  Estado de su pagina: {$estado_pagina}\n"
             . "  Tienda online conectada a su demo (copiar textual): " . ($url_tienda !== '' ? $url_tienda : '(sin tienda disponible: no la menciones)') . "\n"
             . "  Email del lead: " . ($email !== '' ? $email : '(no lo tenemos)') . "\n"

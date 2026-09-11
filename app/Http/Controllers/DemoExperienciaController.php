@@ -69,6 +69,12 @@ class DemoExperienciaController extends Controller
     ];
 
     /**
+     * Tope de filas de página por lead en `demo_eventos_recibidos` (11/9/2026). Ver el comentario
+     * en store_evento_json(): el endpoint es público y sin esto cada POST es una fila.
+     */
+    public const MAX_EVENTOS_PAGINA_POR_LEAD = 200;
+
+    /**
      * GET /api/demo-experiencia/{uuid}
      *
      * Arma el payload completo de la página: datos del lead, estado del turno, respuestas del
@@ -267,7 +273,7 @@ class DemoExperienciaController extends Controller
      * Idempotente por `lead_id + uuid` (el índice único de la tabla): la página dispara y olvida, y
      * un reintento del navegador no puede duplicar la fila ni el mensaje del hilo.
      *
-     * @param Request $request Body `{ uuid, nombre, ocurrido_at?, datos? }`.
+     * @param Request $request Body `{ uuid, nombre, datos? }` (un `ocurrido_at` del navegador se ignora: lo estampa el servidor).
      * @param string  $uuid    Clave pública del lead: dígitos de su teléfono o su `uuid`.
      *
      * @return JsonResponse 200 `{ok: true}` (con `ignorado` o `duplicado` cuando corresponde),
@@ -284,15 +290,22 @@ class DemoExperienciaController extends Controller
         /* Lista cerrada de nombres: el contrato con la SPA son estos tres y nada más. Un nombre
          * desconocido es 422 y no "se guarda igual" como en el canal de la instancia, porque acá
          * no hay hitos que alimentar con un crudo que hoy no sabemos leer: sólo hay tres lecturas
-         * concretas, y una fila con otro nombre no la vería ninguna. Las reglas de `ocurrido_at` y
-         * `datos` son las mismas que en DemoEventosController, por los mismos motivos (una fecha
-         * ilegible o fuera del rango de TIMESTAMP reventaba el create() con un 500; `max:50` cuenta
-         * elementos y no bytes, el tope real va abajo). */
+         * concretas, y una fila con otro nombre no la vería ninguna. La regla de `datos` es la
+         * misma que en DemoEventosController (`max:50` cuenta elementos y no bytes, el tope real va
+         * abajo).
+         *
+         * 🔴 `ocurrido_at` NO se lee del body aunque la página lo mande: lo estampa el servidor.
+         * Medido el 11/9/2026 en la verificación: un ISO con `Z` del navegador entraba al cast
+         * `datetime` sin conversión de zona y la fila quedaba tres horas adelantada —y esa hora es
+         * la que lee el panel, la que le cuenta el agente al lead ("la abrió a las 15:00") y la que
+         * dispara el seguimiento a las dos horas. Para estos tres eventos el momento que importa es
+         * cuándo nos enteramos (la página dispara el POST en el acto), así que el reloj del
+         * servidor es el dato, y de paso un reloj de teléfono corrido no puede dejar "abierta a
+         * las 03:00". */
         $validated = $request->validate([
-            'uuid'        => 'required|string|min:1|max:64',
-            'nombre'      => 'required|string|in:' . implode(',', self::EVENTOS_PAGINA),
-            'ocurrido_at' => 'nullable|date|after:2020-01-01|before:2038-01-01',
-            'datos'       => 'nullable|array|max:50',
+            'uuid'   => 'required|string|min:1|max:64',
+            'nombre' => 'required|string|in:' . implode(',', self::EVENTOS_PAGINA),
+            'datos'  => 'nullable|array|max:50',
         ]);
 
         if (isset($validated['datos'])
@@ -313,6 +326,18 @@ class DemoExperienciaController extends Controller
 
         $nombre = (string) $validated['nombre'];
 
+        /* Tope de filas de página por lead. Es un endpoint público (la clave son los dígitos del
+         * teléfono) y cada POST con un uuid nuevo es una fila: sin tope, quien sepa el número puede
+         * inflar la tabla al ritmo del throttle por IP. Pasado el tope se responde 200 `ignorado`
+         * —la página dispara y olvida— y no se escribe nada. Un lead real, abriendo y cerrando su
+         * página, no se acerca a este número. */
+        $filas_de_pagina = DemoEventoRecibido::where('lead_id', $lead->id)
+            ->whereIn('nombre', self::EVENTOS_PAGINA)
+            ->count();
+        if ($filas_de_pagina >= self::MAX_EVENTOS_PAGINA_POR_LEAD) {
+            return response()->json(['ok' => true, 'ignorado' => true], 200);
+        }
+
         /* Idempotencia: mismo `exists()` + catch del unique que DemoEventosController, y por los
          * mismos motivos (el exists() resuelve el caso normal; el catch, la carrera entre dos
          * requests que leyeron las dos que no existía). Un duplicado responde 200 igual que el
@@ -324,14 +349,14 @@ class DemoExperienciaController extends Controller
             return response()->json(['ok' => true, 'duplicado' => true], 200);
         }
 
-        /* Si es la primera apertura se decide ANTES de insertar, y sobre el nombre: el mensaje de
-         * sistema "abrió su página" va una sola vez por lead aunque la abra diez veces (las
-         * aperturas se cuentan igual, en `demo_eventos_recibidos`, y el panel las muestra). Sin
-         * lock, igual que el resto de este controller: dos primeras aperturas simultáneas (dos
-         * pestañas a la vez) podrían escribir dos mensajes en el hilo, que es ruido y no un dato
-         * corrupto — el mismo criterio que DemoEventosController::avanzar_pipeline_por_ingreso_real(). */
-        $es_primera_apertura = $nombre === self::EVENTO_PAGINA_ABIERTA
-            && ! DemoEventoRecibido::where('lead_id', $lead->id)->where('nombre', self::EVENTO_PAGINA_ABIERTA)->exists();
+        /* Si es la primera vez de ese nombre se decide ANTES de insertar: el mensaje de sistema
+         * ("abrió su página" / "pidió la demo desde su página") va una sola vez por lead aunque la
+         * abra diez veces o toque el botón tres (las repeticiones se cuentan igual, en
+         * `demo_eventos_recibidos`, y el panel las muestra). Sin lock, igual que el resto de este
+         * controller: dos primeras veces simultáneas (dos pestañas a la vez) podrían escribir dos
+         * mensajes en el hilo, que es ruido y no un dato corrupto — el mismo criterio que
+         * DemoEventosController::avanzar_pipeline_por_ingreso_real(). */
+        $es_la_primera_vez = ! DemoEventoRecibido::where('lead_id', $lead->id)->where('nombre', $nombre)->exists();
 
         try {
             DemoEventoRecibido::create([
@@ -339,10 +364,8 @@ class DemoExperienciaController extends Controller
                 'uuid'        => $validated['uuid'],
                 'nombre'      => $nombre,
                 'clip_id'     => null,
-                // Sin `ocurrido_at` del navegador vale el reloj del servidor: para estos eventos el
-                // momento que importa es cuándo nos enteramos, y un reloj de teléfono corrido no
-                // tiene que poder dejar "abierta a las 03:00" en el panel.
-                'ocurrido_at' => isset($validated['ocurrido_at']) ? $validated['ocurrido_at'] : Carbon::now(),
+                // Siempre el reloj del servidor (ver el comentario de la validación, arriba).
+                'ocurrido_at' => Carbon::now(),
                 'datos'       => isset($validated['datos']) ? $validated['datos'] : null,
             ]);
         } catch (QueryException $e) {
@@ -357,13 +380,14 @@ class DemoExperienciaController extends Controller
 
         /* Constancia en el hilo del lead, con el mismo patrón que "completó el formulario" (más
          * arriba, en store_formulario_json()): evento de estado, sin admin, no cuenta como
-         * actividad del hilo. Sólo dos de los tres eventos dejan constancia —la primera apertura y
-         * cada toque del CTA—: "llegó al final" es dato para el panel y para el agente, no algo que
-         * el setter tenga que ver pasar en la conversación. */
+         * actividad del hilo. Sólo dos de los tres eventos dejan constancia, y sólo la primera vez
+         * cada uno —la apertura y el toque del CTA—: "llegó al final" es dato para el panel y para
+         * el agente, no algo que el setter tenga que ver pasar en la conversación, y un lead que
+         * toca el botón tres veces seguidas no necesita tres líneas en el hilo. */
         $texto_del_hilo = null;
-        if ($es_primera_apertura) {
+        if ($es_la_primera_vez && $nombre === self::EVENTO_PAGINA_ABIERTA) {
             $texto_del_hilo = 'El lead abrió su página de experiencia';
-        } elseif ($nombre === self::EVENTO_CTA_TOCADO) {
+        } elseif ($es_la_primera_vez && $nombre === self::EVENTO_CTA_TOCADO) {
             $texto_del_hilo = 'El lead pidió la demo desde su página (tocó el botón de WhatsApp)';
         }
 

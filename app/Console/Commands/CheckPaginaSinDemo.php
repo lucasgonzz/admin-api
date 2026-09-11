@@ -107,6 +107,10 @@ class CheckPaginaSinDemo extends Command
             ->whereNull('pagina_seguimiento_enviado_at')
             /* Marca manual "este lead ya no recibe mensajes" (número bloqueado o dado de baja). */
             ->whereNull('no_recibe_mensajes_at')
+            /* El interruptor maestro de automatizaciones del lead (el del modal de operaciones):
+             * los demás Check* del ciclo de demo lo respetan, y este mensaje es una automatización
+             * más. Apagado a mano por Lucas, nada sale solo. */
+            ->where('automatizaciones_demo_activas', true)
             /* Con una sugerencia del agente esperando aprobación, la conversación ya tiene algo en
              * vuelo: mandar esto encima sería hablarle dos veces. */
             ->where('tiene_sugerencia_pendiente', false)
@@ -226,12 +230,20 @@ class CheckPaginaSinDemo extends Command
             );
 
             /* Se registra haya salido o no (mismo criterio que LeadFollowupService): con
-             * whatsapp_message_id null el hilo muestra el banner de error de entrega y el motivo. */
+             * whatsapp_message_id null el hilo muestra el banner de error de entrega y el motivo.
+             *
+             * 🔴 `is_followup` en FALSE, como el check de ingreso y no como una plantilla de
+             * cadencia. LeadFollowupService cuenta las filas con is_followup=true para consumir el
+             * cupo de max_followups del estado y para elegir la plantilla siguiente
+             * (followup_number = contados + 1): con true, este mensaje se comía un cupo de
+             * contactado/calificado y le hacía saltear la plantilla d1 al lead, y encima un envío
+             * fallido (sin wamid ni followup_template_id) también contaba. Este texto es un aviso
+             * del sistema, no un paso de la cadencia. */
             LeadMessage::create([
                 'lead_id'             => $lead->id,
                 'sender'              => 'sistema',
                 'status'              => 'enviado',
-                'is_followup'         => true,
+                'is_followup'         => false,
                 'content'             => $content,
                 'whatsapp_message_id' => $whatsapp_message_id,
                 'whatsapp_send_error' => $whatsapp_message_id === null ? $this->whatsapp_send_service->last_send_error : null,

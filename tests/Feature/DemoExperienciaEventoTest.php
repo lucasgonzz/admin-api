@@ -7,6 +7,7 @@ use App\Models\Admin;
 use App\Models\DemoEventoRecibido;
 use App\Models\Lead;
 use App\Models\LeadMessage;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
@@ -77,7 +78,7 @@ class DemoExperienciaEventoTest extends TestCase
      *
      * @return void
      */
-    public function test_el_cta_deja_constancia_cada_vez_y_el_final_no_escribe_en_el_hilo(): void
+    public function test_el_cta_deja_constancia_solo_la_primera_vez_y_el_final_no_escribe_en_el_hilo(): void
     {
         $lead = $this->crear_lead_sin_turno();
 
@@ -87,7 +88,10 @@ class DemoExperienciaEventoTest extends TestCase
         $this->postear($lead, 'cta_demo_tocado', 'uuid-cta-1')->assertStatus(200);
         $this->postear($lead, 'cta_demo_tocado', 'uuid-cta-2')->assertStatus(200);
 
-        $this->assertSame(2, $this->mensajes_de_sistema($lead, 'El lead pidió la demo desde su página (tocó el botón de WhatsApp)'));
+        /* Las dos filas se guardan (el panel cuenta), pero el hilo recibe UNA línea: tres toques
+         * seguidos al botón no son tres avisos para el setter (verificación del 11/9/2026). */
+        $this->assertSame(2, DemoEventoRecibido::where('lead_id', $lead->id)->where('nombre', 'cta_demo_tocado')->count());
+        $this->assertSame(1, $this->mensajes_de_sistema($lead, 'El lead pidió la demo desde su página (tocó el botón de WhatsApp)'));
         $this->assertDatabaseHas('lead_messages', [
             'lead_id'         => $lead->id,
             'sender'          => 'sistema',
@@ -177,9 +181,18 @@ class DemoExperienciaEventoTest extends TestCase
         $this->assertNull($sin_eventos->json('pagina'), 'Sin eventos de página, `pagina` es null.');
         $this->assertFalse((bool) $sin_eventos->json('tiene_plan'));
 
-        $this->postear($lead, 'pagina_abierta_sin_turno', 'uuid-a-2', '2026-09-11 11:40:00')->assertStatus(200);
-        $this->postear($lead, 'pagina_abierta_sin_turno', 'uuid-a-1', '2026-09-11 10:15:00')->assertStatus(200);
-        $this->postear($lead, 'pagina_final_sin_turno', 'uuid-f-1', '2026-09-11 10:21:30')->assertStatus(200);
+        /* Las fechas las estampa el servidor: se mueve el reloj entre POST y POST. La segunda
+         * apertura llega con un reloj ANTERIOR a la primera a propósito: "abierta_at" es el MÍNIMO
+         * de las aperturas, no la que llegó primero. */
+        $this->en_el_instante('2026-09-11 11:40:00', function () use ($lead) {
+            $this->postear($lead, 'pagina_abierta_sin_turno', 'uuid-a-2')->assertStatus(200);
+        });
+        $this->en_el_instante('2026-09-11 10:15:00', function () use ($lead) {
+            $this->postear($lead, 'pagina_abierta_sin_turno', 'uuid-a-1')->assertStatus(200);
+        });
+        $this->en_el_instante('2026-09-11 10:21:30', function () use ($lead) {
+            $this->postear($lead, 'pagina_final_sin_turno', 'uuid-f-1')->assertStatus(200);
+        });
 
         $con_apertura = $this->getJson('/api/admin/lead/' . $lead->id . '/demo-roadmap')->assertStatus(200);
         $this->assertSame([
@@ -189,7 +202,9 @@ class DemoExperienciaEventoTest extends TestCase
             'aperturas'  => 2,
         ], $con_apertura->json('pagina'));
 
-        $this->postear($lead, 'cta_demo_tocado', 'uuid-c-1', '2026-09-11 10:22:00')->assertStatus(200);
+        $this->en_el_instante('2026-09-11 10:22:00', function () use ($lead) {
+            $this->postear($lead, 'cta_demo_tocado', 'uuid-c-1')->assertStatus(200);
+        });
 
         $con_cta = $this->getJson('/api/admin/lead/' . $lead->id . '/demo-roadmap')->assertStatus(200);
         $this->assertSame('2026-09-11 10:22:00', $con_cta->json('pagina.cta_at'));
@@ -198,19 +213,59 @@ class DemoExperienciaEventoTest extends TestCase
     }
 
     /**
-     * (8) Sin `ocurrido_at` vale el reloj del servidor (la fila nunca queda sin fecha).
+     * (8) `ocurrido_at` lo estampa SIEMPRE el servidor: aunque el navegador mande una fecha (y la
+     *     página la manda), se ignora. Un ISO con `Z` entraba al cast sin conversión de zona y
+     *     dejaba la fila tres horas adelantada (verificación del 11/9/2026); con o sin fecha del
+     *     cliente, la fila queda con el reloj del servidor.
      *
      * @return void
      */
-    public function test_sin_ocurrido_at_se_usa_el_reloj_del_servidor(): void
+    public function test_ocurrido_at_lo_estampa_el_servidor_aunque_el_navegador_mande_otra_fecha(): void
     {
         $lead = $this->crear_lead_sin_turno();
 
-        $this->postear($lead, 'pagina_abierta_sin_turno', 'uuid-sin-fecha')->assertStatus(200);
+        Carbon::setTestNow(Carbon::parse('2026-09-11 12:00:28', config('app.timezone')));
+        try {
+            $this->postear($lead, 'pagina_abierta_sin_turno', 'uuid-sin-fecha')->assertStatus(200);
+            $this->postear($lead, 'pagina_final_sin_turno', 'uuid-con-z', '2026-01-01T00:00:00Z')->assertStatus(200);
+        } finally {
+            Carbon::setTestNow();
+        }
 
-        $evento = DemoEventoRecibido::where('lead_id', $lead->id)->where('uuid', 'uuid-sin-fecha')->first();
-        $this->assertNotNull($evento->ocurrido_at);
-        $this->assertSame(DemoExperienciaController::EVENTO_PAGINA_ABIERTA, $evento->nombre);
+        foreach (['uuid-sin-fecha', 'uuid-con-z'] as $uuid) {
+            $evento = DemoEventoRecibido::where('lead_id', $lead->id)->where('uuid', $uuid)->first();
+            $this->assertSame('2026-09-11 12:00:28', $evento->ocurrido_at->format('Y-m-d H:i:s'), $uuid);
+        }
+    }
+
+    /**
+     * (9) Tope de filas de página por lead: pasado MAX_EVENTOS_PAGINA_POR_LEAD, el POST responde
+     *     200 `ignorado` y no escribe nada (endpoint público, ver el controller).
+     *
+     * @return void
+     */
+    public function test_pasado_el_tope_por_lead_el_evento_se_ignora(): void
+    {
+        $lead  = $this->crear_lead_sin_turno();
+        $filas = [];
+        for ($i = 0; $i < DemoExperienciaController::MAX_EVENTOS_PAGINA_POR_LEAD; $i++) {
+            $filas[] = [
+                'lead_id'     => $lead->id,
+                'uuid'        => 'relleno-' . $i,
+                'nombre'      => DemoExperienciaController::EVENTO_PAGINA_ABIERTA,
+                'ocurrido_at' => Carbon::now(),
+                'created_at'  => Carbon::now(),
+                'updated_at'  => Carbon::now(),
+            ];
+        }
+        DemoEventoRecibido::insert($filas);
+
+        $this->postear($lead, 'cta_demo_tocado', 'uuid-de-mas')
+            ->assertStatus(200)
+            ->assertJsonPath('ignorado', true);
+
+        $this->assertSame(0, DemoEventoRecibido::where('lead_id', $lead->id)->where('uuid', 'uuid-de-mas')->count());
+        $this->assertSame(0, LeadMessage::where('lead_id', $lead->id)->count());
     }
 
     /**
@@ -221,6 +276,16 @@ class DemoExperienciaEventoTest extends TestCase
      *
      * @return \Illuminate\Testing\TestResponse
      */
+    private function en_el_instante(string $fecha, callable $accion): void
+    {
+        Carbon::setTestNow(Carbon::parse($fecha, config('app.timezone')));
+        try {
+            $accion();
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
     private function postear(Lead $lead, string $nombre, string $uuid, ?string $ocurrido_at = null)
     {
         $body = ['uuid' => $uuid, 'nombre' => $nombre];

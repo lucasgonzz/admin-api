@@ -117,16 +117,24 @@ class LeadDemoSettingsController extends Controller
                no que haya escrito un espacio. Por eso es un closure y no un `regex`. */
             'whatsapp_numero_leads'           => [
                 'sometimes',
+                /* "nullable": el panel manda el campo vacío cuando el operador lo borra, y
+                   ConvertEmptyStringsToNull lo vuelve null antes de validar. Null no se persiste
+                   (persist_from_request usa isset) y el getter cae al default: borrar el campo es
+                   "volver al default", no un 422. */
+                'nullable',
                 'string',
                 'max:40',
                 function ($attribute, $value, $fail) {
+                    if ($value === null || $value === '') {
+                        return;
+                    }
                     $digitos = LeadDemoSettings::normalizar_digitos_whatsapp((string) $value);
                     if (! LeadDemoSettings::son_digitos_whatsapp_validos($digitos)) {
                         $fail('El número de WhatsApp tiene que tener entre '.LeadDemoSettings::MIN_DIGITOS_WHATSAPP.' y '.LeadDemoSettings::MAX_DIGITOS_WHATSAPP.' dígitos, con código de país.');
                     }
                 },
             ],
-            'cta_whatsapp_texto'              => 'sometimes|string|min:1|max:'.LeadDemoSettings::MAX_CHARS_CTA_TEXTO,
+            'cta_whatsapp_texto'              => 'sometimes|nullable|string|min:1|max:'.LeadDemoSettings::MAX_CHARS_CTA_TEXTO,
             'pagina_seguimiento_minutos'      => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
         ]);
 
