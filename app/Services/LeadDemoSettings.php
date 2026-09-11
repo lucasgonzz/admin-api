@@ -77,9 +77,9 @@ class LeadDemoSettings
     /**
      * Clave: minutos post-inicio para preguntar al lead si pudo ingresar.
      *
-     * @deprecated Obsoleto tras la feature de ciclo de demo automatizado (prompt 094+).
-     *             El check de ingreso ahora se envía en el minuto exacto de inicio (ver prompt 096).
-     *             No borrar aún; mantener para no romper comandos existentes.
+     * Vuelve a tener consumidor desde el 10/9/2026 (misión demo-agendado-directo): minutos desde
+     * que el lead terminó el video de introducción hasta preguntarle si pudo entrar
+     * (CheckDemoIngresoPostVideo). Entre el 4/9 y el 10/9 no la leía nadie.
      */
     public const KEY_CHECK_INGRESO_MINUTOS_POST = 'demo_check_ingreso_minutos_post';
 
@@ -136,6 +136,20 @@ class LeadDemoSettings
      * Minutos: si hubo un mensaje entrante o saliente dentro de esta ventana, el check se pospone.
      */
     public const KEY_FIN_CHECK_SILENCIO_MINUTOS = 'fin_check_silencio_minutos';
+
+    /**
+     * Clave: ventana de "conversación viva" para el check de ingreso post-video (misión
+     * demo-agendado-directo, 10/9/2026). Minutos: si hubo un mensaje entrante o saliente dentro de
+     * esta ventana, el check no se manda todavía (se reevalúa en el próximo tick).
+     */
+    public const KEY_CHECK_INGRESO_SILENCIO_MINUTOS = 'demo_check_ingreso_silencio_minutos';
+
+    /**
+     * Clave: ventana de "conversación viva" para el recordatorio de demo de la dinámica nueva
+     * (misión demo-agendado-directo). Decisión de Lucas, textual: "quiero que ese mensaje se le
+     * envíe solo si no se ha estado hablando con ese lead en los últimos treinta minutos".
+     */
+    public const KEY_RECORDATORIO_SILENCIO_MINUTOS = 'demo_recordatorio_silencio_minutos';
 
     /**
      * Clave: cuánto se pospone el check de fin de demo cuando hay conversación viva y nadie (ni el
@@ -218,8 +232,14 @@ class LeadDemoSettings
     /** Valor por defecto: hora del recordatorio de mañana de demo. */
     private const DEFAULT_RECORDATORIO_MANANA_HORA = '09:00';
 
-    /** Valor por defecto: check de ingreso post-inicio (minutos). */
-    private const DEFAULT_CHECK_INGRESO_MINUTOS_POST = 5;
+    /**
+     * Valor por defecto: check de ingreso, minutos después de que el lead TERMINÓ EL VIDEO de
+     * introducción (misión demo-agendado-directo, 10/9/2026; antes se medía desde el inicio del
+     * turno y valía 5). Lucas: "el mensaje de chequeo de si pudo entrar a la demo quiero que se
+     * envíe recién a los diez minutos desde que el lead completó el video".
+     * Los admins que ya tenían el 5 viejo guardado los sube DemoCheckIngresoDesdeVideoSeeder.
+     */
+    private const DEFAULT_CHECK_INGRESO_MINUTOS_POST = 10;
 
     /** Valor por defecto: resumen antes del fin de la demo (minutos). */
     private const DEFAULT_RESUMEN_MINUTOS_ANTES_FIN = 10;
@@ -271,6 +291,12 @@ class LeadDemoSettings
 
     /** Valor por defecto: ventana de "conversación viva" para el check de fin (minutos). */
     private const DEFAULT_FIN_CHECK_SILENCIO_MINUTOS = 10;
+
+    /** Valor por defecto: ventana de "conversación viva" para el check de ingreso post-video (minutos). */
+    private const DEFAULT_CHECK_INGRESO_SILENCIO_MINUTOS = 10;
+
+    /** Valor por defecto: ventana de "conversación viva" para el recordatorio de demo (minutos). */
+    private const DEFAULT_RECORDATORIO_SILENCIO_MINUTOS = 30;
 
     /** Valor por defecto: demora al posponer el check de fin cuando nadie indicó cuánto (minutos). */
     private const DEFAULT_FIN_CHECK_DEMORA_DEFAULT_MINUTOS = 15;
@@ -346,6 +372,8 @@ class LeadDemoSettings
             'pendiente_ingreso_horas_timeout'     => self::get_pendiente_ingreso_horas_timeout(),
             'pendiente_terminar_timeout_minutos'  => self::get_pendiente_terminar_timeout_minutos(),
             'fin_check_silencio_minutos'          => self::get_fin_check_silencio_minutos(),
+            'check_ingreso_silencio_minutos'      => self::get_check_ingreso_silencio_minutos(),
+            'recordatorio_silencio_minutos'       => self::get_recordatorio_silencio_minutos(),
             'fin_check_demora_default_minutos'    => self::get_fin_check_demora_default_minutos(),
             'experiencia_default'                 => self::get_experiencia_default(),
         ];
@@ -492,6 +520,14 @@ class LeadDemoSettings
         if (isset($data['fin_check_silencio_minutos'])) {
             AdminSetting::set(self::KEY_FIN_CHECK_SILENCIO_MINUTOS, (string) self::clamp((int) $data['fin_check_silencio_minutos']));
         }
+        // Ventanas de silencio del check de ingreso post-video y del recordatorio (misión
+        // demo-agendado-directo). Mismo "isset": un SPA anterior a esta misión no las manda.
+        if (isset($data['check_ingreso_silencio_minutos'])) {
+            AdminSetting::set(self::KEY_CHECK_INGRESO_SILENCIO_MINUTOS, (string) self::clamp((int) $data['check_ingreso_silencio_minutos']));
+        }
+        if (isset($data['recordatorio_silencio_minutos'])) {
+            AdminSetting::set(self::KEY_RECORDATORIO_SILENCIO_MINUTOS, (string) self::clamp((int) $data['recordatorio_silencio_minutos']));
+        }
         if (isset($data['fin_check_demora_default_minutos'])) {
             AdminSetting::set(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS, (string) self::clamp((int) $data['fin_check_demora_default_minutos']));
         }
@@ -594,6 +630,12 @@ class LeadDemoSettings
         }
         if (AdminSetting::get(self::KEY_FIN_CHECK_SILENCIO_MINUTOS) === null) {
             AdminSetting::set(self::KEY_FIN_CHECK_SILENCIO_MINUTOS, (string) self::DEFAULT_FIN_CHECK_SILENCIO_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_CHECK_INGRESO_SILENCIO_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_CHECK_INGRESO_SILENCIO_MINUTOS, (string) self::DEFAULT_CHECK_INGRESO_SILENCIO_MINUTOS);
+        }
+        if (AdminSetting::get(self::KEY_RECORDATORIO_SILENCIO_MINUTOS) === null) {
+            AdminSetting::set(self::KEY_RECORDATORIO_SILENCIO_MINUTOS, (string) self::DEFAULT_RECORDATORIO_SILENCIO_MINUTOS);
         }
         if (AdminSetting::get(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS) === null) {
             AdminSetting::set(self::KEY_FIN_CHECK_DEMORA_DEFAULT_MINUTOS, (string) self::DEFAULT_FIN_CHECK_DEMORA_DEFAULT_MINUTOS);
@@ -714,13 +756,37 @@ class LeadDemoSettings
     }
 
     /**
-     * Minutos después del inicio para preguntar al lead si pudo ingresar a la demo.
+     * Minutos después de que el lead terminó el video de introducción para preguntarle si pudo
+     * ingresar a la demo (CheckDemoIngresoPostVideo, misión demo-agendado-directo). Hasta el
+     * 4/9/2026 esta misma setting medía desde el inicio del turno (CheckDemoIngress, borrado).
      *
      * @return int
      */
     public static function get_check_ingreso_minutos_post(): int
     {
         return self::clamp((int) AdminSetting::get(self::KEY_CHECK_INGRESO_MINUTOS_POST, (string) self::DEFAULT_CHECK_INGRESO_MINUTOS_POST));
+    }
+
+    /**
+     * Ventana de "conversación viva" del check de ingreso post-video: si hubo un mensaje (entrante
+     * o saliente) más nuevo que esto, el check no se manda todavía.
+     *
+     * @return int
+     */
+    public static function get_check_ingreso_silencio_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_CHECK_INGRESO_SILENCIO_MINUTOS, (string) self::DEFAULT_CHECK_INGRESO_SILENCIO_MINUTOS));
+    }
+
+    /**
+     * Ventana de "conversación viva" del recordatorio de demo (dinámica nueva): si hubo un mensaje
+     * más nuevo que esto, el recordatorio no sale aunque esté activado para el lead.
+     *
+     * @return int
+     */
+    public static function get_recordatorio_silencio_minutos(): int
+    {
+        return self::clamp((int) AdminSetting::get(self::KEY_RECORDATORIO_SILENCIO_MINUTOS, (string) self::DEFAULT_RECORDATORIO_SILENCIO_MINUTOS));
     }
 
     /**
