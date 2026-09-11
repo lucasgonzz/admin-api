@@ -9046,6 +9046,7 @@ BLOQUE_DEL_MANUAL;
             . "  Pagina de acceso del lead (copiar textual): {$url_pagina}\n"
             . "  Tienda online conectada a su demo (copiar textual): " . ($url_tienda !== '' ? $url_tienda : '(sin tienda disponible: no la menciones)') . "\n"
             . "  Email del lead: " . ($email !== '' ? $email : '(no lo tenemos)') . "\n"
+            . "  Carta de acceso por mail: " . ($lead->demo_mail_sent_at ? 'ya enviada (' . $lead->demo_mail_sent_at->copy()->setTimezone(DemoDirectaService::TZ)->format('H:i') . ')' : 'todavia no enviada') . "\n"
             . "  Demo: {$estado_demo}\n"
             . "Reglas de este turno:\n"
             . "  - Para ofrecerla: \"si queres, te la puedo tener lista en diez minutos\". Sin hora, sin grilla, sin preguntar\n"
