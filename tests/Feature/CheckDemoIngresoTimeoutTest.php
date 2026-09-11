@@ -123,12 +123,28 @@ class CheckDemoIngresoTimeoutTest extends TestCase
         $lead->demo_experiencia  = Lead::EXPERIENCIA_NUEVA;
         $lead->save();
 
-        Carbon::setTestNow($inicio->copy()->addHours(3));
+        /* A los 30 minutos: el timeout corto (15) no la toca, sigue agendada. */
+        Carbon::setTestNow($inicio->copy()->addMinutes(30));
 
         $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
 
         $lead->refresh();
         $this->assertSame('demo_agendada', $lead->status);
+
+        /* Cambio de comportamiento (misión demo-agendado-directo, 10/9/2026): la ventana extendida
+         * sigue excluida del timeout corto, pero desde esa misión toda ventana extendida de la
+         * dinámica nueva es una demo DIRECTA, y a los 60 minutos del inicio sin ingreso (setting
+         * demo_directa_no_show_minutos) pierde el turno para liberar la instancia. Antes de esa
+         * misión este test afirmaba que a las 3 horas seguía agendada; hoy eso sería una instancia
+         * bloqueada media tarde por un lead que no entró. */
+        \App\Models\AdminSetting::set(\App\Services\LeadDemoSettings::KEY_DEMO_DIRECTA_NO_SHOW_MINUTOS, '60');
+        Carbon::setTestNow($inicio->copy()->addHours(3));
+
+        $this->artisan('leads:check-demo-ingreso-timeout')->assertExitCode(0);
+
+        $lead->refresh();
+        $this->assertSame('demo_pendiente_de_ingreso', $lead->status);
+        $this->assertNull($lead->demo_id, 'El no-show libera la instancia.');
     }
 
     /**
