@@ -874,6 +874,9 @@ return [
                     'demo_pendiente_terminar_notificado', 'demo_no_ingreso_notificado',
                     'demo_fin_check_enviado', 'demo_fin_check_reprogramado_para',
                     'presentation_mail_sent_at', 'followup_mail_sent_at', 'demo_mail_sent_at',
+                    /* Seguimiento único de la página como landing (misión experiencia-landing,
+                       11/9/2026): cuándo salió (o se intentó) el "vi que le pegaste una mirada". */
+                    'pagina_seguimiento_enviado_at',
                 ],
                 'formulario'       => [
                     'use_deposits', 'use_price_lists', 'price_type_1', 'price_type_2',

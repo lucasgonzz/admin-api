@@ -93,6 +93,13 @@ class Kernel extends ConsoleKernel
         // el lead terminó el video de introducción, dentro de la ventana de la demo y con silencio.
         $schedule->command('leads:check-demo-ingreso-post-video')->everyMinute();
 
+        // Página como landing (misión experiencia-landing, 11/9/2026): "vi que le pegaste una mirada a
+        // tu página..." al lead SIN turno que la abrió hace N minutos (demo_pagina_seguimiento_minutos,
+        // 120 por defecto) y no pidió la demo ni volvió a escribir. Cada cinco minutos y no cada
+        // minuto: el umbral es de dos horas, así que un retraso de hasta cinco minutos no cambia nada,
+        // y el envío es texto libre (necesita la ventana de 24 hs), no una plantilla.
+        $schedule->command('leads:check-pagina-sin-demo')->everyFiveMinutes();
+
         // Envía seguimiento único de fin si el lead no confirmó que terminó (demo_fin_seguimiento_minutos).
         $schedule->command('leads:check-demo-fin-seguimiento')->everyMinute();
 
