@@ -368,6 +368,22 @@ class LeadSuggestionSendService
             throw new \InvalidArgumentException('El mensaje a enviar no puede estar vacío.');
         }
 
+        /*
+         * Demo directa (misión demo-agendado-directo, 10/9/2026): la URL de la tienda que escribió
+         * el modelo salió de la instancia PREVISTA al generar; apply_parsed_response() ya la corrige
+         * en `content` al asignar la instancia real, pero si el admin EDITÓ el texto, lo que sale es
+         * $edited_content, que no pasó por ahí. Reemplazo determinista de una URL conocida (las
+         * tiendas de las otras instancias) por la de la demo del lead, sobre el texto que
+         * efectivamente se manda. Sin demo asignada no hay nada que corregir.
+         */
+        $lead_fresco_para_tienda = $lead->fresh();
+        if ($lead_fresco_para_tienda !== null && $lead_fresco_para_tienda->usa_experiencia_demo_nueva() && ! empty($lead_fresco_para_tienda->demo_id)) {
+            $lead_fresco_para_tienda->loadMissing('demo');
+            if ($lead_fresco_para_tienda->demo !== null) {
+                $body = app(\App\Services\DemoDirectaService::class)->corregir_links_de_tienda($body, $lead_fresco_para_tienda->demo);
+            }
+        }
+
         $phone = trim((string) $lead->phone);
 
         // Si la ventana de conversación de WhatsApp está cerrada (sin mensaje entrante en 24hs),

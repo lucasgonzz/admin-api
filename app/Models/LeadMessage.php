@@ -341,7 +341,11 @@ class LeadMessage extends Model
         $acciones = [];
 
         /* agendar_demo: mostrar día y hora si vienen presentes en el paquete. */
-        if (! empty($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])) {
+        if (! empty($parsed['agendar_demo']) && is_array($parsed['agendar_demo']) && ! empty($parsed['agendar_demo']['ahora'])) {
+            /* Demo directa (misión demo-agendado-directo): no hay día ni hora en el paquete, la
+             * instancia se asigna al aplicar y arranca diez minutos después. */
+            $acciones[] = 'Agendar demo: ahora (la instancia libre se asigna al aprobar)';
+        } elseif (! empty($parsed['agendar_demo']) && is_array($parsed['agendar_demo'])) {
             $agendar_demo = $parsed['agendar_demo'];
             $demo_date    = isset($agendar_demo['demo_date']) ? trim((string) $agendar_demo['demo_date']) : '';
             $demo_start   = isset($agendar_demo['demo_start_time']) ? trim((string) $agendar_demo['demo_start_time']) : '';

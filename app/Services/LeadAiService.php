@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\AprobacionEnCursoException;
 use App\Exceptions\HorarioYaNoDisponibleException;
+use App\Exceptions\SinDemoLibreException;
 use App\Events\LeadSuggestionCreated;
 use App\Services\CloserGoogleCalendarBusyService;
 use App\Services\CloserGoogleCalendarEventService;
@@ -96,6 +97,16 @@ class LeadAiService
     private const PROHIBICION_RANGO_HORARIO_SIN_JSON = <<<'TXT'
 ⚠️ PROHIBIDO — Nunca anunciar un rango de horario propio sin JSON de disponibilidad:
 Cuando el lead pregunta por disponibilidad en términos generales ("la semana que viene por la tarde", "¿podés mañana?", "¿tenés algo el finde?") sin mencionar un día puntual, la única acción válida es devolver solicita_disponibilidad: true con dia_solicitado (vocabulario cerrado: 'manana', 'pasado_manana', un día de semana, un día de semana con sufijo _proximo, o '+N' días — nunca una fecha calculada por vos). NO responder con frases como "tengo disponibilidad de X a Y hs" ni ninguna variante que afirme conocer el horario disponible. Esa información solo puede venir del JSON que el sistema devuelve en la segunda llamada. Si el agente no tiene ese JSON en el contexto actual, no tiene información de disponibilidad.
+TXT;
+
+    /**
+     * Contraparte de PROHIBICION_RANGO_HORARIO_SIN_JSON para la demo directa (misión
+     * demo-agendado-directo, 10/9/2026): en esa dinámica no hay grilla ni segunda llamada, y la
+     * regla de arriba le ordenaría al modelo pedir una disponibilidad que el servidor ya no
+     * consulta. Se inyecta en su lugar cuando el lead tiene la demo directa activa.
+     */
+    private const NOTA_DEMO_DIRECTA = <<<'TXT'
+⚠️ DINÁMICA DE DEMO DIRECTA (vigente para este lead): la demo NO se agenda por día ni horario. No existe JSON de disponibilidad ni segunda llamada del sistema. Nunca devuelvas solicita_disponibilidad: true, nunca dia_solicitado, nunca demo_id/demo_date/demo_start_time. La demo se ofrece para ahora ("te la puedo tener lista en diez minutos") y cuando el lead acepta se devuelve agendar_demo: {"ahora": true}. Cómo ofrecerla, qué decir y qué links pasar está en el recurso demo_agenda y en el bloque DEMO DIRECTA del contexto de este turno; ese bloque manda sobre cualquier regla de horarios de otro recurso.
 TXT;
 
     /**
@@ -717,9 +728,13 @@ TXT;
             throw new \RuntimeException('ANTHROPIC_API_KEY no está configurada.');
         }
 
+        /* Demo directa (misión demo-agendado-directo): se resuelve una sola vez acá y viaja por
+         * parámetro al system prompt, al contexto y al post-procesado del paquete. */
+        $demo_directa = $this->contrato_demo_directa_activo($lead);
+
         /* Pasar el estado para inyectar la sección FAQ solo cuando corresponde */
-        $system       = $this->build_system_prompt();
-        $user_content = $this->build_user_content($lead, $is_followup, '', $intencion_forzada);
+        $system       = $this->build_system_prompt($demo_directa);
+        $user_content = $this->build_user_content($lead, $is_followup, '', $intencion_forzada, $demo_directa);
         $model        = (string) config('services.anthropic.model', 'claude-sonnet-4-20250514');
         $http         = $this->build_http_client();
 
@@ -771,6 +786,27 @@ TXT;
 
         /* true cuando cualquiera de las tres condiciones aplica */
         $needs_availability_check = $solicita_disponibilidad || $estado_sugerido === 'demo_agendada' || $cancelar_demo_flag;
+
+        /*
+         * DEMO DIRECTA (misión demo-agendado-directo, 10/9/2026): no hay grilla, así que no hay
+         * segunda llamada con disponibilidad, pida lo que pida el modelo. `solicita_disponibilidad`
+         * se apaga y queda logueado (si aparece seguido, el `.md` está pidiendo algo que esta
+         * dinámica ya no tiene). `agendar_demo` se normaliza a la única forma válida acá,
+         * {ahora: true} más la previsión de instancia, y la instancia real se elige al aplicar.
+         */
+        if ($demo_directa) {
+            if ($solicita_disponibilidad) {
+                Log::channel('disponibilidad')->info('[DISPONIBILIDAD] Demo directa: el modelo pidió disponibilidad y se ignora (no hay grilla en esta dinámica).', [
+                    'lead_id' => $lead->id,
+                ]);
+                $parsed['solicita_disponibilidad'] = false;
+            }
+            $needs_availability_check = false;
+            $parsed['agendar_demo']   = $this->normalizar_agendar_demo_directa(
+                isset($parsed['agendar_demo']) ? $parsed['agendar_demo'] : null,
+                $lead
+            );
+        }
 
         /* El gate ya decidió que esta respuesta no se puede confiar: no se gasta una segunda
          * llamada para agendar sobre una base que no se sostiene, y —lo importante— el paquete
@@ -827,7 +863,11 @@ TXT;
          */
         $guardar_email_raw = isset($parsed['guardar_email']) ? trim((string) $parsed['guardar_email']) : '';
         $tiene_agendar     = ! empty($parsed['agendar_demo']);
-        if ($guardar_email_raw !== '' && ! $tiene_agendar && ! $cancelar_demo_flag) {
+        /* En la demo directa el email se pide DESPUÉS de agendar, en el mismo mensaje que lleva el
+         * link, y llega en el turno siguiente: un `guardar_email` suelto es el camino normal, no
+         * una agenda fuera de secuencia. Lo que dispara es la carta de acceso por mail (ver
+         * apply_parsed_response()), no ningún Mail 1 con credenciales. */
+        if ($guardar_email_raw !== '' && ! $tiene_agendar && ! $cancelar_demo_flag && ! $demo_directa) {
             Log::channel('daily')->warning('LeadAiService: guardar_email sin agendar_demo — agenda fuera de secuencia, derivando a intervención humana.', [
                 'lead_id'         => $lead->id,
                 'estado_sugerido' => $estado_sugerido,
@@ -2839,6 +2879,26 @@ TXT;
     const MARCADOR_OFERTA_FLEXIBLE = 'oferta_flexible';
 
     /**
+     * Marcador que tiene que aparecer en el recurso `demo_agenda` de la dinámica nueva para que la
+     * DEMO DIRECTA (misión demo-agendado-directo, 10/9/2026) se active: sin grilla, sin horarios,
+     * sin segunda llamada de disponibilidad; el agente ofrece "te la puedo tener lista en diez
+     * minutos" y cuando el lead acepta devuelve `agendar_demo: {ahora: true}`.
+     *
+     * Mismo mecanismo y mismo motivo que MARCADOR_OFERTA_FLEXIBLE (ver arriba): el `.md` y el
+     * código llegan a producción a destiempo. Con este código arriba y el `.md` viejo, el modelo
+     * seguiría pidiendo `solicita_disponibilidad` y el servidor —si ya ignorara la segunda llamada—
+     * lo dejaría sin horarios que ofrecer; con el `.md` nuevo y el código viejo, el `agendar_demo`
+     * sin `demo_id` se descartaría en silencio y el lead recibiría el link sin ninguna demo
+     * asignada (exactamente el lead 30 del 4/8/2026). Buscando el marcador, las dos mitades
+     * conmutan juntas en la sincronización siguiente al push del `.md`, y el rollback es sacar la
+     * cadena, sin deploy.
+     *
+     * Reemplaza en la práctica a la apertura flexible, que nunca se encendió en producción (el
+     * `.md` con `oferta_flexible` quedó como borrador en el informe del 2/9/2026).
+     */
+    const MARCADOR_DEMO_DIRECTA = 'demo_directa';
+
+    /**
      * ¿El `.md` que gobierna la agenda de la dinámica nueva ya trae el contrato de apertura flexible?
      *
      * 🔴 El resultado se resuelve UNA VEZ por generación y viaja por parámetro o en una variable
@@ -2876,6 +2936,70 @@ TXT;
 
             return false;
         }
+    }
+
+    /**
+     * ¿La demo directa está viva para este lead? Dinámica nueva + el marcador en su `demo_agenda`.
+     *
+     * Misma disciplina que contrato_oferta_flexible_activo(): se resuelve UNA vez por generación y
+     * viaja por parámetro, nunca como propiedad de instancia; y ante cualquier problema leyendo el
+     * recurso devuelve false, que es el comportamiento anterior (la grilla de siempre).
+     *
+     * @param Lead $lead
+     *
+     * @return bool
+     */
+    protected function contrato_demo_directa_activo(Lead $lead): bool
+    {
+        if (! $lead->usa_experiencia_demo_nueva()) {
+            return false;
+        }
+
+        try {
+            $contenido = app(WhatsappProtocolService::class)->getRecurso('demo_agenda', $lead->demo_experiencia_efectiva());
+
+            return strpos($contenido, self::MARCADOR_DEMO_DIRECTA) !== false;
+        } catch (\Throwable $e) {
+            Log::channel('disponibilidad')->warning(
+                '[DISPONIBILIDAD] No se pudo leer el recurso demo_agenda para decidir la demo directa; se sigue con la grilla.',
+                [
+                    'lead_id' => $lead->id,
+                    'error'   => $e->getMessage(),
+                ]
+            );
+
+            return false;
+        }
+    }
+
+    /**
+     * Normaliza lo que el modelo devolvió en `agendar_demo` cuando la demo directa está activa.
+     *
+     * En esa dinámica la única forma válida es `{ahora: true}` (más las dos claves de previsión
+     * que escribe el servidor). Pero el modelo puede venir de un `.md` a medio sincronizar o de la
+     * costumbre, y mandar `true` a secas o el objeto viejo con demo_id/fecha/hora: cualquier valor
+     * truthy se lee como "el lead aceptó hacerla ahora", porque en la demo directa no hay otra cosa
+     * que un `agendar_demo` pueda significar, y la hora que el modelo hubiera inventado se ignora
+     * (la pone el servidor al aplicar). Un valor vacío o null queda como null.
+     *
+     * @param mixed $crudo Lo que vino en $parsed['agendar_demo'].
+     * @param Lead  $lead
+     *
+     * @return array<string, mixed>|null
+     */
+    protected function normalizar_agendar_demo_directa($crudo, Lead $lead): ?array
+    {
+        if (empty($crudo)) {
+            return null;
+        }
+
+        $prevista = app(DemoDirectaService::class)->elegir_prevista($lead);
+
+        return [
+            'ahora'               => true,
+            'demo_id_previsto'    => $prevista['demo'] !== null ? (int) $prevista['demo']->id : null,
+            'url_tienda_prevista' => DemoDirectaService::url_tienda($prevista['demo']),
+        ];
     }
 
     /**
@@ -3495,6 +3619,104 @@ TXT;
             $ventanas_sin_margen = [];
 
             return false;
+        }
+    }
+
+    /**
+     * Ajusta el vencimiento del token de ingreso al turno recién escrito en $lead (extraído del
+     * bloque de agendar_demo el 10/9/2026 para que la demo directa lo reutilice; el porqué completo
+     * es el que sigue, tal cual estaba inline).
+     *
+     * El TOKEN de ingreso acompaña al reagendado, igual que ya hace
+     * LeadController::update_demo_end_time_json() con la edición manual desde el
+     * panel (mismo servicio, mismo criterio de extender/acortar, mismo piso de
+     * `now + gracia`). Sin esto, un lead que reagenda por WhatsApp —el camino más
+     * común— se queda con el vencimiento calculado contra el turno VIEJO: el gate
+     * público (`DemoExperienciaController::evaluar_ingreso()`) lo deja pasar porque
+     * lee la hora en vivo, pero el login real contra la instancia
+     * (`DemoIngresoController::store()`) rechaza el token vencido y el lead nunca
+     * entra, sin ningún error visible para nadie (bug medido en producción el
+     * 3/9/2026, lead 594).
+     *
+     * Igual que el panel: sólo si hay un token emitido y no revocado (uno revocado
+     * se revocó a propósito, extenderlo acá lo reviviría; sin token todavía no hay
+     * nada que ajustar — lo resuelve calcular_expiracion() cuando se emita).
+     *
+     * Timezone explícito en el Carbon::parse(), NO vía
+     * DemoIngresoTokenService::calcular_expiracion() (esa parsea sin timezone
+     * explícito): se replica el cálculo que ya usa update_demo_end_time_json y no
+     * el otro, que es el que arrastra el riesgo.
+     *
+     * Si el aviso a la instancia falla, a propósito NO se revierte el reagendado
+     * (a diferencia del panel, que sí revierte): acá el agente ya le confirmó al
+     * lead el horario nuevo por WhatsApp, y revertir dejaría al lead creyendo que
+     * tiene un turno que el sistema deshizo. Queda logueado; si el token no se pudo
+     * ajustar, el lead va a repetir el mismo síntoma de hoy y se resuelve a mano con
+     * "Reemitir" desde el panel.
+     *
+     * 🔴 SE LE PASA AL SERVICIO UNA INSTANCIA APARTE de Lead, no `$lead`. Adentro,
+     * extender_vencimiento()/acortar_vencimiento() hacen `$lead->update([...])`, que
+     * persiste TODOS los atributos sucios del modelo en ese momento — y acá `$lead`
+     * todavía tiene en memoria `demo_flexible`, `status` y todo lo que el resto de
+     * apply_parsed_response() (otras ~1000 líneas: intervención humana, mensaje,
+     * flags de notificación) va a seguir mutando antes de EL ÚNICO `$lead->save()`
+     * del método (documentado como tal en varios puntos de este archivo). Guardar acá
+     * a través de `$lead` dejaría, ante cualquier excepción posterior sin catch, el
+     * reagendado y el token persistidos a medias sin el resto de los flags — exactamente
+     * el estado "a medias" que este archivo evita a propósito en otros lugares (ver
+     * el `Lead::query()->whereKey()->update()` de más abajo en el método). Una
+     * instancia recién traída de la base no tiene ninguna otra mutación pendiente, así
+     * que su propio `update()` toca únicamente la columna del token (y `demo_id`, si
+     * hiciera falta fijarlo para resolver la demo correcta — ver abajo).
+     *
+     * @param Lead   $lead          Lead con demo_id/demo_date/demo_end_time YA escritos en memoria.
+     * @param int    $demo_id       Instancia asignada (se fija explícito en la instancia aparte).
+     * @param string $demo_date     Y-m-d del turno.
+     * @param string $demo_end      HH:MM de fin del turno.
+     * @param bool   $es_reagendado Sólo para el log.
+     *
+     * @return void
+     */
+    private function ajustar_token_de_ingreso_al_turno(Lead $lead, int $demo_id, string $demo_date, string $demo_end, bool $es_reagendado): void
+    {
+        if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
+            try {
+                $gracia_token = LeadDemoSettings::get_gracia_minutos_post();
+                $fin_token_datetime = Carbon::parse(
+                    $demo_date . ' ' . $demo_end,
+                    'America/Argentina/Buenos_Aires'
+                );
+                $expira_nueva_token = $fin_token_datetime->copy()->addMinutes($gracia_token);
+                $token_service_reagendado = new \App\Services\DemoIngresoTokenService();
+
+                /* Instancia aparte (ver docblock de arriba). demo_id se fija explícito
+                 * por si el reagendado cambió también de instancia de demo: sin esto,
+                 * loadMissing('demo') adentro del servicio resolvería la demo VIEJA. */
+                $lead_para_token = Lead::find($lead->id);
+                if ($lead_para_token !== null) {
+                    $lead_para_token->demo_id = $demo_id;
+
+                    if ($lead->demo_ingreso_token_expira_at === null
+                        || $lead->demo_ingreso_token_expira_at->lt($expira_nueva_token)) {
+                        $token_service_reagendado->extender_vencimiento($lead_para_token, $expira_nueva_token);
+                    } else {
+                        /* Piso del acorte: nunca un vencimiento en el pasado. */
+                        $ahora_para_token = AppTime::now();
+                        $piso_token       = $ahora_para_token->copy()->addMinutes($gracia_token);
+                        $expira_objetivo_token = $expira_nueva_token->lt($piso_token) ? $piso_token : $expira_nueva_token;
+                        $token_service_reagendado->acortar_vencimiento($lead_para_token, $expira_objetivo_token);
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::error('LeadAiService: no se pudo ajustar el token de ingreso al reagendar la demo por WhatsApp.', [
+                    'lead_id'       => $lead->id,
+                    'demo_id'       => $demo_id,
+                    'demo_date'     => $demo_date,
+                    'demo_end'      => $demo_end,
+                    'is_reagendado' => $es_reagendado,
+                    'error'         => $e->getMessage(),
+                ]);
+            }
         }
     }
 
@@ -5577,6 +5799,21 @@ TXT;
             if (array_key_exists('agendar_demo', $final_actions)) {
                 $agendar_admin = $final_actions['agendar_demo'];
 
+                /* Demo directa (misión demo-agendado-directo): el panel manda `{ahora: true}` a
+                 * secas, y las dos claves de previsión que escribió el servidor al generar
+                 * (`demo_id_previsto`, `url_tienda_prevista`) se conservan del paquete original.
+                 * Misma lección que `ventana_extendida`: el front reconstruye el objeto clave por
+                 * clave y lo que no conoce se pierde. Sólo son informativas (log y corrección de la
+                 * URL de la tienda), pero sin ellas el log de la asignación no puede decir si la
+                 * instancia cambió entre generar y aprobar. */
+                if (is_array($agendar_admin) && ! empty($agendar_admin['ahora']) && is_array($parsed['agendar_demo'] ?? null)) {
+                    foreach (['demo_id_previsto', 'url_tienda_prevista'] as $clave_prevision) {
+                        if (! array_key_exists($clave_prevision, $agendar_admin) && array_key_exists($clave_prevision, $parsed['agendar_demo'])) {
+                            $agendar_admin[$clave_prevision] = $parsed['agendar_demo'][$clave_prevision];
+                        }
+                    }
+                }
+
                 if (is_array($agendar_admin)
                     && ! array_key_exists('ventana_extendida', $agendar_admin)
                     && isset($parsed['agendar_demo']['ventana_extendida'])) {
@@ -5909,6 +6146,15 @@ TXT;
         $closer_call_promover_hold     = false;
         $closer_call_inicio_confirmado = null;
 
+        /* Acumula los eventos de notificación a admins disparados por este mensaje.
+         * Cada elemento: ['evento' => string, 'admins' => string[]].
+         * Se persiste en $msg->admin_notifications al finalizar.
+         *
+         * Va ACÁ y no después del bloque de agendar_demo (donde estaba hasta el 10/9/2026): ese
+         * bloque ya apendeaba "Demo agendada" y la inicialización posterior la pisaba, así que la
+         * notificación se mandaba pero nunca quedaba registrada en el mensaje. */
+        $admin_notifications_log = [];
+
         /* Acción: cancelar demo agendada cuando el lead pide reagendar.
          * Solo tiene efecto si el lead tiene demo_date cargada; si no, el flag se ignora.
          * Limpia los 4 campos de demo para liberar el slot en la disponibilidad de inmediato. */
@@ -5992,7 +6238,149 @@ TXT;
              */
             $forzar_slot = ! empty($parsed['forzar_slot']);
 
-            if ($demo_id && $demo_date !== '' && $demo_start !== '') {
+            /*
+             * DEMO DIRECTA (misión demo-agendado-directo, 10/9/2026): `agendar_demo: {ahora: true}`.
+             * No hay slot que validar: se elige la instancia libre EN ESTE INSTANTE para una ventana
+             * que arranca en diez minutos (DemoDirectaService), y se escribe. Es la respuesta a la
+             * queja concreta de Lucas —"tardo tres minutos en aprobar y ya me sale el error de que
+             * ese horario ya no está disponible"—: acá nada caduca entre generar y aprobar, porque
+             * la hora no existe hasta que se aprueba.
+             *
+             * Lock GLOBAL (no por instancia): la elección de instancia y su escritura tienen que
+             * ser atómicas entre dos aprobaciones simultáneas de leads distintos, y la instancia
+             * no se conoce antes de elegirla.
+             *
+             * Sin instancia libre, en aprobación se tira SinDemoLibreException (422 reintentable,
+             * ver la clase); en el camino de generación sin retención (interruptor de Cuenta
+             * apagado) no se manda una promesa incumplible: el texto se reemplaza por uno fijo que
+             * dice a partir de qué hora, y el lead queda para intervención humana.
+             */
+            if (! empty($agendar_demo['ahora']) && $lead->usa_experiencia_demo_nueva()) {
+                $lock_directa    = Cache::lock('demo_asignacion_directa', 8);
+                $lock_directa_ok = false;
+                try {
+                    $lock_directa_ok = (bool) $lock_directa->block(5);
+                } catch (LockTimeoutException $e) {
+                    $lock_directa_ok = false;
+                }
+
+                $directa       = app(DemoDirectaService::class);
+                $ahora_directa = AppTime::now(DemoDirectaService::TZ);
+                $ventana       = $directa->ventana_desde($ahora_directa);
+                $demo_libre    = $lock_directa_ok ? $directa->instancia_libre($lead, $ventana['inicio'], $ventana['fin']) : null;
+
+                if ($demo_libre === null) {
+                    if ($lock_directa_ok) {
+                        $lock_directa->release();
+                    }
+                    $proxima_liberacion = $lock_directa_ok ? $directa->proxima_liberacion($lead, $ahora_directa) : null;
+
+                    Log::warning('LeadAiService: demo directa sin instancia libre al aplicar.', [
+                        'lead_id'            => $lead->id,
+                        'lock_ok'            => $lock_directa_ok,
+                        'proxima_liberacion' => $proxima_liberacion !== null ? $proxima_liberacion->toDateTimeString() : null,
+                        'for_approval'       => $for_approval,
+                    ]);
+
+                    if ($for_approval) {
+                        if (! $lock_directa_ok) {
+                            throw new AprobacionEnCursoException(
+                                'Se está asignando otra demo directa en este mismo instante. '
+                                . 'Esperá unos segundos y volvé a aprobar. No se le envió nada al lead.'
+                            );
+                        }
+
+                        throw new SinDemoLibreException(
+                            'Las instancias de demo están todas ocupadas en este momento'
+                            . ($proxima_liberacion !== null ? ' (la primera se libera a las ' . $proxima_liberacion->format('H:i') . ')' : '')
+                            . '. Volvé a aprobar más tarde. No se le envió nada al lead.'
+                        );
+                    }
+
+                    /* Generación sin retención: texto fijo, sin hora inventada, y el lead a una persona. */
+                    $mensaje = $proxima_liberacion !== null
+                        ? 'Justo en este momento se me ocupó la demo. A partir de las ' . $proxima_liberacion->format('H:i')
+                            . ' te la puedo tener lista: avisame por acá y en diez minutos entrás.'
+                        : 'Justo en este momento se me ocupó la demo. En cuanto se libere te aviso por acá y la arrancamos.';
+                    $agendar_descartado_por_slot_invalido = true;
+                    $parsed['requiere_intervencion_humana'] = true;
+                    $parsed['motivo_intervencion']           = 'El lead aceptó la demo directa pero no había ninguna instancia libre al aplicar la acción. Revisar y asignarle una a mano.';
+
+                    $pipeline_status       = LeadPipelineStatus::ensure_exists($previous_status);
+                    $estado                = $pipeline_status->slug;
+                    $suggested_lead_status = null;
+                } else {
+                    $demo_id    = (int) $demo_libre->id;
+                    $demo_date  = $ventana['inicio']->format('Y-m-d');
+                    $demo_start = $ventana['inicio']->format('H:i');
+                    $demo_end   = $ventana['fin']->format('H:i');
+
+                    $demo_confirmada_este_turno = true;
+
+                    $lead->demo_id         = $demo_id;
+                    $lead->demo_date       = $demo_date;
+                    $lead->demo_start_time = $demo_start;
+                    $lead->demo_end_time   = $demo_end;
+                    /* Ventana extendida siempre: es lo que le deja al lead varias horas para entrar sin
+                     * que los relojes del ciclo (timeout de ingreso, check de fin) lo muevan de estado. */
+                    $lead->demo_flexible   = true;
+
+                    /* El token de ingreso, si ya hay uno vigente (re-asignación después de un
+                     * cancelar_demo), acompaña a la ventana nueva. */
+                    $this->ajustar_token_de_ingreso_al_turno($lead, $demo_id, $demo_date, $demo_end, $es_reagendado);
+
+                    $lead->status          = 'demo_agendada';
+                    $pipeline_status       = LeadPipelineStatus::ensure_exists('demo_agendada');
+                    $estado                = $pipeline_status->slug;
+                    $suggested_lead_status = $estado !== $previous_status ? $estado : null;
+
+                    /* La URL de la tienda que el modelo escribió salió de la instancia PREVISTA al
+                     * generar; si la asignada es otra, se corrige en el texto. Reemplazo de una URL
+                     * conocida, no reescritura del mensaje (ver DemoDirectaService). */
+                    $mensaje = $directa->corregir_links_de_tienda($mensaje, $demo_libre);
+
+                    Log::info('LeadAiService: demo directa asignada.', [
+                        'lead_id'          => $lead->id,
+                        'demo_id'          => $demo_id,
+                        'demo_id_previsto' => isset($agendar_demo['demo_id_previsto']) ? $agendar_demo['demo_id_previsto'] : null,
+                        'demo_date'        => $demo_date,
+                        'demo_start'       => $demo_start,
+                        'demo_end'         => $demo_end,
+                        'for_approval'     => $for_approval,
+                    ]);
+
+                    if ($lead->welcome_variant_id) {
+                        $ab_variant_directa = \App\Models\MessageVariant::find($lead->welcome_variant_id);
+                        if ($ab_variant_directa) {
+                            $ab_variant_directa->increment_scheduled();
+                        }
+                    }
+
+                    /* Reserva preventiva del closer, igual que cualquier demo de la dinámica nueva
+                     * (se ejecuta en el bloque POST-save, ver más abajo). */
+                    $google_event_create_needed = true;
+
+                    try {
+                        $demo_notify_service = new \App\Services\DemoScheduledWhatsappService(
+                            new \App\Services\WhatsappSendService()
+                        );
+                        $demo_notified = $demo_notify_service->notify($lead, $demo_date, $demo_start, $es_reagendado);
+                        if (! empty($demo_notified)) {
+                            $admin_notifications_log[] = [
+                                'evento' => $es_reagendado ? 'Demo reagendada' : 'Demo agendada',
+                                'admins' => $demo_notified,
+                            ];
+                        }
+                    } catch (\Throwable $e) {
+                        Log::error('LeadAiService: error al notificar demo directa agendada por WhatsApp.', [
+                            'lead_id' => $lead->id,
+                            'error'   => $e->getMessage(),
+                        ]);
+                    }
+
+                    $lock_directa->release();
+                }
+            } elseif ($demo_id && $demo_date !== '' && $demo_start !== '') {
                 /*
                  * FIX (bug de colisión de horarios — leads 65, 70, 93, 192, 197, 234 en
                  * producción, detectado 1/7/2026): la validación de disponibilidad (leer
@@ -6446,88 +6834,9 @@ TXT;
                     $lead->demo_start_time = $demo_start;
                     $lead->demo_end_time   = $demo_end;
 
-                    /*
-                     * El TOKEN de ingreso acompaña al reagendado, igual que ya hace
-                     * LeadController::update_demo_end_time_json() con la edición manual desde el
-                     * panel (mismo servicio, mismo criterio de extender/acortar, mismo piso de
-                     * `now + gracia`). Sin esto, un lead que reagenda por WhatsApp —el camino más
-                     * común— se queda con el vencimiento calculado contra el turno VIEJO: el gate
-                     * público (`DemoExperienciaController::evaluar_ingreso()`) lo deja pasar porque
-                     * lee la hora en vivo, pero el login real contra la instancia
-                     * (`DemoIngresoController::store()`) rechaza el token vencido y el lead nunca
-                     * entra, sin ningún error visible para nadie (bug medido en producción el
-                     * 3/9/2026, lead 594).
-                     *
-                     * Igual que el panel: sólo si hay un token emitido y no revocado (uno revocado
-                     * se revocó a propósito, extenderlo acá lo reviviría; sin token todavía no hay
-                     * nada que ajustar — lo resuelve calcular_expiracion() cuando se emita).
-                     *
-                     * Timezone explícito en el Carbon::parse(), NO vía
-                     * DemoIngresoTokenService::calcular_expiracion() (esa parsea sin timezone
-                     * explícito): se replica el cálculo que ya usa update_demo_end_time_json y no
-                     * el otro, que es el que arrastra el riesgo.
-                     *
-                     * Si el aviso a la instancia falla, a propósito NO se revierte el reagendado
-                     * (a diferencia del panel, que sí revierte): acá el agente ya le confirmó al
-                     * lead el horario nuevo por WhatsApp, y revertir dejaría al lead creyendo que
-                     * tiene un turno que el sistema deshizo. Queda logueado; si el token no se pudo
-                     * ajustar, el lead va a repetir el mismo síntoma de hoy y se resuelve a mano con
-                     * "Reemitir" desde el panel.
-                     *
-                     * 🔴 SE LE PASA AL SERVICIO UNA INSTANCIA APARTE de Lead, no `$lead`. Adentro,
-                     * extender_vencimiento()/acortar_vencimiento() hacen `$lead->update([...])`, que
-                     * persiste TODOS los atributos sucios del modelo en ese momento — y acá `$lead`
-                     * todavía tiene en memoria `demo_flexible`, `status` y todo lo que el resto de
-                     * apply_parsed_response() (otras ~1000 líneas: intervención humana, mensaje,
-                     * flags de notificación) va a seguir mutando antes de EL ÚNICO `$lead->save()`
-                     * del método (documentado como tal en varios puntos de este archivo). Guardar acá
-                     * a través de `$lead` dejaría, ante cualquier excepción posterior sin catch, el
-                     * reagendado y el token persistidos a medias sin el resto de los flags — exactamente
-                     * el estado "a medias" que este archivo evita a propósito en otros lugares (ver
-                     * el `Lead::query()->whereKey()->update()` de más abajo en el método). Una
-                     * instancia recién traída de la base no tiene ninguna otra mutación pendiente, así
-                     * que su propio `update()` toca únicamente la columna del token (y `demo_id`, si
-                     * hiciera falta fijarlo para resolver la demo correcta — ver abajo).
-                     */
-                    if (! empty($lead->demo_ingreso_token) && is_null($lead->demo_ingreso_token_revocado_at)) {
-                        try {
-                            $gracia_token = LeadDemoSettings::get_gracia_minutos_post();
-                            $fin_token_datetime = Carbon::parse(
-                                $lead->demo_date->format('Y-m-d') . ' ' . $demo_end,
-                                'America/Argentina/Buenos_Aires'
-                            );
-                            $expira_nueva_token = $fin_token_datetime->copy()->addMinutes($gracia_token);
-                            $token_service_reagendado = new \App\Services\DemoIngresoTokenService();
-
-                            /* Instancia aparte (ver docblock de arriba). demo_id se fija explícito
-                             * por si el reagendado cambió también de instancia de demo: sin esto,
-                             * loadMissing('demo') adentro del servicio resolvería la demo VIEJA. */
-                            $lead_para_token = Lead::find($lead->id);
-                            if ($lead_para_token !== null) {
-                                $lead_para_token->demo_id = $demo_id;
-
-                                if ($lead->demo_ingreso_token_expira_at === null
-                                    || $lead->demo_ingreso_token_expira_at->lt($expira_nueva_token)) {
-                                    $token_service_reagendado->extender_vencimiento($lead_para_token, $expira_nueva_token);
-                                } else {
-                                    /* Piso del acorte: nunca un vencimiento en el pasado. */
-                                    $ahora_para_token = AppTime::now();
-                                    $piso_token       = $ahora_para_token->copy()->addMinutes($gracia_token);
-                                    $expira_objetivo_token = $expira_nueva_token->lt($piso_token) ? $piso_token : $expira_nueva_token;
-                                    $token_service_reagendado->acortar_vencimiento($lead_para_token, $expira_objetivo_token);
-                                }
-                            }
-                        } catch (\Throwable $e) {
-                            Log::error('LeadAiService: no se pudo ajustar el token de ingreso al reagendar la demo por WhatsApp.', [
-                                'lead_id'       => $lead->id,
-                                'demo_id'       => $demo_id,
-                                'demo_date'     => $demo_date,
-                                'demo_end'      => $demo_end,
-                                'is_reagendado' => $es_reagendado,
-                                'error'         => $e->getMessage(),
-                            ]);
-                        }
-                    }
+                    /* El token de ingreso, si ya hay uno vigente, acompaña al turno nuevo (ver el
+                     * método, que conserva el porqué completo del bug del lead 594). */
+                    $this->ajustar_token_de_ingreso_al_turno($lead, (int) $demo_id, (string) $demo_date, (string) $demo_end, $es_reagendado);
 
                     /* La modalidad se escribe siempre que el lead sea de la dinámica NUEVA, no solo
                      * cuando es true: un reagendamiento de un lead que antes tenía ventana extendida
@@ -6618,10 +6927,7 @@ TXT;
         $notificar_no_ingreso         = false;
         $notificar_llamada_agendada   = false;
 
-        /* Acumula los eventos de notificación a admins disparados por este mensaje.
-         * Cada elemento: ['evento' => string, 'admins' => string[]].
-         * Se persiste en $msg->admin_notifications al finalizar. */
-        $admin_notifications_log = [];
+        /* ($admin_notifications_log se inicializa más arriba, antes de cancelar/agendar demo.) */
 
         /* Acción: confirmar que el lead ingresó a la demo (inferencia conversacional).
          * Solo válida si el lead está en demo_agendada. Ya no hace falta para los leads con
@@ -7418,7 +7724,10 @@ TXT;
         $reenviar_mail_flag = ! empty($parsed['reenviar_mail_demo']);
 
         // Evitar el doble envío: si ya se mandó el Mail 1 en este mismo paquete (arriba), no reenviar de nuevo.
-        if ($reenviar_mail_flag && ! $debe_enviar_mail_demo) {
+        // En la dinámica nueva no hay Mail 1: `reenviar_mail_demo` reenvía la carta de acceso, en el
+        // bloque siguiente (misión demo-agendado-directo). Sin este gate, la exigencia de doc_number de
+        // abajo mandaba a intervención humana a todo lead de la dinámica nueva que pidiera el mail.
+        if ($reenviar_mail_flag && ! $debe_enviar_mail_demo && ! $lead->usa_experiencia_demo_nueva()) {
             // Datos mínimos indispensables para poder armar y mandar el mail sin romper el helper/blade.
             $tiene_datos_para_reenviar = ! empty($lead->email)
                 && ! empty($lead->demo_id)
@@ -7489,6 +7798,67 @@ TXT;
                 $lead->update([
                     'requiere_intervencion_humana' => true,
                     'claude_auto_reply'            => false,
+                ]);
+            }
+        }
+
+        /*
+         * CARTA DE ACCESO por mail (dinámica nueva, misión demo-agendado-directo, 10/9/2026).
+         * Es la "llave" que Lucas pidió: el lead recibe por WhatsApp los links de su página y de
+         * la tienda demo, y por mail los mismos dos accesos como botones, para abrirlos desde la
+         * computadora. Sale en tres situaciones, todas con la demo YA asignada:
+         *
+         *   1. Al asignar la demo directa, si ya teníamos el email (y el admin no apagó el mail).
+         *   2. Cuando el email llega después (guardar_email suelto, que en esta dinámica es el
+         *      camino normal: se pide en el mismo mensaje que lleva el link).
+         *   3. A pedido del lead (reenviar_mail_demo), con la misma guardia anti-ráfaga de 5
+         *      minutos que el Mail 1.
+         *
+         * `demo_mail_sent_at` es la marca de "ya salió", compartida con el Mail 1 sin conflicto:
+         * en esta dinámica el Mail 1 nunca sale (ver $debe_enviar_mail_demo).
+         */
+        if ($lead->usa_experiencia_demo_nueva()) {
+            $lead_con_demo_asignada = ! empty($lead->demo_id) && in_array((string) $lead->status, [
+                'demo_agendada',
+                'demo_pendiente_de_ingreso',
+                'demo_en_curso',
+                'demo_pendiente_de_terminar',
+            ], true);
+            $carta_ya_enviada = ! empty($lead->demo_mail_sent_at);
+
+            $carta_por_asignacion  = $demo_confirmada_este_turno && ! $carta_ya_enviada && $enviar_mail_demo_flag;
+            $carta_por_email_nuevo = $email_nuevo && ! $carta_ya_enviada;
+            $carta_por_reenvio     = $reenviar_mail_flag
+                && ! ($lead->demo_mail_sent_at && $lead->demo_mail_sent_at->diffInMinutes(AppTime::now()) < 5);
+
+            if ($lead_con_demo_asignada && ! empty($lead->email)
+                && ($carta_por_asignacion || $carta_por_email_nuevo || $carta_por_reenvio)) {
+                try {
+                    $lead->loadMissing('demo');
+                    $carta = \App\Mail\Helpers\LeadDemoAccesoMailHelper::build($lead);
+                    \Illuminate\Support\Facades\Mail::to($lead->email)->send($carta);
+                    $lead->update(['demo_mail_sent_at' => AppTime::now()]);
+
+                    $motivo_carta = $carta_por_reenvio && ! $carta_por_asignacion && ! $carta_por_email_nuevo
+                        ? 'Carta de acceso reenviada (pedido del lead)'
+                        : 'Carta de acceso enviada';
+                    Log::info('LeadAiService: carta de acceso a la demo enviada.', [
+                        'lead_id' => $lead->id,
+                        'email'   => $lead->email,
+                        'motivo'  => $motivo_carta,
+                    ]);
+                    $admin_notifications_log[] = ['evento' => $motivo_carta, 'admins' => []];
+                } catch (\Throwable $e) {
+                    Log::error('LeadAiService: error al enviar la carta de acceso a la demo.', [
+                        'lead_id' => $lead->id,
+                        'error'   => $e->getMessage(),
+                    ]);
+                }
+            } elseif ($reenviar_mail_flag && empty($lead->email)) {
+                /* El lead pide el mail y no tenemos correo: el agente tiene que pedírselo, no hay
+                 * nada que reenviar. Queda logueado, sin intervención (no es un error). */
+                Log::info('LeadAiService: se pidió la carta de acceso pero el lead no tiene email cargado.', [
+                    'lead_id' => $lead->id,
                 ]);
             }
         }
@@ -8329,10 +8699,17 @@ TXT;
      * Requiere que el system base modular esté sincronizado; si no lo está, lanza
      * RuntimeException en vez de caer a un fallback (ver prompt 271).
      *
+     * @param bool $demo_directa true cuando la demo directa está viva para el lead de este turno
+     *                           (misión demo-agendado-directo): reemplaza la prohibición de rangos
+     *                           sin JSON —que en esa dinámica exigiría pedir una disponibilidad que
+     *                           ya no existe— por la nota que la contradice. Cambia el prefijo
+     *                           cacheado del system prompt, así que hay dos variantes en caché, no
+     *                           una: es el precio de no darle al modelo dos órdenes opuestas.
+     *
      * @throws \RuntimeException Si el system base modular no está sincronizado en BD.
      * @return string
      */
-    protected function build_system_prompt(): string
+    protected function build_system_prompt(bool $demo_directa = false): string
     {
         $prompt_activo = AiSystemPrompt::obtener_activo();
 
@@ -8378,8 +8755,17 @@ TXT;
         /*
          * Regla de código adicional (prompt 151): refuerza que sin JSON de disponibilidad
          * en el contexto actual el agente no puede afirmar rangos horarios propios.
+         *
+         * En la demo directa esa regla manda justo lo contrario de lo que hay que hacer (pedir
+         * `solicita_disponibilidad`), así que se reemplaza por la nota de la dinámica. El detalle
+         * operativo (cómo ofrecer, qué devolver, qué links) va en el contexto del turno, en
+         * build_demo_directa_context(): acá solo la regla de fondo.
          */
-        $contenido .= "\n\n" . self::PROHIBICION_RANGO_HORARIO_SIN_JSON;
+        if ($demo_directa) {
+            $contenido .= "\n\n" . self::NOTA_DEMO_DIRECTA;
+        } else {
+            $contenido .= "\n\n" . self::PROHIBICION_RANGO_HORARIO_SIN_JSON;
+        }
 
         /* Índice del manual del sistema (2/9/2026). Puede venir vacío a propósito: ver el
          * comentario dentro de build_bloque_manual() sobre por qué acá no se escala. */
@@ -8607,6 +8993,78 @@ BLOQUE_DEL_MANUAL;
     }
 
     /**
+     * Bloque "DEMO DIRECTA" del contexto (misión demo-agendado-directo, 10/9/2026): reemplaza al de
+     * la página inmersiva cuando el marcador está vivo. Lleva lo que el modelo tiene que COPIAR (los
+     * dos links), lo que tiene que SABER (si hay email, si la demo ya está asignada, si hay una
+     * instancia libre ahora mismo) y las reglas del turno.
+     *
+     * La instancia que figura acá es una PREVISIÓN (DemoDirectaService::elegir_prevista()): sirve
+     * para escribir la URL de la tienda y para no ofrecer "ahora" cuando no hay ninguna libre. La
+     * asignación real la hace apply_parsed_response() al aplicar el paquete, y si la instancia
+     * cambió, corrige la URL de la tienda en el texto.
+     *
+     * @param Lead $lead
+     *
+     * @return string
+     */
+    private function build_demo_directa_context(Lead $lead): string
+    {
+        $url_pagina = (string) $lead->demo_experiencia_url;
+        if ($url_pagina === '') {
+            /* Sin link no hay nada que ofrecer: el `.md` ya manda frenar con intervención humana. */
+            return "\n\nDEMO DIRECTA: este lead no tiene link de página de acceso (sin uuid ni teléfono). No ofrezcas la demo: devolvé requiere_intervencion_humana: true con el motivo.";
+        }
+
+        $directa  = app(DemoDirectaService::class);
+        $prevista = $directa->elegir_prevista($lead);
+
+        $lead->loadMissing('demo');
+        $tiene_demo_asignada = $lead->demo_id !== null && $lead->demo_date !== null
+            && in_array((string) $lead->status, self::ESTADOS_REQUIEREN_SUPERVISION_AGENDAMIENTO, true)
+            && (string) $lead->status !== 'solicita_disponibilidad';
+
+        /* La tienda que se muestra es la de la demo YA asignada si la hay; si no, la prevista. */
+        $demo_para_tienda = $tiene_demo_asignada && $lead->demo ? $lead->demo : $prevista['demo'];
+        $url_tienda       = DemoDirectaService::url_tienda($demo_para_tienda);
+
+        $email = trim((string) $lead->email);
+
+        if ($tiene_demo_asignada) {
+            $estado_demo = 'YA ASIGNADA (instancia ' . (int) $lead->demo_id . ', arranca a las '
+                . self::time_string_to_hhmm($lead->demo_start_time) . ' y queda abierta hasta las '
+                . self::time_string_to_hhmm($lead->demo_end_time) . ' de hoy). No la vuelvas a agendar; si el lead dice que ahora no puede, cancelar_demo: true.';
+        } elseif ($prevista['demo'] !== null) {
+            $estado_demo = 'SIN ASIGNAR, y hay una instancia libre ahora mismo: podés ofrecerla para ahora.';
+        } elseif ($prevista['proxima_liberacion'] !== null) {
+            $estado_demo = 'SIN ASIGNAR, y NO hay ninguna instancia libre ahora: la primera se libera a las '
+                . $prevista['proxima_liberacion']->format('H:i') . '. No devuelvas agendar_demo; decile a partir de qué hora se la podés tener lista y que te avise.';
+        } else {
+            $estado_demo = 'SIN ASIGNAR, y no hay instancias de demo cargadas. No devuelvas agendar_demo: requiere_intervencion_humana: true.';
+        }
+
+        $bloque = "\n\nDEMO DIRECTA (dinamica nueva -- la demo se hace AHORA, sin horarios):\n"
+            . "  Pagina de acceso del lead (copiar textual): {$url_pagina}\n"
+            . "  Tienda online conectada a su demo (copiar textual): " . ($url_tienda !== '' ? $url_tienda : '(sin tienda disponible: no la menciones)') . "\n"
+            . "  Email del lead: " . ($email !== '' ? $email : '(no lo tenemos)') . "\n"
+            . "  Demo: {$estado_demo}\n"
+            . "Reglas de este turno:\n"
+            . "  - Para ofrecerla: \"si queres, te la puedo tener lista en diez minutos\". Sin hora, sin grilla, sin preguntar\n"
+            . "    horarios. Si el lead pregunta cuando, la respuesta es ahora mismo (o cuando se siente en la computadora).\n"
+            . "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"
+            . "    links de arriba (la pagina y la tienda, copiados textuales) y pedile el mail para mandarle las llaves de\n"
+            . "    acceso, que le sirven para abrirla desde la computadora. Si ya tenemos email, no lo pidas. El sistema\n"
+            . "    asigna la instancia libre al enviar y la demo arranca diez minutos despues: no inventes hora ni fecha.\n"
+            . "  - Cuando el lead pasa su mail (en cualquier momento): guardar_email con el correo. El sistema le manda la carta\n"
+            . "    de acceso solo; no prometas nada mas que \"te lo mando al mail\".\n"
+            . "  - Si dice que ahora no puede: no agendes nada; decile que cuando pueda sentarse te avise y en diez minutos\n"
+            . "    la tenes lista. No propongas horarios ni pidas disponibilidad.\n"
+            . "  - NUNCA solicita_disponibilidad, NUNCA dia_solicitado, NUNCA demo_id/demo_date/demo_start_time.\n"
+            . "  - No existen usuario ni contrasena: todo el acceso pasa por el boton de la pagina.";
+
+        return $bloque;
+    }
+
+    /**
      * Bloque "COORDINACIÓN DE LA LLAMADA CON EL CLOSER" (grupo 307, prompt 04): huecos reales del
      * closer (armados con CloserAgendaService, grupo 307, prompt 02) y las instrucciones del tramo
      * post-demo. Sin este bloque el agente tiene las acciones (agendar_llamada_closer,
@@ -8698,7 +9156,7 @@ BLOQUE_DEL_MANUAL;
      *
      * @return string Contenido listo para enviar como mensaje user a la API.
      */
-    protected function build_user_content(Lead $lead, bool $is_followup, string $availability_context = '', ?string $intencion_forzada = null): string
+    protected function build_user_content(Lead $lead, bool $is_followup, string $availability_context = '', ?string $intencion_forzada = null, bool $demo_directa = false): string
     {
         $historial = '';
         foreach ($lead->messages as $msg) {
@@ -8840,7 +9298,11 @@ TXT;
          * está por confirmar demo_agendada en la respuesta que se está armando ahora mismo). Se
          * inyecta siempre que el lead use la dinámica nueva, sin importar su status.
          */
-        if ($lead->usa_experiencia_demo_nueva()) {
+        if ($demo_directa) {
+            /* Demo directa (misión demo-agendado-directo): el bloque trae los dos links, el email,
+             * el estado de la demo y si hay instancia libre. Reemplaza al de la página inmersiva. */
+            $txt .= $this->build_demo_directa_context($lead);
+        } elseif ($lead->usa_experiencia_demo_nueva()) {
             $demo_experiencia_context = $this->build_demo_experiencia_context($lead);
             if ($demo_experiencia_context !== '') {
                 $txt .= $demo_experiencia_context;
@@ -8855,7 +9317,20 @@ TXT;
             }
         }
 
-        if ($lead_status_for_context === 'demo_agendada') {
+        if ($lead_status_for_context === 'demo_agendada' && $lead->usa_experiencia_demo_nueva()) {
+            /* Dinámica nueva: el acceso es la página (link de arriba), no hay credenciales. Hasta
+             * el 10/9/2026 este estado recibía el bloque de abajo, que habla de usuario y
+             * contraseña, y el `.md` de demo_ciclo tenía que desmentirlo. */
+            $txt .= "\n\nCONTEXTO DE DEMO - INGRESO (dinámica nueva):\n"
+                . "El lead tiene la demo asignada y todavía no entró de verdad. El sistema detecta solo el ingreso\n"
+                . "cuando abre la demo desde su página; si te escribe antes, tu objetivo es que entre.\n"
+                . "Si dice que no puede entrar, volvé a pasarle el link de su página (copiado textual del bloque de\n"
+                . "arriba): ahí mira el video de introducción y entra con un botón. NO hay usuario, contraseña ni\n"
+                . "documento de prueba, y no existe ningún mail con credenciales.\n"
+                . "Si dice que ya entró, devolvé confirmar_ingreso: true. Si dice claramente que no va a poder o no\n"
+                . "quiere entrar, devolvé marcar_no_ingreso: true. Si intentaste resolverlo y aun así no puede,\n"
+                . "devolvé requiere_intervencion_humana: true con motivo_intervencion claro.";
+        } elseif ($lead_status_for_context === 'demo_agendada') {
             /* El lead está en el tramo de la demo agendada, todavía sin confirmar el ingreso real
              * (con demo v2 conectada, ese ingreso lo detecta solo DemoEventosController apenas
              * abre el Magic Link -- este bloque cubre el caso en que escribe ANTES de eso, ya sea

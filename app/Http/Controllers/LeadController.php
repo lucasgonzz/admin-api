@@ -1003,6 +1003,51 @@ class LeadController extends Controller
         // Lead objetivo del envío del mail de demo.
         $lead = Lead::withAll()->findOrFail($id);
 
+        /*
+         * Dinámica nueva (misión demo-agendado-directo, 10/9/2026): el mail de demo es la CARTA DE
+         * ACCESO (dos botones: página de la demo y tienda), no el Mail 1 con credenciales. Pide
+         * mucho menos: email y una instancia asignada. Sin esto, el botón del panel exigía
+         * doc_number/horarios que en esta dinámica no existen y no se podía mandar nunca.
+         */
+        if ($lead->usa_experiencia_demo_nueva()) {
+            $missing_carta = [];
+            if (empty($lead->email)) {
+                $missing_carta[] = 'email';
+            }
+            if (empty($lead->demo_id)) {
+                $missing_carta[] = 'demo asignada';
+            }
+            if (! empty($missing_carta)) {
+                return response()->json([
+                    'message' => 'Faltan los siguientes campos: ' . implode(', ', $missing_carta) . '.',
+                ], 422);
+            }
+
+            try {
+                $lead->loadMissing('demo');
+                Mail::to($lead->email)->send(\App\Mail\Helpers\LeadDemoAccesoMailHelper::build($lead));
+                $lead->update([
+                    'demo_mail_sent_at'    => now(),
+                    'demo_mail_last_error' => null,
+                ]);
+            } catch (\Throwable $error) {
+                Log::error('LeadController@send_demo_mail_json (carta de acceso) error: ' . $error->getMessage(), [
+                    'lead_id' => $lead->id,
+                ]);
+
+                $lead->update([
+                    'demo_mail_last_error' => $error->getMessage(),
+                ]);
+
+                return response()->json([
+                    'message' => 'No se pudo enviar el mail de acceso a la demo: ' . $error->getMessage(),
+                    'model'   => $this->fullModel('lead', $lead->id),
+                ], 422);
+            }
+
+            return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);
+        }
+
         // Validación de campos obligatorios para la demo antes de enviar el correo.
         $missing = [];
         if (empty($lead->contact_name))   { $missing[] = 'nombre'; }
