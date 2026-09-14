@@ -100,19 +100,84 @@ class LeadFollowupService
     }
 
     /**
+     * 🔴 LA definición de "este lead contestó", y la única que hay. La usan el cron, el botón de
+     * forzar seguimiento, el reintento de seguimientos fallidos y `/leads`.
+     *
+     * Un lead contestó si tiene un entrante (`sender = 'lead'`, sin contar eventos de estado) cuyo
+     * `id` es MAYOR que el del primer saliente del hilo (`sender != 'lead'`, también sin eventos de
+     * estado). Si no tiene ningún saliente, no contestó — todavía no le dijimos nada.
+     *
+     * **Por qué "después del primer saliente" y no "cualquier entrante".** En los leads de
+     * clic-a-WhatsApp el primer mensaje del hilo es del propio lead (*"¡Hola! Quiero más
+     * información"*, el automático del anuncio) y recién después sale la bienvenida. Ese primer
+     * entrante no es una respuesta a nada: si contara, todo lead de anuncio quedaría afuera del
+     * cron antes de recibir un solo seguimiento.
+     *
+     * **Por qué existe** (decisión de Lucas, 14/9/2026): el cron de seguimientos se ocupa SOLO de
+     * los leads que nunca contestaron. Entre el 10/9 y el 14/9 el motor pausó "por inactividad" a
+     * 27 leads, 8 de ellos en plena conversación (el #637 contestó y fue pausado 25 hs después), y
+     * mandó `contactado_d4` ("contame a qué se dedica tu empresa") a leads que ya lo habían
+     * contado. Todo lead que respondió al menos una vez lo lleva `/leads` a mano: ni plantilla
+     * automática ni pausa automática.
+     *
+     * 🔴 El "reinicio del contador de seguimientos con cada entrante" NO hace falta con esta regla
+     * y no hay que agregarlo "por las dudas": un lead con un entrante posterior al primer saliente
+     * está afuera del cron, así que su contador de cupo no se evalúa nunca. Agregar el reinicio
+     * sería código muerto que confunde sobre quién lleva a ese lead.
+     *
+     * @param Lead $lead Lead a evaluar.
+     *
+     * @return bool true si el lead contestó al menos una vez después del primer saliente.
+     */
+    public function lead_respondio(Lead $lead): bool
+    {
+        /* Primer saliente real del hilo. Los eventos de estado (pausa automática, cambios de
+           estado) llevan sender 'sistema' pero no son mensajes que el lead haya recibido. */
+        $primer_saliente_id = LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('sender', '!=', 'lead')
+            ->where('is_status_event', false)
+            ->min('id');
+
+        if ($primer_saliente_id === null) {
+            return false;
+        }
+
+        return LeadMessage::query()
+            ->where('lead_id', $lead->id)
+            ->where('sender', 'lead')
+            ->where('is_status_event', false)
+            ->where('id', '>', (int) $primer_saliente_id)
+            ->exists();
+    }
+
+    /**
      * Fuerza el envío del seguimiento que corresponde a un lead AHORA MISMO,
      * ignorando horas_espera y tiene_sugerencia_pendiente. Pensado para testing
      * manual desde el panel admin. El resto de la lógica (conteo de followups,
      * elección de template, pausado por límite alcanzado) es idéntica a producción.
      *
+     * Lo único que NO ignora es que el lead haya contestado: desde el 14/9/2026 un lead que
+     * respondió está afuera del motor automático (ver {@see lead_respondio()}), y forzarlo desde el
+     * panel mandaría exactamente la plantilla genérica que se quiso evitar. Devuelve
+     * `lead_respondio` sin tocar nada; `LeadController::force_followup_json` reenvía el array tal
+     * cual y la SPA lo muestra como texto.
+     *
      * @param Lead $lead
      *
      * @return array{result:string, followup_number:int|null, via:string|null}
-     *   result: 'suggestion'|'paused'|'no_rule'|'limit_reached_already_paused'
-     *   via: 'template'|'claude'|null
+     *   result: 'suggestion'|'paused'|'no_rule'|'lead_respondio'|'limit_reached_already_paused'
+     *   via: 'template'|'verificacion'|'claude'|'closer_notified'|null
      */
     public function force_followup_now(Lead $lead): array
     {
+        /* Un lead que contestó no recibe seguimientos automáticos, ni siquiera forzados: lo lleva
+           /leads a mano (decisión de Lucas, 14/9/2026). Se evalúa antes que la regla porque, con o
+           sin regla, el motivo que le sirve al operador es este. */
+        if ($this->lead_respondio($lead)) {
+            return ['result' => 'lead_respondio', 'followup_number' => null, 'via' => null];
+        }
+
         $rules_by_estado = FollowupRule::query()->where('activa', true)->get()->keyBy('estado');
 
         if (! $rules_by_estado->has($lead->status)) {
@@ -198,6 +263,18 @@ class LeadFollowupService
             return null;
         }
         if (! $rules_by_estado->has($lead->status)) {
+            return null;
+        }
+
+        /*
+         * 🔴 El cron se ocupa SOLO de los leads que nunca contestaron (decisión de Lucas,
+         * 14/9/2026). Un lead que respondió al menos una vez después del primer saliente sale del
+         * alcance: ni plantilla automática ni pausa por cupo agotado — lo lleva /leads a mano.
+         * Va ANTES del cálculo de horas y del conteo de cupo a propósito: hasta el 14/9 el motor
+         * llegaba al `pause_lead()` con leads en plena conversación (8 de los 27 pausados entre
+         * el 10/9 y el 14/9) y les mandaba plantillas que ya no tenían sentido. Ver lead_respondio().
+         */
+        if ($this->lead_respondio($lead)) {
             return null;
         }
 

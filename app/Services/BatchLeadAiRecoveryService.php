@@ -185,6 +185,20 @@ class BatchLeadAiRecoveryService
                 continue;
             }
 
+            /* Un lead que contestó está afuera del motor automático (decisión de Lucas, 14/9/2026:
+               lo lleva /leads a mano). Cubre también al que respondió ANTES del intento fallido —
+               un seguimiento que el cron le mandó cuando la guarda todavía no existía— y que el
+               chequeo de "mensaje más nuevo" de abajo no ve. Se cuenta como omitido, igual que los
+               demás casos, sin cambiar la forma del array que devuelve el método. */
+            if (app(LeadFollowupService::class)->lead_respondio($lead)) {
+                Log::channel('daily')->info('BatchLeadAiRecoveryService: seguimiento fallido no reintentado, el lead contestó.', [
+                    'lead_id'    => $lead_id,
+                    'message_id' => $failed_message->id,
+                ]);
+                $skipped++;
+                continue;
+            }
+
             /* Si ya hay CUALQUIER mensaje más nuevo que el fallido (otro seguimiento que sí salió, una
                respuesta del lead, un mensaje manual del setter), la conversación ya siguió después del
                fallo — no reintentar por encima para no mandar una plantilla desactualizada. */
