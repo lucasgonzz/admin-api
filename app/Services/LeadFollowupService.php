@@ -120,6 +120,13 @@ class LeadFollowupService
      * contado. Todo lead que respondió al menos una vez lo lleva `/leads` a mano: ni plantilla
      * automática ni pausa automática.
      *
+     * **"Saliente" acá es cualquier fila nuestra que no sea evento de estado, haya salido o no**
+     * (a diferencia de `LeadMessage::apply_reply_to_lead_conditions()`, que exige `whatsapp_message_id`
+     * para contar un saliente como respuesta al lead). Es a propósito: si nuestra bienvenida quedó
+     * en `sugerido`, se rechazó o falló, y el lead escribió por segunda vez igual, ese lead está
+     * conversando y esperando — lo tiene que ver `/leads`, no el cron con una plantilla genérica.
+     * El error, si lo hay, es en la dirección conservadora: el cron no toca de más.
+     *
      * 🔴 El "reinicio del contador de seguimientos con cada entrante" NO hace falta con esta regla
      * y no hay que agregarlo "por las dudas": un lead con un entrante posterior al primer saliente
      * está afuera del cron, así que su contador de cupo no se evalúa nunca. Agregar el reinicio
@@ -161,7 +168,8 @@ class LeadFollowupService
      * respondió está afuera del motor automático (ver {@see lead_respondio()}), y forzarlo desde el
      * panel mandaría exactamente la plantilla genérica que se quiso evitar. Devuelve
      * `lead_respondio` sin tocar nada; `LeadController::force_followup_json` reenvía el array tal
-     * cual y la SPA lo muestra como texto.
+     * cual en `outcome` (hoy ningún componente de admin-spa despacha `force_followup`, así que el
+     * valor nuevo no lo interpreta nadie: compatible hacia atrás sin tocar la SPA).
      *
      * @param Lead $lead
      *
