@@ -243,6 +243,27 @@ class ClientProperties
                 // 'show' => true,
                 'width' => 80,
             ],
+            /**
+             * El interruptor del asistente por WhatsApp (misión asistente-por-whatsapp, 16/9/2026).
+             *
+             * 🔴 `value => false` y no true: esta casilla se prende cliente por cliente y a mano,
+             * DESPUÉS de que ese cliente tenga la versión del `empresa-api` con las rutas
+             * `api/admin-sync/asistente/*` y la `api_key` cargada acá. Prendida sobre un cliente
+             * viejo, el canal responde 404 y el dueño recibe el texto honesto de que su sistema
+             * todavía no tiene la función — degrada bien, pero no sirve para nada.
+             *
+             * No lleva `show => true` (o sea, no sale en la tabla del listado) porque la columna
+             * no ayuda a encontrar un cliente: se toca desde la ficha, una vez, cuando se lo
+             * actualiza.
+             */
+            [
+                'key' => 'asistente_whatsapp_activo',
+                'text' => 'Habla con su asistente por WhatsApp',
+                'type' => 'checkbox',
+                'value' => false,
+                'not_show_on_table' => true,
+                'width' => 260,
+            ],
             [
                 'key' => 'implementation',
                 'text' => 'Implementación',

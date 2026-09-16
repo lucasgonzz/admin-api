@@ -46,6 +46,10 @@ class Client extends Model
         'precio_tienda_nube'       => 'decimal:2',
         'total_mensualidad'        => 'decimal:2',
         'payment_expired_at'       => 'date',
+        // Interruptor del asistente por WhatsApp (misión asistente-por-whatsapp, 16/9/2026).
+        // Casteado a bool y no leído crudo porque el ruteo del webhook decide con un `if` sobre
+        // esta columna, y un "0" string es verdadero en PHP.
+        'asistente_whatsapp_activo' => 'boolean',
     ];
 
     /**
