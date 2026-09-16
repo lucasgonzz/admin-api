@@ -7,6 +7,7 @@ use App\Helpers\WhatsappNormalizer;
 use App\Services\SupportAiSettings;
 use App\Services\SupportAiSuggestionScheduler;
 use App\Models\Client;
+use App\Models\ClientAssistantMessage;
 use App\Models\ClientEmployee;
 use App\Models\EcommerceImplementation;
 use App\Models\EcommerceImplementationMessage;
@@ -17,6 +18,8 @@ use App\Models\LeadMessage;
 use App\Models\SupportMessage;
 use App\Models\SupportTicket;
 use App\Models\WhatsappConfig;
+use App\Services\AsistenteWhatsappService;
+use App\Services\AsistenteWhatsappSettings;
 use App\Services\EcommerceImplementationBroadcastService;
 use App\Services\EcommerceImplementationConversationService;
 use App\Services\ImplementationBroadcastService;
@@ -173,6 +176,31 @@ class WhatsappWebhookController extends Controller
                         'route'                       => 'ecommerce-implementacion',
                         'client_id'                   => $client->id,
                         'ecommerce_implementation_id' => $ecommerce_implementation->id,
+                    ]);
+                } elseif ((bool) $client->asistente_whatsapp_activo && $client_employee === null) {
+                    /*
+                     * El canal del asistente por WhatsApp (misión asistente-por-whatsapp, 16/9/2026).
+                     *
+                     * Va DESPUÉS de las dos ramas de implementación y ANTES de soporte, y ese orden
+                     * es la decisión: un cliente en onboarding sigue hablando con su implementación
+                     * aunque tenga el canal prendido, porque ahí hay un flujo a medio terminar con
+                     * pasos que esperan una respuesta concreta, y meterle el asistente en el medio
+                     * lo dejaría colgado.
+                     *
+                     * 🔴 `$client_employee === null` es "es EL DUEÑO", no un chequeo defensivo. En
+                     * este repo no hay ningún flag de dueño: el dueño es el que resuelve por
+                     * `clients.phone` (o por el lead promovido) y no matchea con ningún
+                     * `ClientEmployee`. Es la decisión de Lucas de esta misión —solo el dueño habla
+                     * con el asistente—, y un empleado de un cliente con el canal prendido cae en
+                     * la rama de soporte de abajo, que está desconectada.
+                     */
+                    app(AsistenteWhatsappService::class)->recibir($parsed, $client);
+                    Log::channel('daily')->info('WhatsApp webhook: mensaje enrutado al asistente del cliente.', [
+                        'from'      => $parsed['from'],
+                        'type'      => $parsed['type'],
+                        'route'     => 'asistente',
+                        'client_id' => $client->id,
+                        'cito'      => ! empty($parsed['reply_to_message_id']),
                     ]);
                 } else {
                     $this->handle_support_message($parsed, $client, $client_employee, $assignment_service);
@@ -629,15 +657,58 @@ class WhatsappWebhookController extends Controller
         }
 
         return [
-            'from'          => WhatsappNormalizer::normalize((string) $from_raw),
-            'message_id'    => (string) $message_id,
-            'type'          => $type,
-            'body'          => $body,
-            'inbound_media' => $inbound_media,
-            'kapso_content' => $kapso_content,
-            'timestamp'     => $timestamp,
-            'contact_name'  => $contact_name,
+            'from'                => WhatsappNormalizer::normalize((string) $from_raw),
+            'message_id'          => (string) $message_id,
+            'type'                => $type,
+            'body'                => $body,
+            'inbound_media'       => $inbound_media,
+            'kapso_content'       => $kapso_content,
+            'timestamp'           => $timestamp,
+            'contact_name'        => $contact_name,
+            'reply_to_message_id' => $this->extract_reply_to_message_id($message),
         ];
+    }
+
+    /**
+     * wamid del mensaje que el remitente CITÓ al responder, si citó alguno.
+     *
+     * Lo usa el canal del asistente por WhatsApp (misión asistente-por-whatsapp, 16/9/2026) y es
+     * el mecanismo entero con el que se separan conversaciones ahí: en WhatsApp no hay ningún
+     * botón de "nueva conversación", así que responder citando un mensaje viejo del asistente es
+     * la forma de decir "seguime esta". Ver `AsistenteWhatsappService`.
+     *
+     * Se leen tres rutas, en orden, y ninguna se saca aunque parezca redundante: la primera es la
+     * de Meta (`message.context.id`, la que viene documentada), la segunda es la misma anidada
+     * bajo el bloque de Kapso, y la tercera es la forma plana que usan algunos reenvíos. El costo
+     * de leer una ruta que nunca llega es cero; el costo de no leer la que sí llega es que la cita
+     * no funciona y cada mensaje del dueño abre una conversación nueva, sin que nada lo denuncie.
+     * Es exactamente lo que ya pasó con `conversation.contact_name` (ver el comentario grande en
+     * `parse_inbound_message()`), y por eso acá se listan todas de entrada.
+     *
+     * @param array<string, mixed> $message Nodo message del payload Kapso.
+     *
+     * @return string|null wamid citado, o null si el mensaje no cita nada.
+     */
+    private function extract_reply_to_message_id(array $message): ?string
+    {
+        $candidatos = [
+            isset($message['context']['id']) ? $message['context']['id'] : null,
+            isset($message['kapso']['context']['id']) ? $message['kapso']['context']['id'] : null,
+            isset($message['reply_to']) ? $message['reply_to'] : null,
+        ];
+
+        foreach ($candidatos as $candidato) {
+            if ($candidato === null || is_array($candidato)) {
+                continue;
+            }
+
+            $candidato = trim((string) $candidato);
+            if ($candidato !== '') {
+                return $candidato;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -794,6 +865,17 @@ class WhatsappWebhookController extends Controller
         }
 
         if (EcommerceImplementationMessage::where('whatsapp_message_id', $message_id)->exists()) {
+            return true;
+        }
+
+        /* 🔴 El canal del asistente por WhatsApp NO deja `SupportMessage` (misión
+         * asistente-por-whatsapp, 16/9/2026): su mensaje entrante vive en su propia tabla. Sin
+         * esta consulta, un reintento de Kapso sobre el mismo wamid —que pasa cada vez que el
+         * webhook tarda en contestar— le volvería a mandar el mismo mensaje al asistente del
+         * cliente, y ese asistente CARGA COSAS. Un "sí, dale" duplicado es una compra duplicada. */
+        if (ClientAssistantMessage::where('whatsapp_message_id', $message_id)
+            ->where('direccion', ClientAssistantMessage::DIRECCION_ENTRANTE)
+            ->exists()) {
             return true;
         }
 
@@ -999,6 +1081,49 @@ class WhatsappWebhookController extends Controller
         ?ClientEmployee $client_employee,
         SupportTicketAssignmentService $assignment_service
     ): void {
+        /*
+         * 🔴 EL SOPORTE POR ESTE NÚMERO ESTÁ DESCONECTADO (misión asistente-por-whatsapp, 16/9/2026).
+         *
+         * Lucas lo dictó así: *"actualmente los clientes se comunican a otro número por soporte,
+         * así que simplemente dejá desconectada la parte de tickets de soporte; en el futuro,
+         * cuando consiga otro número, se pondrá en marcha"*.
+         *
+         * Es un INTERRUPTOR y no un borrado, y la diferencia importa. `SupportTicket`,
+         * `SupportMessage`, `SupportAiSuggestionService`, la bandeja del admin-spa y el espejo
+         * hacia el ERP del cliente quedan enteros y funcionando: los tickets que ya existen se
+         * siguen leyendo, contestando y cerrando desde el admin. Lo único que se apaga es que un
+         * mensaje entrante por ESTE número abra uno nuevo. El día que aparezca el otro número,
+         * esto se vuelve a prender escribiendo una fila en `admin_settings`.
+         *
+         * El corte va antes que todo lo demás —incluido el canal `sistema:`— porque el punto es
+         * que por acá no nazca NADA: ni ticket, ni `SupportMessage`, ni sugerencia de Claude.
+         */
+        if (! AsistenteWhatsappSettings::tickets_habilitados()) {
+            Log::channel('daily')->info('WhatsApp webhook: soporte desconectado, no se abre ticket.', [
+                'from'               => $parsed['from'],
+                'type'               => $parsed['type'],
+                'client_id'          => $client->id,
+                'client_employee_id' => $client_employee ? $client_employee->id : null,
+                'message_id'         => $parsed['message_id'],
+                'body_preview'       => mb_substr((string) ($parsed['body'] ?? ''), 0, 200),
+            ]);
+
+            /* El texto de cortesía es opcional y nace VACÍO. Con el canal apagado, contestarle
+             * algo automático a alguien que escribió por soporte es peor que no contestarle: lo
+             * deja creyendo que alguien lo leyó. Si Lucas quiere derivar al otro número, carga el
+             * texto en `support_whatsapp_desconectado_texto` y sale. */
+            $texto = AsistenteWhatsappSettings::texto_de_soporte_desconectado();
+            if ($texto !== '') {
+                (new WhatsappSendService())->send_text(
+                    (string) $parsed['from'],
+                    $texto,
+                    'Soporte por WhatsApp desconectado - cliente #' . $client->id
+                );
+            }
+
+            return;
+        }
+
         // NUEVO — interceptar el canal "sistema:" antes de crear ticket de soporte.
         // Solo aplica a clientes activos (este método ya está dentro de esa rama); los leads
         // se enrutan por handle_lead_message y nunca llegan acá.
