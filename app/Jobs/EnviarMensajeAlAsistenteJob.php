@@ -386,6 +386,24 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
+        /* 🔴 409: el cliente SÍ tiene la ruta, pero no pudo decidir de qué dueño hablamos — una base
+         * compartida sin USER_ID en el .env de ese frente. Es distinto del 404 a propósito: si se
+         * tratara como "no tiene el endpoint", le diríamos al dueño que actualice un sistema que ya
+         * está actualizado, y el problema real —una variable sin cargar— no lo vería nadie. Se
+         * arregla con una configuración, así que no se reintenta. */
+        if ($status === 409) {
+            $this->cerrar_con_error(
+                $asistente,
+                $fila,
+                $client,
+                $sender,
+                'El sistema del cliente no pudo resolver el dueño (409). '
+                . 'Si la base la comparten varios comercios, falta USER_ID en el .env de ese frente.'
+            );
+
+            return;
+        }
+
         /* 401 / 403: la clave no coincide, o al dueño le falta la extensión `asistente_ia`. Las
          * dos se arreglan con una configuración, ninguna con esperar. */
         if ($status === 401 || $status === 403) {
