@@ -124,6 +124,32 @@ abstract class BaseDelCanal extends TestCase
     }
 
     /**
+     * Corre un ingreso del job sobre la misma instancia, para simular el polling.
+     *
+     * Se llama a `handle()` derecho y no se pasa por la cola: `release()` no reencola nada cuando no
+     * hay job de cola detrás, así que cada llamada es exactamente una consulta y la prueba controla
+     * cuántas hubo, sin que el reloj participe.
+     *
+     * Vive en la base y no en cada archivo de prueba porque la firma de `handle()` crece cuando el
+     * job necesita una dependencia nueva, y con la llamada repetida en dos lugares eso son dos
+     * archivos que se rompen por algo que no tiene nada que ver con lo que están probando.
+     *
+     * @param \App\Jobs\EnviarMensajeAlAsistenteJob $job
+     * @param WhatsappSendService                   $sender Espía del envío a Meta.
+     *
+     * @return void
+     */
+    protected function correr_job($job, WhatsappSendService $sender): void
+    {
+        $job->handle(
+            app(\App\Services\AsistenteWhatsappService::class),
+            app(\App\Services\ClientEmpresaApiUrlResolver::class),
+            $sender,
+            app(\App\Services\AsistenteImagenesService::class)
+        );
+    }
+
+    /**
      * `ClientApi` activa del cliente, con su tipo de hosting.
      *
      * Existe porque la regla de `/public` depende de `client_apis.hosting_type` y NO de

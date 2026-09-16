@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Services\AsistenteImagenesService;
 use App\Services\AsistenteWhatsappService;
 use App\Services\ClientEmpresaApiUrlResolver;
 use App\Services\WhatsappSendService;
@@ -108,11 +109,25 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     private $esperas_usadas = 0;
 
     /**
-     * @param int $mensaje_id Fila entrante de `client_assistant_messages`.
+     * Metadata de las fotos que trajo el mensaje (URL firmada, mime, id de Meta), sin los bytes.
+     *
+     * Viaja en el payload del job y no en una columna: una URL firmada de Kapso escrita en la base
+     * es una credencial guardada para siempre. Los bytes se bajan recién en la ida, que es el único
+     * momento en que hacen falta. Laravel reencola el mismo payload en cada `release()`, así que
+     * esto sigue disponible si el job vuelve a entrar — aunque después de la ida ya no se use.
+     *
+     * @var array<int, array<string, mixed>>
      */
-    public function __construct(int $mensaje_id)
+    private $imagenes;
+
+    /**
+     * @param int                              $mensaje_id Fila entrante de `client_assistant_messages`.
+     * @param array<int, array<string, mixed>> $imagenes   Metadata de las fotos, si el mensaje traía.
+     */
+    public function __construct(int $mensaje_id, array $imagenes = [])
     {
         $this->mensaje_id = $mensaje_id;
+        $this->imagenes   = $imagenes;
     }
 
     /**
@@ -134,16 +149,18 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     /**
      * Manda el mensaje al asistente del cliente, o consulta si la respuesta ya está.
      *
-     * @param AsistenteWhatsappService   $asistente Servicio del canal (filas, textos, avisos).
-     * @param ClientEmpresaApiUrlResolver $urls     Resolución de la URL del `empresa-api`.
-     * @param WhatsappSendService        $sender    Envío a Kapso/Meta.
+     * @param AsistenteWhatsappService    $asistente Servicio del canal (filas, textos, avisos).
+     * @param ClientEmpresaApiUrlResolver $urls      Resolución de la URL del `empresa-api`.
+     * @param WhatsappSendService         $sender    Envío a Kapso/Meta.
+     * @param AsistenteImagenesService    $imagenes  Descarga y validación de las fotos del dueño.
      *
      * @return void
      */
     public function handle(
         AsistenteWhatsappService $asistente,
         ClientEmpresaApiUrlResolver $urls,
-        WhatsappSendService $sender
+        WhatsappSendService $sender,
+        AsistenteImagenesService $imagenes
     ): void {
         $fila = ClientAssistantMessage::find($this->mensaje_id);
         if ($fila === null) {
@@ -181,7 +198,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
 
         try {
             if ($fila->ai_message_id === null) {
-                $this->enviar($asistente, $urls, $sender, $fila, $client);
+                $this->enviar($asistente, $urls, $sender, $imagenes, $fila, $client);
 
                 return;
             }
@@ -240,6 +257,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * @param AsistenteWhatsappService    $asistente
      * @param ClientEmpresaApiUrlResolver $urls
      * @param WhatsappSendService         $sender
+     * @param AsistenteImagenesService    $imagenes
      * @param ClientAssistantMessage      $fila
      * @param Client                      $client
      *
@@ -249,6 +267,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         AsistenteWhatsappService $asistente,
         ClientEmpresaApiUrlResolver $urls,
         WhatsappSendService $sender,
+        AsistenteImagenesService $imagenes,
         ClientAssistantMessage $fila,
         Client $client
     ): void {
@@ -295,6 +314,46 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $cuerpo['ai_conversation_id'] = (int) $fila->ai_conversation_id;
         }
 
+        $partes                  = $this->como_multipart($cuerpo);
+        $preparadas_con_descarte = false;
+
+        /*
+         * Las fotos: se bajan de Kapso recién acá y se pegan al mismo multipart.
+         *
+         * 🔴 Una descarga que falla NO voltea el mensaje. El dueño escribió algo y espera respuesta;
+         * perder el mensaje entero por un adjunto que no se pudo bajar es peor que perder el
+         * adjunto. Lo que sí pasa es que el asistente se entera, porque la nota se le pega al texto
+         * y con eso puede pedir la foto de nuevo en vez de contestar como si nunca hubiera existido.
+         */
+        if ($this->imagenes !== []) {
+            $preparadas = $imagenes->preparar($this->imagenes, (int) $fila->id);
+
+            $faltantes = count($this->imagenes) - count($preparadas['partes']);
+            if ($faltantes > 0) {
+                $nota = $imagenes->nota_para_el_asistente($faltantes);
+
+                foreach ($partes as $indice => $parte) {
+                    if ($parte['name'] !== 'texto') {
+                        continue;
+                    }
+
+                    $texto = trim((string) $parte['contents']);
+                    $partes[$indice]['contents'] = $texto !== '' ? ($texto . "\n" . $nota) : $nota;
+                }
+            }
+
+            if ($preparadas['descartes'] !== []) {
+                /* Queda escrito en la fila, que es donde se va a mirar cuando el dueño diga "te
+                 * mandé la factura y no la viste". El texto es el mismo que ya se le explicó al
+                 * asistente, en criollo y sin la URL de nada. */
+                $preparadas_con_descarte = true;
+                $fila->error = mb_strimwidth(implode(' ', $preparadas['descartes']), 0, 1000, '…');
+                $fila->save();
+            }
+
+            $partes = array_merge($partes, $preparadas['partes']);
+        }
+
         try {
             $respuesta = Http::withHeaders([
                     'X-Admin-Api-Key' => $api_key,
@@ -302,7 +361,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
                 ->asMultipart()
-                ->post($url, $this->como_multipart($cuerpo));
+                ->post($url, $partes);
         } catch (ConnectionException $exception) {
             /* El sistema del cliente no atendió. Es el caso transitorio por excelencia (el shared
              * hosting devuelve esto cuando está saturado), así que se reintenta dentro del mismo
@@ -378,7 +437,16 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             ? (int) $datos['ai_conversation_id']
             : $fila->ai_conversation_id;
         $fila->estado             = ClientAssistantMessage::ESTADO_ENVIADO;
-        $fila->error              = null;
+
+        /* 🔴 El `error` se limpia solo si no quedó una nota de descarte de fotos escrita unas líneas
+         * más arriba. La columna lleva las dos cosas —lo que falló y lo que se descartó—, y este es
+         * el único punto donde se pisan: "el mensaje salió bien" no borra "la foto no viajó", que es
+         * justamente lo que hay que poder leer cuando el dueño dice que mandó la factura y nadie la
+         * vio. */
+        if ($preparadas_con_descarte === false) {
+            $fila->error = null;
+        }
+
         $fila->save();
 
         Log::channel('daily')->info('AsistenteWhatsapp: mensaje aceptado por el sistema del cliente.', [

@@ -49,23 +49,6 @@ class ViajeDelMensajeTest extends BaseDelCanal
     }
 
     /**
-     * Corre un ingreso del job sobre la misma instancia, para simular el polling.
-     *
-     * @param EnviarMensajeAlAsistenteJob $job
-     * @param WhatsappSendService         $sender
-     *
-     * @return void
-     */
-    private function correr(EnviarMensajeAlAsistenteJob $job, WhatsappSendService $sender): void
-    {
-        $job->handle(
-            app(AsistenteWhatsappService::class),
-            app(ClientEmpresaApiUrlResolver::class),
-            $sender
-        );
-    }
-
-    /**
      * El camino feliz: 202, dos consultas, y la respuesta le llega al dueño.
      *
      * @return void
@@ -90,7 +73,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
         $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
 
         /* Ingreso 1: la ida. */
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
         $fila->refresh();
         $this->assertSame(ClientAssistantMessage::ESTADO_ENVIADO, $fila->estado);
         $this->assertSame(91, (int) $fila->ai_conversation_id);
@@ -98,13 +81,13 @@ class ViajeDelMensajeTest extends BaseDelCanal
         $this->assertCount(0, $espia->textos, 'Todavía no hay nada que mandarle al dueño.');
 
         /* Ingreso 2: sigue pendiente. */
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
         $fila->refresh();
         $this->assertSame(ClientAssistantMessage::ESTADO_ENVIADO, $fila->estado);
         $this->assertCount(0, $espia->textos);
 
         /* Ingreso 3: llegó la respuesta. */
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
         $fila->refresh();
 
         $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->estado);
@@ -137,8 +120,8 @@ class ViajeDelMensajeTest extends BaseDelCanal
         ]);
 
         $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
-        $this->correr($job, $espia);
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
 
         $saliente = ClientAssistantMessage::where('client_id', $client->id)
             ->where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)
@@ -174,7 +157,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
         ]);
 
         $con_cita = $this->fila_entrante($client, 'Sí, dale', 412);
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $con_cita->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $con_cita->id), $espia);
 
         $cuerpo = $this->cuerpo_del_ultimo_post();
         $this->assertStringContainsString('ai_conversation_id', $cuerpo);
@@ -184,7 +167,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
         $sin_cita->whatsapp_message_id = 'wamid.ENTRANTE2';
         $sin_cita->save();
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $sin_cita->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $sin_cita->id), $espia);
 
         $this->assertStringNotContainsString(
             'ai_conversation_id',
@@ -215,7 +198,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
             '*' => Http::response(['ai_conversation_id' => 1, 'ai_message_id' => 2], 202),
         ]);
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         Http::assertSent(function ($request) {
             return $request->url() === 'https://api-ferreteria-de-prueba.test/public/api/admin-sync/asistente/mensajes'
@@ -241,7 +224,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
             '*' => Http::response(['ai_conversation_id' => 1, 'ai_message_id' => 2], 202),
         ]);
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         Http::assertSent(function ($request) {
             return $request->url() === 'https://api-ferreteria-de-prueba.test/api/admin-sync/asistente/mensajes';
@@ -269,8 +252,8 @@ class ViajeDelMensajeTest extends BaseDelCanal
         ]);
 
         $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
-        $this->correr($job, $espia);
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
 
         $fila->refresh();
 
@@ -297,7 +280,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
         $fila->estado = ClientAssistantMessage::ESTADO_RESPONDIDO;
         $fila->save();
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         Http::assertNothingSent();
         $this->assertCount(0, $espia->textos);
@@ -320,7 +303,7 @@ class ViajeDelMensajeTest extends BaseDelCanal
         $client->asistente_whatsapp_activo = false;
         $client->save();
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         $fila->refresh();
 

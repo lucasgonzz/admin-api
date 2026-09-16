@@ -201,21 +201,7 @@ class WhatsappInboundMediaService
             return false;
         }
 
-        $api_key = trim((string) $config->kapso_api_key);
-        $phone_number_id = trim((string) $config->phone_number_id);
-        $binary = null;
-
-        if (! empty($media['url'])) {
-            $binary = $this->download_media_binary((string) $media['url'], $api_key);
-        }
-
-        if (($binary === null || $binary === '') && ! empty($media['whatsapp_media_id']) && $phone_number_id !== '') {
-            $binary = $this->download_media_binary_by_whatsapp_id(
-                (string) $media['whatsapp_media_id'],
-                $phone_number_id,
-                $api_key
-            );
-        }
+        $binary = $this->descargar_binario($media, $config);
 
         if ($binary === null || $binary === '') {
             Log::channel('daily')->warning('WhatsappInboundMediaService: no se pudo descargar media.', [
@@ -262,21 +248,7 @@ class WhatsappInboundMediaService
             return false;
         }
 
-        $api_key = trim((string) $config->kapso_api_key);
-        $phone_number_id = trim((string) $config->phone_number_id);
-        $binary = null;
-
-        if (! empty($media['url'])) {
-            $binary = $this->download_media_binary((string) $media['url'], $api_key);
-        }
-
-        if (($binary === null || $binary === '') && ! empty($media['whatsapp_media_id']) && $phone_number_id !== '') {
-            $binary = $this->download_media_binary_by_whatsapp_id(
-                (string) $media['whatsapp_media_id'],
-                $phone_number_id,
-                $api_key
-            );
-        }
+        $binary = $this->descargar_binario($media, $config);
 
         if ($binary === null || $binary === '') {
             Log::channel('daily')->warning('WhatsappInboundMediaService: no se pudo descargar media de lead.', [
@@ -474,6 +446,87 @@ class WhatsappInboundMediaService
     }
 
     /**
+     * Baja los bytes de un adjunto entrante y nada más: no guarda en disco ni crea ninguna fila.
+     *
+     * Es el camino de descarga de Kapso —la URL directa primero y, si falla, el repliegue por
+     * `whatsapp_media_id` contra el proxy de Meta— **expuesto**, porque no todo adjunto entrante
+     * termina en un archivo local. El canal del asistente por WhatsApp (misión
+     * asistente-por-whatsapp, 16/9/2026) necesita los bytes para reenviárselos al `empresa-api` del
+     * cliente en el mismo multipart del mensaje, y ahí guardar una copia en el admin no serviría de
+     * nada: la foto de la factura la procesa el sistema del cliente, no este.
+     *
+     * 🔴 Este método ES el camino, no una copia suya. `persist_support_attachment()` y
+     * `persist_lead_attachment()` tenían los dos este mismo bloque escrito palabra por palabra y
+     * ahora los dos entran por acá: el reintento sin API key y el repliegue por id siguen siendo un
+     * solo lugar. Si mañana Kapso cambia cómo sirve la media, se toca una vez.
+     *
+     * Devuelve null cuando no se pudo bajar, y **no loguea ese caso**: cada llamador sabe qué
+     * significa para él —para soporte es un adjunto que se pierde, para el asistente es un mensaje
+     * que igual tiene que salir sin la foto— y ya tiene su propio aviso con su propio contexto.
+     *
+     * @param array{url?: string|null, mime?: string|null, filename?: string|null, whatsapp_media_id?: string|null} $media
+     *        Metadata que dejó `extract_inbound_media()`.
+     * @param WhatsappConfig|null $config Config activa, si el llamador ya la tiene cargada. Se pasa
+     *        para no repetir la consulta; sin ella se resuelve acá.
+     *
+     * @return string|null Los bytes, o null si no se pudo bajar por ningún camino.
+     */
+    public function descargar_binario(array $media, ?WhatsappConfig $config = null): ?string
+    {
+        if ($config === null) {
+            $config = WhatsappConfig::getActive();
+        }
+
+        if (! $config || ! $config->is_active) {
+            return null;
+        }
+
+        $api_key         = trim((string) $config->kapso_api_key);
+        $phone_number_id = trim((string) $config->phone_number_id);
+        $binary          = null;
+
+        if (! empty($media['url'])) {
+            $binary = $this->download_media_binary((string) $media['url'], $api_key);
+        }
+
+        if (($binary === null || $binary === '') && ! empty($media['whatsapp_media_id']) && $phone_number_id !== '') {
+            $binary = $this->download_media_binary_by_whatsapp_id(
+                (string) $media['whatsapp_media_id'],
+                $phone_number_id,
+                $api_key
+            );
+        }
+
+        return ($binary === null || $binary === '') ? null : $binary;
+    }
+
+    /**
+     * Recorta una URL de media para que se pueda loguear sin filtrar nada.
+     *
+     * 🔴 Las URLs de media de Kapso vienen FIRMADAS: la credencial viaja en la query string, así que
+     * una URL entera en el log es un token en texto plano que sobrevive en `storage/logs` y en todo
+     * backup que lo levante. Se deja el esquema, el host y la ruta —que es lo único que sirve para
+     * saber contra qué se estaba hablando— y se tira la query.
+     *
+     * @param string $url URL cruda.
+     *
+     * @return string Versión segura para el log.
+     */
+    private function url_para_log(string $url): string
+    {
+        $partes = parse_url($url);
+        if (! is_array($partes) || empty($partes['host'])) {
+            return '(url ilegible)';
+        }
+
+        $esquema = isset($partes['scheme']) ? $partes['scheme'] . '://' : '';
+        $ruta    = isset($partes['path']) ? $partes['path'] : '';
+        $sufijo  = empty($partes['query']) ? '' : '?(firma omitida)';
+
+        return $esquema . $partes['host'] . $ruta . $sufijo;
+    }
+
+    /**
      * Descarga bytes del archivo remoto (Kapso suele requerir X-API-Key).
      *
      * @param string $url
@@ -500,8 +553,10 @@ class WhatsappInboundMediaService
                 return $response->body();
             }
         } catch (\Throwable $exception) {
+            /* La URL va recortada: la firma de Kapso viaja en la query string y un log no es lugar
+             * para una credencial. Ver url_para_log(). */
             Log::channel('daily')->error('WhatsappInboundMediaService: excepción al descargar.', [
-                'url'   => $url,
+                'url'   => $this->url_para_log($url),
                 'error' => $exception->getMessage(),
             ]);
         }

@@ -123,9 +123,53 @@ class AsistenteWhatsappService
             'ai_conversation_id'  => $fila->ai_conversation_id,
         ]);
 
-        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id)->onConnection(self::CONEXION_DE_COLA);
+        /*
+         * Las fotos viajan en el DESPACHO y no en una columna, y es a propósito.
+         *
+         * Lo que se manda acá es la metadata de Kapso (URL firmada, mime, id), no los bytes: los
+         * bytes los baja el job, que es el único que puede salir a la red sin hacerle esperar el 200
+         * a Meta. Guardar esa metadata en `client_assistant_messages` sería dejar una URL firmada
+         * escrita en la base para siempre, que es justo lo que no se quiere; y guardar los bytes
+         * sería quedarse con la factura de un tercero en un storage que no le corresponde.
+         *
+         * El payload del job sobrevive a los `release()` del polling —Laravel reencola el mismo—,
+         * así que la metadata sigue ahí si el job vuelve a entrar. Lo que la fila sí guarda es que
+         * el mensaje era una foto (`tipo`) y qué se descartó (`error`), que es lo que hace falta
+         * para diagnosticar.
+         */
+        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, $this->imagenes_del_mensaje($parsed))
+            ->onConnection(self::CONEXION_DE_COLA);
 
         return $fila;
+    }
+
+    /**
+     * La metadata de las fotos que trae un mensaje entrante, si trae alguna.
+     *
+     * Hoy devuelve a lo sumo UNA: WhatsApp manda un adjunto por mensaje y el webhook deja uno solo
+     * en `inbound_media`. Igual se devuelve una lista y no un valor suelto, porque el contrato con
+     * el `empresa-api` es `imagenes[]` y porque así el tope de tres tiene dónde aplicarse — el día
+     * que Kapso agrupe un envío múltiple, o que alguien vuelva a correr el job a mano, no hay nada
+     * que cambiar acá.
+     *
+     * Solo fotos: un audio ya llega transcripto en el texto y un PDF o un video no son algo que el
+     * asistente pueda mirar, así que ni se intentan bajar.
+     *
+     * @param array<string, mixed> $parsed Resultado de `parse_inbound_message()`.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function imagenes_del_mensaje(array $parsed): array
+    {
+        if (strtolower((string) ($parsed['type'] ?? '')) !== 'image') {
+            return [];
+        }
+
+        if (empty($parsed['inbound_media']) || ! is_array($parsed['inbound_media'])) {
+            return [];
+        }
+
+        return [$parsed['inbound_media']];
     }
 
     /**
@@ -155,13 +199,60 @@ class AsistenteWhatsappService
         string $estado,
         ?string $error = null
     ): ClientAssistantMessage {
+        $fila = $this->registrar_saliente_de(
+            (int) $entrante->client_id,
+            (string) $entrante->telefono,
+            $texto,
+            $whatsapp_message_id,
+            $entrante->ai_conversation_id,
+            $estado,
+            $error
+        );
+
+        $fila->ai_message_id = $entrante->ai_message_id;
+        $fila->save();
+
+        return $fila;
+    }
+
+    /**
+     * Deja una fila saliente que NO responde a ningún mensaje del dueño.
+     *
+     * El caso es el informe de la mañana: lo manda el admin por su cuenta, sin que nadie haya
+     * escrito antes, así que no hay fila entrante de la cual sacar el teléfono ni la conversación.
+     *
+     * 🔴 **Y esa fila es lo que hace que al informe se le pueda preguntar algo**, que es la mitad
+     * del pedido de Lucas: *"para abrirlos desde el celular y poder preguntarles cosas"*. Sin ella,
+     * el dueño responde citando el informe —*"¿por qué bajó la caja?"*— y la cita no resuelve
+     * ninguna conversación: la pregunta cae en el hilo genérico de WhatsApp y el asistente contesta
+     * sin el informe delante. Con ella, la cita lo manda a la conversación del informe, que del
+     * lado del cliente ya nace con el contexto armado.
+     *
+     * @param int         $client_id           Cliente dueño del hilo.
+     * @param string      $telefono            E.164 del dueño.
+     * @param string      $texto               Lo que salió (o lo que se intentó mandar).
+     * @param string|null $whatsapp_message_id wamid de Meta, o null si el envío falló.
+     * @param int|null    $ai_conversation_id  Conversación del `empresa-api` a la que lleva la cita.
+     * @param string      $estado              Estado con el que nace la fila.
+     * @param string|null $error               Detalle del fallo, si lo hubo.
+     *
+     * @return ClientAssistantMessage
+     */
+    public function registrar_saliente_de(
+        int $client_id,
+        string $telefono,
+        string $texto,
+        ?string $whatsapp_message_id,
+        ?int $ai_conversation_id,
+        string $estado,
+        ?string $error = null
+    ): ClientAssistantMessage {
         $fila                      = new ClientAssistantMessage();
-        $fila->client_id           = (int) $entrante->client_id;
-        $fila->telefono            = (string) $entrante->telefono;
+        $fila->client_id           = $client_id;
+        $fila->telefono            = $telefono;
         $fila->direccion           = ClientAssistantMessage::DIRECCION_SALIENTE;
         $fila->whatsapp_message_id = $whatsapp_message_id;
-        $fila->ai_conversation_id  = $entrante->ai_conversation_id;
-        $fila->ai_message_id       = $entrante->ai_message_id;
+        $fila->ai_conversation_id  = $ai_conversation_id;
         $fila->tipo                = 'text';
         $fila->texto               = $texto;
         $fila->estado              = $estado;

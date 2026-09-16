@@ -50,23 +50,6 @@ class DegradacionesDelCanalTest extends BaseDelCanal
     }
 
     /**
-     * Corre un ingreso del job sobre la misma instancia.
-     *
-     * @param EnviarMensajeAlAsistenteJob $job
-     * @param WhatsappSendService         $sender
-     *
-     * @return void
-     */
-    private function correr(EnviarMensajeAlAsistenteJob $job, WhatsappSendService $sender): void
-    {
-        $job->handle(
-            app(AsistenteWhatsappService::class),
-            app(ClientEmpresaApiUrlResolver::class),
-            $sender
-        );
-    }
-
-    /**
      * 404: el cliente todavía no tiene el endpoint. Texto honesto y nada de reintentos.
      *
      * @return void
@@ -80,7 +63,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
         $this->fakear_http(['*' => Http::response(['message' => 'Not Found'], 404)]);
 
         $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
 
         $fila->refresh();
 
@@ -94,7 +77,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
         $this->assertSame(AsistenteWhatsappService::TEXTO_SIN_ENDPOINT, $espia->textos[0]['body']);
 
         /* Un segundo ingreso no vuelve a pegarle a nadie: la fila ya está en un estado final. */
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
         $this->assertCount(1, $espia->textos, 'El 404 no se reintenta: la ruta no va a aparecer esperando.');
     }
 
@@ -153,7 +136,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
 
         $this->fakear_http(['*' => Http::response(['message' => 'Unauthorized'], 401)]);
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         $fila->refresh();
 
@@ -176,7 +159,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
 
         $this->fakear_http(['*' => Http::response(['message' => 'Forbidden'], 403)]);
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         $fila->refresh();
 
@@ -198,7 +181,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
         $client = $this->crear_cliente('+5493411234567', true, '');
         $fila   = $this->fila_entrante($client);
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         $fila->refresh();
 
@@ -230,7 +213,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
         $esperas = count(EnviarMensajeAlAsistenteJob::ESPERAS_DE_POLLING);
 
         for ($i = 0; $i < $esperas; $i++) {
-            $this->correr($job, $espia);
+            $this->correr_job($job, $espia);
 
             $fila->refresh();
             $this->assertSame(
@@ -242,7 +225,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
         }
 
         /* Se acabó el presupuesto. */
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
 
         $fila->refresh();
         $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $fila->estado);
@@ -295,7 +278,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
 
         /* La ida más todas las consultas del presupuesto. */
         for ($i = 0; $i <= count(EnviarMensajeAlAsistenteJob::ESPERAS_DE_POLLING); $i++) {
-            $this->correr($job, $espia);
+            $this->correr_job($job, $espia);
         }
 
         $fila->refresh();
@@ -330,8 +313,8 @@ class DegradacionesDelCanalTest extends BaseDelCanal
         ]);
 
         $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
-        $this->correr($job, $espia);
-        $this->correr($job, $espia);
+        $this->correr_job($job, $espia);
+        $this->correr_job($job, $espia);
 
         $saliente = ClientAssistantMessage::where('client_id', $client->id)
             ->where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)
@@ -357,7 +340,7 @@ class DegradacionesDelCanalTest extends BaseDelCanal
 
         $this->fakear_http(['*' => Http::response(['ok' => true], 200)]);
 
-        $this->correr(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
+        $this->correr_job(new EnviarMensajeAlAsistenteJob((int) $fila->id), $espia);
 
         $fila->refresh();
 
