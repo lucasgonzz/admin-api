@@ -779,9 +779,12 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     /**
      * Arma el cuerpo con la forma que espera `asMultipart()`.
      *
-     * El endpoint es multipart porque el contrato contempla `imagenes[]`, y un POST multipart con
-     * `Http::asMultipart()` necesita la lista de `['name' => ..., 'contents' => ...]`, no el array
-     * asociativo que toma `->post()` en modo JSON.
+     * El endpoint es multipart porque el contrato contempla `imagenes[]`. Laravel sabe convertir un
+     * array asociativo a partes solo (`PendingRequest::parseMultipartBodyFormat()`), así que esto
+     * NO existe para eso: existe por el **cast a string**. `ai_conversation_id` es un entero, y
+     * Guzzle exige que el `contents` de una parte sea string o recurso — un entero le hace tirar
+     * `InvalidArgumentException` justo en el único campo que viaja cuando el dueño citó un mensaje,
+     * o sea en el camino que menos se prueba a mano.
      *
      * @param array<string, mixed> $cuerpo Campos del contrato.
      *
