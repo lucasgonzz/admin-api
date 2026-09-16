@@ -59,6 +59,24 @@ class AsistenteWhatsappService
     const CACHE_AVISO_404 = 'asistente_whatsapp_aviso_404';
 
     /**
+     * Conexión de cola por la que sale el job, explícita.
+     *
+     * 🔴 **Explícita y no la default, y esto es lo único que hace que el canal funcione.**
+     * `QUEUE_CONNECTION` cae a `sync` cuando no está seteada, y en `sync` el job corre INLINE
+     * adentro del webhook: el POST al cliente saldría dentro del request de Kapso, y peor, el
+     * polling no existiría —`release()` sobre un `SyncJob` no reencola nada—, así que el dueño
+     * nunca recibiría la respuesta y nada lo denunciaría. Es la misma clase de error que en este
+     * repo ya dejó tres demos mudas con `RunDemoSetupJob`, y está escrita con todas las letras en
+     * `ClaudeDemoOpsController`.
+     *
+     * ⚠️ Precondición de infraestructura: al job lo corre el worker
+     * `queue:work database --stop-when-empty` que el scheduler dispara cada minuto. Si ese cron no
+     * corre, este canal no hace NADA visible: la fila queda en `recibido` y el job dormido en
+     * `jobs`. Esa fila en `recibido` es justamente la señal para mirar.
+     */
+    const CONEXION_DE_COLA = 'database';
+
+    /**
      * Recibe un mensaje del dueño y lo deja encaminado hacia el asistente de su sistema.
      *
      * Deja la fila entrante SIEMPRE, incluso cuando después todo falle: es lo que permite
@@ -105,7 +123,7 @@ class AsistenteWhatsappService
             'ai_conversation_id'  => $fila->ai_conversation_id,
         ]);
 
-        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id);
+        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id)->onConnection(self::CONEXION_DE_COLA);
 
         return $fila;
     }

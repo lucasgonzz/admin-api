@@ -388,7 +388,11 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             'ai_message_id'        => $fila->ai_message_id,
         ]);
 
-        $this->esperar_y_volver();
+        /* Van los cuatro parámetros y no ninguno: si los reintentos transitorios de la ida ya se
+         * comieron el presupuesto, esta llamada tiene que poder CERRAR el mensaje con la disculpa.
+         * Sin ellos volvería en silencio y la fila quedaría en `enviado` para siempre, con el dueño
+         * esperando una respuesta que nadie iba a ir a buscar. */
+        $this->esperar_y_volver($asistente, $fila, $client, $sender);
     }
 
     /**

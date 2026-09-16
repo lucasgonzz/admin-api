@@ -1081,52 +1081,6 @@ class WhatsappWebhookController extends Controller
         ?ClientEmployee $client_employee,
         SupportTicketAssignmentService $assignment_service
     ): void {
-        /*
-         * 🔴 EL SOPORTE POR ESTE NÚMERO ESTÁ DESCONECTADO (misión asistente-por-whatsapp, 16/9/2026).
-         *
-         * Lucas lo dictó así: *"actualmente los clientes se comunican a otro número por soporte,
-         * así que simplemente dejá desconectada la parte de tickets de soporte; en el futuro,
-         * cuando consiga otro número, se pondrá en marcha"*.
-         *
-         * Es un INTERRUPTOR y no un borrado, y la diferencia importa. `SupportTicket`,
-         * `SupportMessage`, `SupportAiSuggestionService`, la bandeja del admin-spa y el espejo
-         * hacia el ERP del cliente quedan enteros y funcionando: los tickets que ya existen se
-         * siguen leyendo, contestando y cerrando desde el admin. Lo único que se apaga es que un
-         * mensaje entrante por ESTE número abra uno nuevo. El día que aparezca el otro número,
-         * esto se vuelve a prender escribiendo una fila en `admin_settings`.
-         *
-         * El corte va antes que todo lo demás —incluido el canal `sistema:`— porque el punto es
-         * que por acá no nazca NADA: ni ticket, ni `SupportMessage`, ni sugerencia de Claude.
-         */
-        if (! AsistenteWhatsappSettings::tickets_habilitados()) {
-            Log::channel('daily')->info('WhatsApp webhook: soporte desconectado, no se abre ticket.', [
-                'from'               => $parsed['from'],
-                'type'               => $parsed['type'],
-                'client_id'          => $client->id,
-                'client_employee_id' => $client_employee ? $client_employee->id : null,
-                'message_id'         => $parsed['message_id'],
-                'body_preview'       => mb_substr((string) ($parsed['body'] ?? ''), 0, 200),
-            ]);
-
-            /* El texto de cortesía es opcional y nace VACÍO. Con el canal apagado, contestarle
-             * algo automático a alguien que escribió por soporte es peor que no contestarle: lo
-             * deja creyendo que alguien lo leyó. Si Lucas quiere derivar al otro número, carga el
-             * texto en `support_whatsapp_desconectado_texto` y sale. */
-            $texto = AsistenteWhatsappSettings::texto_de_soporte_desconectado();
-            if ($texto !== '') {
-                /* Por el contenedor y no con `new`: es la misma instancia en producción —el
-                 * servicio no tiene dependencias en el constructor— y es la única forma de que una
-                 * prueba pueda mirar qué texto salió sin mandarle un WhatsApp a nadie. */
-                app(WhatsappSendService::class)->send_text(
-                    (string) $parsed['from'],
-                    $texto,
-                    'Soporte por WhatsApp desconectado - cliente #' . $client->id
-                );
-            }
-
-            return;
-        }
-
         // NUEVO — interceptar el canal "sistema:" antes de crear ticket de soporte.
         // Solo aplica a clientes activos (este método ya está dentro de esa rama); los leads
         // se enrutan por handle_lead_message y nunca llegan acá.
@@ -1159,6 +1113,56 @@ class WhatsappWebhookController extends Controller
             return;
         }
         // FIN interceptación canal "sistema:".
+
+        /*
+         * 🔴 EL SOPORTE POR ESTE NÚMERO ESTÁ DESCONECTADO (misión asistente-por-whatsapp, 16/9/2026).
+         *
+         * Lucas lo dictó así: *"actualmente los clientes se comunican a otro número por soporte,
+         * así que simplemente dejá desconectada la parte de tickets de soporte; en el futuro,
+         * cuando consiga otro número, se pondrá en marcha"*.
+         *
+         * Es un INTERRUPTOR y no un borrado, y la diferencia importa. `SupportTicket`,
+         * `SupportMessage`, `SupportAiSuggestionService`, la bandeja del admin-spa y el espejo
+         * hacia el ERP del cliente quedan enteros y funcionando: los tickets que ya existen se
+         * siguen leyendo, contestando y cerrando desde el admin. Lo único que se apaga es que un
+         * mensaje entrante por ESTE número abra uno nuevo. El día que aparezca el otro número,
+         * esto se vuelve a prender escribiendo una fila en `admin_settings`.
+         *
+         * 🔴 Y el corte va DESPUÉS de la interceptación del canal `sistema:`, no antes. Ese canal
+         * tampoco abre ticket —también corta con un `return`—, así que apagarlo de paso no haría
+         * nada por el objetivo de esta misión y sí le sacaría a un empleado autorizado una consulta
+         * que hoy le funciona. El plan es explícito en que `SistemaQueryService` queda "en el código
+         * pero fuera del camino": fuera del camino del DUEÑO con el asistente prendido, que es quien
+         * ya no pasa por acá. Para el resto sigue andando igual que ayer.
+         */
+        if (! AsistenteWhatsappSettings::tickets_habilitados()) {
+            Log::channel('daily')->info('WhatsApp webhook: soporte desconectado, no se abre ticket.', [
+                'from'               => $parsed['from'],
+                'type'               => $parsed['type'],
+                'client_id'          => $client->id,
+                'client_employee_id' => $client_employee ? $client_employee->id : null,
+                'message_id'         => $parsed['message_id'],
+                'body_preview'       => mb_substr((string) ($parsed['body'] ?? ''), 0, 200),
+            ]);
+
+            /* El texto de cortesía es opcional y nace VACÍO. Con el canal apagado, contestarle
+             * algo automático a alguien que escribió por soporte es peor que no contestarle: lo
+             * deja creyendo que alguien lo leyó. Si Lucas quiere derivar al otro número, carga el
+             * texto en `support_whatsapp_desconectado_texto` y sale. */
+            $texto = AsistenteWhatsappSettings::texto_de_soporte_desconectado();
+            if ($texto !== '') {
+                /* Por el contenedor y no con `new`: es la misma instancia en producción —el
+                 * servicio no tiene dependencias en el constructor— y es la única forma de que una
+                 * prueba pueda mirar qué texto salió sin mandarle un WhatsApp a nadie. */
+                app(WhatsappSendService::class)->send_text(
+                    (string) $parsed['from'],
+                    $texto,
+                    'Soporte por WhatsApp desconectado - cliente #' . $client->id
+                );
+            }
+
+            return;
+        }
 
         $ticket_for_ai_dispatch = null;
         $inbound_message_id = null;

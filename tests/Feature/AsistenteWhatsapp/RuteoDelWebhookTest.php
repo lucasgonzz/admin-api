@@ -66,7 +66,13 @@ class RuteoDelWebhookTest extends BaseDelCanal
         /* Y no abrió ningún ticket: el canal del asistente reemplaza a soporte, no lo duplica. */
         $this->assertSame(0, SupportTicket::where('client_id', $client->id)->count());
 
-        Queue::assertPushed(EnviarMensajeAlAsistenteJob::class);
+        /* 🔴 Y sale por la conexión `database`, no por la default. `QUEUE_CONNECTION` cae a `sync`
+         * cuando no está seteada, y en `sync` el job corre inline adentro del webhook y el polling
+         * no existe —`release()` sobre un `SyncJob` no reencola nada—: el dueño nunca recibiría la
+         * respuesta y nada lo denunciaría. */
+        Queue::assertPushed(EnviarMensajeAlAsistenteJob::class, function ($job) {
+            return $job->connection === 'database';
+        });
     }
 
     /**
@@ -208,6 +214,53 @@ class RuteoDelWebhookTest extends BaseDelCanal
             1,
             SupportMessage::where('whatsapp_message_id', 'wamid.DE-SOPORTE')->count()
         );
+    }
+
+    /**
+     * El canal `sistema:` sigue andando con los tickets desconectados.
+     *
+     * 🔴 El interruptor apaga que nazca un TICKET, no todo lo que pasa por este método. El canal
+     * `sistema:` tampoco abría ticket —corta con su propio `return`—, así que apagarlo de paso no
+     * aportaría nada al objetivo de la misión y sí le sacaría a un empleado una consulta que hoy le
+     * funciona. El plan lo deja "en el código pero fuera del camino": fuera del camino del dueño con
+     * el asistente prendido, que es quien ya no pasa por acá.
+     *
+     * Se mide de forma indirecta y a propósito: con el texto de cortesía del soporte desconectado
+     * cargado, un `sistema:` NO tiene que recibirlo. Si el interruptor estuviera antes, ese texto
+     * saldría. Como tampoco nace ticket, el único camino que queda es el `return` del canal
+     * `sistema:` — que es exactamente lo que se quiere probar, sin tocar una línea de ese código ni
+     * salir a consultarle nada a Claude.
+     *
+     * @return void
+     */
+    public function test_el_canal_sistema_sigue_andando_con_los_tickets_apagados(): void
+    {
+        Queue::fake();
+
+        AdminSetting::where('key', AsistenteWhatsappSettings::KEY_TICKETS_ENABLED)->delete();
+        AdminSetting::set(
+            AsistenteWhatsappSettings::KEY_DESCONECTADO_TEXTO,
+            'Por soporte escribinos al 341 555-1234.'
+        );
+
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente('+5493411234567', false);
+        $this->crear_empleado($client, '+5493419999999');
+
+        $this->postear_webhook(
+            $this->payload_de_texto('+5493419999999', 'sistema: cuánto vendí hoy', 'wamid.CANAL-SISTEMA')
+        )->assertStatus(200);
+
+        foreach ($espia->textos as $texto) {
+            $this->assertStringNotContainsString(
+                'Por soporte escribinos',
+                $texto['body'],
+                'Un mensaje del canal sistema no puede caer en la rama del soporte desconectado.'
+            );
+        }
+
+        $this->assertSame(0, SupportTicket::where('client_id', $client->id)->count());
+        $this->assertSame(0, SupportMessage::where('whatsapp_message_id', 'wamid.CANAL-SISTEMA')->count());
     }
 
     /**
