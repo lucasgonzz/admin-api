@@ -86,6 +86,60 @@ class ClientEmpresaApiUrlResolver
     }
 
     /**
+     * Devuelve la URL del SPA del cliente (sin slash final) o cadena vacía si no hay ninguna válida.
+     *
+     * Es el gemelo de `resolve_base_url()` para el otro frente: aquélla resuelve por dónde le habla
+     * el ADMIN a la API del cliente; ésta, por dónde entra una PERSONA al sistema de ese cliente
+     * desde su teléfono. Recorre los mismos candidatos y en el mismo orden —API activa primero,
+     * después el resto— para que las dos respondan sobre la misma instalación.
+     *
+     * 🔴 Existe por una clase de error que este proyecto ya tiene escrita (`APRENDER_NO_PARCHEAR.md`,
+     * 9/9/2026): **una URL que un sistema le entrega a otro no se arma con `APP_URL`**. El link del
+     * informe que el asistente le manda al dueño por WhatsApp lo intenta armar primero el
+     * `empresa-api`, con una config propia que hoy **ningún cliente tiene cargada** —no está en el
+     * seeder de plantillas de `.env` ni la escribe la generación del admin—, así que devuelve null
+     * para todos. El dato bueno vive acá: `client_apis.spa_url`, que es literalmente cómo se alcanza
+     * a ese cliente desde afuera, y que está cargado en las 105 filas de la base del admin.
+     *
+     * No agrega `/public` ni nada: el SPA es el frente público, no la API.
+     *
+     * @param  Client  $client
+     * @param  ClientVersionUpgrade|null  $upgrade
+     * @return string  URL sin barra final, o vacía si ninguna candidata sirve.
+     */
+    public function resolve_spa_url(Client $client, ?ClientVersionUpgrade $upgrade = null): string
+    {
+        $client->loadMissing('active_client_api', 'client_apis');
+
+        if ($upgrade !== null) {
+            $upgrade->loadMissing('target_client_api');
+        }
+
+        $candidates = [];
+
+        if ($upgrade !== null && $upgrade->target_client_api instanceof ClientApi) {
+            $candidates[] = $upgrade->target_client_api->spa_url;
+        }
+
+        if ($client->active_client_api instanceof ClientApi) {
+            $candidates[] = $client->active_client_api->spa_url;
+        }
+
+        foreach ($client->client_apis as $client_api) {
+            $candidates[] = $client_api->spa_url;
+        }
+
+        foreach ($candidates as $candidate) {
+            $normalized = $this->normalize_base_url($candidate);
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
+        return '';
+    }
+
+    /**
      * URL completa hacia un path de admin-sync (p. ej. publish-version).
      *
      * @param  Client  $client

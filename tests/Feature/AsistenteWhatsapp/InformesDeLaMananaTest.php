@@ -4,6 +4,7 @@ namespace Tests\Feature\AsistenteWhatsapp;
 
 use App\Models\AdminSetting;
 use App\Models\Client;
+use App\Models\ClientAssistantMessage;
 use App\Models\ClientTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
@@ -413,6 +414,246 @@ class InformesDeLaMananaTest extends BaseDelCanal
 
         $this->assertSame('enviado_texto', $resultado['estado']);
         $this->assertStringContainsString('Vendiste $10.000.', $espia->textos[0]['body']);
+    }
+
+    /**
+     * 🔴 Cuando el cliente no manda link, se arma con su `spa_url` y el token.
+     *
+     * Y ese es el camino REAL, no el de borde: el `empresa-api` arma su URL leyendo una config del
+     * `.env` del cliente que **no tiene ningún cliente cargada** —no está en el seeder de plantillas
+     * de `.env` ni la escribe la generación del admin—, así que devuelve null para los cuarenta. Sin
+     * este repliegue, la decisión de Lucas de mandar "resumen + link" quedaría en "resumen" para
+     * todos, con un warning en el log de cada cliente como única señal.
+     *
+     * @return void
+     */
+    public function test_sin_link_del_cliente_se_arma_con_la_spa_url(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $this->crear_client_api($client);
+        $client->active_client_api->spa_url = 'https://ferreteria.comerciocity.com/';
+        $client->active_client_api->save();
+
+        $this->abrir_la_ventana((string) $client->phone);
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response([
+                'informes' => [
+                    [
+                        'id'      => 41,
+                        'tipo'    => 'rendimiento',
+                        'titulo'  => 'Rendimiento de ayer',
+                        'resumen' => 'Vendiste $10.000.',
+                        'url'     => null,
+                        'token'   => 'token-largo-del-informe',
+                    ],
+                ],
+            ], 200),
+            '*/avisado' => Http::response(['ok' => true], 200),
+        ]);
+
+        $resultado = app(AsistenteInformesService::class)->enviar_a($client);
+
+        $this->assertSame('enviado_texto', $resultado['estado']);
+        $this->assertStringContainsString(
+            'https://ferreteria.comerciocity.com/informe/token-largo-del-informe',
+            $espia->textos[0]['body']
+        );
+    }
+
+    /**
+     * La `url` que manda el cliente gana: la arma el sistema que sabe cómo se llega a sí mismo.
+     *
+     * @return void
+     */
+    public function test_si_el_cliente_manda_link_se_respeta(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $this->crear_client_api($client);
+        $client->active_client_api->spa_url = 'https://otra-cosa.test';
+        $client->active_client_api->save();
+
+        $this->abrir_la_ventana((string) $client->phone);
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response($this->informes_del_dia(), 200),
+            '*/avisado'                       => Http::response(['ok' => true], 200),
+        ]);
+
+        app(AsistenteInformesService::class)->enviar_a($client);
+
+        $this->assertStringContainsString(
+            'https://ferreteria.comerciocity.com/informe/abc123',
+            $espia->textos[0]['body']
+        );
+        $this->assertStringNotContainsString('otra-cosa.test', $espia->textos[0]['body']);
+    }
+
+    /**
+     * Sin `spa_url` y sin `url`, el informe sale con el resumen y sin link — no se cae.
+     *
+     * @return void
+     */
+    public function test_sin_spa_url_el_informe_sale_sin_link(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $this->abrir_la_ventana((string) $client->phone);
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response([
+                'informes' => [
+                    [
+                        'id'      => 42,
+                        'tipo'    => 'caja',
+                        'titulo'  => 'Caja y vencimientos',
+                        'resumen' => 'Dos cheques esta semana.',
+                        'url'     => null,
+                        'token'   => 'un-token',
+                    ],
+                ],
+            ], 200),
+            '*/avisado' => Http::response(['ok' => true], 200),
+        ]);
+
+        $resultado = app(AsistenteInformesService::class)->enviar_a($client);
+
+        $this->assertSame('enviado_texto', $resultado['estado']);
+        $this->assertStringContainsString('Dos cheques esta semana.', $espia->textos[0]['body']);
+        $this->assertStringNotContainsString('/informe/', $espia->textos[0]['body']);
+    }
+
+    /**
+     * 🔴 El informe deja su fila saliente, con la conversación del informe.
+     *
+     * Es lo que hace que al informe se le pueda PREGUNTAR algo, que es la mitad de lo que pidió
+     * Lucas. Sin esta fila, el dueño responde citando el informe y la cita no resuelve nada: la
+     * pregunta cae en el hilo genérico y el asistente contesta sin el informe delante.
+     *
+     * @return void
+     */
+    public function test_el_informe_deja_fila_saliente_con_su_conversacion(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $this->abrir_la_ventana((string) $client->phone);
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response([
+                'informes' => [
+                    [
+                        'id'                 => 51,
+                        'tipo'               => 'rendimiento',
+                        'titulo'             => 'Rendimiento de ayer',
+                        'resumen'            => 'Vendiste $10.000.',
+                        'url'                => 'https://ferreteria.comerciocity.com/informe/uno',
+                        'ai_conversation_id' => 808,
+                    ],
+                ],
+            ], 200),
+            '*/avisado' => Http::response(['ok' => true], 200),
+        ]);
+
+        app(AsistenteInformesService::class)->enviar_a($client);
+
+        $saliente = ClientAssistantMessage::where('client_id', $client->id)
+            ->where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)
+            ->first();
+
+        $this->assertNotNull($saliente, 'El informe tenía que dejar su fila saliente.');
+        $this->assertSame('wamid.saliente.1', $saliente->whatsapp_message_id);
+        $this->assertSame(808, (int) $saliente->ai_conversation_id);
+        $this->assertStringContainsString('Rendimiento de ayer', (string) $saliente->texto);
+
+        /* Y con eso, responder citando el informe lleva a la conversación del informe. */
+        $this->assertSame(
+            808,
+            ClientAssistantMessage::conversacion_por_cita((int) $client->id, 'wamid.saliente.1')
+        );
+    }
+
+    /**
+     * Un `empresa-api` viejo no manda la conversación: la fila queda igual, sin ella.
+     *
+     * Es la degradación correcta — la pregunta entra como conversación común de WhatsApp — y no un
+     * error: el informe igual le llegó al dueño.
+     *
+     * @return void
+     */
+    public function test_sin_conversacion_del_cliente_la_fila_queda_igual(): void
+    {
+        $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $this->abrir_la_ventana((string) $client->phone);
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response($this->informes_del_dia(), 200),
+            '*/avisado'                       => Http::response(['ok' => true], 200),
+        ]);
+
+        app(AsistenteInformesService::class)->enviar_a($client);
+
+        $saliente = ClientAssistantMessage::where('client_id', $client->id)
+            ->where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)
+            ->first();
+
+        $this->assertNotNull($saliente);
+        $this->assertNull($saliente->ai_conversation_id);
+    }
+
+    /**
+     * Si el envío falla, no queda ninguna fila saliente inventada.
+     *
+     * @return void
+     */
+    public function test_un_envio_rechazado_no_deja_fila_saliente(): void
+    {
+        $this->espiar_sender(false);
+        $client = $this->crear_cliente();
+        $this->abrir_la_ventana((string) $client->phone);
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response($this->informes_del_dia(), 200),
+        ]);
+
+        app(AsistenteInformesService::class)->enviar_a($client);
+
+        $this->assertSame(
+            0,
+            ClientAssistantMessage::where('client_id', $client->id)->count()
+        );
+    }
+
+    /**
+     * Por plantilla también queda la fila, con el texto ya renderizado.
+     *
+     * @return void
+     */
+    public function test_por_plantilla_tambien_queda_la_fila_saliente(): void
+    {
+        $this->espiar_sender();
+        $client = $this->crear_cliente();
+
+        AdminSetting::set(AsistenteWhatsappSettings::KEY_INFORME_TEMPLATE_NAME, 'informes_del_dia');
+        $this->crear_plantilla('informes_del_dia');
+
+        $this->fakear_http([
+            '*/asistente/informes-pendientes' => Http::response($this->informes_del_dia(), 200),
+            '*/avisado'                       => Http::response(['ok' => true], 200),
+        ]);
+
+        app(AsistenteInformesService::class)->enviar_a($client);
+
+        $saliente = ClientAssistantMessage::where('client_id', $client->id)
+            ->where('direccion', ClientAssistantMessage::DIRECCION_SALIENTE)
+            ->first();
+
+        $this->assertNotNull($saliente);
+        $this->assertSame('wamid.plantilla.1', $saliente->whatsapp_message_id);
+        $this->assertStringContainsString('Rendimiento de ayer', (string) $saliente->texto);
+        $this->assertStringNotContainsString('{{1}}', (string) $saliente->texto);
     }
 
     /**

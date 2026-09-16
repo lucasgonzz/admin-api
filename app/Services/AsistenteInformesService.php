@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Client;
+use App\Models\ClientAssistantMessage;
 use App\Models\ClientTemplate;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
@@ -41,6 +42,15 @@ class AsistenteInformesService
      * Prefijo de la ruta que marca un informe como avisado. Se completa con `/{id}/avisado`.
      */
     const RUTA_INFORMES = 'api/admin-sync/asistente/informes';
+
+    /**
+     * Ruta del SPA del cliente que abre un informe compartido, sin barras.
+     *
+     * Es el único pedazo del frente del cliente que el admin conoce, y se usa solo cuando hay que
+     * armar el link acá (ver `link_del_informe()`). Si el `empresa-api` manda su propia `url`, esta
+     * constante no participa.
+     */
+    const RUTA_DEL_INFORME_EN_EL_SPA = 'informe';
 
     /**
      * Largo máximo del texto que viaja como variable de plantilla.
@@ -145,12 +155,20 @@ class AsistenteInformesService
     /**
      * Manda los informes del día a un cliente.
      *
-     * @param Client $client Cliente con el canal prendido.
+     * @param Client                        $client    Cliente con el canal prendido.
+     * @param AsistenteWhatsappService|null $asistente Dueño de la fila saliente del hilo. Opcional
+     *        para no romper a ningún llamador viejo; se resuelve del contenedor si no viene.
      *
      * @return array{client_id: int, nombre: string, estado: string, informes: int, detalle: string}
      */
-    public function enviar_a(Client $client): array
+    public function enviar_a(Client $client, ?AsistenteWhatsappService $asistente = null): array
     {
+        /* Por el contenedor si el llamador no lo pasa: el barrido resuelve uno solo y se lo presta a
+           todos los clientes, y una prueba puede pasar el suyo. */
+        if ($asistente === null) {
+            $asistente = app(AsistenteWhatsappService::class);
+        }
+
         $telefono = trim((string) $client->phone);
         if ($telefono === '') {
             return $this->resultado($client, 'sin_telefono', 0, 'El cliente no tiene teléfono cargado en su ficha.');
@@ -182,6 +200,33 @@ class AsistenteInformesService
         if ($enviado['estado'] !== 'enviado_texto' && $enviado['estado'] !== 'enviado_plantilla') {
             return $this->resultado($client, $enviado['estado'], count($informes), $enviado['detalle']);
         }
+
+        /*
+         * 🔴 La fila saliente del informe, que es lo que hace que se le pueda PREGUNTAR algo.
+         *
+         * Lucas lo pidió textual: *"para abrirlos desde el celular y poder preguntarles cosas"*. Sin
+         * esta fila, el dueño responde citando el informe —*"¿por qué bajó la caja?"*— y la cita no
+         * resuelve ninguna conversación: la pregunta cae en el hilo genérico de WhatsApp y el
+         * asistente contesta sin el informe delante. Con ella, la cita lo lleva a la conversación
+         * del informe, que del lado del cliente ya nace con el contexto armado.
+         *
+         * Con varios informes en un mismo mensaje se guarda la conversación del PRIMERO, que es el
+         * mismo criterio con el que se ordena todo lo demás acá: el primero del día es el que más
+         * pesa (el rendimiento de ayer). Preguntar por el segundo cae en el hilo del primero, que
+         * tiene igual el contexto del mostrador — bastante mejor que caer en el hilo genérico.
+         *
+         * El `ai_conversation_id` es opcional: un `empresa-api` viejo no lo manda y la fila queda sin
+         * él. Ahí la cita no resuelve nada y la pregunta entra como conversación común de WhatsApp,
+         * que es la degradación correcta y no un error.
+         */
+        $asistente->registrar_saliente_de(
+            (int) $client->id,
+            $telefono,
+            (string) $enviado['texto'],
+            (string) $enviado['whatsapp_message_id'],
+            $informes[0]['ai_conversation_id'],
+            ClientAssistantMessage::ESTADO_RESPONDIDO
+        );
 
         /* Paso dos: recién ahora, con el WhatsApp ya entregado, se marcan los informes. */
         $marcados = 0;
@@ -257,14 +302,69 @@ class AsistenteInformesService
                 'tipo'    => trim((string) ($fila['tipo'] ?? '')),
                 'titulo'  => trim((string) ($fila['titulo'] ?? '')),
                 'resumen' => trim((string) ($fila['resumen'] ?? '')),
-                /* El link puede venir null a propósito: el `empresa-api` elige devolver null antes
-                 * que armar una URL con la del API y mandarle un link roto al dueño. En ese caso el
-                 * mensaje sale igual, con el resumen y sin link. */
-                'url'     => trim((string) ($fila['url'] ?? '')),
+                /* El link puede venir vacío, y de hecho HOY viene vacío para todos: el `empresa-api`
+                 * lo arma leyendo una config del `.env` del cliente que no está en el seeder de
+                 * plantillas ni la escribe la generación del admin. Elige devolver null antes que
+                 * mandarle un link roto a cuarenta dueños, que está bien — y por eso abajo lo
+                 * armamos de este lado, que es donde vive el dato bueno. */
+                'url'     => $this->link_del_informe($client, $fila),
+                /* Conversación del informe del lado del cliente: es lo que hace que responder
+                 * citando el mensaje lleve la pregunta al hilo que tiene el informe delante.
+                 * Opcional: un `empresa-api` viejo no la manda y la fila saliente queda sin ella. */
+                'ai_conversation_id' => isset($fila['ai_conversation_id']) && $fila['ai_conversation_id'] !== null
+                    ? (int) $fila['ai_conversation_id']
+                    : null,
             ];
         }
 
         return ['estado' => 'ok', 'informes' => $informes, 'detalle' => ''];
+    }
+
+    /**
+     * El link que abre el informe en el teléfono del dueño.
+     *
+     * Dos fuentes, en orden, y la segunda es la que funciona hoy:
+     *
+     *   1. **La `url` que mandó el `empresa-api`.** Es la mejor: la arma el sistema que sabe cómo se
+     *      llega a sí mismo. Se respeta tal cual si viene.
+     *   2. **`client_apis.spa_url` + la ruta del informe + el token.** El repliegue, y en la práctica
+     *      el único camino: el `empresa-api` arma su URL leyendo una config del `.env` del cliente
+     *      que **no tiene ningún cliente cargada** —no está en el seeder de plantillas de `.env` ni
+     *      la escribe la generación del admin—, así que devuelve null para todos. Sin esto, la
+     *      decisión de Lucas de mandar "resumen + link" quedaría en "resumen" para los cuarenta.
+     *
+     * 🔴 Y el repliegue sale de `client_apis.spa_url` y NO de `config('app.url')`: es la clase de
+     * error `la URL que un sistema le entrega a otro, armada con APP_URL` (`APRENDER_NO_PARCHEAR.md`,
+     * 9/9/2026). `app.url` es la del admin; la que el dueño tiene que abrir es la de SU sistema.
+     *
+     * Si no hay ninguna de las dos, se devuelve vacío y el informe sale con el resumen y sin link.
+     * Eso es una degradación, no una falla: el dueño igual se entera de que su informe está.
+     *
+     * @param Client               $client Cliente dueño del informe.
+     * @param array<string, mixed> $fila   Informe tal como lo devolvió el `empresa-api`.
+     *
+     * @return string Link absoluto, o cadena vacía si no se pudo armar ninguno.
+     */
+    private function link_del_informe(Client $client, array $fila): string
+    {
+        $url = trim((string) ($fila['url'] ?? ''));
+        if ($url !== '') {
+            return $url;
+        }
+
+        /* Sin token no hay nada que armar: la vista del informe es pública justamente porque el
+         * token es la credencial, y un link sin él no abre nada. */
+        $token = trim((string) ($fila['token'] ?? ''));
+        if ($token === '') {
+            return '';
+        }
+
+        $spa_url = $this->urls->resolve_spa_url($client);
+        if ($spa_url === '') {
+            return '';
+        }
+
+        return $spa_url . '/' . self::RUTA_DEL_INFORME_EN_EL_SPA . '/' . rawurlencode($token);
     }
 
     /**
@@ -290,7 +390,12 @@ class AsistenteInformesService
             return ['estado' => 'error', 'detalle' => 'Meta rechazó el texto: ' . (string) $this->sender->last_send_error];
         }
 
-        return ['estado' => 'enviado_texto', 'detalle' => ''];
+        return [
+            'estado'              => 'enviado_texto',
+            'detalle'             => '',
+            'whatsapp_message_id' => $whatsapp_message_id,
+            'texto'               => $texto,
+        ];
     }
 
     /**
@@ -360,7 +465,15 @@ class AsistenteInformesService
             return ['estado' => 'error', 'detalle' => 'Meta rechazó la plantilla: ' . (string) $this->sender->last_send_error];
         }
 
-        return ['estado' => 'enviado_plantilla', 'detalle' => ''];
+        return [
+            'estado'              => 'enviado_plantilla',
+            'detalle'             => '',
+            'whatsapp_message_id' => $whatsapp_message_id,
+            /* El texto que queda en el hilo es la variable ya renderizada y no la plantilla cruda:
+               es el mismo criterio que sigue `SupportTemplateSendService`, porque quien relee la
+               fila tiene que ver lo que le llegó al dueño y no un "{{1}}". */
+            'texto'               => $variable,
+        ];
     }
 
     /**
