@@ -20,6 +20,21 @@ class Kernel extends ConsoleKernel
         $schedule->command('support:check-response-alerts')->everyFiveMinutes();
         // Una vez por día alcanza: un cliente se queda sin teléfono cargado una vez, no cada cinco minutos.
         $schedule->command('support:check-clients-without-phone')->dailyAt('09:00');
+
+        /* Los informes de la mañana del mostrador, por WhatsApp, a los dueños con el asistente por
+         * WhatsApp prendido (misión asistente-por-whatsapp, 16/9/2026).
+         *
+         * 08:30 hora de Argentina sin hacer nada especial: `config('app.timezone')` de este repo ya
+         * es `America/Argentina/Buenos_Aires`, así que `dailyAt()` lee esa hora y no la del sistema
+         * operativo. Y 08:30 y no 09:00 porque el informe es para leerlo antes de abrir el negocio.
+         *
+         * `withoutOverlapping()` porque el barrido le pega al `empresa-api` de cada cliente con el
+         * canal prendido, uno atrás del otro: si un día hay cuarenta y alguno tarda, la corrida se
+         * estira y no puede haber dos mandando los mismos informes a la vez. La idempotencia de
+         * `avisado_at` cubre el doble envío, pero recién DESPUÉS de mandarlo — que es tarde. */
+        $schedule->command('asistente:enviar-informes')
+            ->dailyAt('08:30')
+            ->withoutOverlapping();
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.
