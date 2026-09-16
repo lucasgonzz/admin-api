@@ -1114,7 +1114,10 @@ class WhatsappWebhookController extends Controller
              * texto en `support_whatsapp_desconectado_texto` y sale. */
             $texto = AsistenteWhatsappSettings::texto_de_soporte_desconectado();
             if ($texto !== '') {
-                (new WhatsappSendService())->send_text(
+                /* Por el contenedor y no con `new`: es la misma instancia en producción —el
+                 * servicio no tiene dependencias en el constructor— y es la única forma de que una
+                 * prueba pueda mirar qué texto salió sin mandarle un WhatsApp a nadie. */
+                app(WhatsappSendService::class)->send_text(
                     (string) $parsed['from'],
                     $texto,
                     'Soporte por WhatsApp desconectado - cliente #' . $client->id
