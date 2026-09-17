@@ -70,11 +70,13 @@ class AdminSetting extends Model
     /**
      * Valor crudo de una key, leído de la base una sola vez por request.
      *
-     * 🔴 Es para las lecturas que se REPITEN dentro de una misma serialización — hoy,
-     * `implementation_form_url`, que el accesor form_link de Implementation consulta una vez por
-     * fila serializada (un listado de N implementaciones eran N consultas a admin_settings).
-     * Para una lectura suelta seguí usando get(): no tiene sentido memorizar algo que se lee
-     * una vez.
+     * 🔴 Es para las lecturas que se REPITEN dentro del mismo request. El caso que lo motivó es
+     * `implementation_form_url`: el accesor form_link de Implementation lo consulta una vez por
+     * fila serializada, así que un listado de N implementaciones eran N consultas a
+     * admin_settings. Hoy lo usan las nueve keys de ImplementationSettings.
+     *
+     * Para una lectura suelta y única seguí usando get(): memorizar algo que se lee una sola vez
+     * no ahorra nada y suma una entrada que hay que invalidar.
      *
      * Devuelve exactamente lo mismo que `AdminSetting::where('key', $key)->value('value')`:
      * el string guardado, o null si no hay fila.
