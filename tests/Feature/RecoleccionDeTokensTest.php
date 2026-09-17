@@ -203,7 +203,14 @@ class RecoleccionDeTokensTest extends BaseDelCanal
         $servicio = app(ClientAiTokensSyncService::class);
 
         $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
-        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $segundo = $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        /* 🔴 Sin esta aserción el test pasa por el motivo equivocado: si el upsert fuera un
+         * `create()` pelado, la segunda corrida explotaría contra el unique, la transacción
+         * revertiría, el service lo atraparía y devolvería `failed` — y el conteo daría 2 igual,
+         * porque las filas de la PRIMERA corrida siguen ahí. La idempotencia es que la segunda
+         * corrida termine BIEN, no solo que no deje filas de más. */
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $segundo['estado']);
 
         $this->assertSame(
             2,
@@ -248,7 +255,10 @@ class RecoleccionDeTokensTest extends BaseDelCanal
             ]), 200),
         ]);
 
-        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $segundo = $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        // Ver el comentario del test del upsert: sin esto, un `create()` pelado pasaría igual.
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $segundo['estado']);
 
         $this->assertSame(1, ClientAiTokenUsage::where('client_id', $client->id)->count());
 
@@ -287,7 +297,10 @@ class RecoleccionDeTokensTest extends BaseDelCanal
         $servicio = app(ClientAiTokensSyncService::class);
 
         $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
-        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $segundo = $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        // Ver el comentario del test del upsert: sin esto, un `create()` pelado pasaría igual.
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $segundo['estado']);
 
         $this->assertSame(
             3,
@@ -340,7 +353,10 @@ class RecoleccionDeTokensTest extends BaseDelCanal
 
         $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
         $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
-        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $tercero = $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        // Ver el comentario del test del upsert: sin esto, un `create()` pelado pasaría igual.
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $tercero['estado']);
 
         $filas = ClientAiTokenUsagePerson::where('client_id', $client->id)->get();
 
@@ -367,6 +383,170 @@ class RecoleccionDeTokensTest extends BaseDelCanal
         $this->assertNull($resumen[0]['auth_user_id'], 'Hacia afuera el centinela vuelve a ser null.');
         $this->assertSame(ClientAiTokenUsagePerson::ETIQUETA_AUTOMATICO, $resumen[0]['nombre']);
         $this->assertSame(80000, $resumen[0]['tokens']);
+    }
+
+    /**
+     * 🔴 Un HTTP 200 cuyo cuerpo NO es el payload de consumo tiene que quedar `failed`, no
+     * `success` con cero filas.
+     *
+     * No es un caso de laboratorio: el shared hosting de Hostinger sirve su página genérica **con
+     * HTTP 200** cuando la cuenta está saturada. `Response::json()` es un `json_decode` pelado, así
+     * que ese HTML devuelve null y un guard flojo lo convierte en "no gastó nada". El resultado
+     * sería una solapa que dice "Traído el 18/09 03:15" mostrando cero tokens — exactamente
+     * indistinguible de un cliente que de verdad no gastó nada, que es la confusión que la columna
+     * de estado existe para evitar.
+     *
+     * @return void
+     */
+    public function test_un_200_que_no_es_el_payload_de_consumo_queda_failed(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response(
+                '<html><head><title>Service Unavailable</title></head><body>Este sitio no está disponible</body></html>',
+                200,
+                ['Content-Type' => 'text/html']
+            ),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(
+            ClientAiTokensSyncService::ESTADO_FAILED,
+            $resultado['estado'],
+            'Un 200 con la página del hosting quedó en verde: el guard no está mirando la forma del payload.'
+        );
+        $this->assertStringContainsString('dias', (string) $resultado['mensaje']);
+
+        $client->refresh();
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $client->ai_tokens_sync_status);
+        $this->assertNull(
+            $client->ai_tokens_synced_at,
+            'Un cuerpo que no es el payload no puede estampar la fecha de última sincronización.'
+        );
+    }
+
+    /**
+     * 🔴 `proveedor` es parte de la clave: dos filas del mismo payload con el mismo modelo y
+     * distinto proveedor son DOS filas, no una.
+     *
+     * El origen agrupa por `(fecha, proceso, proveedor, modelo)` —cuatro dimensiones— y el espejo
+     * tiene que indexar las mismas cuatro más el cliente. Con `proveedor` en los valores, las dos
+     * filas colapsan en una y la que queda tiene los contadores de la última en vez de la suma:
+     * consumo que desaparece sin que nada lo denuncie.
+     *
+     * @return void
+     */
+    public function test_dos_filas_con_el_mismo_modelo_y_distinto_proveedor_no_colapsan(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $una = $this->fila('2026-09-16', 'chat_mensaje', 'modelo-compartido', 3, 10000, 500);
+        $una['proveedor'] = 'anthropic';
+
+        $otra = $this->fila('2026-09-16', 'chat_mensaje', 'modelo-compartido', 7, 44000, 900);
+        $otra['proveedor'] = 'openai';
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response(
+                $this->payload_de_consumo([$una, $otra]),
+                200
+            ),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(
+            2,
+            ClientAiTokenUsage::where('client_id', $client->id)->count(),
+            'Las dos filas colapsaron en una: `proveedor` no está en la clave única.'
+        );
+
+        $this->assertSame(2, $resultado['filas'], 'El contador informó algo distinto de lo que entró.');
+
+        $anthropic = ClientAiTokenUsage::where('client_id', $client->id)->where('proveedor', 'anthropic')->first();
+        $openai    = ClientAiTokenUsage::where('client_id', $client->id)->where('proveedor', 'openai')->first();
+
+        $this->assertSame(10000, $anthropic->input_tokens);
+        $this->assertSame(44000, $openai->input_tokens);
+    }
+
+    /**
+     * 🔴 Una fila con una fecha fuera del rango pedido se descarta.
+     *
+     * Si se guardara, quedaría **para siempre**: el upsert solo pisa lo que la fuente vuelve a
+     * informar, y el admin nunca vuelve a pedir ese día. Ninguna corrida futura la tocaría ni la
+     * borraría, y el espejo dejaría de ser reconstruible desde la fuente — que es lo único que
+     * justifica que esta tabla exista.
+     *
+     * @return void
+     */
+    public function test_una_fila_con_fecha_fuera_del_rango_pedido_se_descarta(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo([
+                $this->fila('2026-09-16', 'chat_mensaje', 'claude-sonnet-5', 2, 3000, 100),
+                // El cliente contesta de más: un día de 2024 que nadie pidió.
+                $this->fila('2024-01-05', 'chat_mensaje', 'claude-sonnet-5', 99, 999999, 99999),
+                // Y uno del día siguiente al rango.
+                $this->fila('2026-09-18', 'chat_mensaje', 'claude-sonnet-5', 50, 50000, 5000),
+            ], [
+                $this->persona('2024-01-05', 3, 'Juan', 99, 999999, 99999),
+            ]), 200),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $resultado['estado']);
+
+        $filas = ClientAiTokenUsage::where('client_id', $client->id)->get();
+
+        $this->assertCount(1, $filas, 'Entraron filas de días que nadie pidió.');
+        $this->assertSame('2026-09-16', substr((string) $filas[0]->fecha, 0, 10));
+
+        $this->assertSame(
+            0,
+            ClientAiTokenUsagePerson::where('client_id', $client->id)->count(),
+            'La fila de persona fuera del rango también tiene que descartarse.'
+        );
+
+        // Y el contador informa solo lo que efectivamente entró.
+        $this->assertSame(1, $resultado['filas']);
+    }
+
+    /**
+     * Un corte de conexión o un timeout deja el cliente en `failed`, sin excepción y sin fecha.
+     *
+     * 🔴 Es la rama que MÁS se va a ejecutar en producción —cuarenta y cinco instancias en shared
+     * hosting, todas las noches— y es la única que no tenía prueba. Acá no hay respuesta HTTP
+     * asociada, así que es el único camino donde `$response` queda en null.
+     *
+     * @return void
+     */
+    public function test_un_corte_de_conexion_deja_el_cliente_en_failed_sin_excepcion(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => function () {
+                throw new \Illuminate\Http\Client\ConnectionException(
+                    'cURL error 28: Operation timed out after 15000 milliseconds'
+                );
+            },
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $resultado['estado']);
+        $this->assertStringContainsString('timed out', (string) $resultado['mensaje']);
+        $this->assertSame(0, ClientAiTokenUsage::where('client_id', $client->id)->count());
+
+        $client->refresh();
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $client->ai_tokens_sync_status);
+        $this->assertNull($client->ai_tokens_synced_at);
     }
 
     /**

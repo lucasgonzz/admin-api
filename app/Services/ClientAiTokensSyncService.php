@@ -118,7 +118,18 @@ class ClientAiTokensSyncService
                     'Accept'          => 'application/json',
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
-                ->retry((int) config('services.client_api.retries', 2), 500)
+                /* 🔴 El tercer parámetro NO es adorno: sin él se reintenta CUALQUIER no-2xx,
+                 * incluido el 404. Y el 404 es el caso esperado durante las semanas en que casi
+                 * ningún cliente tiene todavía el endpoint, así que el barrido nocturno haría
+                 * noventa requests en vez de cuarenta y cinco para enterarse de lo mismo. Un 4xx
+                 * no se arregla insistiendo. */
+                ->retry(
+                    (int) config('services.client_api.retries', 2),
+                    500,
+                    function ($exception) {
+                        return $this->conviene_reintentar($exception);
+                    }
+                )
                 ->get($url, [
                     'desde' => (string) $desde,
                     'hasta' => (string) $hasta,
@@ -170,19 +181,39 @@ class ClientAiTokensSyncService
         }
 
         $data = $response->json();
-        if (! is_array($data)) {
-            $data = [];
+
+        /* 🔴 Un 200 NO alcanza para dar el dato por bueno: hay que reconocer la FORMA del payload.
+         *
+         * `Response::json()` en Laravel 8 es un `json_decode` pelado, así que un cuerpo que no
+         * parsea devuelve null. Y el 200 con un cuerpo que no es el nuestro no es hipotético: el
+         * shared hosting de Hostinger sirve su página genérica CON HTTP 200 cuando la cuenta está
+         * saturada, cosa que ya nos pasó y está documentada. Sin este corte, ese HTML quedaría
+         * como `success` con la fecha estampada, cero filas escritas, y la solapa diría "Traído el
+         * 18/09 03:15" mostrando cero tokens — que es EXACTAMENTE indistinguible de un cliente que
+         * no gastó nada. La columna de estado existe para que esas dos cosas no se parezcan.
+         *
+         * Se exige `dias` con `array_key_exists` y no con `isset`: un `"dias": null` también es un
+         * payload que no sirve, e `isset` lo dejaría pasar como si no estuviera. */
+        if (! is_array($data) || ! array_key_exists('dias', $data) || ! is_array($data['dias'])) {
+            return $this->registrar(
+                $client,
+                self::ESTADO_FAILED,
+                'El cliente respondió HTTP ' . $response->status() . ' pero el cuerpo no es el '
+                . 'payload de consumo (falta el bloque `dias`). Suele ser la página genérica del '
+                . 'hosting cuando la cuenta está saturada. Empieza así: '
+                . substr(trim((string) $response->body()), 0, self::CHARS_DE_CUERPO)
+            );
         }
 
-        $dias = isset($data['dias']) && is_array($data['dias']) ? $data['dias'] : [];
+        $dias = $data['dias'];
 
-        /* 🔴 Un payload SIN el bloque `personas` no es un error: es un cliente con una versión
-         * intermedia, que informa los días y todavía no informa quién los gastó. Se guardan los
-         * días y listo — mismo criterio que el 404 para el endpoint entero. */
+        /* 🔴 Un payload sin el bloque `personas` SÍ es aceptable, a diferencia de `dias`: es un
+         * cliente con una versión intermedia, que informa los días y todavía no informa quién los
+         * gastó. Se guardan los días y listo — mismo criterio que el 404 para el endpoint entero. */
         $personas = isset($data['personas']) && is_array($data['personas']) ? $data['personas'] : [];
 
         try {
-            $filas = $this->espejar($client, $dias, $personas);
+            $filas = $this->espejar($client, $dias, $personas, $desde, $hasta);
         } catch (\Throwable $e) {
             /* Que una fila venga mal formada no puede tumbar el barrido. La transacción de
              * `espejar()` ya hizo rollback, así que el cliente queda como estaba. */
@@ -214,42 +245,59 @@ class ClientAiTokensSyncService
      * dos cortes —por acción y por persona— viajan en la misma transacción a propósito: son dos
      * vistas del mismo hecho y no puede quedar una escrita y la otra no.
      *
+     * 🔴 **Una fila con una `fecha` fuera del rango pedido se descarta.** Sin este corte, un
+     * cliente que contesta de más (por un bug propio o por una fecha mal calculada) deja una fila
+     * que NINGUNA corrida futura vuelve a tocar: el upsert solo pisa lo que la fuente vuelve a
+     * informar, y el admin nunca pide ese día. Esa fila queda para siempre y el espejo deja de ser
+     * reconstruible desde la fuente, que es lo único que justifica que esta tabla exista.
+     *
      * @param Client                           $client   Cliente dueño del consumo.
      * @param array<int, array<string, mixed>> $dias     Bloque `dias` del payload del cliente.
      * @param array<int, array<string, mixed>> $personas Bloque `personas`; vacío si el cliente no lo manda.
+     * @param string                           $desde    Primer día pedido, AAAA-MM-DD.
+     * @param string                           $hasta    Último día pedido, AAAA-MM-DD.
      *
-     * @return int Cantidad de filas escritas o actualizadas, sumando los dos cortes.
+     * @return int Cantidad de filas efectivamente escritas, sumando los dos cortes.
      */
-    protected function espejar(Client $client, array $dias, array $personas = [])
+    protected function espejar(Client $client, array $dias, array $personas, $desde, $hasta)
     {
         $escritas = 0;
 
-        DB::transaction(function () use ($client, $dias, $personas, &$escritas) {
+        DB::transaction(function () use ($client, $dias, $personas, $desde, $hasta, &$escritas) {
+            /* 🔴 Se cuentan las CLAVES distintas que se escribieron, no las vueltas del bucle. Con
+             * un contador por iteración, dos filas del payload que caen en la misma clave informan
+             * "2 filas" cuando en la base entró una sola — y ese número es lo que ve el operador
+             * cuando aprieta "Traer ahora". */
+            $claves_escritas = [];
+
             foreach ($dias as $fila) {
                 if (! is_array($fila)) {
                     continue;
                 }
 
-                $fecha = trim((string) (isset($fila['fecha']) ? $fila['fecha'] : ''));
+                $fecha = $this->fecha_usable($fila, $desde, $hasta);
 
-                // Una fila sin fecha no se puede ubicar en el tiempo: se descarta en vez de
-                // inventarle un día. El resto del rango se guarda igual.
-                if ($fecha === '') {
+                if ($fecha === null) {
                     continue;
                 }
 
-                /* `proceso` y `modelo` nunca viajan como null hacia la base: en MySQL un NULL no
-                 * colisiona con otro NULL dentro de un índice único, y eso solo alcanzaría para
-                 * que el upsert deje de ser idempotente sin que nada avise. */
+                /* 🔴 Las cinco dimensiones, las mismas por las que agrupa el origen. `proveedor`
+                 * TIENE que estar en la clave: si viaja en los valores, dos filas del mismo payload
+                 * con el mismo modelo y distinto proveedor colapsan en una, y la que queda tiene los
+                 * contadores de la última en vez de la suma.
+                 *
+                 * Ninguna viaja como null hacia la base: en MySQL un NULL no colisiona con otro
+                 * NULL dentro de un índice único, y eso solo alcanzaría para que el upsert deje de
+                 * ser idempotente sin que nada avise. */
                 $clave = [
                     'client_id' => (int) $client->id,
-                    'fecha'     => substr($fecha, 0, 10),
+                    'fecha'     => $fecha,
                     'proceso'   => (string) (isset($fila['proceso']) ? $fila['proceso'] : ''),
+                    'proveedor' => (string) (isset($fila['proveedor']) && $fila['proveedor'] !== null ? $fila['proveedor'] : 'anthropic'),
                     'modelo'    => (string) (isset($fila['modelo']) ? $fila['modelo'] : ''),
                 ];
 
                 ClientAiTokenUsage::updateOrCreate($clave, [
-                    'proveedor'                   => (string) (isset($fila['proveedor']) ? $fila['proveedor'] : 'anthropic'),
                     'llamadas'                    => (int) (isset($fila['llamadas']) ? $fila['llamadas'] : 0),
                     'input_tokens'                => (int) (isset($fila['input_tokens']) ? $fila['input_tokens'] : 0),
                     'output_tokens'               => (int) (isset($fila['output_tokens']) ? $fila['output_tokens'] : 0),
@@ -257,23 +305,85 @@ class ClientAiTokensSyncService
                     'cache_read_input_tokens'     => (int) (isset($fila['cache_read_input_tokens']) ? $fila['cache_read_input_tokens'] : 0),
                 ]);
 
-                $escritas++;
+                $claves_escritas[implode('|', $clave)] = true;
             }
 
-            $escritas += $this->espejar_personas($client, $personas);
+            $escritas = count($claves_escritas) + $this->espejar_personas($client, $personas, $desde, $hasta);
         });
 
         return $escritas;
     }
 
     /**
+     * La fecha de una fila del payload, ya normalizada, o null si no sirve.
+     *
+     * Dos motivos para descartar, y los dos terminan igual —se saltea la fila y el resto del
+     * payload se guarda—: que no traiga fecha (no se puede ubicar en el tiempo) o que caiga fuera
+     * del rango pedido (ver el docblock de `espejar()`).
+     *
+     * @param array<string, mixed> $fila  Fila del payload.
+     * @param string               $desde Primer día pedido, AAAA-MM-DD.
+     * @param string               $hasta Último día pedido, AAAA-MM-DD.
+     *
+     * @return string|null Fecha AAAA-MM-DD, o null si la fila se descarta.
+     */
+    protected function fecha_usable(array $fila, $desde, $hasta)
+    {
+        $fecha = trim((string) (isset($fila['fecha']) ? $fila['fecha'] : ''));
+
+        if ($fecha === '') {
+            return null;
+        }
+
+        $fecha = substr($fecha, 0, 10);
+
+        /* Comparación de strings y no de fechas: el formato AAAA-MM-DD ordena igual como texto que
+         * como fecha, y así una fecha basura ('0000-00-00', 'ayer') queda afuera sola en vez de
+         * hacer explotar un parser. */
+        if ($fecha < (string) $desde || $fecha > (string) $hasta) {
+            return null;
+        }
+
+        return $fecha;
+    }
+
+    /**
+     * Si conviene reintentar una llamada que falló.
+     *
+     * Un 4xx no se arregla insistiendo: el 404 es la versión vieja del cliente y el 401 es una
+     * api_key que no coincide. Los dos van a dar exactamente lo mismo en el segundo intento, y el
+     * 404 es el caso MAYORITARIO mientras el parque se actualiza. Un 5xx o un corte de conexión sí
+     * pueden ser pasajeros.
+     *
+     * @param \Throwable $exception Excepción que levantó el cliente HTTP.
+     *
+     * @return bool
+     */
+    protected function conviene_reintentar($exception)
+    {
+        if (! ($exception instanceof \Illuminate\Http\Client\RequestException)) {
+            // ConnectionException, timeout, DNS: puede ser pasajero.
+            return true;
+        }
+
+        if ($exception->response === null) {
+            return true;
+        }
+
+        $status = (int) $exception->response->status();
+
+        return $status < 400 || $status >= 500;
+    }
+
+    /**
      * Vuelca el bloque `personas` a `client_ai_token_usage_people`, con el mismo upsert idempotente.
      *
-     * 🔴 **Una fila sin `fecha` se descarta.** Sin día no hay dónde ubicarla, y el `fecha` es parte
-     * de la clave única: meterla con una fecha inventada (la de hoy, la del extremo del rango) haría
-     * que la corrida siguiente, con otro rango, la pise con un agregado distinto — o sea, el
-     * acumulador desincronizado en silencio que esta parte entera existe para no tener. Se descarta
-     * y el resto del payload se guarda igual.
+     * 🔴 **Una fila sin `fecha`, o con una fecha fuera del rango pedido, se descarta.** Sin día no
+     * hay dónde ubicarla, y el `fecha` es parte de la clave única: meterla con una fecha inventada
+     * (la de hoy, la del extremo del rango) haría que la corrida siguiente, con otro rango, la pise
+     * con un agregado distinto — o sea, el acumulador desincronizado en silencio que esta parte
+     * entera existe para no tener. Y una fila fuera del rango queda para siempre, porque ninguna
+     * corrida futura la vuelve a pedir. Se descartan y el resto del payload se guarda igual.
      *
      * 🔴 **`auth_user_id` nulo se guarda como 0**, el centinela de "procesos automáticos". Ver la
      * migración: un NULL no colisiona consigo mismo adentro de un índice único, y esa fila es
@@ -283,21 +393,24 @@ class ClientAiTokensSyncService
      *
      * @param Client                           $client   Cliente dueño del consumo.
      * @param array<int, array<string, mixed>> $personas Bloque `personas` del payload.
+     * @param string                           $desde    Primer día pedido, AAAA-MM-DD.
+     * @param string                           $hasta    Último día pedido, AAAA-MM-DD.
      *
-     * @return int Cantidad de filas escritas o actualizadas.
+     * @return int Cantidad de claves distintas escritas.
      */
-    protected function espejar_personas(Client $client, array $personas)
+    protected function espejar_personas(Client $client, array $personas, $desde, $hasta)
     {
-        $escritas = 0;
+        // Mismo criterio que en `espejar()`: se cuentan claves escritas, no vueltas del bucle.
+        $claves_escritas = [];
 
         foreach ($personas as $fila) {
             if (! is_array($fila)) {
                 continue;
             }
 
-            $fecha = trim((string) (isset($fila['fecha']) ? $fila['fecha'] : ''));
+            $fecha = $this->fecha_usable($fila, $desde, $hasta);
 
-            if ($fecha === '') {
+            if ($fecha === null) {
                 continue;
             }
 
@@ -309,7 +422,7 @@ class ClientAiTokensSyncService
 
             $clave = [
                 'client_id'    => (int) $client->id,
-                'fecha'        => substr($fecha, 0, 10),
+                'fecha'        => $fecha,
                 'auth_user_id' => $auth_user_id,
             ];
 
@@ -325,10 +438,10 @@ class ClientAiTokensSyncService
                 'cache_read_input_tokens'     => (int) (isset($fila['cache_read_input_tokens']) ? $fila['cache_read_input_tokens'] : 0),
             ]);
 
-            $escritas++;
+            $claves_escritas[implode('|', $clave)] = true;
         }
 
-        return $escritas;
+        return count($claves_escritas);
     }
 
     /**

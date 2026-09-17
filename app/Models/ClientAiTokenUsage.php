@@ -100,18 +100,13 @@ class ClientAiTokenUsage extends Model
      */
     public static function costo_usd($modelo, array $tokens, $precios = null)
     {
-        if ($precios === null) {
-            $precios = config('ia_precios', []);
-        }
+        $tarifa = self::tarifa_de($modelo, $precios);
 
-        $clave = trim((string) $modelo);
-
-        if ($clave === '' || ! is_array($precios) || ! isset($precios[$clave]) || ! is_array($precios[$clave])) {
+        if ($tarifa === null) {
             return null;
         }
 
-        $tarifa = $precios[$clave];
-        $costo  = 0.0;
+        $costo = 0.0;
 
         foreach (self::PUNTAS as $columna => $punta) {
             $cantidad = (float) (isset($tokens[$columna]) ? $tokens[$columna] : 0);
@@ -136,13 +131,89 @@ class ClientAiTokenUsage extends Model
      */
     public static function tiene_precio($modelo, $precios = null)
     {
+        return self::tarifa_de($modelo, $precios) !== null;
+    }
+
+    /**
+     * La tarifa que le corresponde a un modelo, o null si no hay ninguna cargada.
+     *
+     * Primero busca el nombre EXACTO. Si no está, cae al **prefijo más largo** de la tabla que
+     * matchee, y ahí está el punto de esto:
+     *
+     * 🔴 Del lado del cliente se guarda el modelo tal como lo devuelve la API, y la API devuelve el
+     * id resuelto, no el alias que se pidió. O sea que el día que `claude-sonnet-4-5` empiece a
+     * responder `claude-sonnet-4-5-20250929`, la búsqueda exacta deja de encontrarlo y la cifra
+     * principal del admin —la que Lucas mira para saber cuánto está gastando— pasa a `—` sin un
+     * error, sin un log y sin nada que lo anuncie. Un cambio de nombre en el proveedor no puede
+     * apagar el costeo.
+     *
+     * El prefijo tiene que cortar en un guion (`claude-sonnet-4-5` + `-20250929`), no en cualquier
+     * lado: sin esa frontera, un futuro `claude-haiku-4-55` se costearía con la tarifa de
+     * `claude-haiku-4-5`, que es un modelo distinto. Y tiene que ser un prefijo ESTRICTO, más corto
+     * que el modelo: la igualdad ya la resolvió la búsqueda exacta.
+     *
+     * @param string|null               $modelo  Modelo tal como lo informó el cliente.
+     * @param array<string, array>|null $precios Tabla de precios; por defecto config('ia_precios').
+     *
+     * @return array<string, float>|null
+     */
+    public static function tarifa_de($modelo, $precios = null)
+    {
         if ($precios === null) {
             $precios = config('ia_precios', []);
         }
 
+        if (! is_array($precios)) {
+            return null;
+        }
+
         $clave = trim((string) $modelo);
 
-        return $clave !== '' && is_array($precios) && isset($precios[$clave]) && is_array($precios[$clave]);
+        if ($clave === '') {
+            return null;
+        }
+
+        // Nombre exacto: el caso normal y el que no tiene ninguna ambigüedad.
+        if (isset($precios[$clave]) && is_array($precios[$clave])) {
+            return $precios[$clave];
+        }
+
+        /** Tarifa del prefijo más largo encontrado hasta ahora, y su largo. */
+        $mejor_tarifa = null;
+        $mejor_largo  = 0;
+
+        foreach ($precios as $nombre => $tarifa) {
+            if (! is_array($tarifa)) {
+                continue;
+            }
+
+            $nombre = (string) $nombre;
+            $largo  = strlen($nombre);
+
+            // Solo interesa si es más específico que el mejor que ya tenemos.
+            if ($largo <= $mejor_largo) {
+                continue;
+            }
+
+            // Prefijo estricto: el modelo tiene que ser más largo que el nombre de la tarifa.
+            if (strlen($clave) <= $largo) {
+                continue;
+            }
+
+            if (substr($clave, 0, $largo) !== $nombre) {
+                continue;
+            }
+
+            // La frontera del guion: `claude-sonnet-4-5` + `-20250929` sí, `claude-haiku-4-5` + `5` no.
+            if (substr($clave, $largo, 1) !== '-') {
+                continue;
+            }
+
+            $mejor_tarifa = $tarifa;
+            $mejor_largo  = $largo;
+        }
+
+        return $mejor_tarifa;
     }
 
     /**

@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 /**
  * API JSON (Sanctum) del consumo de IA de TODOS los clientes juntos, para la pantalla "Tokens" de
@@ -25,6 +26,15 @@ class TokensResumenController extends Controller
      * Días del rango por defecto cuando el pedido no trae fechas.
      */
     const DIAS_POR_DEFECTO = 30;
+
+    /**
+     * 🔴 Techo del rango que se puede LEER de una sola vez, en días.
+     *
+     * Un año largo: cubre cualquier consulta razonable (la pantalla ofrece 7, 30 y 90 días) y corta
+     * el `desde=1900-01-01` que agruparía la tabla entera. Es distinto del techo de lo que se le
+     * puede PEDIR al cliente, que lo fija el endpoint del otro lado.
+     */
+    const MAX_DIAS_DE_LECTURA = 366;
 
     /**
      * Total del período, serie por día, ranking de clientes y desglose por acción.
@@ -104,6 +114,19 @@ class TokensResumenController extends Controller
     /**
      * Resuelve el rango del pedido, con los últimos 30 días como valor por defecto.
      *
+     * Se valida antes de tocar la base: un `desde` posterior al `hasta` es un 422, no un resultado
+     * vacío que parece "este cliente no gastó nada".
+     *
+     * 🔴 Y hay un TECHO de 366 días, que no es una comodidad: sin él, un
+     * `desde=1900-01-01&hasta=2100-01-01` —escrito a mano o pegado de un link viejo— agrupa la tabla
+     * entera de todos los clientes en una sola consulta. Nadie mira doscientos años de consumo de
+     * IA; la pantalla ofrece 7, 30 y 90 días.
+     *
+     * El middleware `ConvertEmptyStringsToNull` hace que `?hasta=` llegue como null y caiga en el
+     * default de hoy. Por eso los dos cortes de abajo corren DESPUÉS de resolver los defaults y no
+     * como reglas de `validate()`: un `hasta` vacío con un `desde` en el futuro pasaría las reglas
+     * y se comería el `after_or_equal`.
+     *
      * @param Request $request Pedido.
      *
      * @return array{desde: string, hasta: string}
@@ -122,6 +145,21 @@ class TokensResumenController extends Controller
         $desde = isset($datos['desde']) && $datos['desde'] !== null
             ? (string) $datos['desde']
             : Carbon::parse($hasta)->subDays(self::DIAS_POR_DEFECTO - 1)->format('Y-m-d');
+
+        if ($desde > $hasta) {
+            throw ValidationException::withMessages([
+                'desde' => 'La fecha "desde" no puede ser posterior a la fecha "hasta".',
+            ]);
+        }
+
+        $dias = Carbon::parse($desde)->startOfDay()->diffInDays(Carbon::parse($hasta)->startOfDay()) + 1;
+
+        if ($dias > self::MAX_DIAS_DE_LECTURA) {
+            throw ValidationException::withMessages([
+                'desde' => 'El rango pedido es de ' . $dias . ' días y el máximo es '
+                    . self::MAX_DIAS_DE_LECTURA . '. Achicá el período.',
+            ]);
+        }
 
         return ['desde' => $desde, 'hasta' => $hasta];
     }

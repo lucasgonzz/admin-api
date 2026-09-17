@@ -47,10 +47,19 @@ class Kernel extends ConsoleKernel
          * una pausa de un segundo entre cada una: si un día alguna tarda, la corrida se estira y no
          * puede haber dos barriendo a la vez. El upsert es idempotente, así que un doble barrido no
          * corrompería nada — pero duplicaría la cantidad de conexiones por segundo contra el shared
-         * hosting, que es exactamente lo que la pausa está tratando de evitar. */
+         * hosting, que es exactamente lo que la pausa está tratando de evitar.
+         *
+         * 🔴 Los 60 minutos del `withoutOverlapping()` NO son decorativos: el default de Laravel es
+         * 24 HORAS, y este comando corre una vez por día. O sea que un proceso que muera sin
+         * liberar el mutex —el server se reinicia, lo mata el OOM, se corta la luz— dejaría el
+         * candado tomado hasta justo después de la corrida siguiente, y el consumo de ese día no se
+         * traería nunca. Con la ventana de tres días se recuperaría al otro día, pero el agujero es
+         * evitable con un número. El peor caso real de la corrida es de ~24 minutos (45 clientes ×
+         * (timeout de 15 s + 1 s de pausa) en el escenario en que todos den timeout), así que 60 da
+         * más del doble de margen y sigue siendo mucho menos que un día. */
         $schedule->command('tokens:recolectar')
             ->dailyAt('03:15')
-            ->withoutOverlapping();
+            ->withoutOverlapping(60);
 
         $schedule->command('leads:check-followups')->everyTwoHours();
 

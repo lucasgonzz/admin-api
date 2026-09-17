@@ -161,6 +161,86 @@ class ConsumoDeTokensDelClienteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Un modelo con la fecha pegada al alias se costea con la tarifa del alias.
+     *
+     * Del lado del cliente se guarda el modelo tal como lo devuelve la API, y la API devuelve el id
+     * resuelto, no el alias que se pidió. El día que `claude-sonnet-4-5` empiece a responder
+     * `claude-sonnet-4-5-20250929`, la búsqueda por nombre exacto deja de encontrarlo y la cifra
+     * principal del admin pasa a `—` sin un error y sin un log. Un cambio de nombre del proveedor no
+     * puede apagar el costeo.
+     *
+     * Y el prefijo tiene que cortar en un guion: sin esa frontera, un futuro `claude-haiku-4-55` se
+     * costearía con la tarifa de `claude-haiku-4-5`, que es otro modelo.
+     *
+     * @return void
+     */
+    public function test_un_modelo_con_fecha_se_costea_con_la_tarifa_de_su_alias(): void
+    {
+        $this->admin_logueado();
+
+        $client = $this->crear_cliente();
+
+        // claude-sonnet-4-5 → input 3,00 por millón. Un millón de tokens = 3,00 USD.
+        $this->sembrar_consumo($client, '2026-09-16', 'chat_mensaje', 'claude-sonnet-4-5-20250929', [
+            'input_tokens' => 1000000,
+        ], 1);
+
+        // 55 no es 5: este NO tiene que matchear con claude-haiku-4-5.
+        $this->sembrar_consumo($client, '2026-09-17', 'chat_titulo', 'claude-haiku-4-55', [
+            'input_tokens' => 1000000,
+        ], 1);
+
+        $response = $this->getJson(
+            '/api/admin/client/' . $client->id . '/tokens?desde=2026-09-15&hasta=2026-09-17'
+        );
+
+        $response->assertStatus(200);
+
+        $por_modelo = [];
+        foreach ($response->json('por_modelo') as $grupo) {
+            $por_modelo[$grupo['modelo']] = $grupo;
+        }
+
+        $this->assertEqualsWithDelta(
+            3.00,
+            $por_modelo['claude-sonnet-4-5-20250929']['costo_usd'],
+            0.0001,
+            'El id con fecha no cayó al prefijo del alias: la cifra principal se apagaría sola.'
+        );
+        $this->assertTrue($por_modelo['claude-sonnet-4-5-20250929']['tiene_precio']);
+
+        $this->assertNull(
+            $por_modelo['claude-haiku-4-55']['costo_usd'],
+            'El prefijo matcheó sin frontera de guion: 4-55 no es 4-5.'
+        );
+    }
+
+    /**
+     * 🔴 Un rango absurdo se rechaza con 422 en vez de agrupar la tabla entera.
+     *
+     * `desde=1900-01-01&hasta=2100-01-01` —escrito a mano o pegado de un link viejo— barre todo lo
+     * que haya. Nadie mira doscientos años de consumo de IA; la pantalla ofrece 7, 30 y 90 días.
+     *
+     * @return void
+     */
+    public function test_un_rango_de_doscientos_anios_se_rechaza_en_los_dos_endpoints(): void
+    {
+        $this->admin_logueado();
+
+        $client = $this->crear_cliente();
+
+        $this->getJson('/api/admin/client/' . $client->id . '/tokens?desde=1900-01-01&hasta=2100-01-01')
+            ->assertStatus(422);
+
+        $this->getJson('/api/admin/tokens/resumen?desde=1900-01-01&hasta=2100-01-01')
+            ->assertStatus(422);
+
+        // Y un `desde` posterior al `hasta` tampoco puede devolver "no gastó nada".
+        $this->getJson('/api/admin/client/' . $client->id . '/tokens?desde=2026-12-01&hasta=2026-01-01')
+            ->assertStatus(422);
+    }
+
+    /**
      * El resumen global suma a todos los clientes y no se trae nada de afuera del rango.
      *
      * @return void
