@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
 use App\Models\ClientAiTokenUsagePerson;
 use App\Services\ClientAiTokensSyncService;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
 use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
@@ -175,6 +176,41 @@ class RecoleccionDeTokensTest extends BaseDelCanal
         $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $client->ai_tokens_sync_status);
         $this->assertNull($client->ai_tokens_sync_message);
         $this->assertNotNull($client->ai_tokens_synced_at);
+
+        /* 🔴 La mitad del contrato que NINGUNA otra prueba mira: lo que el admin MANDA.
+         *
+         * El resto de este archivo afirma sobre lo que el admin hace con la respuesta, y el fake
+         * matchea con un comodín (`*...consumo-ia*`) — o sea que todo pasaría igual si los
+         * parámetros se llamaran `from`/`to` o el header fuera `X-Api-Key`. Y del otro lado tampoco
+         * está cubierto: el test del proveedor prueba al proveedor. Este es el único lugar donde se
+         * afirma que admin → empresa habla el idioma que el contrato declara. */
+        Http::assertSent(function ($request) use ($client) {
+            $partes = parse_url($request->url());
+            parse_str(isset($partes['query']) ? $partes['query'] : '', $query);
+
+            $this->assertStringEndsWith(
+                '/api/admin-sync/consumo-ia',
+                isset($partes['path']) ? $partes['path'] : '',
+                'Cambió la ruta del contrato.'
+            );
+
+            // El header, con el valor exacto de `clients.api_key` de ESE cliente.
+            $this->assertSame(
+                [(string) $client->api_key],
+                $request->header('X-Admin-Api-Key'),
+                'El header del contrato cambió de nombre o no lleva la api_key del cliente.'
+            );
+
+            // Los dos parámetros, con el nombre y el formato que declara el contrato.
+            $this->assertArrayHasKey('desde', $query, 'El parámetro `desde` no viajó.');
+            $this->assertArrayHasKey('hasta', $query, 'El parámetro `hasta` no viajó.');
+            $this->assertSame('2026-09-15', $query['desde']);
+            $this->assertSame('2026-09-17', $query['hasta']);
+            $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}$/', $query['desde']);
+            $this->assertMatchesRegularExpression('/^\d{4}-\d{2}-\d{2}$/', $query['hasta']);
+
+            return true;
+        });
     }
 
     /**
@@ -518,6 +554,88 @@ class RecoleccionDeTokensTest extends BaseDelCanal
     }
 
     /**
+     * 422: el cliente rechazó el rango por ser más largo de lo que acepta (62 días).
+     *
+     * Queda `failed` con el motivo, no `no_soportado`: el endpoint existe y contestó, lo que está
+     * mal es lo que le pedimos. Confundirlo con la versión vieja escondería un bug del admin detrás
+     * de "este cliente todavía no se actualizó".
+     *
+     * @return void
+     */
+    public function test_un_422_por_rango_largo_queda_failed_con_el_motivo(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response([
+                'message' => 'El rango no puede superar los 62 días.',
+                'errors'  => ['desde' => ['El rango no puede superar los 62 días.']],
+            ], 422),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-01-01', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $resultado['estado']);
+        $this->assertStringContainsString('422', (string) $resultado['mensaje']);
+        $this->assertStringContainsString('62', (string) $resultado['mensaje']);
+
+        $this->assertNotSame(
+            ClientAiTokensSyncService::ESTADO_NO_SOPORTADO,
+            $resultado['estado'],
+            'Un 422 no es "versión vieja": esconderlo ahí taparía un bug del admin.'
+        );
+
+        $client->refresh();
+        $this->assertNull($client->ai_tokens_synced_at);
+    }
+
+    /**
+     * 409: el frente de ese cliente vive sobre una base compartida y su `.env` no tiene `USER_ID`,
+     * así que el proveedor no sabe de qué comercio hablar y se niega a adivinar.
+     *
+     * 🔴 Es un caso REAL del parque —`u767360347_empresa` tiene 51 comercios adentro— y no es ni
+     * una versión vieja ni un problema de red: está MAL CONFIGURADO, y se arregla cargando una
+     * línea en un archivo. Un `failed` genérico se lee como "se cayó la conexión" y nadie va a ir a
+     * mirar el `.env` de ese frente, así que el mensaje tiene que nombrar la causa real.
+     *
+     * 🔴 El cuerpo que devuelve el fake NO dice "USER_ID" a propósito. Si lo dijera, el test pasaría
+     * igual con el cajón genérico —que copia el cuerpo del cliente al mensaje— y no probaría nada:
+     * lo que se mide acá es que el admin ponga el diagnóstico de su lado, sin depender de cómo esté
+     * redactada la respuesta del otro.
+     *
+     * @return void
+     */
+    public function test_un_409_de_base_compartida_sin_user_id_queda_failed_con_el_motivo(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response(['message' => 'Conflict'], 409),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $resultado['estado']);
+
+        $mensaje = (string) $resultado['mensaje'];
+
+        $this->assertStringContainsString(
+            'USER_ID',
+            $mensaje,
+            'El 409 cayó en el cajón genérico: el mensaje no nombra la variable que hay que cargar.'
+        );
+        $this->assertStringContainsString('.env', $mensaje, 'El mensaje no dice dónde se carga.');
+        $this->assertStringContainsString('409', $mensaje);
+
+        $this->assertSame(0, ClientAiTokenUsage::where('client_id', $client->id)->count());
+
+        $client->refresh();
+        $this->assertStringContainsString('USER_ID', (string) $client->ai_tokens_sync_message);
+        $this->assertStringContainsString('.env', (string) $client->ai_tokens_sync_message);
+        $this->assertNull($client->ai_tokens_synced_at);
+    }
+
+    /**
      * Un corte de conexión o un timeout deja el cliente en `failed`, sin excepción y sin fecha.
      *
      * 🔴 Es la rama que MÁS se va a ejecutar en producción —cuarenta y cinco instancias en shared
@@ -627,9 +745,13 @@ class RecoleccionDeTokensTest extends BaseDelCanal
             /** @var array<int, int> Ids visitados, en orden. */
             public $visitados = [];
 
+            /** @var array<int, array{0: string, 1: string}> Rangos con los que se lo llamó. */
+            public $rangos = [];
+
             public function traer_del_cliente(Client $client, $desde, $hasta)
             {
                 $this->visitados[] = (int) $client->id;
+                $this->rangos[]    = [(string) $desde, (string) $hasta];
 
                 if ((int) $client->id === $this->revienta_a) {
                     throw new \RuntimeException('El empresa-api de este cliente se cayó a pedazos.');
@@ -657,5 +779,55 @@ class RecoleccionDeTokensTest extends BaseDelCanal
             $explosivo->visitados,
             'El barrido se cortó en el cliente que explotó y no llegó al siguiente.'
         );
+    }
+
+    /**
+     * 🔴 Un `--dias` más largo de lo que el cliente acepta se RECORTA al techo, no se manda igual.
+     *
+     * El `empresa-api` corta en 62 días con un 422. Un `--dias=90` escrito para un backfill no
+     * traería nada: dejaría a los cuarenta y cinco clientes en `failed` de una sola pasada. Es
+     * recuperable —el motivo queda escrito en cada uno— pero es una corrida entera tirada, y el
+     * controlador ya sabía recortar mientras el comando no.
+     *
+     * @return void
+     */
+    public function test_el_comando_recorta_los_dias_al_techo_que_acepta_el_cliente(): void
+    {
+        $this->crear_cliente('+5493413333333');
+
+        $espia = new class extends ClientAiTokensSyncService {
+            /** @var array<int, array{0: string, 1: string}> Rangos con los que se lo llamó. */
+            public $rangos = [];
+
+            public function traer_del_cliente(Client $client, $desde, $hasta)
+            {
+                $this->rangos[] = [(string) $desde, (string) $hasta];
+
+                return [
+                    'estado'          => ClientAiTokensSyncService::ESTADO_SUCCESS,
+                    'mensaje'         => null,
+                    'filas'           => 0,
+                    'sincronizado_at' => null,
+                ];
+            }
+        };
+
+        $this->app->instance(ClientAiTokensSyncService::class, $espia);
+
+        Artisan::call('tokens:recolectar', ['--dias' => 90]);
+
+        $this->assertNotEmpty($espia->rangos);
+
+        $desde = Carbon::parse($espia->rangos[0][0]);
+        $hasta = Carbon::parse($espia->rangos[0][1]);
+
+        $this->assertSame(
+            ClientAiTokensSyncService::MAX_DIAS_POR_PEDIDO,
+            $desde->diffInDays($hasta) + 1,
+            'El comando le pidió al cliente un rango más largo del que acepta: los 45 quedarían en failed.'
+        );
+
+        // Y el operador tiene que enterarse de que se le recortó lo que pidió.
+        $this->assertStringContainsString('62', Artisan::output());
     }
 }

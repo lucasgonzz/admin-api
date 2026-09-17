@@ -31,10 +31,13 @@ use Illuminate\Support\Facades\Log;
  *     muerto — el mismo pozo que ya está documentado en `ClientScheduleSyncService.php:146-152` y
  *     en `DeploymentService::step_update_default_version()`.
  *
- *  3. **404 es el caso ESPERADO, no un error.** La instancia del cliente todavía no tiene la ruta
- *     `api/admin-sync/consumo-ia`: va a seguir así durante semanas, hasta que se actualice. Se
- *     registra `no_soportado`, no se reintenta y no se avisa a nadie. Confundirlo con un fallo
- *     llenaría la pestaña de rojos que no hay que arreglar.
+ *  3. **Cada código de respuesta nombra su causa.** El 404 es el caso ESPERADO —la instancia del
+ *     cliente todavía no tiene la ruta y va a seguir así durante semanas—, se registra
+ *     `no_soportado`, no se reintenta y no se avisa a nadie: confundirlo con un fallo llenaría la
+ *     pestaña de rojos que no hay que arreglar. El 401/403 nombra la `api_key`, y el 409 nombra el
+ *     `USER_ID` que le falta al `.env` de ese frente. Los tres son `failed` o `no_soportado`, pero
+ *     el estado dice QUÉ pasó y el mensaje dice a DÓNDE ir: un "falló" a secas se lee como "se cayó
+ *     la conexión" y manda a nadie a ningún lado.
  *
  *  4. **El upsert reescribe, no acumula.** Es la propiedad que hace que este dato sea reconstruible
  *     desde la fuente en cualquier momento: volver a pedir el mismo rango deja exactamente el mismo
@@ -59,6 +62,17 @@ class ClientAiTokensSyncService
 
     /** Caracteres del cuerpo de la respuesta del cliente que se guardan en el mensaje. */
     const CHARS_DE_CUERPO = 300;
+
+    /**
+     * 🔴 Techo de días que se le pueden pedir al `empresa-api` en UNA llamada.
+     *
+     * Es el mismo 62 que valida el endpoint del otro lado: pedirle más devuelve 422 y la
+     * recolección queda en `failed`. Vive acá y no en cada llamador porque los dos —el botón
+     * "Traer ahora" del controlador y el `--dias` del comando— tienen que respetar el mismo número,
+     * y con dos copias una se queda vieja. Ya pasó: el controlador recortaba y el comando no, así
+     * que un `--dias=90` dejaba a los cuarenta y cinco clientes en rojo de una sola pasada.
+     */
+    const MAX_DIAS_POR_PEDIDO = 62;
 
     /**
      * @var ClientEmpresaApiUrlResolver Resuelve la URL base del `empresa-api` del cliente.
@@ -151,6 +165,31 @@ class ClientAiTokensSyncService
                 'La versión instalada del empresa-api de este cliente todavía no tiene el endpoint '
                 . 'admin-sync/consumo-ia. Los tokens van a empezar a viajar solos cuando el cliente '
                 . 'se actualice.'
+            );
+        }
+
+        if ($response !== null && $response->status() === 409) {
+            /* 🔴 El 409 tiene mensaje propio y no cae en el cajón genérico, aunque el estado siga
+             * siendo `failed`.
+             *
+             * El proveedor lo devuelve cuando el `.env` del frente de ese cliente no tiene
+             * `USER_ID` y la base tiene más de un comercio adentro (`u767360347_empresa` tiene 51).
+             * O sea: NO está viejo y NO se cayó la conexión — está MAL CONFIGURADO, y se arregla
+             * cargando una línea en un archivo. Un `failed` genérico se lee como "no se pudo
+             * conectar" y nadie va a ir a mirar el `.env` de ese frente; el estado dice qué pasó,
+             * pero el que manda a alguien a arreglarlo es el mensaje.
+             *
+             * No lleva un cuarto estado porque para el admin el desenlace es el mismo que cualquier
+             * otro fallo —no hay dato y hay que volver— y un estado más obliga a tocar la solapa,
+             * los filtros y el comando para distinguir algo que ya distingue el texto. */
+            return $this->registrar(
+                $client,
+                self::ESTADO_FAILED,
+                'A este cliente le falta `USER_ID` en el .env de su frente activo. Su empresa-api '
+                . 'comparte la base con otros comercios y sin esa variable no sabe de cuál informar, '
+                . 'así que se niega a adivinar (HTTP 409). No es una versión vieja ni un problema de '
+                . 'red: se resuelve cargando USER_ID en ese .env y volviendo a traer. Respuesta del '
+                . 'cliente: ' . substr(trim((string) $response->body()), 0, self::CHARS_DE_CUERPO)
             );
         }
 

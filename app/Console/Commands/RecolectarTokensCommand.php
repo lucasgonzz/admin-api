@@ -41,7 +41,7 @@ class RecolectarTokensCommand extends Command
      */
     protected $signature = 'tokens:recolectar
         {--client= : ID de un solo cliente, para reintentar sin barrer a todos}
-        {--dias=3 : Cuántos días hacia atrás traer, contando hoy}';
+        {--dias=3 : Cuántos días hacia atrás traer, contando hoy (techo: 62, el del sistema del cliente)}';
 
     /**
      * Descripción visible en php artisan list.
@@ -72,6 +72,22 @@ class RecolectarTokensCommand extends Command
             $this->error('--dias tiene que ser 1 o más.');
 
             return 1;
+        }
+
+        /* 🔴 Se recorta al techo en vez de dejarlo pasar. El `empresa-api` corta en 62 días con un
+         * 422, así que un `--dias=90` escrito para un backfill no traería NADA: dejaría a los
+         * cuarenta y cinco clientes en `failed` de una sola pasada. Es recuperable —el motivo queda
+         * escrito en cada uno— pero es una corrida entera tirada y un susto al mirar la tabla.
+         * Para cubrir más que eso se corre el comando varias veces, moviendo la ventana. */
+        if ($dias > ClientAiTokensSyncService::MAX_DIAS_POR_PEDIDO) {
+            $this->warn(
+                'Pediste ' . $dias . ' días y el sistema de los clientes acepta hasta '
+                . ClientAiTokensSyncService::MAX_DIAS_POR_PEDIDO . ' por consulta. Se traen los '
+                . ClientAiTokensSyncService::MAX_DIAS_POR_PEDIDO . ' más recientes. Para cubrir más, '
+                . 'corré el comando de nuevo con otra ventana.'
+            );
+
+            $dias = ClientAiTokensSyncService::MAX_DIAS_POR_PEDIDO;
         }
 
         $hasta = Carbon::now(config('app.timezone'))->format('Y-m-d');

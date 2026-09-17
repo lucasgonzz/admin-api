@@ -37,14 +37,15 @@ class ClientTokensController extends Controller
     const DIAS_POR_DEFECTO = 30;
 
     /**
-     * 🔴 Techo del rango que se le puede pedir al `empresa-api` de un cliente en una sola llamada.
+     * Techo del rango que se le puede pedir al `empresa-api` en una sola llamada.
      *
-     * Es el mismo 62 que valida el endpoint del otro lado (`ConsumoIaController`): pedirle más
-     * devuelve 422 y el refresco a mano fallaría sin que el operador entienda por qué. Cuando el
-     * rango que está mirando es más largo, el refresco cubre los últimos 62 días y la respuesta lo
-     * DICE en `nota` — recortar en silencio sería mentirle a quien apretó el botón.
+     * 🔴 Se lee del service y NO se redeclara acá: es el mismo número que tiene que respetar el
+     * comando de recolección, y dos copias del mismo techo son dos números que se desincronizan.
+     * Cuando el rango que el operador está mirando es más largo, el refresco cubre los últimos 62
+     * días y la respuesta lo DICE en `nota` — recortar en silencio sería mentirle a quien apretó el
+     * botón.
      */
-    const MAX_DIAS_POR_PEDIDO = 62;
+    const MAX_DIAS_POR_PEDIDO = ClientAiTokensSyncService::MAX_DIAS_POR_PEDIDO;
 
     /**
      * 🔴 Techo del rango que se puede LEER de una sola vez, en días.
