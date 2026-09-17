@@ -4435,14 +4435,41 @@ class LeadController extends Controller
             ->where('lead_id', (int) $lead_id)
             ->pluck('id');
 
-        // Una fila de lectura por mensaje para este admin (idempotente vía firstOrCreate).
-        foreach ($message_ids as $message_id) {
-            \App\Models\LeadMessageRead::firstOrCreate([
-                'lead_message_id' => $message_id,
-                'admin_id'        => $admin_id,
-            ], [
-                'read_at' => now(),
-            ]);
+        // 🔴 Una sola inserción masiva, no un firstOrCreate por mensaje. Lo que había antes eran
+        // DOS consultas por mensaje (el SELECT del firstOrCreate más el INSERT cuando faltaba):
+        // una conversación de 300 mensajes eran hasta 600 consultas, y esto se dispara cada vez
+        // que alguien abre la conversación. Ahora son dos consultas fijas más el insert.
+        //
+        // No hace falta llenar created_at/updated_at a mano: LeadMessageRead tiene
+        // $timestamps = false y la tabla solo guarda read_at.
+        $ya_leidos = \App\Models\LeadMessageRead::query()
+            ->where('admin_id', $admin_id)
+            ->whereIn('lead_message_id', $message_ids)
+            ->pluck('lead_message_id');
+
+        // Solo los que este admin todavía no tenía marcados.
+        $faltantes = $message_ids->diff($ya_leidos)->values();
+
+        if ($faltantes->isNotEmpty()) {
+            // Mismo instante para todo el lote: es una sola acción del operador (abrir el hilo).
+            $read_at = now()->toDateTimeString();
+
+            $filas = [];
+            foreach ($faltantes as $message_id) {
+                $filas[] = [
+                    'lead_message_id' => (int) $message_id,
+                    'admin_id'        => $admin_id,
+                    'read_at'         => $read_at,
+                ];
+            }
+
+            // insertOrIgnore y no insert: la tabla tiene el único lmr_msg_admin_uq
+            // (lead_message_id, admin_id), así que si dos pestañas del mismo admin abren el hilo
+            // a la vez, la segunda no revienta con un duplicado — se ignora y queda la primera.
+            // El chunk es por el tope de placeholders del driver en un hilo largo.
+            foreach (array_chunk($filas, 500) as $lote) {
+                \App\Models\LeadMessageRead::insertOrIgnore($lote);
+            }
         }
 
         // Abrir la conversación también limpia cualquier marca manual de "no leído" (estilo WhatsApp).
