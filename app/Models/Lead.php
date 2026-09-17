@@ -438,7 +438,11 @@ class Lead extends Model
     {
         $query->with(
             'target_client',
+            // Los dos clientes del lead se serializan con los accesores ecommerce_* de su $appends,
+            // que resuelven contra client_ecommerce: sin precargarla salian dos consultas por lead.
+            'target_client.client_ecommerce',
             'promoted_client.implementation',
+            'promoted_client.client_ecommerce',
             'created_by_admin',
             'demo',
             'personalized_demo_videos',
@@ -465,7 +469,11 @@ class Lead extends Model
     {
         $query->with(
             'target_client',
+            // Mismo motivo que en scopeWithAll(): los accesores ecommerce_* del $appends de Client
+            // resuelven contra client_ecommerce, y esta variante la usa el LISTADO de leads.
+            'target_client.client_ecommerce',
             'promoted_client.implementation',
+            'promoted_client.client_ecommerce',
             'created_by_admin',
             'demo',
             'personalized_demo_videos',

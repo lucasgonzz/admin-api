@@ -105,6 +105,9 @@ class SupportTicketController extends BaseController
         return SupportTicket::query()
             ->with([
                 'client',
+                // Los accesores ecommerce_* del $appends de Client resuelven contra esta relacion:
+                // sin precargarla salia una consulta por ticket en GET /support-ticket.
+                'client.client_ecommerce',
                 'client_employee',
                 'assigned_admin',
                 'lastMessage.sender_admin',

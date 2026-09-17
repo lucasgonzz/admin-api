@@ -16,7 +16,9 @@ class ClientNotificationRead extends Model
     ];
 
     function scopeWithAll($query) {
-        $query->with('client', 'version_notification.version');
+        // Los accesores ecommerce_* del $appends de Client resuelven contra client_ecommerce:
+        // sin precargarla salia una consulta por fila serializada.
+        $query->with('client', 'client.client_ecommerce', 'version_notification.version');
     }
 
     public function client() {

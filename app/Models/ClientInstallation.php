@@ -140,6 +140,9 @@ class ClientInstallation extends Model
     {
         $query->with([
             'client',
+            // Los accesores ecommerce_* del $appends de Client resuelven contra esta relacion:
+            // sin precargarla salia una consulta por fila en GET /installations.
+            'client.client_ecommerce',
             'client_api',
             'version',
             'deployment_logs' => function ($relation_query) {

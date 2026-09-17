@@ -57,7 +57,9 @@ class Implementation extends Model
      */
     public function scopeWithAll($query)
     {
-        $query->with(['client', 'stages', 'messages']);
+        // client.client_ecommerce va precargada porque los accesores ecommerce_* del $appends de
+        // Client resuelven contra ella: sin esto salia una consulta por implementacion serializada.
+        $query->with(['client', 'client.client_ecommerce', 'stages', 'messages']);
     }
 
     /**

@@ -54,7 +54,9 @@ class ClientEmployee extends Model
      */
     public function scopeWithAll($query)
     {
-        $query->with('client');
+        // Los accesores ecommerce_* del $appends de Client resuelven contra client_ecommerce:
+        // sin precargarla salia una consulta por fila serializada.
+        $query->with('client', 'client.client_ecommerce');
     }
 
     /**

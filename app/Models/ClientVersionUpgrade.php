@@ -137,6 +137,12 @@ class ClientVersionUpgrade extends Model
     function scopeWithAll($query) {
         $query->with([
             'client',
+            // Client tiene ecommerce_spa_url / ecommerce_api_url (y los dos *_path) en su $appends,
+            // y los cuatro accesores resuelven contra client_ecommerce. Sin este eager load salia
+            // una consulta por cada upgrade serializado — y GET /update se pollea cada 4 segundos
+            // mientras corre un deploy. Es aditivo: la relacion ya viajaba en el JSON, porque el
+            // accesor la cargaba lazy antes de que Laravel serializara las relaciones.
+            'client.client_ecommerce',
             'target_client_api',
             'from_version',
             'to_version',

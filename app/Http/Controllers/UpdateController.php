@@ -33,7 +33,9 @@ class UpdateController extends BaseController
     ];
 
     function index(Request $request) {
-        $query = ClientVersionUpgrade::with('client', 'from_version', 'to_version', 'created_by_admin')
+        // client.client_ecommerce: mismo motivo que en index_json(): los accesores ecommerce_* del
+        // $appends de Client resuelven contra ella y salia una consulta por fila del listado.
+        $query = ClientVersionUpgrade::with('client', 'client.client_ecommerce', 'from_version', 'to_version', 'created_by_admin')
             ->withCount([
                 'update_seeders as seeders_failed_count' => function ($q) {
                     $q->where('status', 'fallido');
@@ -256,7 +258,10 @@ class UpdateController extends BaseController
             $per = 200;
         }
         $q = ClientVersionUpgrade::query()
-            ->with('client', 'from_version', 'to_version', 'created_by_admin')
+            // client.client_ecommerce: los accesores ecommerce_* del $appends de Client resuelven
+            // contra ella. Este es el listado que admin-spa pollea cada 4 segundos durante un
+            // deploy, asi que una consulta por fila se paga muchas veces por minuto.
+            ->with('client', 'client.client_ecommerce', 'from_version', 'to_version', 'created_by_admin')
             ->orderBy('scheduled_date', 'desc')
             ->orderBy('id', 'desc');
         if ($request->filled('client_id')) {

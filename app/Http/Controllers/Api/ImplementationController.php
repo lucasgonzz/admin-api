@@ -42,7 +42,9 @@ class ImplementationController extends Controller
     {
         // Listado completo con relaciones necesarias para el panel izquierdo.
         $implementations = Implementation::query()
-            ->with(['client', 'stages', 'stages.config'])
+            // client.client_ecommerce: los accesores ecommerce_* del $appends de Client resuelven
+            // contra ella, y sin precargarla salia una consulta por fila del listado.
+            ->with(['client', 'client.client_ecommerce', 'stages', 'stages.config'])
             ->orderBy('updated_at', 'desc')
             ->get();
 
