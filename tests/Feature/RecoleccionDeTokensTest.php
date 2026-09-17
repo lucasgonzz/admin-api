@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
+use App\Models\ClientAiTokenUsagePerson;
 use App\Services\ClientAiTokensSyncService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Http;
@@ -33,18 +34,57 @@ class RecoleccionDeTokensTest extends BaseDelCanal
      * admin, este test tiene que ponerse en rojo. Es exactamente el lugar donde este proyecto ya se
      * quemó (`manual_tasks` vs `tareas`).
      *
-     * @param array<int, array<string, mixed>> $dias Bloque `dias`.
+     * @param array<int, array<string, mixed>> $dias     Bloque `dias`.
+     * @param array<int, array<string, mixed>> $personas Bloque `personas`.
      *
      * @return array<string, mixed>
      */
-    private function payload_de_consumo(array $dias): array
+    private function payload_de_consumo(array $dias, array $personas = []): array
     {
         return [
             'user_id'  => 500,
             'desde'    => '2026-09-15',
             'hasta'    => '2026-09-17',
             'dias'     => $dias,
-            'personas' => [],
+            'personas' => $personas,
+        ];
+    }
+
+    /**
+     * Una fila del bloque `personas`.
+     *
+     * 🔴 **Lleva `fecha`, y tiene que llevarla.** El espejo del admin guarda una fila por cliente,
+     * día y persona, con unique `(client_id, fecha, auth_user_id)`: sin día no hay dónde ubicar la
+     * fila, y meterla con una fecha inventada haría que la corrida siguiente —con otro rango— la
+     * pise con un agregado distinto. O sea, el acumulador desincronizado en silencio que toda esta
+     * parte existe para no tener.
+     *
+     * @param string      $fecha        Día.
+     * @param int|null    $auth_user_id Usuario de la base del cliente; null = procesos automáticos.
+     * @param string|null $nombre       Nombre resuelto por el cliente.
+     * @param int         $llamadas     Llamadas agregadas.
+     * @param int         $input        Tokens de entrada.
+     * @param int         $output       Tokens de salida.
+     *
+     * @return array<string, mixed>
+     */
+    private function persona(
+        string $fecha,
+        $auth_user_id,
+        $nombre,
+        int $llamadas = 1,
+        int $input = 1000,
+        int $output = 200
+    ): array {
+        return [
+            'fecha'                       => $fecha,
+            'auth_user_id'                => $auth_user_id,
+            'nombre'                      => $nombre,
+            'llamadas'                    => $llamadas,
+            'input_tokens'                => $input,
+            'output_tokens'               => $output,
+            'cache_creation_input_tokens' => 0,
+            'cache_read_input_tokens'     => 0,
         ];
     }
 
@@ -217,6 +257,116 @@ class RecoleccionDeTokensTest extends BaseDelCanal
         $this->assertSame(9, $fila->llamadas);
         $this->assertSame(22000, $fila->input_tokens);
         $this->assertSame(1300, $fila->output_tokens);
+    }
+
+    /**
+     * El mismo upsert, del lado de las personas: correrlo dos veces no acumula ni duplica.
+     *
+     * Vale igual que el de los días y por el mismo motivo: la recolección nocturna vuelve a pedir
+     * los últimos tres días todas las noches. Si esto se acumulara, el empleado que más usa el
+     * sistema aparecería gastando el triple, que es un número que nadie tiene con qué desmentir.
+     *
+     * @return void
+     */
+    public function test_el_upsert_por_persona_tampoco_acumula_al_correr_dos_veces(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $personas = [
+            $this->persona('2026-09-16', 3, 'Juan', 40, 90000, 5000),
+            $this->persona('2026-09-16', 7, 'Brisa', 12, 20000, 1500),
+            $this->persona('2026-09-17', 3, 'Juan', 5, 8000, 400),
+        ];
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo([
+                $this->fila('2026-09-16', 'chat_mensaje', 'claude-sonnet-5', 52, 110000, 6500),
+            ], $personas), 200),
+        ]);
+
+        $servicio = app(ClientAiTokensSyncService::class);
+
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(
+            3,
+            ClientAiTokenUsagePerson::where('client_id', $client->id)->count(),
+            'La segunda corrida creó filas de persona nuevas: el upsert no pega contra el unique.'
+        );
+
+        $juan_del_16 = ClientAiTokenUsagePerson::where('client_id', $client->id)
+            ->where('auth_user_id', 3)
+            ->where('fecha', '2026-09-16')
+            ->first();
+
+        $this->assertSame(40, $juan_del_16->llamadas, 'Las llamadas de la persona se acumularon.');
+        $this->assertSame(90000, $juan_del_16->input_tokens, 'Los tokens de la persona se acumularon.');
+
+        // Y el corte de lectura pliega los dos días de Juan en una sola línea del rango.
+        $resumen = ClientAiTokenUsagePerson::resumir((int) $client->id, '2026-09-15', '2026-09-17');
+
+        $this->assertCount(2, $resumen, 'El resumen tiene que tener una línea por persona, no por día.');
+        $this->assertSame('Juan', $resumen[0]['nombre']);
+        $this->assertSame(45, $resumen[0]['llamadas']);
+        $this->assertSame(98000 + 5400, $resumen[0]['tokens']);
+    }
+
+    /**
+     * 🔴 La fila de los procesos automáticos: llega con `auth_user_id` NULO del otro lado y tiene
+     * que guardarse como UNA sola fila por día, no una por corrida.
+     *
+     * Es el caso que obliga al centinela 0 en vez de una columna nullable: en MySQL un NULL no
+     * colisiona con otro NULL adentro de un índice único, así que con `auth_user_id` nullable esta
+     * fila —la que más se repite, porque el scheduler de embeddings corre todos los días— se
+     * apilaría en cada corrida y el consumo "de nadie" crecería solo, sin que nada avise.
+     *
+     * @return void
+     */
+    public function test_el_consumo_sin_persona_se_guarda_y_se_lee_como_una_sola_fila(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo([
+                $this->fila('2026-09-16', 'embeddings_articulos', 'text-embedding-3-small', 400, 80000, 0),
+            ], [
+                // Tal cual lo manda el contrato: sin persona detrás, `auth_user_id` viaja en null.
+                $this->persona('2026-09-16', null, null, 400, 80000, 0),
+            ]), 200),
+        ]);
+
+        $servicio = app(ClientAiTokensSyncService::class);
+
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $filas = ClientAiTokenUsagePerson::where('client_id', $client->id)->get();
+
+        $this->assertCount(
+            1,
+            $filas,
+            'Tres corridas dejaron más de una fila de procesos automáticos: el NULL se está '
+            . 'colando en la clave única.'
+        );
+
+        $this->assertSame(
+            ClientAiTokenUsagePerson::AUTOMATICO,
+            $filas[0]->auth_user_id,
+            'El auth_user_id nulo del contrato tiene que guardarse como el centinela 0.'
+        );
+        $this->assertNull($filas[0]->nombre);
+        $this->assertSame(400, $filas[0]->llamadas);
+
+        // Y al leer se muestra con nombre propio, no como un renglón en blanco ni como "Usuario #0".
+        $resumen = ClientAiTokenUsagePerson::resumir((int) $client->id, '2026-09-15', '2026-09-17');
+
+        $this->assertCount(1, $resumen);
+        $this->assertTrue($resumen[0]['es_automatico']);
+        $this->assertNull($resumen[0]['auth_user_id'], 'Hacia afuera el centinela vuelve a ser null.');
+        $this->assertSame(ClientAiTokenUsagePerson::ETIQUETA_AUTOMATICO, $resumen[0]['nombre']);
+        $this->assertSame(80000, $resumen[0]['tokens']);
     }
 
     /**

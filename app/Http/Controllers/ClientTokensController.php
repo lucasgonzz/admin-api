@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
+use App\Models\ClientAiTokenUsagePerson;
 use App\Services\ClientAiTokensSyncService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -143,6 +144,10 @@ class ClientTokensController extends Controller
             'por_dia'        => $por_dia,
             'por_proceso'    => $por_proceso,
             'por_modelo'     => $por_modelo,
+            /* 🔴 Sin costo, y no es un olvido: el precio depende del modelo y este corte no lo
+             * trae. Va en tokens y llamadas, y la interfaz lo aclara para que nadie los lea como
+             * plata. Repartir el costo total proporcionalmente sería inventar un número. */
+            'por_persona'    => ClientAiTokenUsagePerson::resumir((int) $client->id, $desde, $hasta),
             'sincronizacion' => $this->estado_de_sincronizacion($client),
         ];
     }

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
+use App\Models\ClientAiTokenUsagePerson;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -175,8 +176,13 @@ class ClientAiTokensSyncService
 
         $dias = isset($data['dias']) && is_array($data['dias']) ? $data['dias'] : [];
 
+        /* 🔴 Un payload SIN el bloque `personas` no es un error: es un cliente con una versión
+         * intermedia, que informa los días y todavía no informa quién los gastó. Se guardan los
+         * días y listo — mismo criterio que el 404 para el endpoint entero. */
+        $personas = isset($data['personas']) && is_array($data['personas']) ? $data['personas'] : [];
+
         try {
-            $filas = $this->espejar($client, $dias);
+            $filas = $this->espejar($client, $dias, $personas);
         } catch (\Throwable $e) {
             /* Que una fila venga mal formada no puede tumbar el barrido. La transacción de
              * `espejar()` ya hizo rollback, así que el cliente queda como estaba. */
@@ -204,18 +210,21 @@ class ClientAiTokensSyncService
      * cliente sin datos durante la transacción y, si el payload llegara recortado por cualquier
      * motivo, perdería lo que ya estaba bien.
      *
-     * Todo adentro de UNA transacción por cliente: un rango se guarda entero o no se guarda.
+     * Todo adentro de UNA transacción por cliente: un rango se guarda entero o no se guarda. Los
+     * dos cortes —por acción y por persona— viajan en la misma transacción a propósito: son dos
+     * vistas del mismo hecho y no puede quedar una escrita y la otra no.
      *
-     * @param Client                        $client Cliente dueño del consumo.
-     * @param array<int, array<string, mixed>> $dias Bloque `dias` del payload del cliente.
+     * @param Client                           $client   Cliente dueño del consumo.
+     * @param array<int, array<string, mixed>> $dias     Bloque `dias` del payload del cliente.
+     * @param array<int, array<string, mixed>> $personas Bloque `personas`; vacío si el cliente no lo manda.
      *
-     * @return int Cantidad de filas escritas o actualizadas.
+     * @return int Cantidad de filas escritas o actualizadas, sumando los dos cortes.
      */
-    protected function espejar(Client $client, array $dias)
+    protected function espejar(Client $client, array $dias, array $personas = [])
     {
         $escritas = 0;
 
-        DB::transaction(function () use ($client, $dias, &$escritas) {
+        DB::transaction(function () use ($client, $dias, $personas, &$escritas) {
             foreach ($dias as $fila) {
                 if (! is_array($fila)) {
                     continue;
@@ -250,7 +259,74 @@ class ClientAiTokensSyncService
 
                 $escritas++;
             }
+
+            $escritas += $this->espejar_personas($client, $personas);
         });
+
+        return $escritas;
+    }
+
+    /**
+     * Vuelca el bloque `personas` a `client_ai_token_usage_people`, con el mismo upsert idempotente.
+     *
+     * 🔴 **Una fila sin `fecha` se descarta.** Sin día no hay dónde ubicarla, y el `fecha` es parte
+     * de la clave única: meterla con una fecha inventada (la de hoy, la del extremo del rango) haría
+     * que la corrida siguiente, con otro rango, la pise con un agregado distinto — o sea, el
+     * acumulador desincronizado en silencio que esta parte entera existe para no tener. Se descarta
+     * y el resto del payload se guarda igual.
+     *
+     * 🔴 **`auth_user_id` nulo se guarda como 0**, el centinela de "procesos automáticos". Ver la
+     * migración: un NULL no colisiona consigo mismo adentro de un índice único, y esa fila es
+     * justamente la que se repite todos los días.
+     *
+     * Corre adentro de la transacción que abrió `espejar()`: no abre una propia.
+     *
+     * @param Client                           $client   Cliente dueño del consumo.
+     * @param array<int, array<string, mixed>> $personas Bloque `personas` del payload.
+     *
+     * @return int Cantidad de filas escritas o actualizadas.
+     */
+    protected function espejar_personas(Client $client, array $personas)
+    {
+        $escritas = 0;
+
+        foreach ($personas as $fila) {
+            if (! is_array($fila)) {
+                continue;
+            }
+
+            $fecha = trim((string) (isset($fila['fecha']) ? $fila['fecha'] : ''));
+
+            if ($fecha === '') {
+                continue;
+            }
+
+            /* Nulo, vacío o ausente son todos lo mismo acá: no hubo persona detrás. `(int) null`
+             * da 0, que es exactamente el centinela, pero se escribe explícito para que se lea. */
+            $auth_user_id = isset($fila['auth_user_id']) && $fila['auth_user_id'] !== null
+                ? (int) $fila['auth_user_id']
+                : ClientAiTokenUsagePerson::AUTOMATICO;
+
+            $clave = [
+                'client_id'    => (int) $client->id,
+                'fecha'        => substr($fecha, 0, 10),
+                'auth_user_id' => $auth_user_id,
+            ];
+
+            $nombre = trim((string) (isset($fila['nombre']) ? $fila['nombre'] : ''));
+
+            ClientAiTokenUsagePerson::updateOrCreate($clave, [
+                // Vacío se guarda como null: "el cliente no informó el nombre" no es "se llama ''".
+                'nombre'                      => $nombre === '' ? null : mb_substr($nombre, 0, 120),
+                'llamadas'                    => (int) (isset($fila['llamadas']) ? $fila['llamadas'] : 0),
+                'input_tokens'                => (int) (isset($fila['input_tokens']) ? $fila['input_tokens'] : 0),
+                'output_tokens'               => (int) (isset($fila['output_tokens']) ? $fila['output_tokens'] : 0),
+                'cache_creation_input_tokens' => (int) (isset($fila['cache_creation_input_tokens']) ? $fila['cache_creation_input_tokens'] : 0),
+                'cache_read_input_tokens'     => (int) (isset($fila['cache_read_input_tokens']) ? $fila['cache_read_input_tokens'] : 0),
+            ]);
+
+            $escritas++;
+        }
 
         return $escritas;
     }
