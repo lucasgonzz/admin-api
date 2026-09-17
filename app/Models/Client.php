@@ -50,6 +50,12 @@ class Client extends Model
         // Casteado a bool y no leído crudo porque el ruteo del webhook decide con un `if` sobre
         // esta columna, y un "0" string es verdadero en PHP.
         'asistente_whatsapp_activo' => 'boolean',
+        /* Última recolección EXITOSA del consumo de tokens de IA (misión tokens-por-cliente,
+         * 17/9/2026). Casteada a datetime y no leída cruda porque la pestaña muestra "Traído el …"
+         * y el front necesita una fecha con la que pueda hacer cuentas, no el string de MySQL.
+         * Las otras dos columnas del trío (`ai_tokens_sync_status`, `ai_tokens_sync_message`) son
+         * texto y no necesitan cast, igual que las de `schedule_sync_*`. */
+        'ai_tokens_synced_at'       => 'datetime',
     ];
 
     /**
