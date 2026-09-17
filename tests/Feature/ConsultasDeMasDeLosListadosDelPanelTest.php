@@ -494,6 +494,43 @@ class ConsultasDeMasDeLosListadosDelPanelTest extends TestCase
     }
 
     /**
+     * `for_select` combinado con `page` también funciona.
+     *
+     * Es una rama que existe en el controller (index_json pagina cuando llega `page`) y que el
+     * código nuevo tiene que saber recorrer: sobre el paginador, each() forwardea a la colección
+     * de adentro. Los dos llamadores del SPA no mandan `page` hoy, pero el endpoint lo acepta y
+     * no puede tirar un 500 si alguien lo combina.
+     *
+     * @return void
+     */
+    public function test_for_select_tambien_anda_paginado(): void
+    {
+        $admin = $this->crear_admin();
+        for ($i = 0; $i < 3; $i++) {
+            $this->crear_cliente('Dueño ' . $i, 'Comercio ' . $i);
+        }
+
+        $response = $this->actingAs($admin, 'sanctum')->getJson('/api/admin/client?for_select=1&page=1&per_page=2');
+
+        $response->assertStatus(200);
+
+        $payload = $response->json();
+        $this->assertArrayHasKey('models', $payload);
+        // Paginado: el SPA lee models.data, que extract_models_array() también contempla.
+        $this->assertArrayHasKey('data', $payload['models'], 'Con page tiene que seguir viniendo el paginador de Laravel.');
+        $this->assertNotEmpty($payload['models']['data']);
+
+        $claves = array_keys($payload['models']['data'][0]);
+        sort($claves);
+
+        $this->assertSame(
+            ['company_name', 'id', 'name'],
+            $claves,
+            'Paginado también tiene que devolver los tres campos y ningún accesor lazy.'
+        );
+    }
+
+    /**
      * El listado COMPLETO (sin el flag) no se tocó: sigue trayendo las relaciones y los accesores.
      *
      * Es la otra mitad del contrato de D5: cinco vistas de admin-spa le pegan a /client sin el
