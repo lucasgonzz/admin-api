@@ -20,6 +20,78 @@ use Illuminate\Http\Request;
 class ImplementationSettingsController extends Controller
 {
     /**
+     * Keys de admin_settings que toca esta pantalla, para precargarlas de una.
+     *
+     * Constante de clase y no un enum: admin-api corre PHP 7.4 en producción.
+     *
+     * @var array<int, string>
+     */
+    const KEYS_DE_LA_PANTALLA = [
+        'implementation_assigned_admin_id',
+        'implementation_file_wait_seconds',
+        'implementation_employees_wait_seconds',
+        'implementation_form_contact_delay_seconds',
+        'implementation_form_url',
+        'implementation_google_cuota_default',
+        'implementation_google_api_key_default',
+        'implementation_google_api_key_demo',
+        'implementation_google_cuota_demo',
+    ];
+
+    /**
+     * Devuelve los nueve settings de implementación en una sola respuesta.
+     *
+     * 🔴 Se AGREGA, no reemplaza: los nueve GET de a uno siguen existiendo y devolviendo
+     * exactamente lo mismo. admin-spa los mantiene como camino de respaldo.
+     *
+     * El motivo es que la pantalla de configuración hacía 9 GET al montarse, uno por setting,
+     * todos contra la misma tabla. Ahora es un request y —gracias al prime_memo— una sola
+     * consulta a admin_settings.
+     *
+     * Cada entrada viene bajo la misma clave que usa su ruta individual y con el MISMO cuerpo que
+     * devuelve esa ruta, así el SPA parsea igual en los dos caminos y el respaldo es un cambio de
+     * origen, no de forma:
+     *
+     *   implementation-assigned-admin    => { admin_id: int|null }
+     *   implementation-file-wait         => { seconds: int }
+     *   implementation-employees-wait    => { seconds: int }
+     *   implementation-form-contact-delay=> { seconds: int }
+     *   implementation-form-url          => { url: string }
+     *   implementation-google-cuota-default   => { cuota: int }
+     *   implementation-google-api-key-default => { api_key: string }
+     *   implementation-google-api-key-demo    => { api_key: string }
+     *   implementation-google-cuota-demo      => { cuota: int }
+     *
+     * Los valores salen de los mismos métodos que usan las rutas de a uno, así que los fallbacks
+     * (15, 30, 60, 300, 100, cadena vacía) no están duplicados acá y no pueden desincronizarse.
+     *
+     * @return JsonResponse
+     */
+    public function show_all(): JsonResponse
+    {
+        // Las nueve keys en una consulta; los getters de abajo las leen del memo.
+        AdminSetting::prime_memo(self::KEYS_DE_LA_PANTALLA);
+
+        // Mismo tratamiento que show(): entero o null si no hay admin configurado.
+        $raw_admin_id = AdminSetting::memo_value('implementation_assigned_admin_id');
+        $admin_id     = ($raw_admin_id !== null && (int) $raw_admin_id > 0) ? (int) $raw_admin_id : null;
+
+        return response()->json([
+            'settings' => [
+                'implementation-assigned-admin'         => ['admin_id' => $admin_id],
+                'implementation-file-wait'              => ['seconds' => ImplementationSettings::get_file_wait_seconds()],
+                'implementation-employees-wait'         => ['seconds' => ImplementationSettings::get_employees_wait_seconds()],
+                'implementation-form-contact-delay'     => ['seconds' => ImplementationSettings::get_form_contact_delay_seconds()],
+                'implementation-form-url'               => ['url' => ImplementationSettings::get_form_url()],
+                'implementation-google-cuota-default'   => ['cuota' => ImplementationSettings::get_google_cuota_default()],
+                'implementation-google-api-key-default' => ['api_key' => ImplementationSettings::get_google_api_key_default()],
+                'implementation-google-api-key-demo'    => ['api_key' => ImplementationSettings::get_google_api_key_demo()],
+                'implementation-google-cuota-demo'      => ['cuota' => ImplementationSettings::get_google_cuota_demo()],
+            ],
+        ], 200);
+    }
+
+    /**
      * Retorna el admin actualmente configurado como responsable de implementaciones.
      *
      * Devuelve admin_id (int o null) para pre-seleccionar el valor en el select del frontend.

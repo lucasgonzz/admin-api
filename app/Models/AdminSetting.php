@@ -93,6 +93,37 @@ class AdminSetting extends Model
     }
 
     /**
+     * Deja varias keys memorizadas con UNA sola consulta.
+     *
+     * Para cuando ya se sabe de antemano que se van a leer todas — hoy, el endpoint que devuelve
+     * los settings de implementación juntos: sin esto serían nueve SELECT contra la misma tabla.
+     * Las keys que no tienen fila quedan memorizadas como null, así que tampoco pagan una consulta
+     * después.
+     *
+     * No pisa lo que ya estaba memorizado: si en este request ya se leyó una key, el valor es el
+     * mismo (cualquier escritura vacía el memo entero).
+     *
+     * @param array<int, string> $keys Claves a precargar.
+     *
+     * @return void
+     */
+    public static function prime_memo(array $keys): void
+    {
+        // Solo las que faltan; si están todas, no se toca la base.
+        $faltantes = array_values(array_diff($keys, array_keys(self::$value_memo)));
+
+        if (empty($faltantes)) {
+            return;
+        }
+
+        $filas = self::whereIn('key', $faltantes)->pluck('value', 'key');
+
+        foreach ($faltantes as $key) {
+            self::$value_memo[$key] = $filas->has($key) ? $filas->get($key) : null;
+        }
+    }
+
+    /**
      * Obtiene el valor de una clave o el default si no existe.
      *
      * @param string $key     Clave de configuración.

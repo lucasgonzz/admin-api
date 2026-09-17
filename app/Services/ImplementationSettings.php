@@ -9,6 +9,16 @@ use App\Models\AdminSetting;
  *
  * Proporciona métodos estáticos para leer cada setting relevante al flujo
  * de implementación, con fallbacks seguros si el registro no existe.
+ *
+ * 🔴 Todas leen con AdminSetting::memo_value(): una consulta por key y por request, no una por
+ * llamada. Lo pedía get_form_url() —que el $appends de Implementation dispara una vez por fila
+ * serializada— y de paso lo aprovechan las demás, que en más de un flujo se leen dos veces
+ * (RunDemoSetupService llama a get_google_cuota_demo() y get_google_api_key_demo() en dos lugares).
+ *
+ * El memo lo vacía cualquier escritura por Eloquent sobre admin_settings (los eventos saved y
+ * deleted de AdminSetting), así que el request que guarda un valor y después lo vuelve a leer ve
+ * el nuevo. Y cada job de la cola arranca con el memo limpio (AppServiceProvider), porque ahí el
+ * "request" dura lo que dure el worker.
  */
 class ImplementationSettings
 {
@@ -24,7 +34,7 @@ class ImplementationSettings
     public static function get_file_wait_seconds(): int
     {
         // Leer el valor guardado; fallback a 15 si no existe o es 0.
-        $value = (int) AdminSetting::where('key', 'implementation_file_wait_seconds')->value('value');
+        $value = (int) AdminSetting::memo_value('implementation_file_wait_seconds');
 
         return $value > 0 ? $value : 15;
     }
@@ -42,7 +52,7 @@ class ImplementationSettings
     public static function get_employees_wait_seconds(): int
     {
         // Leer el valor guardado; fallback a 30 si no existe o es 0.
-        $value = (int) AdminSetting::where('key', 'implementation_employees_wait_seconds')->value('value');
+        $value = (int) AdminSetting::memo_value('implementation_employees_wait_seconds');
 
         return $value > 0 ? $value : 30;
     }
@@ -59,7 +69,7 @@ class ImplementationSettings
     public static function get_form_contact_delay_seconds(): int
     {
         // Leer el valor guardado; fallback a 60 si no existe o es 0.
-        $value = (int) AdminSetting::where('key', 'implementation_form_contact_delay_seconds')->value('value');
+        $value = (int) AdminSetting::memo_value('implementation_form_contact_delay_seconds');
 
         return $value > 0 ? $value : 60;
     }
@@ -71,15 +81,10 @@ class ImplementationSettings
      * El valor se lee desde admin_settings con key 'implementation_form_url'.
      * Si no existe el registro, devuelve cadena vacía.
      *
-     * 🔴 Única de esta clase que lee con memo, y no por gusto: el accesor form_link de
-     * Implementation está en su $appends, así que esto se llamaba UNA VEZ POR FILA SERIALIZADA
-     * — N consultas a admin_settings en GET /implementation, y otras tantas en GET /client y
-     * GET /lead, que arrastran la implementación como relación. Las demás lecturas de esta
-     * clase pasan una sola vez por request y siguen yendo derecho a la base.
-     *
-     * El memo lo invalida cualquier escritura por Eloquent sobre admin_settings
-     * (AdminSetting::boot()), así que el request que guarda la URL y después serializa
-     * implementaciones ve el valor nuevo, no el viejo.
+     * 🔴 Es la lectura que motivó el memo de toda la clase: el accesor form_link de Implementation
+     * está en su $appends, así que esto se llamaba UNA VEZ POR FILA SERIALIZADA — N consultas a
+     * admin_settings en GET /implementation, y otras tantas en GET /client y GET /lead, que
+     * arrastran la implementación como relación.
      *
      * @return string URL base del formulario (sin barra final ni token).
      */
@@ -108,7 +113,7 @@ class ImplementationSettings
     public static function get_google_cuota_default(): int
     {
         // Leer el valor guardado; fallback a 300 si no existe o es 0.
-        $value = (int) AdminSetting::where('key', 'implementation_google_cuota_default')->value('value');
+        $value = (int) AdminSetting::memo_value('implementation_google_cuota_default');
 
         return $value > 0 ? $value : 300;
     }
@@ -129,7 +134,7 @@ class ImplementationSettings
     public static function get_google_api_key_default(): string
     {
         // Leer el valor guardado; trim para que un valor con espacios al final no rompa la llamada a Google.
-        $value = trim((string) AdminSetting::where('key', 'implementation_google_api_key_default')->value('value'));
+        $value = trim((string) AdminSetting::memo_value('implementation_google_api_key_default'));
 
         return $value;
     }
@@ -150,7 +155,7 @@ class ImplementationSettings
     public static function get_google_api_key_demo(): string
     {
         // Leer el valor guardado; trim para que un valor con espacios al final no rompa la llamada a Google.
-        $value = trim((string) AdminSetting::where('key', 'implementation_google_api_key_demo')->value('value'));
+        $value = trim((string) AdminSetting::memo_value('implementation_google_api_key_demo'));
 
         return $value;
     }
@@ -168,7 +173,7 @@ class ImplementationSettings
     public static function get_google_cuota_demo(): int
     {
         // Leer el valor guardado; fallback a 100 si no existe o es 0.
-        $value = (int) AdminSetting::where('key', 'implementation_google_cuota_demo')->value('value');
+        $value = (int) AdminSetting::memo_value('implementation_google_cuota_demo');
 
         return $value > 0 ? $value : 100;
     }

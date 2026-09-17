@@ -882,6 +882,11 @@ Route::prefix('admin')->group(function () {
         Route::get('ecommerce-installations/{installation}/logs', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'logs_json']);
         Route::delete('ecommerce-installations/{installation}', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'destroy_json']);
 
+        // Los nueve settings de implementación en una sola respuesta. Se AGREGA: los GET de a uno
+        // de acá abajo siguen existiendo iguales y admin-spa los usa como respaldo. No colisiona
+        // con ninguno porque todas estas rutas son literales, sin {parametro}.
+        Route::get('settings/implementation', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show_all']);
+
         // Configuración de implementaciones: admin asignado por defecto.
         Route::get('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'show']);
         Route::put('settings/implementation-assigned-admin', [\App\Http\Controllers\Api\ImplementationSettingsController::class, 'update']);
