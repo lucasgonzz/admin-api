@@ -86,6 +86,33 @@ class ClientController extends BaseController
 
     // --- API JSON (admin-spa) ---
 
+    /**
+     * Listado de clientes, completo o liviano.
+     *
+     * Query `for_select=1`: respuesta liviana (id, name, company_name) para los selects
+     * relacionales del SPA, sin las 7 relaciones de withAll() ni los accesores ecommerce_*.
+     * Mismo criterio que VersionController::index_json(), que ya lo hacía.
+     *
+     * 🔴 Los tres campos no son un recorte a ojo: son los que usan los DOS únicos llamadores de
+     * `?for_select=1` sobre /client en admin-spa (no hay más; el resto le pega a /client sin el
+     * flag y sigue recibiendo todo):
+     *
+     *   - common-vue/components/model/form/Index.vue: `value` = model.id, y el texto sale de
+     *     `property.relation_label || relation_display_key`. La única property del repo con
+     *     `relation => 'client'` es client_id de ClientVersionUpgradeProperties, que declara
+     *     `relation_label => 'company_name'`; y como ClientProperties no tiene ninguna property
+     *     con `reprecentar_model`, el display key por defecto del SPA es 'name'. De ahí los tres.
+     *   - common-vue/.../column-filter/modal/fields/FilterSelect.vue: `value` = model.id, texto
+     *     por `field.relation_label || 'name'`, y descarta la fila si id viene null.
+     *
+     * Ninguno de los dos toca una relación del cliente, y el envoltorio `{ models: [...] }` es
+     * parte del contrato: `extract_models_array()` de los dos componentes devuelve lista vacía
+     * (sin error visible) si la respuesta fuera un array pelado.
+     *
+     * @param Request $request
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
     public function index_json(Request $request)
     {
         $per = (int) $request->input('per_page', 100);
@@ -95,11 +122,32 @@ class ClientController extends BaseController
         if ($per > 200) {
             $per = 200;
         }
-        $q = Client::query()->withAll()->orderBy('id', 'desc');
+
+        /** Selectores relacionales del SPA: evitar withAll() en el listado completo. */
+        $for_select = $request->boolean('for_select');
+
+        if ($for_select) {
+            $q = Client::query()
+                ->select(['id', 'name', 'company_name'])
+                ->orderBy('id', 'desc');
+        } else {
+            $q = Client::query()->withAll()->orderBy('id', 'desc');
+        }
+
         if ($request->has('page')) {
             $models = $q->paginate($per);
         } else {
             $models = $q->get();
+        }
+
+        if ($for_select) {
+            // Sin esto no se ahorra nada: los cuatro accesores ecommerce_* del $appends de Client
+            // resuelven contra client_ecommerce, así que al serializar dispararían una consulta
+            // lazy POR FILA — justo lo que este camino viene a evitar. Ninguno de los dos
+            // llamadores los usa. each() anda igual sobre Collection que sobre el paginador.
+            $models->each(function ($client) {
+                $client->setAppends([]);
+            });
         }
 
         return response()->json(['models' => $models], 200);
