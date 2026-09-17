@@ -35,6 +35,23 @@ class Kernel extends ConsoleKernel
         $schedule->command('asistente:enviar-informes')
             ->dailyAt('08:30')
             ->withoutOverlapping();
+
+        /* Recolección del consumo de tokens de IA de cada cliente (misión tokens-por-cliente,
+         * 17/9/2026).
+         *
+         * 03:15 porque es la hora más muerta: el barrido le pega al `empresa-api` de cada cliente
+         * uno atrás del otro y ningún comercio está vendiendo. Y :15 y no en punto para no caer
+         * arriba de los crons que la mayoría de los hostings dispara a la hora exacta.
+         *
+         * `withoutOverlapping()` porque la corrida son cuarenta y cinco llamadas HTTP en serie con
+         * una pausa de un segundo entre cada una: si un día alguna tarda, la corrida se estira y no
+         * puede haber dos barriendo a la vez. El upsert es idempotente, así que un doble barrido no
+         * corrompería nada — pero duplicaría la cantidad de conexiones por segundo contra el shared
+         * hosting, que es exactamente lo que la pausa está tratando de evitar. */
+        $schedule->command('tokens:recolectar')
+            ->dailyAt('03:15')
+            ->withoutOverlapping();
+
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.

@@ -1,0 +1,331 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\Client;
+use App\Models\ClientAiTokenUsage;
+use App\Services\ClientAiTokensSyncService;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Http;
+use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
+
+/**
+ * La recolección del consumo de tokens de IA desde el `empresa-api` de cada cliente.
+ *
+ * 🔴 **El test que más importa de este archivo es el del upsert** (`..._dos_veces_...`). Toda la
+ * arquitectura de esta parte descansa en que volver a pedir un rango REESCRIBA en vez de acumular:
+ * es lo que permite que la recolección nocturna use una ventana de tres días para que un cliente
+ * caído se recupere solo, y es lo que permite apretar "Traer ahora" sin miedo. Si esa propiedad se
+ * rompe, no se rompe con un error: se rompe con números que crecen solos y que nadie puede
+ * distinguir de un cliente que gastó mucho.
+ *
+ * Hereda de `BaseDelCanal` por su `fakear_http()`, que hace `Http::swap()` ANTES del `fake` porque
+ * `Http::fake()` acumula y gana el primero que matchea. Duplicar esa sutileza en otro archivo es
+ * pedir que se olvide la mitad.
+ */
+class RecoleccionDeTokensTest extends BaseDelCanal
+{
+    /**
+     * Payload de ejemplo del `empresa-api`, con las claves EXACTAS del contrato.
+     *
+     * 🔴 Los nombres de las claves se escriben acá a mano, tal cual los declara el plan, y no se
+     * derivan de ninguna constante del admin: si mañana alguien renombra una columna del lado del
+     * admin, este test tiene que ponerse en rojo. Es exactamente el lugar donde este proyecto ya se
+     * quemó (`manual_tasks` vs `tareas`).
+     *
+     * @param array<int, array<string, mixed>> $dias Bloque `dias`.
+     *
+     * @return array<string, mixed>
+     */
+    private function payload_de_consumo(array $dias): array
+    {
+        return [
+            'user_id'  => 500,
+            'desde'    => '2026-09-15',
+            'hasta'    => '2026-09-17',
+            'dias'     => $dias,
+            'personas' => [],
+        ];
+    }
+
+    /**
+     * Una fila del bloque `dias`, con los cuatro contadores.
+     *
+     * @param string $fecha    Día.
+     * @param string $proceso  Acción que gastó.
+     * @param string $modelo   Modelo.
+     * @param int    $llamadas Llamadas agregadas.
+     * @param int    $input    Tokens de entrada.
+     * @param int    $output   Tokens de salida.
+     *
+     * @return array<string, mixed>
+     */
+    private function fila(
+        string $fecha,
+        string $proceso,
+        string $modelo,
+        int $llamadas = 1,
+        int $input = 1000,
+        int $output = 200
+    ): array {
+        return [
+            'fecha'                       => $fecha,
+            'proceso'                     => $proceso,
+            'proveedor'                   => 'anthropic',
+            'modelo'                      => $modelo,
+            'llamadas'                    => $llamadas,
+            'input_tokens'                => $input,
+            'output_tokens'               => $output,
+            'cache_creation_input_tokens' => 0,
+            'cache_read_input_tokens'     => 0,
+        ];
+    }
+
+    /**
+     * Cliente listo para que le pidan el consumo: con ClientApi activa y api_key.
+     *
+     * @param string $url URL de su `empresa-api`.
+     *
+     * @return Client
+     */
+    private function cliente_consultable(string $url = 'https://api-ferreteria.test'): Client
+    {
+        $client = $this->crear_cliente();
+        $this->crear_client_api($client, $url, 'shared_hosting');
+
+        return $client->fresh();
+    }
+
+    /**
+     * El camino feliz: el cliente contesta, las filas quedan guardadas y el estado es success.
+     *
+     * @return void
+     */
+    public function test_el_sync_guarda_las_filas_y_marca_el_cliente_como_sincronizado(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo([
+                $this->fila('2026-09-16', 'chat_mensaje', 'claude-sonnet-5', 12, 41230, 3100),
+                $this->fila('2026-09-17', 'whatsapp_sugerencia', 'claude-haiku-4-5', 3, 5000, 400),
+            ]), 200),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $resultado['estado']);
+        $this->assertSame(2, $resultado['filas']);
+
+        $this->assertSame(2, ClientAiTokenUsage::where('client_id', $client->id)->count());
+
+        $fila = ClientAiTokenUsage::where('client_id', $client->id)
+            ->where('proceso', 'chat_mensaje')
+            ->first();
+
+        $this->assertNotNull($fila);
+        $this->assertSame('2026-09-16', substr((string) $fila->fecha, 0, 10));
+        $this->assertSame('claude-sonnet-5', $fila->modelo);
+        $this->assertSame('anthropic', $fila->proveedor);
+        $this->assertSame(12, $fila->llamadas);
+        $this->assertSame(41230, $fila->input_tokens);
+        $this->assertSame(3100, $fila->output_tokens);
+
+        $client->refresh();
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $client->ai_tokens_sync_status);
+        $this->assertNull($client->ai_tokens_sync_message);
+        $this->assertNotNull($client->ai_tokens_synced_at);
+    }
+
+    /**
+     * 🔴 **El test que sostiene toda la mecánica.** Correr el sync dos veces con los MISMOS datos
+     * tiene que dejar exactamente el mismo resultado: ni una fila de más, ni un token de más.
+     *
+     * Sin esta propiedad, la ventana de tres días de la recolección nocturna triplicaría el consumo
+     * de cada cliente todas las noches, y el número resultante sería indistinguible de un cliente
+     * que gastó tres veces más.
+     *
+     * @return void
+     */
+    public function test_correr_el_sync_dos_veces_con_los_mismos_datos_no_duplica_ni_acumula(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $dias = [
+            $this->fila('2026-09-16', 'chat_mensaje', 'claude-sonnet-5', 12, 41230, 3100),
+            $this->fila('2026-09-17', 'embeddings_articulos', 'text-embedding-3-small', 400, 80000, 0),
+        ];
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo($dias), 200),
+        ]);
+
+        $servicio = app(ClientAiTokensSyncService::class);
+
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(
+            2,
+            ClientAiTokenUsage::where('client_id', $client->id)->count(),
+            'La segunda corrida creó filas nuevas: el upsert no está pegando contra el unique.'
+        );
+
+        $chat = ClientAiTokenUsage::where('client_id', $client->id)
+            ->where('proceso', 'chat_mensaje')
+            ->first();
+
+        $this->assertSame(12, $chat->llamadas, 'Las llamadas se acumularon en vez de reescribirse.');
+        $this->assertSame(41230, $chat->input_tokens, 'Los tokens se acumularon en vez de reescribirse.');
+    }
+
+    /**
+     * Correrlo con datos distintos para el mismo día reescribe la fila: el cliente es la fuente de
+     * verdad y el admin es un espejo, no un libro mayor.
+     *
+     * Es el caso REAL de la ventana de tres días: el día de ayer se vuelve a pedir cuando ya tiene
+     * más consumo acumulado que cuando se pidió por primera vez.
+     *
+     * @return void
+     */
+    public function test_pedir_de_nuevo_un_dia_que_creyo_reescribe_la_fila_con_el_valor_nuevo(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo([
+                $this->fila('2026-09-16', 'chat_mensaje', 'claude-sonnet-5', 5, 10000, 500),
+            ]), 200),
+        ]);
+
+        $servicio = app(ClientAiTokensSyncService::class);
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        // Más tarde el mismo día siguió gastando: el cliente ahora informa más.
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response($this->payload_de_consumo([
+                $this->fila('2026-09-16', 'chat_mensaje', 'claude-sonnet-5', 9, 22000, 1300),
+            ]), 200),
+        ]);
+
+        $servicio->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(1, ClientAiTokenUsage::where('client_id', $client->id)->count());
+
+        $fila = ClientAiTokenUsage::where('client_id', $client->id)->first();
+
+        $this->assertSame(9, $fila->llamadas);
+        $this->assertSame(22000, $fila->input_tokens);
+        $this->assertSame(1300, $fila->output_tokens);
+    }
+
+    /**
+     * 404: la versión instalada del cliente todavía no tiene el endpoint.
+     *
+     * 🔴 Es el caso ESPERADO durante semanas, no un error. Tiene estado propio (`no_soportado`), no
+     * escribe ninguna fila y no toca `ai_tokens_synced_at`. Y sobre todo: **no lanza**, porque esto
+     * corre adentro de un barrido de cuarenta y cinco clientes.
+     *
+     * @return void
+     */
+    public function test_un_cliente_sin_el_endpoint_queda_no_soportado_sin_filas_y_sin_excepcion(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response(['message' => 'Not Found'], 404),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_NO_SOPORTADO, $resultado['estado']);
+        $this->assertSame(0, ClientAiTokenUsage::where('client_id', $client->id)->count());
+
+        $client->refresh();
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_NO_SOPORTADO, $client->ai_tokens_sync_status);
+        $this->assertNotNull($client->ai_tokens_sync_message);
+        $this->assertNull(
+            $client->ai_tokens_synced_at,
+            'Un 404 no puede estampar la fecha de última sincronización exitosa.'
+        );
+    }
+
+    /**
+     * 401: la api_key del admin no coincide con la del cliente. Eso SÍ es un fallo, y el motivo
+     * tiene que quedar escrito para que alguien pueda arreglarlo sin leer el log.
+     *
+     * @return void
+     */
+    public function test_un_401_deja_el_cliente_en_failed_con_el_motivo_escrito(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            '*/api/admin-sync/consumo-ia*' => Http::response(['message' => 'Unauthenticated.'], 401),
+        ]);
+
+        $resultado = app(ClientAiTokensSyncService::class)->traer_del_cliente($client, '2026-09-15', '2026-09-17');
+
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $resultado['estado']);
+        $this->assertStringContainsString('401', (string) $resultado['mensaje']);
+        $this->assertStringContainsString('api_key', (string) $resultado['mensaje']);
+
+        $client->refresh();
+        $this->assertSame(ClientAiTokensSyncService::ESTADO_FAILED, $client->ai_tokens_sync_status);
+        $this->assertStringContainsString('401', (string) $client->ai_tokens_sync_message);
+    }
+
+    /**
+     * Un cliente que explota no puede llevarse puesto el barrido de los demás.
+     *
+     * El servicio ya se compromete a no lanzar; esto prueba el cinturón sobre los tirantes, que es
+     * el `try/catch` por cliente del comando. Se reemplaza el servicio en el contenedor por uno que
+     * revienta a propósito para el primer cliente: es la única forma de ejercitar ese `catch` sin
+     * romper el contrato del servicio real.
+     *
+     * @return void
+     */
+    public function test_el_barrido_sigue_con_el_resto_cuando_un_cliente_explota(): void
+    {
+        $primero = $this->crear_cliente('+5493411111111');
+        $segundo = $this->crear_cliente('+5493412222222');
+
+        $explosivo = new class extends ClientAiTokensSyncService {
+            /** @var int Id del cliente al que se le hace reventar la consulta. */
+            public $revienta_a = 0;
+
+            /** @var array<int, int> Ids visitados, en orden. */
+            public $visitados = [];
+
+            public function traer_del_cliente(Client $client, $desde, $hasta)
+            {
+                $this->visitados[] = (int) $client->id;
+
+                if ((int) $client->id === $this->revienta_a) {
+                    throw new \RuntimeException('El empresa-api de este cliente se cayó a pedazos.');
+                }
+
+                return [
+                    'estado'          => ClientAiTokensSyncService::ESTADO_SUCCESS,
+                    'mensaje'         => null,
+                    'filas'           => 0,
+                    'sincronizado_at' => null,
+                ];
+            }
+        };
+
+        $explosivo->revienta_a = (int) $primero->id;
+
+        $this->app->instance(ClientAiTokensSyncService::class, $explosivo);
+
+        $salida = Artisan::call('tokens:recolectar', ['--dias' => 3]);
+
+        $this->assertSame(0, $salida, 'El comando tiene que terminar en 0 aunque un cliente explote.');
+        $this->assertContains((int) $primero->id, $explosivo->visitados);
+        $this->assertContains(
+            (int) $segundo->id,
+            $explosivo->visitados,
+            'El barrido se cortó en el cliente que explotó y no llegó al siguiente.'
+        );
+    }
+}
