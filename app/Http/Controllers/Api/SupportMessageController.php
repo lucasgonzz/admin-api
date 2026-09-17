@@ -322,6 +322,69 @@ class SupportMessageController extends BaseController
     }
 
     /**
+     * Marca leídos VARIOS mensajes de una sola pasada.
+     *
+     * 🔴 Se AGREGA, no reemplaza: mark_read() sigue existiendo y funcionando igual, y admin-spa
+     * lo mantiene como camino de respaldo. El motivo es que al entrar a un ticket con 40 mensajes
+     * sin leer, el SPA hacía 40 POST — 40 requests, cada uno con su login de sesión, su
+     * findOrFail y su UPDATE.
+     *
+     * Lo que se ahorra son las consultas y los requests, NO la sincronización al ERP: esa sigue
+     * siendo un POST por mensaje, igual que en el de a uno, porque el endpoint de empresa-api es
+     * por mensaje (manda message_uuid) y no existe una variante en lote del otro lado. En un
+     * ticket de WhatsApp —el caso que motivó esto— no se sincroniza nada, así que quedan dos
+     * consultas y listo.
+     *
+     * Por eso el tope de 500 ids es una validación y no un recorte silencioso: si alguna vez
+     * llega un lote más grande, tiene que fallar con 422 y que el SPA caiga al camino de a uno,
+     * no marcar 500 y dejar el resto sin leer sin que nadie se entere.
+     *
+     * @param Request                  $request      Trae `ids`: array de ids de SupportMessage.
+     * @param SupportClientSyncService $sync_service Servicio HTTP hacia el ERP del cliente.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function mark_read_bulk(Request $request, SupportClientSyncService $sync_service)
+    {
+        $validated = $request->validate([
+            'ids'   => ['required', 'array', 'min:1', 'max:500'],
+            'ids.*' => ['required', 'integer'],
+        ]);
+
+        // Ids normalizados y sin repetidos: el SPA puede mandar el mismo dos veces.
+        $ids = array_values(array_unique(array_map('intval', $validated['ids'])));
+
+        // Los que existen de verdad. A diferencia del de a uno, un id inexistente no tira 404:
+        // en un lote eso dejaría sin marcar a los otros 39 por culpa de uno solo.
+        $messages = SupportMessage::with('ticket')->whereIn('id', $ids)->get();
+
+        if ($messages->isEmpty()) {
+            return response()->json(['ok' => true, 'marked' => 0], 200);
+        }
+
+        // Mismo instante para todo el lote: es una sola acción del operador (abrir el ticket).
+        $read_at = now();
+
+        // Un solo UPDATE. Eloquent le suma updated_at solo, igual que haría cada save().
+        SupportMessage::whereIn('id', $messages->pluck('id')->all())
+            ->update(['read_at' => $read_at]);
+
+        foreach ($messages as $message) {
+            // El modelo en memoria tiene que llevar el read_at nuevo: es el valor que
+            // sync_read_to_client() le manda al ERP.
+            $message->read_at = $read_at;
+
+            // Misma guarda que en mark_read(): en un ticket de WhatsApp el cliente no tiene chat
+            // del ERP donde ver la lectura, así que sincronizar sería un POST al pedo.
+            if (! $this->ticket_is_whatsapp($message->ticket)) {
+                $sync_service->sync_read_to_client($message);
+            }
+        }
+
+        return response()->json(['ok' => true, 'marked' => $messages->count()], 200);
+    }
+
+    /**
      * Indica si el ticket viaja por WhatsApp y por lo tanto no se sincroniza al ERP.
      *
      * Un ticket nulo se trata como ERP: es el comportamiento que había antes de esta guarda.
