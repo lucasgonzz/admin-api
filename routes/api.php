@@ -13,6 +13,7 @@ use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\ClientScheduleController;
+use App\Http\Controllers\ClientTokensController;
 use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
 use App\Http\Controllers\DeploymentController;
@@ -37,6 +38,7 @@ use App\Http\Controllers\LeadController;
 use App\Http\Controllers\MetaRawWebhookController;
 use App\Http\Controllers\ProtocolEntryController;
 use App\Http\Controllers\SharedDatabaseGroupController;
+use App\Http\Controllers\TokensResumenController;
 use App\Http\Controllers\UpdateCommandController;
 use App\Http\Controllers\UpdateController;
 use App\Http\Controllers\UpdateSeederController;
@@ -502,6 +504,16 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Horarios: encola el push al empresa-api. */
         Route::post('client/{clientId}/horarios/sync', [ClientScheduleController::class, 'sync_json']);
+
+        /* Consumo de tokens de IA (misión tokens-por-cliente, 17/9/2026).
+           El GET lee del espejo local (`client_ai_token_usages`) y NO sale a la red: abrir una
+           pestaña no puede depender de que la instancia del cliente esté arriba. El único que sale
+           es el POST, que es el botón "Traer ahora" y corre sincrónico porque quien lo aprieta está
+           mirando la pantalla. El resumen global va sin {clientId} y por eso no colisiona con nada
+           del grupo `client/...`. */
+        Route::get('client/{clientId}/tokens', [ClientTokensController::class, 'show_json']);
+        Route::post('client/{clientId}/tokens/sync', [ClientTokensController::class, 'sync_json']);
+        Route::get('tokens/resumen', [TokensResumenController::class, 'index_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
