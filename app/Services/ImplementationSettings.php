@@ -71,14 +71,22 @@ class ImplementationSettings
      * El valor se lee desde admin_settings con key 'implementation_form_url'.
      * Si no existe el registro, devuelve cadena vacía.
      *
+     * 🔴 Única de esta clase que lee con memo, y no por gusto: el accesor form_link de
+     * Implementation está en su $appends, así que esto se llamaba UNA VEZ POR FILA SERIALIZADA
+     * — N consultas a admin_settings en GET /implementation, y otras tantas en GET /client y
+     * GET /lead, que arrastran la implementación como relación. Las demás lecturas de esta
+     * clase pasan una sola vez por request y siguen yendo derecho a la base.
+     *
+     * El memo lo invalida cualquier escritura por Eloquent sobre admin_settings
+     * (AdminSetting::boot()), así que el request que guarda la URL y después serializa
+     * implementaciones ve el valor nuevo, no el viejo.
+     *
      * @return string URL base del formulario (sin barra final ni token).
      */
     public static function get_form_url(): string
     {
         // Leer la URL guardada; devuelve cadena vacía si no está configurada.
-        $value = (string) AdminSetting::where('key', 'implementation_form_url')->value('value');
-
-        return $value ?? '';
+        return (string) AdminSetting::memo_value('implementation_form_url');
     }
 
     /**
