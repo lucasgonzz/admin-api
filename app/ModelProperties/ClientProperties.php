@@ -87,6 +87,24 @@ class ClientProperties
                 'width' => 140,
                 'show'  => true,
             ],
+            /*
+             * Casilla del dueño. Es a donde sale el mail con las novedades cuando se le actualiza
+             * el sistema, y la fuente de verdad de ese envío: lo que esté escrito acá le gana a lo
+             * que conteste el `empresa-api` del cliente.
+             *
+             * Editable a mano a propósito. La columna se llena sola cuando el cliente ya corre una
+             * versión con `admin-sync/contacto-dueno`, pero durante semanas la mayoría no la va a
+             * tener — y la única forma de avisarle a esos es escribirla desde acá.
+             */
+            [
+                'key' => 'email',
+                'text' => 'Mail',
+                'type' => 'text',
+                'value' => '',
+                'use_to_filter_in_search' => true,
+                'width' => 200,
+                'show'  => true,
+            ],
             [
                 'key' => 'client_employees',
                 'text' => 'Empleados',

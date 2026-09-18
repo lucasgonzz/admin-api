@@ -2,10 +2,13 @@
 
 namespace App\Models;
 
+use App\Jobs\EnviarAvisoDeActualizacionJob;
 use App\ModelProperties\ClientVersionUpgradeProperties;
 use App\Models\Concerns\HasUuid;
+use App\Services\AvisoDeActualizacionService;
 use App\Services\VersionNumberComparator;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
 
 class ClientVersionUpgrade extends Model
 {
@@ -45,6 +48,11 @@ class ClientVersionUpgrade extends Model
      *
      * Cualquier save() que deje el status en `terminada` pasa por aca, asi que ningun camino nuevo
      * puede volver a dejar la version desalineada sin que nada avise.
+     *
+     * Por ese mismo motivo el AVISO AL DUEÑO cuelga de acá y no del pipeline de deployment: los
+     * tres caminos que cierran un upgrade pasan por este hook, y el pipeline es solo uno de los
+     * tres. Enganchar el aviso en `DeploymentService::step_complete()` dejaría sin avisar a todo
+     * cliente que Lucas cierre a mano desde la grilla.
      */
     protected static function boot()
     {
@@ -63,7 +71,51 @@ class ClientVersionUpgrade extends Model
             }
 
             $upgrade->alinear_version_del_cliente();
+
+            $upgrade->despachar_aviso_de_actualizacion();
         });
+    }
+
+    /**
+     * Deja anotado que a este upgrade le falta avisarle al dueño, y encola el envío.
+     *
+     * Lo que pasa acá adentro son DOS escrituras y nada más: la fila de `client_upgrade_notices`
+     * —que es el registro y, sobre todo, lo que hace que el aviso no se duplique— y el despacho
+     * del job. 🔴 **Lo que sale a la red (el mail, la consulta al `empresa-api` del cliente y el
+     * WhatsApp) vive en `EnviarAvisoDeActualizacionJob`**, porque este hook corre adentro del
+     * request que cierra el upgrade.
+     *
+     * 🔴 **Y nada de esto puede hacer fallar el upgrade.** El `try/catch` no es prolijidad: sin él,
+     * una excepción del aviso subiría por el `saved()` y abortaría el `save()` que acaba de
+     * registrar que el cliente se actualizó bien. El aviso es un extra; el upgrade es el trabajo.
+     *
+     * @return bool true si quedó encolado.
+     */
+    public function despachar_aviso_de_actualizacion()
+    {
+        try {
+            $service = new AvisoDeActualizacionService();
+
+            /* Devuelve null cuando no hay nada que hacer: sin cliente, o el aviso de este upgrade
+               ya se trabajó. Ahí tampoco se encola nada. */
+            $aviso = $service->registrar($this);
+
+            if (is_null($aviso)) {
+                return false;
+            }
+
+            EnviarAvisoDeActualizacionJob::dispatch((int) $this->id)
+                ->onConnection(EnviarAvisoDeActualizacionJob::CONEXION_DE_COLA);
+
+            return true;
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('ClientVersionUpgrade: no se pudo encolar el aviso al dueño.', [
+                'client_version_upgrade_id' => $this->id,
+                'error'                     => $exception->getMessage(),
+            ]);
+
+            return false;
+        }
     }
 
     /**

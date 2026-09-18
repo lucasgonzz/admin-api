@@ -3,6 +3,12 @@
     $brand = config('commerciocity.brand_name', 'ComercioCity');
     $headerBg = config('commerciocity.header_background', '#0068D4');
     $logoUrl = config('commerciocity.logo_url');
+    // Medidas del logo, de config y no fijas acá: el isotipo de ComercioCity es CUADRADO y con las
+    // medidas apaisadas que estaban escritas a mano (120x55) se deformaba. Salen de config para que
+    // cambiar el logo por uno de otra proporción no obligue a tocar este partial, que lo comparten
+    // todos los mails del sistema.
+    $logoWidth = (int) config('commerciocity.logo_width', 72);
+    $logoHeight = (int) config('commerciocity.logo_height', 72);
 @endphp
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:linear-gradient(180deg,{{ $headerBg }} 0%,{{ $headerBg }} 100%);background-color:{{ $headerBg }};">
     <tr>
@@ -10,8 +16,10 @@
             <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
                 <tr>
                     @if(!empty($logoUrl))
-                    <td valign="middle" style="padding-right:12px;">
-                        <img src="{{ $logoUrl }}" alt="{{ $brand }}" width="120" height="55" style="display:block;width:120px;height:55px;border:0;border-radius:8px;" />
+                    {{-- Sin padding lateral: la celda es la única de una tabla centrada, así que un
+                         padding a un solo lado corría el logo del centro. --}}
+                    <td valign="middle">
+                        <img src="{{ $logoUrl }}" alt="{{ $brand }}" width="{{ $logoWidth }}" height="{{ $logoHeight }}" style="display:block;width:{{ $logoWidth }}px;height:{{ $logoHeight }}px;border:0;border-radius:8px;" />
                     </td>
                     @else
                     <td valign="middle">
