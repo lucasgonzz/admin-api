@@ -815,6 +815,19 @@ class LeadProperties
                 'value' => null,
                 'show' => false,
             ],
+            /*
+             * Cada cuántos meses se actualiza la mensualidad por IPC (misión modulo-cobranzas,
+             * 18/9/2026). Está acá para que el PUT genérico del lead (ModelPropertiesHelper) lo
+             * persista cuando la pestaña Contrato lo manda; default 6 = el texto histórico del
+             * contrato ("cada seis (6) meses").
+             */
+            [
+                'key' => 'contract_meses_actualizacion',
+                'text' => 'Contrato — meses entre actualizaciones (IPC)',
+                'type' => 'number',
+                'value' => 6,
+                'show' => false,
+            ],
         ];
     }
 }

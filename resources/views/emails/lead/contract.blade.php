@@ -301,8 +301,11 @@
     @if($fecha_primer_pago_mensual)
         <p>El primer pago de la mensualidad deberá realizarse el <strong>{{ $fecha_primer_pago_mensual }}</strong>.</p>
     @endif
+    {{-- Cada cuántos meses se actualiza por IPC: variable desde la misión modulo-cobranzas (18/9/2026).
+         El texto ("seis (6) meses") lo arma LeadContractPdfService::meses_en_letras(); el `??` es la red
+         para un llamador que renderice la vista con datos armados por otro camino y sin esa clave. --}}
     <p>
-        Los importes de la mensualidad podrán actualizarse cada <strong>seis (6) meses</strong> conforme al índice IPC publicado por el INDEC,
+        Los importes de la mensualidad podrán actualizarse cada <strong>{{ $meses_actualizacion_texto ?? 'seis (6) meses' }}</strong> conforme al índice IPC publicado por el INDEC,
         con un aviso previo de <strong>quince (15) días</strong> al CLIENTE.
     </p>
 

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Client;
+use Carbon\Carbon;
 
 /**
  * Calcula y persiste la mensualidad de un Client, replicando exactamente la
@@ -116,6 +117,17 @@ class ClientMensualidadService
             $client->payment_expired_at = $payload['payment_expired_at'];
         }
 
+        /* Primer mes que se cobra (misión modulo-cobranzas, 18/9/2026). Solo si la clave VIENE en
+         * el payload: el SPA anterior a esta misión no la manda y no tiene por qué borrarla. Con la
+         * clave en null sí se borra (es el input vaciado a mano: "todavía no arrancó"). Se guarda
+         * siempre como el día 1, porque el módulo compara meses y un 15 de agosto colgado ahí
+         * haría que agosto quede antes del inicio. */
+        if (array_key_exists('mensualidad_inicio', $payload)) {
+            $client->mensualidad_inicio = $payload['mensualidad_inicio'] !== null && $payload['mensualidad_inicio'] !== ''
+                ? Carbon::parse($payload['mensualidad_inicio'])->startOfMonth()->toDateString()
+                : null;
+        }
+
         // Datos fiscales del receptor, solo si vinieron en el payload (para no pisarlos en updates parciales).
         if (array_key_exists('afip_cuit', $payload)) {
             $client->afip_cuit = $payload['afip_cuit'];
@@ -188,6 +200,13 @@ class ClientMensualidadService
             'afip_condicion_iva' => $client->afip_condicion_iva,
             'afip_domicilio' => $client->afip_domicilio,
             'desglose' => $desglose,
+            /* Cobranzas (misión modulo-cobranzas, 18/9/2026). `mensualidad_inicio` como 'YYYY-MM-DD'
+             * o null (el cast lo trae como Carbon y el front quiere un string para el input). La
+             * `actualizacion` es el resumen de la última actualización oficial de precios; se
+             * resuelve acá con app() y no por constructor porque CobranzasMensualidadService
+             * depende de este servicio (para aplicar los precios) y al revés sería circular. */
+            'mensualidad_inicio' => $client->mensualidad_inicio ? $client->mensualidad_inicio->toDateString() : null,
+            'actualizacion' => app(CobranzasMensualidadService::class)->resumen_actualizacion($client),
         ];
     }
 }

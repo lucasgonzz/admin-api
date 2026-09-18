@@ -62,6 +62,19 @@ class Client extends Model
         // el …"). ai_plan_sync_status/_message son texto y no necesitan cast.
         'ai_plan_id'                => 'integer',
         'ai_plan_synced_at'         => 'datetime',
+        /* Contrato del cliente (misión modulo-cobranzas, 18/9/2026): los mismos casts que tiene
+         * `Lead` para las mismas columnas, porque `LeadContractPdfService` lee los atributos por
+         * nombre en los dos modelos y espera lo mismo de cada uno (arrays ya decodificados, fechas
+         * como Carbon). `contract_meses_actualizacion` a int porque se hacen cuentas con él. */
+        'contract_financiacion'              => 'array',
+        'contract_clausulas_particulares'    => 'array',
+        'contract_fecha_emision'             => 'date',
+        'contract_fecha_primer_pago_unico'   => 'date',
+        'contract_fecha_primer_pago_mensual' => 'date',
+        'contract_meses_actualizacion'       => 'integer',
+        'contract_copiado_desde_lead_at'     => 'datetime',
+        // Primer mes que se cobra la mensualidad (siempre el día 1). Nulo = todavía no arrancó.
+        'mensualidad_inicio'                 => 'date',
     ];
 
     /**
@@ -247,5 +260,54 @@ class Client extends Model
     public function ai_plan()
     {
         return $this->belongsTo(AiPlan::class, 'ai_plan_id');
+    }
+
+    /*
+     * Cobranzas (misión modulo-cobranzas, 18/9/2026). Las cuatro relaciones de abajo
+     * 🔴 a propósito NO se suman a scopeWithAll(), con el mismo criterio que `schedule_days` y
+     * `ai_plan`: ese scope lo usa index_json() para listar TODOS los clientes, y el historial de
+     * pagos y precios de cada uno engordaría ese payload sin que nadie lo pida. El módulo de
+     * Cobranzas y las pestañas del cliente tienen sus propios endpoints, que cargan lo que
+     * necesitan en consultas acotadas.
+     */
+
+    /**
+     * Historial de actualizaciones de precio de la mensualidad, la más reciente primero.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function mensualidad_actualizaciones()
+    {
+        return $this->hasMany(MensualidadActualizacion::class)->orderByDesc('fecha')->orderByDesc('id');
+    }
+
+    /**
+     * Meses de mensualidad con estado afirmado (los que tienen fila; el resto se deduce).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function mensualidad_periodos()
+    {
+        return $this->hasMany(MensualidadPeriodo::class);
+    }
+
+    /**
+     * Pagos recibidos por la mensualidad.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function mensualidad_pagos()
+    {
+        return $this->hasMany(MensualidadPago::class);
+    }
+
+    /**
+     * Cuotas de la licencia (el pago único del contrato), por número.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function licencia_cuotas()
+    {
+        return $this->hasMany(LicenciaCuota::class)->orderBy('numero')->orderBy('id');
     }
 }
