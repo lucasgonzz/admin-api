@@ -169,30 +169,53 @@ class CobranzasController extends Controller
 
     /**
      * Guarda las preferencias del admin autenticado: los meses seleccionados (1 a 24, 'YYYY-MM')
-     * y el orden. Se persiste en `admins.cobranzas_preferencias`, así cada admin tiene la suya.
+     * y el orden de Mensualidades, y/o la selección de meses de Licencias. Se persiste en
+     * `admins.cobranzas_preferencias`, así cada admin tiene la suya.
      *
-     * @param  Request                     $request  {meses: [...], orden}
+     * Aditivo y con semántica de MERGE (misión cobranzas-mejoras, 18/9/2026, pedido 4):
+     * Mensualidades.vue manda `{meses, orden}` y Licencias.vue manda `{licencias_meses}`, cada una
+     * sin la clave de la otra — por eso todos los campos son `sometimes` (una request que solo
+     * manda una de las dos no tiene por qué mandar la otra) y la escritura parte de lo ya guardado
+     * en vez de reemplazarlo entero. Sin este cuidado, guardar una selección borraría la de la
+     * otra vista cada vez que alguien toca un mes.
+     *
+     * @param  Request                     $request  {meses?: [...], orden?, licencias_meses?: [...]}
      * @param  CobranzasMensualidadService $service
      * @return \Illuminate\Http\JsonResponse
      */
     public function guardar_preferencias_json(Request $request, CobranzasMensualidadService $service)
     {
         $validated = $request->validate([
-            'meses'   => ['required', 'array', 'min:1', 'max:' . self::MAXIMO_MESES],
-            'meses.*' => ['required', 'string', self::REGLA_PERIODO],
-            'orden'   => ['required', 'string', 'in:' . implode(',', self::ORDENES)],
+            'meses'             => ['sometimes', 'array', 'min:1', 'max:' . self::MAXIMO_MESES],
+            'meses.*'           => ['sometimes', 'string', self::REGLA_PERIODO],
+            'orden'             => ['sometimes', 'string', 'in:' . implode(',', self::ORDENES)],
+            'licencias_meses'   => ['sometimes', 'array', 'min:1', 'max:' . self::MAXIMO_MESES],
+            'licencias_meses.*' => ['sometimes', 'string', self::REGLA_PERIODO],
         ]);
 
         $admin = $request->user();
 
-        /** Sin duplicados y ordenados: la tira se dibuja siempre igual sin importar cómo se clickeó. */
-        $meses = array_values(array_unique($validated['meses']));
-        sort($meses);
+        // Se parte de lo ya guardado y se pisa SOLO lo que vino validado en este request.
+        $preferencias = is_array($admin->cobranzas_preferencias) ? $admin->cobranzas_preferencias : [];
 
-        $admin->cobranzas_preferencias = [
-            'meses' => $meses,
-            'orden' => $validated['orden'],
-        ];
+        if (array_key_exists('meses', $validated)) {
+            /** Sin duplicados y ordenados: la tira se dibuja siempre igual sin importar cómo se clickeó. */
+            $meses = array_values(array_unique($validated['meses']));
+            sort($meses);
+            $preferencias['meses'] = $meses;
+        }
+
+        if (array_key_exists('orden', $validated)) {
+            $preferencias['orden'] = $validated['orden'];
+        }
+
+        if (array_key_exists('licencias_meses', $validated)) {
+            $licencias_meses = array_values(array_unique($validated['licencias_meses']));
+            sort($licencias_meses);
+            $preferencias['licencias_meses'] = $licencias_meses;
+        }
+
+        $admin->cobranzas_preferencias = $preferencias;
         $admin->save();
 
         return response()->json($this->preferencias_normalizadas($admin->cobranzas_preferencias, $service->mes_corriente()));
@@ -238,17 +261,46 @@ class CobranzasController extends Controller
     /**
      * Las preferencias con defaults aplicados y basura descartada: meses que no son 'YYYY-MM' se
      * ignoran, y si no queda ninguno se usa el corriente; un orden desconocido cae a 'carga'.
+     * `licencias_meses` (misión cobranzas-mejoras, 18/9/2026) se sanea con la misma lógica que
+     * `meses`, pero es independiente: Licencias no tiene "orden".
      *
      * @param mixed  $guardadas    Lo que hay en `admins.cobranzas_preferencias` (array o null).
      * @param string $mes_corriente
      *
-     * @return array{meses: array<int, string>, orden: string}
+     * @return array{meses: array<int, string>, orden: string, licencias_meses: array<int, string>}
      */
     private function preferencias_normalizadas($guardadas, string $mes_corriente): array
     {
+        $meses = $this->meses_saneados($guardadas, 'meses', $mes_corriente);
+        $licencias_meses = $this->meses_saneados($guardadas, 'licencias_meses', $mes_corriente);
+
+        $orden = is_array($guardadas) && isset($guardadas['orden']) && in_array($guardadas['orden'], self::ORDENES, true)
+            ? $guardadas['orden']
+            : 'carga';
+
+        return [
+            'meses'           => $meses,
+            'orden'           => $orden,
+            'licencias_meses' => $licencias_meses,
+        ];
+    }
+
+    /**
+     * Saca de `$guardadas[$clave]` los 'YYYY-MM' válidos, sin duplicados y ordenados; si no queda
+     * ninguno, el mes corriente. Extraído para que `meses` y `licencias_meses` compartan
+     * exactamente el mismo saneo dentro de `preferencias_normalizadas()`.
+     *
+     * @param mixed  $guardadas
+     * @param string $clave         'meses' o 'licencias_meses'.
+     * @param string $mes_corriente
+     *
+     * @return array<int, string>
+     */
+    private function meses_saneados($guardadas, string $clave, string $mes_corriente): array
+    {
         $meses = [];
-        if (is_array($guardadas) && isset($guardadas['meses']) && is_array($guardadas['meses'])) {
-            foreach ($guardadas['meses'] as $mes) {
+        if (is_array($guardadas) && isset($guardadas[$clave]) && is_array($guardadas[$clave])) {
+            foreach ($guardadas[$clave] as $mes) {
                 if (CobranzasMensualidadService::es_periodo_valido($mes)) {
                     $meses[] = $mes;
                 }
@@ -257,17 +309,6 @@ class CobranzasController extends Controller
         $meses = array_values(array_unique($meses));
         sort($meses);
 
-        if (count($meses) === 0) {
-            $meses = [$mes_corriente];
-        }
-
-        $orden = is_array($guardadas) && isset($guardadas['orden']) && in_array($guardadas['orden'], self::ORDENES, true)
-            ? $guardadas['orden']
-            : 'carga';
-
-        return [
-            'meses' => $meses,
-            'orden' => $orden,
-        ];
+        return count($meses) === 0 ? [$mes_corriente] : $meses;
     }
 }
