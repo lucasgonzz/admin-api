@@ -3,6 +3,7 @@
 namespace Tests\Feature\AvisoDeActualizacion;
 
 use App\Models\ClientUpgradeNotice;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 
@@ -125,5 +126,132 @@ class ClienteSinElEndpointTest extends BaseDelAviso
 
         $this->assertSame(ClientUpgradeNotice::ESTADO_SIN_MAIL, $aviso->estado);
         Http::assertNothingSent();
+    }
+
+    /**
+     * 🔴 **El 404 se pide UNA sola vez.**
+     *
+     * `retry()` sin su tercer parametro reintenta cualquier respuesta no exitosa, y el 404 es el
+     * caso NORMAL de este canal durante semanas: cada upgrade de cada cliente que todavía corre una
+     * versión sin el endpoint. Reintentarlo serían dos requests con 500 ms de espera en el medio
+     * para enterarse exactamente de lo mismo. Un 4xx no se arregla insistiendo.
+     *
+     * @return void
+     */
+    public function test_el_404_se_pide_una_sola_vez()
+    {
+        Mail::fake();
+        Http::fake(['*contacto-dueno*' => Http::response('', 404)]);
+
+        $client  = $this->crear_cliente(['email' => null]);
+        $version = $this->crear_version();
+        $this->crear_novedad($version, 'Una novedad', 'El cuerpo de la novedad.');
+        $upgrade = $this->crear_upgrade($client, [$version]);
+        $upgrade->update(['status' => 'terminada']);
+
+        $aviso = $this->servicio()->avisar($upgrade->fresh());
+
+        $this->assertSame(ClientUpgradeNotice::ESTADO_SIN_MAIL, $aviso->estado);
+
+        Http::assertSentCount(1);
+    }
+
+    /**
+     * El 401 tampoco se reintenta: el cliente entendió el pedido y dijo que no.
+     *
+     * @return void
+     */
+    public function test_la_api_key_rechazada_se_pide_una_sola_vez()
+    {
+        Mail::fake();
+        Http::fake(['*contacto-dueno*' => Http::response('', 401)]);
+
+        $client  = $this->crear_cliente(['email' => null]);
+        $version = $this->crear_version();
+        $this->crear_novedad($version, 'Una novedad', 'El cuerpo de la novedad.');
+        $upgrade = $this->crear_upgrade($client, [$version]);
+        $upgrade->update(['status' => 'terminada']);
+
+        $this->servicio()->avisar($upgrade->fresh());
+
+        Http::assertSentCount(1);
+    }
+
+    /**
+     * 🔴 **Un 5xx SÍ se reintenta**: eso es lo que separa "no insistas" de "no reintentes
+     * nada". Un 502 de un nginx que estaba reiniciando puede andar medio segundo después.
+     *
+     * @return void
+     */
+    public function test_el_error_del_servidor_si_se_reintenta()
+    {
+        Mail::fake();
+        Http::fake(['*contacto-dueno*' => Http::response('', 500)]);
+
+        $client  = $this->crear_cliente(['email' => null]);
+        $version = $this->crear_version();
+        $this->crear_novedad($version, 'Una novedad', 'El cuerpo de la novedad.');
+        $upgrade = $this->crear_upgrade($client, [$version]);
+        $upgrade->update(['status' => 'terminada']);
+
+        $aviso = $this->servicio()->avisar($upgrade->fresh());
+
+        $this->assertSame(ClientUpgradeNotice::ESTADO_SIN_MAIL, $aviso->estado);
+
+        Http::assertSentCount((int) config('services.client_api.retries', 2));
+    }
+
+    /**
+     * 🔴 **El cliente que no contesta: timeout, conexión rechazada, DNS que no resuelve.**
+     *
+     * Es el único modo de degradación que no tiene respuesta HTTP, así que no pasa por
+     * `motivo_del_status()` sino por el `catch (\Throwable)` del resolver. Ese catch es lo único
+     * que lo separa de una excepción subiendo hasta el job — y sin este test, sacarlo no lo
+     * denunciaría nadie.
+     *
+     * De paso deja escrito que SÍ se reintenta: es el caso pasajero por excelencia.
+     *
+     * @return void
+     */
+    public function test_el_cliente_que_no_contesta_deja_el_aviso_en_sin_mail()
+    {
+        Mail::fake();
+
+        $intentos = 0;
+
+        Http::fake(function ($request) use (&$intentos) {
+            $intentos++;
+
+            throw new ConnectionException('cURL error 28: Operation timed out');
+        });
+
+        $client  = $this->crear_cliente(['email' => null]);
+        $version = $this->crear_version();
+        $this->crear_novedad($version, 'Una novedad', 'El cuerpo de la novedad.');
+        $upgrade = $this->crear_upgrade($client, [$version]);
+        $upgrade->update(['status' => 'terminada']);
+
+        $this->assertSame('terminada', $upgrade->fresh()->status, 'el upgrade cerró bien igual');
+
+        $aviso = $this->servicio()->avisar($upgrade->fresh());
+
+        $this->assertNotNull($aviso);
+        $this->assertSame(
+            ClientUpgradeNotice::ESTADO_SIN_MAIL,
+            $aviso->estado,
+            'el cliente que no contesta es un dato que falta, no una excepción que sube'
+        );
+        $this->assertNull($aviso->mail_enviado_at);
+        $this->assertNull($aviso->email);
+
+        Mail::assertNothingSent();
+        $this->assertSame(0, $this->whatsapp->cuantos_envios());
+        $this->assertNull($client->fresh()->email);
+
+        $this->assertSame(
+            (int) config('services.client_api.retries', 2),
+            $intentos,
+            'un corte de conexión SÍ se reintenta: puede ser pasajero'
+        );
     }
 }

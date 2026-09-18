@@ -112,14 +112,32 @@ class ClientContactEmailResolver
                     'Accept'          => 'application/json',
                 ])
                 ->timeout((int) config('services.client_api.timeout', 15))
-                ->retry((int) config('services.client_api.retries', 2), 500)
+                /*
+                 * 🔴 El tercer parámetro NO es adorno: sin él se reintenta CUALQUIER respuesta no
+                 * exitosa, incluido el 404 — que en este canal es el caso NORMAL durante semanas,
+                 * en cada upgrade de cada cliente que todavía corre una versión sin el endpoint.
+                 * Reintentarlo sería pedir dos veces, con 500 ms de espera en el medio, para
+                 * enterarse exactamente de lo mismo. Un 4xx no se arregla insistiendo.
+                 *
+                 * Mismo criterio y misma forma que `ClientAiTokensSyncService`, que ya pasó por
+                 * esto en este repo.
+                 */
+                ->retry(
+                    (int) config('services.client_api.retries', 2),
+                    500,
+                    function ($exception) {
+                        return $this->conviene_reintentar($exception);
+                    }
+                )
                 ->get($url);
         } catch (RequestException $exception) {
             /*
              * ⚠️ Con `retry()` activo (tries > 1), Laravel NO devuelve la respuesta fallida: la
-             * convierte en excepción después de agotar los intentos. O sea que el 404 —el caso de
-             * lejos más común de este canal— llega por ACÁ y no por el `successful()` de abajo.
-             * Ese chequeo igual se queda, porque con `CLIENT_API_RETRIES=1` no hay excepción.
+             * convierte en excepción. O sea que el 404 —el caso de lejos más común de este canal—
+             * llega por ACÁ y no por el `successful()` de abajo, aunque no se lo reintente: el
+             * helper `retry()` de Laravel re-lanza la excepción en cuanto el callable dice que no
+             * conviene insistir. Ese chequeo igual se queda, porque con `CLIENT_API_RETRIES=1` no
+             * hay excepción.
              */
             $status = $exception->response !== null ? $exception->response->status() : 0;
 
@@ -197,6 +215,38 @@ class ClientContactEmailResolver
             // la próxima vez y ya.
             $this->anotar($client, 'no se pudo guardar la casilla (' . $exception->getMessage() . ')');
         }
+    }
+
+    /**
+     * Si vale la pena volver a pedir después de esta falla.
+     *
+     * La línea es entre lo que puede cambiar en 500 ms y lo que no:
+     *
+     *   - **Los `4xx` NO se reintentan.** El 404 (el cliente corre una versión sin el endpoint) y
+     *     el 401/403 (la api_key no sirve) son respuestas firmes: el cliente entendió el pedido y
+     *     dijo que no. Volver a preguntar da lo mismo y duplica el tráfico de todo el canal.
+     *   - **Los errores de conexión y los `5xx` SÍ.** Timeout, DNS que no resuelve, conexión
+     *     rechazada, 502 de un nginx que estaba reiniciando: todos son estados pasajeros del otro
+     *     lado, y medio segundo después puede andar.
+     *
+     * @param \Throwable $exception Lo que tiró el intento anterior.
+     *
+     * @return bool true para volver a intentar.
+     */
+    protected function conviene_reintentar($exception): bool
+    {
+        if (! ($exception instanceof RequestException)) {
+            // ConnectionException, timeout, DNS: puede ser pasajero.
+            return true;
+        }
+
+        if ($exception->response === null) {
+            return true;
+        }
+
+        $status = (int) $exception->response->status();
+
+        return $status < 400 || $status >= 500;
     }
 
     /**
