@@ -633,6 +633,9 @@ class CobranzasMensualidadService
                 'cantidad_empleados'      => (int) $client->cantidad_empleados,
                 'tiene_ecommerce'         => (bool) $client->tiene_ecommerce,
                 'afip_cuit'               => $client->afip_cuit,
+                // Teléfono del dueño (misión cobranzas-mejoras, 18/9/2026): sin este campo el
+                // frontend no tiene con qué armar el link de wa.me del botón "Enviar WhatsApp".
+                'phone'                   => $client->phone,
                 'cobranzas_observaciones' => $client->cobranzas_observaciones,
                 'actualizacion'           => $this->resumen_actualizacion($client, $cargado['ultimas_oficiales'][$client->id] ?? null, true),
                 'meses'                   => $por_mes,

@@ -121,17 +121,32 @@ class ClientMensualidadController extends Controller
      * anteriormente, no vuelve a emitir: devuelve el registro existente con
      * `ya_facturado = true`.
      *
-     * @param  Request                $request
-     * @param  int|string             $clientId
-     * @param  AfipFacturacionService $service   Inyectado por el IoC de Laravel.
+     * Antes de facturar (pedido 9, misión cobranzas-mejoras, 18/9/2026) trae los empleados vivos
+     * del cliente, para que el total facturado sea el actualizado y no el que quedó la última vez
+     * que alguien tocó "Traer empleados" a mano. Cubre los dos lugares donde se factura (el botón
+     * de la fila en Mensualidades.vue y el de la pestaña Facturación del cliente): los dos pegan a
+     * este mismo endpoint.
+     *
+     * @param  Request                     $request
+     * @param  int|string                  $clientId
+     * @param  AfipFacturacionService      $service   Inyectado por el IoC de Laravel.
+     * @param  CobranzasMensualidadService $cobranzas Inyectado por el IoC de Laravel.
      * @return \Illuminate\Http\JsonResponse
      */
-    public function emitir_factura_json(Request $request, $clientId, AfipFacturacionService $service)
+    public function emitir_factura_json(Request $request, $clientId, AfipFacturacionService $service, CobranzasMensualidadService $cobranzas)
     {
         $client = Client::findOrFail($clientId);
 
         // Período a facturar: por default, el mes/año actual ('YYYY-MM').
         $periodo = $request->input('periodo', date('Y-m'));
+
+        /* Sin chequear el resultado ni frenar si `soportado` da false: es exactamente lo que ya
+         * hace el botón manual "Traer empleados" (si el cliente no soporta la sincronización, no
+         * pasa nada y se factura con los datos que ya había). Nunca tira excepción (el camino de
+         * red está en try/catch adentro de ClientMensualidadSyncService), así que no hace falta un
+         * try/catch acá tampoco. `sincronizar_empleados()` deja `total_mensualidad` actualizado en
+         * el MISMO objeto $client que se le pasa después a `emitir()`. */
+        $cobranzas->sincronizar_empleados($client);
 
         $resultado = $service->emitir($client, $periodo);
 
