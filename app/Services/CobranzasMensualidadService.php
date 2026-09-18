@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Helpers\AppTime;
+use App\Helpers\WhatsappNormalizer;
 use App\Models\Admin;
 use App\Models\Client;
 use App\Models\MensualidadActualizacion;
@@ -753,9 +754,14 @@ class CobranzasMensualidadService
                 'cantidad_empleados'      => (int) $client->cantidad_empleados,
                 'tiene_ecommerce'         => (bool) $client->tiene_ecommerce,
                 'afip_cuit'               => $client->afip_cuit,
-                // Teléfono del dueño (misión cobranzas-mejoras, 18/9/2026): sin este campo el
-                // frontend no tiene con qué armar el link de wa.me del botón "Enviar WhatsApp".
+                // Teléfono del dueño, crudo tal como está cargado (misión cobranzas-mejoras,
+                // 18/9/2026): por si el frontend lo necesita para mostrarlo tal cual.
                 'phone'                   => $client->phone,
+                // Ya normalizado a dígitos puros, listo para wa.me/ (hallazgo del chequeo
+                // independiente, 18/9/2026): `clients.phone` es de formato libre, y el frontend no
+                // tiene por qué reimplementar la normalización de teléfonos argentinos. El
+                // frontend usa ESTE campo directo, sin volver a tocarlo.
+                'phone_whatsapp'          => $this->phone_para_whatsapp($client->phone),
                 'cobranzas_observaciones' => $client->cobranzas_observaciones,
                 'actualizacion'           => $this->resumen_actualizacion($client, $cargado['ultimas_oficiales'][$client->id] ?? null, true),
                 'meses'                   => $por_mes,
@@ -763,6 +769,28 @@ class CobranzasMensualidadService
         }
 
         return $tabla;
+    }
+
+    /**
+     * Normaliza `clients.phone` (formato libre) a dígitos puros, listo para `wa.me/<numero>`
+     * (hallazgo del chequeo independiente, misión cobranzas-mejoras, 18/9/2026).
+     *
+     * Usa `WhatsappNormalizer` y NO `ArgentinePhoneNormalizer`: se grepearon los dos antes de
+     * elegir. `WhatsappNormalizer` es el que ya usan `WhatsappSendService` para mandar mensajes
+     * de verdad y `ClientPhoneDirectory` para reconocer los teléfonos de un cliente —el mismo tipo
+     * de uso que necesita este link—; `ArgentinePhoneNormalizer` es del flujo de formularios de
+     * implementación (`ImplementationConversationService`/`ImplementationFormMapper`), un dominio
+     * distinto.
+     *
+     * @param string|null $phone Crudo, tal como está en `clients.phone`.
+     *
+     * @return string|null Solo dígitos (sin '+'), o null si no se pudo normalizar (vacío, sin dígitos).
+     */
+    protected function phone_para_whatsapp(?string $phone): ?string
+    {
+        $normalizado = WhatsappNormalizer::normalize((string) $phone);
+
+        return $normalizado !== '' ? ltrim($normalizado, '+') : null;
     }
 
     /**
