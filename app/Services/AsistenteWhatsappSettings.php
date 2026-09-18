@@ -7,7 +7,7 @@ use App\Models\AdminSetting;
 /**
  * Los interruptores globales del canal del asistente por WhatsApp.
  *
- * Son tres y cada uno tapa un agujero distinto:
+ * Son cuatro y cada uno tapa un agujero distinto:
  *
  *   1. **Los tickets de soporte, desconectados.** Lucas lo dictó el 16/9/2026: *"actualmente los
  *      clientes se comunican a otro número por soporte, así que simplemente dejá desconectada la
@@ -22,8 +22,13 @@ use App\Models\AdminSetting;
  *   3. **Con qué plantilla salen los informes de la mañana.** A las 8:30 la ventana de 24 hs de
  *      Meta está cerrada para casi todos los dueños, así que sin plantilla aprobada esa parte no
  *      sale. No hay default posible: una plantilla inventada la rechaza Meta.
+ *   4. **Con qué plantilla se avisa que le actualizamos el sistema.** Mismo problema que el punto
+ *      3 y por el mismo motivo: un upgrade se cierra a cualquier hora y la ventana de 24 hs casi
+ *      nunca está abierta. 🔴 Mientras esa fila no exista, el WhatsApp del aviso NO SE MANDA y
+ *      queda pendiente — **el mail sale igual**. Un `send_template` con una plantilla que no está
+ *      creada en Meta lo rechaza Meta, así que inventarle un default sería garantizar el rechazo.
  *
- * Ninguna de las tres tiene migración ni seeder, por el mismo motivo que `SupportAiSettings`: la
+ * Ninguna de las cuatro tiene migración ni seeder, por el mismo motivo que `SupportAiSettings`: la
  * fila se materializa cuando alguien la escribe, y hasta entonces manda el default de acá.
  * Sembrarlas sería un segundo lugar donde vive el default, y los dos se desincronizan sin aviso.
  */
@@ -43,6 +48,15 @@ class AsistenteWhatsappSettings
 
     /** Idioma por defecto de la plantilla, el mismo que usan las de cliente. */
     private const DEFAULT_INFORME_TEMPLATE_LANGUAGE = 'es_AR';
+
+    /** Clave: nombre de la plantilla de Meta con la que se avisa que actualizamos el sistema. */
+    public const KEY_ACTUALIZACION_TEMPLATE_NAME = 'asistente_actualizacion_template_name';
+
+    /** Clave: idioma con el que esa plantilla quedó aprobada en Meta. */
+    public const KEY_ACTUALIZACION_TEMPLATE_LANGUAGE = 'asistente_actualizacion_template_language';
+
+    /** Idioma por defecto de la plantilla del aviso de actualización. */
+    private const DEFAULT_ACTUALIZACION_TEMPLATE_LANGUAGE = 'es_AR';
 
     /**
      * Indica si un mensaje de cliente por WhatsApp todavía abre un ticket de soporte.
@@ -100,5 +114,31 @@ class AsistenteWhatsappSettings
         $idioma = trim((string) AdminSetting::get(self::KEY_INFORME_TEMPLATE_LANGUAGE, ''));
 
         return $idioma !== '' ? $idioma : self::DEFAULT_INFORME_TEMPLATE_LANGUAGE;
+    }
+
+    /**
+     * Nombre de la plantilla de Meta con la que se avisa que le actualizamos el sistema al dueño.
+     *
+     * 🔴 Cadena vacía significa NO MANDAR NADA, no "mandá algo genérico". La plantilla
+     * (`cc_sistema_actualizado`) se crea a mano en Meta y hasta que exista, el WhatsApp del aviso
+     * queda pendiente: el mail, que es el que lleva el contenido, sale igual.
+     *
+     * @return string Cadena vacía si no hay ninguna configurada.
+     */
+    public static function plantilla_de_actualizaciones(): string
+    {
+        return trim((string) AdminSetting::get(self::KEY_ACTUALIZACION_TEMPLATE_NAME, ''));
+    }
+
+    /**
+     * Idioma con el que esa plantilla quedó aprobada en Meta.
+     *
+     * @return string
+     */
+    public static function idioma_de_la_plantilla_de_actualizaciones(): string
+    {
+        $idioma = trim((string) AdminSetting::get(self::KEY_ACTUALIZACION_TEMPLATE_LANGUAGE, ''));
+
+        return $idioma !== '' ? $idioma : self::DEFAULT_ACTUALIZACION_TEMPLATE_LANGUAGE;
     }
 }
