@@ -89,6 +89,24 @@ class ReintentarAvisoDeActualizacionCommand extends Command
             );
         }
 
+        $esperando = $this->candidatos_esperando_a_la_cola()->get();
+
+        if (! $esperando->isEmpty()) {
+            $this->warn($esperando->count() . ' aviso(s) esperando a la cola hace rato:');
+            $this->table(
+                ['Aviso', 'Cliente', 'Negocio', 'Upgrade', 'Version', 'Estado', 'Motivo'],
+                $esperando->map(function ($aviso) {
+                    return $this->fila_del_reporte($aviso);
+                })->all()
+            );
+            $this->line(
+                'Estos los tendria que haber mandado el worker de la cola (`queue:work database`, '
+                . 'que el scheduler dispara cada minuto). Si aparecen aca es porque NO se esta '
+                . 'moviendo: revisa que el scheduler este corriendo. Se pueden reintentar a mano '
+                . 'con --aplicar, sin riesgo de duplicar (el aviso se reclama antes de mandarse).'
+            );
+        }
+
         $solo_whatsapp = $this->candidatos_solo_whatsapp()->get();
 
         if ($solo_whatsapp->isEmpty()) {
@@ -152,13 +170,21 @@ class ReintentarAvisoDeActualizacionCommand extends Command
         $que_falta = 'el mail';
 
         if (! $aviso instanceof ClientUpgradeNotice) {
+            /* Los que la cola nunca levantó. Van después de los `sin_mail` porque el motivo de
+               estos no es del cliente sino nuestro -el worker no corrió- y se arreglan solos en
+               cuanto vuelva a correr. */
+            $aviso = $this->candidatos_esperando_a_la_cola()->where('client_id', $client->id)->first();
+            $que_falta = 'el mail (lo tendría que haber mandado la cola y no se movió)';
+        }
+
+        if (! $aviso instanceof ClientUpgradeNotice) {
             $aviso = $this->candidatos_solo_whatsapp()->where('client_id', $client->id)->first();
             $que_falta = 'el WhatsApp (el mail ya salió y no se vuelve a mandar)';
         }
 
         if (! $aviso instanceof ClientUpgradeNotice) {
             $this->info(
-                'El cliente ' . $this->nombre($client) . ' no tiene ningún aviso pendiente: o ya salió '
+                'El cliente ' . $client->resolve_display_name() . ' no tiene ningún aviso pendiente: o ya salió '
                 . 'todo, o nunca se le cerró una actualización.'
             );
 
@@ -175,7 +201,7 @@ class ReintentarAvisoDeActualizacionCommand extends Command
             return 0;
         }
 
-        $this->line('Cliente: ' . $this->nombre($client) . ' (#' . $client->id . ')');
+        $this->line('Cliente: ' . $client->resolve_display_name() . ' (#' . $client->id . ')');
         $this->line('Aviso #' . $aviso->id . ' de la actualización #' . $aviso->client_version_upgrade_id
             . ', estado "' . $aviso->estado . '".');
         $this->line('Falta: ' . $que_falta . '.');
@@ -213,11 +239,23 @@ class ReintentarAvisoDeActualizacionCommand extends Command
     }
 
     /**
-     * Avisos a los que todavía les falta el mail.
+     * Avisos a los que todavía les falta el mail y que ya nadie va a levantar solo.
      *
-     * Son los `sin_mail` (no había casilla) y los `error` (falló de verdad). 🔴 `pendiente` NO
-     * entra: ese lo tiene el job de la cola y meterse sería mandarlo dos veces. `sin_novedades`
-     * tampoco: reintentar eso da el mismo resultado vacío.
+     * Tres estados, y los tres terminales:
+     *
+     *   - `sin_mail` - no había casilla en ningún lado. Es el caso que motiva el comando: alguien
+     *     la consigue por WhatsApp y se reintenta con `--email=`.
+     *   - `error` - falló de verdad. El motivo está en la fila.
+     *   - `sin_novedades` - 🔴 **entra a propósito, aunque reintentarlo hoy dé el mismo
+     *     resultado vacío.** El caso real es que el upgrade cierre antes de que se publique la
+     *     novedad de esa versión: el martes queda `sin_novedades` y el miércoles alguien la carga.
+     *     Reintentarlo ahí sí manda el mail. Y si todavía no hay ninguna, `trabajar()` lo vuelve a
+     *     dejar `sin_novedades` sin mandar nada: es idempotente, así que incluirlo no cuesta nada.
+     *     Lo que no se hace es reintentarlo SOLO, en el hook: eso pagaría una llamada HTTP al
+     *     `empresa-api` del cliente cada vez que alguien toca el upgrade. Este comando corre a mano.
+     *
+     * 🔴 `pendiente` y `enviando` NO entran acá: esos los tiene -o los tuvo- la cola, y van en
+     * su propio bloque (`candidatos_esperando_a_la_cola()`), que se lee con otro ojo.
      *
      * @return \Illuminate\Database\Eloquent\Builder
      */
@@ -225,7 +263,38 @@ class ReintentarAvisoDeActualizacionCommand extends Command
     {
         return ClientUpgradeNotice::query()
             ->whereNull('mail_enviado_at')
-            ->whereIn('estado', [ClientUpgradeNotice::ESTADO_SIN_MAIL, ClientUpgradeNotice::ESTADO_ERROR])
+            ->whereIn('estado', [
+                ClientUpgradeNotice::ESTADO_SIN_MAIL,
+                ClientUpgradeNotice::ESTADO_ERROR,
+                ClientUpgradeNotice::ESTADO_SIN_NOVEDADES,
+            ])
+            ->with(['client', 'client_version_upgrade.to_version'])
+            ->orderByDesc('id');
+    }
+
+    /**
+     * Avisos que hace rato están esperando que la cola los tome.
+     *
+     * 🔴 **Este bloque existe porque sin él un aviso trabado es invisible.** El job tiene
+     * `$tries = 1` y no tiene `failed()`, y el propio `Console/Kernel.php` documenta que el
+     * scheduler se muere por ratos: si el `queue:work` no corre, la fila se queda en `pendiente`
+     * para siempre. Antes esa fila no entraba en ninguna de las dos consultas y el reporte imprimía
+     * "No hay ningún aviso esperando el mail" con el dueño sin enterarse de nada.
+     *
+     * Van los `pendiente` de más de `MINUTOS_PARA_SOSPECHAR_DEL_WORKER` -un aviso recién creado se
+     * trabaja en segundos, así que media hora quieto no es demora- y los `enviando` colgados, que
+     * son los que un worker reclamó y murió sin soltar.
+     *
+     * 🔴 Reintentar uno de estos a mano NO puede duplicar el mail: `AvisoDeActualizacionService`
+     * reclama la fila con un UPDATE condicional antes de salir a la red, así que si el worker la
+     * agarró en el mismo momento, uno de los dos se va sin mandar nada.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    private function candidatos_esperando_a_la_cola()
+    {
+        return ClientUpgradeNotice::query()
+            ->esperandoALaCola()
             ->with(['client', 'client_version_upgrade.to_version'])
             ->orderByDesc('id');
     }
@@ -275,7 +344,7 @@ class ReintentarAvisoDeActualizacionCommand extends Command
         return [
             '#' . $aviso->id,
             is_null($client) ? '(sin cliente)' : (string) $client->slug,
-            is_null($client) ? '' : $this->nombre($client),
+            is_null($client) ? '' : $client->resolve_display_name(),
             '#' . $aviso->client_version_upgrade_id,
             $version,
             (string) $aviso->estado,
@@ -303,19 +372,5 @@ class ReintentarAvisoDeActualizacionCommand extends Command
         }
 
         return null;
-    }
-
-    /**
-     * Nombre con el que se muestra un cliente.
-     *
-     * @param Client $client
-     *
-     * @return string
-     */
-    private function nombre(Client $client): string
-    {
-        $company = trim((string) $client->company_name);
-
-        return $company !== '' ? $company : trim((string) $client->name);
     }
 }
