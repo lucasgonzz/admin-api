@@ -86,6 +86,10 @@ class WhatsappDelAvisoTest extends BaseDelAviso
     /**
      * Con la ventana abierta sale texto libre, y el texto nombra la casilla a la que fue el mail.
      *
+     * 🔴 Y NO invita a responder "por acá": el número que manda el aviso solo contesta si el dueño
+     * tiene `asistente_whatsapp_activo`, y para la mayoría del parque no lo tiene. Lo encontró el
+     * redactor de la novedad el 18/9/2026, con el texto ya escrito.
+     *
      * @return void
      */
     public function test_con_la_ventana_abierta_sale_texto_libre()
@@ -101,8 +105,14 @@ class WhatsappDelAvisoTest extends BaseDelAviso
         $this->assertCount(1, $this->whatsapp->textos);
         $this->assertCount(0, $this->whatsapp->plantillas);
 
-        $this->assertStringContainsString('dueno@ejemplo.test', $this->whatsapp->textos[0]['body']);
-        $this->assertStringContainsString('mail', $this->whatsapp->textos[0]['body']);
+        $body = $this->whatsapp->textos[0]['body'];
+
+        $this->assertStringContainsString('dueno@ejemplo.test', $body);
+        $this->assertStringContainsString('mail', $body);
+
+        $this->assertStringNotContainsStringIgnoringCase('preguntame', $body, 'no invita a preguntar por este número');
+        $this->assertStringNotContainsStringIgnoringCase('por acá', $body, 'no invita a preguntar por este número');
+        $this->assertStringNotContainsStringIgnoringCase('explique', $body, 'no ofrece explicar nada por este número');
     }
 
     /**

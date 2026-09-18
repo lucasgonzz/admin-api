@@ -58,8 +58,11 @@ class ClientVersionUpgradeMail extends ComercioCityMail
 
             'detail_lines' => self::lineas_de_novedades($novedades),
 
-            'closing' => 'Si querés que te contemos alguna de estas novedades con más detalle, '
-                . 'escribile al asistente por WhatsApp y te la explicamos.',
+            // 🔴 Las dudas van al WhatsApp de SOPORTE, no al número del asistente que manda este
+            // aviso: ese número solo contesta si el dueño tiene `asistente_whatsapp_activo`, y
+            // para la mayoría del parque no lo tiene — la pregunta quedaría sin respuesta.
+            'closing' => 'Si tenés alguna duda sobre estas novedades, escribinos por el WhatsApp '
+                . 'de soporte, el de siempre.',
         ]));
     }
 

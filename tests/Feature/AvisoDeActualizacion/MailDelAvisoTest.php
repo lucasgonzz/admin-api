@@ -218,6 +218,13 @@ class MailDelAvisoTest extends BaseDelAviso
         /* Y el saludo con el nombre del negocio, que sale de `Client::resolve_display_name()`. */
         $this->assertStringContainsString($client->resolve_display_name(), $html);
 
+        /* 🔴 El cierre manda las dudas al WhatsApp de SOPORTE y no al número del asistente que
+           manda el aviso: ese número solo contesta si el dueño tiene `asistente_whatsapp_activo`,
+           y para la mayoría del parque no lo tiene. */
+        $this->assertStringContainsString('WhatsApp de soporte', $html);
+        $this->assertStringNotContainsStringIgnoringCase('escribile al asistente', $html);
+        $this->assertStringNotContainsStringIgnoringCase('te la explicamos', $html);
+
         /* 🔴 El logo del header: que la etiqueta esté, que apunte al archivo de config y que
            lleve las medidas de config. A 56 px se veía chico en escritorio; el número vive en
            `config/commerciocity.php` justamente para poder cambiarlo sin tocar el partial. */

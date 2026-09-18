@@ -500,6 +500,11 @@ class AvisoDeActualizacionService
     /**
      * El texto del WhatsApp cuando la ventana de 24 hs está abierta.
      *
+     * 🔴 No invita a preguntar "por acá": este número solo contesta si el dueño tiene
+     * `asistente_whatsapp_activo`, y para la mayoría del parque no lo tiene. Una invitación a
+     * responderle a un número que no responde es peor que no invitar. El detalle va en el mail, y
+     * las dudas, al WhatsApp de soporte (el mail lo dice en su cierre).
+     *
      * @param string|null $casilla Dirección a la que salió el mail, para nombrarla.
      *
      * @return string
@@ -511,8 +516,7 @@ class AvisoDeActualizacionService
             : '';
 
         return 'Hola! Te actualizamos el sistema: ya tenés las mejoras nuevas andando. '
-            . 'Te mandamos un mail' . $donde . ' con el detalle de todo lo que trae. '
-            . 'Si querés que te explique alguna, preguntame por acá.';
+            . 'Te mandamos un mail' . $donde . ' con el detalle de todo lo que trae.';
     }
 
     /**
