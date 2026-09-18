@@ -170,4 +170,87 @@ class MailDelAvisoTest extends BaseDelAviso
             return $etiquetas === ['Para todos', 'Solo para este cliente'];
         });
     }
+
+    /**
+     * 🔴 **El único test que renderiza el blade de verdad.**
+     *
+     * Los otros usan `Mail::fake()`, que intercepta el mailable ANTES de `build()`: aseguran el
+     * payload y nunca la plantilla. Con eso, un `@include` a un partial que no existe, una variable
+     * mal nombrada o un `@endif` de más pasarían la suite entera y reventarían en el primer upgrade
+     * real, con el mail ya en camino.
+     *
+     * Acá no hay fake: el mailer de los tests es `array` (phpunit.xml), así que el mail se arma
+     * entero —servicio, mailable, layout, partials— y queda en memoria en vez de salir. Lo que se
+     * mira es el HTML que efectivamente se habría mandado.
+     *
+     * @return void
+     */
+    public function test_el_mail_se_renderiza_entero_con_las_novedades_y_el_logo()
+    {
+        Http::fake();
+
+        $client  = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $version = $this->crear_version();
+
+        $this->crear_novedad(
+            $version,
+            'Escaneo de facturas',
+            'Subís la factura del proveedor y el sistema carga los artículos solo.',
+            1
+        );
+
+        $upgrade = $this->crear_upgrade($client, [$version]);
+        $upgrade->update(['status' => 'terminada']);
+
+        $aviso = $this->servicio()->avisar($upgrade->fresh());
+
+        $this->assertNotNull($aviso->mail_enviado_at, 'precondición: el mail salió');
+
+        $html = $this->html_del_único_mail();
+
+        /* El contenido: el titular de la novedad y su cuerpo tienen que estar en el HTML. */
+        $this->assertStringContainsString('Escaneo de facturas', $html);
+        $this->assertStringContainsString(
+            'Subís la factura del proveedor y el sistema carga los artículos solo.',
+            $html
+        );
+
+        /* Y el saludo con el nombre del negocio, que sale de `Client::resolve_display_name()`. */
+        $this->assertStringContainsString($client->resolve_display_name(), $html);
+
+        /* 🔴 El logo del header: que la etiqueta esté, que apunte al archivo de config y que
+           lleve las medidas de config. A 56 px se veía chico en escritorio; el número vive en
+           `config/commerciocity.php` justamente para poder cambiarlo sin tocar el partial. */
+        $ancho = (int) config('commerciocity.logo_width');
+        $alto  = (int) config('commerciocity.logo_height');
+
+        $this->assertGreaterThan(0, $ancho, 'la config del ancho del logo tiene que estar cargada');
+
+        $this->assertMatchesRegularExpression(
+            '/<img[^>]+src="' . preg_quote((string) config('commerciocity.logo_url'), '/') . '"/',
+            $html,
+            'el <img> del logo tiene que estar, apuntando al archivo de config'
+        );
+
+        $this->assertStringContainsString('width="' . $ancho . '"', $html);
+        $this->assertStringContainsString('height="' . $alto . '"', $html);
+        $this->assertStringContainsString('width:' . $ancho . 'px;height:' . $alto . 'px', $html);
+    }
+
+    /**
+     * El HTML del único mail que se mandó en este test.
+     *
+     * Sale del transporte `array` de Laravel, que guarda el mensaje ya armado en memoria en vez de
+     * entregarlo. O sea que esto es, literalmente, lo que le habría llegado al dueño.
+     *
+     * @return string
+     */
+    private function html_del_único_mail(): string
+    {
+        $mensajes = Mail::getSwiftMailer()->getTransport()->messages();
+
+        $this->assertCount(1, $mensajes, 'tiene que haber salido exactamente un mail');
+
+        return (string) $mensajes->first()->getBody();
+    }
 }
