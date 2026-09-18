@@ -18,6 +18,11 @@ use Illuminate\Support\Facades\Http;
  * escribir este). Mockear el servicio no es solo la forma de esquivar esa dependencia: es también
  * la forma más directa de probar el ORDEN correcto (sincronizar antes de facturar) y el valor
  * exacto que le llega, capturando el mismo objeto `$client` que recibe el mock.
+ *
+ * El test 3 (mes ya facturado) es la excepción: no mockea `AfipFacturacionService`, porque la
+ * idempotencia de `ya_facturado()`/`emitir()` corta ANTES de llegar a WSAA/WSFE, así que corre
+ * contra el servicio real — y de paso verifica `importe_total` en la respuesta real de
+ * `AfipFacturacionService::respuesta()` (hallazgo del chequeo independiente, 18/9/2026).
  */
 class EmitirFacturaSincronizaEmpleadosTest extends BaseDeCobranzas
 {
@@ -47,6 +52,9 @@ class EmitirFacturaSincronizaEmpleadosTest extends BaseDeCobranzas
         $empleados_recibidos = null;
 
         $this->mock(AfipFacturacionService::class, function ($mock) use (&$total_recibido, &$empleados_recibidos) {
+            // El controller ahora consulta ya_facturado() ANTES de decidir si sincroniza: en este
+            // test el mes es nuevo, así que da false y el flujo sigue de largo hacia emitir().
+            $mock->shouldReceive('ya_facturado')->once()->andReturn(false);
             $mock->shouldReceive('emitir')
                 ->once()
                 ->andReturnUsing(function (Client $client_recibido, $periodo) use (&$total_recibido, &$empleados_recibidos) {
@@ -85,6 +93,8 @@ class EmitirFacturaSincronizaEmpleadosTest extends BaseDeCobranzas
         $total_recibido = null;
 
         $this->mock(AfipFacturacionService::class, function ($mock) use (&$total_recibido) {
+            // Mismo motivo que en el test anterior: ya_facturado() se consulta primero.
+            $mock->shouldReceive('ya_facturado')->once()->andReturn(false);
             $mock->shouldReceive('emitir')
                 ->once()
                 ->andReturnUsing(function (Client $client_recibido, $periodo) use (&$total_recibido) {
@@ -103,5 +113,40 @@ class EmitirFacturaSincronizaEmpleadosTest extends BaseDeCobranzas
         $this->assertEqualsWithDelta(12000.0, $total_recibido, 0.001, 'Sin sincronización soportada, factura con el total que ya tenía.');
 
         Http::assertNothingSent();
+    }
+
+    /**
+     * 3. 🔴 Un mes que YA está facturado no dispara `sincronizar_empleados()`: ni sale a la red del
+     * cliente, ni pisa `cantidad_empleados`/`total_mensualidad` con los datos de hoy (hallazgo del
+     * chequeo independiente, 18/9/2026). Corre por el camino real (sin mockear
+     * `AfipFacturacionService`): la idempotencia de `ya_facturado()` corta antes de llegar a
+     * WSAA/WSFE, así que no hace falta. De paso confirma que `importe_total` viaja en la
+     * respuesta.
+     *
+     * @return void
+     */
+    public function test_un_mes_ya_facturado_no_sincroniza_empleados(): void
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente([
+            'api_url'            => 'https://api-prueba-cobranzas.test',
+            'api_key'            => 'clave-de-prueba',
+            'cantidad_empleados' => 2,
+            'total_mensualidad'  => 12000,
+        ]);
+        // Factura ya autorizada (resultado 'A' + cae) para el mismo período que se va a pedir.
+        $this->sembrar_factura($client, '2026-09');
+
+        $response = $this->postJson('/api/admin/client/' . $client->id . '/emitir-factura', ['periodo' => '2026-09']);
+
+        $response->assertStatus(200);
+        $this->assertTrue($response->json('ya_facturado'));
+        $this->assertEqualsWithDelta(12000.0, $response->json('importe_total'), 0.001, 'importe_total viaja en la respuesta (para que el frontend muestre el monto real).');
+
+        // Nada de sincronizar_empleados(): ni un GET a mensualidad-info, ni un cambio en el cliente.
+        Http::assertNothingSent();
+
+        $client->refresh();
+        $this->assertSame(2, (int) $client->cantidad_empleados, 'No se tocó: el mes ya estaba facturado.');
     }
 }

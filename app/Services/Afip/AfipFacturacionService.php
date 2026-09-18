@@ -43,17 +43,13 @@ class AfipFacturacionService
      * @param  Client $client  Cliente a facturar (receptor).
      * @param  string $periodo Período a facturar, formato 'YYYY-MM'.
      * @return array{ok: bool, ya_facturado: bool, resultado: string|null, cae: string|null,
-     *               cbte_numero: int|null, error_message: string|null, invoice_id: int|null}
+     *               cbte_numero: int|null, error_message: string|null, invoice_id: int|null,
+     *               importe_total: float|null}
      */
     public function emitir(Client $client, $periodo)
     {
         // 1. Idempotencia: un período ya autorizado (CAE emitido) nunca se re-emite.
-        $invoice_ya_autorizada = MensualidadInvoice::where('client_id', $client->id)
-            ->where('periodo', $periodo)
-            ->where('resultado', 'A')
-            ->whereNotNull('cae')
-            ->latest('id')
-            ->first();
+        $invoice_ya_autorizada = $this->invoice_autorizada($client, $periodo);
 
         if ($invoice_ya_autorizada) {
             return $this->respuesta($invoice_ya_autorizada, true);
@@ -190,6 +186,46 @@ class AfipFacturacionService
     }
 
     /**
+     * ¿Ya hay una Factura C autorizada (resultado 'A', con CAE) para este cliente y período?
+     *
+     * Público para que el controller pueda consultarlo ANTES de decidir si vale la pena hacer un
+     * llamado de red al cliente (hallazgo del chequeo independiente de la misión
+     * cobranzas-mejoras, 18/9/2026): sincronizar empleados es una llamada HTTP al empresa-api del
+     * cliente que puede tardar varios segundos (timeout + reintentos) y además pisa
+     * `cantidad_empleados`/`total_mensualidad` con los datos de HOY — no tiene sentido pagar ese
+     * costo, ni arriesgar ese pisado, en un mes que `emitir()` va a cortar de todos modos por esta
+     * misma idempotencia sin llegar a leer esos campos.
+     *
+     * @param  Client $client
+     * @param  string $periodo Período a consultar, formato 'YYYY-MM'.
+     * @return bool
+     */
+    public function ya_facturado(Client $client, $periodo)
+    {
+        return $this->invoice_autorizada($client, $periodo) !== null;
+    }
+
+    /**
+     * La Factura C autorizada (resultado 'A', con CAE) de este cliente y período, si existe. Si
+     * por algún motivo hubiera más de una, la más reciente. Extraído para que `emitir()` y
+     * `ya_facturado()` compartan exactamente la misma consulta de idempotencia, en vez de tener
+     * dos definiciones de "ya está facturado" que se puedan desincronizar.
+     *
+     * @param  Client $client
+     * @param  string $periodo
+     * @return MensualidadInvoice|null
+     */
+    protected function invoice_autorizada(Client $client, $periodo)
+    {
+        return MensualidadInvoice::where('client_id', $client->id)
+            ->where('periodo', $periodo)
+            ->where('resultado', 'A')
+            ->whereNotNull('cae')
+            ->latest('id')
+            ->first();
+    }
+
+    /**
      * Arma un mensaje de error legible a partir de los nodos `Errors`/`Observaciones`
      * que devuelve AFIP cuando rechaza un comprobante.
      *
@@ -221,6 +257,12 @@ class AfipFacturacionService
     /**
      * Arma la respuesta estándar del servicio a partir de un MensualidadInvoice ya persistido.
      *
+     * `importe_total` viaja acá (hallazgo del chequeo independiente, 18/9/2026) para que el
+     * frontend pueda mostrar el monto REAL que quedó facturado, en vez de prometer de antemano el
+     * que tenía cargado antes de que `emitir_factura_json()` sincronice empleados: ese sync puede
+     * cambiar el total entre que Lucas confirma el `window.confirm()` y que AFIP autoriza el
+     * comprobante, y una Factura C no se puede corregir después.
+     *
      * @param  MensualidadInvoice $invoice
      * @param  bool               $ya_facturado Si se abortó por idempotencia (período ya autorizado).
      * @return array
@@ -235,6 +277,7 @@ class AfipFacturacionService
             'cbte_numero' => $invoice->cbte_numero,
             'error_message' => $invoice->error_message,
             'invoice_id' => $invoice->id,
+            'importe_total' => $invoice->importe_total !== null ? (float) $invoice->importe_total : null,
         ];
     }
 

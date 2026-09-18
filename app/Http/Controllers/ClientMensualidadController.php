@@ -127,6 +127,13 @@ class ClientMensualidadController extends Controller
      * de la fila en Mensualidades.vue y el de la pestaña Facturación del cliente): los dos pegan a
      * este mismo endpoint.
      *
+     * 🔴 Solo sincroniza si el período TODAVÍA no está facturado (hallazgo del chequeo
+     * independiente, 18/9/2026): sin este chequeo, cada click sobre un mes ya autorizado por AFIP
+     * salía igual a la red del cliente (hasta ~30s de timeout + reintentos) y pisaba
+     * `cantidad_empleados`/`total_mensualidad` con los datos de HOY aunque `emitir()` no fuera a
+     * emitir nada — si Lucas había ajustado esos números a mano para un mes viejo, el sync se los
+     * pisaba sin avisar.
+     *
      * @param  Request                     $request
      * @param  int|string                  $clientId
      * @param  AfipFacturacionService      $service   Inyectado por el IoC de Laravel.
@@ -146,7 +153,9 @@ class ClientMensualidadController extends Controller
          * red está en try/catch adentro de ClientMensualidadSyncService), así que no hace falta un
          * try/catch acá tampoco. `sincronizar_empleados()` deja `total_mensualidad` actualizado en
          * el MISMO objeto $client que se le pasa después a `emitir()`. */
-        $cobranzas->sincronizar_empleados($client);
+        if (! $service->ya_facturado($client, $periodo)) {
+            $cobranzas->sincronizar_empleados($client);
+        }
 
         $resultado = $service->emitir($client, $periodo);
 
