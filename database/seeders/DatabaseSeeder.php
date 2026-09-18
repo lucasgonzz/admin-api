@@ -52,6 +52,8 @@ class DatabaseSeeder extends Seeder
             ImplementationFileWaitSeeder::class,
             // Fila única de configuración fiscal (AFIP) propia de ComercioCity.
             ComerciocityAfipConfigSeeder::class,
+            // Los tres paquetes de IA del piloto (tentativos, idempotentes por nombre).
+            AiPlanSeeder::class,
         ]);
 
         // Plantilla base de variables .env de empresa-api: solo siembra si no hay filas de ese scope.

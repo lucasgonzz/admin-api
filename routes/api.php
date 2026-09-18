@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AdminTaskController;
 use App\Http\Controllers\AdminTaskNotificationController;
+use App\Http\Controllers\AiPlanController;
 use App\Http\Controllers\TaskTemplateController;
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AdminSearchProxyController;
@@ -514,6 +515,14 @@ Route::prefix('admin')->group(function () {
         Route::get('client/{clientId}/tokens', [ClientTokensController::class, 'show_json']);
         Route::post('client/{clientId}/tokens/sync', [ClientTokensController::class, 'sync_json']);
         Route::get('tokens/resumen', [TokensResumenController::class, 'index_json']);
+
+        /* Paquetes de IA (misión foto-sucursal-y-asistente-configurable, 17/9/2026).
+           El ABM del catálogo de planes (CRUD). La asignación de un paquete a un cliente y el push a
+           su instancia van más abajo, con las rutas por-cliente. */
+        Route::get('ai-plan', [AiPlanController::class, 'index_json']);
+        Route::post('ai-plan', [AiPlanController::class, 'store_json']);
+        Route::put('ai-plan/{id}', [AiPlanController::class, 'update_json']);
+        Route::delete('ai-plan/{id}', [AiPlanController::class, 'destroy_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
