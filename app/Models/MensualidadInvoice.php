@@ -40,6 +40,17 @@ class MensualidadInvoice extends Model
     protected $guarded = [];
 
     /**
+     * Hoy nada devuelve el modelo entero (los endpoints arman el array a mano o seleccionan
+     * columnas explícitas), así que esto no filtra nada en la práctica todavía. Es higiene barata
+     * para cuando eso cambie (hallazgo del chequeo independiente, misión cobranzas-mejoras,
+     * 18/9/2026): `public_token` da acceso directo y durable al PDF de la factura, no tiene que
+     * poder filtrarse por accidente si algún día alguien serializa este modelo entero.
+     *
+     * @var array<int, string>
+     */
+    protected $hidden = ['public_token'];
+
+    /**
      * Casteos de tipos para lectura y persistencia consistente.
      *
      * @var array<string, string>
