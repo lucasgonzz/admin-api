@@ -119,6 +119,15 @@ class EnviarAvisoDeActualizacionJob implements ShouldQueue
     /**
      * Último recurso: si el servicio se cayó antes de poder escribir el motivo, se escribe acá.
      *
+     * 🔴 Entra también `enviando`, y no solo `pendiente`. `enviando` es el estado con el que el
+     * servicio RECLAMA la fila antes de salir a la red, y si la caída fue después de ese reclamo
+     * —por ejemplo, un fallo de base en el mismo `save()` que iba a dejar el motivo— la fila
+     * quedaría reclamada por un job que ya murió. Soltarla acá la devuelve enseguida al reintento
+     * a mano en vez de dejarla esperando los diez minutos de `scopeColgados()`.
+     *
+     * Lo que NO se toca es una fila ya resuelta: los estados terminales no están en la lista, así
+     * que un aviso que alcanzó a mandar el mail no se pisa con un error.
+     *
      * @param string $motivo
      *
      * @return void
@@ -127,7 +136,11 @@ class EnviarAvisoDeActualizacionJob implements ShouldQueue
     {
         try {
             ClientUpgradeNotice::where('client_version_upgrade_id', $this->client_version_upgrade_id)
-                ->where('estado', ClientUpgradeNotice::ESTADO_PENDIENTE)
+                ->whereNull('mail_enviado_at')
+                ->whereIn('estado', [
+                    ClientUpgradeNotice::ESTADO_PENDIENTE,
+                    ClientUpgradeNotice::ESTADO_ENVIANDO,
+                ])
                 ->update([
                     'estado' => ClientUpgradeNotice::ESTADO_ERROR,
                     'error'  => $motivo,
