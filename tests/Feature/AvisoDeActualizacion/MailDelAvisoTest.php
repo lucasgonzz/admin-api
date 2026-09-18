@@ -4,6 +4,7 @@ namespace Tests\Feature\AvisoDeActualizacion;
 
 use App\Mail\ClientVersionUpgradeMail;
 use App\Models\ClientUpgradeNotice;
+use App\Services\AvisoDeActualizacionService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 
@@ -40,6 +41,11 @@ class MailDelAvisoTest extends BaseDelAviso
 
         Mail::assertSent(ClientVersionUpgradeMail::class, function ($mail) use ($version) {
             if (! $mail->hasTo('dueno@ejemplo.test')) {
+                return false;
+            }
+
+            /* 🔴 Por el mailer de `admin@comerciocity.com`, no por el default (que es el de leads). */
+            if ($mail->mailer !== AvisoDeActualizacionService::MAILER) {
                 return false;
             }
 
@@ -172,6 +178,43 @@ class MailDelAvisoTest extends BaseDelAviso
     }
 
     /**
+     * Sin la credencial del mailer `admin` en el .env, el mail no se intenta y la fila dice qué
+     * falta y dónde — en vez del error críptico del SMTP. Y el WhatsApp tampoco sale, porque el
+     * mail no salió.
+     *
+     * @return void
+     */
+    public function test_sin_la_credencial_del_mailer_no_se_intenta_y_queda_escrito_que_falta()
+    {
+        Mail::fake();
+        Http::fake();
+
+        config([
+            'mail.mailers.' . AvisoDeActualizacionService::MAILER . '.transport' => 'smtp',
+            'mail.mailers.' . AvisoDeActualizacionService::MAILER . '.username'  => null,
+            'mail.mailers.' . AvisoDeActualizacionService::MAILER . '.password'  => null,
+        ]);
+
+        $client  = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $version = $this->crear_version();
+        $this->crear_novedad($version, 'Escaneo de facturas', 'Subís la factura y listo.', 1);
+
+        $upgrade = $this->crear_upgrade($client, [$version]);
+        $upgrade->update(['status' => 'terminada']);
+
+        $aviso = $this->servicio()->avisar($upgrade->fresh());
+
+        $this->assertSame(ClientUpgradeNotice::ESTADO_ERROR, $aviso->estado);
+        $this->assertNull($aviso->mail_enviado_at);
+        $this->assertNull($aviso->whatsapp_enviado_at);
+        $this->assertStringContainsString('MAIL_ADMIN_USERNAME', (string) $aviso->error);
+        $this->assertStringContainsString('admin@comerciocity.com', (string) $aviso->error);
+
+        Mail::assertNothingSent();
+        $this->assertSame(0, $this->whatsapp->cuantos_envios(), 'sin mail no hay WhatsApp');
+    }
+
+    /**
      * 🔴 **El único test que renderiza el blade de verdad.**
      *
      * Los otros usan `Mail::fake()`, que intercepta el mailable ANTES de `build()`: aseguran el
@@ -206,7 +249,11 @@ class MailDelAvisoTest extends BaseDelAviso
 
         $this->assertNotNull($aviso->mail_enviado_at, 'precondición: el mail salió');
 
-        $html = $this->html_del_único_mail();
+        $mensaje = $this->único_mail_que_salió();
+        $html    = (string) $mensaje->getBody();
+
+        /* 🔴 El remitente es admin@comerciocity.com: el `from` del mailer `admin`, no el global. */
+        $this->assertArrayHasKey('admin@comerciocity.com', (array) $mensaje->getFrom());
 
         /* El contenido: el titular de la novedad y su cuerpo tienen que estar en el HTML. */
         $this->assertStringContainsString('Escaneo de facturas', $html);
@@ -252,12 +299,16 @@ class MailDelAvisoTest extends BaseDelAviso
      *
      * @return string
      */
-    private function html_del_único_mail(): string
+    private function único_mail_que_salió(): \Swift_Message
     {
-        $mensajes = Mail::getSwiftMailer()->getTransport()->messages();
+        /* Del transporte del mailer `admin`, que es por donde tiene que salir; y nada por el
+           mailer por defecto, que es el de leads. Cada mailer tiene su propio `array`. */
+        $por_admin   = Mail::mailer(AvisoDeActualizacionService::MAILER)->getSwiftMailer()->getTransport()->messages();
+        $por_default = Mail::mailer(null)->getSwiftMailer()->getTransport()->messages();
 
-        $this->assertCount(1, $mensajes, 'tiene que haber salido exactamente un mail');
+        $this->assertCount(0, $por_default, 'por el mailer por defecto no tiene que salir nada');
+        $this->assertCount(1, $por_admin, 'tiene que haber salido exactamente un mail por el mailer admin');
 
-        return (string) $mensajes->first()->getBody();
+        return $por_admin->first();
     }
 }
