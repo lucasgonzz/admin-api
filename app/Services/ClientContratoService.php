@@ -135,9 +135,8 @@ class ClientContratoService
      * Genera las cuotas de la licencia desde el contrato del cliente.
      *
      * - Con `contract_financiacion` (`[{monto, fecha}]`): una cuota por fila, numeradas en orden,
-     *   con el monto parseado igual que lo parsea el PDF (`LeadContractPdfService::
-     *   parse_numeric_amount`: saca símbolos, coma decimal a punto), `vencimiento` = la fecha,
-     *   `periodo` = el mes de esa fecha.
+     *   con el monto parseado con `monto_desde_texto()` (formato argentino: `1.500` son mil
+     *   quinientos, no uno y medio), `vencimiento` = la fecha, `periodo` = el mes de esa fecha.
      * - Sin financiación pero con `contract_precio_licencia` > 0: UNA cuota por el total, con
      *   `vencimiento` = `contract_fecha_primer_pago_unico`.
      *
@@ -166,7 +165,7 @@ class ClientContratoService
                     continue;
                 }
 
-                $monto = LeadContractPdfService::parse_numeric_amount($cuota['monto'] ?? null);
+                $monto = self::monto_desde_texto($cuota['monto'] ?? null);
                 if ($monto <= 0) {
                     continue;
                 }
@@ -180,7 +179,7 @@ class ClientContratoService
 
         // Sin financiación: una sola cuota por el precio de la licencia, si lo hay.
         if (count($filas) === 0) {
-            $precio_licencia = LeadContractPdfService::parse_numeric_amount($client->contract_precio_licencia);
+            $precio_licencia = self::monto_desde_texto($client->contract_precio_licencia);
 
             if ($precio_licencia <= 0) {
                 return 0;
@@ -234,6 +233,76 @@ class ClientContratoService
         }
 
         return $fecha->copy()->startOfMonth()->toDateString();
+    }
+
+    /**
+     * Convierte el monto tipeado en el contrato a número, leyéndolo como se escribe en Argentina.
+     *
+     * 🔴 No se usa `LeadContractPdfService::parse_numeric_amount()` a propósito: esa función toma
+     * el punto como decimal, así que `'1.500'` (mil quinientos, como lo tipea cualquiera acá) da
+     * 1,5 — y una cuota de licencia de USD 1,50 en vez de USD 1.500 es exactamente el error que
+     * nadie ve hasta que llega la plata. La regla acá es la del lector humano: si hay punto Y coma,
+     * el último de los dos es el decimal; si hay un solo separador y detrás vienen exactamente tres
+     * dígitos (`1.500`, `12.000`, `1,500`), es de miles; en cualquier otro caso es decimal
+     * (`1500.50`, `1,5`). Lo que no sea dígito ni separador (moneda, espacios, `$`) se descarta.
+     * La regla del PDF queda como está: cambiarla ahí es otra misión y toca comprobantes ya emitidos.
+     *
+     * @param mixed $valor
+     *
+     * @return float 0.0 si no hay nada legible.
+     */
+    public static function monto_desde_texto($valor): float
+    {
+        if ($valor === null || $valor === '') {
+            return 0.0;
+        }
+
+        if (is_int($valor) || is_float($valor)) {
+            return (float) $valor;
+        }
+
+        /** Solo dígitos y separadores; el signo se pierde a propósito (una cuota nunca es negativa). */
+        $limpio = preg_replace('/[^0-9.,]/', '', (string) $valor);
+
+        if ($limpio === '' || $limpio === null) {
+            return 0.0;
+        }
+
+        $ultimo_punto = strrpos($limpio, '.');
+        $ultima_coma  = strrpos($limpio, ',');
+
+        if ($ultimo_punto !== false && $ultima_coma !== false) {
+            // Los dos separadores: el que aparece último es el decimal, el otro es de miles.
+            $decimal = $ultimo_punto > $ultima_coma ? '.' : ',';
+            $miles   = $decimal === '.' ? ',' : '.';
+            $limpio  = str_replace($miles, '', $limpio);
+            $limpio  = str_replace($decimal, '.', $limpio);
+
+            return (float) $limpio;
+        }
+
+        $separador = $ultimo_punto !== false ? '.' : ($ultima_coma !== false ? ',' : null);
+
+        if ($separador === null) {
+            return (float) $limpio;
+        }
+
+        $partes = explode($separador, $limpio);
+
+        /* Un solo separador con grupos de exactamente tres dígitos detrás (`1.500`, `1.500.000`)
+         * es de miles. Cualquier otro largo (`1500.50`, `1,5`, `0.75`) es decimal. */
+        $es_de_miles = count($partes) >= 2;
+        foreach (array_slice($partes, 1) as $grupo) {
+            if (strlen($grupo) !== 3) {
+                $es_de_miles = false;
+            }
+        }
+
+        if ($es_de_miles) {
+            return (float) implode('', $partes);
+        }
+
+        return (float) str_replace(',', '.', $limpio);
     }
 
     /**

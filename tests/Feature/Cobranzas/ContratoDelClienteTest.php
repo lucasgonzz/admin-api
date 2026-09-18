@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LicenciaCuota;
 use App\Services\LeadContractPdfService;
+use App\Services\ClientContratoService;
 use App\Services\RunUserSetupService;
 use Illuminate\Support\Facades\Storage;
 
@@ -111,7 +112,7 @@ class ContratoDelClienteTest extends BaseDeCobranzas
         $cuotas = LicenciaCuota::where('client_id', $client->id)->orderBy('numero')->get();
         $this->assertCount(2, $cuotas);
         $this->assertSame(1, $cuotas[0]->numero);
-        $this->assertEqualsWithDelta(1000.0, (float) $cuotas[0]->monto, 0.001, 'El monto de la cuota es el del contrato, parseado con la misma regla que el PDF.');
+        $this->assertEqualsWithDelta(1000.0, (float) $cuotas[0]->monto, 0.001, 'El monto de la cuota es el del contrato, leído como se escribe en Argentina.');
         $this->assertSame('USD', $cuotas[0]->moneda);
         $this->assertSame('2026-10', $cuotas[0]->periodo);
         $this->assertSame('2026-10-05', $cuotas[0]->vencimiento->toDateString());
@@ -122,6 +123,47 @@ class ContratoDelClienteTest extends BaseDeCobranzas
 
         $lead->refresh();
         $this->assertSame($client->id, $lead->promoted_client_id);
+    }
+
+    /**
+     * 1c. Los montos del contrato se tipean a mano y en Argentina el punto es de miles: `1.500`
+     * tiene que dar mil quinientos, no uno y medio. Cubre las formas que aparecen de verdad en los
+     * contratos cargados y las dos ambiguas que decide la regla de los tres dígitos.
+     *
+     * @return void
+     */
+    public function test_los_montos_del_contrato_se_leen_con_formato_argentino(): void
+    {
+        $casos = [
+            '1.500'        => 1500.0,
+            '1.500.000'    => 1500000.0,
+            '1,500'        => 1500.0,
+            '1.500,50'     => 1500.5,
+            '1,500.50'     => 1500.5,
+            '1500.50'      => 1500.5,
+            '1,5'          => 1.5,
+            '0.75'         => 0.75,
+            'USD 1.200'    => 1200.0,
+            '$ 12.000'     => 12000.0,
+            '1500'         => 1500.0,
+            ''             => 0.0,
+            'sin numero'   => 0.0,
+        ];
+
+        foreach ($casos as $texto => $esperado) {
+            $this->assertEqualsWithDelta($esperado, ClientContratoService::monto_desde_texto($texto), 0.0001, 'Texto: "' . $texto . '"');
+        }
+
+        $this->assertEqualsWithDelta(1500.0, ClientContratoService::monto_desde_texto(1500), 0.0001);
+        $this->assertEqualsWithDelta(0.0, ClientContratoService::monto_desde_texto(null), 0.0001);
+
+        // Y la cuota que nace del contrato usa esa regla: `1.500` es una cuota de mil quinientos.
+        $lead = $this->crear_lead_con_contrato([
+            'contract_financiacion' => [['monto' => '1.500', 'fecha' => '2026-10-05']],
+        ]);
+        $client = app(RunUserSetupService::class)->ensure_production_client($lead, '');
+        $cuota = LicenciaCuota::where('client_id', $client->id)->first();
+        $this->assertEqualsWithDelta(1500.0, (float) $cuota->monto, 0.001);
     }
 
     /**
