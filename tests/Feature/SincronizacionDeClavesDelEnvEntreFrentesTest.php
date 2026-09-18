@@ -9,6 +9,7 @@ use App\Models\ClientApi;
 use App\Models\ClientSshCredential;
 use App\Models\ClientVersionUpgrade;
 use App\Models\DeploymentLog;
+use App\Models\EnvTemplate;
 use App\Models\Version;
 use App\Services\DeploymentService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
@@ -366,6 +367,7 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
 
         $upload      = array_search('upload_api', $steps, true);
         $sync        = array_search('sync_env_keys', $steps, true);
+        $pusher      = array_search('sync_pusher_template', $steps, true);
         $migraciones = array_search('run_migrations', $steps, true);
 
         $this->assertSame(
@@ -373,10 +375,18 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
             $sync,
             'sync_env_keys va inmediatamente después de upload_api.'
         );
+        /* Desde la misión `pusher-app-produccion-vs-desarrollo` (18/9/2026), sync_pusher_template
+           se intercala entre los dos: usa la misma conexión SSH recién abierta por sync_env_keys y
+           tiene que correr, igual que ese paso, ANTES de run_migrations (ver su propio docblock). */
         $this->assertSame(
             $sync + 1,
+            $pusher,
+            'sync_pusher_template va inmediatamente después de sync_env_keys.'
+        );
+        $this->assertSame(
+            $pusher + 1,
             $migraciones,
-            'run_migrations va inmediatamente después de sync_env_keys: migrate bootea con el .env del destino.'
+            'run_migrations va inmediatamente después de sync_pusher_template: migrate bootea con el .env del destino.'
         );
     }
 
@@ -399,6 +409,149 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
             $fuente,
             'El case existe pero no llama al metodo.'
         );
+    }
+
+    /* ==========================================================================================
+     | sync_pusher_template — misión `pusher-app-produccion-vs-desarrollo` (18/9/2026)
+     |========================================================================================= */
+
+    /** 🔴 Mismo candado que el de sync_env_keys, para el paso nuevo. */
+    public function test_el_paso_de_pusher_esta_enganchado_en_el_switch_y_no_queda_muerto(): void
+    {
+        $fuente = $this->fuente_ejecutable();
+
+        $this->assertStringContainsString(
+            "case 'sync_pusher_template':",
+            $fuente,
+            'El paso esta en $steps pero no tiene case en el switch: no se ejecutaria nunca.'
+        );
+
+        $this->assertStringContainsString(
+            '$this->step_sync_pusher_template();',
+            $fuente,
+            'El case existe pero no llama al metodo.'
+        );
+    }
+
+    /**
+     * `claves_pusher_a_forzar()` es la contracara de `claves_a_sincronizar()`: fuerza lo que
+     * DIFIERE, sin importar si el destino ya tenía algo. Probada sin SSH, como esa.
+     */
+    public function test_claves_pusher_a_forzar_pisa_lo_que_difiere(): void
+    {
+        $plantilla = [
+            'PUSHER_APP_ID'     => '2147311',
+            'PUSHER_APP_KEY'    => 'key-de-produccion',
+            'PUSHER_APP_SECRET' => 'secret-de-produccion',
+            'PUSHER_APP_CLUSTER' => 'sa1',
+        ];
+
+        /* El destino tiene la app vieja en ID/KEY, el secret bien y CLUSTER falta directamente. */
+        $destino = [
+            'PUSHER_APP_ID'  => '1561202',
+            'PUSHER_APP_KEY' => '7fc3a66cec31239fc44e',
+            'PUSHER_APP_SECRET' => 'secret-de-produccion',
+        ];
+
+        $a_forzar = DeploymentService::claves_pusher_a_forzar($plantilla, $destino);
+
+        $this->assertSame(
+            [
+                'PUSHER_APP_ID'      => '2147311',
+                'PUSHER_APP_KEY'     => 'key-de-produccion',
+                'PUSHER_APP_CLUSTER' => 'sa1',
+            ],
+            $a_forzar,
+            'Fuerza ID/KEY (difieren) y CLUSTER (falta); no toca SECRET porque ya coincide.'
+        );
+    }
+
+    /** Si el destino ya coincide en las 4, no hay nada para forzar. */
+    public function test_claves_pusher_a_forzar_vacio_cuando_ya_coincide_todo(): void
+    {
+        $plantilla = ['PUSHER_APP_ID' => '2147311', 'PUSHER_APP_CLUSTER' => 'sa1'];
+        $destino   = ['PUSHER_APP_ID' => '2147311', 'PUSHER_APP_CLUSTER' => 'sa1'];
+
+        $this->assertSame([], DeploymentService::claves_pusher_a_forzar($plantilla, $destino));
+    }
+
+    /** Plantilla sin ninguna clave cargada: el paso lo dice y no llega a abrir SSH. */
+    public function test_sin_plantilla_cargada_no_toca_nada_y_deja_traza(): void
+    {
+        /* setUp() no siembra env_templates de scope=empresa: no hay filas, entonces las 4 claves
+           quedan sin valor y el paso corta antes de intentar cualquier SSH. */
+        $e       = $this->escenario('shared_hosting', 'shared_hosting');
+        $service = new DeploymentService($e['upgrade']);
+
+        $this->invocar_paso_pusher($service);
+
+        $lineas = $this->lineas_del_paso_pusher($e['upgrade']);
+        $this->assertNotEmpty($lineas);
+        $this->assertTrue(
+            $lineas->contains(function ($linea) {
+                return $linea->level === 'info' && strpos($linea->line, 'nada para forzar') !== false;
+            }),
+            'Sin ninguna clave cargada, la última línea tiene que decir que no hay nada para forzar.'
+        );
+    }
+
+    /**
+     * 🔴 Con la plantilla cargada pero el SSH caído (mismo puerto cerrado que el resto del
+     * archivo), el paso degrada a warning y no lanza. Nunca puede aparecer un valor de la
+     * plantilla (ni siquiera el cluster, que no es secreto) en la línea de log.
+     */
+    public function test_con_plantilla_cargada_y_ssh_caido_deja_warning_y_no_aborta(): void
+    {
+        EnvTemplate::create(['key' => 'PUSHER_APP_ID', 'scope' => 'empresa', 'value' => '2147311', 'group' => 'pusher', 'is_common' => true, 'is_manual_on_create' => false, 'sort_order' => 1]);
+        EnvTemplate::create(['key' => 'PUSHER_APP_KEY', 'scope' => 'empresa', 'value' => 'key-de-produccion-0x7', 'group' => 'pusher', 'is_common' => true, 'is_manual_on_create' => false, 'sort_order' => 2]);
+        EnvTemplate::create(['key' => 'PUSHER_APP_SECRET', 'scope' => 'empresa', 'value' => 'secret-de-produccion-0x7', 'group' => 'pusher', 'is_common' => true, 'is_manual_on_create' => false, 'sort_order' => 3]);
+        EnvTemplate::create(['key' => 'PUSHER_APP_CLUSTER', 'scope' => 'empresa', 'value' => 'sa1', 'group' => 'pusher', 'is_common' => true, 'is_manual_on_create' => false, 'sort_order' => 4]);
+
+        $e       = $this->escenario('shared_hosting', 'shared_hosting');
+        $service = new DeploymentService($e['upgrade']);
+
+        $this->invocar_paso_pusher($service);
+
+        $lineas = $this->lineas_del_paso_pusher($e['upgrade']);
+        $this->assertNotEmpty($lineas);
+
+        $ultima = $lineas->last();
+        $this->assertSame('warning', $ultima->level, 'El SSH caído no puede abortar el deploy.');
+
+        foreach (['2147311', 'key-de-produccion-0x7', 'secret-de-produccion-0x7', 'sa1'] as $valor) {
+            $this->assertStringNotContainsString(
+                $valor,
+                $ultima->line,
+                'Ningún valor de la plantilla puede aparecer en el log, ni siquiera el cluster.'
+            );
+        }
+    }
+
+    /**
+     * Invoca `step_sync_pusher_template()` por reflection (privado).
+     *
+     * @param  DeploymentService  $service
+     * @return void
+     */
+    private function invocar_paso_pusher(DeploymentService $service): void
+    {
+        $metodo = new \ReflectionMethod($service, 'step_sync_pusher_template');
+        $metodo->setAccessible(true);
+        $metodo->invoke($service);
+    }
+
+    /**
+     * Líneas que step_sync_pusher_template() dejó en deployment_logs para ese upgrade, en orden.
+     *
+     * @param  ClientVersionUpgrade  $upgrade
+     * @return \Illuminate\Support\Collection
+     */
+    private function lineas_del_paso_pusher(ClientVersionUpgrade $upgrade)
+    {
+        return DeploymentLog::where('client_version_upgrade_id', $upgrade->id)
+            ->where('step', 'sync_pusher_template')
+            ->orderBy('id')
+            ->get();
     }
 
     /**
@@ -428,6 +581,7 @@ class SincronizacionDeClavesDelEnvEntreFrentesTest extends TestCase
         );
         $this->assertSame('pause_for_crons', $pre[count($pre) - 1], 'El pre-cierre termina en la pausa por los crons.');
         $this->assertContains('sync_env_keys', $pre);
+        $this->assertContains('sync_pusher_template', $pre);
         $this->assertContains('restart_queue_workers', $pre);
     }
 
