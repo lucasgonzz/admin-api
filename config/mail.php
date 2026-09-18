@@ -45,6 +45,33 @@ return [
             'auth_mode' => null,
         ],
 
+        /*
+         * El remitente con el que ComercioCity le habla a un CLIENTE (hoy, el aviso de que le
+         * actualizamos el sistema). Decisión de Lucas (18/9/2026): esos mails salen desde
+         * `admin@comerciocity.com`, y los de leads (demo, propuesta, acceso, presentación) siguen
+         * saliendo desde la casilla de `MAIL_USERNAME`. Es un mailer aparte y no un `->from()` en el
+         * mailable porque el SMTP de Hostinger exige autenticarse con la casilla que figura como
+         * remitente: cambiar el "from" sin cambiar la credencial lo rechaza.
+         *
+         * Comparte host, puerto y cifrado con `smtp` (es el mismo Hostinger); lo único propio son
+         * la credencial y el remitente. `MAIL_ADMIN_TRANSPORT` existe para que los tests lo pongan
+         * en `array`, igual que `MAIL_MAILER`.
+         */
+        'admin' => [
+            'transport' => env('MAIL_ADMIN_TRANSPORT', 'smtp'),
+            'host' => env('MAIL_HOST', 'smtp.mailgun.org'),
+            'port' => env('MAIL_PORT', 587),
+            'encryption' => env('MAIL_ENCRYPTION', 'tls'),
+            'username' => env('MAIL_ADMIN_USERNAME'),
+            'password' => env('MAIL_ADMIN_PASSWORD'),
+            'timeout' => null,
+            'auth_mode' => null,
+            'from' => [
+                'address' => env('MAIL_ADMIN_FROM_ADDRESS', 'admin@comerciocity.com'),
+                'name' => env('MAIL_FROM_NAME', 'ComercioCity'),
+            ],
+        ],
+
         'ses' => [
             'transport' => 'ses',
         ],

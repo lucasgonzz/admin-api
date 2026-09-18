@@ -39,6 +39,15 @@ use Illuminate\Support\Facades\Mail;
 class AvisoDeActualizacionService
 {
     /**
+     * El mailer por el que sale el mail: el que manda desde `admin@comerciocity.com`.
+     *
+     * No es el mailer por defecto del admin (que es el de leads, `admisiones@`): está definido
+     * aparte en `config/mail.php` con su propia credencial, porque Hostinger no deja mandar como
+     * una casilla autenticándose con otra. Ver el comentario de ese bloque de config.
+     */
+    const MAILER = 'admin';
+
+    /**
      * @var ClientContactEmailResolver
      */
     private $resolver_de_casilla;
@@ -259,9 +268,22 @@ class AvisoDeActualizacionService
                 return $aviso;
             }
 
-            /* 4. El mail. */
+            /* 4. El mail. Antes de intentarlo, que el mailer tenga con qué autenticarse: sin la
+               credencial, el SMTP contestaría con un error críptico y la fila quedaría con ese
+               texto. Así queda escrito qué falta y dónde. */
+            $sin_credencial = $this->que_le_falta_al_mailer();
+
+            if ($sin_credencial !== null) {
+                Log::channel('daily')->error('AvisoDeActualizacion: el mailer no tiene credencial.', [
+                    'client_id' => $client->id,
+                    'motivo'    => $sin_credencial,
+                ]);
+
+                return $this->cerrar_con_error($aviso, 'No se pudo mandar el mail: ' . $sin_credencial);
+            }
+
             try {
-                Mail::to($casilla)->send(ClientVersionUpgradeMail::armar(
+                Mail::mailer(self::MAILER)->to($casilla)->send(ClientVersionUpgradeMail::armar(
                     $client->resolve_display_name(),
                     $this->version_de_destino($upgrade),
                     $novedades
@@ -495,6 +517,34 @@ class AvisoDeActualizacionService
         }
 
         return $salida;
+    }
+
+    /**
+     * Dice qué le falta al mailer `admin` para poder mandar, o `null` si no le falta nada.
+     *
+     * Solo mira la credencial cuando el transporte es SMTP: en los tests el transporte es `array`
+     * y no autentica contra nadie.
+     *
+     * @return string|null
+     */
+    private function que_le_falta_al_mailer(): ?string
+    {
+        $mailer = (array) config('mail.mailers.' . self::MAILER, []);
+
+        if (empty($mailer)) {
+            return 'el mailer `' . self::MAILER . '` no está definido en config/mail.php.';
+        }
+
+        if ((string) ($mailer['transport'] ?? '') !== 'smtp') {
+            return null;
+        }
+
+        if (trim((string) ($mailer['username'] ?? '')) === '' || trim((string) ($mailer['password'] ?? '')) === '') {
+            return 'el mailer `' . self::MAILER . '` no tiene credencial: cargar MAIL_ADMIN_USERNAME y '
+                . 'MAIL_ADMIN_PASSWORD (la casilla admin@comerciocity.com) en el .env del admin.';
+        }
+
+        return null;
     }
 
     /**
