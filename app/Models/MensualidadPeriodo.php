@@ -19,6 +19,12 @@ use Illuminate\Database\Eloquent\Model;
  * @property string|null $monto_esperado Cuánto se esperaba ese mes (nulo = el total actual del cliente).
  * @property string|null $observacion    Nota del mes.
  * @property bool        $importado      Si la escribió el importador de la planilla.
+ * @property \Carbon\Carbon|null $vencimiento_avanzado_en Cuándo se adelantó `clients.payment_expired_at`
+ *                                                          por este período (misión cobranzas-mejoras,
+ *                                                          18/9/2026). Null = todavía no se adelantó.
+ *                                                          Es el candado de idempotencia: sin esto,
+ *                                                          borrar un pago y volver a registrarlo
+ *                                                          adelantaría el vencimiento dos veces.
  */
 class MensualidadPeriodo extends Model
 {
@@ -60,9 +66,10 @@ class MensualidadPeriodo extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'client_id'      => 'integer',
-        'monto_esperado' => 'decimal:2',
-        'importado'      => 'boolean',
+        'client_id'                => 'integer',
+        'monto_esperado'           => 'decimal:2',
+        'importado'                => 'boolean',
+        'vencimiento_avanzado_en'  => 'datetime',
     ];
 
     /**
