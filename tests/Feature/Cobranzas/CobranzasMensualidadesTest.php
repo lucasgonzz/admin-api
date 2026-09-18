@@ -253,6 +253,13 @@ class CobranzasMensualidadesTest extends BaseDeCobranzas
         $response->assertStatus(200);
         $this->assertSame('pagado', $response->json('periodo.estado'), 'Lo cerró la planilla, no el pago.');
         $this->assertTrue($response->json('periodo.importado'));
+        $this->assertNull($response->json('periodo.monto_esperado'), 'Un mes pagado según la planilla no tiene esperado: no se le inventa el precio de hoy.');
+
+        // Un mes vivo (pendiente) sí cae al total actual del cliente.
+        $vivo = $this->getJson('/api/admin/client/' . $client->id . '/mensualidad/periodos?desde=2026-09&hasta=2026-09');
+        $vivo->assertStatus(200);
+        $this->assertSame('pendiente', $vivo->json('periodos.0.estado'));
+        $this->assertEqualsWithDelta(12000.0, $vivo->json('periodos.0.monto_esperado'), 0.001);
     }
 
     /**

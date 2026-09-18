@@ -189,6 +189,15 @@ class CobranzasMensualidadService
             ? (float) $fila->monto_esperado
             : ($client->total_mensualidad !== null ? (float) $client->total_mensualidad : null);
 
+        /* Un mes que la planilla dio por pagado sin monto (Lucas, 18/9/2026: "sin monto, solo el
+         * estado") no tiene esperado: mostrarle el precio de HOY sería inventarle un importe a un
+         * mes de hace un año, en el que el cliente pagaba otra cosa. Queda null y la pantalla
+         * muestra "—". Los meses vivos (pendiente, parcial, futuro) sí caen al total actual. */
+        if ($fila !== null && $fila->importado && $fila->monto_esperado === null
+            && $fila->estado === MensualidadPeriodo::ESTADO_PAGADO) {
+            $monto_esperado = null;
+        }
+
         /** Lo que entró: suma de los pagos CON monto (los importados sin monto no suman). */
         $monto_pagado = 0.0;
         foreach ($pagos as $pago) {
