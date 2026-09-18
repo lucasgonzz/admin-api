@@ -63,9 +63,16 @@ class EnvTemplateSeeder extends Seeder
             ['key' => 'MAIL_ENCRYPTION',   'value' => 'ssl',                             'group' => 'mail',   'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 6],
             ['key' => 'MAIL_FROM_ADDRESS', 'value' => 'sistema@comerciocity.com',        'group' => 'mail',   'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 7],
             ['key' => 'MAIL_FROM_NAME',    'value' => 'ComercioCity Sistemas',           'group' => 'mail',   'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 8],
-            ['key' => 'PUSHER_APP_ID',     'value' => '1561202',                         'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 1],
-            ['key' => 'PUSHER_APP_KEY',    'value' => '7fc3a66cec31239fc44e',            'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 2],
-            ['key' => 'PUSHER_APP_SECRET', 'value' => 'c0a6bc62a3bf0df98517',            'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 3],
+            // PUSHER_APP_ID/KEY/SECRET: sin valor a propósito (mismo patrón que ANTHROPIC_API_KEY,
+            // abajo). Hasta el 18/9/2026 acá vivía hardcodeada la app 1561202 ("comerciocity"
+            // vieja), que ya NO EXISTE en la cuenta de Pusher — instalar un cliente de cero con
+            // esa key lo dejaba emitiendo al vacío desde el día uno. La app vigente de producción
+            // (comerciocity-production) la carga Lucas acá mismo, desde el panel > plantilla .env.
+            ['key' => 'PUSHER_APP_ID',     'value' => null,                              'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'App de producción de Pusher (dashboard.pusher.com > comerciocity-production). Configurar el valor en el panel de plantilla .env.', 'sort_order' => 1],
+            ['key' => 'PUSHER_APP_KEY',    'value' => null,                              'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'App de producción de Pusher (dashboard.pusher.com > comerciocity-production). Configurar el valor en el panel de plantilla .env.', 'sort_order' => 2],
+            ['key' => 'PUSHER_APP_SECRET', 'value' => null,                              'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => 'App de producción de Pusher (dashboard.pusher.com > comerciocity-production). Configurar el valor en el panel de plantilla .env.', 'sort_order' => 3],
+            // El cluster SÍ queda con valor: las tres apps de la cuenta (development/staging/production)
+            // viven todas en sa1 — no es parte del bug, cambia solo si la cuenta cambia de cluster.
             ['key' => 'PUSHER_APP_CLUSTER','value' => 'sa1',                             'group' => 'pusher', 'is_common' => true,  'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 4],
             ['key' => 'QUEUE_CONNECTION',  'value' => 'database',                        'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 1],
             ['key' => 'CACHE_DRIVER',      'value' => 'file',                            'group' => 'misc',   'is_common' => false, 'is_manual_on_create' => false, 'notes' => null,                                    'sort_order' => 2],

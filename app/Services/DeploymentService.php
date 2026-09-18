@@ -7,6 +7,7 @@ use App\Models\ClientApi;
 use App\Models\ClientSshCredential;
 use App\Models\ClientVersionUpgrade;
 use App\Models\DeploymentLog;
+use App\Models\EnvTemplate;
 use App\Models\Version;
 use App\Models\VersionCommand;
 use App\Models\VersionSeeder;
@@ -61,13 +62,16 @@ class DeploymentService
 
     /**
      * Orden de etapas del pipeline de deployment.
-     * Pre-cierre: compile_spa → upload_spa → upload_api → sync_env_keys → run_migrations →
-     *             restart_queue_workers → pause_for_crons
+     * Pre-cierre: compile_spa → upload_spa → upload_api → sync_env_keys → sync_pusher_template →
+     *             run_migrations → restart_queue_workers → pause_for_crons
      * Post-cierre (negocio cerrado): run_seeders → run_commands → update_default_version → complete
      *
      * `sync_env_keys` va ENTRE upload_api y run_migrations a propósito: las migraciones, los
      * seeders y los comandos que siguen bootean Laravel con el `.env` del destino, y tienen que
      * encontrarlo completo (ver step_sync_env_keys()).
+     *
+     * `sync_pusher_template` va INMEDIATAMENTE DESPUÉS: usa la misma conexión SSH del mismo `.env`
+     * que acaba de completar sync_env_keys(), pero con la regla al revés (ver step_sync_pusher_template()).
      *
      * @var array<int, string>
      */
@@ -76,6 +80,7 @@ class DeploymentService
         'upload_spa',
         'upload_api',
         'sync_env_keys',
+        'sync_pusher_template',
         'run_migrations',
         'restart_queue_workers',
         'pause_for_crons',
@@ -290,6 +295,10 @@ class DeploymentService
                     // Sin timestamp propio en el upgrade: es un complemento del `.env` que nunca
                     // aborta (degrada a warning), no un hito que el panel tenga que mostrar aparte.
                     $this->step_sync_env_keys();
+                    break;
+                case 'sync_pusher_template':
+                    // Mismo criterio que sync_env_keys: sin timestamp propio, nunca aborta el deploy.
+                    $this->step_sync_pusher_template();
                     break;
                 case 'run_migrations':
                     $this->step_run_migrations();
@@ -996,6 +1005,156 @@ class DeploymentService
         }
 
         return preg_match(self::CLAVES_PROPIAS_DEL_FRENTE_PATRON, $clave) === 1;
+    }
+
+    /**
+     * Claves de Pusher gestionadas centralmente por la plantilla `is_common` (scope 'empresa'), no
+     * por cada cliente: una sola cuenta de Pusher para toda la flota (decisión de Lucas, 18/9/2026,
+     * al pasar a Startup). step_sync_pusher_template() las fuerza SIEMPRE desde la plantilla, al
+     * revés que step_sync_env_keys(): ahí "el destino ya la tiene" es motivo para respetarla (regla
+     * 1 de claves_a_sincronizar()); acá es exactamente lo que nunca dejaba que una app de Pusher
+     * vieja, o un secret desactualizado, se autocorrigiera solos en un upgrade (medido el 18/9/2026:
+     * 26 clientes con `PUSHER_APP_ID` de una app que ya no existe en la cuenta).
+     *
+     * @var array<int, string>
+     */
+    const CLAVES_PUSHER_GESTIONADAS_CENTRALMENTE = [
+        'PUSHER_APP_ID',
+        'PUSHER_APP_KEY',
+        'PUSHER_APP_SECRET',
+        'PUSHER_APP_CLUSTER',
+    ];
+
+    /**
+     * Cuáles de las claves de Pusher hay que forzar en el destino: las que la plantilla trae CON
+     * VALOR y difieren de lo que el destino ya tiene — sea lo que sea, a diferencia de
+     * claves_a_sincronizar() (que respeta cualquier valor ya presente).
+     *
+     * Función estática y pura a propósito —entran dos arrays ya resueltos, sale un array, sin SSH
+     * ni modelos— para poder probar la regla de qué se fuerza sin SSH real, mismo criterio que
+     * claves_a_sincronizar()/claves_apartadas().
+     *
+     * @param  array<string, string>  $plantilla  Las 4 claves de Pusher con valor (ya filtradas de
+     *                                             vacías por el caller: la plantilla sin cargar no
+     *                                             fuerza nada).
+     * @param  array<string, string>  $destino    `.env` del frente destino, ya parseado.
+     * @return array<string, string>  KEY => valor de la plantilla a escribir; vacío si coincide todo.
+     */
+    public static function claves_pusher_a_forzar(array $plantilla, array $destino): array
+    {
+        $a_forzar = [];
+
+        foreach ($plantilla as $clave => $valor_plantilla) {
+            $valor_actual = trim((string) ($destino[$clave] ?? ''));
+
+            if ($valor_actual !== trim((string) $valor_plantilla)) {
+                $a_forzar[$clave] = $valor_plantilla;
+            }
+        }
+
+        return $a_forzar;
+    }
+
+    /**
+     * Etapa: fuerza `PUSHER_APP_ID/KEY/SECRET/CLUSTER` del `.env` del destino al valor de la
+     * plantilla `is_common` (scope='empresa'), sin importar lo que el destino ya tenía.
+     *
+     * Va DESPUÉS de sync_env_keys() a propósito: ese paso completa lo que falta respetando lo que
+     * ya está (correcto para casi todas las claves, ver su docblock). Para Pusher esa regla es
+     * exactamente el bug — la cuenta es una sola para toda la flota, así que un valor "propio" del
+     * cliente no es una decisión de nadie, es un resabio de una rotación anterior. Esta etapa no
+     * respeta nada: compara la plantilla contra el destino y pisa lo que difiera.
+     *
+     * Si la plantilla todavía no tiene alguna de las 4 claves cargada (`value` vacío — Lucas todavía
+     * no la puso en el panel), esa clave puntual NO se toca: mejor dejar al cliente con lo que ya
+     * tenía que escribirle, por ejemplo, un `PUSHER_APP_SECRET` vacío y tirarle abajo los canales
+     * privados que sí andaban.
+     *
+     * @return void
+     */
+    private function step_sync_pusher_template()
+    {
+        $templates = EnvTemplate::where('scope', 'empresa')
+            ->where('is_common', true)
+            ->whereIn('key', self::CLAVES_PUSHER_GESTIONADAS_CENTRALMENTE)
+            ->get()
+            ->keyBy('key');
+
+        /* Solo las claves que la plantilla realmente tiene cargadas (con valor, sin espacios). */
+        $vars_de_la_plantilla = [];
+        foreach (self::CLAVES_PUSHER_GESTIONADAS_CENTRALMENTE as $key) {
+            $valor = trim((string) ($templates[$key]->value ?? ''));
+
+            if ($valor === '') {
+                $this->log(
+                    'sync_pusher_template',
+                    "La plantilla todavía no tiene {$key} cargado (panel > plantilla .env): no se "
+                    . 'toca esa clave en el .env del destino.',
+                    'warning'
+                );
+                continue;
+            }
+
+            $vars_de_la_plantilla[$key] = $valor;
+        }
+
+        if (count($vars_de_la_plantilla) === 0) {
+            $this->log(
+                'sync_pusher_template',
+                'La plantilla no tiene ninguna clave de Pusher cargada: nada para forzar en este deploy.',
+                'info'
+            );
+
+            return;
+        }
+
+        $env_ssh = new EnvSshService();
+
+        try {
+            $env_destino = $env_ssh->read_env_for($this->target_api);
+
+            /* Solo escribe las que realmente difieren del destino, para no ensuciar el log ni el
+               .env con una reescritura idéntica. */
+            $vars_a_forzar = self::claves_pusher_a_forzar($vars_de_la_plantilla, $env_destino);
+
+            if (count($vars_a_forzar) === 0) {
+                $this->log(
+                    'sync_pusher_template',
+                    'El .env del destino ya tiene las claves de Pusher iguales a la plantilla: nada que forzar.',
+                    'success'
+                );
+
+                return;
+            }
+
+            $env_ssh->write_env_vars_for($this->target_api, $vars_a_forzar);
+
+            $this->log(
+                'sync_pusher_template',
+                'Claves de Pusher forzadas al valor de la plantilla, sin importar lo que tenía el '
+                . 'frente destino (' . count($vars_a_forzar) . '): ' . implode(', ', array_keys($vars_a_forzar)),
+                'success'
+            );
+        } catch (\Throwable $e) {
+            /* El mensaje de EnvSshService nombra rutas y claves, nunca valores. */
+            $this->log(
+                'sync_pusher_template',
+                'No se pudo forzar las claves de Pusher del destino desde la plantilla. El deploy '
+                . 'sigue, pero ese frente puede quedar con la app de Pusher vieja o un secret '
+                . 'desactualizado. Detalle: ' . $this->truncate_for_log($e->getMessage(), 600),
+                'warning'
+            );
+        } finally {
+            try {
+                $env_ssh->disconnect();
+            } catch (\Throwable $e) {
+                $this->log(
+                    'sync_pusher_template',
+                    'La sesión SSH de este paso no cerró limpia: ' . $this->truncate_for_log($e->getMessage(), 300),
+                    'info'
+                );
+            }
+        }
     }
 
     /**

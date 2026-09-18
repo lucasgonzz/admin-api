@@ -30,12 +30,15 @@ use Tests\TestCase;
  *  1. 🔴 Que `resume_from_step` sólo se acepte sobre un deployment `failed`. Sobre cualquier otro
  *     estado es 422 sin escribir nada: reanudar "desde upload_api" un upgrade que nunca arrancó
  *     desplegaría una API sin haber subido la SPA.
- *  2. 🔴 Que sólo acepte las cinco etapas del pre-cierre (`compile_spa`, `upload_spa`, `upload_api`,
- *     `sync_env_keys`, `run_migrations`). `run_seeders` y lo que sigue corren sobre el sistema EN
- *     USO y tienen su propio endpoint con gate de horario: colarlas por acá sería saltear ese gate.
+ *  2. 🔴 Que sólo acepte las seis etapas del pre-cierre (`compile_spa`, `upload_spa`, `upload_api`,
+ *     `sync_env_keys`, `sync_pusher_template`, `run_migrations`). `run_seeders` y lo que sigue
+ *     corren sobre el sistema EN USO y tienen su propio endpoint con gate de horario: colarlas por
+ *     acá sería saltear ese gate.
  *     `sync_env_keys` se sumó en la misión `optimizacion-vps-fase1` (10/9/2026): es la etapa que
  *     completa el `.env` del destino con las claves que le faltan respecto del activo, corre sobre
  *     la API destino como las otras cuatro, y va antes de `run_migrations`.
+ *     `sync_pusher_template` se sumó en la misión `pusher-app-produccion-vs-desarrollo` (18/9/2026),
+ *     inmediatamente después: fuerza `PUSHER_*` desde la plantilla, al revés que `sync_env_keys`.
  *  3. Que con `resume_from_step` NO se borren los logs del intento anterior (el motivo del fallo es
  *     justo lo que hace falta para decidir desde dónde reanudar), se agregue una línea que lo
  *     declare, y el job se encole con esa etapa en la conexión `database`.
@@ -57,10 +60,11 @@ class ReanudacionDelDeploymentPorClaudeTest extends TestCase
     const NOMBRE = 'Distribuidora Rioplatense';
 
     /**
-     * Las cinco etapas del pre-cierre que se pueden reanudar, en orden. `sync_env_keys` va entre
-     * `upload_api` y `run_migrations`, igual que en `DeploymentService::$steps`.
+     * Las seis etapas del pre-cierre que se pueden reanudar, en orden. `sync_env_keys` y
+     * `sync_pusher_template` van entre `upload_api` y `run_migrations`, igual que en
+     * `DeploymentService::$steps`.
      */
-    const ETAPAS_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'run_migrations'];
+    const ETAPAS_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations'];
 
     /**
      * Setea la clave de ingesta: en el .env del slot está vacía y el middleware es fail-closed.
@@ -311,8 +315,8 @@ class ReanudacionDelDeploymentPorClaudeTest extends TestCase
         );
     }
 
-    /** Las cinco etapas del pre-cierre se aceptan, cada una con su propio `failed`. */
-    public function test_acepta_las_cinco_etapas_del_pre_cierre(): void
+    /** Las seis etapas del pre-cierre se aceptan, cada una con su propio `failed`. */
+    public function test_acepta_las_seis_etapas_del_pre_cierre(): void
     {
         Queue::fake();
 

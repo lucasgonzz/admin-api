@@ -121,8 +121,12 @@ class ClaudeUpgradeOpsController extends Controller
      * `run_migrations` para que las migraciones booteen con el archivo completo. Reanudar desde ahí
      * sirve cuando `upload_api` ya salió y lo que se quiere es volver a completar el `.env` antes
      * de migrar (ver DeploymentService::step_sync_env_keys()).
+     *
+     * `sync_pusher_template` (misión `pusher-app-produccion-vs-desarrollo`, 18/9/2026) entra por lo
+     * mismo, inmediatamente después: fuerza `PUSHER_APP_ID/KEY/SECRET/CLUSTER` desde la plantilla
+     * `is_common`, al revés que `sync_env_keys` (ver DeploymentService::step_sync_pusher_template()).
      */
-    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'run_migrations'];
+    const ETAPAS_REANUDABLES_DEL_PRE_CIERRE = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations'];
 
     /**
      * Etapa del reintento de comandos. Mismo string que despacha el botón del panel en

@@ -122,10 +122,12 @@ class ClaudeClientOpsController extends Controller
      * `paused` y corta la pasada; lo que sigue corre recién con el negocio cerrado. Puesta al día
      * el 10/9/2026 (misión `optimizacion-vps-fase1`): le faltaban `restart_queue_workers` (en el
      * pipeline desde el 26/8) y `sync_env_keys` (completa el `.env` del destino desde el frente
-     * activo). Un candado en SincronizacionDeClavesDelEnvEntreFrentesTest compara estas dos
-     * listas contra `$steps` para que la próxima etapa nueva no vuelva a quedar sin replicar.
+     * activo). Y el 18/9/2026 (misión `pusher-app-produccion-vs-desarrollo`): `sync_pusher_template`
+     * (fuerza `PUSHER_*` desde la plantilla, al revés que `sync_env_keys`). Un candado en
+     * SincronizacionDeClavesDelEnvEntreFrentesTest compara estas dos listas contra `$steps` para
+     * que la próxima etapa nueva no vuelva a quedar sin replicar.
      */
-    const PIPELINE_PRE_CIERRE  = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'run_migrations', 'restart_queue_workers', 'pause_for_crons'];
+    const PIPELINE_PRE_CIERRE  = ['compile_spa', 'upload_spa', 'upload_api', 'sync_env_keys', 'sync_pusher_template', 'run_migrations', 'restart_queue_workers', 'pause_for_crons'];
     const PIPELINE_POST_CIERRE = ['run_seeders', 'run_commands', 'update_default_version', 'complete'];
 
     /** Valores válidos de `client_version_upgrades.deployment_status` (null = nunca arrancó). */

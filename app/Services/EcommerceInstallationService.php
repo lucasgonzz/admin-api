@@ -797,6 +797,9 @@ class EcommerceInstallationService
         if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_FIREBASE_API_KEY', '')) === '') {
             $missing_tienda_env_keys[] = 'VUE_APP_FIREBASE_API_KEY (admin .env: DEPLOY_TIENDA_FIREBASE_API_KEY)';
         }
+        if (trim((string) config('services.deploy.spa_pusher_key', '')) === '') {
+            $missing_tienda_env_keys[] = 'VUE_APP_PUSHER_KEY (admin .env: DEPLOY_SPA_PUSHER_KEY)';
+        }
         if (count($missing_tienda_env_keys) > 0) {
             $this->log(
                 'compile_spa',
@@ -2811,6 +2814,12 @@ class EcommerceInstallationService
             'VUE_APP_COMMERCE_ID'  => (string) $this->owner_commerce_id(),
             'VUE_APP_APP_URL'      => $spa_url,
             'VUE_APP_ICONS_VERSION' => date('YmdHis'),
+            // Misma cuenta/app de Pusher que empresa-spa (DeploymentService::build_spa_env_file_content()):
+            // una sola cuenta para toda la flota, no una por proyecto. Hasta el 18/9/2026 tienda-spa
+            // ni siquiera leía esto: tenía la key hardcodeada en main.js (y encima la de una app que
+            // ya no existe en la cuenta) — ver tienda-spa/src/main.js.
+            'VUE_APP_PUSHER_KEY'     => trim((string) config('services.deploy.spa_pusher_key', '')),
+            'VUE_APP_PUSHER_CLUSTER' => trim((string) config('services.deploy.spa_pusher_cluster', 'sa1')),
         ];
 
         // Mergea las variables fijas de tienda-spa (Google Maps / Firebase) definidas en config,
