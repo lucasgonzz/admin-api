@@ -56,6 +56,12 @@ class Client extends Model
          * Las otras dos columnas del trío (`ai_tokens_sync_status`, `ai_tokens_sync_message`) son
          * texto y no necesitan cast, igual que las de `schedule_sync_*`. */
         'ai_tokens_synced_at'       => 'datetime',
+        // Paquete de IA asignado y última recolección de su push (misión foto-sucursal-y-asistente-
+        // configurable, 17/9/2026). ai_plan_id casteado a int para comparar sin sorpresas; el
+        // datetime del push por el mismo motivo que ai_tokens_synced_at (la ficha muestra "Enviado
+        // el …"). ai_plan_sync_status/_message son texto y no necesitan cast.
+        'ai_plan_id'                => 'integer',
+        'ai_plan_synced_at'         => 'datetime',
     ];
 
     /**
@@ -225,5 +231,21 @@ class Client extends Model
     public function shared_database_group()
     {
         return $this->belongsTo(SharedDatabaseGroup::class, 'shared_database_group_id');
+    }
+
+    /**
+     * Paquete de IA asignado a este cliente (misión foto-sucursal-y-asistente-configurable,
+     * 17/9/2026). Null cuando todavía no tiene ninguno (que significa "sin tope": no corta).
+     *
+     * 🔴 A propósito NO se suma a scopeWithAll(): el paquete se lee en la ficha de un cliente y en
+     * el push, no en el listado de todos, y sumar una relación más engorda ese payload sin que nadie
+     * lo pida. El id (`ai_plan_id`) sí viaja siempre porque es una columna; quien necesite el nombre
+     * y los topes cruza contra el catálogo (`ai-plan`) o carga la relación explícitamente.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function ai_plan()
+    {
+        return $this->belongsTo(AiPlan::class, 'ai_plan_id');
     }
 }
