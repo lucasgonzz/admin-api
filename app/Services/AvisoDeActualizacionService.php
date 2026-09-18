@@ -225,6 +225,13 @@ class AvisoDeActualizacionService
     ): ClientUpgradeNotice {
         if ($aviso->mail_pendiente()) {
 
+            /* 1.bis. El reclamo. Ver `reclamar()`: sin esto, dos workers mandan dos mails. */
+            if (! $this->reclamar($aviso)) {
+                $fresco = $aviso->fresh();
+
+                return $fresco instanceof ClientUpgradeNotice ? $fresco : $aviso;
+            }
+
             /* 2. La casilla. */
             $casilla = $this->resolver_de_casilla->resolve($client);
 
@@ -255,7 +262,7 @@ class AvisoDeActualizacionService
             /* 4. El mail. */
             try {
                 Mail::to($casilla)->send(ClientVersionUpgradeMail::armar(
-                    $this->nombre_del_negocio($client),
+                    $client->resolve_display_name(),
                     $this->version_de_destino($upgrade),
                     $novedades
                 ));
@@ -281,6 +288,78 @@ class AvisoDeActualizacionService
         }
 
         return $aviso;
+    }
+
+    /**
+     * Toma el aviso para sí antes de salir a la red, y dice si lo consiguió.
+     *
+     * 🔴 **Esto es lo único que impide que al mismo dueño le lleguen DOS mails.** El scheduler
+     * corre `queue:work database --stop-when-empty` cada minuto y a propósito NO usa
+     * `withoutOverlapping()` —está escrito y explicado en `Console/Kernel.php`—, así que puede
+     * haber dos workers vivos a la vez tomando el mismo job. Entre el `mail_pendiente()` de acá
+     * arriba y el `mail_enviado_at = now()` de abajo pasan la resolución de la casilla (HTTP, con
+     * timeout de 15 s), la consulta de novedades y el SMTP: si los dos leen antes de que ninguno
+     * escriba, los dos mandan. La ventana es todo ese tramo, no un instante.
+     *
+     * El índice único `cun_upgrade_client_unique` NO cubre esto: protege la fila, no el envío.
+     *
+     * **Cómo se reclama.** Un UPDATE condicional, que es una sola sentencia y por lo tanto atómica:
+     * MySQL bloquea la fila para escribirla. `update()` devuelve **filas afectadas**, y ahí está la
+     * exclusión mutua — el primero recibe 1 y sigue; el segundo recibe 0 y se va sin mandar nada.
+     * Es el mismo patrón que `LeadScheduledMessageService::despachar_uno()` (estado de paso
+     * `enviando` + `dispatch_started_at` + destrabe por antigüedad), que este repo ya usa para los
+     * mensajes programados a leads y que nació del mismo problema medido: cinco corridas, cinco
+     * WhatsApps al mismo lead.
+     *
+     * **Las dos condiciones del WHERE, y por qué cada una:**
+     *
+     *   - `mail_enviado_at IS NULL` — si otro worker ya lo mandó mientras este venía en camino, no
+     *     hay nada que reclamar. Es el chequeo de `mail_pendiente()` otra vez, pero contra la base
+     *     y en la misma sentencia que escribe, que es lo que lo vuelve confiable.
+     *   - el estado no es `enviando`, **o** el reclamo está colgado — un aviso reclamado por un
+     *     proceso que murió sin poder soltarlo quedaría trabado para siempre: invisible para el
+     *     hook (que solo despacha los `pendiente`) y para el reintento a mano. `scopeColgados()`
+     *     lo libera pasados `MINUTOS_PARA_DAR_POR_COLGADO`.
+     *
+     * 🔴 **El reintento a mano sigue funcionando sobre estas filas**, y por eso la condición mira
+     * `enviando` y no "está en `pendiente`": un aviso en `sin_mail`, `sin_novedades` o `error`
+     * —que son los que levanta `aviso-actualizacion:reintentar`— no está reclamado por nadie, así
+     * que se reclama sin problema. Lo único que el comando no puede pisar es un aviso que un worker
+     * está trabajando en este mismo momento, que es justamente lo correcto.
+     *
+     * @param ClientUpgradeNotice $aviso Fila a reclamar. Si se consigue, queda releída de la base.
+     *
+     * @return bool true si este proceso se quedó con el aviso.
+     */
+    private function reclamar(ClientUpgradeNotice $aviso): bool
+    {
+        $reclamado = ClientUpgradeNotice::where('id', $aviso->id)
+            ->whereNull('mail_enviado_at')
+            ->where(function ($query) {
+                $query->where('estado', '!=', ClientUpgradeNotice::ESTADO_ENVIANDO)
+                    ->orWhere(function ($colgado) {
+                        $colgado->colgados();
+                    });
+            })
+            ->update([
+                'estado'              => ClientUpgradeNotice::ESTADO_ENVIANDO,
+                'dispatch_started_at' => now(),
+            ]);
+
+        if ($reclamado === 0) {
+            Log::channel('daily')->info(
+                'AvisoDeActualizacion: el aviso ya lo tiene otro proceso, o el mail ya salió. No se manda nada.',
+                ['client_upgrade_notice_id' => $aviso->id, 'client_id' => $aviso->client_id]
+            );
+
+            return false;
+        }
+
+        /* Releído de la base, como en `despachar_uno()`: el objeto en memoria puede venir de antes
+           del reclamo y de acá en adelante se escribe sobre él. */
+        $aviso->refresh();
+
+        return true;
     }
 
     /**
@@ -340,7 +419,7 @@ class AvisoDeActualizacionService
                     $telefono,
                     $plantilla,
                     // Una sola variable: el nombre del negocio.
-                    [$this->nombre_del_negocio($client)],
+                    [$client->resolve_display_name()],
                     AsistenteWhatsappSettings::idioma_de_la_plantilla_de_actualizaciones(),
                     'Aviso de actualización al cliente ' . $client->id
                 );
@@ -434,20 +513,6 @@ class AvisoDeActualizacionService
         return 'Hola! Te actualizamos el sistema: ya tenés las mejoras nuevas andando. '
             . 'Te mandamos un mail' . $donde . ' con el detalle de todo lo que trae. '
             . 'Si querés que te explique alguna, preguntame por acá.';
-    }
-
-    /**
-     * Nombre con el que se le habla al negocio.
-     *
-     * @param Client $client
-     *
-     * @return string Vacío si el cliente no tiene ninguno de los dos.
-     */
-    private function nombre_del_negocio(Client $client): string
-    {
-        $company = trim((string) $client->company_name);
-
-        return $company !== '' ? $company : trim((string) $client->name);
     }
 
     /**

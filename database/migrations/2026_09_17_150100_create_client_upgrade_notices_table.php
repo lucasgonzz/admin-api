@@ -55,6 +55,8 @@ class CreateClientUpgradeNoticesTable extends Migration
              * `ClientUpgradeNotice` — acá van sueltos porque una migración no importa modelos.
              *
              *   pendiente     — la fila la creó el hook, el job todavía no la trabajó.
+             *   enviando      — un worker la RECLAMÓ y está trabajándola ahora mismo. Ver
+             *                   `dispatch_started_at`, acá abajo.
              *   enviado       — el mail salió. (El WhatsApp puede haber quedado pendiente; eso se
              *                   cuenta en `whatsapp_enviado_at` y en `error`.)
              *   sin_mail      — no hay casilla ni en `clients.email` ni en el cliente. No salió
@@ -70,6 +72,25 @@ class CreateClientUpgradeNoticesTable extends Migration
             // Cuándo salió cada cosa. Nulos = todavía no salió.
             $table->timestamp('mail_enviado_at')->nullable();
             $table->timestamp('whatsapp_enviado_at')->nullable();
+
+            /*
+             * 🔴 Cuándo un worker RECLAMÓ este aviso, y es lo que hace que dos workers no manden
+             * dos mails al mismo dueño.
+             *
+             * El scheduler corre `queue:work database --stop-when-empty` cada minuto y a
+             * propósito NO usa `withoutOverlapping()` (está escrito y explicado en
+             * `Console/Kernel.php`), así que puede haber dos workers vivos a la vez. Sin esta
+             * columna, los dos leen la fila en `pendiente`, los dos pasan la resolución de la
+             * casilla (HTTP, hasta 15 s), la consulta de novedades y el SMTP antes de que ninguno
+             * escriba `mail_enviado_at`, y salen DOS mails. La ventana no es teórica: es todo ese
+             * tramo.
+             *
+             * El reclamo es un UPDATE condicional sobre `estado` — el que lo gana afecta una fila,
+             * el que llega segundo afecta cero — y esta fecha es la que permite destrabar un
+             * reclamo que quedó colgado porque el proceso murió sin poder soltarlo. Mismo patrón
+             * que `lead_scheduled_messages.dispatch_started_at`.
+             */
+            $table->timestamp('dispatch_started_at')->nullable();
 
             // El wamid que devuelve Meta para el WhatsApp del aviso. Nulo si no salió.
             $table->string('whatsapp_message_id', 120)->nullable();

@@ -14,7 +14,8 @@ use Illuminate\Database\Eloquent\Model;
  * @property int         $client_version_upgrade_id Actualización que disparó el aviso.
  * @property int         $client_id                 Cliente al que se le avisó.
  * @property string|null $email                     Dirección a la que salió el mail.
- * @property string      $estado                    pendiente | enviado | sin_mail | sin_novedades | error
+ * @property string      $estado                    pendiente | enviando | enviado | sin_mail | sin_novedades | error
+ * @property \Illuminate\Support\Carbon|null $dispatch_started_at Cuándo un worker reclamó este aviso.
  * @property string|null $whatsapp_message_id       wamid que devolvió Meta.
  * @property string|null $error                     Motivo legible, para `error` y para el WhatsApp que no salió.
  */
@@ -24,6 +25,25 @@ class ClientUpgradeNotice extends Model
      * La fila la creó el hook al cerrarse el upgrade; el job todavía no la trabajó.
      */
     const ESTADO_PENDIENTE = 'pendiente';
+
+    /**
+     * Un worker RECLAMÓ este aviso y lo está trabajando ahora mismo.
+     *
+     * 🔴 **Es el estado que hace que dos workers no manden dos mails al mismo dueño.** El
+     * scheduler corre `queue:work database --stop-when-empty` cada minuto y a propósito NO usa
+     * `withoutOverlapping()` (está escrito y explicado en `Console/Kernel.php`), así que puede
+     * haber dos workers vivos a la vez. Sin este estado los dos leen la fila en `pendiente`, los
+     * dos pasan la resolución de la casilla (HTTP, hasta 15 s), la consulta de novedades y el
+     * SMTP antes de que ninguno escriba `mail_enviado_at`, y salen dos mails.
+     *
+     * El reclamo lo hace `AvisoDeActualizacionService::reclamar()` con un UPDATE condicional: el
+     * que lo gana afecta una fila, el que llega segundo afecta cero y se va sin mandar nada.
+     *
+     * Es un estado de PASO: todo camino normal lo deja en `enviado`, `sin_mail`, `sin_novedades` o
+     * `error` antes de devolver. Si queda acá, el proceso murió a mitad — y para eso está
+     * `dispatch_started_at` y el scope `colgados()`.
+     */
+    const ESTADO_ENVIANDO = 'enviando';
 
     /**
      * El mail salió. 🔴 No dice nada del WhatsApp: ese puede haber quedado pendiente (sin
@@ -60,6 +80,27 @@ class ClientUpgradeNotice extends Model
     const ESTADO_ERROR = 'error';
 
     /**
+     * A los cuántos minutos un aviso reclamado (`enviando`) se da por colgado.
+     *
+     * El job tiene `$timeout = 120`, así que a los diez minutos el worker que lo reclamó ya no
+     * existe de ninguna manera: o terminó y dejó la fila en otro estado, o lo mató el sistema
+     * operativo sin darle tiempo a soltar el reclamo. El margen es holgado a propósito — dar por
+     * colgado uno que sigue vivo es exactamente el mail duplicado que el reclamo vino a evitar.
+     */
+    const MINUTOS_PARA_DAR_POR_COLGADO = 10;
+
+    /**
+     * A los cuántos minutos un aviso en `pendiente` deja de ser "lo tiene la cola" y pasa a ser
+     * "el worker no está corriendo".
+     *
+     * El scheduler despacha `queue:work database --stop-when-empty` cada minuto, así que un aviso
+     * recién creado se trabaja en segundos. Media hora sin moverse no es demora: es que nadie lo
+     * está consumiendo. `Console/Kernel.php` documenta que ese scheduler se muere por ratos, y el
+     * job tiene `$tries = 1` y no tiene `failed()`, así que no hay nada más que lo levante.
+     */
+    const MINUTOS_PARA_SOSPECHAR_DEL_WORKER = 30;
+
+    /**
      * Todas las filas las escribe el propio canal (el hook y el job), nunca un request de usuario:
      * no hay entrada de afuera de la que protegerse con una lista blanca.
      *
@@ -75,6 +116,7 @@ class ClientUpgradeNotice extends Model
         'client_id'                 => 'integer',
         'mail_enviado_at'           => 'datetime',
         'whatsapp_enviado_at'       => 'datetime',
+        'dispatch_started_at'       => 'datetime',
     ];
 
     /**
@@ -137,5 +179,54 @@ class ClientUpgradeNotice extends Model
     public function whatsapp_pendiente(): bool
     {
         return is_null($this->whatsapp_enviado_at);
+    }
+
+    /**
+     * Avisos reclamados por un worker que ya no existe.
+     *
+     * Un aviso queda así solo si el proceso murió entre el reclamo y el resultado: todos los
+     * caminos normales de `AvisoDeActualizacionService` lo sacan de `enviando` antes de devolver,
+     * incluido el `catch` que lo cierra con `error`. O sea que esto atrapa lo que ningún `catch`
+     * puede atrapar — el proceso matado.
+     *
+     * 🔴 Es lo único que impide que un reclamo sea una trampa permanente. Sin esto, un worker
+     * muerto a mitad dejaría el aviso en `enviando` para siempre: invisible para el hook (que solo
+     * despacha los `pendiente`) y para el reintento a mano.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeColgados($query)
+    {
+        return $query->where('estado', self::ESTADO_ENVIANDO)
+            ->where(function ($sub) {
+                $sub->whereNull('dispatch_started_at')
+                    ->orWhere('dispatch_started_at', '<=', now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADO));
+            });
+    }
+
+    /**
+     * Avisos que hace rato están esperando que la cola los tome.
+     *
+     * Son los `pendiente` viejos —el job nunca corrió— y los `colgados()` —el job corrió y se
+     * murió a mitad—. Los dos se miran por el mismo motivo y con el mismo ojo: si esta lista no
+     * está vacía, el `queue:work` del scheduler no está corriendo.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeEsperandoALaCola($query)
+    {
+        return $query->whereNull('mail_enviado_at')
+            ->where(function ($sub) {
+                $sub->where(function ($pendientes) {
+                    $pendientes->where('estado', self::ESTADO_PENDIENTE)
+                        ->where('created_at', '<=', now()->subMinutes(self::MINUTOS_PARA_SOSPECHAR_DEL_WORKER));
+                })->orWhere(function ($colgados) {
+                    $colgados->colgados();
+                });
+            });
     }
 }
