@@ -150,10 +150,12 @@ class MensualidadFacturaPdf extends fpdf
         }
 
         // Logo de ComercioCity: usa el personalizado (prompt 360) si fue
-        // cargado desde admin-spa; si no, cae al default `logo.jpg` de siempre.
+        // cargado desde admin-spa; si no, cae al default `logo_comerciocity.png`
+        // (el isotipo de la marca, no el de ARCA: ese va aparte, fijo, en
+        // print_qr() junto al QR, porque ahí es obligatorio y no de marca).
         $logo_path = !empty($this->config->logo_path)
             ? public_path(ltrim($this->config->logo_path, '/'))
-            : public_path().'/afip/logo.jpg';
+            : public_path().'/afip/logo_comerciocity.png';
         if (@file_exists($logo_path)) {
             $this->Image($logo_path, 5, 15.2, 35, 35);
         }
@@ -390,11 +392,14 @@ class MensualidadFacturaPdf extends fpdf
 
         $this->y += $img_width + 2;
 
-        // Mismo criterio que en `print_header()`: logo personalizado si existe,
-        // si no el default `logo.jpg`.
-        $logo_path = !empty($this->config->logo_path)
-            ? public_path(ltrim($this->config->logo_path, '/'))
-            : public_path().'/afip/logo.jpg';
+        // Logo "Comprobante Autorizado": a diferencia de print_header(), este NO
+        // es configurable ni cae en el logo de marca. Réplica fija de
+        // `AfipQrPdf::logo_afip()` (empresa-api), que en todos los comprobantes
+        // de todos los clientes imprime siempre el mismo logo oficial junto al
+        // QR. Antes de este cambio compartía `$this->config->logo_path` con el
+        // encabezado, así que subir un "logo de factura" personalizado también
+        // reemplazaba sin querer este logo obligatorio.
+        $logo_path = public_path().'/afip/logo.jpg';
         if (@file_exists($logo_path)) {
             $this->Image($logo_path, $img_start_x, $this->y, 30, 15);
             $this->y += 15;

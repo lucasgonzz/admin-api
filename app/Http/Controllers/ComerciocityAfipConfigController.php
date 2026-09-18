@@ -71,11 +71,14 @@ class ComerciocityAfipConfigController extends Controller
     }
 
     /**
-     * Sube (o reemplaza) el logo personalizado que se imprime en la Factura C
-     * de mensualidad (`MensualidadFacturaPdf`), en el encabezado y en el pie
-     * de página. Se persiste en `public/afip/` con nombre fijo `logo_custom.{ext}`
-     * (sobrescribible) y se guarda la ruta relativa en `logo_path`. Si no se
-     * carga ninguno, el PDF sigue usando el `logo.jpg` default (sin regresión).
+     * Sube (o reemplaza) el logo personalizado que se imprime en el encabezado
+     * de la Factura C de mensualidad (`MensualidadFacturaPdf::print_header()`).
+     * NO afecta el logo del pie de página junto al QR ("Comprobante
+     * Autorizado"): ese es fijo, es el oficial de AFIP/ARCA y no se puede
+     * reemplazar desde acá. Se persiste en `public/afip/` con nombre fijo
+     * `logo_custom.{ext}` (sobrescribible) y se guarda la ruta relativa en
+     * `logo_path`. Si no se carga ninguno, el encabezado sigue usando el
+     * default `logo_comerciocity.png` (el isotipo de la marca).
      *
      * @param Request $request
      *

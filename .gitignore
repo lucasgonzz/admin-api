@@ -31,7 +31,7 @@ yarn-error.log
 # Material criptografico de AFIP: NUNCA se versiona (incidente 28/7/2026).
 # La rama vieja `develop` de este repo se llevo, en un `git add -A`, las claves
 # privadas de produccion y testing de public/afip/ a un repositorio publico.
-# `public/afip/logo.jpg` es lo unico de esa carpeta que si esta versionado.
+# Las imagenes de esa carpeta (logo.jpg, logo_comerciocity.png) si estan versionadas.
 /public/afip/**/*.key
 /public/afip/**/*.pem
 /public/afip/**/*.crt
