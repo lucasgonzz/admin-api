@@ -12,7 +12,10 @@ use App\Http\Controllers\Api\MetaController;
 use App\Http\Controllers\ClientApiController;
 use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
+use App\Http\Controllers\ClientContratoController;
+use App\Http\Controllers\ClientLicenciaController;
 use App\Http\Controllers\ClientMensualidadController;
+use App\Http\Controllers\CobranzasController;
 use App\Http\Controllers\ClientScheduleController;
 use App\Http\Controllers\ClientTokensController;
 use App\Http\Controllers\ComerciocityAfipConfigController;
@@ -540,6 +543,48 @@ Route::prefix('admin')->group(function () {
         Route::get('client/{clientId}/factura/{invoiceId}/pdf', [ClientMensualidadController::class, 'factura_pdf']);
         // Token de un solo uso para la vista en vivo del PDF sin auth:sanctum (prompt 362).
         Route::post('client/{clientId}/factura/{invoiceId}/pdf-access-token', [ClientMensualidadController::class, 'factura_pdf_access_token_json']);
+
+        /* Cobranzas (misión modulo-cobranzas, 18/9/2026). Cuatro bloques:
+
+           1. El módulo Cobranzas: las dos tablas de todos los clientes y las preferencias de vista
+              del admin autenticado. `cobranzas/...` no colisiona con nada del grupo `client/...`. */
+        Route::get('cobranzas/mensualidades', [CobranzasController::class, 'mensualidades_json']);
+        Route::get('cobranzas/licencias', [CobranzasController::class, 'licencias_json']);
+        Route::get('cobranzas/preferencias', [CobranzasController::class, 'preferencias_json']);
+        Route::put('cobranzas/preferencias', [CobranzasController::class, 'guardar_preferencias_json']);
+
+        /* 2. Los meses, pagos y actualizaciones de precio de la mensualidad de UN cliente (la
+              tarjeta "Pagos de la mensualidad" y el bloque "Actualizaciones de precio" del modal).
+              Van bajo `client/{clientId}/mensualidad/...`, al lado del GET/PUT del snapshot; el
+              `{periodo}` del PUT se restringe a 'YYYY-MM' para que no se coma otra ruta del grupo. */
+        Route::get('client/{clientId}/mensualidad/periodos', [ClientMensualidadController::class, 'periodos_json']);
+        Route::put('client/{clientId}/mensualidad/periodos/{periodo}', [ClientMensualidadController::class, 'marcar_periodo_json'])
+            ->where('periodo', '[0-9]{4}-[0-9]{2}');
+        Route::post('client/{clientId}/mensualidad/pagos', [ClientMensualidadController::class, 'registrar_pago_json']);
+        Route::delete('client/{clientId}/mensualidad/pagos/{pagoId}', [ClientMensualidadController::class, 'eliminar_pago_json']);
+        Route::get('client/{clientId}/mensualidad/actualizaciones', [ClientMensualidadController::class, 'actualizaciones_json']);
+        Route::post('client/{clientId}/mensualidad/actualizaciones', [ClientMensualidadController::class, 'registrar_actualizacion_json']);
+        Route::patch('client/{clientId}/mensualidad/actualizaciones/{id}', [ClientMensualidadController::class, 'editar_actualizacion_json']);
+        Route::delete('client/{clientId}/mensualidad/actualizaciones/{id}', [ClientMensualidadController::class, 'eliminar_actualizacion_json']);
+        // Botón "Traer empleados": guarda solo cantidad_empleados desde el conteo vivo del cliente. 200 siempre.
+        Route::post('client/{clientId}/mensualidad/sincronizar-empleados', [ClientMensualidadController::class, 'sincronizar_empleados_json']);
+
+        /* 3. El contrato del cliente (las mismas columnas que el lead) y su PDF. */
+        Route::get('client/{clientId}/contrato', [ClientContratoController::class, 'show_json']);
+        Route::put('client/{clientId}/contrato', [ClientContratoController::class, 'update_json']);
+        Route::post('client/{clientId}/contrato/pdf', [ClientContratoController::class, 'pdf']);
+
+        /* 4. Las cuotas de la licencia. `desde-contrato` va ANTES de `{cuotaId}` por si algún día
+              `{cuotaId}` deja de ser numérico; hoy además se restringe a dígitos. */
+        Route::get('client/{clientId}/licencias', [ClientLicenciaController::class, 'index_json']);
+        Route::post('client/{clientId}/licencias', [ClientLicenciaController::class, 'store_json']);
+        Route::post('client/{clientId}/licencias/desde-contrato', [ClientLicenciaController::class, 'desde_contrato_json']);
+        Route::put('client/{clientId}/licencias/{cuotaId}', [ClientLicenciaController::class, 'update_json'])
+            ->where('cuotaId', '[0-9]+');
+        Route::post('client/{clientId}/licencias/{cuotaId}/pago', [ClientLicenciaController::class, 'registrar_pago_json'])
+            ->where('cuotaId', '[0-9]+');
+        Route::delete('client/{clientId}/licencias/{cuotaId}', [ClientLicenciaController::class, 'destroy_json'])
+            ->where('cuotaId', '[0-9]+');
 
         Route::get('lead', [LeadController::class, 'index_json']);
         Route::get('lead/unread-badges', [LeadController::class, 'unread_badges_json']);

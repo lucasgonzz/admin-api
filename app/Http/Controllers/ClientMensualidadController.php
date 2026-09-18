@@ -4,13 +4,17 @@ namespace App\Http\Controllers;
 
 use App\Models\Client;
 use App\Models\ComerciocityAfipConfig;
+use App\Models\MensualidadActualizacion;
 use App\Models\MensualidadInvoice;
 use App\Models\MensualidadInvoicePdfAccessToken;
+use App\Models\MensualidadPago;
+use App\Models\MensualidadPeriodo;
 use App\Http\Controllers\Pdf\MensualidadFacturaPdf;
 use App\Services\Afip\AfipConstanciaInscripcionService;
 use App\Services\Afip\AfipFacturacionService;
 use App\Services\ClientMensualidadService;
 use App\Services\ClientMensualidadSyncService;
+use App\Services\CobranzasMensualidadService;
 use Illuminate\Http\Request;
 
 /**
@@ -65,6 +69,8 @@ class ClientMensualidadController extends Controller
             'precio_mercado_libre' => ['nullable', 'numeric', 'min:0'],
             'precio_tienda_nube' => ['nullable', 'numeric', 'min:0'],
             'payment_expired_at' => ['nullable', 'date'],
+            // Primer mes que se cobra (misión modulo-cobranzas, 18/9/2026). Se guarda como día 1.
+            'mensualidad_inicio' => ['nullable', 'date'],
             /* Los `max` son los anchos reales de las columnas en `clients` (migración
                2026_07_08_100100). Sin ellos, un valor más largo —que ahora puede
                llegar solo, traído de ARCA por el botón "Obtener datos"— explota como
@@ -349,5 +355,242 @@ class ClientMensualidadController extends Controller
         $client = Client::findOrFail($clientId);
 
         return response()->json($sync_service->actualizar_en_cliente($client));
+    }
+
+    /* ------------------------------------------------------------------ *
+     |  Cobranzas: meses, pagos y actualizaciones de precio (misión modulo-cobranzas, 18/9/2026)
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Regla de validación de un mes 'YYYY-MM' (la misma en todos los endpoints de cobranzas).
+     */
+    const REGLA_PERIODO = 'regex:/^\\d{4}-(0[1-9]|1[0-2])$/';
+
+    /**
+     * Los meses de mensualidad del cliente con su estado calculado, mes a mes (incluidos los que
+     * no tienen fila). Es la tarjeta "Pagos de la mensualidad" del modal del cliente.
+     *
+     * @param  Request                     $request  ?desde=YYYY-MM&hasta=YYYY-MM (opcionales).
+     * @param  int|string                  $clientId
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function periodos_json(Request $request, $clientId, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        $validated = $request->validate([
+            'desde' => ['nullable', 'string', self::REGLA_PERIODO],
+            'hasta' => ['nullable', 'string', self::REGLA_PERIODO],
+        ]);
+
+        return response()->json([
+            'periodos'           => $service->periodos($client, $validated['desde'] ?? null, $validated['hasta'] ?? null),
+            'mensualidad_inicio' => $client->mensualidad_inicio ? $client->mensualidad_inicio->toDateString() : null,
+            'mes_corriente'      => $service->mes_corriente(),
+        ]);
+    }
+
+    /**
+     * Registra un pago de la mensualidad de un mes y devuelve el mes recalculado.
+     *
+     * @param  Request                     $request  {periodo, monto?, fecha_pago?, medio?, observacion?, cerrar_periodo?}
+     * @param  int|string                  $clientId
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function registrar_pago_json(Request $request, $clientId, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        $validated = $request->validate([
+            'periodo'        => ['required', 'string', self::REGLA_PERIODO],
+            'monto'          => ['nullable', 'numeric', 'min:0'],
+            'fecha_pago'     => ['nullable', 'date'],
+            'medio'          => ['nullable', 'string', 'max:40'],
+            'observacion'    => ['nullable', 'string'],
+            'cerrar_periodo' => ['nullable', 'boolean'],
+        ]);
+
+        return response()->json([
+            'periodo' => $service->registrar_pago($client, $validated, $request->user()),
+        ]);
+    }
+
+    /**
+     * Borra un pago de la mensualidad y devuelve el mes recalculado. El pago tiene que ser de
+     * este cliente: un id de otro cliente es un 404, no un borrado.
+     *
+     * @param  int|string                  $clientId
+     * @param  int|string                  $pagoId
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function eliminar_pago_json($clientId, $pagoId, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        $pago = MensualidadPago::where('client_id', $client->id)->findOrFail($pagoId);
+
+        return response()->json([
+            'periodo' => $service->eliminar_pago($client, $pago),
+        ]);
+    }
+
+    /**
+     * Marca a mano el estado de un mes: `sin_cargo`, `pendiente` (reabrir) o `pagado` sin pago.
+     * `parcial` no se marca a mano: sale solo de registrar un pago menor al esperado.
+     *
+     * @param  Request                     $request  {estado, observacion?, monto_esperado?}
+     * @param  int|string                  $clientId
+     * @param  string                      $periodo  'YYYY-MM' (viene en la ruta).
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function marcar_periodo_json(Request $request, $clientId, $periodo, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        if (! CobranzasMensualidadService::es_periodo_valido($periodo)) {
+            return response()->json(['message' => 'El período tiene que ser YYYY-MM.'], 422);
+        }
+
+        $validated = $request->validate([
+            'estado'         => ['required', 'string', 'in:' . MensualidadPeriodo::ESTADO_PENDIENTE . ',' . MensualidadPeriodo::ESTADO_PAGADO . ',' . MensualidadPeriodo::ESTADO_SIN_CARGO],
+            'observacion'    => ['nullable', 'string'],
+            'monto_esperado' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        return response()->json([
+            'periodo' => $service->marcar_periodo(
+                $client,
+                $periodo,
+                $validated['estado'],
+                array_key_exists('observacion', $validated) ? (string) ($validated['observacion'] ?? '') : null,
+                isset($validated['monto_esperado']) ? (float) $validated['monto_esperado'] : null
+            ),
+        ]);
+    }
+
+    /**
+     * El historial de actualizaciones de precio del cliente (más reciente primero) y el resumen
+     * de la última oficial.
+     *
+     * @param  int|string                  $clientId
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function actualizaciones_json($clientId, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        return response()->json([
+            'actualizaciones' => $service->actualizaciones($client),
+            'resumen'         => $service->resumen_actualizacion($client),
+        ]);
+    }
+
+    /**
+     * Registra una actualización de precios y la aplica al cliente (los cinco precios; empleados,
+     * toggles y fecha de pago quedan como estaban).
+     *
+     * @param  Request                     $request  {fecha?, precio_plan, precio_por_cuenta, precio_ecommerce?, precio_mercado_libre?, precio_tienda_nube?, es_oficial?, observacion?}
+     * @param  int|string                  $clientId
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function registrar_actualizacion_json(Request $request, $clientId, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        $validated = $request->validate([
+            'fecha'                => ['nullable', 'date'],
+            'precio_plan'          => ['required', 'numeric', 'min:0'],
+            'precio_por_cuenta'    => ['required', 'numeric', 'min:0'],
+            'precio_ecommerce'     => ['nullable', 'numeric', 'min:0'],
+            'precio_mercado_libre' => ['nullable', 'numeric', 'min:0'],
+            'precio_tienda_nube'   => ['nullable', 'numeric', 'min:0'],
+            'es_oficial'           => ['nullable', 'boolean'],
+            'observacion'          => ['nullable', 'string'],
+        ]);
+
+        return response()->json($service->registrar_actualizacion($client, $validated, $request->user()));
+    }
+
+    /**
+     * Edita la marca de oficial y/o la nota de una actualización ya registrada. Los precios no se
+     * editan: una actualización con otros precios es otra actualización.
+     *
+     * @param  Request                     $request  {es_oficial?, observacion?}
+     * @param  int|string                  $clientId
+     * @param  int|string                  $id
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function editar_actualizacion_json(Request $request, $clientId, $id, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        $actualizacion = MensualidadActualizacion::where('client_id', $client->id)->findOrFail($id);
+
+        $validated = $request->validate([
+            'es_oficial'  => ['nullable', 'boolean'],
+            'observacion' => ['nullable', 'string'],
+        ]);
+
+        if (array_key_exists('es_oficial', $validated) && $validated['es_oficial'] !== null) {
+            $actualizacion->es_oficial = (bool) $validated['es_oficial'];
+        }
+
+        if (array_key_exists('observacion', $validated)) {
+            $observacion = trim((string) $validated['observacion']);
+            $actualizacion->observacion = $observacion === '' ? null : $observacion;
+        }
+
+        $actualizacion->save();
+
+        return response()->json([
+            'actualizaciones' => $service->actualizaciones($client),
+            'resumen'         => $service->resumen_actualizacion($client),
+        ]);
+    }
+
+    /**
+     * Borra una actualización del historial. NO revierte los precios del cliente: los precios
+     * vigentes son los que están en `clients`, y borrar una fila del historial es corregir el
+     * historial, no volver atrás un cambio.
+     *
+     * @param  int|string                  $clientId
+     * @param  int|string                  $id
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function eliminar_actualizacion_json($clientId, $id, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        MensualidadActualizacion::where('client_id', $client->id)->findOrFail($id)->delete();
+
+        return response()->json([
+            'actualizaciones' => $service->actualizaciones($client),
+            'resumen'         => $service->resumen_actualizacion($client),
+        ]);
+    }
+
+    /**
+     * Botón "Traer empleados": consulta el conteo vivo en el empresa-api del cliente y lo guarda
+     * (solo `cantidad_empleados`; recalcula el total). Responde 200 siempre: un cliente sin
+     * sincronización (versión vieja, sin api_key, sin sistema) vuelve con `soportado` false y el
+     * motivo, que es un resultado, no un error del request.
+     *
+     * @param  int|string                  $clientId
+     * @param  CobranzasMensualidadService $service
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function sincronizar_empleados_json($clientId, CobranzasMensualidadService $service)
+    {
+        $client = Client::findOrFail($clientId);
+
+        return response()->json($service->sincronizar_empleados($client));
     }
 }
