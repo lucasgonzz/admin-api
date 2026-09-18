@@ -1,0 +1,4254 @@
+{
+  "_origen": "ComercioCity administracion.xlsx (hojas MENSUALIDADES y LICENCIAS), 18/9/2026",
+  "_generado_por": "_cruzado/misiones/20260918-modulo-cobranzas/generar_historial.py (repo de conocimiento)",
+  "_decisiones": [
+    "Meses PAGADO sin monto: solo el estado (Lucas, 18/9/2026).",
+    "Verde = pagada, rojo = pendiente, amarillo = parcial en LICENCIAS (Lucas, 18/9/2026).",
+    "Se crean Kas, Jorge Bello y Scrap Free; MZA Group, Chevrocar, Angelo, Super Mexico y Juan Burgos quedan afuera (Lucas, 18/9/2026)."
+  ],
+  "clientes": [
+    {
+      "planilla": "ANANDA COMPANY",
+      "client_id": 3,
+      "crear": null,
+      "afip_cuit": "30718624033",
+      "afip_razon_social": "ASOCIACION CIVIL CANNABIS MEDICINAL BAPEN",
+      "afip_condicion_iva": "Exento",
+      "monto_mensual_planilla": 36000.0,
+      "cantidad_empleados_planilla": 3,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-01-01",
+      "observaciones": [
+        "2026-01: \"NUEVO\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-02",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-02",
+          "monto": 1400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "San Cayetano",
+      "client_id": 4,
+      "crear": null,
+      "afip_cuit": "20329618626",
+      "afip_razon_social": "CUTIPA ERNESTO EDUARDO",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 108000.0,
+      "cantidad_empleados_planilla": 9,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-10-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-09",
+          "monto": 1200.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Distri-creo",
+      "client_id": 5,
+      "crear": null,
+      "afip_cuit": "20238040788",
+      "afip_razon_social": "FRINGELLA PABLO JAVIER",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 36000.0,
+      "cantidad_empleados_planilla": 3,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-08",
+          "monto": 100.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-09",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-10",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "HT5 Store",
+      "client_id": 10,
+      "crear": null,
+      "afip_cuit": "20957935568",
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 80000.0,
+      "cantidad_empleados_planilla": 6,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-05-01",
+      "observaciones": [
+        "2025-08: \"PORQUE PAGO 80 EN JUNIO\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-02",
+          "monto": 1500.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Ferretotal",
+      "client_id": 11,
+      "crear": null,
+      "afip_cuit": "30718052005",
+      "afip_razon_social": "FERRETOTAL MATHEU",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 72000.0,
+      "cantidad_empleados_planilla": 5,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [
+        "Licencia: la planilla declara 2 cuotas y tiene 4 con monto"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-08",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-09",
+          "monto": 366.66,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-10",
+          "monto": 366.66,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2025-11",
+          "monto": 366.66,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Golden-breeze",
+      "client_id": 12,
+      "crear": null,
+      "afip_cuit": "30716582899",
+      "afip_razon_social": "GOLDEN BREEZE MINERALES S.A.",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-09",
+          "monto": 466.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-10",
+          "monto": 466.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-11",
+          "monto": 466.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2026-03",
+          "monto": 466.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 5,
+          "periodo": "2026-05",
+          "monto": 466.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 6,
+          "periodo": "2026-06",
+          "monto": 466.67,
+          "moneda": "USD",
+          "estado": "parcial",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "ARFREN AUTOPARTES SA",
+      "client_id": 13,
+      "crear": null,
+      "afip_cuit": "30718863623",
+      "afip_razon_social": "ARFREN AUTOPARTES S.A.",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-01-01",
+      "observaciones": [
+        "2026-01: \"NUEVO\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-10",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-10",
+          "monto": 685.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Trama",
+      "client_id": 14,
+      "crear": null,
+      "afip_cuit": "23303671579",
+      "afip_razon_social": "RANDAZZO LUIS ALBERTO",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 132000.0,
+      "cantidad_empleados_planilla": 10,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-10-01",
+      "observaciones": [
+        "2026-09: \"VOLVER LINK\" en la planilla",
+        "Licencia: la planilla declara 2 cuotas y tiene 3 con monto"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-09",
+          "monto": 552.3,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-10",
+          "monto": 750.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-01",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Golonorte (800)",
+      "client_id": 15,
+      "crear": null,
+      "afip_cuit": "20422880608",
+      "afip_razon_social": "KRZYSZYCHA ENZO GASTON",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 60000.0,
+      "cantidad_empleados_planilla": 4,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [
+        "Licencia: la planilla declara 6 cuotas y tiene 3 con monto"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-03",
+          "monto": 340.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-04",
+          "monto": 340.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-05",
+          "monto": 340.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Truvari (1000)",
+      "client_id": 16,
+      "crear": null,
+      "afip_cuit": "20270144528",
+      "afip_razon_social": "BAINOTTI FERNANDO DANIEL",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 84000.0,
+      "cantidad_empleados_planilla": 6,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-03",
+          "monto": 1420.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-04",
+          "monto": 1420.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Servian",
+      "client_id": 17,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": "Nicolas servian",
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-06-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-03",
+          "monto": 368.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-04",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-05",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "2r",
+      "client_id": 18,
+      "crear": null,
+      "afip_cuit": "33716718919",
+      "afip_razon_social": "2R RACING PARTS",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 36000.0,
+      "cantidad_empleados_planilla": 3,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-09",
+          "monto": 550.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-10",
+          "monto": 750.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Masquito",
+      "client_id": 19,
+      "crear": null,
+      "afip_cuit": "20292700599",
+      "afip_razon_social": "SREBERNICH SERGIO JOSE",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 60000.0,
+      "cantidad_empleados_planilla": 5,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-09",
+          "monto": 2426.5,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "San Blas",
+      "client_id": 20,
+      "crear": null,
+      "afip_cuit": "20250779470",
+      "afip_razon_social": "AGUERO FABIAN ARMENGOL",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 60000.0,
+      "cantidad_empleados_planilla": 5,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-07",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-08",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-09",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Panchito",
+      "client_id": 24,
+      "crear": null,
+      "afip_cuit": "20943460087",
+      "afip_razon_social": "LIMA MENDOZA ARMIN",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-08",
+          "monto": 250.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-09",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-10",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Innovate",
+      "client_id": 27,
+      "crear": null,
+      "afip_cuit": "23323850674",
+      "afip_razon_social": "RODRIGUES MARIEL SUSANA",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-07",
+          "monto": 365.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-08",
+          "monto": 365.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-09",
+          "monto": 365.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2025-10",
+          "monto": 365.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 5,
+          "periodo": "2025-11",
+          "monto": 365.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 6,
+          "periodo": "2025-12",
+          "monto": 365.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Ferreteria ROBER",
+      "client_id": 28,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 12000.0,
+      "cantidad_empleados_planilla": 1,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-08",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-09",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Despensa la martina",
+      "client_id": 30,
+      "crear": null,
+      "afip_cuit": "20330997827",
+      "afip_razon_social": "MEDINA HUGO MARCELO",
+      "afip_condicion_iva": "Consumidor final",
+      "monto_mensual_planilla": 72000.0,
+      "cantidad_empleados_planilla": 6,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-11-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-10",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-10",
+          "monto": 1200.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "HiperMax",
+      "client_id": 33,
+      "crear": null,
+      "afip_cuit": "20282094496",
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 96000.0,
+      "cantidad_empleados_planilla": 8,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Fenix",
+      "client_id": 34,
+      "crear": null,
+      "afip_cuit": "20393698986",
+      "afip_razon_social": "PERONI FEDERICO OSCAR",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 108000.0,
+      "cantidad_empleados_planilla": 8,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Galvan Mayorista",
+      "client_id": 35,
+      "crear": null,
+      "afip_cuit": "20317077190",
+      "afip_razon_social": "GALVAN DI BATTISTA MATIAS EMANUEL",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 1,
+      "tiene_ecommerce_planilla": true,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "CF",
+      "client_id": 36,
+      "crear": null,
+      "afip_cuit": "30718330315",
+      "afip_razon_social": "FURSOC S.R.L.",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [
+        "2026-09: \"VOLVER LINK\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-08",
+          "monto": 591.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-09",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-10",
+          "monto": 666.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "3dTisk (1200)",
+      "client_id": 38,
+      "crear": null,
+      "afip_cuit": "30717346471",
+      "afip_razon_social": "(ITALIA) ALEK S.A.S.",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 60000.0,
+      "cantidad_empleados_planilla": 5,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [
+        "Licencia: la planilla declara 3 cuotas y tiene 6 con monto"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-06",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-07",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-08",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": "215.000 pesos fijos -> (según planilla)"
+        },
+        {
+          "numero": 4,
+          "periodo": "2026-01",
+          "monto": 145.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 5,
+          "periodo": "2026-02",
+          "monto": 145.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 6,
+          "periodo": "2026-03",
+          "monto": 145.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Ferretería Oliva",
+      "client_id": 39,
+      "crear": null,
+      "afip_cuit": "27214521968",
+      "afip_razon_social": "DUARTE ANDREA KARINA",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 12000.0,
+      "cantidad_empleados_planilla": 3,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-01-01",
+      "observaciones": [
+        "2026-01: \"NUEVO\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-01",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "ffperformance",
+      "client_id": 40,
+      "crear": null,
+      "afip_cuit": "30718385233",
+      "afip_razon_social": "PUSH THE LIMITS S.A.S.",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-07",
+          "monto": 225.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-08",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-09",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2025-10",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 5,
+          "periodo": "2025-11",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 6,
+          "periodo": "2026-03",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "MB MALIZIA",
+      "client_id": 42,
+      "crear": null,
+      "afip_cuit": "27259574868",
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-01-01",
+      "observaciones": [
+        "2026-01: \"NUEVO\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-02",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-01",
+          "monto": 250.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-02",
+          "monto": 250.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Ferremas",
+      "client_id": 43,
+      "crear": null,
+      "afip_cuit": "20398333269",
+      "afip_razon_social": "ENZO JAVIER ABRIGO",
+      "afip_condicion_iva": "Consumidor final",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-04-01",
+      "observaciones": [
+        "Licencia: la planilla declara 2 cuotas y tiene 4 con monto"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-02",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-03",
+          "monto": 200.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-06",
+          "monto": 500000.0,
+          "moneda": "ARS",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2026-07",
+          "monto": 300000.0,
+          "moneda": "ARS",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "HB distribuciones",
+      "client_id": 47,
+      "crear": null,
+      "afip_cuit": "20274864185",
+      "afip_razon_social": "BROGGI ADOLFO HORACIO",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 108000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": null,
+      "observaciones": [
+        "Licencias 2025-03: \"20274864185\""
+      ],
+      "mensualidad_periodos": [],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-04",
+          "monto": 1000000.0,
+          "moneda": "ARS",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-06",
+          "monto": 1000000.0,
+          "moneda": "ARS",
+          "estado": "pendiente",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-07",
+          "monto": 1000000.0,
+          "moneda": "ARS",
+          "estado": "pendiente",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2026-08",
+          "monto": 800.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "GoldenBike",
+      "client_id": 48,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": null,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": null,
+      "observaciones": [
+        "2026-01: \"TODAVIA NO ARRANCO\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-07",
+          "monto": 1425.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Secure point (10.000)",
+      "client_id": 49,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Consumidor final",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-04",
+          "monto": 226.25,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-05",
+          "monto": 265.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "La cava",
+      "client_id": 50,
+      "crear": null,
+      "afip_cuit": "20246729957",
+      "afip_razon_social": "Sebastian",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 35000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-07-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-06",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-07",
+          "monto": 200.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-08",
+          "monto": 200.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Punto Diet",
+      "client_id": 52,
+      "crear": null,
+      "afip_cuit": "23236885194",
+      "afip_razon_social": "BAIGORRIA MARIA MARGARITA",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 13000.0,
+      "cantidad_empleados_planilla": 1,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Grupo limp",
+      "client_id": 53,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": "Nicolas",
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 80000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-08-01",
+      "observaciones": [
+        "2026-08: \"ARRANCA\" en la planilla"
+      ],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-06",
+          "monto": 650.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-07",
+          "monto": 650.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Unicas Distribuidora Capilar",
+      "client_id": 56,
+      "crear": null,
+      "afip_cuit": "23282932164",
+      "afip_razon_social": "Yesica Tissi",
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 90000.0,
+      "cantidad_empleados_planilla": 4,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-07",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-08",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "parcial",
+          "observacion": "PAGO $436.000 restan $500.000 (según planilla)"
+        }
+      ]
+    },
+    {
+      "planilla": "Pañalera Tiju",
+      "client_id": 57,
+      "crear": null,
+      "afip_cuit": "27365198379",
+      "afip_razon_social": "Agustin",
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 30000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-07",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-08",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-09",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2026-10",
+          "monto": 300.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Quino2",
+      "client_id": 59,
+      "crear": null,
+      "afip_cuit": "30715871951",
+      "afip_razon_social": "Virginia",
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 30000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2026-09-01",
+      "observaciones": [
+        "2026-09: \"ARRANCA\" en la planilla"
+      ],
+      "mensualidad_periodos": [],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-07",
+          "monto": 500.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-08",
+          "monto": 450.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-09",
+          "monto": 450.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Doblep herreria",
+      "client_id": 60,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": null,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": null,
+      "observaciones": [],
+      "mensualidad_periodos": [],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-08",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-09",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2026-10",
+          "monto": 400.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Pack Descartables",
+      "client_id": 61,
+      "crear": null,
+      "afip_cuit": "23431575019",
+      "afip_razon_social": "COCO FRANCO ALBERTO",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 48000.0,
+      "cantidad_empleados_planilla": 4,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Kiosco Verde",
+      "client_id": 62,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": null,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Candy",
+      "client_id": 63,
+      "crear": null,
+      "afip_cuit": "20429349185",
+      "afip_razon_social": "SUC. GUAYCHU FRANCISCO BARRIOS COSTA",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 36000.0,
+      "cantidad_empleados_planilla": 3,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Mayorista de pesca",
+      "client_id": 64,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": null,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": null,
+      "observaciones": [],
+      "mensualidad_periodos": [],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2026-09",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2026-10",
+          "monto": 600.0,
+          "moneda": "USD",
+          "estado": "pendiente",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Desire",
+      "client_id": 65,
+      "crear": null,
+      "afip_cuit": "27939087562",
+      "afip_razon_social": "ALVARON LOLI OLINDA SOFIA",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 12000.0,
+      "cantidad_empleados_planilla": 1,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-12-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "parcial",
+          "observacion": "FALTAN $4.000 (según planilla)",
+          "faltan": 4000.0
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-06",
+          "monto": 166.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-07",
+          "monto": 166.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-08",
+          "monto": 166.67,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "RosMar",
+      "client_id": 66,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Consumidor final",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Sr Imperio",
+      "client_id": 67,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-12",
+          "estado": "pagado",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-08",
+          "monto": 2500.0,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Feito",
+      "client_id": 68,
+      "crear": null,
+      "afip_cuit": "23164165604",
+      "afip_razon_social": "CATTANEO ELIZABETH JUANA",
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 144000.0,
+      "cantidad_empleados_planilla": 12,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Electro Lacarra (900)",
+      "client_id": 69,
+      "crear": null,
+      "afip_cuit": null,
+      "afip_razon_social": null,
+      "afip_condicion_iva": null,
+      "monto_mensual_planilla": null,
+      "cantidad_empleados_planilla": null,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": null,
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "sin_cargo",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "sin_cargo",
+          "observacion": null
+        }
+      ],
+      "licencia_cuotas": [
+        {
+          "numero": 1,
+          "periodo": "2025-04",
+          "monto": 133.33,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 2,
+          "periodo": "2025-05",
+          "monto": 183.33,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 3,
+          "periodo": "2025-06",
+          "monto": 183.33,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 4,
+          "periodo": "2025-07",
+          "monto": 183.33,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 5,
+          "periodo": "2025-08",
+          "monto": 183.33,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        },
+        {
+          "numero": 6,
+          "periodo": "2025-09",
+          "monto": 183.33,
+          "moneda": "USD",
+          "estado": "pagada",
+          "observacion": null
+        }
+      ]
+    },
+    {
+      "planilla": "Jorge Bello",
+      "client_id": null,
+      "crear": {
+        "clave": "jorge-bello",
+        "company_name": "Jorge Bello",
+        "name": "Jorge Bello"
+      },
+      "afip_cuit": "20183206223",
+      "afip_razon_social": "BELLO JORGE RAMON RUFINO",
+      "afip_condicion_iva": "Monotributista",
+      "monto_mensual_planilla": 24000.0,
+      "cantidad_empleados_planilla": 2,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Kas",
+      "client_id": null,
+      "crear": {
+        "clave": "kas",
+        "company_name": "Kas",
+        "name": "Roberto Daniel Kablan"
+      },
+      "afip_cuit": "30717835766",
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 60000.0,
+      "cantidad_empleados_planilla": 5,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    },
+    {
+      "planilla": "Scrap Free",
+      "client_id": null,
+      "crear": {
+        "clave": "scrap-free",
+        "company_name": "Scrap Free",
+        "name": "Scrap Free",
+        "nota": "Otro proyecto: no usa el sistema de ComercioCity, solo se le cobra la mensualidad desde el admin."
+      },
+      "afip_cuit": "30717277429",
+      "afip_razon_social": null,
+      "afip_condicion_iva": "Responsable inscripto",
+      "monto_mensual_planilla": 75000.0,
+      "cantidad_empleados_planilla": 19,
+      "tiene_ecommerce_planilla": false,
+      "mensualidad_inicio": "2025-08-01",
+      "observaciones": [],
+      "mensualidad_periodos": [
+        {
+          "periodo": "2025-08",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-09",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-10",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-11",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2025-12",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-01",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-02",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-03",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-04",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-05",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-06",
+          "estado": "pagado",
+          "observacion": null
+        },
+        {
+          "periodo": "2026-07",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-08",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        },
+        {
+          "periodo": "2026-09",
+          "estado": "pendiente",
+          "observacion": "Sin marca en la planilla"
+        }
+      ],
+      "licencia_cuotas": []
+    }
+  ],
+  "avisos": [
+    "MENSUALIDADES fila 23 \"MZAGroup Gabi\": omitido por decisión de Lucas",
+    "MENSUALIDADES fila 36 \"Chevrocar\": omitido por decisión de Lucas",
+    "MENSUALIDADES fila 39 \"Angelo\": omitido por decisión de Lucas",
+    "LICENCIAS fila 11 \"MZA Group\": omitido por decisión de Lucas",
+    "LICENCIAS fila 25 \"Juan Burgos \": omitido por decisión de Lucas",
+    "LICENCIAS fila 27 \"Chevrocar\": omitido por decisión de Lucas",
+    "LICENCIAS fila 29 \"Super Mexico\": omitido por decisión de Lucas"
+  ]
+}

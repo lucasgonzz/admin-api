@@ -55,6 +55,9 @@ class Admin extends Authenticatable
         // Flag para recibir WhatsApp (además del push, que siempre se manda) cuando un mensaje
         // requiere verificación porque el lead está coordinando agenda (motivo de negocio, no error).
         'notify_verificacion_agendamiento_whatsapp' => 'boolean',
+        // Preferencias del módulo de Cobranzas (misión modulo-cobranzas, 18/9/2026):
+        // {meses: ['YYYY-MM', ...], orden: 'carga'|'sin_pago'|'sin_factura'}. Nulo = defaults.
+        'cobranzas_preferencias' => 'array',
     ];
 
     /**

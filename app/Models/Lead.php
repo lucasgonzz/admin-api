@@ -371,6 +371,10 @@ class Lead extends Model
         'contract_fecha_primer_pago_unico'   => 'date',
         'contract_fecha_primer_pago_mensual' => 'date',
 
+        // Cada cuántos meses se actualiza la mensualidad por IPC (misión modulo-cobranzas,
+        // 18/9/2026). Int porque va al PDF en letras y se copia al cliente para hacer cuentas.
+        'contract_meses_actualizacion'       => 'integer',
+
         // Resumen estructurado generado por Claude: {empresa, situacion_actual, funcionalidades, puntos_dolor}
         'demo_summary_structured'      => 'array',
 
