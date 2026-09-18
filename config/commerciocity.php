@@ -14,8 +14,28 @@ return [
 
     'brand_name' => env('COMMERCIOCITY_BRAND_NAME', 'ComercioCity'),
 
-    // URL absoluta del logo que se muestra en el header del mail.
-    'logo_url' => env('COMMERCIOCITY_LOGO_URL', ''),
+    /*
+     * URL absoluta del logo que se muestra en el header del mail.
+     *
+     * El default apunta al isotipo nuevo de ComercioCity (la "C") como GIF animado, servido desde
+     * el storage público del admin de producción. Va como DEFAULT en código y no como variable del
+     * `.env`: el deploy del admin no toca el `.env` de producción, así que una variable nueva
+     * nunca llegaría y el header seguiría cayendo al texto de marca.
+     *
+     * ⚠️ El isotipo es CUADRADO (viewBox 256x256). Las medidas con las que el header lo renderiza
+     * salen de `logo_width` / `logo_height`, acá abajo: si algún día se configura un logo apaisado
+     * por `COMMERCIOCITY_LOGO_URL`, hay que acompañarlo con esas dos.
+     */
+    'logo_url' => env('COMMERCIOCITY_LOGO_URL', 'https://api.comerciocity.com/public/storage/isotipo-comerciocity.gif'),
+
+    /*
+     * Medidas del logo en el header, en píxeles. Cuadradas porque el isotipo lo es.
+     *
+     * Existen como config y no fijas en el blade justamente para que cambiar el logo por uno de
+     * otra proporción no obligue a tocar un partial que comparten todos los mails del sistema.
+     */
+    'logo_width' => (int) env('COMMERCIOCITY_LOGO_WIDTH', 56),
+    'logo_height' => (int) env('COMMERCIOCITY_LOGO_HEIGHT', 56),
 
     // Color principal del header en formato CSS (#hex o nombre).
     'header_background' => env('COMMERCIOCITY_HEADER_BG', '#0068D4'),
