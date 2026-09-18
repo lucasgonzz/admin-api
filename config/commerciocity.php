@@ -22,9 +22,18 @@ return [
      * `.env`: el deploy del admin no toca el `.env` de producción, así que una variable nueva
      * nunca llegaría y el header seguiría cayendo al texto de marca.
      *
-     * ⚠️ El isotipo es CUADRADO (viewBox 256x256). Las medidas con las que el header lo renderiza
-     * salen de `logo_width` / `logo_height`, acá abajo: si algún día se configura un logo apaisado
-     * por `COMMERCIOCITY_LOGO_URL`, hay que acompañarlo con esas dos.
+     * ⚠️ El GIF que se sirve es CUADRADO: 240x240 px. (El SVG maestro del isotipo, en
+     * `marca/assets/isotipo-comerciocity.svg`, tiene viewBox 256x256 — es otro archivo, y lo que
+     * manda para el header es el GIF.) Las medidas con las que el header lo renderiza salen de
+     * `logo_width` / `logo_height`, acá abajo: si algún día se configura un logo apaisado por
+     * `COMMERCIOCITY_LOGO_URL`, hay que acompañarlo con esas dos.
+     *
+     * 🔴 **El GIF tiene FONDO BLANCO PLENO, y eso es a propósito: no lo "mejores" horneándole
+     * el color de ningún header.** Lo consumen CUATRO superficies con fondos distintos: el header
+     * azul de este layout, los mails de demo y de propuesta al lead (sobre azul oscuro #1A1A2E) y
+     * el mail de acceso a la demo (sobre blanco). Una versión anterior traía horneado el azul del
+     * header y sobre los otros tres fondos dejaba un marco brillante alrededor del logo. Está
+     * verificado a mano, con el GIF real y capturas de las cuatro.
      */
     'logo_url' => env('COMMERCIOCITY_LOGO_URL', 'https://api.comerciocity.com/public/storage/isotipo-comerciocity.gif'),
 
@@ -34,8 +43,8 @@ return [
      * Existen como config y no fijas en el blade justamente para que cambiar el logo por uno de
      * otra proporción no obligue a tocar un partial que comparten todos los mails del sistema.
      */
-    'logo_width' => (int) env('COMMERCIOCITY_LOGO_WIDTH', 56),
-    'logo_height' => (int) env('COMMERCIOCITY_LOGO_HEIGHT', 56),
+    'logo_width' => (int) env('COMMERCIOCITY_LOGO_WIDTH', 72),
+    'logo_height' => (int) env('COMMERCIOCITY_LOGO_HEIGHT', 72),
 
     // Color principal del header en formato CSS (#hex o nombre).
     'header_background' => env('COMMERCIOCITY_HEADER_BG', '#0068D4'),
