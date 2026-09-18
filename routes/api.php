@@ -104,6 +104,16 @@ Route::prefix('form')->group(function () {
 Route::get('client/{clientId}/factura/{invoiceId}/pdf-view/{token}', [ClientMensualidadController::class, 'factura_pdf_view']);
 
 /*
+| Link público y durable del PDF de una Factura C de mensualidad (misión cobranzas-mejoras,
+| 18/9/2026, pedido 10): también pública (fuera de `auth:sanctum`), pero a diferencia de la de
+| arriba el token NO vence ni se consume — es el link que se manda por WhatsApp y tiene que poder
+| volver a abrirse desde cualquier dispositivo, en cualquier momento. Se gatea con
+| `mensualidad_invoices.public_token`, emitido por la ruta autenticada
+| `client/{clientId}/factura/{invoiceId}/link-whatsapp` (ver grupo admin).
+*/
+Route::get('client/{clientId}/factura/{invoiceId}/pdf-publico/{token}', [ClientMensualidadController::class, 'factura_pdf_publico']);
+
+/*
 | Página inmersiva de demo (grupo 300, prompt 03): pública, sin auth:sanctum, identificada por
 | el uuid del lead (no enumerable). GET arma el payload completo de la página; POST recibe las
 | nueve respuestas del formulario de configuración. Ver App\Http\Controllers\DemoExperienciaController.
@@ -543,6 +553,10 @@ Route::prefix('admin')->group(function () {
         Route::get('client/{clientId}/factura/{invoiceId}/pdf', [ClientMensualidadController::class, 'factura_pdf']);
         // Token de un solo uso para la vista en vivo del PDF sin auth:sanctum (prompt 362).
         Route::post('client/{clientId}/factura/{invoiceId}/pdf-access-token', [ClientMensualidadController::class, 'factura_pdf_access_token_json']);
+        // Link público y durable (no vence, no se consume) para el botón "Enviar por WhatsApp" de
+        // la factura (pedido 10, misión cobranzas-mejoras, 18/9/2026). La ruta pública que lo sirve
+        // (`pdf-publico/{token}`) va fuera de este grupo, al lado de `pdf-view` (ver arriba en el archivo).
+        Route::post('client/{clientId}/factura/{invoiceId}/link-whatsapp', [ClientMensualidadController::class, 'factura_link_whatsapp_json']);
 
         /* Cobranzas (misión modulo-cobranzas, 18/9/2026). Cuatro bloques:
 

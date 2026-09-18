@@ -251,6 +251,40 @@ class ClientMensualidadController extends Controller
     }
 
     /**
+     * Emite (o reusa) el link público y durable del PDF de una Factura C, para el botón "Enviar
+     * por WhatsApp" (pedido 10, misión cobranzas-mejoras, 18/9/2026). A diferencia de
+     * `factura_pdf_access_token_json()` —token de un solo uso, vive 2 minutos, pensado para que
+     * admin-spa abra el PDF al toque con `window.open()`— este token NO vence ni se consume:
+     * Lucas lo manda por WhatsApp y el cliente tiene que poder volver a abrirlo desde cualquier
+     * dispositivo, en cualquier momento.
+     *
+     * Idempotente: si la factura ya tiene un `public_token` generado, lo reusa tal cual (apretar
+     * el botón dos veces manda el mismo link).
+     *
+     * @param  int|string $clientId
+     * @param  int|string $invoiceId
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function factura_link_whatsapp_json($clientId, $invoiceId)
+    {
+        $invoice = MensualidadInvoice::where('client_id', $clientId)->findOrFail($invoiceId);
+
+        // Misma validación que el resto de los endpoints de PDF: sin CAE no hay nada que enviar.
+        if ($invoice->resultado !== 'A' || empty($invoice->cae)) {
+            return response()->json([
+                'error' => 'Esta factura no está autorizada por AFIP (sin CAE), no se puede generar el PDF.',
+            ], 422);
+        }
+
+        if (empty($invoice->public_token)) {
+            $invoice->public_token = bin2hex(random_bytes(32));
+            $invoice->save();
+        }
+
+        return response()->json(['token' => $invoice->public_token], 200);
+    }
+
+    /**
      * Vista en vivo del PDF de una Factura C (prompt 362): ruta pública
      * (fuera del grupo `auth:sanctum`) gateada por un token de un solo uso
      * emitido por `factura_pdf_access_token_json()`. Existe porque una
@@ -291,6 +325,37 @@ class ClientMensualidadController extends Controller
             return response()->json([
                 'error' => 'Esta factura no está autorizada por AFIP (sin CAE), no se puede generar el PDF.',
             ], 422);
+        }
+
+        return $this->build_factura_pdf_response($invoice);
+    }
+
+    /**
+     * Sirve el PDF de una Factura C por su link público y durable (pedido 10, misión
+     * cobranzas-mejoras, 18/9/2026): a diferencia de `factura_pdf_view()` (de un solo uso, vence a
+     * los 2 minutos), este NO marca nada como usado ni chequea vencimiento — a propósito, porque
+     * es el link que Lucas manda por WhatsApp y tiene que poder volver a abrirse en cualquier
+     * momento, desde cualquier dispositivo.
+     *
+     * Un token que no matchea (factura inexistente, de otro cliente, o de otra factura) da 404
+     * liso: nunca 403 ni un mensaje que confirme "el token existe pero...", para no darle
+     * información a quien esté probando tokens al azar.
+     *
+     * @param  int|string $clientId
+     * @param  int|string $invoiceId
+     * @param  string     $token
+     * @return \Illuminate\Http\Response
+     */
+    public function factura_pdf_publico($clientId, $invoiceId, $token)
+    {
+        $invoice = MensualidadInvoice::with('client')
+            ->where('client_id', $clientId)
+            ->where('id', $invoiceId)
+            ->where('public_token', $token)
+            ->first();
+
+        if (! $invoice || $invoice->resultado !== 'A' || empty($invoice->cae)) {
+            abort(404);
         }
 
         return $this->build_factura_pdf_response($invoice);
