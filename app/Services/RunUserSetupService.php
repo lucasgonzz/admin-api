@@ -228,6 +228,19 @@ class RunUserSetupService
 
         $allocator->attach_client_to_lead_block($lead->id, $client->id);
 
+        /* El contrato viaja con el cliente (misión modulo-cobranzas, 18/9/2026). Hasta acá el
+         * contrato quedaba en el lead, que después de la promoción nadie vuelve a abrir. Se copia
+         * al Client recién creado, se generan las cuotas de la licencia desde su financiación y se
+         * fija el primer mes que se cobra la mensualidad. Solo en esta rama (creación): un cliente
+         * que ya existía pudo haber editado su contrato y la rama de update no lo pisa. Nada de
+         * esto puede frenar la promoción: si el lead no tiene contrato cargado, las tres llamadas
+         * no hacen nada más que dejar `mensualidad_inicio` en el mes corriente. */
+        $contrato_service = app(ClientContratoService::class);
+        $contrato_service->copiar_desde_lead($lead, $client);
+        $contrato_service->generar_cuotas_desde_contrato($client);
+        $client->mensualidad_inicio = $contrato_service->inicio_de_mensualidad_desde_contrato($lead);
+        $client->save();
+
         return $client;
     }
 
