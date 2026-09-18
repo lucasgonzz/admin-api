@@ -61,6 +61,23 @@ class Kernel extends ConsoleKernel
             ->dailyAt('03:15')
             ->withoutOverlapping(60);
 
+        /* Push del paquete de IA de cada cliente a su instancia (misión foto-sucursal-y-asistente-
+         * configurable, 17/9/2026).
+         *
+         * 03:45 y no 03:15: a esa hora ya terminó `tokens:recolectar`, que también le pega en serie
+         * al `empresa-api` de cada cliente. Separarlos media hora evita que los dos barridos se
+         * sumen sobre el mismo shared hosting y disparen el bloqueo por ráfaga de conexiones.
+         *
+         * `withoutOverlapping(30)` por lo mismo que el de tokens: es un comando diario, el default
+         * del lock son 24 horas, y un proceso que muera sin liberarlo dejaría el candado tomado casi
+         * un día entero. El barrido son 45 PUT en serie con 1 s de pausa; 30 minutos dan margen de
+         * sobra y siguen siendo mucho menos que un día. El push es idempotente, así que un doble
+         * barrido no corrompe nada — pero duplica las conexiones por segundo, que es lo que la pausa
+         * trata de evitar. */
+        $schedule->command('ai-planes:sincronizar')
+            ->dailyAt('03:45')
+            ->withoutOverlapping(30);
+
         $schedule->command('leads:check-followups')->everyTwoHours();
 
         // Sincroniza desde GitHub identidad, system prompt y protocolo de WhatsApp a la BD.

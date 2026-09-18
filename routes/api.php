@@ -523,6 +523,12 @@ Route::prefix('admin')->group(function () {
         Route::post('ai-plan', [AiPlanController::class, 'store_json']);
         Route::put('ai-plan/{id}', [AiPlanController::class, 'update_json']);
         Route::delete('ai-plan/{id}', [AiPlanController::class, 'destroy_json']);
+        /* Asignación del paquete a un cliente y push a su instancia (ClientAiPlanSyncService).
+           El POST asigna/desasigna (ai_plan_id null = destope) y dispara el push; el /sync reenvía
+           el plan actual sin cambiarlo (botón "Sincronizar ahora"). Los dos corren sincrónico porque
+           quien los aprieta está mirando la pantalla. No colisionan con client/{clientId}/tokens. */
+        Route::post('client/{clientId}/ai-plan', [AiPlanController::class, 'assign_to_client_json']);
+        Route::post('client/{clientId}/ai-plan/sync', [AiPlanController::class, 'sync_to_client_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
