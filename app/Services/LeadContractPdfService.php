@@ -369,15 +369,16 @@ class LeadContractPdfService
     /**
      * Convierte un monto almacenado como string a float para cálculos.
      *
-     * Público desde la misión modulo-cobranzas: `ClientContratoService` genera las cuotas de la
-     * licencia con la MISMA regla de parseo que usa el PDF, así el monto de la cuota es el que el
-     * cliente leyó en el contrato.
+     * ⚠️ Toma el punto como decimal ('1.500' → 1,5). Es la regla histórica del PDF y se deja como
+     * está porque cambiarla toca contratos ya emitidos; las cuotas de licencia del módulo de
+     * cobranzas NO la usan (ver `ClientContratoService::monto_desde_texto()`, que lee el formato
+     * argentino). Corregirla acá es otra misión.
      *
      * @param mixed $value
      *
      * @return float
      */
-    public static function parse_numeric_amount($value): float
+    protected static function parse_numeric_amount($value): float
     {
         if ($value === null || $value === '') {
             return 0.0;

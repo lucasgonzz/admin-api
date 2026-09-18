@@ -256,6 +256,36 @@ class CobranzasMensualidadesTest extends BaseDeCobranzas
     }
 
     /**
+     * 2d bis. Un cliente sin precios cargados (monto esperado desconocido): un pago con
+     * `cerrar_periodo` lo deja pagado; sin cerrar queda parcial; borrar uno de dos pagos de un mes
+     * cerrado NO lo baja a parcial (no hay contra qué comparar), y borrar el último lo reabre.
+     *
+     * @return void
+     */
+    public function test_sin_monto_esperado_el_recalculo_no_inventa_deuda(): void
+    {
+        $this->admin_logueado();
+        $client = $this->crear_cliente([
+            'precio_plan' => null, 'precio_por_cuenta' => null, 'total_mensualidad' => null,
+        ]);
+
+        $abierto = $this->postJson('/api/admin/client/' . $client->id . '/mensualidad/pagos', ['periodo' => '2026-08', 'monto' => 3000, 'cerrar_periodo' => false]);
+        $this->assertSame('parcial', $abierto->json('periodo.estado'), 'Sin esperado y sin cerrar: parcial, hasta que alguien lo cierre.');
+
+        $cerrado = $this->postJson('/api/admin/client/' . $client->id . '/mensualidad/pagos', ['periodo' => '2026-08', 'monto' => 2000, 'cerrar_periodo' => true]);
+        $this->assertSame('pagado', $cerrado->json('periodo.estado'));
+
+        $pagos = MensualidadPago::where('client_id', $client->id)->where('periodo', '2026-08')->orderBy('id')->get();
+        $this->assertCount(2, $pagos);
+
+        $uno_menos = $this->deleteJson('/api/admin/client/' . $client->id . '/mensualidad/pagos/' . $pagos[1]->id);
+        $this->assertSame('pagado', $uno_menos->json('periodo.estado'), 'Sin esperado no se puede afirmar que debe: sigue pagado.');
+
+        $ninguno = $this->deleteJson('/api/admin/client/' . $client->id . '/mensualidad/pagos/' . $pagos[0]->id);
+        $this->assertSame('pendiente', $ninguno->json('periodo.estado'), 'Sin pagos, pendiente.');
+    }
+
+    /**
      * 2e. Marcar sin cargo y reabrir; el listado del cliente refleja el cambio.
      *
      * @return void

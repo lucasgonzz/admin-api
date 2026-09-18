@@ -132,6 +132,38 @@ class ClientContratoService
     }
 
     /**
+     * Todo lo que un cliente recién nacido de un lead hereda del contrato, en una sola llamada que
+     * NUNCA tira: copia el contrato, genera las cuotas de la licencia desde la financiación y fija
+     * el primer mes que se cobra la mensualidad (el del primer pago mensual del contrato, o el mes
+     * corriente). Un error acá se loguea y la promoción sigue: el contrato se puede recargar a mano
+     * desde la pestaña Contrato del cliente; un cliente sin tareas ni ClientApis, no.
+     *
+     * @param Lead   $lead
+     * @param Client $client Recién creado.
+     *
+     * @return bool true si terminó sin errores.
+     */
+    public function inicializar_desde_lead(Lead $lead, Client $client): bool
+    {
+        try {
+            $this->copiar_desde_lead($lead, $client);
+            $this->generar_cuotas_desde_contrato($client);
+            $client->mensualidad_inicio = $this->inicio_de_mensualidad_desde_contrato($lead);
+            $client->save();
+
+            return true;
+        } catch (\Throwable $error) {
+            Log::error('ClientContratoService: no se pudo copiar el contrato del lead al cliente nuevo; la promoción sigue sin él.', [
+                'lead_id'   => $lead->id,
+                'client_id' => $client->id,
+                'error'     => $error->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
      * Genera las cuotas de la licencia desde el contrato del cliente.
      *
      * - Con `contract_financiacion` (`[{monto, fecha}]`): una cuota por fila, numeradas en orden,

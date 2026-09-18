@@ -225,8 +225,9 @@ class ContratoDelClienteTest extends BaseDeCobranzas
     }
 
     /**
-     * 2. El backfill copia a los promovidos sin contrato copiado, respeta las cuotas que ya hay
-     * y no hace nada la segunda vez.
+     * 2. El backfill copia a los promovidos sin contrato copiado, NO genera cuotas (deuda fantasma
+     * para clientes que ya vienen operando), fija el inicio solo si el contrato trae fecha de primer
+     * pago mensual, y no hace nada la segunda vez.
      *
      * @return void
      */
@@ -264,12 +265,12 @@ class ContratoDelClienteTest extends BaseDeCobranzas
         $this->assertSame('Juan Pérez', $client_viejo->contract_client_name);
         $this->assertNotNull($client_viejo->contract_copiado_desde_lead_at);
         $this->assertSame(12, $client_viejo->contract_meses_actualizacion);
-        $this->assertSame('2026-10-01', $client_viejo->mensualidad_inicio->toDateString(), 'Sin inicio, se fija desde el contrato.');
-        $this->assertSame(2, LicenciaCuota::where('client_id', $client_viejo->id)->count());
+        $this->assertSame('2026-10-01', $client_viejo->mensualidad_inicio->toDateString(), 'Sin inicio, se fija desde la fecha de primer pago mensual del contrato.');
+        $this->assertSame(0, LicenciaCuota::where('client_id', $client_viejo->id)->count(), 'El backfill no genera cuotas: la licencia de un cliente viejo puede estar cobrada sin figurar en la planilla.');
 
         $client_con_cuotas->refresh();
         $this->assertNotNull($client_con_cuotas->contract_copiado_desde_lead_at, 'El contrato se copia igual.');
-        $this->assertSame(1, LicenciaCuota::where('client_id', $client_con_cuotas->id)->count(), 'Pero las cuotas de la planilla mandan: no se generan encima.');
+        $this->assertSame(1, LicenciaCuota::where('client_id', $client_con_cuotas->id)->count(), 'Las cuotas de la planilla quedan como están.');
         $this->assertSame('2026-02-01', $client_con_cuotas->mensualidad_inicio->toDateString(), 'El inicio que ya tenía no se toca.');
 
         $client_pelado->refresh();
@@ -285,7 +286,19 @@ class ContratoDelClienteTest extends BaseDeCobranzas
         $client_viejo->refresh();
         $this->assertSame('Editado después del backfill', $client_viejo->contract_client_name);
         $this->assertEquals($marca, $client_viejo->contract_copiado_desde_lead_at);
-        $this->assertSame(2, LicenciaCuota::where('client_id', $client_viejo->id)->count());
+        $this->assertSame(0, LicenciaCuota::where('client_id', $client_viejo->id)->count());
+
+        // Un contrato SIN fecha de primer pago mensual no inventa el inicio (quedaría en rojo este mes).
+        $lead_sin_fecha = $this->crear_lead_con_contrato(['contract_fecha_primer_pago_mensual' => null]);
+        $client_sin_fecha = $this->crear_cliente(['mensualidad_inicio' => null]);
+        $lead_sin_fecha->promoted_client_id = $client_sin_fecha->id;
+        $lead_sin_fecha->save();
+
+        $this->artisan('cobranzas:copiar-contratos-de-leads')->assertExitCode(0);
+
+        $client_sin_fecha->refresh();
+        $this->assertNotNull($client_sin_fecha->contract_copiado_desde_lead_at);
+        $this->assertNull($client_sin_fecha->mensualidad_inicio, 'Sin fecha en el contrato, el inicio lo carga Lucas a mano.');
 
         // Y con --simular no escribe.
         $otro_lead = $this->crear_lead_con_contrato();

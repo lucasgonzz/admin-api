@@ -232,14 +232,12 @@ class RunUserSetupService
          * contrato quedaba en el lead, que después de la promoción nadie vuelve a abrir. Se copia
          * al Client recién creado, se generan las cuotas de la licencia desde su financiación y se
          * fija el primer mes que se cobra la mensualidad. Solo en esta rama (creación): un cliente
-         * que ya existía pudo haber editado su contrato y la rama de update no lo pisa. Nada de
-         * esto puede frenar la promoción: si el lead no tiene contrato cargado, las tres llamadas
-         * no hacen nada más que dejar `mensualidad_inicio` en el mes corriente. */
-        $contrato_service = app(ClientContratoService::class);
-        $contrato_service->copiar_desde_lead($lead, $client);
-        $contrato_service->generar_cuotas_desde_contrato($client);
-        $client->mensualidad_inicio = $contrato_service->inicio_de_mensualidad_desde_contrato($lead);
-        $client->save();
+         * que ya existía pudo haber editado su contrato y la rama de update no lo pisa.
+         * 🔴 Nada de esto puede frenar la promoción: `PromoteLeadToClientService::run()` no corre en
+         * transacción, y si algo tirara acá el Client ya estaría creado pero sin tareas ni
+         * ClientApis — un cliente a medias que nadie nota hasta que falla la instalación. Por eso
+         * va por `inicializar_desde_lead()`, que atrapa y loguea adentro. */
+        app(ClientContratoService::class)->inicializar_desde_lead($lead, $client);
 
         return $client;
     }

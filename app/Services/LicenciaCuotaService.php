@@ -211,8 +211,19 @@ class LicenciaCuotaService
      */
     public function resumen(Client $client): array
     {
-        $cuotas = LicenciaCuota::where('client_id', $client->id)->get();
+        return $this->resumen_de(LicenciaCuota::where('client_id', $client->id)->get());
+    }
 
+    /**
+     * El mismo resumen, sobre cuotas ya cargadas: lo usa la tabla del módulo, que trae las cuotas
+     * de todos los clientes en una sola consulta y no puede permitirse una por fila.
+     *
+     * @param \Illuminate\Support\Collection $cuotas Cuotas de UN cliente.
+     *
+     * @return array<string, mixed>
+     */
+    public function resumen_de($cuotas): array
+    {
         $total = [];
         $pagado = [];
         $pendiente = [];

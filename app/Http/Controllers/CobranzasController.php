@@ -124,7 +124,7 @@ class CobranzasController extends Controller
                 'cuotas'             => $cuotas->map(function (LicenciaCuota $cuota) use ($service) {
                     return $service->cuota_para_json($cuota);
                 })->values()->all(),
-                'resumen'            => $this->resumen_desde_cuotas($cuotas),
+                'resumen'            => $service->resumen_de($cuotas),
             ];
 
             foreach ($cuotas as $cuota) {
@@ -268,45 +268,6 @@ class CobranzasController extends Controller
         return [
             'meses' => $meses,
             'orden' => $orden,
-        ];
-    }
-
-    /**
-     * El resumen por moneda de un conjunto de cuotas ya cargadas (misma forma que
-     * `LicenciaCuotaService::resumen()`, sin volver a consultar por cada cliente).
-     *
-     * @param \Illuminate\Support\Collection $cuotas
-     *
-     * @return array<string, mixed>
-     */
-    private function resumen_desde_cuotas($cuotas): array
-    {
-        $total = [];
-        $pagado = [];
-        $pendiente = [];
-        $pendientes = 0;
-        $parciales = 0;
-
-        foreach ($cuotas as $cuota) {
-            $moneda = $cuota->moneda;
-            $total[$moneda] = round(($total[$moneda] ?? 0) + (float) $cuota->monto, 2);
-            $pagado[$moneda] = round(($pagado[$moneda] ?? 0) + $cuota->monto_cobrado(), 2);
-            $pendiente[$moneda] = round(($pendiente[$moneda] ?? 0) + $cuota->monto_pendiente(), 2);
-
-            if ($cuota->estado === LicenciaCuota::ESTADO_PENDIENTE) {
-                $pendientes++;
-            } elseif ($cuota->estado === LicenciaCuota::ESTADO_PARCIAL) {
-                $parciales++;
-            }
-        }
-
-        return [
-            'cantidad'             => $cuotas->count(),
-            'total_por_moneda'     => $total,
-            'pagado_por_moneda'    => $pagado,
-            'pendiente_por_moneda' => $pendiente,
-            'pendientes'           => $pendientes,
-            'parciales'            => $parciales,
         ];
     }
 }

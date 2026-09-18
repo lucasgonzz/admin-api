@@ -19,16 +19,21 @@ use Illuminate\Support\Facades\DB;
  *   - el cliente tiene que existir y NO tener `contract_copiado_desde_lead_at` (si lo tiene, ya se
  *     copió, o alguien lo editó a mano en el cliente, y no se pisa);
  *   - el lead tiene que tener al menos un `contract_*` cargado (si no, no hay nada que copiar);
- *   - se copia, se generan las cuotas de licencia desde la financiación (no hace nada si el
- *     cliente ya tiene cuotas, importadas de la planilla o cargadas a mano) y se fija
- *     `mensualidad_inicio` solo si está en null.
+ *   - se copia el contrato, y `mensualidad_inicio` se fija SOLO si está en null y el contrato
+ *     trae fecha de primer pago mensual.
+ *
+ * 🔴 A diferencia de la promoción de un lead nuevo, acá NO se generan cuotas de licencia ni se
+ * inventa un mes de inicio: son clientes que ya vienen operando, su licencia puede estar cobrada
+ * hace meses sin figurar en la planilla, y una cuota "pendiente" nacida del contrato (o un inicio
+ * en el mes corriente) sería deuda fantasma en el módulo. Eso se hace a mano, cliente por cliente,
+ * desde las pestañas Licencias ("Generar cuotas desde el contrato") y Mensualidad.
  *
  * Idempotente por construcción: la segunda corrida no encuentra clientes sin fecha de copia. Con
  * `--simular` recorre y cuenta sin escribir (transacción revertida al final).
  *
  * Corre en producción por el deploy (`pendientes.json` de /deploy-admin), DESPUÉS de
- * `cobranzas:importar-planilla`: así las cuotas importadas de la planilla ya están cuando este
- * comando pregunta si hay cuotas, y no se generan encima las del contrato.
+ * `cobranzas:importar-planilla` (el orden ya no cambia el resultado, pero se mantiene por si
+ * alguna vez vuelve a generar cuotas).
  */
 class CobranzasCopiarContratosDeLeadsCommand extends Command
 {
@@ -41,7 +46,7 @@ class CobranzasCopiarContratosDeLeadsCommand extends Command
     /**
      * @var string
      */
-    protected $description = 'Copia el contrato del lead a cada cliente promovido que todavía no lo tenga, genera sus cuotas de licencia y fija el inicio de la mensualidad. Idempotente; --simular no escribe.';
+    protected $description = 'Copia el contrato del lead a cada cliente promovido que todavía no lo tenga (sin generar cuotas ni inventar el inicio de la mensualidad). Idempotente; --simular no escribe.';
 
     /**
      * @param ClientContratoService $contrato_service
@@ -93,11 +98,20 @@ class CobranzasCopiarContratosDeLeadsCommand extends Command
                         }
                         $conteo['copiados']++;
 
-                        $cuotas = $contrato_service->generar_cuotas_desde_contrato($client);
-                        $conteo['cuotas_creadas'] += $cuotas;
+                        /* 🔴 A diferencia de la promoción de un lead nuevo, el backfill NO genera cuotas ni
+                         * fija el mes de inicio. Estos clientes ya vienen operando: su licencia puede estar
+                         * cobrada hace meses sin figurar en la planilla, y una cuota "pendiente" nacida del
+                         * contrato sería deuda fantasma en el módulo. Lo mismo el inicio: sin fecha de
+                         * primer pago mensual en el contrato el default es el mes corriente, y eso pintaría
+                         * de rojo a un cliente que quizás no se cobra. Las cuotas se generan a mano desde la
+                         * pestaña Licencias ("Generar cuotas desde el contrato") y el inicio se carga en la
+                         * pestaña Mensualidad, cliente por cliente y mirando. */
+                        $cuotas = 0;
 
                         $inicio = '';
-                        if ($client->mensualidad_inicio === null) {
+                        $primer_pago_mensual = $lead->contract_fecha_primer_pago_mensual;
+                        if ($client->mensualidad_inicio === null && ! empty($primer_pago_mensual)) {
+                            // Solo si el contrato lo dice explícitamente: nunca el mes corriente por default.
                             $client->mensualidad_inicio = $contrato_service->inicio_de_mensualidad_desde_contrato($lead);
                             $client->save();
                             $conteo['inicio_fijado']++;
@@ -109,7 +123,7 @@ class CobranzasCopiarContratosDeLeadsCommand extends Command
                             $client->id,
                             $client->resolve_display_name(),
                             $cuotas,
-                            $inicio !== '' ? $inicio : '(ya tenía)',
+                            $inicio !== '' ? $inicio : ($client->mensualidad_inicio !== null ? '(ya tenía)' : '(sin fecha en el contrato)'),
                         ];
                     }
                 });

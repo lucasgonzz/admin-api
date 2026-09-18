@@ -500,12 +500,19 @@ class CobranzasMensualidadService
 
         $esperado = $fila->monto_esperado !== null ? (float) $fila->monto_esperado : 0.0;
 
-        if ($esperado > 0 && $suma >= $esperado) {
-            $fila->estado = MensualidadPeriodo::ESTADO_PAGADO;
-        } elseif ($suma > 0) {
-            $fila->estado = MensualidadPeriodo::ESTADO_PARCIAL;
-        } else {
+        if ($suma <= 0) {
             $fila->estado = MensualidadPeriodo::ESTADO_PENDIENTE;
+        } elseif ($esperado <= 0) {
+            /* Sin monto esperado (cliente sin precios cargados) no hay contra qué comparar: un mes
+             * que ya estaba cerrado como pagado se queda pagado, y uno abierto queda parcial hasta
+             * que alguien lo cierre. Bajarlo a parcial automáticamente decía "debe" sin saber cuánto. */
+            if ($fila->estado !== MensualidadPeriodo::ESTADO_PAGADO) {
+                $fila->estado = MensualidadPeriodo::ESTADO_PARCIAL;
+            }
+        } elseif ($suma >= $esperado) {
+            $fila->estado = MensualidadPeriodo::ESTADO_PAGADO;
+        } else {
+            $fila->estado = MensualidadPeriodo::ESTADO_PARCIAL;
         }
 
         $fila->save();
