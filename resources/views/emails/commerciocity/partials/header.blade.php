@@ -7,8 +7,8 @@
     // medidas apaisadas que estaban escritas a mano (120x55) se deformaba. Salen de config para que
     // cambiar el logo por uno de otra proporción no obligue a tocar este partial, que lo comparten
     // todos los mails del sistema.
-    $logoWidth = (int) config('commerciocity.logo_width', 56);
-    $logoHeight = (int) config('commerciocity.logo_height', 56);
+    $logoWidth = (int) config('commerciocity.logo_width', 72);
+    $logoHeight = (int) config('commerciocity.logo_height', 72);
 @endphp
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:linear-gradient(180deg,{{ $headerBg }} 0%,{{ $headerBg }} 100%);background-color:{{ $headerBg }};">
     <tr>

@@ -94,15 +94,15 @@ class ReintentarAvisoDeActualizacionCommand extends Command
         if (! $esperando->isEmpty()) {
             $this->warn($esperando->count() . ' aviso(s) esperando a la cola hace rato:');
             $this->table(
-                ['Aviso', 'Cliente', 'Negocio', 'Upgrade', 'Version', 'Estado', 'Motivo'],
+                ['Aviso', 'Cliente', 'Negocio', 'Upgrade', 'Versión', 'Estado', 'Motivo'],
                 $esperando->map(function ($aviso) {
                     return $this->fila_del_reporte($aviso);
                 })->all()
             );
             $this->line(
-                'Estos los tendria que haber mandado el worker de la cola (`queue:work database`, '
-                . 'que el scheduler dispara cada minuto). Si aparecen aca es porque NO se esta '
-                . 'moviendo: revisa que el scheduler este corriendo. Se pueden reintentar a mano '
+                'Estos los tendría que haber mandado el worker de la cola (`queue:work database`, '
+                . 'que el scheduler dispara cada minuto). Si aparecen acá es porque NO se está '
+                . 'moviendo: revisá que el scheduler esté corriendo. Se pueden reintentar a mano '
                 . 'con --aplicar, sin riesgo de duplicar (el aviso se reclama antes de mandarse).'
             );
         }

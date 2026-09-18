@@ -79,6 +79,13 @@ class EnviarAvisoDeActualizacionJob implements ShouldQueue
     public function __construct(int $client_version_upgrade_id)
     {
         $this->client_version_upgrade_id = $client_version_upgrade_id;
+
+        /* La conexión viaja con la clase y no solo con quien la despacha: el hook de
+           `ClientVersionUpgrade` ya hace `->onConnection(self::CONEXION_DE_COLA)`, pero un
+           `dispatch()` futuro desde otro lado (un comando, un listener) que se olvide de eso caería
+           a `sync` sin que nada lo denuncie. Va acá y no como `public $connection = ...` porque
+           PHP 7.4 no deja redeclarar la propiedad del trait `Queueable` con otro valor inicial. */
+        $this->connection = self::CONEXION_DE_COLA;
     }
 
     /**
