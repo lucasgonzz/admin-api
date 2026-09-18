@@ -105,12 +105,15 @@ class LicenciasDelClienteTest extends BaseDeCobranzas
         $this->assertSame('2026-08-20', $parcial->json('cuota.fecha_pago'));
         $this->assertSame(1, $parcial->json('resumen.parciales'));
 
+        // El segundo pago va sin nota (el form del SPA manda null): la nota anterior NO se borra.
         $completo = $this->postJson('/api/admin/client/' . $client->id . '/licencias/' . $cuota->id . '/pago', [
             'monto_pagado' => 350,
+            'observacion'  => null,
         ]);
 
         $completo->assertStatus(200);
         $this->assertSame('pagada', $completo->json('cuota.estado'));
+        $this->assertSame('Pagó 436.000 pesos', $completo->json('cuota.observacion'), 'Un pago sin nota nueva no borra la nota que había.');
         $this->assertEqualsWithDelta(600.0, $completo->json('cuota.monto_pagado'), 0.001, 'Acumula.');
         $this->assertEqualsWithDelta(0.0, $completo->json('cuota.monto_pendiente'), 0.001);
         $this->assertSame('2026-09-15', $completo->json('cuota.fecha_pago'), 'Sin fecha, hoy.');

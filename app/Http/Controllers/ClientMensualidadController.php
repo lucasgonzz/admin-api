@@ -466,7 +466,8 @@ class ClientMensualidadController extends Controller
                 $client,
                 $periodo,
                 $validated['estado'],
-                array_key_exists('observacion', $validated) ? (string) ($validated['observacion'] ?? '') : null,
+                // Null o vacío = no tocar la nota (el servicio lo documenta así); para borrarla no hay caso de uso.
+                isset($validated['observacion']) && trim((string) $validated['observacion']) !== '' ? (string) $validated['observacion'] : null,
                 isset($validated['monto_esperado']) ? (float) $validated['monto_esperado'] : null
             ),
         ]);

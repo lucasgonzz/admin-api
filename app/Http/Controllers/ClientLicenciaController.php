@@ -133,7 +133,10 @@ class ClientLicenciaController extends Controller
             $cuota,
             (float) $validated['monto_pagado'],
             $validated['fecha_pago'] ?? null,
-            array_key_exists('observacion', $validated) ? (string) ($validated['observacion'] ?? '') : null,
+            /* Null o vacío = "sin nota nueva", no "borrá la nota": el form de pago del SPA manda null cuando
+             * el operador no escribe nada, y la cuota puede traer la observación importada de la planilla
+             * ("PAGO $436.000 restan $500.000"). Para borrar una nota está Editar. */
+            isset($validated['observacion']) && trim((string) $validated['observacion']) !== '' ? (string) $validated['observacion'] : null,
             ! empty($validated['completa'])
         );
 
