@@ -360,11 +360,19 @@ class CobranzasMensualidadService
      * completo") el mes queda `pagado` aunque el monto no llegue al esperado: es Lucas diciendo
      * "con esto estamos". Sin él, decide la suma de los pagos contra el monto esperado.
      *
+     * Un click hace todo (pedido 7, misión cobranzas-mejoras, 18/9/2026): cuando el pago cierra el
+     * mes completo Y el cliente ya tiene una fecha de próximo pago cargada, el mismo acto de
+     * registrar el pago además adelanta `payment_expired_at` un mes y avisa al sistema del cliente
+     * (ver `avanzar_vencimiento_si_corresponde()`). Un pago parcial, o un cliente sin fecha
+     * cargada, no tocan el vencimiento: no hay nada que adelantar.
+     *
      * @param Client     $client
      * @param array      $datos  {periodo, monto?, fecha_pago?, medio?, observacion?, cerrar_periodo?}
      * @param Admin|null $admin  Quién lo registra.
      *
-     * @return array<string, mixed> El `estado_de()` del mes ya recalculado.
+     * @return array<string, mixed> El `estado_de()` del mes ya recalculado, con una clave más:
+     *                              `vencimiento_avanzado` = {ocurrio, nueva_fecha, sincronizado,
+     *                              motivo_no_sincronizado}.
      */
     public function registrar_pago(Client $client, array $datos, ?Admin $admin = null): array
     {
@@ -395,7 +403,78 @@ class CobranzasMensualidadService
             $this->recalcular_por_pagos($fila);
         }
 
-        return $this->estado_del_mes($client, $periodo);
+        $resultado = $this->estado_del_mes($client, $periodo);
+        $resultado['vencimiento_avanzado'] = $this->avanzar_vencimiento_si_corresponde($client, $cerrar);
+
+        return $resultado;
+    }
+
+    /**
+     * La mitad nueva de `registrar_pago()` (pedido 7, misión cobranzas-mejoras, 18/9/2026):
+     * cuando el pago cerró el mes completo y el cliente ya tiene `payment_expired_at` cargado,
+     * adelanta esa fecha un mes, la guarda en admin y avisa al sistema del cliente.
+     *
+     * Separado en su propio método (en vez de vivir inline en `registrar_pago()`) porque es una
+     * responsabilidad aparte con su propia condición de entrada, y así queda más fácil de leer y
+     * de testear en aislamiento.
+     *
+     * @param Client $client
+     * @param bool   $cerrar Si este pago cerró el mes completo (`cerrar_periodo` del request).
+     *
+     * @return array{ocurrio: bool, nueva_fecha: string|null, sincronizado: bool, motivo_no_sincronizado: string|null}
+     */
+    protected function avanzar_vencimiento_si_corresponde(Client $client, bool $cerrar): array
+    {
+        $vencimiento_avanzado = [
+            'ocurrio'                => false,
+            'nueva_fecha'            => null,
+            'sincronizado'           => false,
+            'motivo_no_sincronizado' => null,
+        ];
+
+        // Un pago parcial no adelanta nada (no se terminó de pagar el mes), y sin fecha cargada en
+        // admin no hay de dónde adelantar (mismo guard que ya usa `actualizar_en_cliente()`).
+        if (! $cerrar || empty($client->payment_expired_at)) {
+            return $vencimiento_avanzado;
+        }
+
+        // Misma regla de fin de mes que ya usa este archivo en otro lado: 31 ene + 1 mes → 28/29
+        // feb, no 3 mar.
+        $nueva_fecha = Carbon::parse($client->payment_expired_at)->addMonthNoOverflow();
+
+        /* Mismo patrón defensivo que ya usan `registrar_actualizacion()` y `sincronizar_empleados()`
+         * más arriba en este archivo: se le pasan SIEMPRE los valores actuales del cliente para
+         * todo lo que un pago no toca (precios, empleados, toggles). Sin este cuidado, registrar un
+         * pago apagaría el ecommerce del cliente o le resetearía los precios. */
+        $this->mensualidad_service->guardar($client, [
+            'precio_plan'          => $client->precio_plan,
+            'precio_por_cuenta'    => $client->precio_por_cuenta,
+            'precio_ecommerce'     => $client->precio_ecommerce,
+            'precio_mercado_libre' => $client->precio_mercado_libre,
+            'precio_tienda_nube'   => $client->precio_tienda_nube,
+            'cantidad_empleados'   => (int) $client->cantidad_empleados,
+            'tiene_ecommerce'      => (bool) $client->tiene_ecommerce,
+            'tiene_mercado_libre'  => (bool) $client->tiene_mercado_libre,
+            'tiene_tienda_nube'    => (bool) $client->tiene_tienda_nube,
+            'payment_expired_at'   => $nueva_fecha->toDateString(),
+        ]);
+
+        $vencimiento_avanzado['ocurrio'] = true;
+        $vencimiento_avanzado['nueva_fecha'] = $nueva_fecha->toDateString();
+
+        /* Best-effort (misma filosofía que `traer_del_cliente()`/`actualizar_en_cliente()`: se
+         * degradan solas): si el cliente no soporta sincronización, el pago y la fecha ya quedaron
+         * guardados en admin igual; lo único que no pasa es el aviso al sistema del cliente, y eso
+         * se informa acá para que no sea un silencio. Nunca tira excepción (el camino de red está
+         * en try/catch adentro de ClientMensualidadSyncService), así que no hace falta un
+         * try/catch acá tampoco. */
+        $sincronizado = $this->sync_service->actualizar_en_cliente($client);
+        $vencimiento_avanzado['sincronizado'] = ! empty($sincronizado['soportado']);
+        if (empty($sincronizado['soportado'])) {
+            $vencimiento_avanzado['motivo_no_sincronizado'] = $sincronizado['error'] ?? null;
+        }
+
+        return $vencimiento_avanzado;
     }
 
     /**
