@@ -17,6 +17,7 @@ use App\Http\Controllers\ClientLicenciaController;
 use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\CobranzasController;
 use App\Http\Controllers\ClientScheduleController;
+use App\Http\Controllers\ClientSessionLockController;
 use App\Http\Controllers\ClientTokensController;
 use App\Http\Controllers\ComerciocityAfipConfigController;
 use App\Http\Controllers\CommonLaravel\SearchController;
@@ -518,6 +519,14 @@ Route::prefix('admin')->group(function () {
         Route::put('client/{clientId}/horarios', [ClientScheduleController::class, 'update_json']);
         /* Botón "Reintentar sincronización" de la pestaña Horarios: encola el push al empresa-api. */
         Route::post('client/{clientId}/horarios/sync', [ClientScheduleController::class, 'sync_json']);
+
+        /* Candado de sesión por pestaña (misión candado-sesion-por-pestana, 19/9/2026): el PUT
+           guarda el interruptor y encola el push al empresa-api del cliente, mismo patrón que
+           horarios de arriba. */
+        Route::get('client/{clientId}/candado-sesion', [ClientSessionLockController::class, 'show_json']);
+        Route::put('client/{clientId}/candado-sesion', [ClientSessionLockController::class, 'update_json']);
+        /* Botón "Reintentar sincronización" de la pestaña Candado de sesión. */
+        Route::post('client/{clientId}/candado-sesion/sync', [ClientSessionLockController::class, 'sync_json']);
 
         /* Consumo de tokens de IA (misión tokens-por-cliente, 17/9/2026).
            El GET lee del espejo local (`client_ai_token_usages`) y NO sale a la red: abrir una

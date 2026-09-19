@@ -34,6 +34,12 @@ class ClientEmpresaApiUrlResolver
     const BUSINESS_HOURS_PATH = 'api/admin-sync/business-hours';
 
     /**
+     * Ruta relativa del endpoint que recibe el candado de sesión por pestaña en empresa-api
+     * (misión candado-sesion-por-pestana, 19/9/2026).
+     */
+    const SESSION_LOCK_PATH = 'api/admin-sync/session-lock';
+
+    /**
      * Devuelve la URL base del empresa-api (sin slash final) o cadena vacía si no hay URL válida.
      * Cada candidato se normaliza con su hosting_type asociado, agregando /public en shared_hosting si corresponde.
      *

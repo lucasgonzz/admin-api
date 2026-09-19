@@ -50,6 +50,11 @@ class Client extends Model
         // Casteado a bool y no leído crudo porque el ruteo del webhook decide con un `if` sobre
         // esta columna, y un "0" string es verdadero en PHP.
         'asistente_whatsapp_activo' => 'boolean',
+        /* Candado de sesión por pestaña (misión candado-sesion-por-pestana, 19/9/2026): booleana
+         * por el mismo motivo que is_active/asistente_whatsapp_activo (un "0" string es verdadero
+         * en PHP). `pestanas_synced_at` NO lleva cast a propósito, igual que `schedule_synced_at`:
+         * viaja como string crudo de MySQL, no como Carbon. */
+        'bloquear_pestanas_duplicadas' => 'boolean',
         /* Última recolección EXITOSA del consumo de tokens de IA (misión tokens-por-cliente,
          * 17/9/2026). Casteada a datetime y no leída cruda porque la pestaña muestra "Traído el …"
          * y el front necesita una fecha con la que pueda hacer cuentas, no el string de MySQL.
