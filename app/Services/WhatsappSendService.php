@@ -720,10 +720,17 @@ class WhatsappSendService
 
             return $message_id;
         } catch (\Throwable $exception) {
+            /*
+             * El origen y el archivo, no el link entero: es una URL del catálogo de un cliente real
+             * y este log lo leen personas (mismo criterio que el warning del job que manda las
+             * fotos del asistente). Para entender un fallo alcanza con de dónde salía y qué archivo
+             * era; el link completo sigue estando del lado del `empresa-api` que lo mandó.
+             */
             Log::channel('daily')->error('WhatsappSendService: excepción al enviar imagen por link.', [
-                'to'    => $normalized_to,
-                'url'   => $link,
-                'error' => $exception->getMessage(),
+                'to'      => $normalized_to,
+                'origen'  => parse_url($link, PHP_URL_HOST),
+                'archivo' => basename((string) parse_url($link, PHP_URL_PATH)),
+                'error'   => $exception->getMessage(),
             ]);
 
             /*

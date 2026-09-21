@@ -772,7 +772,16 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             Log::channel('daily')->warning('AsistenteWhatsapp: una foto de la respuesta no salió.', [
                 'assistant_message_id' => $fila->id,
                 'client_id'            => $client->id,
-                'url'                  => $url,
+                /*
+                 * 🔴 EL ORIGEN DE LA FOTO, NO LA URL ENTERA. Es una URL del catálogo de un cliente
+                 * real y el log diario del admin lo leen personas y lo rota el hosting. El mismo
+                 * criterio con el que la corrección del contrato del 21/9 sacó los adjuntos del
+                 * broadcast: no se pasean URLs del negocio por canales que no las necesitan. Para
+                 * diagnosticar alcanza con de dónde salió y qué archivo era: si hace falta la URL
+                 * completa, está en la respuesta del `empresa-api` de ese cliente.
+                 */
+                'origen'               => parse_url($url, PHP_URL_HOST),
+                'archivo'              => basename((string) parse_url($url, PHP_URL_PATH)),
                 'motivo'               => $resultado['motivo'],
             ]);
         }
