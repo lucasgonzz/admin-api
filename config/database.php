@@ -52,6 +52,24 @@ return [
             'username' => env('DB_USERNAME', 'forge'),
             'password' => env('DB_PASSWORD', ''),
             'unix_socket' => env('DB_SOCKET', ''),
+            /*
+             * Zona horaria de la CONEXION, no de la aplicacion.
+             *
+             * Sin esto la sesion hereda el `SYSTEM` del servidor MySQL, y la base tiene 280
+             * columnas TIMESTAMP, que MySQL convierte a la zona de la sesion al leer. El shared
+             * hosting corre en UTC y el VPS en -03: la misma fila se lee tres horas antes de un
+             * lado que del otro. En el admin eso no es cosmetico — las ventanas de 24 hs de
+             * WhatsApp, las cadencias de seguimiento y los horarios de demo se calculan sobre
+             * esas columnas.
+             *
+             * `env()` sin default a proposito: si la variable no esta, Laravel no manda ningun
+             * `SET time_zone` (isset() da false sobre null) y el comportamiento queda EXACTAMENTE
+             * como estaba. Se prende solo donde hace falta, con DB_TIMEZONE=+00:00 en el .env del
+             * VPS, que replica la sesion UTC del shared.
+             *
+             * Mismo arreglo que scrap-free-api (commit 0c271d1), verificado en produccion.
+             */
+            'timezone' => env('DB_TIMEZONE'),
             'charset' => 'utf8mb4',
             'collation' => 'utf8mb4_unicode_ci',
             'prefix' => '',
