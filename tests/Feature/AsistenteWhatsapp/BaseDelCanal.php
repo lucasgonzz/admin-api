@@ -236,6 +236,14 @@ abstract class BaseDelCanal extends TestCase
             /** @var bool Si mandar una foto revienta con una excepción en vez de devolver null. */
             public $explota_imagenes = false;
 
+            /**
+             * @var int Cuántos envíos de foto seguidos fallan como TRANSITORIOS (el 409 "otro mensaje
+             *          en vuelo" de Kapso) antes de empezar a confirmar. Es lo que dispara el
+             *          segundo intento del job; un rechazo definitivo (`$confirma_imagenes` en
+             *          false) no lo dispara.
+             */
+            public $falla_transitoria_veces = 0;
+
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
                 $this->textos[] = ['to' => $to, 'body' => $body, 'context' => $context];
@@ -273,8 +281,20 @@ abstract class BaseDelCanal extends TestCase
                 $this->imagenes[] = ['to' => $to, 'url' => $url, 'caption' => $caption, 'context' => $context];
                 $this->orden[]    = 'imagen';
 
+                /* Como el método real: cada llamada arranca sin el motivo del fallo anterior. */
+                $this->last_send_error       = null;
+                $this->last_send_status_code = null;
+
                 if ($this->explota_imagenes) {
                     throw new \RuntimeException('Kapso reventó mandando la foto (simulado en la prueba).');
+                }
+
+                if ($this->falla_transitoria_veces > 0) {
+                    $this->falla_transitoria_veces--;
+                    $this->last_send_error       = 'Kapso: otro mensaje en vuelo para esta conversación (409, simulado en la prueba).';
+                    $this->last_send_status_code = 409;
+
+                    return null;
                 }
 
                 if (! $this->confirma_imagenes) {

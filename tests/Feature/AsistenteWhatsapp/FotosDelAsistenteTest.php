@@ -29,9 +29,57 @@ use Illuminate\Support\Facades\Http;
  *
  * El envío se mide con el espía de `BaseDelCanal`, que registra qué salió y en qué orden. Lo que
  * viaja de verdad a Meta cuando se manda una foto por link lo mide `EnvioDeImagenPorLinkTest`.
+ *
+ * Las pausas del job (`pausar()`) se anulan con una subclase anónima que las registra en vez de
+ * dormir, igual que hacen las pruebas de `SupportWhatsappOpenerService`: así se puede medir que la
+ * pausa del 409 se pide antes de cada foto sin que una prueba con seis fotos duerma siete segundos.
  */
 class FotosDelAsistenteTest extends BaseDelCanal
 {
+    /**
+     * Microsegundos que el job habría dormido, en orden.
+     *
+     * @var array<int, int>
+     */
+    private $pausas = [];
+
+    /**
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->pausas = [];
+    }
+
+    /**
+     * El job con la pausa anulada: registra cuánto habría esperado en vez de dormir.
+     *
+     * @param ClientAssistantMessage $fila
+     *
+     * @return EnviarMensajeAlAsistenteJob
+     */
+    private function job_sin_dormir(ClientAssistantMessage $fila): EnviarMensajeAlAsistenteJob
+    {
+        return new class((int) $fila->id, $this->pausas) extends EnviarMensajeAlAsistenteJob {
+            /** @var array<int, int> */
+            private $registro;
+
+            public function __construct(int $mensaje_id, array &$registro)
+            {
+                parent::__construct($mensaje_id);
+
+                $this->registro = &$registro;
+            }
+
+            protected function pausar(int $microsegundos): void
+            {
+                $this->registro[] = $microsegundos;
+            }
+        };
+    }
+
     /**
      * Deja la fila entrante como la deja el webhook.
      *
@@ -114,7 +162,7 @@ class FotosDelAsistenteTest extends BaseDelCanal
      */
     private function tramitar(ClientAssistantMessage $fila, WhatsappSendService $espia): void
     {
-        $job = new EnviarMensajeAlAsistenteJob((int) $fila->id);
+        $job = $this->job_sin_dormir($fila);
 
         $this->correr_job($job, $espia);
         $this->correr_job($job, $espia);
@@ -493,6 +541,141 @@ class FotosDelAsistenteTest extends BaseDelCanal
         $this->assertCount(1, $salientes);
         $this->assertNull($salientes[0]->whatsapp_message_id);
         $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $salientes[0]->estado);
+    }
+
+    /**
+     * 🔴 Antes de CADA foto se hace la pausa del 409, incluida la primera.
+     *
+     * Kapso devuelve 409 "otro mensaje en vuelo para esta conversación" cuando dos envíos salen
+     * pegados (lead #440). El texto acaba de salir por esta misma conversación, así que la primera
+     * foto también espera; sin fotos, no se espera nada.
+     *
+     * @return void
+     */
+    public function test_antes_de_cada_foto_se_hace_la_pausa_del_409(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear_respuesta_lista([
+            $this->adjunto('1'),
+            $this->adjunto('2'),
+            $this->adjunto('3'),
+        ]);
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertCount(3, $espia->imagenes);
+        $this->assertSame(
+            array_fill(0, 3, EnviarMensajeAlAsistenteJob::PAUSA_ANTES_DE_CADA_FOTO_US),
+            $this->pausas,
+            'Una pausa antes de cada foto, la primera incluida.'
+        );
+        $this->assertGreaterThanOrEqual(1200000, EnviarMensajeAlAsistenteJob::PAUSA_ANTES_DE_CADA_FOTO_US, 'Menos de 1200 ms no le alcanza a Kapso para soltar la conversación.');
+    }
+
+    /**
+     * Sin fotos no se duerme ni un microsegundo: el turno de texto solo es idéntico al de hoy.
+     *
+     * @return void
+     */
+    public function test_sin_fotos_no_se_hace_ninguna_pausa(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear_respuesta_lista(null);
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertSame([], $this->pausas);
+    }
+
+    /**
+     * Un 409 de Kapso en una foto se reintenta UNA vez, después de esperar.
+     *
+     * Es el fallo transitorio por excelencia de este canal: la conversación todavía tomada por el
+     * envío anterior. Se suelta en un segundo, y el segundo intento la saca.
+     *
+     * @return void
+     */
+    public function test_un_409_en_una_foto_se_reintenta_una_vez_despues_de_esperar(): void
+    {
+        $espia = $this->espiar_sender();
+        $espia->falla_transitoria_veces = 1;
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear_respuesta_lista([$this->adjunto('1', 'Precintos 03')]);
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertCount(2, $espia->imagenes, 'El primer intento dio 409; el segundo salió.');
+        $this->assertSame($espia->imagenes[0]['url'], $espia->imagenes[1]['url']);
+        $this->assertSame('Precintos 03', $espia->imagenes[1]['caption']);
+
+        $this->assertSame(
+            [
+                EnviarMensajeAlAsistenteJob::PAUSA_ANTES_DE_CADA_FOTO_US,
+                EnviarMensajeAlAsistenteJob::ESPERA_ANTES_DE_REINTENTAR_FOTO_US,
+            ],
+            $this->pausas,
+            'La pausa de siempre antes de la foto, y la espera del reintento después del 409.'
+        );
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->refresh()->estado);
+        $this->assertCount(1, $espia->textos, 'Ninguna disculpa.');
+    }
+
+    /**
+     * Si el 409 persiste, se agotan los intentos y la foto queda como fallida sin tocar el turno.
+     *
+     * @return void
+     */
+    public function test_si_el_409_persiste_la_foto_queda_fallida_y_la_siguiente_sale_igual(): void
+    {
+        $espia = $this->espiar_sender();
+        $espia->falla_transitoria_veces = EnviarMensajeAlAsistenteJob::INTENTOS_POR_FOTO;
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear_respuesta_lista([
+            $this->adjunto('1'),
+            $this->adjunto('2'),
+        ]);
+
+        $this->tramitar($fila, $espia);
+
+        /* La primera consumió sus intentos; la segunda salió a la primera. */
+        $this->assertCount(EnviarMensajeAlAsistenteJob::INTENTOS_POR_FOTO + 1, $espia->imagenes);
+        $this->assertSame('https://r2.comerciocity.com/ferreteria/articulos/precinto-2.jpg', end($espia->imagenes)['url']);
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->refresh()->estado);
+        $this->assertNull($fila->error);
+        $this->assertCount(1, $espia->textos);
+        $this->assertCount(1, $this->salientes($client));
+    }
+
+    /**
+     * Un rechazo definitivo de Meta NO se reintenta: esperar no arregla un link que no pudo bajar.
+     *
+     * @return void
+     */
+    public function test_un_rechazo_definitivo_no_se_reintenta(): void
+    {
+        $espia = $this->espiar_sender();
+        $espia->confirma_imagenes = false;
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear_respuesta_lista([$this->adjunto('1')]);
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertCount(1, $espia->imagenes, 'Un solo intento: el rechazo no era transitorio.');
+        $this->assertSame([EnviarMensajeAlAsistenteJob::PAUSA_ANTES_DE_CADA_FOTO_US], $this->pausas, 'Sin espera de reintento.');
     }
 
     /**

@@ -34,7 +34,9 @@ use Illuminate\Support\Facades\Log;
  * segundos y un job con `timeout` 240 del lado del cliente: tres minutos de `sleep()` acá serían
  * tres minutos con un worker del admin tomado, y este admin tiene UN worker que además corre
  * deployments e instalaciones. `release($delay)` devuelve el job a la cola con fecha y libera el
- * worker; cuando le toca, vuelve a entrar por `handle()` y sigue donde estaba.
+ * worker; cuando le toca, vuelve a entrar por `handle()` y sigue donde estaba. (Lo único que se
+ * hace durmiendo son las pausas de segundos entre el texto y cada foto de la respuesta, que existen
+ * por el 409 de Kapso: ver `mandar_fotos_de_la_respuesta()`.)
  *
  * 🔴 **Y la degradación es la parte que más importa.** Las cuatro rutas `api/admin-sync/asistente/*`
  * son nuevas y los 40+ clientes corren versiones distintas de `master`: durante semanas, la
@@ -78,6 +80,34 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * cincuenta mensajes seguidos al dueño.
      */
     const MAXIMO_DE_FOTOS_POR_RESPUESTA = 6;
+
+    /**
+     * Pausa antes de cada foto, en microsegundos.
+     *
+     * 🔴 No es precaución teórica. Kapso devuelve **409 "otro mensaje en vuelo para esta
+     * conversación"** cuando dos envíos salen pegados (lead #440, 22/7/2026; la misma regla vive
+     * en `LeadSuggestionSendService::enviar_partes()` y en `SupportWhatsappOpenerService`). Acá el
+     * texto y las fotos salen uno atrás del otro por la misma conversación, que es exactamente ese
+     * caso: sin la pausa, la primera foto se perdería casi siempre y el log diría "fallida" sin que
+     * nadie entendiera por qué. 1200 ms es lo que aquella vez alcanzó para que Kapso soltara el
+     * bloqueo.
+     */
+    const PAUSA_ANTES_DE_CADA_FOTO_US = 1200000;
+
+    /**
+     * Espera antes del segundo intento de una foto que falló por algo transitorio, en microsegundos.
+     */
+    const ESPERA_ANTES_DE_REINTENTAR_FOTO_US = 1500000;
+
+    /**
+     * Intentos por foto cuando el fallo es transitorio (409 / 429 / 5xx).
+     *
+     * Dos y no tres como en el opener de soporte: este job tiene `$timeout` 60 y hasta seis fotos,
+     * y con tres intentos más el backoff largo (3500 ms) el peor caso se acerca al techo. La foto
+     * es un extra, y el segundo intento existe por el 409, que se suelta en un segundo. El sender
+     * además ya reintenta a nivel HTTP (`retry(2, 500)`), así que son cuatro pedidos por foto.
+     */
+    const INTENTOS_POR_FOTO = 2;
 
     /**
      * Un solo intento del lado de Laravel.
@@ -668,7 +698,14 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * él, un `Throwable` subiría hasta el `catch` de `handle()`, que cerraría con error —y con la
      * disculpa— un turno que el dueño ya recibió bien. El motivo queda en el log con la URL, que
      * es lo que hace falta para ver si Meta no pudo bajarla (un link caído, una imagen de más de
-     * 5 MB).
+     * 5 MB). Una foto que falla no frena a la siguiente: cada una es independiente, con su propio
+     * epígrafe, a diferencia de las partes de un texto partido.
+     *
+     * ⚠️ Las pausas de acá (`pausar()`) son lo ÚNICO que este job hace durmiendo, y son de
+     * segundos, no de minutos: a lo sumo ~1,2 s por foto más 1,5 s por reintento transitorio. La
+     * regla de "esperar con `release()`" es para los tres minutos del polling; un `release()` por
+     * foto haría que cada una llegara hasta un minuto después de la anterior, que es lo que tarda
+     * el cron en volver a levantar el worker.
      *
      * @param WhatsappSendService    $sender   Envío a Kapso/Meta.
      * @param ClientAssistantMessage $fila     Mensaje del dueño que se está respondiendo.
@@ -718,20 +755,13 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
 
             $intentadas++;
 
-            try {
-                $wamid = $sender->send_image_by_link(
-                    (string) $fila->telefono,
-                    $url,
-                    $texto !== '' ? $texto : null,
-                    'Asistente por WhatsApp - foto - cliente #' . $client->id
-                );
-                $motivo = $wamid === null ? (string) $sender->last_send_error : null;
-            } catch (\Throwable $exception) {
-                $wamid  = null;
-                $motivo = $exception->getMessage();
-            }
+            /* Antes de CADA foto, incluida la primera: el texto acaba de salir por esta misma
+             * conversación y Kapso todavía puede tenerla tomada (ver PAUSA_ANTES_DE_CADA_FOTO_US). */
+            $this->pausar(self::PAUSA_ANTES_DE_CADA_FOTO_US);
 
-            if ($wamid !== null) {
+            $resultado = $this->mandar_una_foto($sender, $fila, $client, $url, $texto !== '' ? $texto : null);
+
+            if ($resultado['wamid'] !== null) {
                 $cuenta['enviadas']++;
 
                 continue;
@@ -743,11 +773,83 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
                 'assistant_message_id' => $fila->id,
                 'client_id'            => $client->id,
                 'url'                  => $url,
-                'motivo'               => $motivo,
+                'motivo'               => $resultado['motivo'],
             ]);
         }
 
         return $cuenta;
+    }
+
+    /**
+     * Un envío de foto, con un segundo intento si el primero falló por algo transitorio.
+     *
+     * Transitorio lo decide `WhatsappSendService::last_send_was_transient()` (409 / 429 / 5xx), y el
+     * caso central es el 409 de Kapso por la conversación tomada. Un rechazo definitivo —un link
+     * que Meta no pudo bajar, un número inválido, la configuración apagada— no se reintenta:
+     * esperar no lo arregla. Una excepción tampoco: el sender ya atrapa las suyas, así que una que
+     * llegue hasta acá es algo que no se entiende, y se reporta tal cual.
+     *
+     * @param WhatsappSendService    $sender  Envío a Kapso/Meta.
+     * @param ClientAssistantMessage $fila    Mensaje del dueño que se está respondiendo.
+     * @param Client                 $client  Cliente dueño del hilo.
+     * @param string                 $url     URL pública de la foto.
+     * @param string|null            $caption Epígrafe, o null para mandarla sola.
+     *
+     * @return array{wamid: string|null, motivo: string|null}
+     */
+    private function mandar_una_foto(
+        WhatsappSendService $sender,
+        ClientAssistantMessage $fila,
+        Client $client,
+        string $url,
+        ?string $caption
+    ): array {
+        $motivo = null;
+
+        for ($intento = 1; $intento <= self::INTENTOS_POR_FOTO; $intento++) {
+            try {
+                $wamid = $sender->send_image_by_link(
+                    (string) $fila->telefono,
+                    $url,
+                    $caption,
+                    'Asistente por WhatsApp - foto - cliente #' . $client->id
+                );
+            } catch (\Throwable $exception) {
+                return ['wamid' => null, 'motivo' => $exception->getMessage()];
+            }
+
+            if ($wamid !== null) {
+                return ['wamid' => $wamid, 'motivo' => null];
+            }
+
+            $motivo = (string) $sender->last_send_error;
+
+            if ($intento < self::INTENTOS_POR_FOTO && $sender->last_send_was_transient()) {
+                $this->pausar(self::ESPERA_ANTES_DE_REINTENTAR_FOTO_US);
+
+                continue;
+            }
+
+            break;
+        }
+
+        return ['wamid' => null, 'motivo' => $motivo];
+    }
+
+    /**
+     * Espera entre un envío y el siguiente. Separado para que un test lo pueda anular.
+     *
+     * Mismo mecanismo que `SupportWhatsappOpenerService::pausar()`: las pruebas del job corren
+     * `handle()` derecho y una subclase anónima lo pisa, así una prueba con seis fotos no duerme
+     * siete segundos por nada.
+     *
+     * @param int $microsegundos Cuánto esperar.
+     *
+     * @return void
+     */
+    protected function pausar(int $microsegundos): void
+    {
+        usleep($microsegundos);
     }
 
     /**
