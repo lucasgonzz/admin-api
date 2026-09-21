@@ -27,7 +27,8 @@ use Illuminate\Support\Facades\Log;
  *      del asistente en `pendiente`, se despacha el job que lo responde y se contesta **202** con
  *      los dos identificadores. O sea: el `empresa-api` tampoco se queda esperando.
  *   2. **La vuelta**: `GET .../mensajes/{id}` cada tantos segundos hasta que el estado deja de ser
- *      `pendiente`, y ahí el texto sale por WhatsApp.
+ *      `pendiente`, y ahí el texto sale por WhatsApp — seguido de las fotos que la respuesta traiga
+ *      en `adjuntos`, una por mensaje y por link (ver `mandar_fotos_de_la_respuesta()`).
  *
  * 🔴 **La espera se hace con `release()`, no durmiendo.** El asistente tiene un presupuesto de 150
  * segundos y un job con `timeout` 240 del lado del cliente: tres minutos de `sleep()` acá serían
@@ -67,6 +68,16 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * que cierre en 180 y no en 228.
      */
     const ESPERAS_DE_POLLING = [3, 5, 8, 13, 21, 34, 55, 41];
+
+    /**
+     * Tope de fotos que se mandan por respuesta del asistente.
+     *
+     * Es el mismo tope que el `empresa-api` aplica al guardar `adjuntos` (`AdjuntosIaHelper::MAX_ADJUNTOS`),
+     * repetido de este lado a propósito: el que decide cuántos mensajes de WhatsApp salen es el
+     * que los manda, y un API que por un bug devolviera cincuenta adjuntos no puede convertirse en
+     * cincuenta mensajes seguidos al dueño.
+     */
+    const MAXIMO_DE_FOTOS_POR_RESPUESTA = 6;
 
     /**
      * Un solo intento del lado de Laravel.
@@ -482,7 +493,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     }
 
     /**
-     * La vuelta: pregunta si el asistente ya terminó y, si terminó, le manda el texto al dueño.
+     * La vuelta: pregunta si el asistente ya terminó y, si terminó, le manda el texto al dueño —
+     * y después, las fotos que la respuesta traiga adjuntas.
      *
      * @param AsistenteWhatsappService    $asistente
      * @param ClientEmpresaApiUrlResolver $urls
@@ -622,11 +634,120 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $whatsapp_message_id === null ? (string) $sender->last_send_error : null
         );
 
+        /* Las fotos van DESPUÉS de que el texto quedó guardado y registrado, y solo si el texto
+         * salió. El orden en el WhatsApp del dueño es ese mismo: primero la respuesta, debajo cada
+         * foto con su epígrafe. Y lo que pase acá no toca ni el estado de la fila ni la fila
+         * saliente del texto, que ya quedaron escritos: una foto que no sale es una línea de log,
+         * no un turno perdido. */
+        $fotos = ['enviadas' => 0, 'fallidas' => 0];
+        if ($whatsapp_message_id !== null) {
+            $fotos = $this->mandar_fotos_de_la_respuesta($sender, $fila, $client, $datos['adjuntos'] ?? []);
+        }
+
         Log::channel('daily')->info('AsistenteWhatsapp: respuesta del asistente entregada.', [
             'assistant_message_id' => $fila->id,
             'client_id'            => $client->id,
             'entregada'            => $whatsapp_message_id !== null,
+            'imagenes_enviadas'    => $fotos['enviadas'],
+            'imagenes_fallidas'    => $fotos['fallidas'],
         ]);
+    }
+
+    /**
+     * Manda por WhatsApp las fotos que el asistente adjuntó a su respuesta, una por mensaje.
+     *
+     * `adjuntos` es la clave opcional del contrato con el `empresa-api` (§2 de la misión
+     * `asistente-omnisciente`): `[{tipo: 'imagen', url: 'https://…', texto: 'epígrafe'}]`. Un API
+     * viejo no la manda, y acá no pasa nada. Cada ítem se valida por su cuenta —tipo `imagen` y
+     * `url` `http(s)`— y lo que no valida se saltea sin error, porque un adjunto raro no puede
+     * voltear a los que están bien. El `texto` viaja como caption; sin texto, la foto va sola.
+     *
+     * 🔴 Un fallo acá se loguea y nada más. No cambia el estado de la fila, no toca la fila
+     * saliente del texto y no le manda ninguna disculpa al dueño: el texto ya salió y la foto es
+     * un extra. Vale también para una excepción, y por eso cada envío va en su propio `try`: sin
+     * él, un `Throwable` subiría hasta el `catch` de `handle()`, que cerraría con error —y con la
+     * disculpa— un turno que el dueño ya recibió bien. El motivo queda en el log con la URL, que
+     * es lo que hace falta para ver si Meta no pudo bajarla (un link caído, una imagen de más de
+     * 5 MB).
+     *
+     * @param WhatsappSendService    $sender   Envío a Kapso/Meta.
+     * @param ClientAssistantMessage $fila     Mensaje del dueño que se está respondiendo.
+     * @param Client                 $client   Cliente dueño del hilo.
+     * @param mixed                  $adjuntos Lo que vino en `adjuntos`, tal cual llegó.
+     *
+     * @return array{enviadas: int, fallidas: int}
+     */
+    private function mandar_fotos_de_la_respuesta(
+        WhatsappSendService $sender,
+        ClientAssistantMessage $fila,
+        Client $client,
+        $adjuntos
+    ): array {
+        $cuenta = ['enviadas' => 0, 'fallidas' => 0];
+
+        if (! is_array($adjuntos) || $adjuntos === []) {
+            return $cuenta;
+        }
+
+        /* Se cuentan los intentos y no las posiciones: seis adjuntos válidos después de tres
+         * inválidos tienen que salir los seis. */
+        $intentadas = 0;
+
+        foreach ($adjuntos as $adjunto) {
+            if ($intentadas >= self::MAXIMO_DE_FOTOS_POR_RESPUESTA) {
+                break;
+            }
+
+            /* Los `is_string` no son paranoia: un `(string)` sobre un array tira "Array to string
+             * conversion", que Laravel convierte en excepción, y eso es justo lo que acá no puede
+             * pasar por un adjunto malformado. */
+            if (! is_array($adjunto)) {
+                continue;
+            }
+
+            $tipo = isset($adjunto['tipo']) && is_string($adjunto['tipo']) ? trim($adjunto['tipo']) : '';
+            $url  = isset($adjunto['url']) && is_string($adjunto['url']) ? trim($adjunto['url']) : '';
+
+            if ($tipo !== 'imagen' || ! preg_match('#^https?://#i', $url)) {
+                continue;
+            }
+
+            $texto = isset($adjunto['texto']) && is_scalar($adjunto['texto'])
+                ? trim((string) $adjunto['texto'])
+                : '';
+
+            $intentadas++;
+
+            try {
+                $wamid = $sender->send_image_by_link(
+                    (string) $fila->telefono,
+                    $url,
+                    $texto !== '' ? $texto : null,
+                    'Asistente por WhatsApp - foto - cliente #' . $client->id
+                );
+                $motivo = $wamid === null ? (string) $sender->last_send_error : null;
+            } catch (\Throwable $exception) {
+                $wamid  = null;
+                $motivo = $exception->getMessage();
+            }
+
+            if ($wamid !== null) {
+                $cuenta['enviadas']++;
+
+                continue;
+            }
+
+            $cuenta['fallidas']++;
+
+            Log::channel('daily')->warning('AsistenteWhatsapp: una foto de la respuesta no salió.', [
+                'assistant_message_id' => $fila->id,
+                'client_id'            => $client->id,
+                'url'                  => $url,
+                'motivo'               => $motivo,
+            ]);
+        }
+
+        return $cuenta;
     }
 
     /**
