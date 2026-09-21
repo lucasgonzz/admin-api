@@ -215,12 +215,31 @@ abstract class BaseDelCanal extends TestCase
             /** @var array<int, array<string, mixed>> Envíos de plantilla. */
             public $plantillas = [];
 
-            /** @var bool Si Meta confirma el envío. */
+            /** @var array<int, array<string, mixed>> Envíos de imagen por link (las fotos del asistente). */
+            public $imagenes = [];
+
+            /**
+             * @var array<int, string> Qué salió y en qué orden (`texto` | `imagen`). Es lo único que
+             *                        puede decir que la respuesta salió ANTES que sus fotos.
+             */
+            public $orden = [];
+
+            /** @var bool Si Meta confirma el envío (texto y plantilla). */
             public $confirma = true;
+
+            /**
+             * @var bool Si Meta confirma las fotos. Separado de `$confirma` a propósito: la prueba de
+             *           "la foto falla" necesita el texto bien y la foto mal, que es el caso real.
+             */
+            public $confirma_imagenes = true;
+
+            /** @var bool Si mandar una foto revienta con una excepción en vez de devolver null. */
+            public $explota_imagenes = false;
 
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
                 $this->textos[] = ['to' => $to, 'body' => $body, 'context' => $context];
+                $this->orden[]  = 'texto';
 
                 if (! $this->confirma) {
                     $this->last_send_error = 'Meta rechazó el envío (simulado en la prueba).';
@@ -247,6 +266,24 @@ abstract class BaseDelCanal extends TestCase
                 }
 
                 return 'wamid.plantilla.' . count($this->plantillas);
+            }
+
+            public function send_image_by_link(string $to, string $url, ?string $caption = null, ?string $context = null, bool $skip_failure_notification = true): ?string
+            {
+                $this->imagenes[] = ['to' => $to, 'url' => $url, 'caption' => $caption, 'context' => $context];
+                $this->orden[]    = 'imagen';
+
+                if ($this->explota_imagenes) {
+                    throw new \RuntimeException('Kapso reventó mandando la foto (simulado en la prueba).');
+                }
+
+                if (! $this->confirma_imagenes) {
+                    $this->last_send_error = 'Meta rechazó la foto (simulado en la prueba).';
+
+                    return null;
+                }
+
+                return 'wamid.imagen.' . count($this->imagenes);
             }
         };
 
