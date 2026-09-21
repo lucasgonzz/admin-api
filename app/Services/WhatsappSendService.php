@@ -585,6 +585,166 @@ class WhatsappSendService
     }
 
     /**
+     * Envía una imagen por WhatsApp a partir de una URL pública, sin subirle nada a Meta.
+     *
+     * La Cloud API acepta un mensaje de imagen de dos formas: `image: {id}` con un media_id que
+     * antes hubo que subir al endpoint `/media` —es lo que hace {@see send_image_attachment()} con
+     * los adjuntos de soporte, que viven en el disco del admin—, o `image: {link}` con una URL que
+     * Meta baja por su cuenta. Este método usa la segunda, y es a propósito: las fotos que el
+     * asistente del sistema de un cliente adjunta a una respuesta (misión `asistente-omnisciente`,
+     * 21/9/2026) son las imágenes de su catálogo de artículos, que ya son URLs públicas del hosting
+     * o de R2. Mandarlas por media_id sería bajar los bytes al admin para volver a subírselos a
+     * Meta —dos viajes por foto por un archivo que Meta puede ir a buscar solo— más un media_id que
+     * caduca a los 30 días y que acá no se reutiliza nunca.
+     *
+     * Lo que Meta exige del link: público (sin login ni firma que venza), `http(s)` y de un tipo
+     * que soporte (jpeg o png, hasta 5 MB). Si no cumple, Meta rechaza el mensaje y esto devuelve
+     * null como cualquier otro fallo de envío, con el motivo en `$last_send_error` y el status en
+     * `$last_send_status_code`.
+     *
+     * 🔴 `$skip_failure_notification` va en **true por defecto**, al revés que en {@see send_text()}.
+     * Una foto que no sale no es un incidente para los admins: el texto de la respuesta ya salió,
+     * y el aviso a admins está throttleado a uno cada 10 minutos de forma global — gastarlo en una
+     * foto del catálogo deja mudo un fallo de envío real de esos diez minutos. El motivo igual queda
+     * en `$last_send_error` para que el llamador lo loguee.
+     *
+     * @param string      $to                        Número destino en formato E.164 (+549…).
+     * @param string      $url                       URL pública `http(s)` de la imagen.
+     * @param string|null $caption                   Epígrafe debajo de la foto; null o vacío = sin epígrafe.
+     * @param string|null $context                   Descripción legible para el motivo del fallo
+     *                                                 (ej: "Asistente por WhatsApp - foto - cliente #42").
+     *                                                 Si es null se arma una descripción genérica.
+     * @param bool        $skip_failure_notification  true (por defecto) para NO avisar a los admins
+     *                                                 del fallo. Ver arriba por qué.
+     *
+     * @return string|null whatsapp_message_id asignado por Meta, o null si falló.
+     */
+    public function send_image_by_link(string $to, string $url, ?string $caption = null, ?string $context = null, bool $skip_failure_notification = true): ?string
+    {
+        // Mismo reseteo que en send_text(): el motivo solo debe quedar seteado si ESTE envío falla.
+        $this->last_send_error = null;
+        $this->last_send_status_code = null;
+
+        $notify_context = $context !== null ? $context : "Envío de imagen por link a {$to}";
+
+        /*
+         * Un link que no es http(s) se corta ACÁ, antes de mirar la configuración: Meta lo
+         * rechazaría igual, y así el motivo queda escrito tenga o no configuración activa. Es la
+         * misma razón por la que send_template() valida sus variables antes de resolve_send_context().
+         */
+        $link = trim($url);
+        if (! preg_match('#^https?://#i', $link)) {
+            Log::channel('daily')->warning('WhatsappSendService: link de imagen inválido, envío cortado antes de salir.', [
+                'to'  => $to,
+                'url' => mb_strimwidth($link, 0, 200, '…'),
+            ]);
+            $this->notify_admins_of_failure(
+                $notify_context,
+                'El link de la imagen no es una URL http(s): ' . mb_strimwidth($link, 0, 200, '…'),
+                $skip_failure_notification
+            );
+
+            return null;
+        }
+
+        /*
+         * test_mode: mismo criterio que send_text(). Se chequea ANTES de resolve_send_context(),
+         * porque ese método ya corta a null en test_mode sin dejar motivo, y el llamador loguearía
+         * "la foto no salió" sin nada adentro por algo que no es un fallo.
+         */
+        $active_config = WhatsappConfig::getActive();
+        if ($active_config && $active_config->is_active && $active_config->test_mode) {
+            $normalized_to = WhatsappNormalizer::normalize($to);
+            $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+            if ($to_digits === '') {
+                Log::channel('daily')->warning('WhatsappSendService: número destino inválido.', [
+                    'to' => $to,
+                ]);
+                $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
+
+                return null;
+            }
+
+            $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
+
+            Log::channel('daily')->info('WhatsappSendService: test_mode activo, imagen por link simulada (no se llamó a la API real).', [
+                'to'                       => $normalized_to,
+                'url'                      => $link,
+                'fake_whatsapp_message_id' => $fake_message_id,
+            ]);
+
+            return $fake_message_id;
+        }
+
+        $send_context = $this->resolve_send_context($skip_failure_notification);
+        if ($send_context === null) {
+            return null;
+        }
+
+        $normalized_to = WhatsappNormalizer::normalize($to);
+        $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+        if ($to_digits === '') {
+            Log::channel('daily')->warning('WhatsappSendService: número destino inválido (imagen por link).', [
+                'to' => $to,
+            ]);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
+
+            return null;
+        }
+
+        $image_payload = ['link' => $link];
+        $caption_text = $caption !== null ? trim($caption) : '';
+        if ($caption_text !== '') {
+            // 1024 es el tope de Meta para el caption de una imagen: más largo, rechaza el mensaje entero.
+            $image_payload['caption'] = mb_strimwidth($caption_text, 0, 1024, '…');
+        }
+
+        $endpoint = $this->messages_endpoint($send_context['phone_number_id']);
+
+        try {
+            $http = KapsoHttpClient::make($send_context['api_key'], (int) config('services.client_api.timeout', 15));
+
+            $response = $http
+                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->post($endpoint, [
+                    'messaging_product' => 'whatsapp',
+                    'to'                => $to_digits,
+                    'type'              => 'image',
+                    'image'             => $image_payload,
+                ]);
+
+            $message_id = $this->extract_message_id_from_response($response, $normalized_to);
+            if ($message_id === null) {
+                $this->notify_admins_of_failure($notify_context, 'Kapso/Meta no devolvió message_id para la imagen (ver logs para detalle).', $skip_failure_notification);
+            }
+
+            return $message_id;
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsappSendService: excepción al enviar imagen por link.', [
+                'to'    => $normalized_to,
+                'url'   => $link,
+                'error' => $exception->getMessage(),
+            ]);
+
+            /*
+             * Status HTTP real del fallo, igual que en send_text(): es lo que distingue en el log un
+             * 400 de Meta por un link que no pudo bajar de un 5xx pasajero de Kapso.
+             */
+            if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+                $this->last_send_status_code = (int) $exception->response->status();
+            } else {
+                if (preg_match('/status code (\d{3})/', $exception->getMessage(), $matches)) {
+                    $this->last_send_status_code = (int) $matches[1];
+                }
+            }
+
+            $this->notify_admins_of_failure($notify_context, $exception->getMessage(), $skip_failure_notification);
+        }
+
+        return null;
+    }
+
+    /**
      * Sube un adjunto de audio y lo envía por WhatsApp (nota de voz o audio según formato).
      *
      * @param string $to
