@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
 use App\Models\ClientAiTokenUsagePerson;
+use App\Models\ClientAiTokenUsagePersonModel;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -12,7 +13,8 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Trae del `empresa-api` de un cliente cuántos tokens de IA gastó en un rango de días y los deja
- * espejados en `client_ai_token_usages`.
+ * espejados en `client_ai_token_usages`, `client_ai_token_usage_people` y
+ * `client_ai_token_usage_person_models`, más la configuración de IA que informa en `clients`.
  *
  * Molde: `ClientMensualidadSyncService` (la llamada saliente) y `ClientScheduleSyncService` (el
  * registro del desenlace en columnas del cliente). De cada uno se toma lo que ya está aprendido:
@@ -41,8 +43,18 @@ use Illuminate\Support\Facades\Log;
  *
  *  4. **El upsert reescribe, no acumula.** Es la propiedad que hace que este dato sea reconstruible
  *     desde la fuente en cualquier momento: volver a pedir el mismo rango deja exactamente el mismo
- *     resultado. Se apoya en el unique `(client_id, fecha, proceso, modelo)` de la tabla, o sea que
- *     no depende de que nadie se acuerde de nada.
+ *     resultado. Se apoya en el unique de cada una de las TRES tablas espejo —por acción
+ *     `(client_id, fecha, proceso, proveedor, modelo)`, por persona `(client_id, fecha,
+ *     auth_user_id)` y por persona y modelo `(client_id, fecha, auth_user_id, proveedor, modelo)`—,
+ *     o sea que no depende de que nadie se acuerde de nada. Y cada clave es, dimensión por
+ *     dimensión, la del `GROUP BY` del bloque del payload que la alimenta: ni una menos (dos filas
+ *     colapsan y se pierde consumo) ni una más (queda una fila que nadie vuelve a pisar).
+ *
+ * Los bloques del payload que NO son `dias` son opcionales, y cada uno marca una versión del
+ * `empresa-api`: `personas` llegó con tokens-por-cliente (17/9/2026); `personas_modelos` y
+ * `configuracion` con proveedores-ia-deepseek (22/9/2026). Un cliente que manda menos bloques que
+ * el admin conoce es un cliente con una versión intermedia, y sigue siendo `success`: se guarda lo
+ * que vino y lo que no vino no se toca.
  */
 class ClientAiTokensSyncService
 {
@@ -251,8 +263,20 @@ class ClientAiTokensSyncService
          * gastó. Se guardan los días y listo — mismo criterio que el 404 para el endpoint entero. */
         $personas = isset($data['personas']) && is_array($data['personas']) ? $data['personas'] : [];
 
+        /* Mismo criterio para los dos bloques de proveedores-ia-deepseek: `personas_modelos` (quién
+         * gastó con qué modelo) y `configuracion` (qué inteligencia eligió el dueño). Ausentes o
+         * mal formados = versión intermedia del cliente. `configuracion` se distingue entre "no
+         * vino" (null: no se toca lo guardado) y "vino" (array: se reescribe la foto). */
+        $personas_modelos = isset($data['personas_modelos']) && is_array($data['personas_modelos'])
+            ? $data['personas_modelos']
+            : [];
+
+        $configuracion = isset($data['configuracion']) && is_array($data['configuracion'])
+            ? $data['configuracion']
+            : null;
+
         try {
-            $filas = $this->espejar($client, $dias, $personas, $desde, $hasta);
+            $filas = $this->espejar($client, $dias, $personas, $personas_modelos, $configuracion, $desde, $hasta);
         } catch (\Throwable $e) {
             /* Que una fila venga mal formada no puede tumbar el barrido. La transacción de
              * `espejar()` ya hizo rollback, así que el cliente queda como estaba. */
@@ -281,8 +305,9 @@ class ClientAiTokensSyncService
      * motivo, perdería lo que ya estaba bien.
      *
      * Todo adentro de UNA transacción por cliente: un rango se guarda entero o no se guarda. Los
-     * dos cortes —por acción y por persona— viajan en la misma transacción a propósito: son dos
-     * vistas del mismo hecho y no puede quedar una escrita y la otra no.
+     * tres cortes —por acción, por persona y por persona y modelo— y la configuración viajan en la
+     * misma transacción a propósito: son vistas del mismo hecho, sacadas del mismo payload, y no
+     * puede quedar una escrita y la otra no.
      *
      * 🔴 **Una fila con una `fecha` fuera del rango pedido se descarta.** Sin este corte, un
      * cliente que contesta de más (por un bug propio o por una fecha mal calculada) deja una fila
@@ -290,19 +315,28 @@ class ClientAiTokensSyncService
      * informar, y el admin nunca pide ese día. Esa fila queda para siempre y el espejo deja de ser
      * reconstruible desde la fuente, que es lo único que justifica que esta tabla exista.
      *
-     * @param Client                           $client   Cliente dueño del consumo.
-     * @param array<int, array<string, mixed>> $dias     Bloque `dias` del payload del cliente.
-     * @param array<int, array<string, mixed>> $personas Bloque `personas`; vacío si el cliente no lo manda.
-     * @param string                           $desde    Primer día pedido, AAAA-MM-DD.
-     * @param string                           $hasta    Último día pedido, AAAA-MM-DD.
+     * @param Client                            $client           Cliente dueño del consumo.
+     * @param array<int, array<string, mixed>>  $dias             Bloque `dias` del payload del cliente.
+     * @param array<int, array<string, mixed>>  $personas         Bloque `personas`; vacío si el cliente no lo manda.
+     * @param array<int, array<string, mixed>>  $personas_modelos Bloque `personas_modelos`; vacío si no lo manda.
+     * @param array<string, mixed>|null         $configuracion    Bloque `configuracion`; null si no lo manda.
+     * @param string                            $desde            Primer día pedido, AAAA-MM-DD.
+     * @param string                            $hasta            Último día pedido, AAAA-MM-DD.
      *
-     * @return int Cantidad de filas efectivamente escritas, sumando los dos cortes.
+     * @return int Cantidad de filas efectivamente escritas, sumando los tres cortes.
      */
-    protected function espejar(Client $client, array $dias, array $personas, $desde, $hasta)
-    {
+    protected function espejar(
+        Client $client,
+        array $dias,
+        array $personas,
+        array $personas_modelos,
+        $configuracion,
+        $desde,
+        $hasta
+    ) {
         $escritas = 0;
 
-        DB::transaction(function () use ($client, $dias, $personas, $desde, $hasta, &$escritas) {
+        DB::transaction(function () use ($client, $dias, $personas, $personas_modelos, $configuracion, $desde, $hasta, &$escritas) {
             /* 🔴 Se cuentan las CLAVES distintas que se escribieron, no las vueltas del bucle. Con
              * un contador por iteración, dos filas del payload que caen en la misma clave informan
              * "2 filas" cuando en la base entró una sola — y ese número es lo que ve el operador
@@ -347,7 +381,13 @@ class ClientAiTokensSyncService
                 $claves_escritas[implode('|', $clave)] = true;
             }
 
-            $escritas = count($claves_escritas) + $this->espejar_personas($client, $personas, $desde, $hasta);
+            $escritas = count($claves_escritas)
+                + $this->espejar_personas($client, $personas, $desde, $hasta)
+                + $this->espejar_personas_modelos($client, $personas_modelos, $desde, $hasta);
+
+            if ($configuracion !== null) {
+                $this->espejar_configuracion($client, $configuracion);
+            }
         });
 
         return $escritas;
@@ -481,6 +521,133 @@ class ClientAiTokensSyncService
         }
 
         return count($claves_escritas);
+    }
+
+    /**
+     * Vuelca el bloque `personas_modelos` a `client_ai_token_usage_person_models`, con el mismo
+     * upsert idempotente que los otros dos cortes.
+     *
+     * 🔴 **La clave tiene CINCO dimensiones, las mismas por las que agrupa el origen**
+     * (`DATE(created_at), auth_user_id, proveedor, modelo` más el cliente). Es el corte que le pone
+     * plata a cada persona, y el precio depende del modelo: si `modelo` o `proveedor` quedaran
+     * fuera de la clave, dos filas del mismo día y la misma persona con distinto modelo colapsarían
+     * en una —la que queda con los contadores de la última— y se costearía Opus con la tarifa de
+     * Haiku o al revés, sin que nada avise.
+     *
+     * Mismas normalizaciones que en los otros dos cortes, y por los mismos motivos: la fecha fuera
+     * del rango se descarta (quedaría para siempre); `auth_user_id` nulo se guarda como 0 (un NULL
+     * no colisiona consigo mismo en un índice único); `proveedor` nulo o ausente cae a `anthropic`
+     * y `modelo` ausente a `''` (ninguna dimensión de la clave viaja como null hacia la base).
+     *
+     * Corre adentro de la transacción que abrió `espejar()`: no abre una propia.
+     *
+     * @param Client                           $client           Cliente dueño del consumo.
+     * @param array<int, array<string, mixed>> $personas_modelos Bloque `personas_modelos` del payload.
+     * @param string                           $desde            Primer día pedido, AAAA-MM-DD.
+     * @param string                           $hasta            Último día pedido, AAAA-MM-DD.
+     *
+     * @return int Cantidad de claves distintas escritas.
+     */
+    protected function espejar_personas_modelos(Client $client, array $personas_modelos, $desde, $hasta)
+    {
+        // Mismo criterio que en `espejar()`: se cuentan claves escritas, no vueltas del bucle.
+        $claves_escritas = [];
+
+        foreach ($personas_modelos as $fila) {
+            if (! is_array($fila)) {
+                continue;
+            }
+
+            $fecha = $this->fecha_usable($fila, $desde, $hasta);
+
+            if ($fecha === null) {
+                continue;
+            }
+
+            /* Nulo, vacío o ausente son todos lo mismo acá: no hubo persona detrás. Se escribe el
+             * centinela explícito para que se lea, igual que en `espejar_personas()`. */
+            $auth_user_id = isset($fila['auth_user_id']) && $fila['auth_user_id'] !== null
+                ? (int) $fila['auth_user_id']
+                : ClientAiTokenUsagePersonModel::AUTOMATICO;
+
+            $clave = [
+                'client_id'    => (int) $client->id,
+                'fecha'        => $fecha,
+                'auth_user_id' => $auth_user_id,
+                'proveedor'    => (string) (isset($fila['proveedor']) && $fila['proveedor'] !== null ? $fila['proveedor'] : 'anthropic'),
+                'modelo'       => (string) (isset($fila['modelo']) ? $fila['modelo'] : ''),
+            ];
+
+            $nombre = trim((string) (isset($fila['nombre']) ? $fila['nombre'] : ''));
+
+            ClientAiTokenUsagePersonModel::updateOrCreate($clave, [
+                // Vacío se guarda como null: "el cliente no informó el nombre" no es "se llama ''".
+                'nombre'                      => $nombre === '' ? null : mb_substr($nombre, 0, 120),
+                'llamadas'                    => (int) (isset($fila['llamadas']) ? $fila['llamadas'] : 0),
+                'input_tokens'                => (int) (isset($fila['input_tokens']) ? $fila['input_tokens'] : 0),
+                'output_tokens'               => (int) (isset($fila['output_tokens']) ? $fila['output_tokens'] : 0),
+                'cache_creation_input_tokens' => (int) (isset($fila['cache_creation_input_tokens']) ? $fila['cache_creation_input_tokens'] : 0),
+                'cache_read_input_tokens'     => (int) (isset($fila['cache_read_input_tokens']) ? $fila['cache_read_input_tokens'] : 0),
+            ]);
+
+            $claves_escritas[implode('|', $clave)] = true;
+        }
+
+        return count($claves_escritas);
+    }
+
+    /**
+     * Guarda en el cliente la foto de qué inteligencia eligió su dueño (bloque `configuracion`).
+     *
+     * 🔴 Solo se llama cuando el bloque VINO. Un cliente con una versión intermedia no lo manda, y
+     * en ese caso las tres columnas no se tocan: pisarlas con null convertiría "lo informó la
+     * semana pasada" en "nunca informó" en la primera recolección después de un downgrade o de un
+     * payload recortado. Adentro del bloque, en cambio, una clave ausente o vacía SÍ se guarda como
+     * null: el bloque es la verdad de hoy, y lo que el cliente no dice hoy no se sabe.
+     *
+     * Se recorta al largo de cada columna en vez de dejar que MySQL rechace la fila entera: un
+     * id de modelo más largo de lo previsto es un dato raro, no un motivo para perder el consumo
+     * del día (la transacción haría rollback de los tres cortes).
+     *
+     * `ai_modelo` guarda `modelo_asistente` y no `modelo_general`: es el que el dueño eligió con
+     * el nivel de pensamiento y el que se ve en la solapa. El general (el del bot de WhatsApp y el
+     * título) es una consecuencia del proveedor, no una elección.
+     *
+     * Corre adentro de la transacción que abrió `espejar()`.
+     *
+     * @param Client               $client        Cliente a marcar.
+     * @param array<string, mixed> $configuracion Bloque `configuracion` del payload.
+     *
+     * @return void
+     */
+    protected function espejar_configuracion(Client $client, array $configuracion)
+    {
+        $client->update([
+            'ai_proveedor'   => $this->texto_o_null($configuracion, 'proveedor', 20),
+            'ai_pensamiento' => $this->texto_o_null($configuracion, 'pensamiento', 20),
+            'ai_modelo'      => $this->texto_o_null($configuracion, 'modelo_asistente', 80),
+        ]);
+    }
+
+    /**
+     * Una clave de texto del payload, recortada al largo de su columna, o null si no vino o vino
+     * vacía.
+     *
+     * @param array<string, mixed> $bloque Bloque del payload.
+     * @param string               $clave  Clave a leer.
+     * @param int                  $largo  Largo máximo de la columna destino.
+     *
+     * @return string|null
+     */
+    protected function texto_o_null(array $bloque, $clave, $largo)
+    {
+        if (! isset($bloque[$clave]) || is_array($bloque[$clave])) {
+            return null;
+        }
+
+        $valor = trim((string) $bloque[$clave]);
+
+        return $valor === '' ? null : mb_substr($valor, 0, (int) $largo);
     }
 
     /**
