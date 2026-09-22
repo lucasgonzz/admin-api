@@ -752,6 +752,122 @@ class WhatsappSendService
     }
 
     /**
+     * Envía una imagen que ya está en memoria: la sube a `/media` y la manda por su media_id.
+     *
+     * Es el otro camino de {@see send_image_by_link()}, y la diferencia que importa no es el costo
+     * sino **cuándo se entera uno de que la foto no sirve**:
+     *
+     * - Por **link**, Meta contesta 200 con un `wamid` y recién después va a buscar el archivo. Si
+     *   el tipo no le sirve —webp, por ejemplo, que es lo que guarda el ERP— lo descarta en
+     *   silencio: el admin registra la foto como enviada, no hay ningún error en ningún log y el
+     *   dueño no recibe nada.
+     * - Por **media_id**, la subida es sincrónica: un archivo que Meta no acepta se rechaza en el
+     *   acto, con status, y el llamador puede contarlo como fallido de verdad.
+     *
+     * Quién elige cuál es {@see AsistenteFotoSalienteService::va_por_link()}, y ahí está escrito
+     * por qué no se usa siempre el mismo.
+     *
+     * 🔴 `$skip_failure_notification` va en **true por defecto**, igual que en `send_image_by_link()`
+     * y por el mismo motivo: una foto que no sale no es un incidente para los admins, y el aviso
+     * está throttleado a uno cada 10 minutos de forma global.
+     *
+     * @param string      $to                        Número destino E.164.
+     * @param string      $contents                  Bytes de la imagen.
+     * @param string      $mime                      `image/jpeg` o `image/png`.
+     * @param string      $filename                  Nombre en el multipart; su extensión debe coincidir con el mime.
+     * @param string|null $caption                   Epígrafe, o null para mandarla sola.
+     * @param string|null $context                   Descripción legible para el motivo del fallo.
+     * @param bool        $skip_failure_notification  true (por defecto) para NO avisar a los admins.
+     *
+     * @return string|null whatsapp_message_id asignado por Meta, o null si falló.
+     */
+    public function send_image_by_bytes(
+        string $to,
+        string $contents,
+        string $mime,
+        string $filename,
+        ?string $caption = null,
+        ?string $context = null,
+        bool $skip_failure_notification = true
+    ): ?string {
+        // Mismo reseteo que en send_image_by_link(): el motivo solo queda si ESTE envío falla.
+        $this->last_send_error = null;
+        $this->last_send_status_code = null;
+
+        $notify_context = $context !== null ? $context : "Envío de imagen a {$to}";
+
+        if ($contents === '') {
+            $this->notify_admins_of_failure($notify_context, 'La imagen a enviar llegó vacía.', $skip_failure_notification);
+
+            return null;
+        }
+
+        /*
+         * test_mode antes de resolve_send_context(), igual que en send_image_by_link(): ese método
+         * corta a null sin dejar motivo, y el llamador loguearía "la foto no salió" por algo que no
+         * es un fallo. Acá además evita subirle un archivo real a Meta desde un entorno de prueba.
+         */
+        $active_config = WhatsappConfig::getActive();
+        if ($active_config && $active_config->is_active && $active_config->test_mode) {
+            $fake_message_id = 'test-' . (string) \Illuminate\Support\Str::uuid();
+
+            Log::channel('daily')->info('WhatsappSendService: test_mode activo, imagen por media_id simulada (no se subió nada).', [
+                'to'                       => WhatsappNormalizer::normalize($to),
+                'archivo'                  => $filename,
+                'fake_whatsapp_message_id' => $fake_message_id,
+            ]);
+
+            return $fake_message_id;
+        }
+
+        $send_context = $this->resolve_send_context($skip_failure_notification);
+        if ($send_context === null) {
+            return null;
+        }
+
+        $normalized_to = WhatsappNormalizer::normalize($to);
+        $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
+        if ($to_digits === '') {
+            Log::channel('daily')->warning('WhatsappSendService: número destino inválido (imagen por media_id).', [
+                'to' => $to,
+            ]);
+            $this->notify_admins_of_failure($notify_context, "Número destino inválido: {$to}", $skip_failure_notification);
+
+            return null;
+        }
+
+        $media_id = $this->upload_media_bytes(
+            $send_context['phone_number_id'],
+            $send_context['api_key'],
+            $contents,
+            $mime,
+            $filename,
+            $skip_failure_notification
+        );
+
+        if ($media_id === null) {
+            /* upload_media_bytes() ya dejó el motivo y el status por notify_admins_of_failure(); si
+             * por algún camino no lo hizo, se pone uno legible para que el log del job no salga
+             * con el motivo en blanco. */
+            if ($this->last_send_error === null) {
+                $this->notify_admins_of_failure($notify_context, 'No se pudo subir la imagen a WhatsApp.', $skip_failure_notification);
+            }
+
+            return null;
+        }
+
+        return $this->send_image_by_media_id(
+            $to,
+            $send_context['phone_number_id'],
+            $send_context['api_key'],
+            $media_id,
+            $caption,
+            $skip_failure_notification,
+            $notify_context
+        );
+    }
+
+    /**
      * Sube un adjunto de audio y lo envía por WhatsApp (nota de voz o audio según formato).
      *
      * @param string $to
@@ -837,27 +953,77 @@ class WhatsappSendService
         string $mime,
         ?string $upload_filename = null
     ): ?string {
+        try {
+            $file_contents = file_get_contents($absolute_path);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('WhatsappSendService: excepción al leer el archivo a subir.', [
+                'path'  => $absolute_path,
+                'error' => $exception->getMessage(),
+            ]);
+            $this->notify_admins_of_failure("Subida de adjunto ({$mime}) a WhatsApp", $exception->getMessage(), false);
+
+            return null;
+        }
+
+        if ($file_contents === false || $file_contents === '') {
+            Log::channel('daily')->warning('WhatsappSendService: archivo de imagen vacío o ilegible.', [
+                'path' => $absolute_path,
+            ]);
+
+            return null;
+        }
+
+        $multipart_name = $upload_filename !== null && $upload_filename !== ''
+            ? $upload_filename
+            : basename($absolute_path);
+
+        return $this->upload_media_bytes($phone_number_id, $api_key, $file_contents, $mime, $multipart_name);
+    }
+
+    /**
+     * Sube al endpoint media de Kapso/Meta un archivo que ya está en memoria.
+     *
+     * Es el cuerpo de {@see upload_media()} sin el paso por el disco. Existe porque las fotos que
+     * el asistente le manda al dueño **nunca tocan el storage del admin**: se bajan del hosting del
+     * cliente, se convierten a JPEG en memoria y se suben desde ahí (ver
+     * {@see AsistenteFotoSalienteService}). Escribir un archivo temporal para volver a leerlo dos
+     * líneas después sería dejar la foto del catálogo de un cliente en el disco de la plataforma
+     * por el único motivo de que esta firma pedía una ruta.
+     *
+     * @param string $phone_number_id
+     * @param string $api_key
+     * @param string $contents                  Bytes del archivo.
+     * @param string $mime                      Content-Type con el que viaja.
+     * @param string $upload_filename           Nombre en el multipart (su extensión debe coincidir con el mime).
+     * @param bool   $skip_failure_notification true para NO avisarle a los admins si la subida falla.
+     *                                          Va en true desde las fotos del asistente por el mismo
+     *                                          motivo que en {@see send_image_by_link()}: el aviso
+     *                                          está throttleado a uno cada 10 minutos de forma
+     *                                          global y gastarlo en una foto del catálogo deja mudo
+     *                                          un fallo de envío real.
+     *
+     * @return string|null Media ID.
+     */
+    public function upload_media_bytes(
+        string $phone_number_id,
+        string $api_key,
+        string $contents,
+        string $mime,
+        string $upload_filename,
+        bool $skip_failure_notification = false
+    ): ?string {
+        if ($contents === '') {
+            return null;
+        }
+
         $endpoint = 'https://api.kapso.ai/meta/whatsapp/v24.0/'
             . rawurlencode($phone_number_id)
             . '/media';
 
         try {
-            $file_contents = file_get_contents($absolute_path);
-            if ($file_contents === false || $file_contents === '') {
-                Log::channel('daily')->warning('WhatsappSendService: archivo de imagen vacío o ilegible.', [
-                    'path' => $absolute_path,
-                ]);
-
-                return null;
-            }
-
-            $multipart_name = $upload_filename !== null && $upload_filename !== ''
-                ? $upload_filename
-                : basename($absolute_path);
-
             $http = KapsoHttpClient::make($api_key, (int) config('services.client_api.timeout', 30), false);
             $response = $http
-                ->attach('file', $file_contents, $multipart_name, ['Content-Type' => $mime])
+                ->attach('file', $contents, $upload_filename, ['Content-Type' => $mime])
                 ->post($endpoint, [
                     'messaging_product' => 'whatsapp',
                 ]);
@@ -873,17 +1039,25 @@ class WhatsappSendService
                 'status' => $response->status(),
                 'body'   => substr($response->body(), 0, 500),
             ]);
+
+            /* El status del rechazo queda a mano del llamador: es lo que distingue un 409 de Kapso
+             * —que se reintenta— de un 400 de Meta por un archivo que no acepta, que no. */
+            $this->last_send_status_code = (int) $response->status();
             $this->notify_admins_of_failure(
                 "Subida de adjunto ({$mime}) a WhatsApp",
                 'Kapso respondió con error al subir el archivo. Status: ' . $response->status(),
-                false
+                $skip_failure_notification
             );
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('WhatsappSendService: excepción al subir media.', [
-                'path'  => $absolute_path,
-                'error' => $exception->getMessage(),
+                'archivo' => $upload_filename,
+                'error'   => $exception->getMessage(),
             ]);
-            $this->notify_admins_of_failure("Subida de adjunto ({$mime}) a WhatsApp", $exception->getMessage(), false);
+            $this->notify_admins_of_failure(
+                "Subida de adjunto ({$mime}) a WhatsApp",
+                $exception->getMessage(),
+                $skip_failure_notification
+            );
         }
 
         return null;
@@ -897,6 +1071,10 @@ class WhatsappSendService
      * @param string      $api_key
      * @param string      $media_id
      * @param string|null $caption
+     * @param bool        $skip_failure_notification true para NO avisarle a los admins. Lo usan las
+     *                                               fotos del asistente, que no son un incidente.
+     * @param string|null $notify_context            Descripción legible del envío para el motivo del
+     *                                               fallo; null arma la genérica de siempre.
      *
      * @return string|null
      */
@@ -905,11 +1083,17 @@ class WhatsappSendService
         string $phone_number_id,
         string $api_key,
         string $media_id,
-        ?string $caption
+        ?string $caption,
+        bool $skip_failure_notification = false,
+        ?string $notify_context = null
     ): ?string {
+        $contexto = $notify_context !== null ? $notify_context : "Envío de imagen a {$to}";
+
         $normalized_to = WhatsappNormalizer::normalize($to);
         $to_digits = preg_replace('/\D+/', '', $normalized_to) ?? '';
         if ($to_digits === '') {
+            $this->notify_admins_of_failure($contexto, "Número destino inválido: {$to}", $skip_failure_notification);
+
             return null;
         }
 
@@ -933,7 +1117,8 @@ class WhatsappSendService
 
             $message_id = $this->extract_message_id_from_response($response, $normalized_to);
             if ($message_id === null) {
-                $this->notify_admins_of_failure("Envío de imagen a {$to}", 'Kapso/Meta no devolvió message_id.', false);
+                $this->last_send_status_code = (int) $response->status();
+                $this->notify_admins_of_failure($contexto, 'Kapso/Meta no devolvió message_id.', $skip_failure_notification);
             }
 
             return $message_id;
@@ -942,7 +1127,18 @@ class WhatsappSendService
                 'to'    => $normalized_to,
                 'error' => $exception->getMessage(),
             ]);
-            $this->notify_admins_of_failure("Envío de imagen a {$to}", $exception->getMessage(), false);
+
+            /* Mismo criterio que en send_image_by_link(): el status real es lo que le deja decidir
+             * al llamador si el fallo fue transitorio (el 409 de Kapso) y conviene reintentar. */
+            if ($exception instanceof \Illuminate\Http\Client\RequestException && $exception->response !== null) {
+                $this->last_send_status_code = (int) $exception->response->status();
+            } else {
+                if (preg_match('/status code (\d{3})/', $exception->getMessage(), $matches)) {
+                    $this->last_send_status_code = (int) $matches[1];
+                }
+            }
+
+            $this->notify_admins_of_failure($contexto, $exception->getMessage(), $skip_failure_notification);
         }
 
         return null;
