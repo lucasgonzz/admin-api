@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
 use App\Models\ClientAiTokenUsagePerson;
+use App\Models\ClientAiTokenUsagePersonModel;
 use App\Services\ClientAiTokensSyncService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -147,6 +148,10 @@ class ClientTokensController extends Controller
             $por_modelo[$indice]['tiene_precio'] = ClientAiTokenUsage::tiene_precio($grupo['modelo']);
         }
 
+        /* El corte por persona y modelo (misión proveedores-ia-deepseek). Vacío para un cliente
+         * con una versión anterior, que informa quién gastó pero no con qué modelo. */
+        $por_persona_modelo = ClientAiTokenUsagePersonModel::resumir((int) $client->id, $desde, $hasta);
+
         return [
             'client_id'      => (int) $client->id,
             'desde'          => $desde,
@@ -155,11 +160,126 @@ class ClientTokensController extends Controller
             'por_dia'        => $por_dia,
             'por_proceso'    => $por_proceso,
             'por_modelo'     => $por_modelo,
-            /* 🔴 Sin costo, y no es un olvido: el precio depende del modelo y este corte no lo
-             * trae. Va en tokens y llamadas, y la interfaz lo aclara para que nadie los lea como
-             * plata. Repartir el costo total proporcionalmente sería inventar un número. */
-            'por_persona'    => ClientAiTokenUsagePerson::resumir((int) $client->id, $desde, $hasta),
+            /* El costo por persona sale del corte por modelo, cuando el cliente lo informa. Hasta
+             * el 22/9/2026 este bloque iba sin plata —"y no es un olvido"— porque el corte por
+             * persona no traía el modelo y sin modelo no hay precio. Sigue siendo cierto para un
+             * cliente con una versión anterior: ahí `costo_usd` va en null y `modelos` vacío, y la
+             * interfaz lo aclara. Lo que NO se hace en ningún caso es repartir el costo total en
+             * proporción a los tokens: sería inventar un número que parece medido. */
+            'por_persona'    => $this->cruzar_por_persona(
+                ClientAiTokenUsagePerson::resumir((int) $client->id, $desde, $hasta),
+                $por_persona_modelo
+            ),
+            /* true cuando el cliente informó al menos una fila del corte por modelo en el rango:
+             * es lo que le dice al front que la columna de costo por persona es real y no un
+             * guion, y que el pie de la tabla tiene que decir de dónde sale la plata. */
+            'informa_modelo_por_persona' => $por_persona_modelo !== [],
+            'configuracion'  => $this->configuracion_de_ia($client),
             'sincronizacion' => $this->estado_de_sincronizacion($client),
+        ];
+    }
+
+    /**
+     * Cruza el corte por persona (la fuente de `llamadas` y `tokens` para TODOS los clientes) con
+     * el corte por persona y modelo (la fuente de la plata, solo para los que lo informan).
+     *
+     * Cada fila del corte por persona gana tres claves:
+     *   - `costo_usd`             → suma de sus modelos con precio, o **null** si no hay corte por
+     *                                modelo para esa persona o si alguno de sus modelos no tiene
+     *                                precio cargado. Null y 0 no son lo mismo: 0 es "no costó
+     *                                nada", null es "no sé cuánto costó".
+     *   - `tiene_precio_completo` → true solo cuando hay corte por modelo y TODOS tienen precio.
+     *   - `modelos`               → el desglose, vacío si el cliente no informa el corte.
+     *
+     * Se cruza por `auth_user_id`, con los procesos automáticos (null hacia afuera, 0 adentro)
+     * incluidos: los dos cortes usan el mismo centinela justamente para que esta fila se encuentre.
+     *
+     * 🔴 Una persona que aparece SOLO en el corte por modelo se agrega igual, con sus números. No
+     * debería pasar —los dos bloques salen de la misma tabla del cliente— pero un payload parcial
+     * o una recolección que falló a mitad entre dos rangos puede dejarlo así, y esconder consumo
+     * porque el otro corte no lo nombró sería perder plata en silencio.
+     *
+     * El resultado se ordena por costo descendente (sin precio al final, por tokens). Para un
+     * cliente que no informa el modelo todos los costos son null y el orden queda por tokens, que
+     * es exactamente el que tenía esta tabla antes.
+     *
+     * @param array<int, array<string, mixed>> $personas Salida de `ClientAiTokenUsagePerson::resumir()`.
+     * @param array<int, array<string, mixed>> $modelos  Salida de `ClientAiTokenUsagePersonModel::resumir()`.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function cruzar_por_persona(array $personas, array $modelos)
+    {
+        /** @var array<int, array<string, mixed>> Corte por modelo, indexado por auth_user_id (0 = automático). */
+        $por_id = [];
+
+        foreach ($modelos as $fila) {
+            $por_id[$this->clave_de_persona($fila)] = $fila;
+        }
+
+        $resultado = [];
+
+        foreach ($personas as $persona) {
+            $clave = $this->clave_de_persona($persona);
+
+            if (isset($por_id[$clave])) {
+                $persona['costo_usd']             = $por_id[$clave]['costo_usd'];
+                $persona['tiene_precio_completo'] = (bool) $por_id[$clave]['tiene_precio_completo'];
+                $persona['modelos']               = $por_id[$clave]['modelos'];
+
+                unset($por_id[$clave]);
+            } else {
+                $persona['costo_usd']             = null;
+                $persona['tiene_precio_completo'] = false;
+                $persona['modelos']               = [];
+            }
+
+            $resultado[] = $persona;
+        }
+
+        // Lo que quedó en el corte por modelo sin pareja: se agrega tal cual, ya tiene la forma.
+        foreach ($por_id as $fila) {
+            $resultado[] = $fila;
+        }
+
+        usort($resultado, [ClientAiTokenUsagePersonModel::class, 'comparar_por_costo']);
+
+        return $resultado;
+    }
+
+    /**
+     * La clave con la que se cruzan los dos cortes por persona: el `auth_user_id`, con el centinela
+     * de los procesos automáticos vuelto a 0 (hacia afuera viaja como null).
+     *
+     * @param array<string, mixed> $fila Fila de cualquiera de los dos `resumir()`.
+     *
+     * @return int
+     */
+    private function clave_de_persona(array $fila)
+    {
+        if (! empty($fila['es_automatico']) || $fila['auth_user_id'] === null) {
+            return ClientAiTokenUsagePerson::AUTOMATICO;
+        }
+
+        return (int) $fila['auth_user_id'];
+    }
+
+    /**
+     * Qué inteligencia eligió el dueño de este cliente, según la última recolección.
+     *
+     * Las tres en null = el cliente nunca informó (versión anterior del sistema), que NO es lo
+     * mismo que "eligió Anthropic": el service no adivina y el front lo dice con todas las letras.
+     *
+     * @param Client $client Cliente.
+     *
+     * @return array<string, string|null>
+     */
+    private function configuracion_de_ia(Client $client)
+    {
+        return [
+            'proveedor'   => $client->ai_proveedor === null ? null : (string) $client->ai_proveedor,
+            'pensamiento' => $client->ai_pensamiento === null ? null : (string) $client->ai_pensamiento,
+            'modelo'      => $client->ai_modelo === null ? null : (string) $client->ai_modelo,
         ];
     }
 

@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\ClientAiTokenUsage;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -37,7 +38,8 @@ class TokensResumenController extends Controller
     const MAX_DIAS_DE_LECTURA = 366;
 
     /**
-     * Total del período, serie por día, ranking de clientes y desglose por acción.
+     * Total del período, serie por día, ranking de clientes, desglose por acción, por modelo y por
+     * proveedor, y cuántos clientes eligieron cada proveedor.
      *
      * @param Request $request Pedido con `desde` y `hasta` opcionales.
      *
@@ -49,25 +51,81 @@ class TokensResumenController extends Controller
         $desde = $rango['desde'];
         $hasta = $rango['hasta'];
 
-        $por_dia     = ClientAiTokenUsage::resumir(['fecha'], $desde, $hasta);
-        $por_proceso = ClientAiTokenUsage::resumir(['proceso'], $desde, $hasta);
-        $por_cliente = ClientAiTokenUsage::resumir(['client_id'], $desde, $hasta);
+        $por_dia       = ClientAiTokenUsage::resumir(['fecha'], $desde, $hasta);
+        $por_proceso   = ClientAiTokenUsage::resumir(['proceso'], $desde, $hasta);
+        $por_cliente   = ClientAiTokenUsage::resumir(['client_id'], $desde, $hasta);
+        $por_modelo    = ClientAiTokenUsage::resumir(['modelo', 'proveedor'], $desde, $hasta);
+        $por_proveedor = ClientAiTokenUsage::resumir(['proveedor'], $desde, $hasta);
 
-        /* El total sale de la serie por día y no de una cuarta consulta: los tres cortes suman lo
+        /* El total sale de la serie por día y no de otra consulta: todos los cortes suman lo
          * mismo, así que pedirlo de nuevo sería trabajo repetido con una chance de dar distinto. */
         $totales = ClientAiTokenUsage::totalizar($por_dia);
 
-        $por_proceso = $this->ordenar_por_costo($por_proceso);
-        $por_cliente = $this->ordenar_por_costo($this->ponerle_nombre_a_los_clientes($por_cliente));
+        $por_proceso   = $this->ordenar_por_costo($por_proceso);
+        $por_cliente   = $this->ordenar_por_costo($this->ponerle_nombre_a_los_clientes($por_cliente));
+        $por_modelo    = $this->ordenar_por_costo($por_modelo);
+        $por_proveedor = $this->ordenar_por_costo($por_proveedor);
+
+        // Cada modelo se marca con si tiene precio, igual que en la pestaña del cliente, para que
+        // el front no tenga que deducirlo de un null que también podría ser "costó cero".
+        foreach ($por_modelo as $indice => $grupo) {
+            $por_modelo[$indice]['tiene_precio'] = ClientAiTokenUsage::tiene_precio($grupo['modelo']);
+        }
+
+        /* `por_proveedor` NO lleva `tiene_precio`: un proveedor agrupa varios modelos y puede
+         * tener unos con precio y otros sin. Lo que viaja es lo que ya trae `resumir()` para
+         * cualquier grupo con varios modelos —`costo_usd` (null solo si NINGUNO tenía precio) y
+         * `modelos_sin_precio` (los que quedaron afuera, si hay)—, que es lo mismo que el front ya
+         * lee para el total y para el corte por acción: si la lista no está vacía, el costo es un
+         * piso, no el total, y se dice. */
 
         return response()->json([
-            'desde'       => $desde,
-            'hasta'       => $hasta,
-            'totales'     => $totales,
-            'por_dia'     => $por_dia,
-            'por_cliente' => $por_cliente,
-            'por_proceso' => $por_proceso,
+            'desde'                  => $desde,
+            'hasta'                  => $hasta,
+            'totales'                => $totales,
+            'por_dia'                => $por_dia,
+            'por_cliente'            => $por_cliente,
+            'por_proceso'            => $por_proceso,
+            'por_modelo'             => $por_modelo,
+            'por_proveedor'          => $por_proveedor,
+            'clientes_por_proveedor' => $this->clientes_por_proveedor(),
         ]);
+    }
+
+    /**
+     * Cuántos clientes eligieron cada proveedor de IA, según lo que informó cada uno en su última
+     * recolección: `[{proveedor: 'anthropic'|'deepseek'|null, clientes: int}]`, con null como
+     * "sin informar".
+     *
+     * 🔴 Cuenta SOLO clientes activos, que son los que barre `tokens:recolectar`. Un cliente
+     * inactivo nunca pasa por la recolección, así que nunca pudo informar nada: contarlo como "sin
+     * informar" inflaría ese número con clientes dados de baja y taparía el dato real, que es
+     * cuántos del parque vivo todavía corren una versión que no informa qué modelo usa.
+     *
+     * No depende del rango de fechas: es la foto de hoy, no un histórico. Y se agrupa en la base
+     * y no en PHP por el mismo motivo que `resumir()`: cuarenta y cinco filas no son nada, pero
+     * traérselas enteras para contarlas acá es trabajo por nada.
+     *
+     * @return array<int, array{proveedor: string|null, clientes: int}>
+     */
+    private function clientes_por_proveedor()
+    {
+        $grupos = Client::query()
+            ->where('is_active', true)
+            ->groupBy('ai_proveedor')
+            ->orderBy('ai_proveedor')
+            ->get(['ai_proveedor', DB::raw('COUNT(*) as clientes')]);
+
+        $resultado = [];
+
+        foreach ($grupos as $grupo) {
+            $resultado[] = [
+                'proveedor' => $grupo->ai_proveedor === null ? null : (string) $grupo->ai_proveedor,
+                'clientes'  => (int) $grupo->clientes,
+            ];
+        }
+
+        return $resultado;
     }
 
     /**
