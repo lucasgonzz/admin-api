@@ -183,13 +183,38 @@ class ClientTokensController extends Controller
      * Cruza el corte por persona (la fuente de `llamadas` y `tokens` para TODOS los clientes) con
      * el corte por persona y modelo (la fuente de la plata, solo para los que lo informan).
      *
-     * Cada fila del corte por persona gana tres claves:
+     * Cada fila del corte por persona gana cinco claves:
      *   - `costo_usd`             → suma de sus modelos con precio, o **null** si no hay corte por
      *                                modelo para esa persona o si alguno de sus modelos no tiene
      *                                precio cargado. Null y 0 no son lo mismo: 0 es "no costó
      *                                nada", null es "no sé cuánto costó".
-     *   - `tiene_precio_completo` → true solo cuando hay corte por modelo y TODOS tienen precio.
      *   - `modelos`               → el desglose, vacío si el cliente no informa el corte.
+     *   - `cobertura_parcial`     → true cuando el corte por modelo NO cubre todas las llamadas del
+     *                                corte por persona (ver abajo).
+     *   - `llamadas_costeadas`    → cuántas llamadas de la persona tienen corte por modelo, o sea,
+     *                                cuántas están detrás de `costo_usd`.
+     *   - `tiene_precio_completo` → true solo cuando hay corte por modelo, TODOS sus modelos tienen
+     *                                precio Y la cobertura es completa: es la marca de "este número
+     *                                es toda la verdad", y cualquiera de las tres cosas que falte
+     *                                la apaga.
+     *
+     * 🔴 **La cobertura parcial es el caso REAL de todo cliente durante los ~30 días posteriores a
+     * actualizarse.** El corte por persona lo trae el admin desde tokens-por-cliente (17/9/2026);
+     * el corte por modelo empezó a llegar con proveedores-ia-deepseek, y la recolección nocturna
+     * trae una ventana de TRES días. O sea que durante un mes la pantalla de 30 días tiene
+     * `llamadas`/`tokens` de 30 días al lado de una plata que cubre 3: 3M tokens junto a US$ 0,60
+     * que en realidad son US$ 6,00, con el pie diciendo "la plata sale del corte por modelo". Un
+     * número corto que parece completo es exactamente el total que miente que esta parte se cuida
+     * de no mostrar.
+     *
+     * Se detecta comparando `llamadas`: es el mismo `COUNT(*)` sobre la misma tabla del cliente en
+     * los dos cortes, así que cuando los dos cubren los mismos días son iguales POR CONSTRUCCIÓN, y
+     * cualquier diferencia es un día que uno tiene y el otro no. Los tokens no sirven para esto
+     * porque también son iguales por construcción y no agregan nada; las llamadas son el entero
+     * más chico y más legible para decirle al operador "30 de 300". Cuando difieren, `costo_usd`
+     * queda como la suma de lo que SÍ se costeó —no se extrapola, no se inventa— y la respuesta lo
+     * marca para que el front lo diga. Se completa solo a medida que la ventana de 30 días avanza
+     * sobre días con corte por modelo, o de una con "Traer ahora", que pide el rango entero.
      *
      * Se cruza por `auth_user_id`, con los procesos automáticos (null hacia afuera, 0 adentro)
      * incluidos: los dos cortes usan el mismo centinela justamente para que esta fila se encuentre.
@@ -223,22 +248,40 @@ class ClientTokensController extends Controller
             $clave = $this->clave_de_persona($persona);
 
             if (isset($por_id[$clave])) {
-                $persona['costo_usd']             = $por_id[$clave]['costo_usd'];
-                $persona['tiene_precio_completo'] = (bool) $por_id[$clave]['tiene_precio_completo'];
-                $persona['modelos']               = $por_id[$clave]['modelos'];
+                $del_modelo = $por_id[$clave];
+
+                /* Las llamadas del corte por modelo son las que están detrás de la plata. Si no
+                 * coinciden con las del corte por persona, hay días de un lado que el otro no
+                 * tiene (ver el docblock): el costo es parcial y se dice, no se estira. */
+                $llamadas_costeadas = (int) $del_modelo['llamadas'];
+                $parcial            = $llamadas_costeadas !== (int) $persona['llamadas'];
+
+                $persona['costo_usd']             = $del_modelo['costo_usd'];
+                $persona['modelos']               = $del_modelo['modelos'];
+                $persona['cobertura_parcial']     = $parcial;
+                $persona['llamadas_costeadas']    = $llamadas_costeadas;
+                $persona['tiene_precio_completo'] = (bool) $del_modelo['tiene_precio_completo'] && ! $parcial;
 
                 unset($por_id[$clave]);
             } else {
+                /* Sin corte por modelo no hay nada que comparar: no es "parcial", es "no hay". El
+                 * front lo muestra como un guion, no como plata parcial. */
                 $persona['costo_usd']             = null;
-                $persona['tiene_precio_completo'] = false;
                 $persona['modelos']               = [];
+                $persona['cobertura_parcial']     = false;
+                $persona['llamadas_costeadas']    = 0;
+                $persona['tiene_precio_completo'] = false;
             }
 
             $resultado[] = $persona;
         }
 
-        // Lo que quedó en el corte por modelo sin pareja: se agrega tal cual, ya tiene la forma.
+        // Lo que quedó en el corte por modelo sin pareja: se agrega con la forma completa. Sus
+        // llamadas son todas costeadas por definición: no hay otro corte contra el que falten.
         foreach ($por_id as $fila) {
+            $fila['cobertura_parcial']  = false;
+            $fila['llamadas_costeadas'] = (int) $fila['llamadas'];
+
             $resultado[] = $fila;
         }
 

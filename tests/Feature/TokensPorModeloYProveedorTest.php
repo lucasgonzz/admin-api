@@ -595,9 +595,12 @@ class TokensPorModeloYProveedorTest extends BaseDelCanal
 
         $personas = $this->indexar($payload['por_persona'], 'nombre');
 
-        // Juan: suma de sus dos modelos, ambos con precio.
+        // Juan: suma de sus dos modelos, ambos con precio, y el corte por modelo cubre sus 14
+        // llamadas (10 + 4): la plata es completa.
         $this->assertEqualsWithDelta(2.30, $personas['Juan']['costo_usd'], 0.0001);
         $this->assertTrue($personas['Juan']['tiene_precio_completo']);
+        $this->assertFalse($personas['Juan']['cobertura_parcial']);
+        $this->assertSame(14, $personas['Juan']['llamadas_costeadas']);
         $this->assertSame(14, $personas['Juan']['llamadas'], 'Las llamadas salen del corte por persona, no del de modelos.');
         $this->assertSame(2000000, $personas['Juan']['tokens']);
         $this->assertCount(2, $personas['Juan']['modelos']);
@@ -637,18 +640,24 @@ class TokensPorModeloYProveedorTest extends BaseDelCanal
         // El sin precio va al final de la lista de modelos.
         $this->assertSame('modelo-inventado-9', $personas['Brisa']['modelos'][1]['modelo']);
 
-        // Carla: solo en el corte por modelo, pero se agrega con sus números.
+        // Carla: solo en el corte por modelo, pero se agrega con sus números, y todas sus llamadas
+        // están costeadas (no hay otro corte contra el que falten).
         $this->assertEqualsWithDelta(1.32, $personas['Carla']['costo_usd'], 0.0001);
         $this->assertTrue($personas['Carla']['tiene_precio_completo']);
+        $this->assertFalse($personas['Carla']['cobertura_parcial']);
+        $this->assertSame(3, $personas['Carla']['llamadas_costeadas']);
         $this->assertSame(3, $personas['Carla']['llamadas']);
         $this->assertSame(9, $personas['Carla']['auth_user_id']);
 
-        // Procesos automáticos: solo en el corte por persona, sin corte por modelo.
+        // Procesos automáticos: solo en el corte por persona, sin corte por modelo. No es
+        // "parcial": es "no hay", y el front lo muestra como un guion.
         $auto = $personas[ClientAiTokenUsagePerson::ETIQUETA_AUTOMATICO];
 
         $this->assertTrue($auto['es_automatico']);
         $this->assertNull($auto['costo_usd']);
         $this->assertFalse($auto['tiene_precio_completo']);
+        $this->assertFalse($auto['cobertura_parcial']);
+        $this->assertSame(0, $auto['llamadas_costeadas']);
         $this->assertSame([], $auto['modelos']);
         $this->assertSame(400, $auto['llamadas']);
 
@@ -696,7 +705,68 @@ class TokensPorModeloYProveedorTest extends BaseDelCanal
         $this->assertSame(2000000, $payload['por_persona'][0]['tokens']);
         $this->assertNull($payload['por_persona'][0]['costo_usd'], 'Sin corte por modelo no hay costo: null, no cero.');
         $this->assertFalse($payload['por_persona'][0]['tiene_precio_completo']);
+        $this->assertFalse($payload['por_persona'][0]['cobertura_parcial']);
+        $this->assertSame(0, $payload['por_persona'][0]['llamadas_costeadas']);
         $this->assertSame([], $payload['por_persona'][0]['modelos']);
+    }
+
+    /**
+     * 🔴 Una persona cuyo corte por modelo NO cubre todas sus llamadas sale marcada como parcial,
+     * con la plata de lo que sí se costeó y sin estirarla.
+     *
+     * Es el caso real de todo cliente durante el mes posterior a actualizarse: el corte por
+     * persona lo viene trayendo el admin hace semanas, y el corte por modelo empezó a llegar con
+     * la versión nueva y la nocturna trae tres días. Pedro tiene 300 llamadas y 3.000.000 de
+     * tokens en el rango, pero el corte por modelo solo cubre las 30 del último día: US$ 0,60 que
+     * en realidad son US$ 6,00. Mostrar 0,60 al lado de 3M tokens sin marcarlo es un total que
+     * miente; extrapolarlo a 6,00 es inventar. Se muestra lo costeado y se dice cuánto falta.
+     *
+     * @return void
+     */
+    public function test_una_persona_cuyo_corte_por_modelo_no_cubre_todas_sus_llamadas_sale_como_parcial(): void
+    {
+        $this->admin_logueado();
+
+        $client = $this->crear_cliente();
+
+        // El corte por persona cubre todo el rango: 270 llamadas al principio y 30 el último día.
+        $this->sembrar_persona($client, '2026-09-01', 11, 'Pedro', 270, 2700000);
+        $this->sembrar_persona($client, '2026-09-16', 11, 'Pedro', 30, 300000);
+
+        // El corte por modelo solo tiene el último día: 300.000 input de Sonnet 5 = 0,60 USD.
+        $this->sembrar_persona_modelo($client, '2026-09-16', 11, 'Pedro', 'anthropic', 'claude-sonnet-5', 30, 300000);
+
+        $response = $this->getJson(
+            '/api/admin/client/' . $client->id . '/tokens?desde=2026-09-01&hasta=2026-09-16'
+        );
+
+        $response->assertStatus(200);
+
+        $payload = $response->json();
+
+        $this->assertTrue($payload['informa_modelo_por_persona']);
+        $this->assertCount(1, $payload['por_persona']);
+
+        $pedro = $payload['por_persona'][0];
+
+        $this->assertSame('Pedro', $pedro['nombre']);
+        $this->assertSame(300, $pedro['llamadas'], 'Las llamadas siguen saliendo del corte por persona.');
+        $this->assertSame(3000000, $pedro['tokens']);
+
+        $this->assertTrue(
+            $pedro['cobertura_parcial'],
+            '30 llamadas costeadas de 300 tiene que salir como cobertura parcial: si no, 0,60 se lee como el total.'
+        );
+        $this->assertSame(30, $pedro['llamadas_costeadas']);
+        $this->assertFalse(
+            $pedro['tiene_precio_completo'],
+            'Con cobertura parcial el costo no es toda la verdad, aunque todos los modelos tengan precio.'
+        );
+
+        // La plata es la suma de lo costeado, tal cual: ni null ni extrapolada a 6,00.
+        $this->assertEqualsWithDelta(0.60, $pedro['costo_usd'], 0.0001);
+        $this->assertCount(1, $pedro['modelos']);
+        $this->assertTrue($pedro['modelos'][0]['tiene_precio']);
     }
 
     // ------------------------------------------------------------------
