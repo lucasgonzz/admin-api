@@ -70,6 +70,9 @@ class AsistenteFotoSalienteService
 
     /**
      * Lado por debajo del cual ya no se sigue achicando: si a esa altura no entra, no es una foto.
+     *
+     * ⚠️ Es un piso del ACHICADO, no un mínimo de entrada: una foto que ya mide menos que esto se
+     * convierte igual, en una sola pasada y sin tocarle el tamaño.
      */
     const LADO_MINIMO = 400;
 
@@ -254,7 +257,12 @@ class AsistenteFotoSalienteService
 
         $lado = min(max($ancho, $alto), self::LADO_MAXIMO);
 
-        while ($lado >= self::LADO_MINIMO) {
+        /* 🔴 El bucle hace SIEMPRE una pasada, y recién después mira si puede achicar más. Con la
+         * condición al principio (`while ($lado >= LADO_MINIMO)`), una foto de menos de 400 px de
+         * lado —un thumbnail del catálogo, que los hay— no entraba nunca y volvía sin convertir, o
+         * sea sin llegar. Lo agarró `test_el_409_reintenta_el_envio_sin_volver_a_bajar_ni_convertir`
+         * con una imagen de 300 px. */
+        while (true) {
             $lienzo = $this->aplanar_sobre_blanco($imagen, $ancho, $alto, $lado);
 
             if ($lienzo !== null) {
@@ -272,7 +280,11 @@ class AsistenteFotoSalienteService
                 imagedestroy($lienzo);
             }
 
-            $lado = (int) floor($lado / 2);
+            if ($lado <= self::LADO_MINIMO) {
+                break;
+            }
+
+            $lado = max(self::LADO_MINIMO, (int) floor($lado / 2));
         }
 
         imagedestroy($imagen);
