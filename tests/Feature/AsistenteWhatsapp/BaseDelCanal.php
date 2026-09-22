@@ -99,7 +99,7 @@ abstract class BaseDelCanal extends TestCase
             /** @var string A qué IP resuelve cualquier host. */
             public $ip_fija = '190.2.3.4';
 
-            protected function ips_del_host(string $host): array
+            protected function ips_del_host(string $host): ?array
             {
                 return [$this->ip_fija];
             }
@@ -358,15 +358,17 @@ abstract class BaseDelCanal extends TestCase
                 string $filename,
                 ?string $caption = null,
                 ?string $context = null,
-                bool $skip_failure_notification = true
+                bool $skip_failure_notification = true,
+                ?int $segundos_por_llamada = null
             ): ?string {
                 $this->imagenes_subidas[] = [
-                    'to'      => $to,
-                    'bytes'   => $contents,
-                    'mime'    => $mime,
-                    'nombre'  => $filename,
-                    'caption' => $caption,
-                    'context' => $context,
+                    'to'       => $to,
+                    'bytes'    => $contents,
+                    'mime'     => $mime,
+                    'nombre'   => $filename,
+                    'caption'  => $caption,
+                    'context'  => $context,
+                    'segundos' => $segundos_por_llamada,
                 ];
                 $this->orden[] = 'imagen';
 

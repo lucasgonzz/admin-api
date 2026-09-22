@@ -88,10 +88,29 @@ class AsistenteFotoSalienteService
     /**
      * Segundos de espera de la descarga.
      *
-     * Esto corre adentro del job del turno, que tiene `timeout` 60 y hasta seis fotos. Veinte
-     * segundos por foto es el techo de lo que se puede gastar sin poner en riesgo el ingreso.
+     * 🔴 **Sale de una cuenta, no de un número redondo.** Esto corre adentro del job del turno, que
+     * tiene `$timeout = 60`, y el peor caso de UNA foto por media_id es la pausa del 409 (1,2 s) +
+     * esta descarga + la subida a `/media` + el mensaje. Con 20 segundos acá —que es lo que decía
+     * antes— una sola foto llegaba a ~82 s y mataba el ingreso: el turno quedaba sin la línea de
+     * log del final, justo la que trae los contadores. Ocho, más los topes de
+     * `EnviarMensajeAlAsistenteJob::SEGUNDOS_POR_ENVIO_DE_FOTO`, dejan el peor caso de una foto
+     * cerca de los 30 s; que no se pasen de ahí varias fotos lo garantiza el presupuesto acumulado
+     * del job, no este número.
      */
-    const SEGUNDOS_DE_DESCARGA = 20;
+    const SEGUNDOS_DE_DESCARGA = 8;
+
+    /**
+     * Saltos de redirect que se siguen, revalidando el destino en cada uno.
+     *
+     * Dos alcanzan para el caso real —`http://` que el hosting normaliza a `https://`, y de ahí a
+     * la ruta final— y ponen un techo a la cadena.
+     */
+    const MAXIMO_DE_SALTOS = 2;
+
+    /**
+     * Tamaño de cada pedazo que se lee del cuerpo de la respuesta, en bytes.
+     */
+    const BYTES_POR_PEDAZO = 262144;
 
     /**
      * Destinos a los que este servicio NO sale, resueltos sobre la IP.
@@ -111,6 +130,7 @@ class AsistenteFotoSalienteService
         '169.254.0.0/16',
         '172.16.0.0/12',
         '192.0.0.0/24',
+        '192.88.99.0/24',
         '192.168.0.0/16',
         '198.18.0.0/15',
         '224.0.0.0/4',
@@ -118,9 +138,47 @@ class AsistenteFotoSalienteService
         '::/128',
         '::1/128',
         '::ffff:0:0/96',
+        '64:ff9b::/96',
+        '2002::/16',
         'fc00::/7',
         'fe80::/10',
     ];
+
+    /**
+     * Tope de resolución de una foto, en píxeles.
+     *
+     * 🔴 **Esto es la guarda contra la bomba de píxeles, y no se puede reemplazar por el tope de
+     * bytes.** `MAXIMO_DE_BYTES_DE_DESCARGA` mide el archivo COMPRIMIDO; lo que GD reserva es la
+     * imagen DESCOMPRIMIDA, y la cuenta es `ancho × alto × 4` bytes por el truecolor. Un PNG de
+     * color plano de 12000×12000 pesa **446.516 bytes** —pasa cualquier tope de archivo sin
+     * despeinarse— y le pide a GD **549 MB**. Con un webp bien comprimido se llega a varios GB.
+     *
+     * Y el `memory_limit` no salva de nada, en ninguno de los dos sentidos. Medido en el VPS de
+     * producción el 22/9/2026: el PHP 7.4 del CLI tiene `memory_limit = 4048M` y el worker corre
+     * con `--memory=1024`, que Laravel sólo chequea ENTRE jobs, nunca durante. O sea que una
+     * imagen de 3 GB entra en el límite y se come la RAM de una máquina de 16 GB donde también
+     * viven MySQL, Redis y los 40+ clientes migrados — y si en cambio se pasa del límite, agotar
+     * la memoria en PHP 7 es un **error fatal, no un `Throwable`**: no lo agarra ningún `catch` y
+     * se lleva puesto el worker, que en este admin es uno solo y además corre deployments.
+     *
+     * 40 megapíxeles son 160 MB de GD. Es holgadísimo para lo que existe: las fotos de artículos
+     * de demo3 pesan entre 7 KB y 92 KB.
+     */
+    const MAXIMO_DE_MEGAPIXELES = 40;
+
+    /**
+     * Bytes que ocupa un píxel de una imagen truecolor de GD.
+     */
+    const BYTES_POR_PIXEL = 4;
+
+    /**
+     * Memoria que se deja libre al calcular cuántos píxeles entran, en bytes.
+     *
+     * Cubre lo que vive al lado de la imagen de origen mientras se convierte: el binario original
+     * (hasta 12 MB), el lienzo de destino (1600×1600×4 ≈ 10 MB), el buffer del JPEG de salida y lo
+     * que GD pida de más durante el `imagecopyresampled`.
+     */
+    const RESERVA_DE_MEMORIA = 67108864;
 
     /**
      * Decide si una foto puede salir por link o si hay que bajarla y convertirla.
@@ -174,13 +232,16 @@ class AsistenteFotoSalienteService
         /* 🔴 El tipo real sale de los BYTES y no de la extensión de la URL, que es justamente la
          * que no alcanzó para nada hasta acá. Misma regla que el servicio de las fotos entrantes:
          * un nombre de archivo es lo que alguien escribió, no lo que hay adentro. */
-        $mime_real = $this->mime_de_los_bytes($binario);
-        if ($mime_real === null) {
+        $datos = $this->datos_de_los_bytes($binario);
+        if ($datos === null) {
             return $this->fallo('Lo que devolvió el link no es una imagen que se pueda leer.');
         }
 
+        $mime_real = (string) $datos['mime'];
+
         /* Ya es de un tipo que Meta acepta y entra en el tope: se sube tal cual. Pasarla igual por
-         * GD sería reencodear un JPEG —perder calidad— para llegar al mismo lugar. */
+         * GD sería reencodear un JPEG —perder calidad— para llegar al mismo lugar. Y de paso se
+         * saltea la guarda de resolución de abajo, que es correcto: GD no participa. */
         if (in_array($mime_real, self::MIMES_QUE_META_ACEPTA, true)
             && strlen($binario) <= self::MAXIMO_DE_BYTES_PARA_META) {
             return [
@@ -190,6 +251,23 @@ class AsistenteFotoSalienteService
                 'convertida' => false,
                 'motivo'     => null,
             ];
+        }
+
+        /* 🔴 LA GUARDA VA ACÁ, ANTES DE GD, Y NO ES OPCIONAL. `getimagesizefromstring()` ya leyó el
+         * ancho y el alto del encabezado sin descomprimir un solo píxel: es gratis y es el único
+         * momento en que se puede decir que no. Un renglón más abajo, `imagecreatefromstring()` ya
+         * reservó `ancho × alto × 4` bytes, y si eso se pasa del `memory_limit` el proceso muere
+         * con un error FATAL que ningún `catch (\Throwable)` agarra — o sea que la promesa de que
+         * una foto no puede voltear el turno se rompe justo acá. Ver MAXIMO_DE_MEGAPIXELES. */
+        $pixeles = (int) $datos['ancho'] * (int) $datos['alto'];
+        $techo   = $this->pixeles_que_entran();
+
+        if ($pixeles > $techo) {
+            return $this->fallo(
+                'La foto tiene ' . $this->en_megapixeles($pixeles) . ' megapíxeles y el máximo que se convierte es '
+                    . $this->en_megapixeles($techo) . ': descomprimirla necesitaría '
+                    . $this->en_megas($pixeles * self::BYTES_POR_PIXEL) . ' MB de memoria.'
+            );
         }
 
         $jpeg = $this->a_jpeg($binario);
@@ -222,73 +300,194 @@ class AsistenteFotoSalienteService
      */
     protected function descargar(string $url): array
     {
-        $url = trim($url);
+        $destino = trim($url);
 
-        $esquema = strtolower((string) parse_url($url, PHP_URL_SCHEME));
-        if ($esquema !== 'http' && $esquema !== 'https') {
-            return ['binario' => null, 'motivo' => 'El link de la foto no es http(s).'];
+        /* 🔴 Los saltos SE SIGUEN, pero de a uno y revalidando el destino en cada uno. Guzzle los
+         * sigue solo (`allow_redirects` prendido) sin volver a preguntarle nada a nadie: ahí el
+         * control de dirección se haría sobre la URL original y la descarga terminaría en otra, así
+         * que un `302` hacia `169.254.169.254` lo saltearía entero. Pero cortarlos seco tampoco
+         * sirve: el `empresa-api` devuelve la `hosting_url` tal cual está guardada, o sea que
+         * **puede venir en `http://`**, y un hosting que la normaliza a `https://` con un 301 dejaría
+         * la foto muerta por un salto perfectamente legítimo. El equilibrio es este bucle. */
+        for ($salto = 0; $salto <= self::MAXIMO_DE_SALTOS; $salto++) {
+            $rechazo = $this->motivo_para_no_ir_a($destino);
+            if ($rechazo !== null) {
+                return ['binario' => null, 'motivo' => $rechazo];
+            }
+
+            try {
+                /* Sin credenciales y sin `retry()`: ver el docblock de la clase. El `Accept` es para
+                 * que un hosting que negocia contenido no devuelva una página de error en HTML.
+                 * `stream => true` es lo que permite cortar el cuerpo a mitad de camino, más abajo. */
+                $respuesta = Http::timeout(self::SEGUNDOS_DE_DESCARGA)
+                    ->withOptions(['allow_redirects' => false, 'stream' => true])
+                    ->withHeaders(['Accept' => 'image/*'])
+                    ->get($destino);
+            } catch (\Throwable $excepcion) {
+                return ['binario' => null, 'motivo' => 'No se pudo bajar la foto: ' . $excepcion->getMessage()];
+            }
+
+            $status = (int) $respuesta->status();
+
+            if ($status < 300 || $status >= 400) {
+                if (! $respuesta->successful()) {
+                    return [
+                        'binario' => null,
+                        'motivo'  => 'El hosting del cliente respondió ' . $status . ' al pedir la foto.',
+                    ];
+                }
+
+                return $this->leer_el_cuerpo($respuesta);
+            }
+
+            if ($salto === self::MAXIMO_DE_SALTOS) {
+                return [
+                    'binario' => null,
+                    'motivo'  => 'El link de la foto redirige más de ' . self::MAXIMO_DE_SALTOS . ' veces.',
+                ];
+            }
+
+            $siguiente = trim((string) $respuesta->header('Location'));
+            if ($siguiente === '') {
+                return [
+                    'binario' => null,
+                    'motivo'  => 'El link de la foto redirige (' . $status . ') pero no dice a dónde.',
+                ];
+            }
+
+            /* Un `Location` puede ser relativo; se resuelve contra la URL que lo devolvió, y el
+             * resultado vuelve a pasar por el control de dirección en la próxima vuelta. */
+            $destino = $this->resolver_destino($destino, $siguiente);
+            if ($destino === null) {
+                return ['binario' => null, 'motivo' => 'El link de la foto redirige a una dirección ilegible.'];
+            }
         }
 
-        $host = (string) parse_url($url, PHP_URL_HOST);
-        if ($host === '') {
-            return ['binario' => null, 'motivo' => 'El link de la foto no tiene dominio.'];
-        }
+        return ['binario' => null, 'motivo' => 'No se pudo bajar la foto.'];
+    }
 
-        $rechazo = $this->motivo_para_no_bajar($host);
-        if ($rechazo !== null) {
-            return ['binario' => null, 'motivo' => $rechazo];
-        }
-
-        try {
-            /* Sin credenciales y sin `retry()`: ver el docblock de la clase. El `Accept` es para que
-             * un hosting que negocia contenido no devuelva una página de error en HTML.
-             *
-             * 🔴 `allow_redirects => false` es parte del chequeo de destino, no una preferencia.
-             * Con los redirects prendidos, el control de IP de arriba se hace sobre una URL y la
-             * descarga termina en otra: un `302` hacia `169.254.169.254` lo saltea entero, porque
-             * el salto lo resuelve Guzzle sin volver a preguntar nada. */
-            $respuesta = Http::timeout(self::SEGUNDOS_DE_DESCARGA)
-                ->withOptions(['allow_redirects' => false])
-                ->withHeaders(['Accept' => 'image/*'])
-                ->get($url);
-        } catch (\Throwable $excepcion) {
-            return ['binario' => null, 'motivo' => 'No se pudo bajar la foto: ' . $excepcion->getMessage()];
-        }
-
-        $status = (int) $respuesta->status();
-
-        /* Cinturón y tirantes del `allow_redirects => false`: si por lo que sea los redirects se
-         * volvieran a prender, esto los sigue cortando acá, con un motivo que se lee. */
-        if ($status >= 300 && $status < 400) {
+    /**
+     * Lee el cuerpo de la respuesta cortando en cuanto se pasa del tope.
+     *
+     * 🔴 **Acá el tope se aplica MIENTRAS se baja, no después.** `$respuesta->body()` trae el
+     * cuerpo entero a memoria y recién ahí se podría medir: contra un hosting que sirve 500 MB, el
+     * rechazo llegaría con los 500 MB ya adentro del worker, que es exactamente lo que el tope
+     * existe para evitar. Leyendo de a pedazos, lo peor que entra es un pedazo de más.
+     *
+     * @param \Illuminate\Http\Client\Response $respuesta Respuesta con el cuerpo sin consumir.
+     *
+     * @return array{binario: string|null, motivo: string|null}
+     */
+    private function leer_el_cuerpo($respuesta): array
+    {
+        /* El `Content-Length`, cuando está, ahorra bajar aunque sea el primer pedazo. No se confía
+         * en él para lo otro: puede mentir o no venir (respuestas `chunked`). */
+        $declarado = (int) $respuesta->header('Content-Length');
+        if ($declarado > self::MAXIMO_DE_BYTES_DE_DESCARGA) {
             return [
                 'binario' => null,
-                'motivo'  => 'El link de la foto redirige (' . $status . ') y los saltos no se siguen: '
-                    . 'el destino del salto no pasó por el control de dirección.',
-            ];
-        }
-
-        if (! $respuesta->successful()) {
-            return [
-                'binario' => null,
-                'motivo'  => 'El hosting del cliente respondió ' . $status . ' al pedir la foto.',
-            ];
-        }
-
-        $binario = (string) $respuesta->body();
-        if ($binario === '') {
-            return ['binario' => null, 'motivo' => 'El link devolvió un archivo vacío.'];
-        }
-
-        $bytes = strlen($binario);
-        if ($bytes > self::MAXIMO_DE_BYTES_DE_DESCARGA) {
-            return [
-                'binario' => null,
-                'motivo'  => 'La foto pesa ' . $this->en_megas($bytes) . ' MB y el máximo que se baja es '
+                'motivo'  => 'La foto declara ' . $this->en_megas($declarado) . ' MB y el máximo que se baja es '
                     . $this->en_megas(self::MAXIMO_DE_BYTES_DE_DESCARGA) . ' MB.',
             ];
         }
 
+        try {
+            $cuerpo = $respuesta->toPsrResponse()->getBody();
+
+            /* Se rebobina antes de leer: `read()` avanza el puntero y no lo devuelve, así que un
+             * cuerpo que alguien ya tocó —o una respuesta que se reusa, como pasa con el
+             * `Http::fake()` de las pruebas, donde el mismo objeto vuelve en cada llamada que
+             * matchea el stub— se leería vacío. En producción no cambia nada; acá es la diferencia
+             * entre bajar la segunda foto y creer que el link devolvió un archivo vacío. */
+            if ($cuerpo->isSeekable()) {
+                $cuerpo->rewind();
+            }
+
+            $binario = '';
+
+            while (! $cuerpo->eof()) {
+                $pedazo = $cuerpo->read(self::BYTES_POR_PEDAZO);
+                if ($pedazo === '') {
+                    break;
+                }
+
+                $binario .= $pedazo;
+
+                if (strlen($binario) > self::MAXIMO_DE_BYTES_DE_DESCARGA) {
+                    $cuerpo->close();
+
+                    return [
+                        'binario' => null,
+                        'motivo'  => 'La foto pasa los ' . $this->en_megas(self::MAXIMO_DE_BYTES_DE_DESCARGA)
+                            . ' MB que se bajan como máximo: se cortó la descarga.',
+                    ];
+                }
+            }
+        } catch (\Throwable $excepcion) {
+            return ['binario' => null, 'motivo' => 'No se pudo leer la foto: ' . $excepcion->getMessage()];
+        }
+
+        if ($binario === '') {
+            return ['binario' => null, 'motivo' => 'El link devolvió un archivo vacío.'];
+        }
+
         return ['binario' => $binario, 'motivo' => null];
+    }
+
+    /**
+     * Motivo por el cual no hay que ir a buscar una foto a esa URL, o null si se puede.
+     *
+     * @param string $url URL a evaluar (la original o la de un salto).
+     *
+     * @return string|null
+     */
+    private function motivo_para_no_ir_a(string $url): ?string
+    {
+        $esquema = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        if ($esquema !== 'http' && $esquema !== 'https') {
+            return 'El link de la foto no es http(s).';
+        }
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        if ($host === '') {
+            return 'El link de la foto no tiene dominio.';
+        }
+
+        return $this->motivo_para_no_bajar($host);
+    }
+
+    /**
+     * Resuelve un `Location` contra la URL que lo devolvió.
+     *
+     * @param string $base    URL del pedido que redirigió.
+     * @param string $destino Valor del header `Location`, absoluto o relativo.
+     *
+     * @return string|null URL absoluta, o null si no se pudo armar.
+     */
+    private function resolver_destino(string $base, string $destino): ?string
+    {
+        if (preg_match('#^[a-z][a-z0-9+.-]*://#i', $destino) === 1) {
+            return $destino;
+        }
+
+        $partes = parse_url($base);
+        if (! is_array($partes) || empty($partes['scheme']) || empty($partes['host'])) {
+            return null;
+        }
+
+        $raiz = $partes['scheme'] . '://' . $partes['host'];
+        if (! empty($partes['port'])) {
+            $raiz .= ':' . $partes['port'];
+        }
+
+        if (strpos($destino, '/') === 0) {
+            return $raiz . $destino;
+        }
+
+        $ruta = isset($partes['path']) ? (string) $partes['path'] : '/';
+        $ruta = substr($ruta, 0, (int) strrpos($ruta, '/') + 1);
+
+        return $raiz . ($ruta === '' ? '/' : $ruta) . $destino;
     }
 
     /**
@@ -339,8 +538,21 @@ class AsistenteFotoSalienteService
             $ips = $this->ips_del_host($host);
         }
 
+        /* 🔴 **Si la resolución falló, se falla CERRADO.** Es distinto de "el dominio no tiene
+         * ninguna dirección": acá la consulta no contestó, así que no se sabe a dónde apunta. Y
+         * Guzzle resuelve por su cuenta con `getaddrinfo` cuando conecta — o sea que seguir con una
+         * lista incompleta es exactamente el agujero: se evalúan las `A`, la consulta `AAAA` se
+         * cae, y la conexión sale por una `AAAA` que nadie miró. No hace falta un atacante con
+         * control del DNS, alcanza con una resolución parcial.
+         *
+         * El precio está asumido: si el resolver del VPS falla de forma intermitente, esas fotos no
+         * salen. Es una foto que no llega contra un pedido a la red interna, y no hay comparación. */
+        if ($ips === null) {
+            return 'No se pudo resolver del todo el dominio de la foto (' . $host . '): no se baja.';
+        }
+
         if ($ips === []) {
-            return 'No se pudo resolver el dominio de la foto (' . $host . ').';
+            return 'El dominio de la foto no resuelve a ninguna dirección (' . $host . ').';
         }
 
         /* TODAS las direcciones, no la primera: un dominio con un A público y un AAAA interno
@@ -360,25 +572,40 @@ class AsistenteFotoSalienteService
      * `protected` para que las pruebas puedan fijar qué resuelve cada host sin tocar el DNS de
      * verdad — que además las haría lentas y dependientes de la red.
      *
+     * 🔴 **Devuelve null cuando una de las dos consultas FALLA**, que no es lo mismo que devolver
+     * una lista vacía. Una lista vacía es un dominio que no tiene direcciones; null es "no sé", y
+     * el llamador lo trata como rechazo. La diferencia importa porque `gethostbynamel()` y
+     * `dns_get_record()` devuelven `false` en error y una lista vacía cuando simplemente no hay
+     * registros de ese tipo — y tragarse el `false` deja pasar una resolución a medias.
+     *
      * @param string $host Dominio.
      *
-     * @return array<int, string> IPv4 e IPv6, o vacío si no resuelve.
+     * @return array<int, string>|null IPv4 e IPv6; vacío si no tiene ninguna; null si falló la consulta.
      */
-    protected function ips_del_host(string $host): array
+    protected function ips_del_host(string $host): ?array
     {
         $ips = [];
 
         $cuatro = @gethostbynamel($host);
-        if (is_array($cuatro)) {
+        if ($cuatro === false) {
+            /* `gethostbynamel()` no distingue "no hay A" de "falló": las dos son false. Se vuelve a
+             * preguntar por `dns_get_record()`, que sí las separa, y recién ahí se decide. */
+            $registros = @dns_get_record($host, DNS_A);
+            if ($registros === false) {
+                return null;
+            }
+        } else {
             $ips = $cuatro;
         }
 
         $seis = @dns_get_record($host, DNS_AAAA);
-        if (is_array($seis)) {
-            foreach ($seis as $fila) {
-                if (is_array($fila) && ! empty($fila['ipv6'])) {
-                    $ips[] = (string) $fila['ipv6'];
-                }
+        if ($seis === false) {
+            return null;
+        }
+
+        foreach ($seis as $fila) {
+            if (is_array($fila) && ! empty($fila['ipv6'])) {
+                $ips[] = (string) $fila['ipv6'];
             }
         }
 
@@ -591,16 +818,28 @@ class AsistenteFotoSalienteService
     }
 
     /**
-     * Tipo real de una imagen, leído de sus bytes.
+     * Tipo, ancho y alto reales de una imagen, leídos de sus bytes.
+     *
+     * 🔴 **El ancho y el alto se devuelven a propósito y hay que usarlos.** `getimagesizefromstring()`
+     * los saca del encabezado sin descomprimir nada, así que son el único dato barato que existe
+     * para decidir si conviene llamar a GD. Tirarlos —que es lo que hacía este método cuando
+     * devolvía sólo el mime— deja la conversión sin ninguna guarda de resolución.
      *
      * @param string $binario Bytes del archivo.
      *
-     * @return string|null Mime, o null si no es una imagen legible.
+     * @return array{mime: string, ancho: int, alto: int}|null Null si no es una imagen legible.
      */
-    private function mime_de_los_bytes(string $binario): ?string
+    private function datos_de_los_bytes(string $binario): ?array
     {
         $info = @getimagesizefromstring($binario);
         if ($info === false || empty($info['mime'])) {
+            return null;
+        }
+
+        $ancho = isset($info[0]) ? (int) $info[0] : 0;
+        $alto  = isset($info[1]) ? (int) $info[1] : 0;
+
+        if ($ancho < 1 || $alto < 1) {
             return null;
         }
 
@@ -608,7 +847,90 @@ class AsistenteFotoSalienteService
 
         /* `image/jpg` no es un tipo real pero aparece en cabeceras viejas; se normaliza en vez de
          * descartarse, igual que en el servicio de las fotos entrantes. */
-        return $mime === 'image/jpg' ? 'image/jpeg' : $mime;
+        return [
+            'mime'  => $mime === 'image/jpg' ? 'image/jpeg' : $mime,
+            'ancho' => $ancho,
+            'alto'  => $alto,
+        ];
+    }
+
+    /**
+     * Cuántos píxeles se pueden descomprimir sin arriesgar la memoria del worker.
+     *
+     * Son dos techos y gana el más bajo:
+     *
+     *   1. **El absoluto** (`MAXIMO_DE_MEGAPIXELES`), que es el que manda en producción: con
+     *      `memory_limit = 4048M` el cálculo de abajo daría cientos de megapíxeles, y nadie quiere
+     *      que el admin reserve 2 GB por una foto de catálogo aunque "entre".
+     *   2. **El que sale del `memory_limit` real**, para que esto siga siendo correcto en un
+     *      entorno con menos memoria (el `php` del shared, una máquina de desarrollo, el día que
+     *      alguien baje el límite). Se usa la mitad de lo que queda libre, no todo: la imagen de
+     *      origen no es lo único vivo mientras se convierte.
+     *
+     * `memory_limit` en -1 es "sin límite": ahí sólo queda el techo absoluto.
+     *
+     * @return int Píxeles.
+     */
+    private function pixeles_que_entran(): int
+    {
+        $absoluto = self::MAXIMO_DE_MEGAPIXELES * 1000000;
+
+        $limite = $this->memory_limit_en_bytes();
+        if ($limite === null) {
+            return $absoluto;
+        }
+
+        $libre = $limite - memory_get_usage(true) - self::RESERVA_DE_MEMORIA;
+        if ($libre < 1) {
+            return 0;
+        }
+
+        $por_memoria = (int) floor(($libre / 2) / self::BYTES_POR_PIXEL);
+
+        return min($absoluto, $por_memoria);
+    }
+
+    /**
+     * `memory_limit` del proceso, en bytes, o null si no tiene tope.
+     *
+     * @return int|null
+     */
+    private function memory_limit_en_bytes(): ?int
+    {
+        $crudo = trim((string) ini_get('memory_limit'));
+
+        if ($crudo === '' || $crudo === '-1') {
+            return null;
+        }
+
+        $unidad = strtolower(substr($crudo, -1));
+        $numero = (int) $crudo;
+
+        if ($unidad === 'g') {
+            return $numero * 1073741824;
+        }
+
+        if ($unidad === 'm') {
+            return $numero * 1048576;
+        }
+
+        if ($unidad === 'k') {
+            return $numero * 1024;
+        }
+
+        return $numero;
+    }
+
+    /**
+     * Megapíxeles con un decimal, para los motivos.
+     *
+     * @param int $pixeles
+     *
+     * @return string
+     */
+    private function en_megapixeles(int $pixeles): string
+    {
+        return number_format($pixeles / 1000000, 1, ',', '');
     }
 
     /**

@@ -778,6 +778,12 @@ class WhatsappSendService
      * @param string|null $caption                   Epígrafe, o null para mandarla sola.
      * @param string|null $context                   Descripción legible para el motivo del fallo.
      * @param bool        $skip_failure_notification  true (por defecto) para NO avisar a los admins.
+     * @param int|null    $segundos_por_llamada       Techo de cada una de las dos llamadas (la subida
+     *                                                y el mensaje). Con un valor acá los reintentos
+     *                                                HTTP del mensaje también bajan a uno: esto
+     *                                                corre adentro del turno, con presupuesto, y el
+     *                                                que reintenta es el job. Null usa la config de
+     *                                                siempre.
      *
      * @return string|null whatsapp_message_id asignado por Meta, o null si falló.
      */
@@ -788,7 +794,8 @@ class WhatsappSendService
         string $filename,
         ?string $caption = null,
         ?string $context = null,
-        bool $skip_failure_notification = true
+        bool $skip_failure_notification = true,
+        ?int $segundos_por_llamada = null
     ): ?string {
         // Mismo reseteo que en send_image_by_link(): el motivo solo queda si ESTE envío falla.
         $this->last_send_error = null;
@@ -842,7 +849,8 @@ class WhatsappSendService
             $contents,
             $mime,
             $filename,
-            $skip_failure_notification
+            $skip_failure_notification,
+            $segundos_por_llamada
         );
 
         if ($media_id === null) {
@@ -863,7 +871,8 @@ class WhatsappSendService
             $media_id,
             $caption,
             $skip_failure_notification,
-            $notify_context
+            $notify_context,
+            $segundos_por_llamada
         );
     }
 
@@ -1001,6 +1010,7 @@ class WhatsappSendService
      *                                          está throttleado a uno cada 10 minutos de forma
      *                                          global y gastarlo en una foto del catálogo deja mudo
      *                                          un fallo de envío real.
+     * @param int|null $segundos                Techo de esta llamada; null usa la config de siempre.
      *
      * @return string|null Media ID.
      */
@@ -1010,7 +1020,8 @@ class WhatsappSendService
         string $contents,
         string $mime,
         string $upload_filename,
-        bool $skip_failure_notification = false
+        bool $skip_failure_notification = false,
+        ?int $segundos = null
     ): ?string {
         if ($contents === '') {
             return null;
@@ -1021,7 +1032,9 @@ class WhatsappSendService
             . '/media';
 
         try {
-            $http = KapsoHttpClient::make($api_key, (int) config('services.client_api.timeout', 30), false);
+            $timeout = $segundos !== null ? $segundos : (int) config('services.client_api.timeout', 30);
+
+            $http = KapsoHttpClient::make($api_key, $timeout, false);
             $response = $http
                 ->attach('file', $contents, $upload_filename, ['Content-Type' => $mime])
                 ->post($endpoint, [
@@ -1075,6 +1088,11 @@ class WhatsappSendService
      *                                               fotos del asistente, que no son un incidente.
      * @param string|null $notify_context            Descripción legible del envío para el motivo del
      *                                               fallo; null arma la genérica de siempre.
+     * @param int|null    $segundos                  Techo de esta llamada. Con un valor acá los
+     *                                               reintentos HTTP bajan a UNO: el llamador corre
+     *                                               con presupuesto de tiempo y reintenta por su
+     *                                               cuenta, así que tres intentos internos le
+     *                                               triplicarían el peor caso a sus espaldas.
      *
      * @return string|null
      */
@@ -1085,7 +1103,8 @@ class WhatsappSendService
         string $media_id,
         ?string $caption,
         bool $skip_failure_notification = false,
-        ?string $notify_context = null
+        ?string $notify_context = null,
+        ?int $segundos = null
     ): ?string {
         $contexto = $notify_context !== null ? $notify_context : "Envío de imagen a {$to}";
 
@@ -1109,9 +1128,12 @@ class WhatsappSendService
         $endpoint = $this->messages_endpoint($phone_number_id);
 
         try {
-            $http = KapsoHttpClient::make($api_key, (int) config('services.client_api.timeout', 15));
+            $timeout   = $segundos !== null ? $segundos : (int) config('services.client_api.timeout', 15);
+            $reintentos = $segundos !== null ? 1 : (int) config('services.client_api.retries', 2);
+
+            $http = KapsoHttpClient::make($api_key, $timeout);
             $response = $http
-                ->retry((int) config('services.client_api.retries', 2), 500)
+                ->retry($reintentos, 500)
                 ->post($endpoint, [
                     'messaging_product' => 'whatsapp',
                     'to'                => $to_digits,

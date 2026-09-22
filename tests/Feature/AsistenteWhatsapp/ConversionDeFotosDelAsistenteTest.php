@@ -69,22 +69,41 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
      *
      * @return EnviarMensajeAlAsistenteJob
      */
-    private function job_sin_dormir(ClientAssistantMessage $fila): EnviarMensajeAlAsistenteJob
+    private function job_sin_dormir(ClientAssistantMessage $fila, float $paso_del_reloj = 0.0): EnviarMensajeAlAsistenteJob
     {
-        return new class((int) $fila->id, $this->pausas) extends EnviarMensajeAlAsistenteJob {
+        return new class((int) $fila->id, $this->pausas, $paso_del_reloj) extends EnviarMensajeAlAsistenteJob {
             /** @var array<int, int> */
             private $registro;
 
-            public function __construct(int $mensaje_id, array &$registro)
+            /** @var float Cuánto avanza el reloj en cada consulta. */
+            private $paso;
+
+            /** @var float Reloj de mentira, en segundos. */
+            private $reloj = 0.0;
+
+            public function __construct(int $mensaje_id, array &$registro, float $paso = 0.0)
             {
                 parent::__construct($mensaje_id);
 
                 $this->registro = &$registro;
+                $this->paso     = $paso;
             }
 
             protected function pausar(int $microsegundos): void
             {
                 $this->registro[] = $microsegundos;
+            }
+
+            /**
+             * Reloj controlado: con `paso` en cero no se mueve —el presupuesto nunca se agota y las
+             * pruebas que no lo miran no se enteran— y con un paso mayor avanza esa cantidad en
+             * cada consulta, que es como se simula un turno que se está quedando sin tiempo.
+             */
+            protected function ahora(): float
+            {
+                $this->reloj += $this->paso;
+
+                return $this->reloj;
             }
         };
     }
@@ -167,9 +186,9 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
      *
      * @return void
      */
-    private function tramitar(ClientAssistantMessage $fila, WhatsappSendService $espia): void
+    private function tramitar(ClientAssistantMessage $fila, WhatsappSendService $espia, float $paso_del_reloj = 0.0): void
     {
-        $job = $this->job_sin_dormir($fila);
+        $job = $this->job_sin_dormir($fila, $paso_del_reloj);
 
         $this->correr_job($job, $espia);
         $this->correr_job($job, $espia);
@@ -214,6 +233,36 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
         imagedestroy($imagen);
 
         return $bytes;
+    }
+
+    /**
+     * Un webp que DICE medir lo que se le pida, en treinta bytes.
+     *
+     * 🔴 Se arma a mano —el encabezado `RIFF`/`VP8X`, que es de donde `getimagesizefromstring()`
+     * saca el tamaño del lienzo— y no con GD, por el mismo motivo por el que existe la guarda que
+     * prueba: `imagecreatetruecolor(12000, 12000)` reservaría acá los 549 MB que hay que evitar, y
+     * la prueba se llevaría puesto el proceso antes de medir nada.
+     *
+     * Y es exactamente la forma del ataque: **el archivo pesa nada y declara una resolución
+     * enorme**. Medido con este mismo PHP 7.4.33: 30 bytes, `getimagesizefromstring()` devuelve
+     * `image/webp 12000x12000`, y pasárselo a `imagecreatefromstring()` mata el proceso.
+     *
+     * @param int $ancho
+     * @param int $alto
+     *
+     * @return string Bytes del webp.
+     */
+    private function webp_que_dice_medir(int $ancho, int $alto): string
+    {
+        $tres_bytes = function (int $numero) {
+            return chr($numero & 0xFF) . chr(($numero >> 8) & 0xFF) . chr(($numero >> 16) & 0xFF);
+        };
+
+        /* VP8X: banderas, tres reservados, y el lienzo en base cero (ancho-1, alto-1). */
+        $vp8x = 'VP8X' . pack('V', 10) . chr(0) . str_repeat(chr(0), 3)
+            . $tres_bytes($ancho - 1) . $tres_bytes($alto - 1);
+
+        return 'RIFF' . pack('V', 4 + strlen($vp8x)) . 'WEBP' . $vp8x;
     }
 
     /**
@@ -514,6 +563,105 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Una imagen con resolución disparatada se rechaza SIN pasar por GD.
+     *
+     * Es la bomba de píxeles, y el tope de bytes no la ve: lo que se mide ahí es el archivo
+     * comprimido y lo que GD reserva es la imagen descomprimida (`ancho × alto × 4`). Un PNG de
+     * color plano de 12000×12000 pesa 446.516 bytes —pasa cualquier tope de archivo— y le pide a GD
+     * 549 MB; con un webp bien comprimido se llega a varios GB.
+     *
+     * Y no alcanza con "que falle": agotar la memoria en PHP 7 es un **error fatal**, no un
+     * `Throwable`, así que no lo agarra ninguno de los dos `catch` de este camino. Se lleva puesto
+     * el worker —uno solo en este admin, y el que corre los deployments— y el turno se pierde
+     * entero, que es exactamente lo que el resto de esta clase promete que no puede pasar.
+     *
+     * La prueba arma el PNG de verdad, con el peso real: si la guarda no estuviera, acá se
+     * reservarían 549 MB.
+     *
+     * @return void
+     */
+    public function test_una_imagen_con_resolucion_disparatada_no_llega_a_gd(): void
+    {
+        $bomba = $this->webp_que_dice_medir(12000, 12000);
+
+        /* El archivo entra cómodo en el tope de descarga: por ahí no se lo agarra, y ese es el
+         * punto entero — el tope mide el archivo comprimido y GD reserva el descomprimido. */
+        $this->assertLessThan(
+            AsistenteFotoSalienteService::MAXIMO_DE_BYTES_DE_DESCARGA,
+            strlen($bomba),
+            'Si pesara más que el tope, la prueba estaría midiendo el tope de bytes y no la resolución.'
+        );
+
+        $this->fakear_http(['*' => Http::response($bomba, 200, ['Content-Type' => 'image/webp'])]);
+
+        $resultado = $this->fotos_que_resuelven_a('190.2.3.4')
+            ->preparar('https://fotos.cliente-de-prueba.test/bomba.webp');
+
+        $this->assertNull($resultado['binario']);
+
+        /* 🔴 El MOTIVO es lo que hace que esta prueba muerda. Sin la guarda, el rechazo llegaría
+         * igual pero por otro lado —`imagecreatefromstring()` no puede con un webp sin datos— y la
+         * prueba quedaría verde sin haber probado nada. Con la guarda, el motivo nombra los
+         * megapíxeles: la decisión se tomó ANTES de llamar a GD. */
+        $this->assertStringContainsString('megapíxeles', (string) $resultado['motivo']);
+        $this->assertStringContainsString('144,0', (string) $resultado['motivo'], '12000 × 12000 son 144 megapíxeles.');
+    }
+
+    /**
+     * Y una bomba de píxeles tampoco voltea el turno: el texto sale y la fila queda respondida.
+     *
+     * @return void
+     */
+    public function test_una_bomba_de_pixeles_no_voltea_el_turno(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear(
+            [$this->adjunto('bomba.webp')],
+            ['*/storage/*' => Http::response($this->webp_que_dice_medir(12000, 12000), 200, ['Content-Type' => 'image/webp'])]
+        );
+
+        $this->tramitar($fila, $espia);
+
+        $fila->refresh();
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->estado);
+        $this->assertNull($fila->error);
+        $this->assertCount(1, $espia->textos);
+        $this->assertCount(0, $espia->imagenes_subidas);
+    }
+
+    /**
+     * Una imagen grande pero razonable sigue convirtiéndose.
+     *
+     * Pinza el techo por arriba: si alguien lo bajara a un valor que deja afuera a una foto normal,
+     * esta prueba cae.
+     *
+     * @return void
+     */
+    public function test_una_foto_grande_pero_razonable_se_sigue_convirtiendo(): void
+    {
+        $this->requiere_webp();
+
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        /* 3000×2000 son 6 megapíxeles: una foto de teléfono, el caso normal del catálogo. */
+        $this->fakear(
+            [$this->adjunto('foto-de-telefono.webp')],
+            ['*/storage/*' => Http::response($this->imagen('webp', 3000, 2000), 200, ['Content-Type' => 'image/webp'])]
+        );
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertCount(1, $espia->imagenes_subidas);
+        $this->assertSame('image/jpeg', $espia->imagenes_subidas[0]['mime']);
+    }
+
+    /**
      * Una foto que pasa el tope de descarga se descarta y el turno sigue igual.
      *
      * @return void
@@ -537,6 +685,49 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
 
         $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->estado);
         $this->assertCount(0, $espia->imagenes_subidas);
+    }
+
+    /**
+     * Un `Content-Length` que ya se pasa del tope corta antes de leer un solo byte del cuerpo.
+     *
+     * @return void
+     */
+    public function test_un_content_length_gigante_corta_antes_de_leer_el_cuerpo(): void
+    {
+        $this->fakear_http([
+            '*' => Http::response('lo que sea', 200, [
+                'Content-Type'   => 'image/webp',
+                'Content-Length' => (string) (AsistenteFotoSalienteService::MAXIMO_DE_BYTES_DE_DESCARGA * 40),
+            ]),
+        ]);
+
+        $resultado = $this->fotos_que_resuelven_a('190.2.3.4')
+            ->preparar('https://fotos.cliente-de-prueba.test/enorme.webp');
+
+        $this->assertNull($resultado['binario']);
+        $this->assertStringContainsString('declara', (string) $resultado['motivo']);
+    }
+
+    /**
+     * Sin `Content-Length`, el corte se hace MIENTRAS se lee, no después de tener todo en memoria.
+     *
+     * 🔴 Es la diferencia que importa contra un hosting que sirve 500 MB: medir `strlen()` sobre el
+     * cuerpo entero significa que el rechazo llega con los 500 MB ya adentro del worker, que es
+     * exactamente lo que el tope existe para evitar. El motivo distingue un caso del otro.
+     *
+     * @return void
+     */
+    public function test_sin_content_length_la_descarga_se_corta_a_mitad_de_camino(): void
+    {
+        $grande = str_repeat('x', AsistenteFotoSalienteService::MAXIMO_DE_BYTES_DE_DESCARGA + 1048576);
+
+        $this->fakear_http(['*' => Http::response($grande, 200, ['Content-Type' => 'image/webp'])]);
+
+        $resultado = $this->fotos_que_resuelven_a('190.2.3.4')
+            ->preparar('https://fotos.cliente-de-prueba.test/enorme.webp');
+
+        $this->assertNull($resultado['binario']);
+        $this->assertStringContainsString('se cortó la descarga', (string) $resultado['motivo']);
     }
 
     /**
@@ -614,6 +805,105 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
         $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->estado);
         $this->assertNull($fila->error);
         $this->assertCount(1, $espia->textos);
+    }
+
+    /**
+     * 🔴 Cuando se acaba el presupuesto del turno, las fotas que faltan no se intentan.
+     *
+     * El ingreso al worker tiene `$timeout = 60` y las fotos salen al final, después del texto. Sin
+     * este corte, seis fotos con sus descargas y sus subidas se pasan del tope y el worker mata el
+     * job — y ahí no se pierde sólo la foto: la línea `respuesta del asistente entregada` está
+     * después del bucle, así que **los contadores desaparecen justo en el turno donde más se los
+     * querría leer**.
+     *
+     * El reloj avanza 4 segundos en cada consulta: con eso la primera foto entra y la segunda ya no.
+     *
+     * @return void
+     */
+    public function test_cuando_se_acaba_el_presupuesto_las_fotos_que_faltan_no_se_intentan(): void
+    {
+        $this->requiere_webp();
+
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear(
+            [
+                $this->adjunto('1.webp', 'La primera'),
+                $this->adjunto('2.webp', 'La segunda'),
+                $this->adjunto('3.webp', 'La tercera'),
+            ],
+            ['*/storage/*' => Http::response($this->imagen('webp', 200, 200), 200, ['Content-Type' => 'image/webp'])]
+        );
+
+        $this->tramitar($fila, $espia, 4.0);
+
+        $fila->refresh();
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->estado, 'El turno cierra igual.');
+        $this->assertCount(1, $espia->textos);
+        $this->assertCount(1, $espia->imagenes_subidas, 'Sólo la primera entró en el presupuesto.');
+        $this->assertSame('La primera', $espia->imagenes_subidas[0]['caption']);
+    }
+
+    /**
+     * El job le pasa al sender el techo de tiempo por llamada, no el de la config.
+     *
+     * @return void
+     */
+    public function test_el_envio_de_una_foto_va_con_el_techo_de_tiempo_del_job(): void
+    {
+        $this->requiere_webp();
+
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear(
+            [$this->adjunto('1.webp')],
+            ['*/storage/*' => Http::response($this->imagen('webp', 200, 200), 200, ['Content-Type' => 'image/webp'])]
+        );
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertCount(1, $espia->imagenes_subidas);
+        $this->assertSame(
+            EnviarMensajeAlAsistenteJob::SEGUNDOS_POR_ENVIO_DE_FOTO,
+            $espia->imagenes_subidas[0]['segundos']
+        );
+    }
+
+    /**
+     * 🔴 La cuenta del presupuesto cierra contra el `$timeout` del job.
+     *
+     * Es aritmética sobre las constantes, como la de `ESPERAS_DE_POLLING` que suma 180: el peor
+     * caso de UNA foto tiene que entrar en el presupuesto, y el presupuesto entero tiene que entrar
+     * en el techo del ingreso con lugar para lo que ya se gastó antes (el GET que trajo la
+     * respuesta y el `send_text()` del texto). Antes esta cuenta no cerraba por lejos: 6 × 20 s de
+     * descarga eran 120 s contra un techo de 60.
+     *
+     * @return void
+     */
+    public function test_el_presupuesto_de_las_fotos_entra_en_el_timeout_del_job(): void
+    {
+        $peor_caso_de_una = (EnviarMensajeAlAsistenteJob::PAUSA_ANTES_DE_CADA_FOTO_US / 1000000)
+            + AsistenteFotoSalienteService::SEGUNDOS_DE_DESCARGA
+            + (EnviarMensajeAlAsistenteJob::SEGUNDOS_POR_ENVIO_DE_FOTO * 2);
+
+        $this->assertLessThanOrEqual(
+            EnviarMensajeAlAsistenteJob::SEGUNDOS_PARA_TODAS_LAS_FOTOS,
+            $peor_caso_de_una,
+            'Si una sola foto no entra en el presupuesto, no se manda ninguna nunca.'
+        );
+
+        $job = new EnviarMensajeAlAsistenteJob(1);
+
+        $this->assertLessThan(
+            $job->timeout,
+            EnviarMensajeAlAsistenteJob::SEGUNDOS_PARA_TODAS_LAS_FOTOS,
+            'El presupuesto de las fotos tiene que dejar lugar para el resto del ingreso.'
+        );
     }
 
     /**

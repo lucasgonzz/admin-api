@@ -98,6 +98,35 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     ];
 
     /**
+     * Presupuesto de tiempo para TODAS las fotos de un turno, en segundos.
+     *
+     * 🔴 **Es un presupuesto acumulado y no un techo por foto, y esa es toda la diferencia.** Este
+     * ingreso al worker tiene `$timeout = 60` y ya gastó lo suyo antes de llegar acá: el GET al
+     * `empresa-api` que trajo la respuesta y el `send_text()` del texto. Lo que queda es esto.
+     *
+     * Con un techo por foto la cuenta no cerraba nunca: seis fotos × 20 s de descarga eran 120 s
+     * sobre un tope de 60, y hasta UNA sola foto se pasaba —1,2 s de pausa + 20 de descarga + 30 de
+     * subida + 1,5 + 30 del reintento ≈ 82 s—. Y la consecuencia no era solamente perder la foto:
+     * si el worker mata el job acá, la línea `respuesta del asistente entregada` **nunca se
+     * escribe**, porque está después del bucle. O sea que los contadores desaparecen justo en el
+     * escenario donde más se los quiere leer.
+     *
+     * Ahora antes de cada foto —y antes de cada reintento— se pregunta si queda presupuesto para el
+     * peor caso de esa llamada; si no queda, se corta el bucle, las que faltan cuentan como
+     * fallidas con su motivo, y el log sale igual.
+     */
+    const SEGUNDOS_PARA_TODAS_LAS_FOTOS = 35;
+
+    /**
+     * Techo de cada llamada a Kapso al mandar una foto por media_id, en segundos.
+     *
+     * Son dos llamadas (la subida a `/media` y el mensaje), así que el peor caso de una foto por
+     * ese camino es la pausa del 409 (1,2 s) + la descarga (`AsistenteFotoSalienteService::SEGUNDOS_DE_DESCARGA`,
+     * 8 s) + 10 + 10 ≈ 30 s. Ese es el número que usa el presupuesto para decidir si arranca.
+     */
+    const SEGUNDOS_POR_ENVIO_DE_FOTO = 10;
+
+    /**
      * Pausa antes de cada foto, en microsegundos.
      *
      * 🔴 No es precaución teórica. Kapso devuelve **409 "otro mensaje en vuelo para esta
@@ -757,6 +786,9 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return $cuenta;
         }
 
+        /* Cuándo se acaba el presupuesto de este turno para fotos. Ver SEGUNDOS_PARA_TODAS_LAS_FOTOS. */
+        $vence = $this->ahora() + self::SEGUNDOS_PARA_TODAS_LAS_FOTOS;
+
         /* Se cuentan los intentos y no las posiciones: seis adjuntos válidos después de tres
          * inválidos tienen que salir los seis. */
         $intentadas = 0;
@@ -786,11 +818,28 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
 
             $intentadas++;
 
+            /* 🔴 El presupuesto se mira ANTES de arrancar la foto, contra el peor caso de una foto
+             * entera. Preguntar después no sirve de nada: para entonces el tiempo ya se gastó y el
+             * riesgo es que el worker mate el ingreso con el log del final sin escribir. */
+            if (! $this->queda_presupuesto($vence, $this->peor_caso_de_una_foto())) {
+                $cuenta['fallidas']++;
+
+                Log::channel('daily')->warning('AsistenteWhatsapp: una foto no se intentó por falta de tiempo en el turno.', [
+                    'assistant_message_id' => $fila->id,
+                    'client_id'            => $client->id,
+                    'origen'               => parse_url($url, PHP_URL_HOST),
+                    'archivo'              => basename((string) parse_url($url, PHP_URL_PATH)),
+                    'ya_enviadas'          => $cuenta['enviadas'],
+                ]);
+
+                continue;
+            }
+
             /* Antes de CADA foto, incluida la primera: el texto acaba de salir por esta misma
              * conversación y Kapso todavía puede tenerla tomada (ver PAUSA_ANTES_DE_CADA_FOTO_US). */
             $this->pausar(self::PAUSA_ANTES_DE_CADA_FOTO_US);
 
-            $resultado = $this->mandar_una_foto($sender, $fotos, $fila, $client, $url, $texto !== '' ? $texto : null);
+            $resultado = $this->mandar_una_foto($sender, $fotos, $fila, $client, $url, $texto !== '' ? $texto : null, $vence);
 
             if ($resultado['wamid'] !== null) {
                 $cuenta['enviadas']++;
@@ -853,6 +902,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * @param Client                       $client  Cliente dueño del hilo.
      * @param string                       $url     URL pública de la foto.
      * @param string|null                  $caption Epígrafe, o null para mandarla sola.
+     * @param float                        $vence   Momento en que se acaba el presupuesto del turno.
      *
      * @return array{wamid: string|null, motivo: string|null, por_link: bool, convertida: bool}
      */
@@ -862,13 +912,14 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         ClientAssistantMessage $fila,
         Client $client,
         string $url,
-        ?string $caption
+        ?string $caption,
+        float $vence
     ): array {
         $telefono = (string) $fila->telefono;
         $contexto = 'Asistente por WhatsApp - foto - cliente #' . $client->id;
 
         if ($fotos->va_por_link($url)) {
-            $resultado = $this->con_reintento_transitorio($sender, function () use ($sender, $telefono, $url, $caption, $contexto) {
+            $resultado = $this->con_reintento_transitorio($sender, $vence, function () use ($sender, $telefono, $url, $caption, $contexto) {
                 return $sender->send_image_by_link($telefono, $url, $caption, $contexto);
             });
 
@@ -909,8 +960,17 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         $mime    = (string) $preparada['mime'];
         $nombre  = (string) $preparada['nombre'];
 
-        $resultado = $this->con_reintento_transitorio($sender, function () use ($sender, $telefono, $binario, $mime, $nombre, $caption, $contexto) {
-            return $sender->send_image_by_bytes($telefono, $binario, $mime, $nombre, $caption, $contexto);
+        $resultado = $this->con_reintento_transitorio($sender, $vence, function () use ($sender, $telefono, $binario, $mime, $nombre, $caption, $contexto) {
+            return $sender->send_image_by_bytes(
+                $telefono,
+                $binario,
+                $mime,
+                $nombre,
+                $caption,
+                $contexto,
+                true,
+                self::SEGUNDOS_POR_ENVIO_DE_FOTO
+            );
         });
 
         return [
@@ -925,11 +985,12 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * Corre un envío y lo repite una vez si el fallo fue de los que se sueltan solos.
      *
      * @param WhatsappSendService $sender Para leer el motivo y el status del fallo.
+     * @param float               $vence  Momento en que se acaba el presupuesto del turno.
      * @param callable            $envio  Devuelve el wamid o null, igual que los métodos del sender.
      *
      * @return array{wamid: string|null, motivo: string|null}
      */
-    private function con_reintento_transitorio(WhatsappSendService $sender, callable $envio): array
+    private function con_reintento_transitorio(WhatsappSendService $sender, float $vence, callable $envio): array
     {
         $motivo = null;
 
@@ -947,6 +1008,17 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $motivo = (string) $sender->last_send_error;
 
             if ($intento < self::INTENTOS_POR_FOTO && $sender->last_send_was_transient()) {
+                /* El reintento también pide permiso: es otra espera más otro envío, y si el
+                 * presupuesto no le alcanza, insistir es lo que mata el ingreso. */
+                $segundos_del_reintento = (self::ESPERA_ANTES_DE_REINTENTAR_FOTO_US / 1000000)
+                    + self::SEGUNDOS_POR_ENVIO_DE_FOTO;
+
+                if (! $this->queda_presupuesto($vence, $segundos_del_reintento)) {
+                    $motivo = $motivo . ' (no quedó tiempo en el turno para reintentar)';
+
+                    break;
+                }
+
                 $this->pausar(self::ESPERA_ANTES_DE_REINTENTAR_FOTO_US);
 
                 continue;
@@ -956,6 +1028,43 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         }
 
         return ['wamid' => null, 'motivo' => $motivo];
+    }
+
+    /**
+     * El peor caso, en segundos, de mandar una foto entera por el camino largo.
+     *
+     * La pausa del 409, la descarga del hosting del cliente, la subida a `/media` y el mensaje.
+     *
+     * @return float
+     */
+    private function peor_caso_de_una_foto(): float
+    {
+        return (self::PAUSA_ANTES_DE_CADA_FOTO_US / 1000000)
+            + AsistenteFotoSalienteService::SEGUNDOS_DE_DESCARGA
+            + (self::SEGUNDOS_POR_ENVIO_DE_FOTO * 2);
+    }
+
+    /**
+     * Indica si todavía entra algo que va a tardar `$segundos` antes de que venza el presupuesto.
+     *
+     * @param float $vence    Momento en que se acaba.
+     * @param float $segundos Cuánto puede tardar lo que se quiere hacer.
+     *
+     * @return bool
+     */
+    private function queda_presupuesto(float $vence, float $segundos): bool
+    {
+        return ($this->ahora() + $segundos) <= $vence;
+    }
+
+    /**
+     * El reloj. Separado para que un test lo pueda mover sin esperar.
+     *
+     * @return float Segundos con decimales, como `microtime(true)`.
+     */
+    protected function ahora(): float
+    {
+        return microtime(true);
     }
 
     /**

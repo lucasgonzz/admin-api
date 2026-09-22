@@ -401,22 +401,26 @@ class DestinoDeLaDescargaDeFotosTest extends BaseDelCanal
     }
 
     /**
-     * Una respuesta 3xx se corta con su motivo, en vez de tratarse como una descarga.
+     * Un servicio que resuelve a la IP que se le diga y deja llamar a `descargar()` derecho.
      *
-     * ⚠️ **Lo que esta prueba NO puede medir es `allow_redirects => false`.** Con `Http::fake()` el
-     * handler de Guzzle está reemplazado y los saltos no se siguen nunca, tenga la opción el valor
-     * que tenga — o sea que una prueba de punta a punta queda verde con la opción prendida. Lo que
-     * sí queda fijado es el corte explícito del 3xx, que es la mitad que vive en este código; la
-     * opción es la otra mitad y su razón de ser está escrita al lado.
+     * ⚠️ **Por qué estas pruebas no van de punta a punta:** con `Http::fake()` el handler de Guzzle
+     * está reemplazado, así que `allow_redirects` no participa —los saltos los sigue este código a
+     * mano, que es justamente lo que hay que medir— y el motivo del rechazo no es observable desde
+     * el espía del envío. Llamando a `descargar()` se ve el motivo exacto de cada caso.
      *
-     * @return void
+     * @param string $ip A qué resuelve cualquier dominio.
+     *
+     * @return AsistenteFotoSalienteService
      */
-    public function test_una_respuesta_con_redirect_se_corta_con_su_motivo(): void
+    private function servicio_que_baja(string $ip = '190.2.3.4'): AsistenteFotoSalienteService
     {
         $servicio = new class extends AsistenteFotoSalienteService {
-            protected function ips_del_host(string $host): array
+            /** @var string */
+            public $ip_fija = '190.2.3.4';
+
+            protected function ips_del_host(string $host): ?array
             {
-                return ['190.2.3.4'];
+                return [$this->ip_fija];
             }
 
             public function bajar(string $url): array
@@ -425,15 +429,120 @@ class DestinoDeLaDescargaDeFotosTest extends BaseDelCanal
             }
         };
 
+        $servicio->ip_fija = $ip;
+
+        return $servicio;
+    }
+
+    /**
+     * Un salto hacia una IP interna se rechaza al revalidar el destino, no antes.
+     *
+     * 🔴 Es la razón de ser del bucle de saltos: el control corre sobre **cada** URL de la cadena,
+     * no sobre la primera. Acá el dominio original es impecable y el `Location` es el que apunta al
+     * endpoint de metadata; el motivo tiene que nombrar esa dirección, que es la prueba de que el
+     * salto se evaluó de verdad.
+     *
+     * @return void
+     */
+    public function test_un_salto_hacia_una_ip_interna_se_rechaza_al_revalidar(): void
+    {
         $this->fakear_http([
             '*' => Http::response('', 302, ['Location' => 'http://169.254.169.254/latest/meta-data/']),
         ]);
 
-        $resultado = $servicio->bajar('https://fotos.cliente-de-prueba.test/1.webp');
+        $resultado = $this->servicio_que_baja()->bajar('https://fotos.cliente-de-prueba.test/1.webp');
 
         $this->assertNull($resultado['binario']);
-        $this->assertStringContainsString('redirige', (string) $resultado['motivo']);
+        $this->assertStringContainsString('169.254.169.254', (string) $resultado['motivo']);
+        $this->assertStringContainsString('no ruteable', (string) $resultado['motivo']);
     }
+
+    /**
+     * Un salto hacia un destino público SÍ se sigue, y la foto llega.
+     *
+     * 🔴 Este es el caso que hace que cortar todo 3xx esté mal: el `empresa-api` devuelve la
+     * `hosting_url` tal cual está guardada, así que **puede venir en `http://`**, y un hosting que
+     * la normaliza a `https://` con un 301 dejaría la foto muerta por un salto perfectamente
+     * legítimo. Antes ese salto lo seguía Meta y nadie se enteraba.
+     *
+     * @return void
+     */
+    public function test_un_salto_hacia_un_destino_publico_se_sigue(): void
+    {
+        $this->fakear_http([
+            'http://fotos.cliente-de-prueba.test/*'  => Http::response('', 301, [
+                'Location' => 'https://fotos.cliente-de-prueba.test/articulos/1.webp',
+            ]),
+            'https://fotos.cliente-de-prueba.test/*' => Http::response($this->webp(), 200),
+        ]);
+
+        $resultado = $this->servicio_que_baja()->bajar('http://fotos.cliente-de-prueba.test/articulos/1.webp');
+
+        $this->assertNotNull($resultado['binario'], 'El salto es legítimo: la foto tiene que llegar.');
+        $this->assertNull($resultado['motivo']);
+    }
+
+    /**
+     * Un `Location` relativo se resuelve contra la URL que lo devolvió.
+     *
+     * @return void
+     */
+    public function test_un_salto_relativo_se_resuelve_contra_la_url_que_lo_devolvio(): void
+    {
+        $this->fakear_http([
+            '*/articulos/1.webp'      => Http::response('', 302, ['Location' => 'final.webp']),
+            '*/articulos/final.webp'  => Http::response($this->webp(), 200),
+        ]);
+
+        $resultado = $this->servicio_que_baja()->bajar('https://fotos.cliente-de-prueba.test/articulos/1.webp');
+
+        $this->assertNotNull($resultado['binario']);
+        $this->assertSame(
+            1,
+            $this->pedidos_hacia('/articulos/final.webp'),
+            'El relativo se resolvió contra la carpeta de la URL original.'
+        );
+    }
+
+    /**
+     * Una cadena de saltos más larga que el tope se corta.
+     *
+     * @return void
+     */
+    public function test_una_cadena_de_saltos_demasiado_larga_se_corta(): void
+    {
+        $this->fakear_http([
+            '*' => Http::response('', 302, ['Location' => 'https://fotos.cliente-de-prueba.test/otra.webp']),
+        ]);
+
+        $resultado = $this->servicio_que_baja()->bajar('https://fotos.cliente-de-prueba.test/1.webp');
+
+        $this->assertNull($resultado['binario']);
+        $this->assertStringContainsString('redirige más de', (string) $resultado['motivo']);
+        $this->assertSame(
+            AsistenteFotoSalienteService::MAXIMO_DE_SALTOS + 1,
+            $this->pedidos_hacia('cliente-de-prueba.test'),
+            'Se piden la original y los saltos permitidos, ni uno más.'
+        );
+    }
+
+    /**
+     * Un 3xx sin `Location` se corta con su motivo en vez de quedar como descarga vacía.
+     *
+     * @return void
+     */
+    public function test_un_redirect_sin_location_se_corta(): void
+    {
+        $this->fakear_http(['*' => Http::response('', 302)]);
+
+        $resultado = $this->servicio_que_baja()->bajar('https://fotos.cliente-de-prueba.test/1.webp');
+
+        $this->assertNull($resultado['binario']);
+        $this->assertStringContainsString('no dice a dónde', (string) $resultado['motivo']);
+    }
+
+    /**
+     * Una URL pública normal sigue bajándose y saliendo convertida.
 
     /**
      * Una URL pública normal sigue bajándose y saliendo convertida.
@@ -463,6 +572,42 @@ class DestinoDeLaDescargaDeFotosTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Si la resolución del dominio FALLA, se falla cerrado: no se baja.
+     *
+     * Es distinto de "el dominio no tiene direcciones", y la diferencia es el agujero: Guzzle
+     * resuelve por su cuenta con `getaddrinfo` cuando conecta, así que seguir adelante con una
+     * lista incompleta —porque la consulta `AAAA` se cayó, por ejemplo— significa evaluar las `A` y
+     * salir por una `AAAA` que nadie miró. No hace falta un atacante con control del DNS: alcanza
+     * con una resolución parcial.
+     *
+     * ⚠️ Lo que esta prueba cubre es el **trato** del fallo, que es donde se decide. Que
+     * `ips_del_host()` devuelva null cuando `gethostbynamel()` o `dns_get_record()` contestan
+     * `false` no se ejercita acá: pedirlo sería salir a consultar DNS de verdad, y ninguna prueba
+     * de esta suite sale a la red.
+     *
+     * @return void
+     */
+    public function test_si_la_resolucion_falla_no_se_baja(): void
+    {
+        $servicio = new class extends AsistenteFotoSalienteService {
+            protected function ips_del_host(string $host): ?array
+            {
+                return null;
+            }
+
+            public function evaluar(string $host): ?string
+            {
+                return $this->motivo_para_no_bajar($host);
+            }
+        };
+
+        $motivo = $servicio->evaluar('fotos.cliente-de-prueba.test');
+
+        $this->assertNotNull($motivo, 'Una resolución fallida no puede tratarse como un dominio sin direcciones.');
+        $this->assertStringContainsString('del todo', (string) $motivo);
+    }
+
+    /**
      * Un dominio que no resuelve a nada tampoco se baja, y tampoco voltea el turno.
      *
      * @return void
@@ -471,7 +616,7 @@ class DestinoDeLaDescargaDeFotosTest extends BaseDelCanal
     {
         /* La lista vacía es lo que devuelve el servicio real cuando el DNS no contesta. */
         $this->app->instance(AsistenteFotoSalienteService::class, new class extends AsistenteFotoSalienteService {
-            protected function ips_del_host(string $host): array
+            protected function ips_del_host(string $host): ?array
             {
                 return [];
             }
