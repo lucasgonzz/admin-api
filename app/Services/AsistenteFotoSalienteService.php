@@ -29,6 +29,10 @@ use Illuminate\Support\Facades\Http;
  * Kapso: mandarle el `X-API-Key` de Kapso —como sí hace `WhatsappInboundMediaService` con la media
  * entrante, que sale contra `api.kapso.ai`— sería regalarle la clave de la plataforma al servidor
  * de un tercero. El pedido va pelado.
+ *
+ * 🔴 **Y no va a cualquier lado.** La URL la elige el `empresa-api` de un cliente y el que ahora la
+ * visita es este proceso, adentro del VPS. Antes la visitaba Meta desde afuera, así que el destino
+ * no importaba; ahora sí. El control está en {@see motivo_para_no_bajar()}, con el porqué completo.
  */
 class AsistenteFotoSalienteService
 {
@@ -88,6 +92,35 @@ class AsistenteFotoSalienteService
      * segundos por foto es el techo de lo que se puede gastar sin poner en riesgo el ingreso.
      */
     const SEGUNDOS_DE_DESCARGA = 20;
+
+    /**
+     * Destinos a los que este servicio NO sale, resueltos sobre la IP.
+     *
+     * Los primeros los tapa también `filter_var()` con `NO_PRIV_RANGE | NO_RES_RANGE` y están
+     * igual: si una versión de PHP cambia lo que esas banderas cubren, el agujero se abre solo y en
+     * silencio. Los que `filter_var` **no** cubre —medido contra el PHP 7.4.33 el 22/9/2026— son
+     * `100.64.0.0/10` (el CGNAT de los hostings), `192.0.0.0/24`, `198.18.0.0/15`, el multicast y,
+     * el peor de todos, `::ffff:0:0/96`: ahí viven las IPv4 mapeadas en IPv6, o sea que
+     * `::ffff:127.0.0.1` **pasaba** el filtro de PHP. Es el bypass de manual.
+     */
+    const RANGOS_NO_RUTEABLES = [
+        '0.0.0.0/8',
+        '10.0.0.0/8',
+        '100.64.0.0/10',
+        '127.0.0.0/8',
+        '169.254.0.0/16',
+        '172.16.0.0/12',
+        '192.0.0.0/24',
+        '192.168.0.0/16',
+        '198.18.0.0/15',
+        '224.0.0.0/4',
+        '240.0.0.0/4',
+        '::/128',
+        '::1/128',
+        '::ffff:0:0/96',
+        'fc00::/7',
+        'fe80::/10',
+    ];
 
     /**
      * Decide si una foto puede salir por link o si hay que bajarla y convertirla.
@@ -179,26 +212,65 @@ class AsistenteFotoSalienteService
      * No reintenta: esto corre adentro del turno, después de que el texto ya salió, y una foto es
      * un extra. Un hosting que no contesta a la primera no justifica gastarle segundos al job.
      *
+     * `protected` por lo mismo que {@see motivo_para_no_bajar()}: hay comportamiento acá —el corte
+     * de los 3xx— que por el camino largo queda tapado por otro rechazo que llega antes, y una
+     * prueba que pase por ahí estaría verde por el motivo equivocado.
+     *
      * @param string $url URL pública de la foto.
      *
      * @return array{binario: string|null, motivo: string|null}
      */
-    private function descargar(string $url): array
+    protected function descargar(string $url): array
     {
+        $url = trim($url);
+
+        $esquema = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        if ($esquema !== 'http' && $esquema !== 'https') {
+            return ['binario' => null, 'motivo' => 'El link de la foto no es http(s).'];
+        }
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        if ($host === '') {
+            return ['binario' => null, 'motivo' => 'El link de la foto no tiene dominio.'];
+        }
+
+        $rechazo = $this->motivo_para_no_bajar($host);
+        if ($rechazo !== null) {
+            return ['binario' => null, 'motivo' => $rechazo];
+        }
+
         try {
             /* Sin credenciales y sin `retry()`: ver el docblock de la clase. El `Accept` es para que
-             * un hosting que negocia contenido no devuelva una página de error en HTML. */
+             * un hosting que negocia contenido no devuelva una página de error en HTML.
+             *
+             * 🔴 `allow_redirects => false` es parte del chequeo de destino, no una preferencia.
+             * Con los redirects prendidos, el control de IP de arriba se hace sobre una URL y la
+             * descarga termina en otra: un `302` hacia `169.254.169.254` lo saltea entero, porque
+             * el salto lo resuelve Guzzle sin volver a preguntar nada. */
             $respuesta = Http::timeout(self::SEGUNDOS_DE_DESCARGA)
+                ->withOptions(['allow_redirects' => false])
                 ->withHeaders(['Accept' => 'image/*'])
-                ->get(trim($url));
+                ->get($url);
         } catch (\Throwable $excepcion) {
             return ['binario' => null, 'motivo' => 'No se pudo bajar la foto: ' . $excepcion->getMessage()];
+        }
+
+        $status = (int) $respuesta->status();
+
+        /* Cinturón y tirantes del `allow_redirects => false`: si por lo que sea los redirects se
+         * volvieran a prender, esto los sigue cortando acá, con un motivo que se lee. */
+        if ($status >= 300 && $status < 400) {
+            return [
+                'binario' => null,
+                'motivo'  => 'El link de la foto redirige (' . $status . ') y los saltos no se siguen: '
+                    . 'el destino del salto no pasó por el control de dirección.',
+            ];
         }
 
         if (! $respuesta->successful()) {
             return [
                 'binario' => null,
-                'motivo'  => 'El hosting del cliente respondió ' . $respuesta->status() . ' al pedir la foto.',
+                'motivo'  => 'El hosting del cliente respondió ' . $status . ' al pedir la foto.',
             ];
         }
 
@@ -217,6 +289,169 @@ class AsistenteFotoSalienteService
         }
 
         return ['binario' => $binario, 'motivo' => null];
+    }
+
+    /**
+     * Motivo por el cual NO hay que ir a buscar una foto a ese dominio, o null si se puede.
+     *
+     * 🔴 **ACÁ ESTÁ LA OTRA TENTACIÓN: *"es el hosting de nuestro propio cliente, ¿para qué el
+     * chequeo?"*. Y la respuesta es que lo que cambió es QUIÉN visita esa URL.**
+     *
+     * Hasta el 22/9/2026 el link viajaba adentro del mensaje y la que iba a buscarlo era **Meta**,
+     * desde afuera. El admin nunca la abría. Desde que existe el camino por media_id, el que hace
+     * el GET es **este proceso**, corriendo adentro del VPS — el mismo VPS donde viven el admin,
+     * su MySQL, su Redis y los ~40 clientes migrados. Y la URL no la elige nadie de este lado: la
+     * manda el `empresa-api` de un cliente, en la clave `adjuntos` de su respuesta.
+     *
+     * O sea que sin este chequeo, un `empresa-api` comprometido —o con un bug— convierte al admin
+     * en su proxy hacia la red interna: `http://127.0.0.1:6379/…` es el Redis, `http://10.x.x.x/…`
+     * es cualquier cliente vecino, y `http://169.254.169.254/…` es el endpoint de metadata del
+     * cloud, que es el premio gordo. Es un SSRF, y lo abrió el arreglo de la foto: por eso el
+     * candado va en el mismo lugar.
+     *
+     * **Se resuelve sobre la IP y no sobre el string del host.** Una lista negra de nombres no
+     * sirve para nada: `interno.cliente.com` puede apuntar a `10.0.0.5` igual que `localhost`.
+     *
+     * ⚠️ **Lo que este chequeo NO cubre, y queda escrito para el que venga:** el DNS rebinding.
+     * Entre esta resolución y la que hace Guzzle al conectar hay una ventana en la que el dominio
+     * puede cambiar de IP. Taparlo pide fijar la IP en la conexión (`CURLOPT_RESOLVE`), que ata el
+     * servicio a cURL y no se puede ejercitar con el `Http::fake()` de las pruebas. Se dejó afuera
+     * a conciencia: exige que el atacante controle el DNS del dominio, que es bastante más que
+     * devolver una URL rara en un JSON.
+     *
+     * `protected` para que las pruebas puedan recorrer la tabla de direcciones de una, sin montar
+     * un turno entero por cada una: por HTTP hay rechazos que llegan antes que este control —Guzzle
+     * ni siquiera parsea `http://[::ffff:127.0.0.1]/…`— y una prueba que pase por ahí estaría
+     * midiendo el error de otro.
+     *
+     * @param string $host Dominio o IP literal del link, tal como salió de `parse_url()`.
+     *
+     * @return string|null Motivo legible del rechazo, o null si el destino es público.
+     */
+    protected function motivo_para_no_bajar(string $host): ?string
+    {
+        /* Una IPv6 en una URL viaja entre corchetes: `http://[::1]/foto.webp`. */
+        $host = trim($host, '[]');
+
+        if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
+            $ips = [$host];
+        } else {
+            $ips = $this->ips_del_host($host);
+        }
+
+        if ($ips === []) {
+            return 'No se pudo resolver el dominio de la foto (' . $host . ').';
+        }
+
+        /* TODAS las direcciones, no la primera: un dominio con un A público y un AAAA interno
+         * pasaría mirando solo una, y cuál usa la conexión no lo decide este código. */
+        foreach ($ips as $ip) {
+            if (! $this->es_ip_publica($ip)) {
+                return 'El link de la foto apunta a una dirección no ruteable (' . $ip . '): no se baja.';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Direcciones IP de un dominio.
+     *
+     * `protected` para que las pruebas puedan fijar qué resuelve cada host sin tocar el DNS de
+     * verdad — que además las haría lentas y dependientes de la red.
+     *
+     * @param string $host Dominio.
+     *
+     * @return array<int, string> IPv4 e IPv6, o vacío si no resuelve.
+     */
+    protected function ips_del_host(string $host): array
+    {
+        $ips = [];
+
+        $cuatro = @gethostbynamel($host);
+        if (is_array($cuatro)) {
+            $ips = $cuatro;
+        }
+
+        $seis = @dns_get_record($host, DNS_AAAA);
+        if (is_array($seis)) {
+            foreach ($seis as $fila) {
+                if (is_array($fila) && ! empty($fila['ipv6'])) {
+                    $ips[] = (string) $fila['ipv6'];
+                }
+            }
+        }
+
+        return array_values(array_unique($ips));
+    }
+
+    /**
+     * Indica si una IP es de las que se puede ir a buscar: pública y ruteable.
+     *
+     * @param string $ip Dirección a evaluar.
+     *
+     * @return bool
+     */
+    private function es_ip_publica(string $ip): bool
+    {
+        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            return false;
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            return false;
+        }
+
+        foreach (self::RANGOS_NO_RUTEABLES as $rango) {
+            if ($this->en_rango($ip, $rango)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Indica si una IP cae adentro de un CIDR. Sirve para IPv4 e IPv6 por igual.
+     *
+     * La comparación se hace sobre la forma BINARIA (`inet_pton`) y no sobre el texto: `010.1.2.3`,
+     * `0x7f.0.0.1` y `::ffff:10.0.0.1` son la misma dirección escrita de tres formas, y comparar
+     * strings las deja pasar a las tres.
+     *
+     * @param string $ip   Dirección.
+     * @param string $cidr Rango en formato `red/bits`.
+     *
+     * @return bool
+     */
+    private function en_rango(string $ip, string $cidr): bool
+    {
+        $partes = explode('/', $cidr);
+        if (count($partes) !== 2) {
+            return false;
+        }
+
+        $red     = @inet_pton($partes[0]);
+        $binaria = @inet_pton($ip);
+        $bits    = (int) $partes[1];
+
+        if ($red === false || $binaria === false || strlen($red) !== strlen($binaria)) {
+            return false;
+        }
+
+        $bytes_enteros = intdiv($bits, 8);
+        $bits_sueltos  = $bits % 8;
+
+        if ($bytes_enteros > 0 && strncmp($binaria, $red, $bytes_enteros) !== 0) {
+            return false;
+        }
+
+        if ($bits_sueltos === 0) {
+            return true;
+        }
+
+        $mascara = chr((0xFF << (8 - $bits_sueltos)) & 0xFF);
+
+        return ($binaria[$bytes_enteros] & $mascara) === ($red[$bytes_enteros] & $mascara);
     }
 
     /**

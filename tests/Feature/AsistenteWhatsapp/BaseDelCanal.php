@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientEmployee;
 use App\Models\WhatsappConfig;
+use App\Services\AsistenteFotoSalienteService;
 use App\Services\WhatsappSendService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Http;
@@ -74,6 +75,41 @@ abstract class BaseDelCanal extends TestCase
         }
 
         Http::fake($stubs);
+    }
+
+    /**
+     * Fija a qué IP resuelven los dominios de las fotos, sin tocar el DNS de verdad.
+     *
+     * Antes de bajar una foto, `AsistenteFotoSalienteService` resuelve el dominio y rechaza todo lo
+     * que caiga en una dirección no ruteable (ver `motivo_para_no_bajar()`). Los dominios `.test`
+     * de estas pruebas no resuelven a nada, así que sin esto cada prueba mediría el rechazo del
+     * control de destino en vez de lo que quiso medir — y además saldría a consultar DNS de verdad,
+     * que es lento y depende de la red.
+     *
+     * Por defecto resuelve a una IP pública cualquiera; las pruebas del control de destino la pisan
+     * con la que necesitan.
+     *
+     * @param string $ip A qué dirección resuelve cualquier dominio.
+     *
+     * @return AsistenteFotoSalienteService El servicio, ya registrado en el contenedor.
+     */
+    protected function fotos_que_resuelven_a(string $ip = '190.2.3.4'): AsistenteFotoSalienteService
+    {
+        $servicio = new class extends AsistenteFotoSalienteService {
+            /** @var string A qué IP resuelve cualquier host. */
+            public $ip_fija = '190.2.3.4';
+
+            protected function ips_del_host(string $host): array
+            {
+                return [$this->ip_fija];
+            }
+        };
+
+        $servicio->ip_fija = $ip;
+
+        $this->app->instance(AsistenteFotoSalienteService::class, $servicio);
+
+        return $servicio;
     }
 
     /**

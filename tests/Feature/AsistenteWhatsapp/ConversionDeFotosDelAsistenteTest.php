@@ -56,6 +56,10 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
         parent::setUp();
 
         $this->pausas = [];
+
+        /* Los dominios `.test` de estas pruebas no resuelven a nada, y el control de destino
+         * rechazaría todo antes de bajar. El control tiene sus propias pruebas más abajo. */
+        $this->fotos_que_resuelven_a('190.2.3.4');
     }
 
     /**
