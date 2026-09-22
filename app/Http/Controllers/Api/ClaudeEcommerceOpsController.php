@@ -181,6 +181,37 @@ class ClaudeEcommerceOpsController extends Controller
      */
     const PARAMETROS_DEL_LOTE = ['client_ids', 'dry_run', 'confirm_client_count', 'confirm_token'];
 
+    /**
+     * Lista blanca del alta de tienda (POST claude/ecommerce/stores).
+     *
+     * 🔴 Los paths de instalación NO están y es deliberado: el modelo los deriva del dominio. Ver
+     * el docblock de `stores_store_json()`.
+     */
+    const PARAMETROS_DEL_ALTA = ['client_id', 'confirm_client_name', 'domain', 'spa_url', 'api_url', 'dry_run'];
+
+    /**
+     * Estado con el que nace una tienda recién registrada, antes de que exista una sola línea de
+     * código suya en ningún servidor. Es el mismo valor que escribe el modal del panel
+     * (`ClientController::sync_ecommerce_urls_from_request()`) al crear la fila.
+     */
+    const ESTADO_TIENDA_NUEVA = 'pending';
+
+    /**
+     * Un dominio pelado: sin esquema, sin barra, sin puerto. Mismo patrón que usa
+     * `hostinger-tienda.php` en el repo de conocimiento, que es el que después crea el subdominio
+     * y los A records de este mismo dominio.
+     */
+    const PATRON_DE_DOMINIO = '/^[a-z0-9][a-z0-9-]{0,62}(\.[a-z0-9][a-z0-9-]{0,62}){1,3}$/';
+
+    /**
+     * Zonas de la plataforma: ninguna puede ser el dominio de la tienda de un cliente.
+     *
+     * Adentro de `comerciocity.com` viven los frentes del ERP de los ~40 clientes y en
+     * `comerciocity.store` los de las demos. Una tienda apuntada ahí compartiría docroot con el
+     * ERP del propio cliente.
+     */
+    const DOMINIOS_DE_LA_PLATAFORMA = ['comerciocity.com', 'comerciocity.store', 'comerciocity.com.ar'];
+
     /* ==============================================================================================
      | 1) GET claude/ecommerce/stores — qué tiendas hay y cuáles se pueden actualizar
      |============================================================================================= */
@@ -635,8 +666,9 @@ class ClaudeEcommerceOpsController extends Controller
                 'El cliente no tiene una tienda (ecommerce) configurada. No se encoló nada.',
                 [
                     'client_id' => (int) $client->id,
-                    'ayuda'     => 'La tienda se crea en la sección "Tienda online (ecommerce)" del perfil del cliente '
-                        . 'en el admin. 🔴 Claude no la crea: ninguna ruta claude/* hace la instalación inicial.',
+                    'ayuda'     => 'La tienda se registra con POST claude/ecommerce/stores (o desde la sección '
+                        . '"Tienda online (ecommerce)" del perfil del cliente en el admin). 🔴 Registrarla no es '
+                        . 'instalarla: ninguna ruta claude/* hace la instalación inicial.',
                 ]
             );
         }
@@ -966,8 +998,254 @@ class ClaudeEcommerceOpsController extends Controller
     }
 
     /* ==============================================================================================
+     | 7) POST claude/ecommerce/stores — alta del REGISTRO de la tienda (NO la instala)
+     |============================================================================================= */
+
+    /**
+     * Da de alta la fila `client_ecommerces` de un cliente: dominio y las dos URLs. Nada más.
+     *
+     * 🔴 ESTO NO INSTALA NADA Y NO TOCA NINGÚN SERVIDOR. Escribe una fila y termina. La regla de la
+     * clase —ninguna ruta `claude/*` crea una `ClientEcommerceInstallation` con `mode = 'install'`—
+     * sigue intacta y verificada por
+     * `ActualizacionDelEcommercePorClaudeTest::test_ninguna_ruta_claude_crea_una_instalacion_inicial()`.
+     * Son dos cosas distintas que la palabra "tienda" confunde: acá se REGISTRA que el cliente tiene
+     * una tienda en tal dominio; instalarla (escribir el `.env`, subir el código, compilar el SPA)
+     * es otra operación, irreversible, que se sigue arrancando desde el panel o a mano.
+     *
+     * POR QUÉ EXISTE (22/9/2026, pedido de Lucas instalando la tienda de Doble P Herrajes): hasta
+     * hoy esta fila sólo se podía crear desde el modal del cliente en el panel, así que una
+     * instalación llevada desde la raíz del pool se frenaba a la mitad esperando que alguien
+     * abriera el navegador. El endpoint que faltaba es el del REGISTRO, no el de la instalación.
+     *
+     * 🔴 `api_url` SE CARGA EXPLÍCITA Y ES OBLIGATORIA CUANDO NO SE DERIVA DEL DOMINIO. El modal del
+     * panel, si la dejan vacía, la completa con la convención vieja `{spa_url}/api`
+     * (`ClientController::sync_ecommerce_urls_from_request()`), que es la de las tiendas SIN
+     * subdominio propio. Una tienda nueva del shared vive en `api.<dominio>`, y con la URL vieja
+     * todo lo que sigue sale mal en cascada sin un solo error visible. Acá el default es
+     * `https://api.<dominio>`, que es la convención que usan las tiendas nuevas, y si alguien
+     * necesita la vieja la manda explícita.
+     *
+     * 🔴 LOS PATHS NO SE ACEPTAN A PROPÓSITO. `ClientEcommerce` los deriva del dominio
+     * (`<dominio>/public_html` y `<dominio>/public_html/api`), que es la forma que tiene un sitio
+     * agregado en Hostinger. Los campos manuales existen para las tiendas de las demos, que viven
+     * en una subcarpeta; exponerlos acá sólo agregaría una forma de equivocarse en el único carril
+     * que este endpoint atiende. Si alguna vez hace falta, se cargan desde el panel.
+     *
+     * Orden de los frenos, todos ANTES de escribir:
+     *   1. Lista blanca de parámetros → cualquier cosa de más, 422 y no se escribe nada.
+     *   2. El cliente existe.
+     *   3. `confirm_client_name` exacto.
+     *   4. El cliente no tiene ya una tienda (una fila por cliente: la relación es `hasOne`).
+     *   5. El dominio es un dominio (pelado, sin esquema ni barra) y no es de ComercioCity.
+     *   6. Ningún otro cliente ni demo tiene ese dominio.
+     *   7. `dry_run` (default true) → devuelve exactamente lo que escribiría.
+     *
+     * @param Request $request Body: client_id, confirm_client_name, domain, spa_url?, api_url?, dry_run?.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function stores_store_json(Request $request)
+    {
+        /* --- Freno 1: lista blanca. Va primero, igual que en el lote: un parámetro que este
+           endpoint no entiende suele ser alguien esperando que haga algo que no hace (instalar,
+           cargar paths, prender tiene_ecommerce). Mejor 422 que un alta silenciosamente distinta
+           de la que pidieron. */
+        $de_mas = array_diff(array_keys($request->all()), self::PARAMETROS_DEL_ALTA);
+        if (count($de_mas) > 0) {
+            return $this->error_422(
+                'Parámetros que este endpoint no acepta: ' . implode(', ', $de_mas) . '. No se creó nada.',
+                [
+                    'parametros_aceptados' => self::PARAMETROS_DEL_ALTA,
+                    'ayuda'                => 'Los paths de instalación se derivan del dominio y no se cargan acá. '
+                        . 'Este endpoint tampoco instala la tienda ni prende clients.tiene_ecommerce.',
+                ]
+            );
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'client_id'           => 'required|integer|min:1',
+            'confirm_client_name' => 'required|string|max:190',
+            'domain'              => 'required|string|max:190',
+            'spa_url'             => 'nullable|string|max:190',
+            'api_url'             => 'nullable|string|max:190',
+            'dry_run'             => 'nullable|boolean',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        /* --- Freno 2: el cliente. */
+        $client = Client::find((int) $request->input('client_id'));
+        if ($client === null) {
+            return $this->error_404('no existe el cliente ' . (int) $request->input('client_id'));
+        }
+
+        /* --- Freno 3: el nombre, antes de mirar el dominio. Mismo freno y mismo motivo que los dos
+           endpoints de actualización: acá alcanza para atarle a un cliente el dominio de otro. */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se creó nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        /* --- Freno 4: una sola tienda por cliente. La relación es hasOne y todo el pipeline lee
+           `$client->client_ecommerce`: con dos filas, cuál gana depende del orden de inserción. */
+        $existente = $client->client_ecommerce()->first();
+        if ($existente !== null) {
+            return $this->error_422(
+                'El cliente ya tiene una tienda cargada. No se creó nada.',
+                [
+                    'client_id'           => (int) $client->id,
+                    'client_ecommerce_id' => (int) $existente->id,
+                    'domain'              => $existente->resolve_domain(),
+                    'spa_url'             => $existente->spa_url,
+                    'api_url'             => $existente->api_url,
+                    'status'              => $existente->status,
+                    'ayuda'               => 'Si el dominio cambió, se edita desde el modal del cliente en el panel: '
+                        . 'cambiarlo mueve los paths de instalación y eso no se hace a ciegas desde acá.',
+                ]
+            );
+        }
+
+        /* --- Freno 5: el dominio. */
+        $domain = mb_strtolower(trim((string) $request->input('domain')));
+        if (! preg_match(self::PATRON_DE_DOMINIO, $domain)) {
+            return $this->error_422(
+                'El dominio "' . $domain . '" no es un dominio válido. No se creó nada.',
+                [
+                    'ayuda' => 'Va pelado, en minúsculas, sin esquema ni barra final: "mitienda.com.ar".',
+                ]
+            );
+        }
+
+        /* 🔴 Los dominios de la plataforma no entran. La tienda de un cliente vive en SU dominio,
+           comprado por él; un subdominio de comerciocity.com es del ERP y de las demos, y apuntar
+           una tienda ahí la haría convivir con el frente del propio cliente en el mismo docroot.
+           Misma lista y mismo motivo que `hostinger-tienda.php` en el repo de conocimiento. */
+        foreach (self::DOMINIOS_DE_LA_PLATAFORMA as $prohibido) {
+            if ($domain === $prohibido || $this->termina_en($domain, '.' . $prohibido)) {
+                return $this->error_422(
+                    'El dominio "' . $domain . '" es de ComercioCity y no puede ser el de la tienda de un cliente. '
+                        . 'No se creó nada.',
+                    [
+                        'dominios_de_la_plataforma' => self::DOMINIOS_DE_LA_PLATAFORMA,
+                        'ayuda'                     => 'La tienda de un cliente va sobre el dominio propio que compró '
+                            . 'en nic.ar. Los subdominios de la plataforma son del ERP y de las demos.',
+                    ]
+                );
+            }
+        }
+
+        /* --- Freno 6: el dominio no puede estar en otra tienda, sea de cliente o de demo. Se
+           compara contra `domain` y contra `spa_url`, porque una tienda vieja puede tener el
+           dominio sólo en la URL (la columna `domain` se empezó a llenar después). */
+        $ocupado = ClientEcommerce::query()
+            ->where(function ($q) use ($domain) {
+                $q->where('domain', $domain)
+                    ->orWhere('spa_url', 'https://' . $domain)
+                    ->orWhere('spa_url', 'http://' . $domain);
+            })
+            ->first();
+        if ($ocupado !== null) {
+            return $this->error_422(
+                'El dominio "' . $domain . '" ya está cargado en otra tienda. No se creó nada.',
+                [
+                    'client_ecommerce_id' => (int) $ocupado->id,
+                    'client_id'           => $ocupado->client_id === null ? null : (int) $ocupado->client_id,
+                    'demo_id'             => $ocupado->demo_id === null ? null : (int) $ocupado->demo_id,
+                ]
+            );
+        }
+
+        /* Las dos URLs: lo que vino, o la convención del dominio. `normalize_url` es la misma que
+           usa el modal, así que una URL escrita con barra final o sin esquema queda igual que si la
+           hubiera cargado Lucas a mano. */
+        $spa_url = ClientEcommerce::normalize_url($request->input('spa_url'));
+        if ($spa_url === '') {
+            $spa_url = 'https://' . $domain;
+        }
+
+        $api_url = ClientEcommerce::normalize_url($request->input('api_url'));
+        if ($api_url === '') {
+            $api_url = 'https://api.' . $domain;
+        }
+
+        $dry_run = $this->booleano_o_null($request, 'dry_run');
+        if ($dry_run === null) {
+            $dry_run = true;
+        }
+
+        /* Lo que se escribiría, calculado una sola vez y usado tanto para el dry_run como para el
+           alta: si fueran dos cálculos, el simulacro podría mentir. Los paths van en null a
+           propósito — el modelo los deriva del dominio (ver el docblock). */
+        $atributos = [
+            'client_id' => (int) $client->id,
+            'domain'    => $domain,
+            'spa_url'   => $spa_url,
+            'api_url'   => $api_url,
+            'api_path'  => null,
+            'spa_path'  => null,
+            'status'    => self::ESTADO_TIENDA_NUEVA,
+        ];
+
+        if ($dry_run) {
+            $simulada = new ClientEcommerce($atributos);
+            $simulada->status = self::ESTADO_TIENDA_NUEVA;
+
+            return response()->json([
+                'dry_run'      => true,
+                'client_id'    => (int) $client->id,
+                'client_name'  => $client->name,
+                'se_crearia'   => $atributos,
+                'paths_derivados' => [
+                    'spa' => $simulada->derived_spa_path(),
+                    'api' => $simulada->derived_api_path(),
+                ],
+                'nota'         => 'Simulacro: no se escribió nada. Repetí con dry_run=false para crear la tienda. '
+                    . '🔴 Esto sólo REGISTRA la tienda: no instala código, no toca DNS y no prende '
+                    . 'clients.tiene_ecommerce.',
+            ], 200);
+        }
+
+        $tienda = ClientEcommerce::create($atributos);
+
+        return response()->json([
+            'dry_run'             => false,
+            'client_ecommerce_id' => (int) $tienda->id,
+            'client_id'           => (int) $client->id,
+            'client_name'         => $client->name,
+            'domain'              => $tienda->resolve_domain(),
+            'spa_url'             => $tienda->spa_url,
+            'api_url'             => $tienda->api_url,
+            'status'              => $tienda->status,
+            'paths_derivados'     => [
+                'spa' => $tienda->derived_spa_path(),
+                'api' => $tienda->derived_api_path(),
+            ],
+            'tiene_ecommerce'     => (bool) $client->tiene_ecommerce,
+            'nota'                => '🔴 La tienda quedó REGISTRADA, no instalada: no se subió código, no se tocó DNS '
+                . 'y clients.tiene_ecommerce sigue como estaba (se prende cuando la tienda ya funciona). La '
+                . 'instalación inicial no la hace ninguna ruta claude/*.',
+        ], 201);
+    }
+
+    /* ==============================================================================================
      | Frenos y precondiciones
      |============================================================================================= */
+
+    /**
+     * ¿`$texto` termina en `$sufijo`? PHP 7.4: no hay `str_ends_with`.
+     *
+     * @param string $texto  Texto a mirar.
+     * @param string $sufijo Sufijo buscado.
+     *
+     * @return bool
+     */
+    private function termina_en($texto, $sufijo)
+    {
+        $largo = strlen($sufijo);
+
+        return $largo === 0 ? true : (substr($texto, -$largo) === $sufijo);
+    }
 
     /**
      * Freno del nombre: `confirm_client_name` tiene que coincidir con `clients.name`, comparado con
