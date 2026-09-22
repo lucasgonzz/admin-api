@@ -195,14 +195,31 @@ class AsistenteFotoSalienteService
      * un worker que también corre deployments. Para una foto que **ya** es jpeg o png eso es gasto
      * puro: Meta la baja sola, gratis y sin que el admin toque un byte.
      *
-     * Por eso la decisión es por extensión y no por lo que declare nadie: `.jpg`, `.jpeg` y `.png`
-     * salen por link; **todo lo demás, incluida la URL sin extensión, se baja y se mira por los
-     * bytes**. Sin extensión no se puede afirmar nada, y el camino largo es el único que termina en
-     * un rechazo *sincrónico* — o sea, el único que puede contar bien.
+     * Por eso la decisión es por extensión: `.jpg`, `.jpeg` y `.png` salen por link; **todo lo
+     * demás, incluida la URL sin extensión, se baja y se mira por los bytes**. Sin extensión no se
+     * puede afirmar nada, y el camino largo es el único que termina en un rechazo *sincrónico* — o
+     * sea, el único que puede contar bien.
+     *
+     * 🔴 **ESTO ES UNA HEURÍSTICA SOBRE EL NOMBRE DEL ARCHIVO, NO UNA CONFIRMACIÓN DEL FORMATO, Y
+     * LA DIFERENCIA IMPORTA.** El resto de esta clase confirma el tipo por los bytes
+     * ({@see datos_de_los_bytes()}) justamente porque un nombre es lo que alguien escribió. Acá no
+     * se puede: confirmar los bytes exige traerlos, y traerlos es exactamente el viaje que este
+     * camino existe para ahorrar. Para una foto de catálogo de 92 KB, "leer los primeros bytes" y
+     * "bajar el archivo" cuestan casi lo mismo.
+     *
+     * **Lo que queda afuera, dicho sin vueltas: un webp servido detrás de una URL terminada en
+     * `.jpg` sale por link y Meta lo descarta en silencio.** Es el bug original sobreviviendo en
+     * ese único caso, y es el precio de no gastar un viaje por cada foto que ya está bien. Se
+     * acepta porque la extensión la escribe el ERP a partir del archivo que él mismo guardó
+     * (`images.hosting_url`), no un tercero arbitrario — pero **el que sirve el archivo es el
+     * hosting del cliente**, así que la garantía es de convención, no de protocolo.
+     *
+     * Si algún día aparece —el síntoma es el de siempre: `imagenes_por_link` contando envíos que el
+     * dueño nunca recibe—, el arreglo es sacar este atajo y bajar todas. No hay una versión barata.
      *
      * @param string $url URL pública de la foto, tal como la mandó el `empresa-api`.
      *
-     * @return bool true si se puede mandar por link tal cual.
+     * @return bool true si el NOMBRE del archivo dice que Meta lo va a aceptar.
      */
     public function va_por_link(string $url): bool
     {

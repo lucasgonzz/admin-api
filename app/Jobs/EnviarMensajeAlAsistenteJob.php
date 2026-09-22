@@ -771,9 +771,14 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * @param Client                       $client   Cliente dueño del hilo.
      * @param mixed                        $adjuntos Lo que vino en `adjuntos`, tal cual llegó.
      *
+     * `protected` y no `private` porque el conteo que devuelve **es** lo que hay que poder medir:
+     * termina en una línea de log y desde afuera del job no se ve de ninguna otra forma. Una prueba
+     * que sólo mirara los envíos del espía no distinguiría "se descartó y se contó" de "se descartó
+     * en silencio", que es justamente la diferencia que importa acá.
+     *
      * @return array{enviadas: int, fallidas: int, por_link: int, convertidas: int}
      */
-    private function mandar_fotos_de_la_respuesta(
+    protected function mandar_fotos_de_la_respuesta(
         WhatsappSendService $sender,
         AsistenteFotoSalienteService $fotos,
         ClientAssistantMessage $fila,
@@ -802,13 +807,47 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
              * conversion", que Laravel convierte en excepción, y eso es justo lo que acá no puede
              * pasar por un adjunto malformado. */
             if (! is_array($adjunto)) {
+                $cuenta['fallidas']++;
+
+                Log::channel('daily')->warning('AsistenteWhatsapp: se descartó un adjunto que no es un objeto.', [
+                    'assistant_message_id' => $fila->id,
+                    'client_id'            => $client->id,
+                    'recibido'             => gettype($adjunto),
+                ]);
+
                 continue;
             }
 
             $tipo = isset($adjunto['tipo']) && is_string($adjunto['tipo']) ? trim($adjunto['tipo']) : '';
             $url  = isset($adjunto['url']) && is_string($adjunto['url']) ? trim($adjunto['url']) : '';
 
+            /* 🔴 **Un descarte por forma se CUENTA y se LOGUEA, no se saltea en silencio.** Es la
+             * misma clase de error que esta corrección vino a arreglar: si el `continue` no tocara
+             * el conteo, un adjunto con `tipo` "foto" o "Imagen" —cualquier cosa que no sea
+             * `imagen` exacto— desaparecería y la línea final del turno diría
+             * `imagenes_enviadas: 0, imagenes_fallidas: 0`, o sea que salió todo bien.
+             *
+             * Hoy no se dispara porque el `empresa-api` filtra más duro de este lado (su
+             * `es_url_absoluta()` compara con `strpos(...) === 0`, sensible a mayúsculas, y acá la
+             * expresión lleva `i`). Se va a disparar el día que alguien sume un `TIPO_*` nuevo en
+             * `AdjuntosIaHelper` sin enseñárselo al admin — que es exactamente el caso
+             * `manual_tasks` vs `tareas` que este proyecto ya tuvo: la clave mal puesta no rompe
+             * nada, el array llega vacío y el envío informa éxito. Por eso el log lleva el `tipo`
+             * recibido: para que el próximo lo lea en vez de deducirlo. */
             if ($tipo !== 'imagen' || ! preg_match('#^https?://#i', $url)) {
+                $cuenta['fallidas']++;
+
+                Log::channel('daily')->warning('AsistenteWhatsapp: se descartó un adjunto que no tiene la forma esperada.', [
+                    'assistant_message_id' => $fila->id,
+                    'client_id'            => $client->id,
+                    'tipo_recibido'        => mb_strimwidth($tipo, 0, 40, '…'),
+                    'tipo_esperado'        => 'imagen',
+                    /* El host y nada más, con el mismo criterio que el resto de este bloque: no se
+                     * pasean URLs del negocio por el log. Vacío si ni siquiera parsea. */
+                    'origen'               => parse_url($url, PHP_URL_HOST),
+                    'url_absoluta'         => (bool) preg_match('#^https?://#i', $url),
+                ]);
+
                 continue;
             }
 

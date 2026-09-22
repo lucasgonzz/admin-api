@@ -81,12 +81,30 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
             /** @var float Reloj de mentira, en segundos. */
             private $reloj = 0.0;
 
+            /**
+             * @var array<string, int> El conteo del turno, que si no termina sólo en el log. Es lo
+             *                         único que distingue un descarte contado de uno en silencio.
+             */
+            public $conteo = [];
+
             public function __construct(int $mensaje_id, array &$registro, float $paso = 0.0)
             {
                 parent::__construct($mensaje_id);
 
                 $this->registro = &$registro;
                 $this->paso     = $paso;
+            }
+
+            protected function mandar_fotos_de_la_respuesta(
+                \App\Services\WhatsappSendService $sender,
+                \App\Services\AsistenteFotoSalienteService $fotos,
+                \App\Models\ClientAssistantMessage $fila,
+                \App\Models\Client $client,
+                $adjuntos
+            ): array {
+                $this->conteo = parent::mandar_fotos_de_la_respuesta($sender, $fotos, $fila, $client, $adjuntos);
+
+                return $this->conteo;
             }
 
             protected function pausar(int $microsegundos): void
@@ -183,15 +201,21 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
      *
      * @param ClientAssistantMessage $fila
      * @param WhatsappSendService    $espia
+     * @param float                  $paso_del_reloj Cuánto avanza el reloj de mentira por consulta.
      *
-     * @return void
+     * @return EnviarMensajeAlAsistenteJob El job, para poder leerle el conteo del turno.
      */
-    private function tramitar(ClientAssistantMessage $fila, WhatsappSendService $espia, float $paso_del_reloj = 0.0): void
-    {
+    private function tramitar(
+        ClientAssistantMessage $fila,
+        WhatsappSendService $espia,
+        float $paso_del_reloj = 0.0
+    ): EnviarMensajeAlAsistenteJob {
         $job = $this->job_sin_dormir($fila, $paso_del_reloj);
 
         $this->correr_job($job, $espia);
         $this->correr_job($job, $espia);
+
+        return $job;
     }
 
     /**
@@ -907,6 +931,98 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Un adjunto con una forma que no se entiende se CUENTA como fallido, no desaparece.
+     *
+     * Es la misma clase de error que toda esta corrección vino a arreglar: si el descarte no
+     * tocara el conteo, un `tipo` mal escrito dejaría la línea final del turno diciendo
+     * `imagenes_enviadas: 0, imagenes_fallidas: 0` — o sea, "salió todo bien" sobre una respuesta
+     * que perdió sus fotos. Es el caso `manual_tasks` vs `tareas` que este proyecto ya tuvo: la
+     * clave mal puesta no rompe nada y el envío informa éxito.
+     *
+     * Hoy no se dispara porque el `empresa-api` filtra más duro de este lado; se va a disparar el
+     * día que alguien sume un tipo de adjunto nuevo sin enseñárselo al admin.
+     *
+     * @return void
+     */
+    public function test_un_adjunto_con_forma_rara_se_cuenta_como_fallido(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        $this->fakear([
+            ['tipo' => 'Imagen', 'url' => self::HOST_DE_FOTOS . 'a.jpg', 'texto' => 'Con mayúscula'],
+            ['tipo' => 'foto', 'url' => self::HOST_DE_FOTOS . 'b.jpg', 'texto' => 'Otro nombre'],
+            ['tipo' => 'imagen', 'url' => '/storage/c.jpg', 'texto' => 'Relativa'],
+            'ni siquiera es un objeto',
+            $this->adjunto('d.jpg', 'La única buena'),
+        ]);
+
+        $job = $this->tramitar($fila, $espia);
+
+        $fila->refresh();
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RESPONDIDO, $fila->estado);
+
+        /* Sólo la última tiene la forma del contrato: las otras cuatro se descartan. */
+        $this->assertCount(1, $espia->imagenes);
+        $this->assertSame('La única buena', $espia->imagenes[0]['caption']);
+        $this->assertCount(0, $espia->imagenes_subidas);
+
+        /* 🔴 Y ACÁ ESTÁ LO QUE IMPORTA: las cuatro descartadas se CUENTAN. Sin esto, la línea final
+         * del turno diría `imagenes_enviadas: 1, imagenes_fallidas: 0` y nadie se enteraría de que
+         * se perdieron cuatro fotos. Mirar sólo los envíos del espía no distingue un descarte
+         * contado de uno en silencio: los dos dan cero envíos.
+         *
+         * ⚠️ Lo que esta prueba no mira es el CONTENIDO del log (el `tipo` recibido). Mockear la
+         * fachada de `Log` para eso obligaría a interceptar todas las líneas del job, que son
+         * varias y de otros temas. */
+        $this->assertSame(1, $job->conteo['enviadas']);
+        $this->assertSame(4, $job->conteo['fallidas'], 'Las cuatro descartadas por forma se cuentan.');
+        $this->assertSame(1, $job->conteo['por_link']);
+        $this->assertSame(0, $job->conteo['convertidas']);
+    }
+
+    /**
+     * ⚠️ Un webp servido con nombre `.jpg` sale por link. Es el límite conocido, no un objetivo.
+     *
+     * `va_por_link()` mira la EXTENSIÓN, que es el nombre del archivo, y no los bytes: confirmarlos
+     * exigiría traerlos, y traerlos es el viaje que ese camino existe para ahorrar. Así que este
+     * caso —un hosting que sirve webp detrás de un `.jpg`— es el bug original sobreviviendo en un
+     * único lugar, y Meta lo va a descartar en silencio.
+     *
+     * La prueba está para que el límite quede **fijado y visible** en vez de ser una sorpresa: si
+     * mañana se decide cerrarlo (bajando todas las fotos, que es la única forma), esta prueba es la
+     * que hay que dar vuelta, y el que la dé vuelta va a leer acá por qué estaba así.
+     *
+     * @return void
+     */
+    public function test_un_webp_con_nombre_jpg_sale_por_link_y_es_el_limite_conocido(): void
+    {
+        $this->requiere_webp();
+
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente();
+        $fila   = $this->fila_entrante($client);
+
+        /* El archivo es webp de verdad; sólo el nombre dice otra cosa. */
+        $this->fakear(
+            [$this->adjunto('disfrazada.jpg')],
+            ['*/storage/*' => Http::response($this->imagen('webp', 300, 300), 200, ['Content-Type' => 'image/webp'])]
+        );
+
+        $this->tramitar($fila, $espia);
+
+        $this->assertCount(1, $espia->imagenes, 'Sale por link: la extensión dice jpg.');
+        $this->assertCount(0, $espia->imagenes_subidas);
+        $this->assertSame(
+            0,
+            $this->veces_que_se_pidio(self::HOST_DE_FOTOS . 'disfrazada.jpg'),
+            'Y nadie mira los bytes, que es precisamente el límite.'
+        );
+    }
+
+    /**
      * Una respuesta con un jpeg y un webp usa un camino distinto para cada uno, en orden.
      *
      * Es lo observable de los contadores nuevos del log (`imagenes_por_link` e
@@ -931,7 +1047,14 @@ class ConversionDeFotosDelAsistenteTest extends BaseDelCanal
             ['*/storage/precinto-2.webp' => Http::response($this->imagen('webp', 300, 300), 200, ['Content-Type' => 'image/webp'])]
         );
 
-        $this->tramitar($fila, $espia);
+        $job = $this->tramitar($fila, $espia);
+
+        /* Los contadores del log, medidos directo: `por_link` es el optimista —Meta valida
+         * asincrónico— y `convertidas` es el que salió por un rechazo sincrónico y se puede creer. */
+        $this->assertSame(2, $job->conteo['enviadas']);
+        $this->assertSame(0, $job->conteo['fallidas']);
+        $this->assertSame(1, $job->conteo['por_link']);
+        $this->assertSame(1, $job->conteo['convertidas']);
 
         $this->assertCount(1, $espia->imagenes, 'El jpeg va por link.');
         $this->assertSame('El que ya es jpeg', $espia->imagenes[0]['caption']);
