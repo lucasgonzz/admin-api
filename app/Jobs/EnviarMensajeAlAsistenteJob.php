@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Services\AsistenteFotoSalienteService;
 use App\Services\AsistenteImagenesService;
 use App\Services\AsistenteWhatsappService;
 use App\Services\ClientEmpresaApiUrlResolver;
@@ -80,6 +81,21 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * cincuenta mensajes seguidos al dueño.
      */
     const MAXIMO_DE_FOTOS_POR_RESPUESTA = 6;
+
+    /**
+     * Conteo de fotos de un turno, en cero.
+     *
+     * `enviadas` y `fallidas` se leyeron siempre; `por_link` y `convertidas` son por dónde salió
+     * cada una de las enviadas, y existen porque el log mentía: un envío por link se cuenta como
+     * exitoso apenas Meta contesta, y Meta valida el archivo recién después. Ver el bloque donde se
+     * escribe la línea del log.
+     */
+    const CUENTA_DE_FOTOS_EN_CERO = [
+        'enviadas'    => 0,
+        'fallidas'    => 0,
+        'por_link'    => 0,
+        'convertidas' => 0,
+    ];
 
     /**
      * Pausa antes de cada foto, en microsegundos.
@@ -194,6 +210,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * @param ClientEmpresaApiUrlResolver $urls      Resolución de la URL del `empresa-api`.
      * @param WhatsappSendService         $sender    Envío a Kapso/Meta.
      * @param AsistenteImagenesService    $imagenes  Descarga y validación de las fotos del dueño.
+     * @param AsistenteFotoSalienteService $fotos    Cómo tiene que salir cada foto de la respuesta.
      *
      * @return void
      */
@@ -201,7 +218,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         AsistenteWhatsappService $asistente,
         ClientEmpresaApiUrlResolver $urls,
         WhatsappSendService $sender,
-        AsistenteImagenesService $imagenes
+        AsistenteImagenesService $imagenes,
+        AsistenteFotoSalienteService $fotos
     ): void {
         $fila = ClientAssistantMessage::find($this->mensaje_id);
         if ($fila === null) {
@@ -244,7 +262,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
                 return;
             }
 
-            $this->consultar($asistente, $urls, $sender, $fila, $client);
+            $this->consultar($asistente, $urls, $sender, $fotos, $fila, $client);
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('AsistenteWhatsapp: excepción tramitando el mensaje.', [
                 'assistant_message_id' => $fila->id,
@@ -526,11 +544,12 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * La vuelta: pregunta si el asistente ya terminó y, si terminó, le manda el texto al dueño —
      * y después, las fotos que la respuesta traiga adjuntas.
      *
-     * @param AsistenteWhatsappService    $asistente
-     * @param ClientEmpresaApiUrlResolver $urls
-     * @param WhatsappSendService         $sender
-     * @param ClientAssistantMessage      $fila
-     * @param Client                      $client
+     * @param AsistenteWhatsappService     $asistente
+     * @param ClientEmpresaApiUrlResolver  $urls
+     * @param WhatsappSendService          $sender
+     * @param AsistenteFotoSalienteService $fotos     Cómo tiene que salir cada foto de la respuesta.
+     * @param ClientAssistantMessage       $fila
+     * @param Client                       $client
      *
      * @return void
      */
@@ -538,6 +557,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         AsistenteWhatsappService $asistente,
         ClientEmpresaApiUrlResolver $urls,
         WhatsappSendService $sender,
+        AsistenteFotoSalienteService $fotos,
         ClientAssistantMessage $fila,
         Client $client
     ): void {
@@ -669,17 +689,26 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * foto con su epígrafe. Y lo que pase acá no toca ni el estado de la fila ni la fila
          * saliente del texto, que ya quedaron escritos: una foto que no sale es una línea de log,
          * no un turno perdido. */
-        $fotos = ['enviadas' => 0, 'fallidas' => 0];
+        $cuenta_de_fotos = self::CUENTA_DE_FOTOS_EN_CERO;
         if ($whatsapp_message_id !== null) {
-            $fotos = $this->mandar_fotos_de_la_respuesta($sender, $fila, $client, $datos['adjuntos'] ?? []);
+            $cuenta_de_fotos = $this->mandar_fotos_de_la_respuesta($sender, $fotos, $fila, $client, $datos['adjuntos'] ?? []);
         }
 
+        /* 🔴 `por_link` y `convertidas` no son decoración: hasta el 22/9/2026 este log decía
+         * `imagenes_enviadas: 1` para una foto que Meta descartó después, y la única forma de
+         * enterarse era que el dueño avisara. Un envío por link sigue siendo optimista —Meta valida
+         * asincrónico—, así que el próximo que lea esta línea tiene que poder distinguir de una cuál
+         * de los dos caminos tomó cada foto: lo que salió por `convertidas` pasó por un rechazo
+         * sincrónico y ese conteo es real. Las que no son ninguno de los dos (`enviadas` menos
+         * `por_link` menos `convertidas`) son las que se bajaron y ya venían en jpeg o png. */
         Log::channel('daily')->info('AsistenteWhatsapp: respuesta del asistente entregada.', [
             'assistant_message_id' => $fila->id,
             'client_id'            => $client->id,
             'entregada'            => $whatsapp_message_id !== null,
-            'imagenes_enviadas'    => $fotos['enviadas'],
-            'imagenes_fallidas'    => $fotos['fallidas'],
+            'imagenes_enviadas'    => $cuenta_de_fotos['enviadas'],
+            'imagenes_fallidas'    => $cuenta_de_fotos['fallidas'],
+            'imagenes_por_link'    => $cuenta_de_fotos['por_link'],
+            'imagenes_convertidas' => $cuenta_de_fotos['convertidas'],
         ]);
     }
 
@@ -707,20 +736,22 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * foto haría que cada una llegara hasta un minuto después de la anterior, que es lo que tarda
      * el cron en volver a levantar el worker.
      *
-     * @param WhatsappSendService    $sender   Envío a Kapso/Meta.
-     * @param ClientAssistantMessage $fila     Mensaje del dueño que se está respondiendo.
-     * @param Client                 $client   Cliente dueño del hilo.
-     * @param mixed                  $adjuntos Lo que vino en `adjuntos`, tal cual llegó.
+     * @param WhatsappSendService          $sender   Envío a Kapso/Meta.
+     * @param AsistenteFotoSalienteService $fotos    Decide el camino de cada foto y convierte.
+     * @param ClientAssistantMessage       $fila     Mensaje del dueño que se está respondiendo.
+     * @param Client                       $client   Cliente dueño del hilo.
+     * @param mixed                        $adjuntos Lo que vino en `adjuntos`, tal cual llegó.
      *
-     * @return array{enviadas: int, fallidas: int}
+     * @return array{enviadas: int, fallidas: int, por_link: int, convertidas: int}
      */
     private function mandar_fotos_de_la_respuesta(
         WhatsappSendService $sender,
+        AsistenteFotoSalienteService $fotos,
         ClientAssistantMessage $fila,
         Client $client,
         $adjuntos
     ): array {
-        $cuenta = ['enviadas' => 0, 'fallidas' => 0];
+        $cuenta = self::CUENTA_DE_FOTOS_EN_CERO;
 
         if (! is_array($adjuntos) || $adjuntos === []) {
             return $cuenta;
@@ -759,10 +790,18 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
              * conversación y Kapso todavía puede tenerla tomada (ver PAUSA_ANTES_DE_CADA_FOTO_US). */
             $this->pausar(self::PAUSA_ANTES_DE_CADA_FOTO_US);
 
-            $resultado = $this->mandar_una_foto($sender, $fila, $client, $url, $texto !== '' ? $texto : null);
+            $resultado = $this->mandar_una_foto($sender, $fotos, $fila, $client, $url, $texto !== '' ? $texto : null);
 
             if ($resultado['wamid'] !== null) {
                 $cuenta['enviadas']++;
+
+                if ($resultado['por_link']) {
+                    $cuenta['por_link']++;
+                }
+
+                if ($resultado['convertida']) {
+                    $cuenta['convertidas']++;
+                }
 
                 continue;
             }
@@ -772,6 +811,10 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             Log::channel('daily')->warning('AsistenteWhatsapp: una foto de la respuesta no salió.', [
                 'assistant_message_id' => $fila->id,
                 'client_id'            => $client->id,
+                /* Por dónde iba cuando falló: un fallo por link y uno por media_id se arreglan en
+                 * lugares distintos —el primero es de Meta yendo a buscar el archivo, el segundo es
+                 * la descarga del hosting del cliente o la conversión. */
+                'camino'               => $resultado['por_link'] ? 'link' : 'media_id',
                 /*
                  * 🔴 EL ORIGEN DE LA FOTO, NO LA URL ENTERA. Es una URL del catálogo de un cliente
                  * real y el log diario del admin lo leen personas y lo rota el hosting. El mismo
@@ -790,7 +833,13 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     }
 
     /**
-     * Un envío de foto, con un segundo intento si el primero falló por algo transitorio.
+     * Un envío de foto: elige el camino y reintenta una vez si el fallo fue transitorio.
+     *
+     * 🔴 **El camino lo decide el formato, y por qué no hay uno solo está escrito en
+     * {@see AsistenteFotoSalienteService::va_por_link()}.** En dos líneas: por link es más barato
+     * pero Meta valida el archivo *después* de contestar que sí, y descarta el webp —que es el 100 %
+     * de las fotos del catálogo— sin decir nada; convertir todas siempre arregla eso pero le cuesta
+     * dos viajes de red y una pasada de GD a cada foto que ya era jpeg y Meta iba a bajar sola.
      *
      * Transitorio lo decide `WhatsappSendService::last_send_was_transient()` (409 / 429 / 5xx), y el
      * caso central es el 409 de Kapso por la conversación tomada. Un rechazo definitivo —un link
@@ -798,31 +847,95 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * esperar no lo arregla. Una excepción tampoco: el sender ya atrapa las suyas, así que una que
      * llegue hasta acá es algo que no se entiende, y se reporta tal cual.
      *
-     * @param WhatsappSendService    $sender  Envío a Kapso/Meta.
-     * @param ClientAssistantMessage $fila    Mensaje del dueño que se está respondiendo.
-     * @param Client                 $client  Cliente dueño del hilo.
-     * @param string                 $url     URL pública de la foto.
-     * @param string|null            $caption Epígrafe, o null para mandarla sola.
+     * @param WhatsappSendService          $sender  Envío a Kapso/Meta.
+     * @param AsistenteFotoSalienteService $fotos   Decide el camino y convierte.
+     * @param ClientAssistantMessage       $fila    Mensaje del dueño que se está respondiendo.
+     * @param Client                       $client  Cliente dueño del hilo.
+     * @param string                       $url     URL pública de la foto.
+     * @param string|null                  $caption Epígrafe, o null para mandarla sola.
      *
-     * @return array{wamid: string|null, motivo: string|null}
+     * @return array{wamid: string|null, motivo: string|null, por_link: bool, convertida: bool}
      */
     private function mandar_una_foto(
         WhatsappSendService $sender,
+        AsistenteFotoSalienteService $fotos,
         ClientAssistantMessage $fila,
         Client $client,
         string $url,
         ?string $caption
     ): array {
+        $telefono = (string) $fila->telefono;
+        $contexto = 'Asistente por WhatsApp - foto - cliente #' . $client->id;
+
+        if ($fotos->va_por_link($url)) {
+            $resultado = $this->con_reintento_transitorio($sender, function () use ($sender, $telefono, $url, $caption, $contexto) {
+                return $sender->send_image_by_link($telefono, $url, $caption, $contexto);
+            });
+
+            return [
+                'wamid'      => $resultado['wamid'],
+                'motivo'     => $resultado['motivo'],
+                'por_link'   => true,
+                'convertida' => false,
+            ];
+        }
+
+        /* 🔴 Bajar y convertir va FUERA del bucle de reintentos, y no es un detalle: el reintento
+         * existe por el 409 de Kapso —la conversación tomada—, que no tiene nada que ver con los
+         * bytes. Adentro del bucle, cada 409 volvería a pedirle el archivo al hosting del cliente y
+         * a pasarlo por GD para llegar exactamente al mismo JPEG. */
+        try {
+            $preparada = $fotos->preparar($url);
+        } catch (\Throwable $exception) {
+            /* Una foto no puede voltear el turno ni acá: el texto ya salió. */
+            return [
+                'wamid'      => null,
+                'motivo'     => $exception->getMessage(),
+                'por_link'   => false,
+                'convertida' => false,
+            ];
+        }
+
+        if ($preparada['binario'] === null) {
+            return [
+                'wamid'      => null,
+                'motivo'     => $preparada['motivo'],
+                'por_link'   => false,
+                'convertida' => false,
+            ];
+        }
+
+        $binario = (string) $preparada['binario'];
+        $mime    = (string) $preparada['mime'];
+        $nombre  = (string) $preparada['nombre'];
+
+        $resultado = $this->con_reintento_transitorio($sender, function () use ($sender, $telefono, $binario, $mime, $nombre, $caption, $contexto) {
+            return $sender->send_image_by_bytes($telefono, $binario, $mime, $nombre, $caption, $contexto);
+        });
+
+        return [
+            'wamid'      => $resultado['wamid'],
+            'motivo'     => $resultado['motivo'],
+            'por_link'   => false,
+            'convertida' => (bool) $preparada['convertida'],
+        ];
+    }
+
+    /**
+     * Corre un envío y lo repite una vez si el fallo fue de los que se sueltan solos.
+     *
+     * @param WhatsappSendService $sender Para leer el motivo y el status del fallo.
+     * @param callable            $envio  Devuelve el wamid o null, igual que los métodos del sender.
+     *
+     * @return array{wamid: string|null, motivo: string|null}
+     */
+    private function con_reintento_transitorio(WhatsappSendService $sender, callable $envio): array
+    {
         $motivo = null;
 
         for ($intento = 1; $intento <= self::INTENTOS_POR_FOTO; $intento++) {
             try {
-                $wamid = $sender->send_image_by_link(
-                    (string) $fila->telefono,
-                    $url,
-                    $caption,
-                    'Asistente por WhatsApp - foto - cliente #' . $client->id
-                );
+                $wamid = $envio();
             } catch (\Throwable $exception) {
                 return ['wamid' => null, 'motivo' => $exception->getMessage()];
             }

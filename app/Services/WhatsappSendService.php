@@ -1098,8 +1098,12 @@ class WhatsappSendService
         }
 
         $image_payload = ['id' => $media_id];
-        if ($caption !== null && trim($caption) !== '') {
-            $image_payload['caption'] = trim($caption);
+        $caption_text = $caption !== null ? trim($caption) : '';
+        if ($caption_text !== '') {
+            // 1024 es el tope de Meta para el caption de una imagen, igual que en send_image_by_link():
+            // más largo, rechaza el mensaje entero — y acá el epígrafe lo escribe el asistente de un
+            // cliente, así que no hay nadie garantizando el largo del otro lado.
+            $image_payload['caption'] = mb_strimwidth($caption_text, 0, 1024, '…');
         }
 
         $endpoint = $this->messages_endpoint($phone_number_id);

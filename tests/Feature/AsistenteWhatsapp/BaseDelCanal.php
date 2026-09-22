@@ -145,7 +145,8 @@ abstract class BaseDelCanal extends TestCase
             app(\App\Services\AsistenteWhatsappService::class),
             app(\App\Services\ClientEmpresaApiUrlResolver::class),
             $sender,
-            app(\App\Services\AsistenteImagenesService::class)
+            app(\App\Services\AsistenteImagenesService::class),
+            app(\App\Services\AsistenteFotoSalienteService::class)
         );
     }
 
@@ -217,6 +218,14 @@ abstract class BaseDelCanal extends TestCase
 
             /** @var array<int, array<string, mixed>> Envíos de imagen por link (las fotos del asistente). */
             public $imagenes = [];
+
+            /**
+             * @var array<int, array<string, mixed>> Envíos de imagen por media_id: los que pasaron por
+             *                                       la descarga y la conversión. Guarda los BYTES que
+             *                                       habrían viajado, que es lo único que puede decir
+             *                                       que el webp salió convertido a JPEG.
+             */
+            public $imagenes_subidas = [];
 
             /**
              * @var array<int, string> Qué salió y en qué orden (`texto` | `imagen`). Es lo único que
@@ -304,6 +313,49 @@ abstract class BaseDelCanal extends TestCase
                 }
 
                 return 'wamid.imagen.' . count($this->imagenes);
+            }
+
+            public function send_image_by_bytes(
+                string $to,
+                string $contents,
+                string $mime,
+                string $filename,
+                ?string $caption = null,
+                ?string $context = null,
+                bool $skip_failure_notification = true
+            ): ?string {
+                $this->imagenes_subidas[] = [
+                    'to'      => $to,
+                    'bytes'   => $contents,
+                    'mime'    => $mime,
+                    'nombre'  => $filename,
+                    'caption' => $caption,
+                    'context' => $context,
+                ];
+                $this->orden[] = 'imagen';
+
+                $this->last_send_error       = null;
+                $this->last_send_status_code = null;
+
+                if ($this->explota_imagenes) {
+                    throw new \RuntimeException('Kapso reventó subiendo la foto (simulado en la prueba).');
+                }
+
+                if ($this->falla_transitoria_veces > 0) {
+                    $this->falla_transitoria_veces--;
+                    $this->last_send_error       = 'Kapso: otro mensaje en vuelo para esta conversación (409, simulado en la prueba).';
+                    $this->last_send_status_code = 409;
+
+                    return null;
+                }
+
+                if (! $this->confirma_imagenes) {
+                    $this->last_send_error = 'Meta rechazó la foto subida (simulado en la prueba).';
+
+                    return null;
+                }
+
+                return 'wamid.imagen-subida.' . count($this->imagenes_subidas);
             }
         };
 
