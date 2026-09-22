@@ -346,7 +346,14 @@ class TokensPorModeloYProveedorTest extends BaseDelCanal
      * son dos filas; el `auth_user_id` nulo se guarda como 0; la fecha fuera del rango se descarta;
      * y correrlo dos veces reescribe en vez de acumular.
      *
-     * Todo en un solo test a propósito: es UN payload real, y lo que importa es que las cuatro
+     * 🔴 Las filas de Juan están armadas para que `modelo` y `proveedor` se prueben POR SEPARADO:
+     * hay dos con el MISMO proveedor y distinto modelo (Sonnet y Haiku, las dos de Anthropic) y
+     * dos con el MISMO modelo y distinto proveedor (`modelo-compartido` por Anthropic y por
+     * DeepSeek). Con solo un par que difiera en las dos dimensiones a la vez, sacar cualquiera de
+     * las dos de la clave del upsert seguía dando verde —lo encontró el verificador con una
+     * mutación— porque la otra dimensión alcanzaba para distinguirlas.
+     *
+     * Todo en un solo test a propósito: es UN payload real, y lo que importa es que las
      * propiedades convivan en la misma corrida.
      *
      * @return void
@@ -356,9 +363,14 @@ class TokensPorModeloYProveedorTest extends BaseDelCanal
         $client = $this->cliente_consultable();
 
         $personas_modelos = [
-            // Juan, el mismo día, con DOS modelos: tienen que quedar como dos filas.
+            // Juan, el mismo día, mismo proveedor, DOS modelos: sin `modelo` en la clave colapsan.
             $this->fila_persona_modelo('2026-09-16', 3, 'Juan', 'anthropic', 'claude-sonnet-5', 10, 100000, 5000),
+            $this->fila_persona_modelo('2026-09-16', 3, 'Juan', 'anthropic', 'claude-haiku-4-5', 6, 30000, 1500),
+            // Juan, el mismo día, otro proveedor y otro modelo.
             $this->fila_persona_modelo('2026-09-16', 3, 'Juan', 'deepseek', 'deepseek-v4-pro', 4, 50000, 2000),
+            // Juan, el mismo día, el MISMO modelo por dos proveedores: sin `proveedor` en la clave colapsan.
+            $this->fila_persona_modelo('2026-09-16', 3, 'Juan', 'anthropic', 'modelo-compartido', 3, 9000, 300),
+            $this->fila_persona_modelo('2026-09-16', 3, 'Juan', 'deepseek', 'modelo-compartido', 2, 7000, 200),
             // Procesos automáticos: `auth_user_id` viaja en null, tal cual el contrato.
             $this->fila_persona_modelo('2026-09-16', null, null, 'openai', 'text-embedding-3-small', 400, 80000, 0),
             // El cliente contesta de más: un día de 2024 que nadie pidió.
@@ -384,41 +396,72 @@ class TokensPorModeloYProveedorTest extends BaseDelCanal
          * mismo porque las filas de la primera siguen ahí. */
         $this->assertSame(ClientAiTokensSyncService::ESTADO_SUCCESS, $segundo['estado']);
 
-        // Un día + una persona + tres del corte nuevo (la de 2024 se descartó).
-        $this->assertSame(5, $segundo['filas'], 'El contador no suma las filas del corte por modelo.');
+        // Un día + una persona + seis del corte nuevo (la de 2024 se descartó).
+        $this->assertSame(8, $segundo['filas'], 'El contador no suma las filas del corte por modelo.');
 
         $filas = ClientAiTokenUsagePersonModel::where('client_id', $client->id)->get();
 
         $this->assertCount(
-            3,
+            6,
             $filas,
-            'Tenían que quedar tres filas: las dos de Juan (un modelo cada una) y la de los automáticos. '
-            . 'Más de tres es que la segunda corrida acumuló; menos es que dos modelos colapsaron o '
-            . 'que entró la fecha de 2024.'
+            'Tenían que quedar seis filas: las cinco de Juan (una por proveedor y modelo) y la de los '
+            . 'automáticos. Más de seis es que la segunda corrida acumuló; menos es que dos filas '
+            . 'colapsaron (falta `modelo` o `proveedor` en la clave) o que entró la fecha de 2024.'
         );
 
-        $juan_sonnet = ClientAiTokenUsagePersonModel::where('client_id', $client->id)
-            ->where('auth_user_id', 3)
-            ->where('modelo', 'claude-sonnet-5')
-            ->first();
+        /**
+         * Una fila de Juan por proveedor y modelo, o null si no está.
+         *
+         * @param string $proveedor Proveedor.
+         * @param string $modelo    Modelo.
+         *
+         * @return ClientAiTokenUsagePersonModel|null
+         */
+        $fila_de_juan = function (string $proveedor, string $modelo) use ($client) {
+            return ClientAiTokenUsagePersonModel::where('client_id', $client->id)
+                ->where('auth_user_id', 3)
+                ->where('proveedor', $proveedor)
+                ->where('modelo', $modelo)
+                ->first();
+        };
 
-        $juan_deepseek = ClientAiTokenUsagePersonModel::where('client_id', $client->id)
-            ->where('auth_user_id', 3)
-            ->where('modelo', 'deepseek-v4-pro')
-            ->first();
+        $juan_sonnet     = $fila_de_juan('anthropic', 'claude-sonnet-5');
+        $juan_haiku      = $fila_de_juan('anthropic', 'claude-haiku-4-5');
+        $juan_deepseek   = $fila_de_juan('deepseek', 'deepseek-v4-pro');
+        $juan_comp_anth  = $fila_de_juan('anthropic', 'modelo-compartido');
+        $juan_comp_deeps = $fila_de_juan('deepseek', 'modelo-compartido');
 
-        $this->assertNotNull($juan_sonnet, 'La fila de Juan con Sonnet no está: colapsó con la de DeepSeek.');
-        $this->assertNotNull($juan_deepseek, 'La fila de Juan con DeepSeek no está: colapsó con la de Sonnet.');
+        // Mismo proveedor, distinto modelo: si `modelo` no está en la clave, una pisa a la otra.
+        $this->assertNotNull($juan_sonnet, 'La fila de Juan con Sonnet no está: colapsó con la de Haiku (`modelo` fuera de la clave).');
+        $this->assertNotNull($juan_haiku, 'La fila de Juan con Haiku no está: colapsó con la de Sonnet (`modelo` fuera de la clave).');
+
+        // Mismo modelo, distinto proveedor: si `proveedor` no está en la clave, una pisa a la otra.
+        $this->assertNotNull($juan_comp_anth, 'La fila de modelo-compartido por Anthropic no está: colapsó con la de DeepSeek (`proveedor` fuera de la clave).');
+        $this->assertNotNull($juan_comp_deeps, 'La fila de modelo-compartido por DeepSeek no está: colapsó con la de Anthropic (`proveedor` fuera de la clave).');
+
+        $this->assertNotNull($juan_deepseek);
 
         // Cada una con SUS contadores, no con la suma ni con los de la última.
         $this->assertSame(10, $juan_sonnet->llamadas);
         $this->assertSame(100000, $juan_sonnet->input_tokens);
-        $this->assertSame('anthropic', $juan_sonnet->proveedor);
+        $this->assertSame(5000, $juan_sonnet->output_tokens);
         $this->assertSame('2026-09-16', substr((string) $juan_sonnet->fecha, 0, 10));
+
+        $this->assertSame(6, $juan_haiku->llamadas);
+        $this->assertSame(30000, $juan_haiku->input_tokens);
+        $this->assertSame(1500, $juan_haiku->output_tokens);
 
         $this->assertSame(4, $juan_deepseek->llamadas);
         $this->assertSame(50000, $juan_deepseek->input_tokens);
-        $this->assertSame('deepseek', $juan_deepseek->proveedor);
+        $this->assertSame(2000, $juan_deepseek->output_tokens);
+
+        $this->assertSame(3, $juan_comp_anth->llamadas);
+        $this->assertSame(9000, $juan_comp_anth->input_tokens);
+        $this->assertSame(300, $juan_comp_anth->output_tokens);
+
+        $this->assertSame(2, $juan_comp_deeps->llamadas);
+        $this->assertSame(7000, $juan_comp_deeps->input_tokens);
+        $this->assertSame(200, $juan_comp_deeps->output_tokens);
 
         $automatico = ClientAiTokenUsagePersonModel::where('client_id', $client->id)
             ->where('modelo', 'text-embedding-3-small')
