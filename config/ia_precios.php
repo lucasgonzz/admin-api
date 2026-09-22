@@ -5,7 +5,8 @@
 | Precios de la IA, en DÓLARES POR MILLÓN DE TOKENS
 |--------------------------------------------------------------------------
 |
-| Cargados el 17/9/2026 contra la referencia oficial de la API de cada proveedor.
+| Cargados el 17/9/2026 contra la referencia oficial de la API de cada proveedor. Ampliada el
+| 22/9/2026 (misión proveedores-ia-deepseek) con Opus 5 y los dos modelos de DeepSeek.
 |
 | 🔴 Esta tabla vive SOLO en el admin, y esa es la decisión que la hace útil: cuando un proveedor
 | cambia la lista, se corrige acá y listo — no hay que tocar a los cuarenta y cinco clientes ni
@@ -28,8 +29,19 @@
 |   cache_read   → leer un bloque ya cacheado. Regla de Anthropic: **0,1 × input**.
 |
 | ⚠️ El precio de OpenAI (`text-embedding-3-small`) queda **pendiente de confirmación de Lucas**:
-| es el único de esta lista que no se verificó contra la factura real. Los embeddings no tienen
-| salida ni caché, así que esas tres puntas van en 0 y no son un faltante.
+| no se verificó contra la factura real. Los embeddings no tienen salida ni caché, así que esas
+| tres puntas van en 0 y no son un faltante.
+|
+| ⚠️ Lo mismo para `claude-opus-5` y los dos de DeepSeek (`deepseek-flash`, `deepseek-v4-pro`),
+| cargados el 22/9/2026: verificados contra la referencia pública de cada proveedor, pero no
+| contra una factura. Los tres quedan pendientes de confirmación de Lucas.
+|
+| 🔴 DeepSeek cobra LA MITAD fuera de su horario pico (pico = 01–04 y 06–10 UTC, de lunes a
+| viernes; leído de api-docs.deepseek.com/quick_start/pricing el 22/9/2026). El espejo del admin
+| es POR DÍA y no sabe a qué hora fue cada llamada, así que se carga el precio PLENO como cota
+| superior: el gasto real de DeepSeek puede ser hasta la mitad de lo que muestra la pantalla, nunca
+| más. Se prefiere un techo honesto a un promedio inventado. Y DeepSeek no cobra la escritura en
+| caché: su `cache_write` en 0 es el precio real, no un dato faltante.
 |
 */
 
@@ -91,6 +103,20 @@ return [
     ],
 
     /*
+     * Opus 5: el modelo de "Profundo" del asistente desde el 17/9/2026, y hasta el 22/9/2026 NO
+     * estaba en esta lista. O sea que todo lo que gastó Profundo se mostraba sin precio (null): el
+     * renglón se veía, pero la cifra principal lo dejaba afuera. Hallazgo de la misión
+     * proveedores-ia-deepseek, corregido de paso. Caché con la regla de Anthropic: 1,25× y 0,1×.
+     * ⚠️ Pendiente de confirmación de Lucas contra la factura.
+     */
+    'claude-opus-5' => [
+        'input'       => 5.00,
+        'output'      => 25.00,
+        'cache_write' => 6.25,
+        'cache_read'  => 0.50,
+    ],
+
+    /*
      * Embeddings de OpenAI (indexar el catálogo y el RAG de cada respuesta de WhatsApp). Sin
      * salida y sin caché: las tres puntas en 0 son el precio real, no un dato faltante.
      * ⚠️ Pendiente de confirmación de Lucas.
@@ -100,6 +126,31 @@ return [
         'output'      => 0.00,
         'cache_write' => 0.00,
         'cache_read'  => 0.00,
+    ],
+
+    /*
+     * DeepSeek-V4.1-Flash: el "Ágil" cuando el dueño elige DeepSeek (misión
+     * proveedores-ia-deepseek, 22/9/2026). Precio PLENO de hora pico, ver el encabezado: el real
+     * puede ser hasta la mitad. `cache_write` en 0 es el precio real (DeepSeek no cobra escribir la
+     * caché) y `cache_read` es su "cache hit". Leído de api-docs.deepseek.com/quick_start/pricing.
+     * ⚠️ Pendiente de confirmación de Lucas contra la factura.
+     */
+    'deepseek-flash' => [
+        'input'       => 0.30,
+        'output'      => 1.20,
+        'cache_write' => 0.00,
+        'cache_read'  => 0.006,
+    ],
+
+    /*
+     * DeepSeek-V4-Pro: el "Profundo" cuando el dueño elige DeepSeek. Mismas aclaraciones que
+     * `deepseek-flash`: precio pleno de hora pico, caché de escritura gratis, pendiente de factura.
+     */
+    'deepseek-v4-pro' => [
+        'input'       => 1.32,
+        'output'      => 3.96,
+        'cache_write' => 0.00,
+        'cache_read'  => 0.044,
     ],
 
 ];
