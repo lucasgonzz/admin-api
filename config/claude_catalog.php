@@ -1007,6 +1007,28 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'POST api/claude/ecommerce/stores' => [
+            'para_que'     => '🔴 REGISTRA la tienda de un cliente (dominio + las dos URLs) y nada más: no instala código, no toca DNS ni servidores, y no prende clients.tiene_ecommerce. Es el paso que antes sólo se podía hacer desde el modal del cliente en el panel, y que frenaba a la mitad una instalación llevada desde la raíz del pool.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'Lista blanca de parámetros: cualquier cosa de más es 422 y no escribe nada.',
+                'confirm_client_name exacto, sin revelar el nombre correcto cuando falla.',
+                'Un cliente no puede tener dos tiendas: si ya tiene una, 422 con la fila que ya existe.',
+                'El dominio va pelado y válido, y NO puede ser de comerciocity.com/.store/.com.ar: esas zonas son del ERP y de las demos.',
+                'El dominio no puede estar cargado en otra tienda, sea de cliente o de demo.',
+                'dry_run por defecto true: la primera llamada devuelve exactamente lo que escribiría, incluidos los paths derivados.',
+                '🔴 No crea ninguna instalación: registrar la tienda e instalarla son dos operaciones distintas, y la segunda sigue sin ruta claude/*.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente dueño de la tienda. Tiene que existir y no tener ya una tienda cargada.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name), comparado con trim + minúsculas.'],
+                ['nombre' => 'domain', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El dominio propio del cliente, pelado: "mitienda.com.ar". Sin esquema ni barra final.'],
+                ['nombre' => 'spa_url', 'obligatorio' => false, 'validacion' => 'nullable|string|max:190', 'que_es' => 'Default https://{domain}. Se manda explícita sólo si la tienda no vive en la raíz del dominio.'],
+                ['nombre' => 'api_url', 'obligatorio' => false, 'validacion' => 'nullable|string|max:190', 'que_es' => '🔴 Default https://api.{domain}, que es la convención de las tiendas nuevas del shared. El modal del panel, si la dejan vacía, usa la convención VIEJA {spa_url}/api y eso rompe todo lo que sigue sin un solo error visible.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Default true. Con false escribe la fila y devuelve 201.'],
+            ],
+        ],
         'GET api/claude/ecommerce/installations' => [
             'para_que'     => 'Corridas del pipeline de tienda (install o update), paginadas por cursor y filtrables por cliente, modo, estado y origen.',
             'escribe'      => false,

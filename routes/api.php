@@ -374,8 +374,13 @@ Route::middleware('claude.task.key')
            🔴 NINGUNA de estas rutas hace la instalación inicial de una tienda: sólo actualización.
            `ecommerce/updates/batch` se declara ANTES que cualquier ruta con {id}, por lo mismo que
            `upgrades/preview`: para que ninguna la capture si mañana se agrega un
-           POST claude/ecommerce/updates/{id}. */
+           POST claude/ecommerce/updates/{id}.
+           ⚠️ POST ecommerce/stores es la excepción que confirma la regla y conviene leerla dos
+           veces: da de alta la FILA de la tienda (dominio + las dos URLs) y no toca ningún
+           servidor. Registrar que el cliente tiene tienda e instalarla son dos cosas distintas;
+           la segunda sigue sin tener ruta claude/*. */
         Route::get('ecommerce/stores', 'Api\ClaudeEcommerceOpsController@stores_json');
+        Route::post('ecommerce/stores', 'Api\ClaudeEcommerceOpsController@stores_store_json');
         Route::get('ecommerce/installations', 'Api\ClaudeEcommerceOpsController@installations_json');
         Route::get('ecommerce/installations/{id}', 'Api\ClaudeEcommerceOpsController@installation_json');
         Route::get('ecommerce/installations/{id}/logs', 'Api\ClaudeEcommerceOpsController@installation_logs_json');
