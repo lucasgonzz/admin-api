@@ -2883,8 +2883,10 @@ class EcommerceInstallationService
      * en history mode funcione bajo Apache: reescribe a index.html cualquier request que no
      * corresponda a un archivo o directorio real, para que el SPA pueda tomar la ruta interna en
      * vez de que Apache devuelva 404 antes de que el JS llegue a cargar (deep-links y refresh
-     * sobre rutas internas). El build de tienda-spa no emite este archivo, por eso lo escribe el
-     * pipeline de deploy (ver build_spa_atomic_deploy_shell(), prompt 193/01).
+     * sobre rutas internas). Lo escribe el pipeline de deploy (ver build_spa_atomic_deploy_shell(),
+     * prompt 193/01) SOLO cuando el build no trae uno propio: desde la misión seo-tiendas
+     * (23/9/2026) tienda-spa versiona su `public/.htaccess`, que manda las rutas a `seo.php`, y ese
+     * tiene prioridad. Este bloque queda como red para los builds anteriores.
      *
      * @return string
      */
@@ -2996,7 +2998,16 @@ class EcommerceInstallationService
             // es idempotente y auto-repara cualquier tienda vieja cuyo .htaccess se hubiera
             // perdido en un swap anterior (hoy no hay .htaccess custom por cliente; si alguna vez
             // hiciera falta uno distinto por tienda, es otra feature aparte, no tocar esto para eso).
-            . 'printf %s ' . escapeshellarg($htaccess_b64) . ' | base64 -d > "$STAGING/.htaccess"; '
+            //
+            // 🔴 SALVO QUE EL BUILD YA TRAIGA SU PROPIO .htaccess (misión seo-tiendas, 23/9/2026).
+            // Desde esa misión tienda-spa versiona `public/.htaccess`, que manda las rutas a
+            // `seo.php` (la capa que le arma a cada URL su título, descripción, datos estructurados
+            // y contenido para los buscadores) en vez de a `index.html`. Pisarlo con el bloque de
+            // acá apagaba esa capa en silencio: la tienda seguía andando y los buscadores seguían
+            // viendo el HTML vacío. Si el zip lo trae (no vacío) gana el del build; si no (un
+            // tienda-spa anterior), se escribe el de siempre y el comportamiento es el de antes.
+            . 'if [ -s "$STAGING/.htaccess" ]; then echo SPA_HTACCESS_DEL_BUILD; '
+            . 'else printf %s ' . escapeshellarg($htaccess_b64) . ' | base64 -d > "$STAGING/.htaccess"; fi; '
             // Guard: con set -e activo, si por lo que sea el archivo no quedó escrito, cortar la
             // corrida acá en vez de desplegar una tienda que va a dar 404 en cualquier deep-link.
             . 'test -s "$STAGING/.htaccess" || (echo SPA_HTACCESS_MISSING; exit 1); '
