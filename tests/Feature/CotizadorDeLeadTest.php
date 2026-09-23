@@ -267,29 +267,119 @@ class CotizadorDeLeadTest extends TestCase
         $lead = $this->crear_lead();
         $this->con_mercado_pago_ok();
 
-        /* Con un dólar de tres decimales las dos formas de calcular difieren:
-           - por item:  round(1500 * 1000.333, 2) + round(600 * 1000.333, 2)
-                        = 1.500.499,5 + 600.199,8 = 2.100.699,3
-           - por total: round(2100 * 1000.333, 2) = 2.100.699,3
-           Acá dan igual, pero el detalle por item tiene que cerrar exactamente con el total, que
-           es lo que mira quien vende si algo no le cuadra. */
+        /* 🔴 Los valores NO son decorativos: son un caso donde las dos formas de calcular dan
+           distinto de verdad, buscado a propósito. Con dólar 1000,05 y precios 1250,55 + 333,33:
+
+           - por item (lo correcto):  round(1250.55 * 1000.05, 2) + round(333.33 * 1000.05, 2)
+                                      = 1.250.612,53 + 333.346,67 = 1.583.959,20
+           - por total (lo incorrecto): round(1583.88 * 1000.05, 2) = 1.583.959,19
+
+           Un centavo de diferencia. Con valores donde las dos formas coinciden, este test pasaría
+           igual aunque el servidor calculara el total de la forma equivocada — o sea que no
+           probaría nada. La versión anterior de este test tenía justamente ese defecto y lo
+           encontró el chequeo independiente del 22/9/2026. */
         $response = $this->postJson('/api/admin/lead/' . $lead->id . '/cotizacion/link-pago', [
-            'dolar'    => 1000.333,
+            'dolar'    => 1000.05,
             'sistemas' => [
-                ['key' => 'gestion',   'precio_usd' => 1500],
-                ['key' => 'ecommerce', 'precio_usd' => 600],
+                ['key' => 'gestion',   'precio_usd' => 1250.55],
+                ['key' => 'ecommerce', 'precio_usd' => 333.33],
             ],
         ]);
 
         $response->assertStatus(200);
         $cotizacion = $response->json('cotizacion');
 
+        /* El total es el de la suma por item, y NO el de multiplicar el total en dólares. */
+        $this->assertSame(1583959.20, (float) $cotizacion['total_ars']);
+        $this->assertNotSame(1583959.19, (float) $cotizacion['total_ars']);
+
+        /* Y el detalle que ve quien vende cierra exactamente con ese total. */
         $suma_de_items = 0.0;
         foreach ($cotizacion['items'] as $item) {
             $suma_de_items += (float) $item['precio_ars'];
         }
 
         $this->assertSame(round($suma_de_items, 2), (float) $cotizacion['total_ars']);
+
+        /* Y es también lo que se le pide cobrar a Mercado Pago. */
+        Http::assertSent(function ($request) {
+            $items = $request->data()['items'];
+
+            return (float) $items[0]['unit_price'] === 1250612.53
+                && (float) $items[1]['unit_price'] === 333346.67;
+        });
+    }
+
+    /** @test */
+    public function un_precio_con_mas_de_dos_decimales_se_redondea_antes_de_multiplicar()
+    {
+        $this->autenticar();
+        $lead = $this->crear_lead();
+        $this->con_mercado_pago_ok();
+
+        /* 🔴 El caso que encontraron dos chequeos independientes el 22/9/2026. El input del
+           front es `type="number" step="0.01"`, pero un valor que viola el `step` se puede
+           tipear y pegar igual, y la API valida `numeric` sin regla de decimales.
+
+           Redondear el precio ANTES de multiplicar (1500.555 → 1500.56) da 2.176.562,28.
+           Multiplicar crudo y redondear después da 2.176.555,03: $7,25 menos.
+
+           El front hace exactamente lo mismo, así que el número que se ve en pantalla y el que
+           cobra el link coinciden. Si alguien saca este `round()` de un lado solo, este test
+           marca el lado del servidor y el preview queda mintiendo en silencio. */
+        $response = $this->postJson('/api/admin/lead/' . $lead->id . '/cotizacion/link-pago', [
+            'dolar'    => 1450.5,
+            'sistemas' => [
+                ['key' => 'gestion', 'precio_usd' => 1500.555],
+            ],
+        ]);
+
+        $response->assertStatus(200);
+        $cotizacion = $response->json('cotizacion');
+
+        $this->assertSame(1500.56, (float) $cotizacion['items'][0]['precio_usd']);
+        $this->assertSame(2176562.28, (float) $cotizacion['total_ars']);
+        $this->assertNotSame(2176555.03, (float) $cotizacion['total_ars']);
+    }
+
+    /** @test */
+    public function el_total_cotizado_queda_guardado_en_el_precio_del_contrato()
+    {
+        $this->autenticar();
+        $lead = $this->crear_lead();
+        $this->con_mercado_pago_ok();
+
+        /* Lucas pidió que el total llene el campo "Precio total (licencia + implementación)".
+           🔴 Se persiste en el mismo save() que la cotización y no queda como borrador del
+           formulario: si viviera solo en el modal, cerrar el lead sin apretar "Guardar datos del
+           contrato" dejaría el link ya generado por un importe y el contrato diciendo otro. */
+        $this->postJson('/api/admin/lead/' . $lead->id . '/cotizacion/link-pago', [
+            'dolar'    => 1000,
+            'sistemas' => [
+                ['key' => 'gestion',   'precio_usd' => 1500],
+                ['key' => 'ecommerce', 'precio_usd' => 600],
+                ['key' => 'agentes',   'precio_usd' => 600],
+            ],
+        ])->assertStatus(200);
+
+        $lead->refresh();
+        $this->assertSame(2700.0, (float) $lead->contract_precio_licencia);
+        $this->assertSame('USD', $lead->contract_currency);
+    }
+
+    /** @test */
+    public function un_valor_ilegible_guardado_a_mano_en_la_configuracion_cae_al_default()
+    {
+        $this->autenticar();
+
+        /* `admin_settings.value` es TEXT y se puede editar contra la base. Sin la guarda, un
+           "abc" se vuelve (float) 0.0, el clamp lo sube al mínimo, y ComercioCity Gestión
+           pasa a ofrecerse por USD 0,01 en vez de por 1500 — sin un solo error en ningún lado. */
+        AdminSetting::create(['key' => CotizadorSettings::KEY_PRECIO_GESTION, 'value' => 'abc']);
+
+        $this->getJson('/api/admin/settings/cotizador')
+            ->assertStatus(200)
+            ->assertJson(['precio_gestion' => 1500]);
     }
 
     /** @test */

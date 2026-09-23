@@ -110,6 +110,16 @@ class LeadCotizacionController extends Controller
         $lead->contract_cotizacion_link_pago     = $preferencia['link_pago'];
         $lead->contract_cotizacion_preference_id = $preferencia['preference_id'];
         $lead->contract_cotizacion_generada_at   = $generada_at;
+
+        /* 🔴 El precio del contrato se persiste ACÁ y no queda como borrador del formulario.
+           Lucas pidió que al cotizar el total llene el campo "Precio total (licencia +
+           implementación)"; si eso viviera solo en el borrador del modal, cerrar el lead sin
+           apretar "Guardar datos del contrato" dejaría la cotización y el link ya guardados por
+           USD 2.700 y el precio del contrato en el valor viejo, sin que nada avise. Dos cosas que
+           tienen que decir lo mismo no pueden guardarse una sí y la otra no. */
+        $lead->contract_precio_licencia = (string) $cotizacion['total_usd'];
+        $lead->contract_currency        = 'USD';
+
         $lead->save();
 
         /* Los datos del link se suman a la cotización recién acá: CotizadorLeadService es el

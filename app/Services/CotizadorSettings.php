@@ -180,7 +180,7 @@ class CotizadorSettings
      */
     public static function get_precio_gestion(): float
     {
-        return self::clamp_precio((float) AdminSetting::get(self::KEY_PRECIO_GESTION, (string) self::DEFAULT_PRECIO_GESTION));
+        return self::clamp_precio(self::leer_numero(self::KEY_PRECIO_GESTION, self::DEFAULT_PRECIO_GESTION));
     }
 
     /**
@@ -190,7 +190,7 @@ class CotizadorSettings
      */
     public static function get_precio_ecommerce(): float
     {
-        return self::clamp_precio((float) AdminSetting::get(self::KEY_PRECIO_ECOMMERCE, (string) self::DEFAULT_PRECIO_ECOMMERCE));
+        return self::clamp_precio(self::leer_numero(self::KEY_PRECIO_ECOMMERCE, self::DEFAULT_PRECIO_ECOMMERCE));
     }
 
     /**
@@ -200,7 +200,7 @@ class CotizadorSettings
      */
     public static function get_precio_agentes(): float
     {
-        return self::clamp_precio((float) AdminSetting::get(self::KEY_PRECIO_AGENTES, (string) self::DEFAULT_PRECIO_AGENTES));
+        return self::clamp_precio(self::leer_numero(self::KEY_PRECIO_AGENTES, self::DEFAULT_PRECIO_AGENTES));
     }
 
     /**
@@ -210,7 +210,7 @@ class CotizadorSettings
      */
     public static function get_descuento_transferencia(): float
     {
-        return self::clamp_descuento((float) AdminSetting::get(self::KEY_DESCUENTO_TRANSFERENCIA, (string) self::DEFAULT_DESCUENTO_TRANSFERENCIA));
+        return self::clamp_descuento(self::leer_numero(self::KEY_DESCUENTO_TRANSFERENCIA, self::DEFAULT_DESCUENTO_TRANSFERENCIA));
     }
 
     /**
@@ -228,7 +228,7 @@ class CotizadorSettings
             $default = self::DEFAULT_LINK_VENCE_DIAS;
         }
 
-        return self::clamp_link_vence_dias((int) AdminSetting::get(self::KEY_LINK_VENCE_DIAS, (string) $default));
+        return self::clamp_link_vence_dias((int) self::leer_numero(self::KEY_LINK_VENCE_DIAS, (float) $default));
     }
 
     /**
@@ -259,6 +259,31 @@ class CotizadorSettings
     public static function mercado_pago_configurado(): bool
     {
         return trim((string) config('services.mercadopago.admin_access_token', '')) !== '';
+    }
+
+    /**
+     * Lee un número de `admin_settings` y cae al default si lo guardado no es un número.
+     *
+     * 🔴 `admin_settings.value` es TEXT y se puede editar a mano contra la base. Sin este chequeo,
+     * un `"abc"` guardado ahí se convierte en `(float) 0.0`, el clamp lo sube al mínimo, y el
+     * precio de ComercioCity Gestión pasa a ofrecerse por **USD 0,01** en vez de por 1500 — sin
+     * un solo error en ningún lado. Un valor ilegible tiene que caer al default, que es el
+     * comportamiento que alguien esperaría; acotarlo al mínimo es peor que no leerlo.
+     *
+     * @param string $key     Clave de `admin_settings`.
+     * @param float  $default Valor al que se cae si no hay fila o si lo guardado no es numérico.
+     *
+     * @return float
+     */
+    private static function leer_numero(string $key, float $default): float
+    {
+        $guardado = AdminSetting::get($key, null);
+
+        if ($guardado === null || ! is_numeric($guardado)) {
+            return $default;
+        }
+
+        return (float) $guardado;
     }
 
     /**

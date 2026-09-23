@@ -262,10 +262,12 @@ return [
 
         // Solo desarrollo: false evita el error cURL 60. 🔴 En producción SIEMPRE true — por el
         // header Authorization viaja el access token.
-        'verify_ssl' => filter_var(
-            env('MP_VERIFY_SSL', env('ANTHROPIC_VERIFY_SSL', true)),
-            FILTER_VALIDATE_BOOLEAN
-        ),
+        //
+        // 🔴 Y a diferencia de 'ca_bundle', esta NO hereda de ANTHROPIC_VERIFY_SSL. Heredarla
+        // significaría que apagar la verificación de un servicio apaga en silencio la del
+        // request que lleva la credencial de cobro, sin que nadie lo haya pedido. El CA bundle
+        // sí se hereda porque es la misma ruta a un archivo y no baja ninguna defensa.
+        'verify_ssl' => filter_var(env('MP_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
     // Pipeline de instalación/actualización del ecommerce (tienda-spa + tienda-api), prompt 584.

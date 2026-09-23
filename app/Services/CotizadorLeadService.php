@@ -66,7 +66,13 @@ class CotizadorLeadService
                 continue;
             }
 
-            $precio_usd = round((float) $elegido['precio_usd'], 2);
+            // 🔴 El precio se redondea a 2 decimales ANTES de multiplicar, y el front hace
+            // exactamente lo mismo. No es cosmético: con `1500.555 * 1450.5`, redondear después
+            // en vez de antes da $7,25 de diferencia sobre el total en pesos — y esos $7,25
+            // serían justamente la brecha entre el número que quien vende dicta por WhatsApp y
+            // el que termina cobrando el link. Lo encontraron dos chequeos independientes el
+            // 22/9/2026, cada uno por su lado.
+            $precio_usd = isset($elegido['precio_usd']) ? round((float) $elegido['precio_usd'], 2) : 0.0;
             $precio_ars = round($precio_usd * $dolar, 2);
 
             $items[] = [

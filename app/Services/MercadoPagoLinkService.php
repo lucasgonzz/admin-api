@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Carbon\Carbon;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -125,11 +126,17 @@ class MercadoPagoLinkService
 
         try {
             $response = $http->post($base_url.'/checkout/preferences', $payload);
-        } catch (\Throwable $e) {
+        } catch (ConnectionException $e) {
             // Falla de transporte (Mercado Pago caído, DNS, timeout, TLS). Se traduce a un motivo
             // legible en vez de dejar salir un 500: quien está cotizando tiene que poder leer qué
             // pasó y reintentar. El mensaje de Guzzle trae la URI, que no tiene ningún secreto
             // adentro justamente porque el token va por header.
+            //
+            // 🔴 Se captura ConnectionException y NO \Throwable a propósito. Con \Throwable, un
+            // error de programación acá adentro —un método que no existe, un tipo mal pasado—
+            // salía como "No se pudo contactar a Mercado Pago" y un 422 que nadie mira, en vez de
+            // un 500 que alguien tiene que arreglar. Un bug disfrazado de problema de red es un
+            // bug que vive para siempre.
             throw new \RuntimeException('No se pudo contactar a Mercado Pago: '.$e->getMessage());
         }
 
