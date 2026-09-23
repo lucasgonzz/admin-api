@@ -221,6 +221,53 @@ return [
         'webhook_secret' => env('KAPSO_WEBHOOK_SECRET', ''),
     ],
 
+    // Mercado Pago: link de cobro de la cotización del sistema que se arma desde la solapa
+    // Contrato de un lead (misión cotizador-lead-mercado-pago, 22/9/2026).
+    //
+    // Es la cuenta de ComercioCity, no la del cliente: lo que se cobra acá es la licencia + la
+    // implementación que se le vende al lead. El admin no tenía ninguna credencial de Mercado Pago
+    // antes de esta misión; la carga Lucas en el `.env` de producción. Sin ella, el endpoint
+    // responde 422 diciendo exactamente eso y no toca el lead.
+    'mercadopago' => [
+        // Access token de la cuenta de ComercioCity (Mercado Pago → Tus integraciones → Credenciales).
+        //
+        // 🔴 Nunca se loguea, ni entero ni parcial ni un prefijo, y no viaja jamás por query
+        // string: Guzzle copia la URI completa adentro del mensaje de sus excepciones de
+        // transporte, así que un token en la URL termina escrito en el laravel.log el día que
+        // Mercado Pago no responda. Va siempre en el header Authorization. Y tampoco vuelve en
+        // ninguna respuesta de la API: hacia el front sale un booleano y nada más
+        // (`mercado_pago_configurado`). Mismo criterio que 'kapso.api_key' y 'hostinger.api_token'.
+        'admin_access_token' => env('MP_ADMIN_ACCESS_TOKEN', ''),
+
+        // Base de la API, sin barra final. El path completo lo arma MercadoPagoLinkService.
+        'base_url' => env('MP_API_BASE_URL', 'https://api.mercadopago.com'),
+
+        // Cuotas sin interés de la preferencia. 3 es lo que pidió Lucas y lo que su cuenta tiene
+        // habilitado; que salgan SIN interés depende de la cuenta, no de este número.
+        'cuotas' => (int) env('MP_CUOTAS', 3),
+
+        // Días que vive el link antes de vencer. Una cotización hecha con el dólar de hoy no puede
+        // seguir cobrando dentro de dos meses. El valor efectivo lo manda la configuración del
+        // panel (CotizadorSettings); esto es el piso si nadie la tocó nunca.
+        'link_vence_dias' => (int) env('MP_LINK_VENCE_DIAS', 7),
+
+        // Segundos de espera de la llamada HTTP a Mercado Pago.
+        'timeout' => (int) env('MP_API_TIMEOUT', 20),
+
+        // Configuración TLS, calcada de 'anthropic' y 'hostinger': WAMP/Windows puede necesitar
+        // apuntar el CA bundle a mano o el handshake falla con "unable to get local issuer
+        // certificate". Si no se define, se reusa ANTHROPIC_CAINFO (el mismo archivo en la máquina
+        // de desarrollo).
+        'ca_bundle' => env('MP_CAINFO', env('ANTHROPIC_CAINFO')),
+
+        // Solo desarrollo: false evita el error cURL 60. 🔴 En producción SIEMPRE true — por el
+        // header Authorization viaja el access token.
+        'verify_ssl' => filter_var(
+            env('MP_VERIFY_SSL', env('ANTHROPIC_VERIFY_SSL', true)),
+            FILTER_VALIDATE_BOOLEAN
+        ),
+    ],
+
     // Pipeline de instalación/actualización del ecommerce (tienda-spa + tienda-api), prompt 584.
     // Reutiliza las credenciales SSH 'vps' y 'shared_hosting' ya usadas por 'deploy' (empresa);
     // solo agrega las rutas propias de los repos de tienda en el VPS de builds.

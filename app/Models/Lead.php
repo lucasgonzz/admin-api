@@ -375,6 +375,14 @@ class Lead extends Model
         // 18/9/2026). Int porque va al PDF en letras y se copia al cliente para hacer cuentas.
         'contract_meses_actualizacion'       => 'integer',
 
+        // Foto de la cotización del sistema hecha desde la solapa Contrato (misión
+        // cotizador-lead-mercado-pago, 22/9/2026): [{key, label, precio_usd, precio_ars}].
+        'contract_cotizacion_items'          => 'array',
+
+        // Cuándo se generó el link de pago. Con el cast, el front recibe la fecha en el mismo
+        // formato que el resto de los timestamps del lead.
+        'contract_cotizacion_generada_at'    => 'datetime',
+
         // Resumen estructurado generado por Claude: {empresa, situacion_actual, funcionalidades, puntos_dolor}
         'demo_summary_structured'      => 'array',
 
