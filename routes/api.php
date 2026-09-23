@@ -683,6 +683,11 @@ Route::prefix('admin')->group(function () {
         // llamada. Es de sólo lectura y lo poléa el panel cada 10s mientras el lead está adentro.
         Route::get('lead/{id}/demo-roadmap', [LeadController::class, 'demo_roadmap_json']);
 
+        // Cotizador del sistema (misión cotizador-lead-mercado-pago, 22/9/2026): recalcula el
+        // total desde los precios recibidos, pide la preferencia a Mercado Pago y guarda la foto
+        // de la cotización en el lead. Nunca acepta un `total` que venga del navegador.
+        Route::post('lead/{id}/cotizacion/link-pago', [\App\Http\Controllers\Api\LeadCotizacionController::class, 'generar_link']);
+
         // Reemisión/revocación del token de ingreso a la demo (grupo 233, prompt 05): misma
         // autenticación/permisos que el resto de las acciones del panel del lead (auth:sanctum).
         Route::post('lead/{id}/demo-token/reemitir', [LeadController::class, 'reemitir_demo_token_json']);
@@ -922,6 +927,12 @@ Route::prefix('admin')->group(function () {
         // Configuración de demos: duración, márgenes de setup/gracia y tiempos de automatizaciones.
         Route::get('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'show']);
         Route::put('settings/lead-demo', [\App\Http\Controllers\Api\LeadDemoSettingsController::class, 'update']);
+
+        // Configuración del cotizador del sistema: precios por defecto de los tres sistemas,
+        // descuento por transferencia y días de vigencia del link de pago. El GET también
+        // devuelve `mercado_pago_configurado` (booleano derivado; el access token nunca viaja).
+        Route::get('settings/cotizador', [\App\Http\Controllers\Api\CotizadorSettingsController::class, 'show']);
+        Route::put('settings/cotizador', [\App\Http\Controllers\Api\CotizadorSettingsController::class, 'update']);
 
         // Multimedia editable de la demo (grupo 300, prompt 02): un GET pinta toda la pantalla
         // (slots del catálogo sincronizado + URLs cargadas) y un PUT guarda/borra la URL de un slot.
