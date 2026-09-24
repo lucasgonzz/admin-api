@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 /**
  * Un paquete de suscripción de IA de ComercioCity (misión foto-sucursal-y-asistente-configurable,
- * 17/9/2026): un precio en dólares y los dos topes mensuales/diarios que viajan a la instancia de
+ * 17/9/2026): un precio en dólares y los topes mensuales/diarios que viajan a la instancia de
  * cada cliente que lo tenga asignado.
  *
  * Ver la migración `create_ai_plans_table` para por qué los topes son nullable (null = sin tope, no
@@ -17,6 +17,9 @@ use Illuminate\Database\Eloquent\Model;
  * @property float       $precio_usd                 Precio mensual en dólares.
  * @property int|null    $tope_tokens_mensual        Tope de tokens del mes; null/0 = sin tope.
  * @property int|null    $tope_interacciones_diarias Tope de interacciones diarias; null/0 = sin tope.
+ * @property int|null    $tope_busquedas_web_diarias Tope diario de búsquedas por código de barras con
+ *                                                   búsqueda web por negocio (24/9/2026); null/0 =
+ *                                                   el defecto de empresa (30), NO sin tope.
  * @property bool        $activo                     Si se ofrece en el ABM (baja lógica).
  * @property int         $orden                      Orden de presentación.
  */
@@ -40,6 +43,7 @@ class AiPlan extends Model
         'precio_usd'                 => 'decimal:2',
         'tope_tokens_mensual'        => 'integer',
         'tope_interacciones_diarias' => 'integer',
+        'tope_busquedas_web_diarias' => 'integer',
         'activo'                     => 'boolean',
         'orden'                      => 'integer',
     ];

@@ -98,7 +98,10 @@ class AiPlanController extends Controller
      * Valida el cuerpo de un alta/edición.
      *
      * El `nombre` es único (es lo que hace idempotente al seeder y lo que evita dos "Básico"): en la
-     * edición se ignora el propio id. Los dos topes son nullable —null o 0 = sin tope— y enteros.
+     * edición se ignora el propio id. Los dos topes de consumo son nullable —null o 0 = sin tope— y
+     * enteros. El tope de búsquedas web diarias (24/9/2026) también es nullable y entero, pero ahí
+     * null o 0 NO es "sin tope": es el defecto de 30 que aplica empresa. Si no viene en el alta,
+     * la columna toma su default (30).
      *
      * @param Request  $request
      * @param int|null $ignorar_id Id a excluir de la regla `unique` en la edición.
@@ -118,6 +121,7 @@ class AiPlanController extends Controller
             'precio_usd'                 => ['required', 'numeric', 'min:0'],
             'tope_tokens_mensual'        => ['nullable', 'integer', 'min:0'],
             'tope_interacciones_diarias' => ['nullable', 'integer', 'min:0'],
+            'tope_busquedas_web_diarias' => ['nullable', 'integer', 'min:0'],
             'activo'                     => ['boolean'],
             'orden'                      => ['nullable', 'integer'],
         ]);

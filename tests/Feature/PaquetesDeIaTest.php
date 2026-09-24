@@ -400,4 +400,145 @@ class PaquetesDeIaTest extends BaseDelCanal
         $this->assertSame('success', $client->ai_plan_sync_status);
         $this->assertNotNull($client->ai_plan_synced_at);
     }
+
+    /**
+     * El tope de búsquedas web diarias (misión asistente-fotos-barras-y-compras, 24/9/2026): el alta
+     * lo guarda si viene, y si no viene la columna toma su default de 30 (decisión de Lucas).
+     *
+     * @return void
+     */
+    public function test_alta_guarda_el_tope_de_busquedas_web_y_sin_el_toma_30(): void
+    {
+        $this->admin_logueado();
+
+        $con_valor = $this->postJson('/api/admin/ai-plan', [
+            'nombre'                     => 'Con búsquedas',
+            'precio_usd'                 => 100,
+            'tope_busquedas_web_diarias' => 45,
+        ]);
+
+        $con_valor->assertStatus(201);
+        $this->assertDatabaseHas('ai_plans', [
+            'id'                         => (int) $con_valor->json('ai_plan.id'),
+            'tope_busquedas_web_diarias' => 45,
+        ]);
+
+        $sin_valor = $this->postJson('/api/admin/ai-plan', [
+            'nombre'     => 'Sin búsquedas',
+            'precio_usd' => 100,
+        ]);
+
+        $sin_valor->assertStatus(201);
+        $this->assertSame(30, AiPlan::findOrFail((int) $sin_valor->json('ai_plan.id'))->tope_busquedas_web_diarias);
+
+        // El listado del ABM lo devuelve, que es de donde lo lee la pantalla.
+        $topes = [];
+        foreach ($this->getJson('/api/admin/ai-plan')->json('ai_plans') as $plan) {
+            $topes[$plan['nombre']] = $plan['tope_busquedas_web_diarias'];
+        }
+
+        $this->assertSame(45, $topes['Con búsquedas']);
+        $this->assertSame(30, $topes['Sin búsquedas']);
+    }
+
+    /**
+     * La edición pisa el tope de búsquedas web, acepta vaciarlo (null = el defecto de empresa) y
+     * rechaza un negativo.
+     *
+     * @return void
+     */
+    public function test_edicion_del_tope_de_busquedas_web(): void
+    {
+        $this->admin_logueado();
+
+        $plan = $this->sembrar_plan('Pro', 200000000, 150);
+
+        $this->putJson('/api/admin/ai-plan/' . $plan->id, [
+            'nombre'                     => 'Pro',
+            'precio_usd'                 => 400,
+            'tope_busquedas_web_diarias' => 80,
+        ])->assertStatus(200);
+
+        $plan->refresh();
+        $this->assertSame(80, $plan->tope_busquedas_web_diarias);
+
+        $this->putJson('/api/admin/ai-plan/' . $plan->id, [
+            'nombre'                     => 'Pro',
+            'precio_usd'                 => 400,
+            'tope_busquedas_web_diarias' => null,
+        ])->assertStatus(200);
+
+        $plan->refresh();
+        $this->assertNull($plan->tope_busquedas_web_diarias);
+
+        $this->putJson('/api/admin/ai-plan/' . $plan->id, [
+            'nombre'                     => 'Pro',
+            'precio_usd'                 => 400,
+            'tope_busquedas_web_diarias' => -1,
+        ])->assertStatus(422);
+    }
+
+    /**
+     * 🔴 El PUT lleva la CUARTA clave exacta del contrato, `tope_busquedas_web_diarias`, con el valor
+     * del paquete asignado, además de las tres de siempre.
+     *
+     * @return void
+     */
+    public function test_asignar_paquete_pushea_el_tope_de_busquedas_web(): void
+    {
+        $this->admin_logueado();
+
+        $this->fakear_http(['*admin-sync/plan-ia*' => Http::response(['ok' => true], 200)]);
+
+        $client = $this->crear_cliente();
+        $plan   = $this->sembrar_plan('Básico', 20000000, 20);
+        $plan->tope_busquedas_web_diarias = 30;
+        $plan->save();
+
+        $this->postJson('/api/admin/client/' . $client->id . '/ai-plan', [
+            'ai_plan_id' => $plan->id,
+        ])->assertStatus(200);
+
+        Http::assertSent(function ($request) {
+            $body = $request->data();
+
+            return $request->method() === 'PUT'
+                && Str::contains($request->url(), 'admin-sync/plan-ia')
+                && array_key_exists('nombre', $body)
+                && array_key_exists('tope_tokens_mensual', $body)
+                && array_key_exists('tope_interacciones_diarias', $body)
+                && array_key_exists('tope_busquedas_web_diarias', $body)
+                && $body['tope_busquedas_web_diarias'] === 30;
+        });
+    }
+
+    /**
+     * 🔴 Sin paquete, la cuarta clave también viaja, en null (del lado de empresa = su defecto de 30).
+     *
+     * @return void
+     */
+    public function test_desasignar_manda_el_tope_de_busquedas_web_en_null(): void
+    {
+        $this->admin_logueado();
+
+        $this->fakear_http(['*admin-sync/plan-ia*' => Http::response(['ok' => true], 200)]);
+
+        $client = $this->crear_cliente();
+        $plan   = $this->sembrar_plan('Básico');
+
+        $client->ai_plan_id = $plan->id;
+        $client->save();
+
+        $this->postJson('/api/admin/client/' . $client->id . '/ai-plan', [
+            'ai_plan_id' => null,
+        ])->assertStatus(200);
+
+        Http::assertSent(function ($request) {
+            $body = $request->data();
+
+            return Str::contains($request->url(), 'admin-sync/plan-ia')
+                && array_key_exists('tope_busquedas_web_diarias', $body)
+                && $body['tope_busquedas_web_diarias'] === null;
+        });
+    }
 }

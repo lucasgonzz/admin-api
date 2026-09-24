@@ -33,7 +33,7 @@ use Illuminate\Support\Facades\Http;
  *     `no_soportado`, pero el estado dice QUÉ pasó y el mensaje dice a DÓNDE ir.
  *
  *  4. **El push es idempotente.** Mandar el mismo plan dos veces deja al cliente exactamente igual:
- *     el receptor pisa las tres columnas del dueño con lo que llega. Por eso el barrido nocturno
+ *     el receptor pisa las columnas del plan del dueño con lo que llega. Por eso el barrido nocturno
  *     puede reenviar sin miedo, y por eso un cliente que estuvo caído se recupera solo en la corrida
  *     siguiente sin cola de reintentos.
  */
@@ -74,7 +74,7 @@ class ClientAiPlanSyncService
     /**
      * Empuja al `empresa-api` del cliente el paquete que tiene asignado.
      *
-     * 🔴 Si el cliente NO tiene paquete (`ai_plan_id` nulo), se manda igual, con las tres claves en
+     * 🔴 Si el cliente NO tiene paquete (`ai_plan_id` nulo), se manda igual, con las claves en
      * null: eso es un DESTOPE explícito del lado del cliente, no un "no hacer nada". Quitarle el
      * paquete a un cliente tiene que llegar a su instancia como "ahora sin tope", no quedar colgado.
      *
@@ -216,15 +216,22 @@ class ClientAiPlanSyncService
     }
 
     /**
-     * Arma el cuerpo del PUT con las TRES claves EXACTAS del contrato.
+     * Arma el cuerpo del PUT con las CUATRO claves EXACTAS del contrato.
      *
      * 🔴 Los nombres son parte del contrato y el otro lado los lee con `$request->input('nombre')`,
-     * etc.: renombrar cualquiera de los tres en el camino es justo donde este proyecto ya se quemó
-     * (`manual_tasks` vs `tareas`). Si el cliente no tiene paquete, los tres van en null (destope).
+     * etc.: renombrar cualquiera de las cuatro en el camino es justo donde este proyecto ya se quemó
+     * (`manual_tasks` vs `tareas`). Si el cliente no tiene paquete, las cuatro van en null (destope
+     * de los dos topes de consumo; en las búsquedas web, null = el defecto de 30 de empresa).
+     *
+     * La cuarta, `tope_busquedas_web_diarias` (misión asistente-fotos-barras-y-compras, 24/9/2026),
+     * es OPCIONAL del lado de empresa y por eso se puede mandar a todo el parque sin romper a nadie:
+     * un `empresa-api` viejo la ignora (su `PlanIaController` valida y lee solo las otras tres, y
+     * contesta 200 igual), y un `empresa-api` nuevo que no la recibe (admin viejo) no toca su columna
+     * y aplica el defecto de 30.
      *
      * @param Client $client Cliente dueño.
      *
-     * @return array{nombre: string|null, tope_tokens_mensual: int|null, tope_interacciones_diarias: int|null}
+     * @return array{nombre: string|null, tope_tokens_mensual: int|null, tope_interacciones_diarias: int|null, tope_busquedas_web_diarias: int|null}
      */
     protected function cuerpo_del_plan(Client $client)
     {
@@ -237,6 +244,7 @@ class ClientAiPlanSyncService
                 'nombre'                     => null,
                 'tope_tokens_mensual'        => null,
                 'tope_interacciones_diarias' => null,
+                'tope_busquedas_web_diarias' => null,
             ];
         }
 
@@ -244,6 +252,7 @@ class ClientAiPlanSyncService
             'nombre'                     => $plan->nombre,
             'tope_tokens_mensual'        => $plan->tope_tokens_mensual,
             'tope_interacciones_diarias' => $plan->tope_interacciones_diarias,
+            'tope_busquedas_web_diarias' => $plan->tope_busquedas_web_diarias,
         ];
     }
 
