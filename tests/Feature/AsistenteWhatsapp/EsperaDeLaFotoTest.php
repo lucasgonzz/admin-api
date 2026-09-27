@@ -938,22 +938,51 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     }
 
     /**
-     * 13. La foto que espera otro dueño (de otro cliente) no se la lleva nadie más.
+     * 13 a. Mismo teléfono, OTRO cliente: la foto que espera en un cliente no se la lleva un
+     *       mensaje del otro.
+     *
+     * Es el dueño de dos comercios con el mismo número. El webhook resuelve un solo cliente por
+     * teléfono, así que el caso se arma llamando a `recibir()` con cada cliente: es la frontera que
+     * cuida el reclamo, y no depende de cómo el webhook elija.
      *
      * @return void
      */
-    public function test_la_foto_de_otro_dueno_no_se_reclama(): void
+    public function test_la_foto_de_otro_cliente_con_el_mismo_telefono_no_se_reclama(): void
     {
-        $this->crear_cliente(self::TELEFONO);
-        $this->crear_cliente('+5493417654321');
+        $comercio_a = $this->crear_cliente(self::TELEFONO);
+        $comercio_b = $this->crear_cliente(self::TELEFONO);
 
-        $this->postear_webhook($this->payload_de_foto('wamid.FOTO-OTRO', '1', null, null, '+5493417654321'))
-            ->assertStatus(200);
-        $this->postear_webhook(
-            $this->payload_de_texto(self::TELEFONO, 'Cuánto vendí ayer?', 'wamid.TEXTO1')
-        )->assertStatus(200);
+        $servicio = app(AsistenteWhatsappService::class);
+        $servicio->recibir($this->parsed_de_foto('wamid.FOTO-B', '1', self::TELEFONO), $comercio_b);
+        $servicio->recibir($this->parsed_de_texto('wamid.TEXTO-A', 'Cuánto vendí ayer?', self::TELEFONO), $comercio_a);
 
-        $foto = $this->fila('wamid.FOTO-OTRO');
+        $foto = $this->fila('wamid.FOTO-B');
+        $this->assertSame((int) $comercio_b->id, (int) $foto->client_id);
+        $this->assertSame(ClientAssistantMessage::ESTADO_ESPERANDO, $foto->estado);
+        $this->assertNull($foto->agrupado_en_id);
+        $this->assertNotNull($this->media_cruda($foto));
+
+        list(, $del_texto) = $this->jobs();
+        $this->assertSame([], $this->imagenes_del_job($del_texto));
+    }
+
+    /**
+     * 13 b. Mismo cliente, OTRO teléfono: la foto que mandó un número no se pega al mensaje de otro.
+     *
+     * El dueño es el par cliente + teléfono. Con el mismo cliente y otro número, la foto es de otra
+     * persona (o de otro celular) y no tiene nada que ver con lo que escribe este.
+     *
+     * @return void
+     */
+    public function test_la_foto_de_otro_telefono_del_mismo_cliente_no_se_reclama(): void
+    {
+        $client = $this->crear_cliente(self::TELEFONO);
+
+        $servicio = app(AsistenteWhatsappService::class);
+        $servicio->recibir($this->parsed_de_foto('wamid.FOTO-OTRO-CEL', '1', '+5493419999999'), $client);
+        $servicio->recibir($this->parsed_de_texto('wamid.TEXTO1', 'Cuánto vendí ayer?', self::TELEFONO), $client);
+
+        $foto = $this->fila('wamid.FOTO-OTRO-CEL');
         $this->assertSame(ClientAssistantMessage::ESTADO_ESPERANDO, $foto->estado);
         $this->assertNull($foto->agrupado_en_id);
         $this->assertNotNull($this->media_cruda($foto));
@@ -1000,11 +1029,10 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     /**
      * Payload de una foto entrante, con epígrafe y cita opcionales.
      *
-     * @param string      $wamid    ID del mensaje.
-     * @param string      $sufijo   Para que cada foto tenga su URL.
-     * @param string|null $caption  Epígrafe, o null para una foto sola.
-     * @param string|null $cita     wamid citado, si el mensaje cita alguno.
-     * @param string      $telefono Remitente.
+     * @param string      $wamid   ID del mensaje.
+     * @param string      $sufijo  Para que cada foto tenga su URL.
+     * @param string|null $caption Epígrafe, o null para una foto sola.
+     * @param string|null $cita    wamid citado, si el mensaje cita alguno.
      *
      * @return array<string, mixed>
      */
@@ -1012,9 +1040,10 @@ class EsperaDeLaFotoTest extends BaseDelCanal
         string $wamid,
         string $sufijo,
         ?string $caption = null,
-        ?string $cita = null,
-        string $telefono = self::TELEFONO
+        ?string $cita = null
     ): array {
+        $telefono = self::TELEFONO;
+
         $imagen = [
             'id'        => 'media.foto.' . $sufijo,
             'mime_type' => 'image/jpeg',
@@ -1065,6 +1094,55 @@ class EsperaDeLaFotoTest extends BaseDelCanal
                 'kapso'     => ['transcript' => ['text' => $transcripcion]],
                 'timestamp' => (string) time(),
             ],
+        ];
+    }
+
+    /**
+     * Una foto sin epígrafe ya parseada, con la forma que deja `parse_inbound_message()`.
+     *
+     * Para las pruebas que llaman a `recibir()` sin pasar por el webhook.
+     *
+     * @param string $wamid    ID del mensaje.
+     * @param string $sufijo   Para que cada foto tenga su URL.
+     * @param string $telefono Remitente.
+     *
+     * @return array<string, mixed>
+     */
+    private function parsed_de_foto(string $wamid, string $sufijo, string $telefono): array
+    {
+        return [
+            'from'                => $telefono,
+            'message_id'          => $wamid,
+            'type'                => 'image',
+            'body'                => null,
+            'inbound_media'       => [
+                'url'               => $this->url_de_foto($sufijo),
+                'mime'              => 'image/jpeg',
+                'filename'          => null,
+                'whatsapp_media_id' => 'media.foto.' . $sufijo,
+            ],
+            'reply_to_message_id' => null,
+        ];
+    }
+
+    /**
+     * Un texto ya parseado, con la forma que deja `parse_inbound_message()`.
+     *
+     * @param string $wamid    ID del mensaje.
+     * @param string $texto    Lo que escribió.
+     * @param string $telefono Remitente.
+     *
+     * @return array<string, mixed>
+     */
+    private function parsed_de_texto(string $wamid, string $texto, string $telefono): array
+    {
+        return [
+            'from'                => $telefono,
+            'message_id'          => $wamid,
+            'type'                => 'text',
+            'body'                => $texto,
+            'inbound_media'       => null,
+            'reply_to_message_id' => null,
         ];
     }
 
