@@ -120,6 +120,7 @@ class ClaudeQueryDePipelinesTest extends BaseDePipelines
 
         $sin = $this->consultar(['model' => 'pipeline_activity', 'opportunity_id' => $escenario['abierta']['id']]);
         $sin->assertStatus(200);
+        $this->assertNotEmpty($sin->json('data'), 'Sin filas, el recorrido de abajo no afirmaría nada.');
         foreach ($sin->json('data') as $fila) {
             $this->assertArrayNotHasKey('body', $fila);
             $this->assertArrayNotHasKey('data', $fila);
@@ -146,8 +147,10 @@ class ClaudeQueryDePipelinesTest extends BaseDePipelines
         $this->assertSame('Perdido', $cambio->json('data.0.to_stage_name'));
 
         $oportunidad = $this->consultar(['model' => 'pipeline_opportunity', 'ids' => $escenario['abierta']['id']])->assertStatus(200);
+        $this->assertCount(1, $oportunidad->json('data'));
         $this->assertArrayNotHasKey('next_action_note', $oportunidad->json('data.0'));
         $this->assertSame('2026-09-30 15:00:00', $oportunidad->json('data.0.next_action_at'));
+        $this->assertSame('manual', $oportunidad->json('data.0.next_action_source'));
 
         $con_contenido = $this->consultar(['model' => 'pipeline_opportunity', 'ids' => $escenario['abierta']['id'], 'include' => 'contenido'])->assertStatus(200);
         $this->assertSame('Llamar al dueño', $con_contenido->json('data.0.next_action_note'));
@@ -169,6 +172,8 @@ class ClaudeQueryDePipelinesTest extends BaseDePipelines
             'include'     => 'etapa,lead',
         ])->assertStatus(200);
 
+        $this->assertNotEmpty($con_etapa->json('data'), 'Sin filas, los recorridos de abajo no afirmarían nada.');
+
         $tipos = [];
         foreach ($con_etapa->json('data') as $fila) {
             $tipos[$fila['id']] = $fila['etapa']['type'];
@@ -176,12 +181,15 @@ class ClaudeQueryDePipelinesTest extends BaseDePipelines
         $this->assertSame('open', $tipos[$escenario['abierta']['id']]);
         $this->assertSame('lost', $tipos[$escenario['perdida']['id']]);
 
+        $leads_vistos = 0;
         foreach ($con_etapa->json('data') as $fila) {
             if ($fila['lead'] !== null) {
+                $leads_vistos++;
                 $this->assertArrayNotHasKey('uuid', $fila['lead'], 'El uuid del lead es una credencial: no viaja por la relación.');
                 $this->assertArrayNotHasKey('phone', $fila['lead']);
             }
         }
+        $this->assertSame(1, $leads_vistos, 'La oportunidad perdida es de un lead: la relación tuvo que venir.');
 
         $abiertas = $this->consultar(['model' => 'pipeline_opportunity', 'pipeline_id' => $pipeline->id, 'sin_cerrar' => 1])->assertStatus(200);
         $this->assertSame([$escenario['abierta']['id']], array_column($abiertas->json('data'), 'id'));

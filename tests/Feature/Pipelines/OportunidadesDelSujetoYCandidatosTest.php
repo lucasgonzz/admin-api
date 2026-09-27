@@ -3,6 +3,7 @@
 namespace Tests\Feature\Pipelines;
 
 use App\Models\Client;
+use App\Models\LeadPipelineStatus;
 use Illuminate\Support\Str;
 
 /**
@@ -188,11 +189,62 @@ class OportunidadesDelSujetoYCandidatosTest extends BaseDePipelines
         $this->assertContains(['slug' => 'nuevo', 'label' => 'Nuevo'], $estados);
         $this->assertContains(['slug' => 'contactado', 'label' => 'Contactado'], $estados);
         $this->assertNotContains('mail2_enviado', array_column($estados, 'slug'), 'Oculto de filtros en todo el admin.');
+        $this->assertSame($this->opciones_del_catalogo(), $estados, 'Los estados salen de options_for_meta(), no de una copia.');
 
         $contactados = $this->getJson('/api/admin/pipelines/' . $pipeline->id . '/candidates?type=lead&lead_status=contactado&q=' . $marca)
             ->assertStatus(200)
             ->json('candidates');
         $this->assertSame([$sin_nombre->id, $solo_contacto->id], array_column($contactados, 'id'));
+    }
+
+    /**
+     * 9. R3: la etiqueta del estado de un lead usa el criterio de `LeadPipelineStatus::label_for()`
+     *    (la del catálogo si la fila existe, si no el slug humanizado), y `lead_statuses` sigue al
+     *    catálogo cuando la tabla tiene filas.
+     *
+     * @return void
+     */
+    public function test_etiqueta_de_estado_con_el_criterio_de_label_for(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $marca    = 'Est' . Str::random(8);
+
+        LeadPipelineStatus::query()->where('slug', 'contactado')->delete();
+        LeadPipelineStatus::create(['slug' => 'contactado', 'label' => 'Ya lo contactamos', 'color' => '#adb5bd', 'sort_order' => 0]);
+
+        $del_catalogo = $this->crear_lead(['company_name' => 'Uno ' . $marca, 'status' => 'contactado']);
+        $inventado    = $this->crear_lead(['company_name' => 'Dos ' . $marca, 'status' => 'estado_inventado']);
+
+        $respuesta = $this->getJson('/api/admin/pipelines/' . $pipeline->id . '/candidates?type=lead&q=' . $marca)->assertStatus(200);
+
+        $por_id = [];
+        foreach ($respuesta->json('candidates') as $candidato) {
+            $por_id[$candidato['id']] = $candidato['status_label'];
+        }
+
+        $this->assertSame(LeadPipelineStatus::label_for('contactado'), $por_id[$del_catalogo->id]);
+        $this->assertSame('Ya lo contactamos', $por_id[$del_catalogo->id]);
+        $this->assertSame(LeadPipelineStatus::label_for('estado_inventado'), $por_id[$inventado->id]);
+        $this->assertSame('Estado inventado', $por_id[$inventado->id]);
+
+        $this->assertContains(['slug' => 'contactado', 'label' => 'Ya lo contactamos'], $respuesta->json('lead_statuses'));
+        $this->assertSame($this->opciones_del_catalogo(), $respuesta->json('lead_statuses'));
+    }
+
+    /**
+     * Lo que `lead_statuses` tiene que publicar: `options_for_meta()` con las claves del contrato.
+     *
+     * @return array<int, array{slug: string, label: string}>
+     */
+    private function opciones_del_catalogo()
+    {
+        $opciones = [];
+        foreach (LeadPipelineStatus::options_for_meta() as $opcion) {
+            $opciones[] = ['slug' => $opcion['value'], 'label' => $opcion['text']];
+        }
+
+        return $opciones;
     }
 
     /**

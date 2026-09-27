@@ -391,6 +391,46 @@ class AgendaYTableroTest extends BaseDePipelines
     }
 
     /**
+     * 8. `pasaron` cuenta oportunidades DISTINTAS: una que entra dos veces a la misma etapa (ida y
+     *    vuelta) cuenta 1, no 2. Y la que volvió a "Por contactar" cuenta 1 ahí aunque haya entrado
+     *    por el alta y por un movimiento.
+     *
+     * @return void
+     */
+    public function test_pasaron_cuenta_una_vez_aunque_entre_dos_veces(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+
+        $ida_y_vuelta = $this->alta_de_uno($pipeline, $this->crear_cliente());
+        $una_vez      = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $contactado = $this->etapa($pipeline, 'Contactado')->id;
+        $calificado = $this->etapa($pipeline, 'Calificado')->id;
+
+        $this->mover($ida_y_vuelta['id'], ['stage_id' => $contactado, 'fields' => ['canal' => 'WhatsApp']])->assertStatus(200);
+        $this->mover($ida_y_vuelta['id'], ['stage_id' => $this->etapa($pipeline, 'Por contactar')->id])->assertStatus(200);
+        $this->mover($ida_y_vuelta['id'], ['stage_id' => $contactado, 'fields' => ['canal' => 'Llamada']])->assertStatus(200);
+        $this->mover($ida_y_vuelta['id'], ['stage_id' => $calificado, 'fields' => ['usa_sistema' => true]])->assertStatus(200);
+
+        $this->mover($una_vez['id'], ['stage_id' => $contactado, 'fields' => ['canal' => 'Llamada']])->assertStatus(200);
+
+        $nombres = [];
+        foreach ($pipeline->stages as $etapa) {
+            $nombres[$etapa->id] = $etapa->name;
+        }
+
+        $embudo = [];
+        foreach ($this->getJson('/api/admin/pipelines/' . $pipeline->id . '/opportunities')->assertStatus(200)->json('resumen.por_etapa') as $fila) {
+            $embudo[$nombres[$fila['stage_id']]] = ['ahora' => $fila['ahora'], 'pasaron' => $fila['pasaron']];
+        }
+
+        $this->assertSame(['ahora' => 0, 'pasaron' => 2], $embudo['Por contactar']);
+        $this->assertSame(['ahora' => 1, 'pasaron' => 2], $embudo['Contactado'], 'La de ida y vuelta entró dos veces y cuenta una.');
+        $this->assertSame(['ahora' => 1, 'pasaron' => 1], $embudo['Calificado']);
+    }
+
+    /**
      * 7. `days_in_stage`: días enteros entre la entrada a la etapa y ahora.
      *
      * @return void

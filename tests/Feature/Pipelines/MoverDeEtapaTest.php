@@ -469,4 +469,378 @@ class MoverDeEtapaTest extends BaseDePipelines
 
         $this->assertSame(PipelineStage::query()->where('name', 'Contactado')->where('pipeline_id', $pipeline->id)->value('id'), $this->oportunidad($op['id'])->stage_id);
     }
+
+    /* ------------------------------------------------------------------------------------------
+     | Ronda de arreglos R1: la próxima acción no queda pegada de la etapa anterior
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Las actividades `next_action` de una oportunidad, de la más vieja a la más nueva.
+     *
+     * @param int $oportunidad_id
+     *
+     * @return array<int, array<string, mixed>> `data` de cada una.
+     */
+    private function cambios_de_proxima_accion($oportunidad_id)
+    {
+        return PipelineActivity::query()
+            ->where('opportunity_id', $oportunidad_id)
+            ->where('type', PipelineActivity::TYPE_NEXT_ACTION)
+            ->orderBy('id')
+            ->get()
+            ->map(function (PipelineActivity $actividad) {
+                return ['from' => $actividad->data['from'], 'to' => $actividad->data['to'], 'note' => $actividad->data['note']];
+            })
+            ->all();
+    }
+
+    /**
+     * 14. R1.3 (se conserva): una próxima acción MANUAL y FUTURA sobrevive a un movimiento que no la
+     *     toca, y la oportunidad lo avisa con `next_action_carries_over`. No hay actividad
+     *     `next_action` porque no cambió nada.
+     *
+     * @return void
+     */
+    public function test_la_proxima_accion_manual_futura_se_conserva_al_mover(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $antes = $this->putJson('/api/admin/pipeline-opportunities/' . $op['id'], [
+            'next_action_at'   => '2026-09-29 11:00',
+            'next_action_note' => 'Llamar al dueño',
+        ])->assertStatus(200);
+        $this->assertSame('manual', $antes->json('opportunity.next_action_source'));
+        $this->assertTrue($antes->json('opportunity.next_action_carries_over'));
+
+        $respuesta = $this->mover($op['id'], [
+            'stage_id' => $this->etapa($pipeline, 'Contactado')->id,
+            'fields'   => ['canal' => 'Llamada'],
+        ]);
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('2026-09-29 11:00:00', $respuesta->json('opportunity.next_action_at'));
+        $this->assertSame('Llamar al dueño', $respuesta->json('opportunity.next_action_note'));
+        $this->assertSame('manual', $respuesta->json('opportunity.next_action_source'));
+        $this->assertTrue($respuesta->json('opportunity.next_action_carries_over'));
+
+        /* Solo la del PUT: el movimiento no cambió la próxima acción. */
+        $this->assertCount(1, $this->cambios_de_proxima_accion($op['id']));
+    }
+
+    /**
+     * 15. R1.3 (se borra): una próxima acción manual que YA VENCIÓ no sobrevive al movimiento: se
+     *     borra entera y queda una actividad `next_action` con el mismo `occurred_at` que el cambio
+     *     de etapa. La última actividad de la tarjeta sigue siendo el movimiento.
+     *
+     * @return void
+     */
+    public function test_una_proxima_accion_manual_vencida_se_borra_al_mover(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $vencida = $this->putJson('/api/admin/pipeline-opportunities/' . $op['id'], [
+            'next_action_at'   => '2026-09-26 18:00',
+            'next_action_note' => 'Mandar el video',
+        ])->assertStatus(200);
+        $this->assertSame('overdue', $vencida->json('opportunity.agenda_bucket'));
+        $this->assertFalse($vencida->json('opportunity.next_action_carries_over'), 'Vencida: no se arrastra.');
+
+        $this->clavar_reloj('2026-09-27 10:15:00');
+
+        $respuesta = $this->mover($op['id'], [
+            'stage_id' => $this->etapa($pipeline, 'Contactado')->id,
+            'fields'   => ['canal' => 'WhatsApp'],
+            'note'     => 'Le escribí',
+        ]);
+
+        $respuesta->assertStatus(200);
+        $this->assertNull($respuesta->json('opportunity.next_action_at'));
+        $this->assertNull($respuesta->json('opportunity.next_action_note'));
+        $this->assertNull($respuesta->json('opportunity.next_action_source'));
+        $this->assertFalse($respuesta->json('opportunity.next_action_carries_over'));
+        $this->assertSame('none', $respuesta->json('opportunity.agenda_bucket'));
+
+        $cambios = $this->cambios_de_proxima_accion($op['id']);
+        $this->assertSame(['from' => '2026-09-26 18:00:00', 'to' => null, 'note' => null], end($cambios));
+
+        $ultima_de_proxima = PipelineActivity::query()->where('opportunity_id', $op['id'])->where('type', 'next_action')->orderByDesc('id')->first();
+        $this->assertSame('2026-09-27 10:15:00', $ultima_de_proxima->occurred_at->format('Y-m-d H:i:s'));
+        $this->assertSame('stage_change', $respuesta->json('opportunity.last_activity.type'));
+        $this->assertSame('Le escribí', $respuesta->json('opportunity.last_activity.body'));
+    }
+
+    /**
+     * 16. R1.3 (se borra): la próxima acción que puso la AGENDA de la etapa que se deja (la fecha
+     *     de la reunión) no sobrevive al pasar a una etapa sin agenda, aunque sea futura. Es el
+     *     defecto que motivó R1.
+     *
+     * @return void
+     */
+    public function test_la_agenda_de_la_etapa_que_se_deja_no_sobrevive(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $agendada = $this->mover($op['id'], [
+            'stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id,
+            'fields'   => ['fecha_reunion' => '2026-09-30 15:00'],
+        ])->assertStatus(200);
+        $this->assertSame('agenda', $agendada->json('opportunity.next_action_source'));
+        $this->assertFalse($agendada->json('opportunity.next_action_carries_over'), 'La de la agenda no se arrastra.');
+
+        $respuesta = $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Calificado')->id, 'fields' => ['usa_sistema' => true]]);
+
+        $respuesta->assertStatus(200);
+        $this->assertNull($respuesta->json('opportunity.next_action_at'));
+        $this->assertNull($respuesta->json('opportunity.next_action_note'));
+        $this->assertNull($respuesta->json('opportunity.next_action_source'));
+        $this->assertSame(
+            [['from' => '2026-09-30 15:00:00', 'to' => null, 'note' => null]],
+            $this->cambios_de_proxima_accion($op['id']),
+            'Una sola actividad next_action: la del borrado (la de la agenda no se registra aparte).'
+        );
+    }
+
+    /**
+     * 17. R1.2: una etapa con campo agenda OPCIONAL que queda vacío no es la regla 1: si el payload
+     *     trae `next_action_at`, se aplica (manual) con su nota y deja su actividad.
+     *
+     * @return void
+     */
+    public function test_agenda_opcional_vacia_con_next_action_at_en_el_payload_se_aplica(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $seguimiento = $this->postJson('/api/admin/pipelines/' . $pipeline->id . '/stages', [
+            'name'   => 'Seguimiento',
+            'fields' => [['key' => 'volver_a_llamar', 'label' => 'Volver a llamar', 'type' => 'datetime', 'agenda' => true]],
+        ])->assertStatus(201)->json('stage.id');
+
+        $respuesta = $this->mover($op['id'], [
+            'stage_id'         => $seguimiento,
+            'fields'           => ['volver_a_llamar' => ''],
+            'next_action_at'   => '2026-10-03 10:00',
+            'next_action_note' => 'Preguntar por la demo',
+        ]);
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('2026-10-03 10:00:00', $respuesta->json('opportunity.next_action_at'));
+        $this->assertSame('Preguntar por la demo', $respuesta->json('opportunity.next_action_note'));
+        $this->assertSame('manual', $respuesta->json('opportunity.next_action_source'));
+        $this->assertTrue($respuesta->json('opportunity.next_action_carries_over'));
+        $this->assertSame([], $respuesta->json('activity.data'), 'El campo agenda vacío no va a la foto.');
+        $this->assertSame(
+            [['from' => null, 'to' => '2026-10-03 10:00:00', 'note' => 'Preguntar por la demo']],
+            $this->cambios_de_proxima_accion($op['id'])
+        );
+    }
+
+    /**
+     * 18. Nota de próxima acción sin fecha: 422 en `errors.next_action_at` con el texto del
+     *     contrato, tanto con la clave en null (R1.2) como sin la clave (R1.3). No se mueve nada.
+     *
+     * @return void
+     */
+    public function test_nota_de_proxima_accion_sin_fecha_da_422_al_mover(): void
+    {
+        $this->admin_logueado();
+        $pipeline   = $this->crear_pipeline();
+        $op         = $this->alta_de_uno($pipeline, $this->crear_cliente());
+        $contactado = $this->etapa($pipeline, 'Contactado')->id;
+
+        $sin_clave = $this->mover($op['id'], [
+            'stage_id'         => $contactado,
+            'fields'           => ['canal' => 'WhatsApp'],
+            'next_action_note' => 'Llamar',
+        ]);
+        $sin_clave->assertStatus(422);
+        $this->assertSame(['next_action_at' => ['Poné la fecha de la próxima acción.']], $sin_clave->json('errors'));
+        $this->assertSame('Poné la fecha de la próxima acción.', $sin_clave->json('message'));
+
+        $en_null = $this->mover($op['id'], [
+            'stage_id'         => $contactado,
+            'fields'           => ['canal' => 'WhatsApp'],
+            'next_action_at'   => null,
+            'next_action_note' => 'Llamar',
+        ]);
+        $en_null->assertStatus(422);
+        $this->assertSame(['next_action_at' => ['Poné la fecha de la próxima acción.']], $en_null->json('errors'));
+
+        $this->assertSame('Por contactar', $this->oportunidad($op['id'])->stage->name);
+    }
+
+    /**
+     * 19. La actividad `next_action` del mover: SÍ por R1.2 (payload), por R1.3 (borrado) y por
+     *     cerrar; NO por R1.1 (agenda), que ya queda en la foto del cambio de etapa.
+     *
+     * @return void
+     */
+    public function test_actividad_next_action_al_mover_por_regla_2_regla_3_y_cierre_y_no_por_regla_1(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        /* R1.1: la agenda la fija, sin actividad aparte. */
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id, 'fields' => ['fecha_reunion' => '2026-09-30 15:00']])
+            ->assertStatus(200);
+        $this->assertSame([], $this->cambios_de_proxima_accion($op['id']), 'Por R1.1 no hay actividad next_action.');
+
+        /* R1.2: la del payload, con actividad. */
+        $this->mover($op['id'], [
+            'stage_id'         => $this->etapa($pipeline, 'Contactado')->id,
+            'fields'           => ['canal' => 'Llamada'],
+            'next_action_at'   => '2026-10-05 10:00',
+            'next_action_note' => 'Mandar la propuesta',
+        ])->assertStatus(200);
+
+        /* R1.1 otra vez (sin actividad) y después R1.3: la de la agenda se borra, con actividad. */
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id, 'fields' => ['fecha_reunion' => '2026-10-01 09:00']])
+            ->assertStatus(200);
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Calificado')->id, 'fields' => ['usa_sistema' => false]])
+            ->assertStatus(200);
+
+        /* Una manual futura y después cerrar: se borra, con actividad. */
+        $this->putJson('/api/admin/pipeline-opportunities/' . $op['id'], ['next_action_at' => '2026-10-10 10:00', 'next_action_note' => 'Insistir'])
+            ->assertStatus(200);
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Ganado')->id, 'fields' => ['paquete' => 'Pro']])
+            ->assertStatus(200);
+
+        $this->assertSame([
+            ['from' => '2026-09-30 15:00:00', 'to' => '2026-10-05 10:00:00', 'note' => 'Mandar la propuesta'],
+            ['from' => '2026-10-01 09:00:00', 'to' => null, 'note' => null],
+            ['from' => null, 'to' => '2026-10-10 10:00:00', 'note' => 'Insistir'],
+            ['from' => '2026-10-10 10:00:00', 'to' => null, 'note' => null],
+        ], $this->cambios_de_proxima_accion($op['id']));
+    }
+
+    /**
+     * 20. `next_action_at` se ignora SIN validarlo cuando no se aplica: moviendo a una perdida o a
+     *     una ganada, y cuando la agenda de la etapa trae valor (R1.1).
+     *
+     * @return void
+     */
+    public function test_next_action_at_mal_formado_se_ignora_si_no_se_aplica(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $this->mover($op['id'], [
+            'stage_id'       => $this->etapa($pipeline, 'Perdido')->id,
+            'lost_reason'    => 'Precio',
+            'next_action_at' => 'cuando pueda',
+        ])->assertStatus(200)->assertJsonPath('opportunity.next_action_at', null);
+
+        $this->mover($op['id'], [
+            'stage_id'       => $this->etapa($pipeline, 'Ganado')->id,
+            'next_action_at' => ['no', 'es', 'una', 'fecha'],
+        ])->assertStatus(200)->assertJsonPath('opportunity.next_action_at', null);
+
+        /* Reabrir hacia una etapa con agenda: manda la agenda y lo del payload no se mira. */
+        $this->mover($op['id'], [
+            'stage_id'       => $this->etapa($pipeline, 'Reunión agendada')->id,
+            'fields'         => ['fecha_reunion' => '2026-10-02 16:30'],
+            'next_action_at' => '2026-99-99T25:00:00.000Z',
+        ])->assertStatus(200)
+            ->assertJsonPath('opportunity.next_action_at', '2026-10-02 16:30:00')
+            ->assertJsonPath('opportunity.next_action_source', 'agenda');
+    }
+
+    /**
+     * 21. `closed_at` al mover ENTRE cerradas (ganada ↔ perdida): se vuelve a escribir con la hora
+     *     del movimiento (regla 5), y el motivo sigue a la etapa.
+     *
+     * @return void
+     */
+    public function test_closed_at_al_mover_entre_cerradas(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Ganado')->id])
+            ->assertStatus(200)
+            ->assertJsonPath('opportunity.closed_at', '2026-09-27 10:00:00');
+
+        $this->clavar_reloj('2026-09-27 12:00:00');
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Perdido')->id, 'lost_reason' => 'Se arrepintió'])
+            ->assertStatus(200)
+            ->assertJsonPath('opportunity.closed_at', '2026-09-27 12:00:00')
+            ->assertJsonPath('opportunity.lost_reason', 'Se arrepintió');
+
+        $this->clavar_reloj('2026-09-27 13:00:00');
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Ganado')->id])
+            ->assertStatus(200)
+            ->assertJsonPath('opportunity.closed_at', '2026-09-27 13:00:00')
+            ->assertJsonPath('opportunity.lost_reason', null);
+    }
+
+    /**
+     * 22. Reapertura hacia una etapa con agenda obligatoria: la exige (422 en su campo) y, con la
+     *     fecha, reabre y fija la próxima acción desde la agenda.
+     *
+     * @return void
+     */
+    public function test_reapertura_hacia_una_etapa_con_agenda(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+        $reunion  = $this->etapa($pipeline, 'Reunión agendada')->id;
+
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Perdido')->id, 'lost_reason' => 'No es el momento'])->assertStatus(200);
+
+        $sin_fecha = $this->mover($op['id'], ['stage_id' => $reunion]);
+        $sin_fecha->assertStatus(422);
+        $this->assertSame(['fields.fecha_reunion'], array_keys($sin_fecha->json('errors')));
+        $this->assertNotNull($this->oportunidad($op['id'])->closed_at, 'Un 422 no reabre.');
+
+        $respuesta = $this->mover($op['id'], ['stage_id' => $reunion, 'fields' => ['fecha_reunion' => '2026-10-01 11:00']]);
+        $respuesta->assertStatus(200);
+        $this->assertNull($respuesta->json('opportunity.closed_at'));
+        $this->assertNull($respuesta->json('opportunity.lost_reason'));
+        $this->assertSame('2026-10-01 11:00:00', $respuesta->json('opportunity.next_action_at'));
+        $this->assertSame('Reunión agendada', $respuesta->json('opportunity.next_action_note'));
+        $this->assertSame('agenda', $respuesta->json('opportunity.next_action_source'));
+    }
+
+    /**
+     * 23. R3: un número infinito (`1e999`) es 422 en su campo, no un 500 al serializar la
+     *     respuesta. Se manda el JSON crudo porque PHP no puede codificar INF para `postJson`.
+     *
+     * @return void
+     */
+    public function test_un_numero_infinito_da_422_y_no_500(): void
+    {
+        $this->admin_logueado();
+        $pipeline   = $this->crear_pipeline();
+        $op         = $this->alta_de_uno($pipeline, $this->crear_cliente());
+        $calificado = $this->etapa($pipeline, 'Calificado')->id;
+
+        $crudo = $this->call(
+            'POST',
+            '/api/admin/pipeline-opportunities/' . $op['id'] . '/move',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json', 'HTTP_ACCEPT' => 'application/json'],
+            '{"stage_id": ' . $calificado . ', "fields": {"empleados": 1e999, "usa_sistema": true}}'
+        );
+        $crudo->assertStatus(422);
+        $this->assertArrayHasKey('fields.empleados', $crudo->json('errors'));
+
+        $como_texto = $this->mover($op['id'], ['stage_id' => $calificado, 'fields' => ['empleados' => '1e999', 'usa_sistema' => true]]);
+        $como_texto->assertStatus(422);
+        $this->assertArrayHasKey('fields.empleados', $como_texto->json('errors'));
+
+        $this->assertSame('Por contactar', $this->oportunidad($op['id'])->stage->name);
+    }
 }

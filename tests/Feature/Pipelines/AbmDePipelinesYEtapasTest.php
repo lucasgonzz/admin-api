@@ -219,6 +219,10 @@ class AbmDePipelinesYEtapasTest extends BaseDePipelines
         $ajeno[0] = $otro->stages->first()->id;
         $this->putJson('/api/admin/pipelines/' . $pipeline->id . '/stage-order', ['stage_ids' => $ajeno])->assertStatus(422);
 
+        $vacio = $this->putJson('/api/admin/pipelines/' . $pipeline->id . '/stage-order', ['stage_ids' => []]);
+        $vacio->assertStatus(422);
+        $this->assertArrayHasKey('stage_ids', $vacio->json('errors'));
+
         /* El orden bueno quedó: los 422 no tocaron nada. */
         $this->assertSame($invertido, PipelineStage::query()->where('pipeline_id', $pipeline->id)->orderBy('sort_order')->pluck('id')->all());
     }
@@ -372,6 +376,59 @@ class AbmDePipelinesYEtapasTest extends BaseDePipelines
             PipelineStage::query()->where('pipeline_id', $pipeline->id)->count(),
             'Ningún 422 dejó una etapa creada.'
         );
+    }
+
+    /**
+     * 15. Los topes de la definición, justo en el borde y uno más: 20 campos, 30 opciones por
+     *     lista, 80 caracteres por etiqueta y por opción.
+     *
+     * @return void
+     */
+    public function test_topes_de_la_definicion_de_campos(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $url      = '/api/admin/pipelines/' . $pipeline->id . '/stages';
+
+        $veinte = [];
+        for ($i = 1; $i <= 20; $i++) {
+            $veinte[] = ['label' => 'Dato ' . $i, 'type' => 'text'];
+        }
+        $this->postJson($url, ['name' => 'Veinte campos', 'fields' => $veinte])->assertStatus(201);
+
+        $veintiuno   = $veinte;
+        $veintiuno[] = ['label' => 'Dato 21', 'type' => 'text'];
+        $de_mas      = $this->postJson($url, ['name' => 'Veintiún campos', 'fields' => $veintiuno]);
+        $de_mas->assertStatus(422);
+        $this->assertSame(['fields' => ['Una etapa puede pedir hasta 20 campos.']], $de_mas->json('errors'));
+
+        $treinta = [];
+        for ($i = 1; $i <= 30; $i++) {
+            $treinta[] = 'Opción ' . $i;
+        }
+        $this->postJson($url, ['name' => 'Treinta opciones', 'fields' => [['label' => 'Rubro', 'type' => 'select', 'options' => $treinta]]])
+            ->assertStatus(201);
+
+        $treinta_y_una   = $treinta;
+        $treinta_y_una[] = 'Opción 31';
+        $opciones_de_mas = $this->postJson($url, ['name' => 'X', 'fields' => [['label' => 'Rubro', 'type' => 'select', 'options' => $treinta_y_una]]]);
+        $opciones_de_mas->assertStatus(422);
+        $this->assertArrayHasKey('fields.0.options', $opciones_de_mas->json('errors'));
+
+        $this->postJson($url, ['name' => 'Etiqueta de 80', 'fields' => [['label' => str_repeat('a', 80), 'type' => 'text']]])->assertStatus(201);
+
+        $etiqueta_larga = $this->postJson($url, ['name' => 'X', 'fields' => [['label' => str_repeat('a', 81), 'type' => 'text']]]);
+        $etiqueta_larga->assertStatus(422);
+        $this->assertArrayHasKey('fields.0.label', $etiqueta_larga->json('errors'));
+
+        $this->postJson($url, ['name' => 'Opción de 80', 'fields' => [['label' => 'Rubro', 'type' => 'select', 'options' => [str_repeat('b', 80)]]]])
+            ->assertStatus(201);
+
+        $opcion_larga = $this->postJson($url, ['name' => 'X', 'fields' => [['label' => 'Rubro', 'type' => 'select', 'options' => [str_repeat('b', 81)]]]]);
+        $opcion_larga->assertStatus(422);
+        $this->assertArrayHasKey('fields.0.options', $opcion_larga->json('errors'));
+
+        $this->assertSame(0, PipelineStage::query()->where('pipeline_id', $pipeline->id)->where('name', 'X')->count(), 'Ningún 422 dejó una etapa creada.');
     }
 
     /**

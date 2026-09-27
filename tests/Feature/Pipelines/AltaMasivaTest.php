@@ -95,7 +95,9 @@ class AltaMasivaTest extends BaseDePipelines
 
     /**
      * 2. Etapa inicial explícita: tiene que ser una abierta de ESTE pipeline. Si no, 422 y no se
-     *    crea nada.
+     *    crea nada. Desde la ronda de arreglos R2 el alta manda también los campos de esa etapa
+     *    (en el pipeline de prueba "Contactado" pide `canal` obligatorio), y la foto queda en la
+     *    actividad `created`.
      *
      * @return void
      */
@@ -107,9 +109,15 @@ class AltaMasivaTest extends BaseDePipelines
         $cliente  = $this->crear_cliente();
 
         $contactado = $this->etapa($pipeline, 'Contactado');
-        $creada     = $this->alta_de_uno($pipeline, $cliente, ['stage_id' => $contactado->id]);
+        $creada     = $this->alta_de_uno($pipeline, $cliente, [
+            'stage_id' => $contactado->id,
+            'fields'   => ['canal' => 'WhatsApp'],
+        ]);
         $this->assertSame($contactado->id, $creada['stage_id']);
-        $this->assertSame('Contactado', PipelineActivity::query()->where('opportunity_id', $creada['id'])->value('to_stage_name'));
+
+        $alta = PipelineActivity::query()->where('opportunity_id', $creada['id'])->first();
+        $this->assertSame('Contactado', $alta->to_stage_name);
+        $this->assertEquals([['key' => 'canal', 'label' => 'Canal', 'type' => 'select', 'value' => 'WhatsApp']], $alta->data);
 
         $otro_cliente = $this->crear_cliente();
 
@@ -229,6 +237,85 @@ class AltaMasivaTest extends BaseDePipelines
 
         $del_cliente = $this->getJson('/api/admin/pipeline-opportunities?client_id=' . $cliente->id)->assertStatus(200)->json('opportunities');
         $this->assertSame([$segunda['id'], $primera['id']], array_column($del_cliente, 'id'), 'La abierta primero, la cerrada después.');
+    }
+
+    /**
+     * 8. R2: el alta en una etapa con campos obligatorios los exige (422 en `fields.<key>`, como al
+     *    mover) y no crea nada; un valor fuera de las opciones también es 422.
+     *
+     * @return void
+     */
+    public function test_alta_con_campos_obligatorios_faltantes_da_422_y_no_crea_nada(): void
+    {
+        $this->admin_logueado();
+        $pipeline   = $this->crear_pipeline();
+        $cliente    = $this->crear_cliente();
+        $contactado = $this->etapa($pipeline, 'Contactado')->id;
+
+        $sin_campos = $this->alta($pipeline, [['type' => 'client', 'id' => $cliente->id]], ['stage_id' => $contactado]);
+        $sin_campos->assertStatus(422);
+        $this->assertSame(['fields.canal'], array_keys($sin_campos->json('errors')));
+        $this->assertSame('Completá «Canal».', $sin_campos->json('message'));
+
+        $fuera_de_opciones = $this->alta($pipeline, [['type' => 'client', 'id' => $cliente->id]], [
+            'stage_id' => $contactado,
+            'fields'   => ['canal' => 'Paloma mensajera'],
+        ]);
+        $fuera_de_opciones->assertStatus(422);
+        $this->assertArrayHasKey('fields.canal', $fuera_de_opciones->json('errors'));
+
+        $reunion = $this->alta($pipeline, [['type' => 'client', 'id' => $cliente->id]], [
+            'stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id,
+            'fields'   => ['que_quiere_ver' => 'Stock'],
+        ]);
+        $reunion->assertStatus(422);
+        $this->assertSame(['fields.fecha_reunion'], array_keys($reunion->json('errors')));
+
+        $this->assertSame(0, PipelineOpportunity::query()->where('pipeline_id', $pipeline->id)->count());
+    }
+
+    /**
+     * 9. R2: el alta en una etapa con campo agenda fija la próxima acción de cada oportunidad
+     *    (`source = agenda`, nota = nombre de la etapa), con el mismo valor para todos los sujetos
+     *    y la foto en la actividad `created`. Como en la regla R1.1 del mover, no deja una actividad
+     *    `next_action` aparte: la fecha ya está en la foto.
+     *
+     * @return void
+     */
+    public function test_alta_en_etapa_con_agenda_fija_la_proxima_accion(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+
+        $respuesta = $this->alta($pipeline, [
+            ['type' => 'client', 'id' => $this->crear_cliente()->id],
+            ['type' => 'lead', 'id' => $this->crear_lead()->id],
+        ], [
+            'stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id,
+            'fields'   => ['fecha_reunion' => '2026-09-30 15:00', 'que_quiere_ver' => 'El asistente respondiendo stock'],
+            'note'     => 'Agendado en la llamada',
+        ]);
+
+        $respuesta->assertStatus(201);
+        $this->assertCount(2, $respuesta->json('created'));
+
+        foreach ($respuesta->json('created') as $op) {
+            $this->assertSame('2026-09-30 15:00:00', $op['next_action_at']);
+            $this->assertSame('Reunión agendada', $op['next_action_note']);
+            $this->assertSame('agenda', $op['next_action_source']);
+            $this->assertFalse($op['next_action_carries_over']);
+            $this->assertSame('week', $op['agenda_bucket']);
+
+            $actividades = PipelineActivity::query()->where('opportunity_id', $op['id'])->get();
+            $this->assertSame(['created'], $actividades->pluck('type')->all());
+            $this->assertSame('Agendado en la llamada', $actividades[0]->body);
+        }
+
+        $foto = $this->getJson('/api/admin/pipeline-opportunities/' . $respuesta->json('created.0.id'))->assertStatus(200)->json('activities.0.data');
+        $this->assertSame([
+            ['key' => 'fecha_reunion', 'label' => 'Fecha y hora', 'type' => 'datetime', 'value' => '2026-09-30 15:00'],
+            ['key' => 'que_quiere_ver', 'label' => 'Qué quiere ver', 'type' => 'textarea', 'value' => 'El asistente respondiendo stock'],
+        ], $foto);
     }
 
     /**

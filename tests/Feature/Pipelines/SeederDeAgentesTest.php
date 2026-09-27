@@ -93,8 +93,9 @@ class SeederDeAgentesTest extends BaseDePipelines
         }
 
         $this->assertSame([], $por_nombre['Por contactar']);
+        /* `canal` NO obligatorio y sin "Próximo paso" en "Reunión hecha": ronda de arreglos R3. */
         $this->assertSame([
-            ['key' => 'canal', 'label' => 'Canal', 'type' => 'select', 'required' => true, 'agenda' => false, 'options' => ['WhatsApp', 'Llamada', 'Mail', 'Presencial']],
+            ['key' => 'canal', 'label' => 'Canal', 'type' => 'select', 'required' => false, 'agenda' => false, 'options' => ['WhatsApp', 'Llamada', 'Mail', 'Presencial']],
         ], $por_nombre['Contactado']);
         $this->assertSame([
             ['key' => 'que_le_intereso', 'label' => 'Qué le interesó', 'type' => 'textarea', 'required' => false, 'agenda' => false, 'options' => []],
@@ -106,7 +107,6 @@ class SeederDeAgentesTest extends BaseDePipelines
         ], $por_nombre['Reunión agendada']);
         $this->assertSame([
             ['key' => 'como_fue', 'label' => 'Cómo fue', 'type' => 'textarea', 'required' => false, 'agenda' => false, 'options' => []],
-            ['key' => 'proximo_paso', 'label' => 'Próximo paso', 'type' => 'text', 'required' => false, 'agenda' => false, 'options' => []],
         ], $por_nombre['Reunión hecha']);
         $this->assertSame([
             ['key' => 'fecha_retomar', 'label' => 'Retomar el', 'type' => 'date', 'required' => true, 'agenda' => true, 'options' => []],
@@ -163,6 +163,11 @@ class SeederDeAgentesTest extends BaseDePipelines
         $op       = $this->alta_de_uno($pipeline, $this->crear_cliente(), ['note' => 'Arranca la campaña']);
         $this->assertSame('Por contactar', $op['stage']['name']);
 
+        /* "Contactado" no frena: el canal es opcional (R3). */
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Contactado')->id, 'note' => 'Le escribí'])
+            ->assertStatus(200)
+            ->assertJsonPath('activity.data', []);
+
         $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id])
             ->assertStatus(422)
             ->assertJsonPath('message', 'Completá «Fecha y hora».');
@@ -190,12 +195,41 @@ class SeederDeAgentesTest extends BaseDePipelines
     /**
      * 4. `DatabaseSeeder` lo llama (así un entorno nuevo nace con el pipeline).
      *
+     * Se prueba el COMPORTAMIENTO y no el texto del archivo: un espía de `DatabaseSeeder` corre su
+     * `run()` real pero anota cada seeder que pide en vez de ejecutarlo (correr todos los seeders
+     * en una prueba sembraría clientes, leads y plantillas de verdad). Buscar
+     * "PipelineAgentesSeeder::class" en el fuente pasaría también con la línea comentada.
+     *
      * @return void
      */
     public function test_database_seeder_lo_incluye(): void
     {
-        $fuente = (string) file_get_contents(database_path('seeders/DatabaseSeeder.php'));
+        $espia = new class extends \Database\Seeders\DatabaseSeeder {
+            /** @var array<int, string> */
+            public $pedidos = [];
 
-        $this->assertStringContainsString('PipelineAgentesSeeder::class', $fuente);
+            /**
+             * Anota en vez de correr.
+             *
+             * @param array|string $class
+             * @param bool         $silent
+             * @param array        $parameters
+             *
+             * @return $this
+             */
+            public function call($class, $silent = false, array $parameters = [])
+            {
+                foreach ((array) $class as $clase) {
+                    $this->pedidos[] = $clase;
+                }
+
+                return $this;
+            }
+        };
+
+        $espia->setContainer(app());
+        $espia->run();
+
+        $this->assertContains(PipelineAgentesSeeder::class, $espia->pedidos);
     }
 }

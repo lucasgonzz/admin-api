@@ -250,6 +250,76 @@ class NotasProximaAccionYResponsableTest extends BaseDePipelines
     }
 
     /**
+     * 10. R1 en el PUT: una nota de próxima acción que queda sin fecha es 422 en
+     *     `errors.next_action_at` con el texto del contrato (sin fecha previa, o borrando la fecha
+     *     y mandando nota a la vez). Con una fecha ya cargada, cambiar solo la nota se puede.
+     *
+     * @return void
+     */
+    public function test_nota_de_proxima_accion_sin_fecha_da_422_en_el_put(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+        $url      = '/api/admin/pipeline-opportunities/' . $op['id'];
+
+        $sola = $this->putJson($url, ['next_action_note' => 'Llamar']);
+        $sola->assertStatus(422);
+        $this->assertSame(['next_action_at' => ['Poné la fecha de la próxima acción.']], $sola->json('errors'));
+        $this->assertSame('Poné la fecha de la próxima acción.', $sola->json('message'));
+
+        $borrando_la_fecha = $this->putJson($url, ['next_action_at' => null, 'next_action_note' => 'Llamar']);
+        $borrando_la_fecha->assertStatus(422);
+        $this->assertSame(['next_action_at' => ['Poné la fecha de la próxima acción.']], $borrando_la_fecha->json('errors'));
+
+        $this->assertNull($this->oportunidad($op['id'])->next_action_note);
+        $this->assertSame(0, PipelineActivity::query()->where('opportunity_id', $op['id'])->where('type', 'next_action')->count());
+
+        $this->putJson($url, ['next_action_at' => '2026-09-29 11:00'])->assertStatus(200);
+        $this->putJson($url, ['next_action_note' => 'Llamar al dueño'])
+            ->assertStatus(200)
+            ->assertJsonPath('opportunity.next_action_at', '2026-09-29 11:00:00')
+            ->assertJsonPath('opportunity.next_action_note', 'Llamar al dueño');
+    }
+
+    /**
+     * 11. R1 en el PUT: con fecha, el origen pasa a `manual` (aunque la hubiera puesto la agenda de
+     *     la etapa); borrar la fecha borra la próxima acción ENTERA (fecha, nota y origen) y lo
+     *     registra.
+     *
+     * @return void
+     */
+    public function test_el_put_marca_el_origen_manual_y_borrar_la_fecha_borra_todo(): void
+    {
+        $this->admin_logueado();
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+        $url      = '/api/admin/pipeline-opportunities/' . $op['id'];
+
+        $this->mover($op['id'], ['stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id, 'fields' => ['fecha_reunion' => '2026-09-30 15:00']])
+            ->assertStatus(200)
+            ->assertJsonPath('opportunity.next_action_source', 'agenda');
+
+        $misma_fecha = $this->putJson($url, ['next_action_at' => '2026-09-30 15:00', 'next_action_note' => 'Confirmar la reunión']);
+        $misma_fecha->assertStatus(200);
+        $this->assertSame('manual', $misma_fecha->json('opportunity.next_action_source'));
+        $this->assertTrue($misma_fecha->json('opportunity.next_action_carries_over'));
+        $this->assertSame(['from' => '2026-09-30 15:00:00', 'to' => '2026-09-30 15:00:00', 'note' => 'Confirmar la reunión'], $misma_fecha->json('activities.0.data'));
+
+        $borrada = $this->putJson($url, ['next_action_at' => null]);
+        $borrada->assertStatus(200);
+        $this->assertNull($borrada->json('opportunity.next_action_at'));
+        $this->assertNull($borrada->json('opportunity.next_action_note'));
+        $this->assertNull($borrada->json('opportunity.next_action_source'));
+        $this->assertFalse($borrada->json('opportunity.next_action_carries_over'));
+        $this->assertSame(['from' => '2026-09-30 15:00:00', 'to' => null, 'note' => null], $borrada->json('activities.0.data'));
+
+        $recargada = $this->oportunidad($op['id']);
+        $this->assertNull($recargada->next_action_note);
+        $this->assertNull($recargada->next_action_source);
+    }
+
+    /**
      * 9. La ficha (#15): la oportunidad con el contacto del sujeto y el pipeline completo (etapas y
      *    conteos), y el historial de la más nueva a la más vieja con la forma Activity.
      *
