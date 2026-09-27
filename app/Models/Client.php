@@ -315,4 +315,20 @@ class Client extends Model
     {
         return $this->hasMany(LicenciaCuota::class)->orderBy('numero')->orderBy('id');
     }
+
+    /**
+     * Oportunidades del CRM de pipelines donde este cliente es el sujeto (misión pipelines-crm,
+     * 27/9/2026), abiertas y cerradas, de todos los pipelines.
+     *
+     * 🔴 A propósito NO se suma a scopeWithAll(), con el mismo criterio que `schedule_days` y las
+     * relaciones de Cobranzas: la pestaña "Pipelines" de la ficha tiene su propio endpoint
+     * (`GET pipeline-opportunities?client_id=`), y el listado de todos los clientes no tiene por
+     * qué cargarlas.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function pipeline_opportunities()
+    {
+        return $this->hasMany(PipelineOpportunity::class, 'client_id');
+    }
 }

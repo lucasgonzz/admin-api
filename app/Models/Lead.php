@@ -972,6 +972,22 @@ class Lead extends Model
     }
 
     /**
+     * Oportunidades del CRM de pipelines donde este lead es el sujeto (misión pipelines-crm,
+     * 27/9/2026), abiertas y cerradas, de todos los pipelines.
+     *
+     * 🔴 No tiene nada que ver con el pipeline de leads (`status` / LeadPipelineStatus): una
+     * oportunidad de un pipeline del CRM no cambia el estado comercial del lead ni dispara nada de
+     * su automatización. A propósito NO se suma a scopeWithAll(): la pestaña "Pipelines" de la ficha
+     * tiene su propio endpoint (`GET pipeline-opportunities?lead_id=`).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function pipeline_opportunities()
+    {
+        return $this->hasMany(PipelineOpportunity::class, 'lead_id');
+    }
+
+    /**
      * Variante de mensaje de welcome asignada a este lead (snapshot A/B).
      *
      * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
