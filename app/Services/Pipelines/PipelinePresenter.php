@@ -65,24 +65,32 @@ class PipelinePresenter
      * Estados del pipeline de LEADS, para el filtro de candidatos: `[{slug, label}]` en el orden
      * del catálogo (o los defaults si la tabla está vacía, igual que `LeadPipelineStatus`).
      *
+     * Sin los de `LeadPipelineStatus::SLUGS_HIDDEN_FROM_SELECT` (hoy `mail2_enviado`), con el mismo
+     * criterio que el resto del admin: siguen en el catálogo por historia, pero se sacaron "de
+     * filtro y de asignación".
+     *
      * @return array<int, array{slug: string, label: string}>
      */
     public function estados_de_lead()
     {
         $filas = LeadPipelineStatus::query()->orderBy('sort_order')->orderBy('id')->get(['slug', 'label']);
 
-        $estados = [];
-
+        $crudos = [];
         if ($filas->isEmpty()) {
             foreach (LeadPipelineStatus::DEFAULT_STATUSES as $slug => $label) {
-                $estados[] = ['slug' => $slug, 'label' => $label];
+                $crudos[] = ['slug' => (string) $slug, 'label' => (string) $label];
             }
-
-            return $estados;
+        } else {
+            foreach ($filas as $fila) {
+                $crudos[] = ['slug' => (string) $fila->slug, 'label' => (string) $fila->label];
+            }
         }
 
-        foreach ($filas as $fila) {
-            $estados[] = ['slug' => (string) $fila->slug, 'label' => (string) $fila->label];
+        $estados = [];
+        foreach ($crudos as $estado) {
+            if (! in_array($estado['slug'], LeadPipelineStatus::SLUGS_HIDDEN_FROM_SELECT, true)) {
+                $estados[] = $estado;
+            }
         }
 
         return $estados;
