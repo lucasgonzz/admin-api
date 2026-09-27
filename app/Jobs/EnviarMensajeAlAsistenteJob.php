@@ -45,6 +45,13 @@ use Illuminate\Support\Facades\Log;
  * tiene estado propio (`degradado`), aviso acotado a uno por cliente por día, un texto honesto
  * para el dueño y **cero reintentos** — reintentar contra un endpoint que no existe es quemar cola
  * para siempre.
+ *
+ * **La foto que espera su instrucción** (misión asistente-espera-foto, 27/9/2026). Una foto sin
+ * epígrafe no sale en el acto: su fila nace `esperando` y este job se despacha con `delay` para que
+ * el dueño alcance a mandar el audio de "cargame este artículo". En ese modo el job es solo un
+ * TEMPORIZADOR (`$segundos_de_espera` > 0): si al despertar la foto ya se la llevó otro mensaje, o
+ * hay una foto más nueva esperando, termina en silencio; si no, cierra la ráfaga y despacha un job
+ * común con todas las fotos, que es el que hace la ida y el polling. Ver `cerrar_la_espera()`.
  */
 class EnviarMensajeAlAsistenteJob implements ShouldQueue
 {
@@ -202,18 +209,34 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * momento en que hacen falta. Laravel reencola el mismo payload en cada `release()`, así que
      * esto sigue disponible si el job vuelve a entrar — aunque después de la ida ya no se use.
      *
+     * Incluye, ANTES que las propias, las fotos que el dueño tenía esperando y que este mensaje se
+     * llevó (ver `AsistenteWhatsappService::reclamar_fotos_en_espera()`).
+     *
      * @var array<int, array<string, mixed>>
      */
     private $imagenes;
 
     /**
-     * @param int                              $mensaje_id Fila entrante de `client_assistant_messages`.
-     * @param array<int, array<string, mixed>> $imagenes   Metadata de las fotos, si el mensaje traía.
+     * Segundos de espera con los que se despachó: mayor que cero es el temporizador de una foto.
+     *
+     * 🔴 Declarada CON valor inicial a propósito. Un job serializado antes del deploy no trae esta
+     * propiedad en el payload, y `SerializesModels::__unserialize()` saltea lo que no encuentra:
+     * sin el `= 0` quedaría en null y ese job viejo se comportaría distinto de como se despachó.
+     *
+     * @var int
      */
-    public function __construct(int $mensaje_id, array $imagenes = [])
+    private $segundos_de_espera = 0;
+
+    /**
+     * @param int                              $mensaje_id         Fila entrante de `client_assistant_messages`.
+     * @param array<int, array<string, mixed>> $imagenes           Metadata de las fotos, si el mensaje traía.
+     * @param int                              $segundos_de_espera Espera de una foto sin epígrafe; 0 = job común.
+     */
+    public function __construct(int $mensaje_id, array $imagenes = [], int $segundos_de_espera = 0)
     {
-        $this->mensaje_id = $mensaje_id;
-        $this->imagenes   = $imagenes;
+        $this->mensaje_id         = $mensaje_id;
+        $this->imagenes           = $imagenes;
+        $this->segundos_de_espera = $segundos_de_espera;
     }
 
     /**
@@ -225,11 +248,25 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * cada ingreso, y este es el techo de último recurso, no el que gobierna la lógica. El tope
      * que manda es `ESPERAS_DE_POLLING`, que se aplica en código y se puede probar.
      *
+     * Se le suma la espera de la foto porque la ventana arranca al DESPACHAR, y el temporizador se
+     * despacha con `delay`: sin la suma, los segundos que la foto pasa esperando se le comerían al
+     * techo.
+     *
      * @return \DateTimeInterface
      */
     public function retryUntil()
     {
-        return now()->addSeconds(600);
+        return now()->addSeconds(600 + (int) $this->segundos_de_espera);
+    }
+
+    /**
+     * Si este job es el temporizador de una foto que espera su instrucción.
+     *
+     * @return bool
+     */
+    private function es_temporizador_de_foto(): bool
+    {
+        return (int) $this->segundos_de_espera > 0;
     }
 
     /**
@@ -256,12 +293,18 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         }
 
         /* Estados finales: la fila ya se resolvió (o se dio por perdida) en un ingreso anterior.
-         * Puede pasar con un `release()` que llegó tarde y un reintento manual en el medio. */
-        if (in_array((string) $fila->estado, [
-            ClientAssistantMessage::ESTADO_RESPONDIDO,
-            ClientAssistantMessage::ESTADO_DEGRADADO,
-            ClientAssistantMessage::ESTADO_ERROR,
-        ], true)) {
+         * Puede pasar con un `release()` que llegó tarde y un reintento manual en el medio.
+         * `agrupado` también es final: esa foto ya viajó con el mensaje de otra fila, y este job
+         * es su temporizador, que despertó tarde. */
+        if ($this->es_estado_final((string) $fila->estado)) {
+            return;
+        }
+
+        /* 🔴 El temporizador de una foto solo sirve mientras la foto espera. Si la fila ya salió
+         * de `esperando` y no es final, la está tramitando el job que despachó el cierre de la
+         * ráfaga: seguir de largo acá sería una segunda ida con las mismas fotos. */
+        if ($this->es_temporizador_de_foto()
+            && (string) $fila->estado !== ClientAssistantMessage::ESTADO_ESPERANDO) {
             return;
         }
 
@@ -275,16 +318,25 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         /* El interruptor se vuelve a mirar acá y no solo en el webhook: entre que el mensaje entró
          * y que el job corre pueden haber pasado minutos, y apagar la casilla tiene que frenar lo
          * que está en vuelo. Se corta en silencio —sin texto de disculpa— porque apagar el canal
-         * es una decisión deliberada, no una falla. */
+         * es una decisión deliberada, no una falla. Va ANTES del cierre de la ráfaga a propósito:
+         * así cada foto en espera la cierra su propio temporizador, y ninguna queda esperando para
+         * siempre con su URL guardada detrás de una más nueva. */
         if (! (bool) $client->asistente_whatsapp_activo) {
             $fila->estado = ClientAssistantMessage::ESTADO_ERROR;
             $fila->error  = 'El canal del asistente se apagó para este cliente antes de mandar el mensaje.';
+            $this->soltar_media_en_espera($fila);
             $fila->save();
 
             return;
         }
 
         try {
+            if ((string) $fila->estado === ClientAssistantMessage::ESTADO_ESPERANDO) {
+                $this->cerrar_la_espera($asistente, $fila, $client);
+
+                return;
+            }
+
             if ($fila->ai_message_id === null) {
                 $this->enviar($asistente, $urls, $sender, $imagenes, $fila, $client);
 
@@ -320,11 +372,15 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             return;
         }
 
-        if (in_array((string) $fila->estado, [
-            ClientAssistantMessage::ESTADO_RESPONDIDO,
-            ClientAssistantMessage::ESTADO_DEGRADADO,
-            ClientAssistantMessage::ESTADO_ERROR,
-        ], true)) {
+        if ($this->es_estado_final((string) $fila->estado)) {
+            return;
+        }
+
+        /* Un temporizador muerto no cierra una fila que ya no es suya: si la foto salió de
+         * `esperando`, la tramita el job que despachó el cierre de la ráfaga, y cerrarla acá con
+         * error sería mandarle la disculpa al dueño mientras el asistente le está contestando. */
+        if ($this->es_temporizador_de_foto()
+            && (string) $fila->estado !== ClientAssistantMessage::ESTADO_ESPERANDO) {
             return;
         }
 
@@ -337,6 +393,70 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             app(WhatsappSendService::class),
             $exception !== null ? $exception->getMessage() : 'El job se dio por muerto sin resolver.'
         );
+    }
+
+    /**
+     * Estados de los que una fila no sale más.
+     *
+     * @param string $estado
+     *
+     * @return bool
+     */
+    private function es_estado_final(string $estado): bool
+    {
+        return in_array($estado, [
+            ClientAssistantMessage::ESTADO_RESPONDIDO,
+            ClientAssistantMessage::ESTADO_DEGRADADO,
+            ClientAssistantMessage::ESTADO_ERROR,
+            ClientAssistantMessage::ESTADO_AGRUPADO,
+        ], true);
+    }
+
+    /**
+     * Se le venció la espera a una foto sin epígrafe: cierra la ráfaga, o no hace nada.
+     *
+     * El reclamo —con su transacción y su `lockForUpdate`— vive en
+     * `AsistenteWhatsappService::cerrar_espera_vencida()`, al lado del que hace el webhook, para
+     * que las dos puntas que compiten por las mismas filas lean con la misma forma. Si devuelve
+     * null, a esta foto no le toca cerrar (se la llevó un mensaje, o hay una más nueva esperando) y
+     * el temporizador termina en silencio.
+     *
+     * 🔴 **La ida no se hace acá: se despacha un job común con las fotos en el payload.** Es la
+     * única forma de que las fotos sobrevivan a un reintento. `release()` reencola el payload
+     * ORIGINAL del job —el del temporizador, que se despachó sin fotos para no dejar la URL en claro
+     * en `jobs` durante la espera—, así que si la ida siguiera en este mismo job y el sistema del
+     * cliente no atendiera a la primera, el reintento volvería a entrar sin las fotos, cuya metadata
+     * ya se borró de la base al reclamarlas: saldría un POST vacío. En el payload del job nuevo
+     * viajan igual que las de una foto con epígrafe, y sobreviven a cada `release()`.
+     *
+     * @param AsistenteWhatsappService $asistente
+     * @param ClientAssistantMessage   $fila      Foto cuya espera venció.
+     * @param Client                   $client
+     *
+     * @return void
+     */
+    private function cerrar_la_espera(
+        AsistenteWhatsappService $asistente,
+        ClientAssistantMessage $fila,
+        Client $client
+    ): void {
+        $cierre = $asistente->cerrar_espera_vencida($fila);
+
+        if ($cierre === null) {
+            return;
+        }
+
+        /* Por el nombre de la clase y no por `self::` ni `static::`: el job que sale es siempre un
+         * job común, sin espera, aunque el que cierra sea una subclase de prueba. */
+        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, $cierre['imagenes'])
+            ->onConnection(AsistenteWhatsappService::CONEXION_DE_COLA);
+
+        Log::channel('daily')->info('AsistenteWhatsapp: se venció la espera de la foto; sale sin instrucción.', [
+            'assistant_message_id' => $fila->id,
+            'client_id'            => $client->id,
+            'fotos'                => count($cierre['imagenes']),
+            'fotos_agrupadas'      => $cierre['agrupadas'],
+        ]);
     }
 
     /**
@@ -416,9 +536,26 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         if ($this->imagenes !== []) {
             $preparadas = $imagenes->preparar($this->imagenes, (int) $fila->id);
 
-            $faltantes = count($this->imagenes) - count($preparadas['partes']);
-            if ($faltantes > 0) {
-                $nota = $imagenes->nota_para_el_asistente($faltantes);
+            /* 🔴 Dos motivos distintos para que una foto no viaje, y cada uno lleva su nota. Las que
+             * quedaron afuera por el TOPE llegaron bien: decirle al asistente que "no se pudieron
+             * recibir" sería mentirle, y le pediría al dueño que reenvíe algo que no falló. Con la
+             * espera de la foto el tope deja de ser teórico: una ráfaga de cuatro fotos y un audio
+             * es un solo mensaje. Las que sí fallaron (no se bajaron, no eran imagen) siguen con la
+             * nota de siempre. */
+            $recibidas       = count($this->imagenes);
+            $afuera_por_tope = max(0, $recibidas - AsistenteImagenesService::MAXIMO_DE_IMAGENES);
+            $no_recibidas    = ($recibidas - $afuera_por_tope) - count($preparadas['partes']);
+
+            $notas = [];
+            if ($no_recibidas > 0) {
+                $notas[] = $imagenes->nota_para_el_asistente($no_recibidas);
+            }
+            if ($afuera_por_tope > 0) {
+                $notas[] = $imagenes->nota_por_el_tope_de_fotos($recibidas);
+            }
+
+            if ($notas !== []) {
+                $nota = implode("\n", $notas);
 
                 foreach ($partes as $indice => $parte) {
                     if ($parte['name'] !== 'texto') {
@@ -555,6 +692,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
 
         $fila->save();
 
+        $this->pasar_la_conversacion_a_las_agrupadas($fila);
+
         Log::channel('daily')->info('AsistenteWhatsapp: mensaje aceptado por el sistema del cliente.', [
             'assistant_message_id' => $fila->id,
             'client_id'            => $client->id,
@@ -567,6 +706,42 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * Sin ellos volvería en silencio y la fila quedaría en `enviado` para siempre, con el dueño
          * esperando una respuesta que nadie iba a ir a buscar. */
         $this->esperar_y_volver($asistente, $fila, $client, $sender);
+    }
+
+    /**
+     * Les pasa a las fotos que viajaron agrupadas en este mensaje la conversación y el mensaje que
+     * devolvió el 202.
+     *
+     * Es lo que hace andar la cita sobre la foto: WhatsApp deja citar cualquier mensaje del hilo, y
+     * el dueño que cita la foto de la factura quiere volver a esa conversación. `conversacion_por_cita()`
+     * busca el `wamid` citado entre las filas con `ai_conversation_id`, y la foto agrupada es la
+     * fila que tiene ese `wamid`.
+     *
+     * 🔴 Va en su propio `try`. El `empresa-api` ya aceptó el mensaje y la fila ya quedó `enviado`:
+     * si esto tirara hasta el `catch` de `handle()`, el turno se cerraría con error y con la
+     * disculpa mientras el asistente del otro lado está contestando. Una cita que no anda es un
+     * detalle; un turno perdido no.
+     *
+     * @param ClientAssistantMessage $fila Mensaje que el `empresa-api` aceptó.
+     *
+     * @return void
+     */
+    private function pasar_la_conversacion_a_las_agrupadas(ClientAssistantMessage $fila): void
+    {
+        try {
+            ClientAssistantMessage::query()
+                ->where('agrupado_en_id', (int) $fila->id)
+                ->where('estado', ClientAssistantMessage::ESTADO_AGRUPADO)
+                ->update([
+                    'ai_conversation_id' => $fila->ai_conversation_id,
+                    'ai_message_id'      => $fila->ai_message_id,
+                ]);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('AsistenteWhatsapp: no se pudo pasar la conversación a las fotos agrupadas.', [
+                'assistant_message_id' => $fila->id,
+                'error'                => $exception->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -1269,6 +1444,7 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     ): void {
         $fila->estado = ClientAssistantMessage::ESTADO_ERROR;
         $fila->error  = mb_strimwidth($detalle, 0, 1000, '…');
+        $this->soltar_media_en_espera($fila);
         $fila->save();
 
         $whatsapp_message_id = $sender->send_text(
@@ -1297,6 +1473,28 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             'client_id'            => $client !== null ? $client->id : null,
             'detalle'              => $detalle,
         ]);
+    }
+
+    /**
+     * Borra la metadata de una foto en espera de una fila que se cierra sin viajar.
+     *
+     * Una foto que esperaba y se cerró con error —o con el canal apagado— no tiene por qué dejar su
+     * URL firmada guardada en una fila muerta, aunque esté cifrada. Mira el valor CRUDO y no el
+     * atributo: leer el atributo lo descifra, y un descifrado que falle (la `APP_KEY` cambió) no
+     * puede voltear justamente el camino que cierra con error. Y solo toca la columna si hay algo
+     * que borrar, así una fila común no la escribe nunca.
+     *
+     * @param ClientAssistantMessage $fila
+     *
+     * @return void
+     */
+    private function soltar_media_en_espera(ClientAssistantMessage $fila): void
+    {
+        $atributos = $fila->getAttributes();
+
+        if (isset($atributos['media_en_espera'])) {
+            $fila->media_en_espera = null;
+        }
     }
 
     /**

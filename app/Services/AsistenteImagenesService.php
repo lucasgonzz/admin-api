@@ -29,9 +29,11 @@ class AsistenteImagenesService
      *
      * Es el tope del `empresa-api` (`POST admin-sync/asistente/mensajes` acepta hasta 3) y se valida
      * de ESTE lado a propósito: mandarle cuatro y que las rechace convierte un mensaje con una foto
-     * de más en un mensaje perdido. Hoy el webhook trae como mucho una por mensaje —WhatsApp manda
-     * un adjunto por vez—, así que este tope es la red para el día que eso cambie o para una corrida
-     * a mano del job.
+     * de más en un mensaje perdido. El webhook trae como mucho una por mensaje —WhatsApp manda un
+     * adjunto por vez—, pero desde la misión asistente-espera-foto (27/9/2026) las fotos sin
+     * epígrafe se juntan con la instrucción que llega después, así que una ráfaga de cuatro fotos
+     * y un audio SÍ pasa por este tope. Lo que queda afuera lleva su propia nota
+     * (`nota_por_el_tope_de_fotos()`).
      */
     const MAXIMO_DE_IMAGENES = 3;
 
@@ -168,6 +170,36 @@ class AsistenteImagenesService
         return $cantidad === 1
             ? '[El dueño mandó una foto que no se pudo recibir. Pedile que la mande de nuevo.]'
             : '[El dueño mandó ' . $cantidad . ' fotos que no se pudieron recibir. Pedile que las mande de nuevo.]';
+    }
+
+    /**
+     * La línea que se le pega al texto cuando llegaron más fotos de las que viajan en un mensaje.
+     *
+     * 🔴 Es otra nota y no la de `nota_para_el_asistente()`, porque dice otra cosa: estas fotos
+     * llegaron BIEN, lo que pasa es que por este canal viajan hasta `MAXIMO_DE_IMAGENES` por
+     * mensaje. Con la foto que espera su instrucción (misión asistente-espera-foto, 27/9/2026) el
+     * caso dejó de ser teórico —una ráfaga de cuatro fotos y un audio es un solo mensaje—, y decirle
+     * al asistente que "no se pudieron recibir" le haría pedirle al dueño que reenvíe algo que no
+     * falló, sin explicarle que el problema es la cantidad.
+     *
+     * @param int $total Cuántas fotos trajo el mensaje, contando las que quedaron afuera.
+     *
+     * @return string Vacío si no se pasó del tope.
+     */
+    public function nota_por_el_tope_de_fotos(int $total): string
+    {
+        $sobrantes = $total - self::MAXIMO_DE_IMAGENES;
+        if ($sobrantes < 1) {
+            return '';
+        }
+
+        $pedido = $sobrantes === 1
+            ? 'Si necesitás la que quedó afuera, pedile que te la mande aparte.'
+            : 'Si necesitás las ' . $sobrantes . ' que quedaron afuera, pedile que te las mande aparte.';
+
+        return '[El dueño mandó ' . $total . ' fotos juntas y por este canal llegan hasta '
+            . self::MAXIMO_DE_IMAGENES . ' por mensaje: viste las primeras ' . self::MAXIMO_DE_IMAGENES
+            . '. ' . $pedido . ']';
     }
 
     /**
