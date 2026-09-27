@@ -57,9 +57,17 @@ use Illuminate\Validation\ValidationException;
  *    completa con un precio por defecto (ver el docblock de cualquiera de las dos tablas).
  *  - 🔴 **Ninguna clave viaja en un mensaje.** Todo texto que sale de acá y que se armó con algo que
  *    devolvió el cliente pasa por `texto_seguro()`, que tapa la `api_key` si el cliente la hubiera
- *    devuelto en un cuerpo de error, y limpia el UTF-8 roto de un cuerpo cortado (un byte suelto
- *    haría fallar el `json_encode` de la respuesta del admin y el operador vería un 500 en vez del
- *    motivo).
+ *    devuelto en un cuerpo de error (tal cual y escapada como en un JSON), y limpia el UTF-8 roto de
+ *    un cuerpo cortado (un byte suelto haría fallar el `json_encode` de la respuesta del admin y el
+ *    operador vería un 500 en vez del motivo). Los cuerpos se tapan ENTEROS antes de recortarlos.
+ *
+ * Y dos más que salieron de la revisión del 27/9/2026:
+ *
+ *  - 🔴 **No se siguen redirecciones** (`allow_redirects` en false): Guzzle, al saltar de host, no
+ *    saca un header propio como `X-Admin-Api-Key`, y una URL mal cargada le regalaría la clave del
+ *    cliente al destino. Un 3xx es un error más, con el destino nombrado.
+ *  - **Un timeout no se reintenta**: esta lectura es en vivo, con alguien esperando (ver
+ *    `conviene_reintentar()`).
  */
 class ClientImageSearchLogService
 {
@@ -347,7 +355,7 @@ class ClientImageSearchLogService
 
         $datos = $resultado['datos'];
 
-        /* 🔴 Un 200 NO alcanza para dar el dato por bueno: hay que reconocer la FORMA del payload.
+        /* 🔴 Un 2xx NO alcanza para dar el dato por bueno: hay que reconocer la FORMA del payload.
          * El shared hosting de Hostinger sirve su página genérica CON HTTP 200 cuando la cuenta está
          * saturada, y sin este corte esa página se vería como "un cliente sin ninguna consulta",
          * que es exactamente indistinguible de un cliente que no buscó nada. Se exigen los dos
@@ -360,7 +368,7 @@ class ClientImageSearchLogService
             return $this->resultado(
                 self::ESTADO_ERROR,
                 $this->texto_seguro(
-                    'El cliente respondió HTTP 200 pero el cuerpo no es el resumen del registro de '
+                    'El cliente respondió HTTP ' . $resultado['status'] . ' pero el cuerpo no es el resumen del registro de '
                     . 'imágenes (faltan los bloques `totales` o `dias`). Suele ser la página genérica '
                     . 'del hosting cuando la cuenta está saturada. Empieza así: '
                     . $resultado['cuerpo'],
@@ -407,7 +415,7 @@ class ClientImageSearchLogService
 
         $datos = $resultado['datos'];
 
-        // Mismo corte que en el resumen: un 200 que no es un paginador no es "cero consultas".
+        // Mismo corte que en el resumen: un 2xx que no es un paginador no es "cero consultas".
         if (! is_array($datos)
             || ! isset($datos['models']) || ! is_array($datos['models'])
             || ! array_key_exists('data', $datos['models']) || ! is_array($datos['models']['data'])
@@ -415,7 +423,7 @@ class ClientImageSearchLogService
             return $this->resultado(
                 self::ESTADO_ERROR,
                 $this->texto_seguro(
-                    'El cliente respondió HTTP 200 pero el cuerpo no es el registro de consultas de '
+                    'El cliente respondió HTTP ' . $resultado['status'] . ' pero el cuerpo no es el registro de consultas de '
                     . 'imágenes (falta `models.data`). Suele ser la página genérica del hosting cuando '
                     . 'la cuenta está saturada. Empieza así: ' . $resultado['cuerpo'],
                     $client
@@ -442,14 +450,15 @@ class ClientImageSearchLogService
      * La llamada saliente, común a los dos endpoints: cortes previos, HTTP y cada desenlace.
      *
      * Devuelve el resultado ya armado cuando NO es `ok`. Cuando es `ok`, `datos` trae el JSON
-     * decodificado tal cual (el llamador valida la forma) y `cuerpo` el principio del cuerpo crudo,
-     * para poder citarlo si la forma no es la esperada.
+     * decodificado tal cual (el llamador valida la forma), `cuerpo` el principio del cuerpo crudo
+     * (ya con la clave tapada), para poder citarlo si la forma no es la esperada, y `status` el
+     * código HTTP real, para que ese mensaje no diga "200" cuando el cliente contestó otro 2xx.
      *
      * @param Client               $client Cliente a consultar.
      * @param string               $path   Ruta relativa del endpoint (una de las dos constantes).
      * @param array<string, mixed> $query  Parámetros de la query.
      *
-     * @return array{estado: string, mensaje: string|null, datos: mixed, cuerpo?: string}
+     * @return array{estado: string, mensaje: string|null, datos: mixed, cuerpo?: string, status?: int}
      */
     protected function pedir(Client $client, $path, array $query)
     {
@@ -485,10 +494,19 @@ class ClientImageSearchLogService
                     'X-Admin-Api-Key' => (string) $client->api_key,
                     'Accept'          => 'application/json',
                 ])
+                /* 🔴 Sin seguir redirecciones. Guzzle las sigue solo (hasta cinco) y, cuando la
+                 * redirección cambia de host, saca `Authorization` y las cookies pero NO un header
+                 * propio como `X-Admin-Api-Key`: la clave del cliente viajaría tal cual a la dirección
+                 * de destino. Alcanza con una URL mal cargada (http en vez de https, un dominio
+                 * vencido que redirige a una página de estacionamiento) para regalarla. Con esto un
+                 * 3xx es una respuesta más, que cae abajo en "respondió HTTP 30x" con el destino a la
+                 * vista para que alguien corrija la URL. */
+                ->withOptions(['allow_redirects' => false])
                 ->timeout((int) config('services.client_api.timeout', 15))
-                /* 🔴 El tercer parámetro NO es adorno: sin él se reintenta cualquier no-2xx,
-                 * incluido el 404, que es el caso esperado mientras el parque se actualiza. Un 4xx
-                 * no se arregla insistiendo; un 5xx o un corte de conexión sí pueden ser pasajeros. */
+                /* 🔴 El tercer parámetro NO es adorno: decide qué se reintenta (ver
+                 * `conviene_reintentar()`). Un 4xx no se arregla insistiendo y un timeout duplicaría
+                 * la espera de quien está mirando la solapa; un 5xx o una falla rápida de conexión
+                 * sí pueden ser pasajeros. */
                 ->retry(
                     (int) config('services.client_api.retries', 2),
                     500,
@@ -527,7 +545,7 @@ class ClientImageSearchLogService
                     . 'comparte la base con otros comercios y sin esa variable no sabe de cuál '
                     . 'informar, así que se niega a adivinar (HTTP 409). No es una versión vieja ni '
                     . 'un problema de red: se resuelve cargando USER_ID en ese .env. Respuesta del '
-                    . 'cliente: ' . $this->extracto_del_cuerpo($response),
+                    . 'cliente: ' . $this->extracto_del_cuerpo($response, $client),
                     $client
                 )
             );
@@ -536,28 +554,35 @@ class ClientImageSearchLogService
         if ($response !== null && $response->status() === 422) {
             /* El cliente rechazó el pedido (rango, filtros). No debería pasar —el admin valida lo
              * mismo antes de salir— así que si pasa es un desacople entre las dos puntas, y lo que
-             * sirve es el motivo que dio el otro lado, no el cuerpo entero. */
-            $cuerpo  = $response->json();
-            $motivo  = is_array($cuerpo) && isset($cuerpo['message']) && ! is_array($cuerpo['message'])
-                ? (string) $cuerpo['message']
-                : $this->extracto_del_cuerpo($response);
-
+             * sirve es el motivo que dio el otro lado (ver `motivo_del_422()`), no el cuerpo entero. */
             return $this->resultado(
                 self::ESTADO_ERROR,
                 $this->texto_seguro(
-                    'El empresa-api del cliente rechazó el pedido (HTTP 422): ' . $motivo,
+                    'El empresa-api del cliente rechazó el pedido (HTTP 422): '
+                    . $this->motivo_del_422($response, $client),
                     $client
                 )
             );
         }
 
         if ($response !== null && ! $response->successful()) {
-            $mensaje = 'El empresa-api del cliente respondió HTTP ' . $response->status() . ': '
-                . $this->extracto_del_cuerpo($response);
+            $status  = (int) $response->status();
+            $mensaje = 'El empresa-api del cliente respondió HTTP ' . $status . ': '
+                . $this->extracto_del_cuerpo($response, $client);
 
-            if ($response->status() === 401 || $response->status() === 403) {
+            if ($status === 401 || $status === 403) {
                 $mensaje .= ' Probablemente la api_key del cliente no coincide con '
                     . 'ADMIN_API_INBOUND_KEY del empresa-api.';
+            }
+
+            if ($status >= 300 && $status < 400) {
+                /* Una redirección que no se siguió (ver `allow_redirects` arriba). El destino se
+                 * nombra porque es justo lo que hace falta para arreglar la URL cargada. */
+                $destino  = trim((string) $response->header('Location'));
+                $mensaje .= ' Es una redirección'
+                    . ($destino !== '' ? ' hacia ' . mb_substr($destino, 0, 200) : '')
+                    . ': el admin no la sigue, para no mandarle la clave del cliente a otra '
+                    . 'dirección. Revisá la URL de la API cargada en el cliente (http o https, /public).';
             }
 
             return $this->resultado(self::ESTADO_ERROR, $this->texto_seguro($mensaje, $client));
@@ -568,7 +593,7 @@ class ClientImageSearchLogService
             Log::warning('ClientImageSearchLogService: no se pudo contactar al empresa-api del cliente.', [
                 'client_id' => $client->id,
                 'url'       => $url,
-                'error'     => $transport_error,
+                'error'     => $this->tapar_clave($transport_error, $client),
             ]);
 
             return $this->resultado(
@@ -581,7 +606,8 @@ class ClientImageSearchLogService
         }
 
         $resultado           = $this->resultado(self::ESTADO_OK, null, $response->json());
-        $resultado['cuerpo'] = $this->extracto_del_cuerpo($response);
+        $resultado['cuerpo'] = $this->extracto_del_cuerpo($response, $client);
+        $resultado['status'] = (int) $response->status();
 
         return $resultado;
     }
@@ -591,16 +617,16 @@ class ClientImageSearchLogService
      *
      * Agrega, sin tocar nada de lo que vino:
      *
-     *   - `totales.costo_busquedas_usd`      → las búsquedas COBRADAS de cada proveedor por su precio
-     *                                          (ver `costo_de_busquedas()`), o null si ninguna tiene
-     *                                          precio cargado.
-     *   - `totales.costo_busquedas_es_techo` → true cuando el reparto de las cobradas entre
-     *                                          proveedores no se puede saber y el número es un techo.
+     *   - `totales.costo_busquedas_usd`      → lo que se pagó por las búsquedas del período (de dónde
+     *                                          sale, en `costear_busquedas()`), o null si ninguna
+     *                                          búsqueda cobrada tiene precio cargado.
+     *   - `totales.costo_busquedas_es_techo` → true cuando el número no se puede saber exacto y es un
+     *                                          techo (nunca un piso).
      *   - `totales.proveedores_sin_precio`   → los proveedores que quedaron afuera de la cuenta.
      *   - `totales.costo_ia_usd`             → la suma de `modelos[].costo_usd`, o null si ningún
      *                                          modelo con tokens tiene precio.
      *   - `totales.modelos_sin_precio`       → los modelos que quedaron afuera de la cuenta.
-     *   - `totales.costo_usd`                → búsquedas + IA; null solo si las dos son null.
+     *   - `totales.costo_usd`                → búsquedas + IA (el null, en `sumar_costos()`).
      *   - `totales.tokens`                   → la suma de las cuatro puntas (el número grande).
      *   - `dias[].costo_busquedas_usd` (+ `costo_busquedas_es_techo`) → lo mismo, día por día.
      *   - `modelos[].costo_usd` + `modelos[].tiene_precio`.
@@ -620,16 +646,10 @@ class ClientImageSearchLogService
 
         $totales = $datos['totales'];
 
-        $por_proveedor = isset($totales['busquedas_por_proveedor']) && is_array($totales['busquedas_por_proveedor'])
-            ? $totales['busquedas_por_proveedor']
-            : [];
+        // Solo las filas que son filas: una entrada rota del bloque no puede tumbar el resto.
+        $dias = array_values(array_filter($datos['dias'], 'is_array'));
 
-        $busquedas = self::costo_de_busquedas(
-            $por_proveedor,
-            isset($totales['busquedas']) ? (int) $totales['busquedas'] : null,
-            isset($totales['busquedas_cobradas']) ? (int) $totales['busquedas_cobradas'] : null,
-            $precios_busqueda
-        );
+        $busquedas = $this->costear_busquedas($totales, $dias, $precios_busqueda);
 
         // ---- IA, modelo por modelo ------------------------------------------------------------
         $modelos = [];
@@ -680,53 +700,17 @@ class ClientImageSearchLogService
         }
 
         $totales['tokens']                   = self::suma_de_tokens($totales);
-        $totales['costo_busquedas_usd']      = $busquedas['costo_usd'];
-        $totales['costo_busquedas_es_techo'] = $busquedas['es_techo'];
-        $totales['proveedores_sin_precio']   = $busquedas['proveedores_sin_precio'];
+        $totales['costo_busquedas_usd']      = $busquedas['total']['costo_usd'];
+        $totales['costo_busquedas_es_techo'] = $busquedas['total']['es_techo'];
+        $totales['proveedores_sin_precio']   = $busquedas['total']['proveedores_sin_precio'];
         $totales['costo_ia_usd']             = $costo_ia;
         $totales['modelos_sin_precio']       = $modelos_sin_precio;
-        $totales['costo_usd']                = self::sumar_costos($busquedas['costo_usd'], $costo_ia);
+        $totales['costo_usd']                = self::sumar_costos($busquedas['total']['costo_usd'], $costo_ia);
 
-        // ---- Búsquedas, día por día -----------------------------------------------------------
-        $proveedores = self::PROVEEDORES_DEL_CONTRATO;
-
-        foreach (array_keys($por_proveedor) as $proveedor) {
-            $proveedor = strtolower(trim((string) $proveedor));
-
-            if ($proveedor !== '' && ! in_array($proveedor, $proveedores, true)) {
-                $proveedores[] = $proveedor;
-            }
-        }
-
-        $dias = [];
-
-        foreach ($datos['dias'] as $dia) {
-            if (! is_array($dia)) {
-                continue;
-            }
-
-            /** @var array<string, int> Búsquedas del día por proveedor, con el patrón `busquedas_<proveedor>`. */
-            $del_dia = [];
-
-            foreach ($proveedores as $proveedor) {
-                $campo = 'busquedas_' . $proveedor;
-
-                if (isset($dia[$campo])) {
-                    $del_dia[$proveedor] = (int) $dia[$campo];
-                }
-            }
-
-            $costo_del_dia = self::costo_de_busquedas(
-                $del_dia,
-                isset($dia['busquedas']) ? (int) $dia['busquedas'] : null,
-                isset($dia['busquedas_cobradas']) ? (int) $dia['busquedas_cobradas'] : null,
-                $precios_busqueda
-            );
-
-            $dia['costo_busquedas_usd']      = $costo_del_dia['costo_usd'];
-            $dia['costo_busquedas_es_techo'] = $costo_del_dia['es_techo'];
-
-            $dias[] = $dia;
+        // ---- Búsquedas, día por día (ya calculadas en `costear_busquedas()`) ------------------
+        foreach ($dias as $indice => $dia) {
+            $dias[$indice]['costo_busquedas_usd']      = $busquedas['dias'][$indice]['costo_usd'];
+            $dias[$indice]['costo_busquedas_es_techo'] = $busquedas['dias'][$indice]['es_techo'];
         }
 
         $datos['totales']      = $totales;
@@ -737,6 +721,165 @@ class ClientImageSearchLogService
             : [];
 
         return $datos;
+    }
+
+    /**
+     * El costo de las búsquedas del resumen: el de cada día y el del período.
+     *
+     * 🔴 **El total de la tarjeta y la tabla por día tienen que contar la MISMA historia.** Hasta la
+     * revisión del 27/9/2026 el total se calculaba sobre los totales y los días cada uno por su
+     * lado, y no daban lo mismo: con 200 búsquedas de Google rechazadas un día y 1.000 de Serper
+     * cobradas otro, el total solo ve "1.200 hechas, 1.000 cobradas", no puede saber de quién eran
+     * las rechazadas, y su techo (las cobradas primero al más caro) decía US$ 1,80; cada día, con un
+     * solo proveedor, es exacto —0 y 1,00— y la tabla sumaba 1,00. Un total que sobreestima al lado
+     * de una tabla que no lo suma es el total que miente.
+     *
+     * Cada DÍA se costea así (`costo_de_busquedas_del_dia()`):
+     *   - con `busquedas_<proveedor>_cobradas` (§13 del plan: el cliente abre las cobradas por
+     *     proveedor): exacto;
+     *   - sin ese corte (un cliente con la versión anterior): con las hechas por proveedor y el total
+     *     de cobradas del día, que es exacto salvo que el día mezcle proveedores con rechazos.
+     *
+     * El PERÍODO, en este orden de preferencia:
+     *   1. `totales.busquedas_cobradas_por_proveedor` (§13): exacto.
+     *   2. La SUMA de los costos por día, cuando los días cubren el período entero (ver
+     *      `los_dias_cubren_el_periodo()`): `es_techo` si algún día lo es y los proveedores sin
+     *      precio de todos los días juntos. El día sabe más que el total: le gana.
+     *   3. La cuenta sobre los totales (`costo_de_busquedas()`), solo cuando no hay días o cuando los
+     *      días no alcanzan para saber de qué proveedor es cada búsqueda.
+     *
+     * @param array<string, mixed>             $totales Bloque `totales` del resumen.
+     * @param array<int, array<string, mixed>> $dias    Filas del bloque `dias` (solo las que son arrays).
+     * @param array<string, mixed>             $precios Tabla de `config('busquedas_precios')`.
+     *
+     * @return array{total: array, dias: array<int, array>} Resultados con la forma de `costo_de_busquedas()`.
+     */
+    protected function costear_busquedas(array $totales, array $dias, $precios)
+    {
+        $proveedores = $this->proveedores_del_resumen($totales);
+
+        /** @var array<int, array> Costo de cada día, en el mismo orden que `$dias`. */
+        $por_dia = [];
+
+        foreach ($dias as $indice => $dia) {
+            $por_dia[$indice] = self::costo_de_busquedas_del_dia($dia, $proveedores, $precios);
+        }
+
+        $cobradas_del_periodo = isset($totales['busquedas_cobradas']) ? (int) $totales['busquedas_cobradas'] : null;
+
+        if (isset($totales['busquedas_cobradas_por_proveedor']) && is_array($totales['busquedas_cobradas_por_proveedor'])) {
+            // 1. El cliente dice cuántas se cobraron de cada proveedor: no hay nada que deducir.
+            $total = self::costo_de_busquedas_cobradas(
+                $totales['busquedas_cobradas_por_proveedor'],
+                $cobradas_del_periodo,
+                $precios
+            );
+        } elseif ($this->los_dias_cubren_el_periodo($totales, $dias, $proveedores)) {
+            // 2. Los días suman el período entero y cada uno sabe más que el total.
+            $total = self::sumar_costos_de_busquedas($por_dia);
+        } else {
+            // 3. Lo único que queda es la cuenta sobre los totales.
+            $total = self::costo_de_busquedas(
+                isset($totales['busquedas_por_proveedor']) && is_array($totales['busquedas_por_proveedor'])
+                    ? $totales['busquedas_por_proveedor']
+                    : [],
+                isset($totales['busquedas']) ? (int) $totales['busquedas'] : null,
+                $cobradas_del_periodo,
+                $precios
+            );
+        }
+
+        return ['total' => $total, 'dias' => $por_dia];
+    }
+
+    /**
+     * Los proveedores de búsqueda que aparecen en el resumen: los dos del contrato más cualquiera que
+     * el cliente nombre en los totales (hechas o cobradas). Un tercero que el cliente agregue mañana
+     * entra solo, sin tocar este archivo.
+     *
+     * @param array<string, mixed> $totales Bloque `totales` del resumen.
+     *
+     * @return array<int, string> Nombres en minúsculas, sin repetir.
+     */
+    protected function proveedores_del_resumen(array $totales)
+    {
+        $proveedores = self::PROVEEDORES_DEL_CONTRATO;
+
+        foreach (['busquedas_por_proveedor', 'busquedas_cobradas_por_proveedor'] as $bloque) {
+            if (! isset($totales[$bloque]) || ! is_array($totales[$bloque])) {
+                continue;
+            }
+
+            foreach (array_keys($totales[$bloque]) as $proveedor) {
+                $proveedor = strtolower(trim((string) $proveedor));
+
+                if ($proveedor !== '' && ! in_array($proveedor, $proveedores, true)) {
+                    $proveedores[] = $proveedor;
+                }
+            }
+        }
+
+        return $proveedores;
+    }
+
+    /**
+     * Si los días alcanzan para costear el período sumándolos.
+     *
+     * Hacen falta tres cosas, y si falla una se cae a la cuenta sobre los totales:
+     *
+     *   1. Que haya días.
+     *   2. Que en cada día las búsquedas por proveedor que el corte abre (`busquedas_serper` +
+     *      `busquedas_google` + las de cualquier otro proveedor que abra) sumen al menos el total
+     *      del día. Si suman menos, ese día tuvo búsquedas de un proveedor que el corte por día no
+     *      nombra, y el total del período —que sí lo nombra en `busquedas_por_proveedor`— sabe más.
+     *   3. Que los días sumen las mismas búsquedas COBRADAS que el total. No debería fallar nunca
+     *      —las dos cosas salen de la misma tabla del cliente—, y si falla es que falta algún día con
+     *      búsquedas pagas: la suma saldría CORTA, que es peor que un techo. Se miran las cobradas y
+     *      no las hechas a propósito: si lo único que falta son búsquedas rechazadas, esas no costaron
+     *      nada y la suma de los días sigue siendo exacta (exigir también las hechas la cambiaría por
+     *      el techo del total, que en ese caso es peor).
+     *
+     * @param array<string, mixed>             $totales     Bloque `totales` del resumen.
+     * @param array<int, array<string, mixed>> $dias        Filas del bloque `dias`.
+     * @param array<int, string>               $proveedores Proveedores del resumen.
+     *
+     * @return bool
+     */
+    protected function los_dias_cubren_el_periodo(array $totales, array $dias, array $proveedores)
+    {
+        if ($dias === []) {
+            return false;
+        }
+
+        /** Cobradas de todos los días juntos, para compararlas con las del total. */
+        $suma_de_cobradas = 0;
+
+        foreach ($dias as $dia) {
+            $busquedas_del_dia = isset($dia['busquedas']) ? (int) $dia['busquedas'] : 0;
+
+            /** Búsquedas del día que el corte por proveedor sí atribuye. */
+            $atribuidas = 0;
+
+            foreach ($proveedores as $proveedor) {
+                $campo = 'busquedas_' . $proveedor;
+
+                if (isset($dia[$campo])) {
+                    $atribuidas += (int) $dia[$campo];
+                }
+            }
+
+            if ($atribuidas < $busquedas_del_dia) {
+                return false;
+            }
+
+            $suma_de_cobradas += isset($dia['busquedas_cobradas']) ? (int) $dia['busquedas_cobradas'] : 0;
+        }
+
+        if (isset($totales['busquedas_cobradas']) && (int) $totales['busquedas_cobradas'] !== $suma_de_cobradas) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -842,25 +985,30 @@ class ClientImageSearchLogService
     }
 
     /**
-     * Costo en dólares de un puñado de búsquedas, abiertas por proveedor.
+     * Costo en dólares de un puñado de búsquedas cuando se sabe cuántas hizo cada proveedor pero
+     * solo cuántas se cobraron EN TOTAL (el caso de un cliente sin el corte de §13).
      *
-     * El dato que manda el cliente es: cuántas búsquedas hizo cada proveedor (todas, se hayan
-     * cobrado o no) y cuántas se cobraron EN TOTAL. Se paga solo la cobrada, así que hay que saber
-     * cuántas cobradas son de cada proveedor, y eso se resuelve así:
+     * Se paga solo la cobrada, así que hay que saber cuántas cobradas son de cada proveedor. Eso se
+     * acota entre dos repartos extremos de las cobradas:
      *
-     *   1. Si se cobraron todas → las de cada proveedor, tal cual. Exacto.
-     *   2. Si hubo un solo proveedor → todas las cobradas son suyas. Exacto.
-     *   3. Si hubo dos o más proveedores Y alguna no se cobró → el reparto real no se puede saber
-     *      desde acá (¿fallaron las de Google o las de Serper?). 🔴 No se inventa una proporción:
-     *      se calcula el TECHO —las cobradas se asignan primero al proveedor más caro— y se marca
-     *      `es_techo`. Un techo honesto y dicho es mejor que un promedio que parece medido.
+     *   - el TECHO: las cobradas van primero al proveedor más caro (los sin precio, al final);
+     *   - el PISO: las cobradas van primero al más barato (los sin precio, primero).
      *
-     * Búsquedas que el total cuenta y ningún proveedor reclama (un cliente que informara el total
-     * sin abrirlo) van bajo el proveedor `''`, que no tiene precio: no se costean y se nombran. Si
-     * no, el costo saldría corto sin que nada lo diga.
+     * Si los dos dan lo mismo, el número es EXACTO. Pasa cuando se cobraron todas, cuando hubo un
+     * solo proveedor, cuando todos cuestan lo mismo y cuando no se cobró ninguna. Si difieren, se
+     * muestra el techo y se marca `es_techo`. 🔴 No se inventa una proporción: un techo honesto y
+     * dicho es mejor que un promedio que parece medido.
      *
-     * Misma regla del null que el resto del admin: si ninguna búsqueda cobrada pudo costearse y hay
-     * proveedores sin precio, el costo es `null` ("no sé"), no cero. Sin búsquedas, es cero.
+     * 🔴 **Sin búsquedas cobradas el costo es cero EXACTO**, sin "techo" y sin faltantes que
+     * nombrar: lo que no se cobró no cuesta nada, tenga precio o no. (Antes de la revisión del
+     * 27/9/2026, un día con dos proveedores y ninguna cobrada salía marcado como techo.)
+     *
+     * Búsquedas que el total cuenta y ningún proveedor reclama (un cliente que informara el total sin
+     * abrirlo) van bajo el proveedor `''`, que no tiene precio: no se costean y se nombran. Si no, el
+     * costo saldría corto sin que nada lo diga.
+     *
+     * Misma regla del null que el resto del admin: si ninguna cobrada pudo ir a un proveedor con
+     * precio y hay proveedores sin precio, el costo es `null` ("no sé"), no cero.
      *
      * @param array<string, int>        $por_proveedor Búsquedas hechas por cada proveedor.
      * @param int|null                  $total         Total de búsquedas hechas (null = la suma de arriba).
@@ -875,20 +1023,7 @@ class ClientImageSearchLogService
             $precios = config('busquedas_precios', []);
         }
 
-        /** @var array<string, int> Búsquedas hechas por proveedor, sin ceros ni negativos. */
-        $hechas = [];
-
-        foreach ($por_proveedor as $proveedor => $cantidad) {
-            $cantidad = (int) $cantidad;
-
-            if ($cantidad <= 0) {
-                continue;
-            }
-
-            $clave          = strtolower(trim((string) $proveedor));
-            $hechas[$clave] = (isset($hechas[$clave]) ? $hechas[$clave] : 0) + $cantidad;
-        }
-
+        $hechas     = self::normalizar_conteos($por_proveedor);
         $atribuidas = array_sum($hechas);
         $total      = $total === null ? $atribuidas : max((int) $total, $atribuidas);
 
@@ -896,86 +1031,269 @@ class ClientImageSearchLogService
             $hechas[''] = (isset($hechas['']) ? $hechas[''] : 0) + ($total - $atribuidas);
         }
 
-        if ($total === 0) {
-            return ['costo_usd' => 0.0, 'es_techo' => false, 'proveedores_sin_precio' => []];
-        }
-
         // Sin el dato de cobradas se asume que se cobraron todas: es la lectura que da el techo.
         $cobradas = $cobradas === null ? $total : min(max((int) $cobradas, 0), $total);
 
-        $es_techo = false;
-
-        /** @var array<string, int> Búsquedas cobradas atribuidas a cada proveedor. */
-        $cobradas_de = [];
-
-        if ($cobradas === $total) {
-            $cobradas_de = $hechas;
-        } elseif (count($hechas) === 1) {
-            foreach (array_keys($hechas) as $proveedor) {
-                $cobradas_de[$proveedor] = $cobradas;
-            }
-        } else {
-            $es_techo = true;
-
-            /* El más caro primero; los sin precio al final (no suman al costo y así lo que sí tiene
-             * precio se lleva todas las cobradas que puede: eso es el techo). A igual precio, por
-             * nombre, para que el resultado no dependa del orden en que vino el JSON. */
-            $orden = array_keys($hechas);
-
-            usort($orden, function ($a, $b) use ($precios) {
-                $precio_a = self::precio_de_busqueda($a, $precios);
-                $precio_b = self::precio_de_busqueda($b, $precios);
-                $precio_a = $precio_a === null ? -1.0 : $precio_a;
-                $precio_b = $precio_b === null ? -1.0 : $precio_b;
-
-                if ($precio_a === $precio_b) {
-                    return strcmp((string) $a, (string) $b);
-                }
-
-                return $precio_a < $precio_b ? 1 : -1;
-            });
-
-            $restantes = $cobradas;
-
-            foreach ($orden as $proveedor) {
-                $asignadas               = min($hechas[$proveedor], $restantes);
-                $cobradas_de[$proveedor] = $asignadas;
-                $restantes              -= $asignadas;
-            }
+        if ($total === 0 || $cobradas === 0) {
+            return ['costo_usd' => 0.0, 'es_techo' => false, 'proveedores_sin_precio' => []];
         }
 
-        $costo      = 0.0;
-        $costeados  = 0;
+        $techo = self::valorizar_cobradas(self::repartir_cobradas($hechas, $cobradas, $precios, true), $precios);
+        $piso  = self::valorizar_cobradas(self::repartir_cobradas($hechas, $cobradas, $precios, false), $precios);
+
+        /* Un proveedor sin precio se nombra si pudo haber tenido alguna búsqueda cobrada, y acá eso
+         * vale para todos: tienen búsquedas hechas y hubo cobradas, así que cualquiera pudo llevarse
+         * alguna. */
         $sin_precio = [];
 
-        foreach ($hechas as $proveedor => $cantidad) {
-            $proveedor = (string) $proveedor;
-            $precio    = self::precio_de_busqueda($proveedor, $precios);
-            $pagadas   = isset($cobradas_de[$proveedor]) ? $cobradas_de[$proveedor] : 0;
-
-            if ($precio === null) {
-                /* En el reparto exacto se nombra solo si tuvo búsquedas cobradas (las que no se
-                 * cobraron no cuestan nada, con o sin precio). En el techo se nombra siempre: el
-                 * reparto no sabe cuántas le tocaron de verdad. */
-                if ($pagadas > 0 || $es_techo) {
-                    $sin_precio[] = $proveedor;
-                }
-
-                continue;
-            }
-
-            $costo += ($pagadas * $precio) / self::BUSQUEDAS_POR_UNIDAD_DE_PRECIO;
-
-            if ($pagadas > 0) {
-                $costeados++;
+        foreach (array_keys($hechas) as $proveedor) {
+            if (self::precio_de_busqueda($proveedor, $precios) === null) {
+                $sin_precio[] = (string) $proveedor;
             }
         }
 
-        if ($costeados === 0 && $sin_precio !== []) {
+        // Tolerancia de redondeo: son sumas de enteros por precios con decimales.
+        $es_techo = abs($techo['costo'] - $piso['costo']) > 0.0000001;
+
+        if ($techo['costeadas'] === 0 && $sin_precio !== []) {
+            return ['costo_usd' => null, 'es_techo' => $es_techo, 'proveedores_sin_precio' => $sin_precio];
+        }
+
+        return ['costo_usd' => $techo['costo'], 'es_techo' => $es_techo, 'proveedores_sin_precio' => $sin_precio];
+    }
+
+    /**
+     * Costo EXACTO de las búsquedas cuando el cliente dice cuántas se cobraron de cada proveedor
+     * (el corte de §13: `totales.busquedas_cobradas_por_proveedor` y
+     * `dias[].busquedas_<proveedor>_cobradas`). No hay nada que deducir: cada una por su precio.
+     *
+     * Si el total de cobradas es mayor que la suma por proveedor (un proveedor que el corte no
+     * abre), la diferencia va bajo el proveedor `''`, sin precio, y se nombra: mejor un faltante a la
+     * vista que un número corto que parece completo.
+     *
+     * @param array<string, int>        $cobradas_por_proveedor Búsquedas cobradas de cada proveedor.
+     * @param int|null                  $cobradas_en_total      Total de cobradas (null = la suma de arriba).
+     * @param array<string, mixed>|null $precios                Tabla de precios; por defecto la config.
+     *
+     * @return array{costo_usd: float|null, es_techo: bool, proveedores_sin_precio: array<int, string>}
+     */
+    public static function costo_de_busquedas_cobradas(array $cobradas_por_proveedor, $cobradas_en_total = null, $precios = null)
+    {
+        if ($precios === null) {
+            $precios = config('busquedas_precios', []);
+        }
+
+        $cobradas   = self::normalizar_conteos($cobradas_por_proveedor);
+        $atribuidas = array_sum($cobradas);
+
+        if ($cobradas_en_total !== null && (int) $cobradas_en_total > $atribuidas) {
+            $cobradas[''] = (isset($cobradas['']) ? $cobradas[''] : 0) + ((int) $cobradas_en_total - $atribuidas);
+        }
+
+        $valor = self::valorizar_cobradas($cobradas, $precios);
+
+        $sin_precio = [];
+
+        foreach (array_keys($cobradas) as $proveedor) {
+            if (self::precio_de_busqueda($proveedor, $precios) === null) {
+                $sin_precio[] = (string) $proveedor;
+            }
+        }
+
+        if ($valor['costeadas'] === 0 && $sin_precio !== []) {
+            return ['costo_usd' => null, 'es_techo' => false, 'proveedores_sin_precio' => $sin_precio];
+        }
+
+        return ['costo_usd' => $valor['costo'], 'es_techo' => false, 'proveedores_sin_precio' => $sin_precio];
+    }
+
+    /**
+     * Costo de las búsquedas de UN día del resumen.
+     *
+     * Con el corte de §13 (`busquedas_serper_cobradas`, `busquedas_google_cobradas`, y el mismo
+     * patrón para cualquier otro proveedor), exacto. Sin él, con las hechas por proveedor
+     * (`busquedas_<proveedor>`) y el total de cobradas del día.
+     *
+     * @param array<string, mixed>      $dia         Fila del bloque `dias`.
+     * @param array<int, string>        $proveedores Proveedores del resumen.
+     * @param array<string, mixed>|null $precios     Tabla de precios; por defecto la config.
+     *
+     * @return array{costo_usd: float|null, es_techo: bool, proveedores_sin_precio: array<int, string>}
+     */
+    public static function costo_de_busquedas_del_dia(array $dia, array $proveedores, $precios = null)
+    {
+        $cobradas_del_dia = isset($dia['busquedas_cobradas']) ? (int) $dia['busquedas_cobradas'] : null;
+
+        /** @var array<string, int> Cobradas por proveedor, si el cliente las abre por día. */
+        $cobradas = [];
+
+        foreach ($proveedores as $proveedor) {
+            $campo = 'busquedas_' . $proveedor . '_cobradas';
+
+            if (isset($dia[$campo])) {
+                $cobradas[$proveedor] = (int) $dia[$campo];
+            }
+        }
+
+        if ($cobradas !== []) {
+            return self::costo_de_busquedas_cobradas($cobradas, $cobradas_del_dia, $precios);
+        }
+
+        /** @var array<string, int> Hechas por proveedor, con el patrón `busquedas_<proveedor>`. */
+        $hechas = [];
+
+        foreach ($proveedores as $proveedor) {
+            $campo = 'busquedas_' . $proveedor;
+
+            if (isset($dia[$campo])) {
+                $hechas[$proveedor] = (int) $dia[$campo];
+            }
+        }
+
+        return self::costo_de_busquedas(
+            $hechas,
+            isset($dia['busquedas']) ? (int) $dia['busquedas'] : null,
+            $cobradas_del_dia,
+            $precios
+        );
+    }
+
+    /**
+     * El costo del período como la suma de los costos de sus días.
+     *
+     * `es_techo` si algún día lo es (con uno solo que sea techo, la suma también lo es), y los
+     * proveedores sin precio de todos los días juntos, sin repetir. Misma regla del null que
+     * `sumar_costos()`: si lo único que se sabe es cero y hay algo sin precio, la suma es "no sé".
+     *
+     * @param array<int, array> $por_dia Resultados de `costo_de_busquedas_del_dia()`.
+     *
+     * @return array{costo_usd: float|null, es_techo: bool, proveedores_sin_precio: array<int, string>}
+     */
+    public static function sumar_costos_de_busquedas(array $por_dia)
+    {
+        $costo      = 0.0;
+        $es_techo   = false;
+        $sin_precio = [];
+
+        foreach ($por_dia as $resultado) {
+            if ($resultado['costo_usd'] !== null) {
+                $costo += (float) $resultado['costo_usd'];
+            }
+
+            if ($resultado['es_techo']) {
+                $es_techo = true;
+            }
+
+            foreach ($resultado['proveedores_sin_precio'] as $proveedor) {
+                if (! in_array($proveedor, $sin_precio, true)) {
+                    $sin_precio[] = $proveedor;
+                }
+            }
+        }
+
+        if ($costo <= 0 && $sin_precio !== []) {
             return ['costo_usd' => null, 'es_techo' => $es_techo, 'proveedores_sin_precio' => $sin_precio];
         }
 
         return ['costo_usd' => $costo, 'es_techo' => $es_techo, 'proveedores_sin_precio' => $sin_precio];
+    }
+
+    /**
+     * Reparte las búsquedas cobradas entre los proveedores, de a una punta de la lista de precios.
+     *
+     * @param array<string, int>   $hechas        Búsquedas hechas por proveedor (el máximo de cada uno).
+     * @param int                  $cobradas      Búsquedas cobradas a repartir.
+     * @param array<string, mixed> $precios       Tabla de precios.
+     * @param bool                 $caros_primero true: el más caro primero y los sin precio al final
+     *                                            (techo). false: al revés (piso).
+     *
+     * @return array<string, int> Cobradas asignadas a cada proveedor.
+     */
+    protected static function repartir_cobradas(array $hechas, $cobradas, $precios, $caros_primero)
+    {
+        $orden = array_keys($hechas);
+
+        usort($orden, function ($a, $b) use ($precios, $caros_primero) {
+            $precio_a = self::precio_de_busqueda($a, $precios);
+            $precio_b = self::precio_de_busqueda($b, $precios);
+            $precio_a = $precio_a === null ? -1.0 : $precio_a;
+            $precio_b = $precio_b === null ? -1.0 : $precio_b;
+
+            // A igual precio, por nombre: el resultado no puede depender del orden en que vino el JSON.
+            if ($precio_a === $precio_b) {
+                return strcmp((string) $a, (string) $b);
+            }
+
+            if ($caros_primero) {
+                return $precio_a < $precio_b ? 1 : -1;
+            }
+
+            return $precio_a > $precio_b ? 1 : -1;
+        });
+
+        $restantes = (int) $cobradas;
+        $reparto   = [];
+
+        foreach ($orden as $proveedor) {
+            $asignadas            = min($hechas[$proveedor], $restantes);
+            $reparto[$proveedor]  = $asignadas;
+            $restantes           -= $asignadas;
+        }
+
+        return $reparto;
+    }
+
+    /**
+     * Pone precio a un reparto de búsquedas cobradas.
+     *
+     * @param array<string, int>   $cobradas Cobradas por proveedor.
+     * @param array<string, mixed> $precios  Tabla de precios.
+     *
+     * @return array{costo: float, costeadas: int} Dólares de las que tienen precio, y cuántas son.
+     */
+    protected static function valorizar_cobradas(array $cobradas, $precios)
+    {
+        $costo     = 0.0;
+        $costeadas = 0;
+
+        foreach ($cobradas as $proveedor => $cantidad) {
+            $precio = self::precio_de_busqueda($proveedor, $precios);
+
+            if ($precio === null || $cantidad <= 0) {
+                continue;
+            }
+
+            $costo     += ($cantidad * $precio) / self::BUSQUEDAS_POR_UNIDAD_DE_PRECIO;
+            $costeadas += $cantidad;
+        }
+
+        return ['costo' => $costo, 'costeadas' => $costeadas];
+    }
+
+    /**
+     * Normaliza un conteo por proveedor: nombres en minúsculas y sin espacios, repetidos sumados, y
+     * sin ceros ni negativos (un proveedor sin búsquedas no participa de ninguna cuenta).
+     *
+     * @param array<string, mixed> $conteos Cantidad por proveedor, tal como vino.
+     *
+     * @return array<string, int>
+     */
+    protected static function normalizar_conteos(array $conteos)
+    {
+        $normalizados = [];
+
+        foreach ($conteos as $proveedor => $cantidad) {
+            $cantidad = (int) $cantidad;
+
+            if ($cantidad <= 0) {
+                continue;
+            }
+
+            $clave                = strtolower(trim((string) $proveedor));
+            $normalizados[$clave] = (isset($normalizados[$clave]) ? $normalizados[$clave] : 0) + $cantidad;
+        }
+
+        return $normalizados;
     }
 
     /**
@@ -1104,10 +1422,16 @@ class ClientImageSearchLogService
     /**
      * Si conviene reintentar una llamada que falló.
      *
-     * Un 4xx no se arregla insistiendo: el 404 es la versión vieja del cliente y el 401 es una
-     * api_key que no coincide. Los dos dan lo mismo en el segundo intento, y el 404 es el caso
-     * MAYORITARIO mientras el parque se actualiza. Un 5xx o un corte de conexión sí pueden ser
-     * pasajeros.
+     * - Un 4xx no se arregla insistiendo: el 404 es la versión vieja del cliente y el 401 es una
+     *   api_key que no coincide. Los dos dan lo mismo en el segundo intento, y el 404 es el caso
+     *   MAYORITARIO mientras el parque se actualiza.
+     * - 🔴 Un TIMEOUT tampoco se reintenta. Esta lectura es EN VIVO, con alguien mirando la solapa, y
+     *   el reintento duplicaría la espera (dos veces `services.client_api.timeout`: 30 segundos con
+     *   el default) para enterarse casi siempre de lo mismo: una instancia que no contestó en 15
+     *   segundos no suele contestar en los 15 siguientes. (El molde, `ClientAiTokensSyncService`, sí
+     *   lo reintenta, pero corre de noche y sin nadie esperando.)
+     * - Un 5xx o una falla RÁPIDA de conexión (conexión rechazada, DNS) sí se reintentan: cuestan
+     *   medio segundo y pueden ser un parpadeo.
      *
      * @param \Throwable $exception Excepción que levantó el cliente HTTP.
      *
@@ -1116,8 +1440,8 @@ class ClientImageSearchLogService
     protected function conviene_reintentar($exception)
     {
         if (! ($exception instanceof RequestException)) {
-            // ConnectionException, timeout, DNS: puede ser pasajero.
-            return true;
+            // ConnectionException o similar: sin respuesta HTTP. Se reintenta salvo que sea un timeout.
+            return ! $this->es_timeout($exception);
         }
 
         if ($exception->response === null) {
@@ -1130,28 +1454,137 @@ class ClientImageSearchLogService
     }
 
     /**
-     * El principio del cuerpo de una respuesta, para citarlo en un mensaje.
+     * Si una falla de transporte fue un timeout.
+     *
+     * Se reconoce por el mensaje, que es lo único que trae la `ConnectionException` de Laravel 8:
+     * cURL lo reporta como "cURL error 28" (operation timed out), y el texto "timed out" cubre
+     * también las variantes que no pasan por cURL.
+     *
+     * @param \Throwable $exception
+     *
+     * @return bool
+     */
+    protected function es_timeout($exception)
+    {
+        $mensaje = strtolower((string) $exception->getMessage());
+
+        return strpos($mensaje, 'curl error 28') !== false
+            || strpos($mensaje, 'timed out') !== false;
+    }
+
+    /**
+     * El principio del cuerpo de una respuesta, para citarlo en un mensaje, con la clave del
+     * cliente ya tapada.
+     *
+     * 🔴 La clave se tapa sobre el cuerpo ENTERO y recién después se recorta. Al revés, una clave que
+     * quedara partida justo en el borde de los 300 caracteres (una mitad adentro, la otra afuera) no
+     * coincidiría con nada al taparla y saldría a la vista a medias.
      *
      * `mb_substr` y no `substr`: cortar un cuerpo en UTF-8 por bytes puede partir un carácter a la
      * mitad, y un byte suelto hace fallar el `json_encode` de la respuesta del admin (ver
      * `texto_seguro()`, que además limpia lo que ya viniera roto).
      *
      * @param \Illuminate\Http\Client\Response $response Respuesta del cliente.
+     * @param Client                           $client   Cliente dueño de la clave.
      *
      * @return string
      */
-    protected function extracto_del_cuerpo($response)
+    protected function extracto_del_cuerpo($response, Client $client)
     {
-        return mb_substr(trim((string) $response->body()), 0, self::CHARS_DE_CUERPO);
+        $cuerpo = $this->tapar_clave(trim((string) $response->body()), $client);
+
+        return mb_substr($cuerpo, 0, self::CHARS_DE_CUERPO);
+    }
+
+    /**
+     * El motivo de un 422 del cliente, en castellano y sin el mensaje genérico de Laravel.
+     *
+     * Un 422 de validación de Laravel trae `message` ("The given data was invalid.", que no dice
+     * nada) y `errors` con los motivos de verdad, campo por campo. Por eso manda `errors`: se juntan
+     * todos sus mensajes. `message` se usa solo si no hay `errors` (el 422 propio del endpoint, el
+     * del rango de más de 62 días, trae solo `message` y ese sí dice qué pasó). Si no hay ninguno de
+     * los dos, el principio del cuerpo.
+     *
+     * @param \Illuminate\Http\Client\Response $response Respuesta 422 del cliente.
+     * @param Client                           $client   Cliente dueño de la clave.
+     *
+     * @return string
+     */
+    protected function motivo_del_422($response, Client $client)
+    {
+        $cuerpo = $response->json();
+
+        if (is_array($cuerpo)) {
+            /** @var array<int, string> Mensajes de `errors`, sin repetir. */
+            $mensajes = [];
+
+            if (isset($cuerpo['errors']) && is_array($cuerpo['errors'])) {
+                array_walk_recursive($cuerpo['errors'], function ($valor) use (&$mensajes) {
+                    if (is_scalar($valor) && trim((string) $valor) !== '' && ! in_array(trim((string) $valor), $mensajes, true)) {
+                        $mensajes[] = trim((string) $valor);
+                    }
+                });
+            }
+
+            if ($mensajes !== []) {
+                return mb_substr($this->tapar_clave(implode(' ', $mensajes), $client), 0, self::CHARS_DE_CUERPO);
+            }
+
+            if (isset($cuerpo['message']) && is_scalar($cuerpo['message']) && trim((string) $cuerpo['message']) !== '') {
+                return mb_substr($this->tapar_clave(trim((string) $cuerpo['message']), $client), 0, self::CHARS_DE_CUERPO);
+            }
+        }
+
+        return $this->extracto_del_cuerpo($response, $client);
+    }
+
+    /**
+     * Tapa la clave del cliente en un texto: tal cual, y también como la escribe `json_encode`.
+     *
+     * 🔴 La segunda forma no es paranoia. Si el cliente devolviera la clave adentro de un JSON,
+     * `json_encode` le escapa las barras (`/` → `\/`) y, según la clave, comillas, barras invertidas
+     * o caracteres no ASCII: la clave tal cual no aparecería en el cuerpo y el reemplazo no taparía
+     * nada. Se exige un largo mínimo para no hacer destrozos con una clave de prueba de dos letras.
+     *
+     * @param string $texto  Texto a limpiar.
+     * @param Client $client Cliente dueño de la clave.
+     *
+     * @return string
+     */
+    protected function tapar_clave($texto, Client $client)
+    {
+        $texto = (string) $texto;
+        $clave = trim((string) $client->api_key);
+
+        if (strlen($clave) < 6) {
+            return $texto;
+        }
+
+        /** @var array<int, string> Las formas en que la clave puede aparecer en el texto. */
+        $formas = [$clave];
+
+        $en_json = json_encode($clave);
+
+        if (is_string($en_json) && strlen($en_json) >= 2) {
+            // Sin las comillas del string JSON.
+            $escapada = substr($en_json, 1, -1);
+
+            if ($escapada !== $clave) {
+                $formas[] = $escapada;
+            }
+        }
+
+        return str_replace($formas, '[clave oculta]', $texto);
     }
 
     /**
      * Un texto listo para salir en la respuesta del admin: sin la clave del cliente y en UTF-8 válido.
      *
-     * 🔴 Tapa la `api_key` del cliente si aparece en el texto. No debería —ningún endpoint del
-     * cliente la devuelve—, pero los mensajes de error copian cuerpos que no controlamos, y una
-     * clave en la pantalla (o en una captura que alguien manda por WhatsApp) no se puede des-mostrar.
-     * Se exige un largo mínimo para no hacer destrozos con una clave de prueba de dos letras.
+     * 🔴 Tapa la `api_key` del cliente si aparece en el texto (ver `tapar_clave()`). No debería
+     * —ningún endpoint del cliente la devuelve—, pero los mensajes de error copian cuerpos que no
+     * controlamos, y una clave en la pantalla (o en una captura que alguien manda por WhatsApp) no
+     * se puede des-mostrar. Los extractos de cuerpo ya llegan tapados (sobre el cuerpo entero, antes
+     * de recortar); esto es la red de seguridad para todo lo demás que se suma al mensaje.
      *
      * @param string $texto  Texto armado con cosas que devolvió el cliente.
      * @param Client $client Cliente dueño de la clave.
@@ -1160,12 +1593,7 @@ class ClientImageSearchLogService
      */
     protected function texto_seguro($texto, Client $client)
     {
-        $texto = (string) $texto;
-        $clave = trim((string) $client->api_key);
-
-        if (strlen($clave) >= 6) {
-            $texto = str_replace($clave, '[clave oculta]', $texto);
-        }
+        $texto = $this->tapar_clave($texto, $client);
 
         // Reemplaza cualquier secuencia UTF-8 inválida por '?': un cuerpo en latin1 o cortado no rompe nada.
         return mb_convert_encoding($texto, 'UTF-8', 'UTF-8');

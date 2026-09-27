@@ -20,6 +20,10 @@ use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
  *     con dos proveedores no se puede saber de cuál eran las rechazadas, el número es un TECHO y
  *     se dice (`es_techo`), no una proporción inventada.
  *  3. **Que la IA se costee por modelo**, con la misma cuenta que la solapa Tokens (prefijo incluido).
+ *  4. 🔴 **Que la tarjeta y la tabla por día cuenten la misma historia** (revisión del 27/9/2026): el
+ *     total de búsquedas sale de las cobradas por proveedor si el cliente las manda (§13 del plan),
+ *     si no de la suma de los días, y la cuenta sobre los totales queda solo para cuando los días no
+ *     alcanzan.
  *
  * Precios con los que se hacen las cuentas (los de la config al 27/9/2026):
  *   serper → US$ 1,00 cada 1.000 búsquedas   ·   google → US$ 5,00 cada 1.000
@@ -458,5 +462,245 @@ class CostoDelRegistroDeImagenesTest extends BaseDelCanal
         // Lo demás de la fila viaja intacto.
         $this->assertSame('HTTP 403: Not enough credits', $por_id[3]['error']);
         $this->assertSame(6, $resultado['datos']['models']['total']);
+    }
+
+    /**
+     * Una fila del bloque `dias` con las claves exactas del contrato (sin el corte de §13).
+     *
+     * @param string $fecha    Día.
+     * @param int    $serper   Búsquedas de Serper hechas.
+     * @param int    $google   Búsquedas de Google hechas.
+     * @param int    $cobradas Búsquedas cobradas del día (entre los dos).
+     *
+     * @return array<string, mixed>
+     */
+    private function dia(string $fecha, int $serper, int $google, int $cobradas): array
+    {
+        return [
+            'fecha'                    => $fecha,
+            'busquedas'                => $serper + $google,
+            'busquedas_cobradas'       => $cobradas,
+            'busquedas_serper'         => $serper,
+            'busquedas_google'         => $google,
+            'validaciones_ia'          => 0,
+            'validaciones_ia_cobradas' => 0,
+            'errores'                  => ($serper + $google) - $cobradas,
+        ];
+    }
+
+    /**
+     * 🔴 El caso que encontró la revisión del 27/9/2026: 200 búsquedas de Google RECHAZADAS un día y
+     * 1.000 de Serper cobradas otro. Mirando solo los totales ("1.200 hechas, 1.000 cobradas") no
+     * se sabe de quién eran las rechazadas y el techo decía US$ 1,80; cada día, con un solo
+     * proveedor, es exacto: 0 y 1,00. La tarjeta tiene que decir lo mismo que la tabla: 1,00, sin
+     * techo, y el total igual a la suma de los días.
+     *
+     * @return void
+     */
+    public function test_el_total_de_busquedas_es_la_suma_de_los_dias_y_no_un_techo_global(): void
+    {
+        $datos = $this->resumen_costeado(
+            $this->totales([
+                'busquedas'               => 1200,
+                'busquedas_cobradas'      => 1000,
+                'busquedas_por_proveedor' => ['serper' => 1000, 'google' => 200],
+                'errores'                 => 200,
+            ]),
+            [
+                $this->dia('2026-09-26', 0, 200, 0),
+                $this->dia('2026-09-27', 1000, 0, 1000),
+            ]
+        );
+
+        $totales = $datos['totales'];
+
+        $this->assertEqualsWithDelta(1.00, $totales['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($totales['costo_busquedas_es_techo'], 'Cada día es exacto: la suma también.');
+        $this->assertSame([], $totales['proveedores_sin_precio']);
+
+        // El día de los rechazos cuesta cero exacto (no "techo"); el de Serper, 1,00.
+        $this->assertSame(0.0, $datos['dias'][0]['costo_busquedas_usd']);
+        $this->assertFalse($datos['dias'][0]['costo_busquedas_es_techo']);
+        $this->assertEqualsWithDelta(1.00, $datos['dias'][1]['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($datos['dias'][1]['costo_busquedas_es_techo']);
+
+        $this->assertEqualsWithDelta(
+            $datos['dias'][0]['costo_busquedas_usd'] + $datos['dias'][1]['costo_busquedas_usd'],
+            $totales['costo_busquedas_usd'],
+            0.000001,
+            'El total de la tarjeta tiene que ser la suma de la tabla por día.'
+        );
+
+        // Lo que decía la cuenta sobre los totales, para que se vea por qué no se usa acá.
+        $global = ClientImageSearchLogService::costo_de_busquedas(['serper' => 1000, 'google' => 200], 1200, 1000);
+        $this->assertEqualsWithDelta(1.80, $global['costo_usd'], 0.000001);
+        $this->assertTrue($global['es_techo']);
+    }
+
+    /**
+     * Con el corte de §13 —las cobradas por proveedor, en el total y en cada día— el costo es
+     * EXACTO aunque un mismo día mezcle proveedores con rechazos, que es justo el caso que sin él
+     * solo tiene techo.
+     *
+     *   día 26: Serper 1.000 hechas y cobradas + Google 200 hechas, 100 cobradas
+     *           → 1.000 × 1,00 / 1.000 + 100 × 5,00 / 1.000 = 1,00 + 0,50 = 1,50
+     *           (sin el corte: techo 1,90 = Google 200 → 1,00 + Serper 900 → 0,90)
+     *   día 27: Serper 500 hechas y cobradas → 0,50
+     *   total:  Serper 1.500 + Google 100 cobradas → 1,50 + 0,50 = 2,00
+     *
+     * @return void
+     */
+    public function test_con_las_cobradas_por_proveedor_el_costo_es_exacto_por_dia_y_en_total(): void
+    {
+        $dia_mezclado = $this->dia('2026-09-26', 1000, 200, 1100);
+        $dia_mezclado['busquedas_serper_cobradas'] = 1000;
+        $dia_mezclado['busquedas_google_cobradas'] = 100;
+
+        $dia_serper = $this->dia('2026-09-27', 500, 0, 500);
+        $dia_serper['busquedas_serper_cobradas'] = 500;
+        $dia_serper['busquedas_google_cobradas'] = 0;
+
+        $datos = $this->resumen_costeado(
+            $this->totales([
+                'busquedas'                        => 1700,
+                'busquedas_cobradas'               => 1600,
+                'busquedas_por_proveedor'          => ['serper' => 1500, 'google' => 200],
+                'busquedas_cobradas_por_proveedor' => ['serper' => 1500, 'google' => 100],
+                'errores'                          => 100,
+            ]),
+            [$dia_mezclado, $dia_serper]
+        );
+
+        $this->assertEqualsWithDelta(1.50, $datos['dias'][0]['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($datos['dias'][0]['costo_busquedas_es_techo']);
+        $this->assertEqualsWithDelta(0.50, $datos['dias'][1]['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($datos['dias'][1]['costo_busquedas_es_techo']);
+
+        $this->assertEqualsWithDelta(2.00, $datos['totales']['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($datos['totales']['costo_busquedas_es_techo']);
+        $this->assertSame([], $datos['totales']['proveedores_sin_precio']);
+
+        // Sin el corte, ese mismo día mezclado solo tiene techo.
+        $sin_corte = ClientImageSearchLogService::costo_de_busquedas(['serper' => 1000, 'google' => 200], 1200, 1100);
+        $this->assertEqualsWithDelta(1.90, $sin_corte['costo_usd'], 0.000001);
+        $this->assertTrue($sin_corte['es_techo']);
+
+        /* Y el total usa el corte aunque no vengan días: sin él, la única cuenta posible sería la de
+         * los totales, que con rechazos mezclados solo da el techo de 1,90. */
+        $sin_dias = $this->resumen_costeado(
+            $this->totales([
+                'busquedas'                        => 1200,
+                'busquedas_cobradas'               => 1100,
+                'busquedas_por_proveedor'          => ['serper' => 1000, 'google' => 200],
+                'busquedas_cobradas_por_proveedor' => ['serper' => 1000, 'google' => 100],
+            ])
+        );
+
+        $this->assertEqualsWithDelta(1.50, $sin_dias['totales']['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($sin_dias['totales']['costo_busquedas_es_techo']);
+    }
+
+    /**
+     * 🔴 Sin búsquedas cobradas el costo es cero EXACTO: ni "techo" ni proveedores sin precio que
+     * nombrar, porque lo que no se cobró no cuesta nada. Y cuando todos los proveedores cuestan lo
+     * mismo tampoco hay techo: cualquier reparto da el mismo número.
+     *
+     * @return void
+     */
+    public function test_sin_cobradas_el_cero_es_exacto_y_a_igual_precio_no_hay_techo(): void
+    {
+        $ninguna = ClientImageSearchLogService::costo_de_busquedas(['serper' => 10, 'google' => 5], 15, 0);
+
+        $this->assertSame(0.0, $ninguna['costo_usd']);
+        $this->assertFalse($ninguna['es_techo'], 'Cero cobradas es un cero exacto, no un techo.');
+        $this->assertSame([], $ninguna['proveedores_sin_precio']);
+
+        $ninguna_sin_precio = ClientImageSearchLogService::costo_de_busquedas(['bing' => 10, 'serper' => 5], 15, 0);
+
+        $this->assertSame(0.0, $ninguna_sin_precio['costo_usd']);
+        $this->assertFalse($ninguna_sin_precio['es_techo']);
+        $this->assertSame([], $ninguna_sin_precio['proveedores_sin_precio']);
+
+        // Dos proveedores al mismo precio, con rechazos: 15 cobradas × 2,00 / 1.000, sin importar de quién.
+        $mismo_precio = ClientImageSearchLogService::costo_de_busquedas(
+            ['uno' => 10, 'otro' => 10],
+            20,
+            15,
+            ['uno' => 2.00, 'otro' => 2.00]
+        );
+
+        $this->assertEqualsWithDelta(0.03, $mismo_precio['costo_usd'], 0.000001);
+        $this->assertFalse($mismo_precio['es_techo']);
+    }
+
+    /**
+     * Un día con búsquedas de un proveedor que el corte por día no abre (el contrato abre Serper y
+     * Google): ahí el día no sabe de quién son y el total del período sí (`busquedas_por_proveedor`),
+     * así que se usa la cuenta sobre los totales. Se nota en el faltante: el total nombra a "bing",
+     * que es lo que hay que cargar en la tabla de precios; la suma de los días diría "sin proveedor".
+     *
+     * @return void
+     */
+    public function test_un_dia_con_un_proveedor_que_el_dia_no_abre_usa_la_cuenta_del_total(): void
+    {
+        $dia = $this->dia('2026-09-27', 5, 0, 10);
+        $dia['busquedas'] = 10;
+        $dia['errores']   = 0;
+
+        $datos = $this->resumen_costeado(
+            $this->totales([
+                'busquedas'               => 10,
+                'busquedas_cobradas'      => 10,
+                'busquedas_por_proveedor' => ['serper' => 5, 'bing' => 5],
+            ]),
+            [$dia]
+        );
+
+        $this->assertEqualsWithDelta(0.005, $datos['totales']['costo_busquedas_usd'], 0.0000001);
+        $this->assertSame(['bing'], $datos['totales']['proveedores_sin_precio']);
+    }
+
+    /**
+     * Si los días no suman las mismas búsquedas COBRADAS que el total (falta un día con búsquedas
+     * pagas), la suma saldría CORTA: se usa la cuenta sobre los totales. Acá falta el día de Google:
+     * la suma de los días diría 1,00 y el total es 1,06.
+     *
+     * Y al revés: si lo que falta son solo búsquedas rechazadas (las cobradas coinciden), esas no
+     * costaron nada y la suma de los días sigue siendo exacta; la cuenta sobre los totales, en cambio,
+     * no sabe de quién eran las rechazadas y daría un techo.
+     *
+     * @return void
+     */
+    public function test_si_los_dias_no_suman_el_total_se_usa_la_cuenta_del_total(): void
+    {
+        // Falta un día con 200 búsquedas de Google, todas rechazadas: las cobradas coinciden.
+        $faltan_rechazadas = $this->resumen_costeado(
+            $this->totales([
+                'busquedas'               => 1200,
+                'busquedas_cobradas'      => 1000,
+                'busquedas_por_proveedor' => ['serper' => 1000, 'google' => 200],
+            ]),
+            [$this->dia('2026-09-27', 1000, 0, 1000)]
+        );
+
+        $this->assertEqualsWithDelta(1.00, $faltan_rechazadas['totales']['costo_busquedas_usd'], 0.000001);
+        $this->assertFalse($faltan_rechazadas['totales']['costo_busquedas_es_techo']);
+
+        $datos = $this->resumen_costeado(
+            $this->totales([
+                'busquedas'               => 1012,
+                'busquedas_cobradas'      => 1012,
+                'busquedas_por_proveedor' => ['serper' => 1000, 'google' => 12],
+            ]),
+            [$this->dia('2026-09-26', 1000, 0, 1000)]
+        );
+
+        $this->assertEqualsWithDelta(
+            1.06,
+            $datos['totales']['costo_busquedas_usd'],
+            0.000001,
+            'Con un día faltante la suma de los días sale corta: manda el total.'
+        );
+        $this->assertFalse($datos['totales']['costo_busquedas_es_techo']);
     }
 }

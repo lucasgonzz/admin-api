@@ -28,7 +28,9 @@ use Tests\Feature\AsistenteWhatsapp\BaseDelCanal;
  *     ninguno lance: la solapa tiene que poder decir qué pasó.
  *  3. **Que los filtros viajen tal cual los pide el contrato, y nada más.** El `empresa-api` de cada
  *     cliente está en su propia versión: el admin le manda solo lo que el contrato nombra.
- *  4. **Que la `api_key` no aparezca nunca en un mensaje.**
+ *  4. **Que la `api_key` no aparezca nunca en un mensaje**, ni partida en el borde de un recorte ni
+ *     escapada adentro de un JSON, y que no viaje a otro host por una redirección (no se siguen).
+ *  5. **Que la espera sea corta**: un timeout no se reintenta (la solapa se lee en vivo).
  *
  * Los payloads se escriben a mano con las claves EXACTAS del contrato del plan (§12.1) y no se
  * derivan de ninguna constante del admin: si alguien renombra una clave de este lado, estos tests
@@ -740,5 +742,211 @@ class RegistroDeImagenesDelClienteTest extends BaseDelCanal
         $this->getJson('/api/admin/client/99999999/imagenes/resumen')->assertStatus(404);
 
         Http::assertNothingSent();
+    }
+
+    /**
+     * Un TIMEOUT no se reintenta: la lectura es en vivo, con alguien mirando la solapa, y un segundo
+     * intento duplicaría la espera para enterarse casi siempre de lo mismo. Una falla RÁPIDA de
+     * conexión (conexión rechazada) sí se reintenta: cuesta medio segundo y puede ser un parpadeo.
+     *
+     * Se cuentan las veces que se llamó al stub, no los pedidos registrados: Laravel registra un
+     * pedido recién cuando hay respuesta, y acá no la hay.
+     *
+     * @return void
+     */
+    public function test_un_timeout_no_se_reintenta_y_una_falla_rapida_si(): void
+    {
+        config(['services.client_api.retries' => 2]);
+
+        $client   = $this->cliente_consultable();
+        $servicio = app(ClientImageSearchLogService::class);
+
+        $intentos = 0;
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => function () use (&$intentos) {
+                $intentos++;
+
+                throw new \Illuminate\Http\Client\ConnectionException(
+                    'cURL error 28: Operation timed out after 15001 milliseconds with 0 bytes received'
+                );
+            },
+        ]);
+
+        $timeout = $servicio->resumen($client, '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $timeout['estado']);
+        $this->assertStringContainsString('timed out', (string) $timeout['mensaje']);
+        $this->assertSame(1, $intentos, 'Un timeout no se reintenta: duplicaría la espera de quien mira.');
+
+        $intentos = 0;
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => function () use (&$intentos) {
+                $intentos++;
+
+                throw new \Illuminate\Http\Client\ConnectionException(
+                    'cURL error 7: Failed to connect to api-ferreteria.test port 443: Connection refused'
+                );
+            },
+        ]);
+
+        $rechazada = $servicio->resumen($client, '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $rechazada['estado']);
+        $this->assertStringContainsString('Connection refused', (string) $rechazada['mensaje']);
+        $this->assertSame(2, $intentos, 'Una falla rápida de conexión sí se reintenta.');
+    }
+
+    /**
+     * 🔴 La clave se tapa sobre el cuerpo ENTERO, antes de recortarlo a 300 caracteres: si no, una
+     * clave que quedara partida en el borde (la mitad adentro del recorte) no coincidiría con nada
+     * y saldría a la vista a medias. Y se tapa también como la escribe `json_encode` (`/` → `\/`),
+     * que es como aparece si el cliente la devuelve adentro de un JSON.
+     *
+     * @return void
+     */
+    public function test_la_clave_se_tapa_antes_de_recortar_y_tambien_escapada_en_json(): void
+    {
+        config(['services.client_api.retries' => 1]);
+
+        $servicio = app(ClientImageSearchLogService::class);
+
+        // La clave empieza en el carácter 291: el recorte de 300 se queda con sus primeros 10.
+        $partida = $this->crear_cliente('+5493411234567', true, 'K3y-S3cr3ta-9f8e7d6c5b4a');
+        $this->crear_client_api($partida, 'https://api-ferreteria.test', 'shared_hosting');
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => Http::response(
+                str_repeat('x', 290) . 'K3y-S3cr3ta-9f8e7d6c5b4a y el resto del error',
+                500
+            ),
+        ]);
+
+        $resultado = $servicio->resumen($partida->fresh(), '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $resultado['estado']);
+        $this->assertStringNotContainsString(
+            'K3y-S3cr',
+            (string) $resultado['mensaje'],
+            'Quedó a la vista el pedazo de la clave que entró en el recorte.'
+        );
+
+        // Una clave con barras, devuelta adentro de un JSON: viaja como abc\/def\/...
+        $con_barras = $this->crear_cliente('+5493419999999', true, 'abc/def/secreta-123');
+        $this->crear_client_api($con_barras, 'https://api-otra-ferreteria.test', 'shared_hosting');
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => Http::response(['message' => 'La clave abc/def/secreta-123 no vale.'], 500),
+        ]);
+
+        $escapada = $servicio->resumen($con_barras->fresh(), '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $escapada['estado']);
+        $this->assertStringNotContainsString('secreta-123', (string) $escapada['mensaje']);
+        $this->assertStringContainsString('[clave oculta]', (string) $escapada['mensaje']);
+    }
+
+    /**
+     * Un 422 de validación del cliente trae `message` genérico ("The given data was invalid.") y los
+     * motivos de verdad en `errors`: se muestran los de `errors`. `message` se usa solo si no hay
+     * `errors` (el 422 propio del rango, que dice qué pasó).
+     *
+     * @return void
+     */
+    public function test_un_422_muestra_los_errores_y_el_message_solo_si_no_hay_errores(): void
+    {
+        $client   = $this->cliente_consultable();
+        $servicio = app(ClientImageSearchLogService::class);
+
+        $this->fakear_http([
+            self::PATRON_CONSULTAS => Http::response([
+                'message' => 'The given data was invalid.',
+                'errors'  => [
+                    'tipo'       => ['El tipo no es válido.'],
+                    'asignacion' => ['La asignación tiene que ser un número.'],
+                ],
+            ], 422),
+        ]);
+
+        $con_errores = $servicio->consultas($client, $servicio->filtros_de_consultas([]));
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $con_errores['estado']);
+        $this->assertStringContainsString('El tipo no es válido.', (string) $con_errores['mensaje']);
+        $this->assertStringContainsString('La asignación tiene que ser un número.', (string) $con_errores['mensaje']);
+        $this->assertStringNotContainsString('The given data was invalid.', (string) $con_errores['mensaje']);
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => Http::response([
+                'message' => 'El rango no puede superar los 62 días (pediste 90).',
+            ], 422),
+        ]);
+
+        $sin_errores = $servicio->resumen($client, '2026-07-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $sin_errores['estado']);
+        $this->assertStringContainsString('pediste 90', (string) $sin_errores['mensaje']);
+    }
+
+    /**
+     * 🔴 Una redirección NO se sigue: Guzzle, al saltar de host, no saca un header propio como
+     * `X-Admin-Api-Key`, así que seguirla le mandaría la clave del cliente al destino. El 3xx queda
+     * como error, con el destino nombrado para que alguien corrija la URL.
+     *
+     * El comodín contesta un resumen VÁLIDO a propósito: si la redirección se siguiera, el resultado
+     * sería `ok` con datos de otro lado, y la prueba lo diría.
+     *
+     * @return void
+     */
+    public function test_una_redireccion_no_se_sigue_y_la_clave_no_viaja_a_otro_host(): void
+    {
+        $client = $this->cliente_consultable();
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => Http::response('', 301, ['Location' => 'https://estacionamiento.test/dominio-en-venta']),
+            '*'                  => Http::response($this->payload_de_resumen(), 200),
+        ]);
+
+        $resultado = app(ClientImageSearchLogService::class)->resumen($client, '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $resultado['estado']);
+        $this->assertNull($resultado['datos']);
+        $this->assertStringContainsString('HTTP 301', (string) $resultado['mensaje']);
+        $this->assertStringContainsString('estacionamiento.test', (string) $resultado['mensaje']);
+
+        Http::assertSentCount(1);
+
+        Http::assertNotSent(function (PedidoSaliente $pedido) {
+            return strpos($pedido->url(), 'estacionamiento.test') !== false;
+        });
+    }
+
+    /**
+     * El mensaje de un cuerpo que no es el payload dice el código HTTP REAL (un 201, un 203), no un
+     * "HTTP 200" escrito a mano que manda a buscar el problema en el lugar equivocado.
+     *
+     * @return void
+     */
+    public function test_un_cuerpo_con_forma_rara_nombra_el_status_real(): void
+    {
+        $client   = $this->cliente_consultable();
+        $servicio = app(ClientImageSearchLogService::class);
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN   => Http::response(['otra' => 'cosa'], 201),
+            self::PATRON_CONSULTAS => Http::response('<html>hola</html>', 203),
+        ]);
+
+        $resumen = $servicio->resumen($client, '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $resumen['estado']);
+        $this->assertStringContainsString('HTTP 201', (string) $resumen['mensaje']);
+        $this->assertStringNotContainsString('HTTP 200', (string) $resumen['mensaje']);
+
+        $consultas = $servicio->consultas($client, $servicio->filtros_de_consultas([]));
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $consultas['estado']);
+        $this->assertStringContainsString('HTTP 203', (string) $consultas['mensaje']);
+        $this->assertStringNotContainsString('HTTP 200', (string) $consultas['mensaje']);
     }
 }
