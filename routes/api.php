@@ -13,6 +13,7 @@ use App\Http\Controllers\ClientApiController;
 use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientContratoController;
+use App\Http\Controllers\ClientImagenesController;
 use App\Http\Controllers\ClientLicenciaController;
 use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\CobranzasController;
@@ -546,6 +547,16 @@ Route::prefix('admin')->group(function () {
         Route::get('client/{clientId}/tokens', [ClientTokensController::class, 'show_json']);
         Route::post('client/{clientId}/tokens/sync', [ClientTokensController::class, 'sync_json']);
         Route::get('tokens/resumen', [TokensResumenController::class, 'index_json']);
+
+        /* Registro de las consultas del circuito de imágenes de artículos (misión
+           imagenes-catalogo-completo, 27/9/2026): cada búsqueda de imágenes (Serper / Google) y cada
+           validación con IA que hizo el sistema del cliente, con su costo. A diferencia de Tokens de
+           arriba, acá NO hay espejo local: es un registro fila por fila y se le pregunta EN VIVO al
+           empresa-api del cliente cada vez que se abre la solapa (ClientImageSearchLogService). Un
+           cliente con una versión anterior contesta 404 y la respuesta dice `no_soportado`, sin
+           ruido. No colisionan con client/{clientId}/tokens. */
+        Route::get('client/{clientId}/imagenes/resumen', [ClientImagenesController::class, 'resumen_json']);
+        Route::get('client/{clientId}/imagenes/consultas', [ClientImagenesController::class, 'consultas_json']);
 
         /* Paquetes de IA (misión foto-sucursal-y-asistente-configurable, 17/9/2026).
            El ABM del catálogo de planes (CRUD). La asignación de un paquete a un cliente y el push a
