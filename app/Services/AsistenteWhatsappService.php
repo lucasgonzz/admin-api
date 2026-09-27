@@ -6,6 +6,7 @@ use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -77,12 +78,61 @@ class AsistenteWhatsappService
     const CONEXION_DE_COLA = 'database';
 
     /**
+     * Segundos que espera una foto sin epígrafe si la configuración no dice otra cosa.
+     *
+     * Treinta es lo que pidió Lucas: el tiempo de sacar la foto, apretar el micrófono y decir
+     * "cargame este artículo". Se ajusta con `ASISTENTE_WHATSAPP_ESPERA_FOTO` sin tocar código.
+     */
+    const SEGUNDOS_DE_ESPERA_DE_FOTO_POR_DEFECTO = 30;
+
+    /**
+     * Cuánto vive una foto en espera, en minutos.
+     *
+     * 🔴 Es el techo que impide que una foto cuyo job se perdió —un worker caído, un deploy en el
+     * medio— se pegue a un mensaje de horas después. El dueño que manda "cuánto vendí ayer" a la
+     * tarde no está hablando de la factura que fotografió a la mañana, y mandarlas juntas haría
+     * que el asistente conteste sobre algo que nadie le preguntó. Se mide contra la fila que CIERRA
+     * la espera (el mensaje nuevo, o la última foto de la ráfaga), no contra el reloj del job: así
+     * una cola atrasada no deja huérfana a una foto que su ráfaga sí tenía que llevarse.
+     */
+    const MINUTOS_DE_VIGENCIA_DE_LA_ESPERA = 10;
+
+    /**
+     * Intentos de la transacción que reclama las fotos en espera.
+     *
+     * El webhook y el job de la última foto pueden reclamar las mismas filas al mismo tiempo, y
+     * con `lockForUpdate` sobre dos lecturas por índice MySQL puede elegir a uno de los dos como
+     * víctima de un deadlock. `DB::transaction()` reintenta justamente ese caso.
+     */
+    const INTENTOS_DEL_RECLAMO = 3;
+
+    /**
      * Recibe un mensaje del dueño y lo deja encaminado hacia el asistente de su sistema.
      *
      * Deja la fila entrante SIEMPRE, incluso cuando después todo falle: es lo que permite
      * diagnosticar un mensaje que el dueño mandó y nunca le volvió. Sin esta tabla ese mensaje es
      * invisible — no abre ticket, no deja `SupportMessage`, y el `empresa-api` puede ni haberse
      * enterado.
+     *
+     * **La foto sin epígrafe espera su instrucción** (misión asistente-espera-foto, 27/9/2026). El
+     * dueño manda la foto de una factura o de un artículo y enseguida un audio diciendo qué hacer
+     * con ella. Si cada uno fuera su propio turno, la foto sola dispararía uno caro (un turno con
+     * foto arranca escalado) y el audio otro donde el modelo YA NO VE la foto: del lado del
+     * `empresa-api` solo viajan al modelo las imágenes del último mensaje del dueño. Por eso acá se
+     * bifurca:
+     *
+     *   - **Foto sin epígrafe**: la fila nace `esperando`, con la metadata cifrada en
+     *     `media_en_espera`, y el job sale con `delay`. No se le manda nada al cliente todavía.
+     *     Otra foto sin epígrafe hace lo mismo, y la ventana se reinicia con ella (factura de dos
+     *     páginas): la ráfaga la cierra el job de la ÚLTIMA foto.
+     *   - **Cualquier otra cosa** (texto, audio, foto con epígrafe, documento): se reclaman las
+     *     fotos que ese dueño tenía esperando y viajan en el job de este mensaje, antes que las
+     *     propias. Un solo POST con la instrucción y las fotos, que el contrato con el `empresa-api`
+     *     ya soporta (`imagenes[]` no mira el `tipo`).
+     *
+     * ⚠️ El `delay` depende del worker permanente de supervisor (`api_admin_queue`, desde el
+     * 21/9/2026): con él la foto sale a los ~30 s. Con el worker viejo del cron sale al primer tick
+     * después de los 30 s, que es lento pero igual correcto.
      *
      * @param array<string, mixed> $parsed Resultado de `WhatsappWebhookController::parse_inbound_message()`.
      * @param Client               $client Cliente cuyo dueño escribió.
@@ -93,6 +143,10 @@ class AsistenteWhatsappService
     {
         $reply_to = isset($parsed['reply_to_message_id']) ? trim((string) $parsed['reply_to_message_id']) : '';
 
+        $imagenes = $this->imagenes_del_mensaje($parsed);
+        $segundos = $this->segundos_de_espera_de_foto();
+        $espera   = $segundos > 0 && $this->es_foto_sin_epigrafe($parsed, $imagenes);
+
         $fila                               = new ClientAssistantMessage();
         $fila->client_id                    = (int) $client->id;
         $fila->telefono                     = (string) $parsed['from'];
@@ -101,7 +155,9 @@ class AsistenteWhatsappService
         $fila->reply_to_whatsapp_message_id = $reply_to !== '' ? $reply_to : null;
         $fila->tipo                         = substr((string) ($parsed['type'] ?? 'text'), 0, 20);
         $fila->texto                        = $parsed['body'];
-        $fila->estado                       = ClientAssistantMessage::ESTADO_RECIBIDO;
+        $fila->estado                       = $espera
+            ? ClientAssistantMessage::ESTADO_ESPERANDO
+            : ClientAssistantMessage::ESTADO_RECIBIDO;
 
         /* La cita se resuelve ACÁ y no en el job a propósito: es una consulta a una tabla propia,
          * no sale a la red, y dejarla resuelta en la fila hace que el hilo se pueda leer sin
@@ -113,6 +169,14 @@ class AsistenteWhatsappService
             $fila->reply_to_whatsapp_message_id
         );
 
+        /* 🔴 La metadata de la foto que espera va CIFRADA (cast `encrypted:array` del modelo) y
+         * vive ahí solo hasta que alguien la reclama: el reclamo la pone en null en el mismo
+         * movimiento en que la saca. Mientras espera, el job no la lleva en el payload —la tabla
+         * `jobs` la guardaría en claro durante toda la espera—. */
+        if ($espera) {
+            $fila->media_en_espera = $imagenes;
+        }
+
         $fila->save();
 
         Log::channel('daily')->info('AsistenteWhatsapp: mensaje del dueño recibido.', [
@@ -121,7 +185,18 @@ class AsistenteWhatsappService
             'tipo'                => $fila->tipo,
             'cito'                => $fila->reply_to_whatsapp_message_id !== null,
             'ai_conversation_id'  => $fila->ai_conversation_id,
+            'espera_instruccion'  => $espera,
         ]);
+
+        if ($espera) {
+            /* El tercer parámetro es la espera, y no es decorativo: `retryUntil()` la suma a su
+             * ventana, que Laravel calcula al DESPACHAR y no cuando el job por fin corre. */
+            EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, [], $segundos)
+                ->onConnection(self::CONEXION_DE_COLA)
+                ->delay(now()->addSeconds($segundos));
+
+            return $fila;
+        }
 
         /*
          * Las fotos viajan en el DESPACHO y no en una columna, y es a propósito.
@@ -130,17 +205,305 @@ class AsistenteWhatsappService
          * bytes los baja el job, que es el único que puede salir a la red sin hacerle esperar el 200
          * a Meta. Guardar esa metadata en `client_assistant_messages` sería dejar una URL firmada
          * escrita en la base para siempre, que es justo lo que no se quiere; y guardar los bytes
-         * sería quedarse con la factura de un tercero en un storage que no le corresponde.
+         * sería quedarse con la factura de un tercero en un storage que no le corresponde. (La foto
+         * que ESPERA es la única excepción, y va cifrada y por minutos: ver arriba.)
          *
          * El payload del job sobrevive a los `release()` del polling —Laravel reencola el mismo—,
          * así que la metadata sigue ahí si el job vuelve a entrar. Lo que la fila sí guarda es que
          * el mensaje era una foto (`tipo`) y qué se descartó (`error`), que es lo que hace falta
          * para diagnosticar.
+         *
+         * Las fotos que el dueño tenía esperando van ANTES que las propias: es el orden en que las
+         * mandó, y el asistente lee la primera como la principal (el encabezado de la factura).
          */
-        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, $this->imagenes_del_mensaje($parsed))
+        $reclamadas = $this->reclamar_fotos_en_espera($fila);
+
+        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, array_merge($reclamadas, $imagenes))
             ->onConnection(self::CONEXION_DE_COLA);
 
         return $fila;
+    }
+
+    /**
+     * Segundos que espera una foto sin epígrafe antes de salir sola. Cero apaga la espera.
+     *
+     * Acotado a la vigencia de una foto en espera: una espera más larga que la vigencia haría que un
+     * texto que llega a tiempo desde la silla del dueño ya no pudiera llevarse la foto.
+     *
+     * @return int
+     */
+    public function segundos_de_espera_de_foto(): int
+    {
+        $crudo = config(
+            'services.asistente_whatsapp.segundos_de_espera_de_foto',
+            self::SEGUNDOS_DE_ESPERA_DE_FOTO_POR_DEFECTO
+        );
+
+        /* Un valor que no es número (la variable escrita vacía en el `.env`) cae al default y no a
+         * cero: apagar la espera tiene que ser una decisión, no un typo. */
+        $segundos = is_numeric($crudo) ? (int) $crudo : self::SEGUNDOS_DE_ESPERA_DE_FOTO_POR_DEFECTO;
+
+        if ($segundos < 0) {
+            return 0;
+        }
+
+        return min($segundos, self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA * 60);
+    }
+
+    /**
+     * Se lleva las fotos que el dueño tenía esperando, para que viajen con este mensaje.
+     *
+     * Lo llama `recibir()` con la fila del mensaje que cierra ya guardada. Reclama las fotos del
+     * MISMO dueño (`client_id` + `telefono`), anteriores a este mensaje y dentro de la vigencia; las
+     * pasa a `agrupado` en esta fila, les borra `media_en_espera` y devuelve su metadata en orden de
+     * llegada. Una foto que llegó DESPUÉS de este mensaje no se toca: esa espera sus segundos y sale
+     * sola (el caso "audio primero, foto después", que el plan deja afuera a propósito).
+     *
+     * 🔴 Transacción con `lockForUpdate`, porque el job de la última foto puede estar reclamando las
+     * mismas filas en el mismo instante (se le venció la espera justo cuando llegó el audio). El que
+     * toma el lock primero se las lleva; el otro las relee después del commit, ya en `agrupado` o
+     * en `recibido`, y no las encuentra. Sin el lock, la misma foto podía viajar dos veces.
+     *
+     * Si el reclamo falla, este mensaje sale igual sin las fotos, y las fotos salen solas cuando se
+     * les venza la espera: nada se pierde, solo se pierde el agrupamiento.
+     *
+     * @param ClientAssistantMessage $fila Fila del mensaje que cierra la espera, ya persistida.
+     *
+     * @return array<int, array<string, mixed>> Metadata de las fotos reclamadas, en orden de llegada.
+     */
+    public function reclamar_fotos_en_espera(ClientAssistantMessage $fila): array
+    {
+        $desde = ($fila->created_at !== null ? $fila->created_at->copy() : now())
+            ->subMinutes(self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA);
+
+        $en_espera = function () use ($fila, $desde) {
+            return ClientAssistantMessage::query()
+                ->enEsperaDelDueno((int) $fila->client_id, (string) $fila->telefono)
+                ->where('id', '<', (int) $fila->id)
+                ->where('created_at', '>=', $desde);
+        };
+
+        /* Casi ningún mensaje tiene fotos esperando: se mira primero sin lock, para no tomar locks
+         * de rango en cada texto del dueño. La lectura que vale es la de adentro de la transacción. */
+        if (! $en_espera()->exists()) {
+            return [];
+        }
+
+        try {
+            return DB::transaction(function () use ($fila, $en_espera) {
+                $fotos = $en_espera()->orderBy('id')->lockForUpdate()->get();
+
+                if ($fotos->isEmpty()) {
+                    return [];
+                }
+
+                $imagenes = $this->agrupar_fotos_en($fila, $fotos);
+
+                if ($fila->isDirty()) {
+                    $fila->save();
+                }
+
+                Log::channel('daily')->info('AsistenteWhatsapp: el mensaje se llevó fotos que esperaban su instrucción.', [
+                    'client_id'            => $fila->client_id,
+                    'assistant_message_id' => $fila->id,
+                    'fotos_agrupadas'      => $fotos->count(),
+                ]);
+
+                return $imagenes;
+            }, self::INTENTOS_DEL_RECLAMO);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->warning('AsistenteWhatsapp: no se pudieron reclamar las fotos en espera; salen solas.', [
+                'client_id'            => $fila->client_id,
+                'assistant_message_id' => $fila->id,
+                'error'                => $exception->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    /**
+     * Cierra la ráfaga de fotos cuando se le venció la espera a una, sin que llegara instrucción.
+     *
+     * Lo llama `EnviarMensajeAlAsistenteJob` cuando su fila todavía está `esperando`. Devuelve null
+     * —y no toca nada— en los dos casos en que no le corresponde cerrar:
+     *
+     *   - su foto ya no está esperando: la reclamó un mensaje, que la lleva en su propio job;
+     *   - hay una foto MÁS NUEVA del mismo dueño esperando: la ráfaga sigue abierta y la cierra el
+     *     job de esa última foto, que se lleva a esta. Es lo que hace que la ventana se reinicie
+     *     con cada foto.
+     *
+     * Si le corresponde, reclama las anteriores (quedan `agrupado` en esta), vuelve la propia a
+     * `recibido`, borra la metadata de todas y la devuelve en orden de llegada, con la propia al
+     * final. Es exactamente lo que pasaba antes con una foto sola: el POST sale con las fotos y el
+     * texto vacío.
+     *
+     * 🔴 Las tres lecturas salen de UNA consulta con `lockForUpdate` sobre las fotos en espera del
+     * dueño, la misma forma que la del webhook: si el webhook y este job leyeran en órdenes
+     * distintos (primero la propia por id, después las demás por índice), MySQL tendría con qué
+     * armar un deadlock entre los dos.
+     *
+     * La vigencia se mide contra ESTA foto y no contra el reloj: con la cola atrasada, las fotos de
+     * una misma ráfaga tienen que seguir encontrándose entre sí aunque ya hayan pasado diez minutos
+     * desde la primera.
+     *
+     * @param ClientAssistantMessage $fila Foto cuya espera venció.
+     *
+     * @return array{imagenes: array<int, array<string, mixed>>, agrupadas: int}|null
+     */
+    public function cerrar_espera_vencida(ClientAssistantMessage $fila): ?array
+    {
+        $creada = $fila->created_at !== null ? $fila->created_at->copy() : now();
+        $desde  = $creada->copy()->subMinutes(self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA);
+        $hasta  = $creada->copy()->addMinutes(self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA);
+
+        return DB::transaction(function () use ($fila, $desde, $hasta) {
+            $en_espera = ClientAssistantMessage::query()
+                ->enEsperaDelDueno((int) $fila->client_id, (string) $fila->telefono)
+                ->where('created_at', '>=', $desde)
+                ->where('created_at', '<=', $hasta)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
+            $id_propio = (int) $fila->id;
+
+            $propia = $en_espera->first(function ($foto) use ($id_propio) {
+                return (int) $foto->id === $id_propio;
+            });
+
+            if ($propia === null) {
+                return null;
+            }
+
+            $hay_una_mas_nueva = $en_espera->contains(function ($foto) use ($id_propio) {
+                return (int) $foto->id > $id_propio;
+            });
+
+            if ($hay_una_mas_nueva) {
+                return null;
+            }
+
+            $anteriores = $en_espera->filter(function ($foto) use ($id_propio) {
+                return (int) $foto->id < $id_propio;
+            });
+
+            $imagenes = array_merge(
+                $this->agrupar_fotos_en($propia, $anteriores),
+                $this->media_en_espera_de($propia)
+            );
+
+            $propia->estado          = ClientAssistantMessage::ESTADO_RECIBIDO;
+            $propia->media_en_espera = null;
+            $propia->save();
+
+            return [
+                'imagenes'  => $imagenes,
+                'agrupadas' => $anteriores->count(),
+            ];
+        }, self::INTENTOS_DEL_RECLAMO);
+    }
+
+    /**
+     * Pasa un grupo de fotos en espera a `agrupado` en la fila que las cierra.
+     *
+     * Devuelve la metadata de todas, en el orden en que vienen, y deja a cada una sin
+     * `media_en_espera`. Si la fila que cierra no trae conversación deducida de una cita y alguna
+     * foto sí —el dueño mandó la foto citando una respuesta vieja del asistente y después el audio
+     * sin citar—, la fila que cierra se queda con la de la foto más reciente: la cita era la
+     * intención de seguir esa conversación, y el audio es la segunda mitad del mismo pedido. Quien
+     * llama es el que guarda la fila que cierra.
+     *
+     * Se llama siempre adentro de la transacción del reclamo.
+     *
+     * @param ClientAssistantMessage                         $cierre Fila con la que viajan las fotos.
+     * @param iterable<int, ClientAssistantMessage>          $fotos  Fotos en espera, en orden de llegada.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function agrupar_fotos_en(ClientAssistantMessage $cierre, $fotos): array
+    {
+        $imagenes     = [];
+        $conversacion = null;
+
+        foreach ($fotos as $foto) {
+            $imagenes = array_merge($imagenes, $this->media_en_espera_de($foto));
+
+            if ($foto->ai_conversation_id !== null) {
+                $conversacion = (int) $foto->ai_conversation_id;
+            }
+
+            $foto->estado          = ClientAssistantMessage::ESTADO_AGRUPADO;
+            $foto->agrupado_en_id  = (int) $cierre->id;
+            $foto->media_en_espera = null;
+            $foto->save();
+        }
+
+        if ($cierre->ai_conversation_id === null && $conversacion !== null) {
+            $cierre->ai_conversation_id = $conversacion;
+        }
+
+        return $imagenes;
+    }
+
+    /**
+     * La metadata guardada de una foto en espera, como lista de adjuntos.
+     *
+     * Si no se puede descifrar —la `APP_KEY` cambió mientras la foto esperaba— no voltea el
+     * reclamo: la foto se da por perdida, queda en el log, y el resto de la ráfaga sigue su viaje.
+     *
+     * @param ClientAssistantMessage $foto Fila en espera.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function media_en_espera_de(ClientAssistantMessage $foto): array
+    {
+        try {
+            $media = $foto->media_en_espera;
+        } catch (\Throwable $exception) {
+            /* Sin el valor crudo: aunque esté cifrado, es la URL firmada de un adjunto. */
+            Log::channel('daily')->warning('AsistenteWhatsapp: no se pudo leer la foto en espera.', [
+                'assistant_message_id' => $foto->id,
+                'error'                => $exception->getMessage(),
+            ]);
+
+            return [];
+        }
+
+        if (! is_array($media)) {
+            return [];
+        }
+
+        $lista = [];
+        foreach ($media as $adjunto) {
+            if (is_array($adjunto)) {
+                $lista[] = $adjunto;
+            }
+        }
+
+        return $lista;
+    }
+
+    /**
+     * Si el mensaje es una foto que llegó sola, sin nada escrito.
+     *
+     * El epígrafe manda: una foto con epígrafe YA trae su instrucción ("esto es la compra de
+     * Distribuidora Norte") y sale en el acto, como siempre. Sin epígrafe, el `body` que deja el
+     * webhook es null (`extract_media_caption_body()` no inventa ningún placeholder), y esa es la
+     * foto que se queda esperando.
+     *
+     * @param array<string, mixed>              $parsed   Resultado de `parse_inbound_message()`.
+     * @param array<int, array<string, mixed>> $imagenes Lo que devolvió `imagenes_del_mensaje()`.
+     *
+     * @return bool
+     */
+    private function es_foto_sin_epigrafe(array $parsed, array $imagenes): bool
+    {
+        if ($imagenes === []) {
+            return false;
+        }
+
+        return trim((string) ($parsed['body'] ?? '')) === '';
     }
 
     /**

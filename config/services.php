@@ -221,6 +221,17 @@ return [
         'webhook_secret' => env('KAPSO_WEBHOOK_SECRET', ''),
     ],
 
+    // El asistente por WhatsApp del dueño (misión asistente-espera-foto, 27/9/2026).
+    'asistente_whatsapp' => [
+        // Segundos que espera una foto que llegó SIN epígrafe antes de mandarse sola al asistente.
+        // Es la ventana para que el dueño mande la instrucción ("cargame este artículo", casi
+        // siempre un audio) y las dos viajen en un solo turno. Cuenta desde la ÚLTIMA foto: una
+        // factura de dos páginas reinicia la ventana con la segunda. En 0 la espera se apaga y
+        // cada foto sale sola como antes. AsistenteWhatsappService::segundos_de_espera_de_foto()
+        // la acota a la vigencia de una foto en espera (10 minutos).
+        'segundos_de_espera_de_foto' => env('ASISTENTE_WHATSAPP_ESPERA_FOTO', 30),
+    ],
+
     // Mercado Pago: link de cobro de la cotización del sistema que se arma desde la solapa
     // Contrato de un lead (misión cotizador-lead-mercado-pago, 22/9/2026).
     //
