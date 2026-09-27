@@ -922,6 +922,57 @@ class RegistroDeImagenesDelClienteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 El destino de una redirección se nombra en el mensaje, y si trae la clave del cliente se tapa
+     * ANTES de recortarlo a 200 caracteres: al revés, una clave que cayera justo en el borde quedaría
+     * partida y la mitad que entró en el recorte saldría a la vista. Y si viaja codificada como en
+     * una URL (`/` → `%2F`), también se tapa.
+     *
+     * @return void
+     */
+    public function test_el_destino_de_una_redireccion_se_tapa_antes_de_recortarlo(): void
+    {
+        $servicio = app(ClientImageSearchLogService::class);
+
+        $client = $this->crear_cliente('+5493411234567', true, 'K3y-S3cr3ta-9f8e7d6c5b4a');
+        $this->crear_client_api($client, 'https://api-ferreteria.test', 'shared_hosting');
+
+        // 32 + 153 = 185 caracteres antes de la clave: el recorte de 200 se quedaba con sus primeros 15.
+        $destino = 'https://estacionamiento.test/?q=' . str_repeat('x', 153) . 'K3y-S3cr3ta-9f8e7d6c5b4a&resto=1';
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => Http::response('', 302, ['Location' => $destino]),
+        ]);
+
+        $resultado = $servicio->resumen($client->fresh(), '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $resultado['estado']);
+        $this->assertStringContainsString('HTTP 302', (string) $resultado['mensaje']);
+        $this->assertStringContainsString('estacionamiento.test', (string) $resultado['mensaje']);
+        $this->assertStringNotContainsString(
+            'K3y-S3cr',
+            (string) $resultado['mensaje'],
+            'Quedó a la vista el pedazo de la clave que entró en el recorte del destino.'
+        );
+        $this->assertStringContainsString('[clave oculta]', (string) $resultado['mensaje']);
+
+        // La clave con barras, codificada como en una URL: abc%2Fdef%2Fsecreta-123.
+        $con_barras = $this->crear_cliente('+5493419999999', true, 'abc/def/secreta-123');
+        $this->crear_client_api($con_barras, 'https://api-otra-ferreteria.test', 'shared_hosting');
+
+        $this->fakear_http([
+            self::PATRON_RESUMEN => Http::response('', 301, [
+                'Location' => 'https://estacionamiento.test/?k=' . rawurlencode('abc/def/secreta-123'),
+            ]),
+        ]);
+
+        $codificada = $servicio->resumen($con_barras->fresh(), '2026-09-01', '2026-09-27');
+
+        $this->assertSame(ClientImageSearchLogService::ESTADO_ERROR, $codificada['estado']);
+        $this->assertStringNotContainsString('secreta-123', (string) $codificada['mensaje']);
+        $this->assertStringContainsString('[clave oculta]', (string) $codificada['mensaje']);
+    }
+
+    /**
      * El mensaje de un cuerpo que no es el payload dice el código HTTP REAL (un 201, un 203), no un
      * "HTTP 200" escrito a mano que manda a buscar el problema en el lugar equivocado.
      *

@@ -577,10 +577,15 @@ class ClientImageSearchLogService
 
             if ($status >= 300 && $status < 400) {
                 /* Una redirección que no se siguió (ver `allow_redirects` arriba). El destino se
-                 * nombra porque es justo lo que hace falta para arreglar la URL cargada. */
+                 * nombra porque es justo lo que hace falta para arreglar la URL cargada.
+                 *
+                 * 🔴 Primero se tapa la clave y DESPUÉS se recorta, por lo mismo que en
+                 * `extracto_del_cuerpo()`: un destino que trajera la clave justo en el borde de los
+                 * 200 caracteres la dejaría partida, y la mitad que entró en el recorte ya no
+                 * coincidiría con nada al taparla. */
                 $destino  = trim((string) $response->header('Location'));
                 $mensaje .= ' Es una redirección'
-                    . ($destino !== '' ? ' hacia ' . mb_substr($destino, 0, 200) : '')
+                    . ($destino !== '' ? ' hacia ' . mb_substr($this->tapar_clave($destino, $client), 0, 200) : '')
                     . ': el admin no la sigue, para no mandarle la clave del cliente a otra '
                     . 'dirección. Revisá la URL de la API cargada en el cliente (http o https, /public).';
             }
@@ -1539,7 +1544,8 @@ class ClientImageSearchLogService
     }
 
     /**
-     * Tapa la clave del cliente en un texto: tal cual, y también como la escribe `json_encode`.
+     * Tapa la clave del cliente en un texto: tal cual, como la escribe `json_encode` y como viaja
+     * codificada adentro de una URL.
      *
      * 🔴 La segunda forma no es paranoia. Si el cliente devolviera la clave adentro de un JSON,
      * `json_encode` le escapa las barras (`/` → `\/`) y, según la clave, comillas, barras invertidas
@@ -1573,6 +1579,20 @@ class ClientImageSearchLogService
                 $formas[] = $escapada;
             }
         }
+
+        /* Y como viaja adentro de una URL —el `Location` de una redirección es exactamente eso—:
+         * codificada con `rawurlencode` (`/` → `%2F`, espacio → `%20`) o con `urlencode` (espacio →
+         * `+`). Para una clave de letras, números y guiones las tres formas son la misma. */
+        $formas[] = rawurlencode($clave);
+        $formas[] = urlencode($clave);
+
+        $formas = array_values(array_unique($formas));
+
+        /* La más larga primero: si una forma estuviera adentro de otra, reemplazar antes la corta
+         * dejaría pedazos de la larga a la vista. */
+        usort($formas, function ($a, $b) {
+            return strlen($b) - strlen($a);
+        });
 
         return str_replace($formas, '[clave oculta]', $texto);
     }
