@@ -29,9 +29,11 @@ class AsistenteImagenesService
      *
      * Es el tope del `empresa-api` (`POST admin-sync/asistente/mensajes` acepta hasta 3) y se valida
      * de ESTE lado a propósito: mandarle cuatro y que las rechace convierte un mensaje con una foto
-     * de más en un mensaje perdido. Hoy el webhook trae como mucho una por mensaje —WhatsApp manda
-     * un adjunto por vez—, así que este tope es la red para el día que eso cambie o para una corrida
-     * a mano del job.
+     * de más en un mensaje perdido. El webhook trae como mucho una por mensaje —WhatsApp manda un
+     * adjunto por vez—, pero desde la misión asistente-espera-foto (27/9/2026) las fotos sin
+     * epígrafe se juntan con la instrucción que llega después, así que una ráfaga de cuatro fotos
+     * y un audio SÍ pasa por este tope. Lo que queda afuera lleva su propia nota
+     * (`nota_por_el_tope_de_fotos()`).
      */
     const MAXIMO_DE_IMAGENES = 3;
 
@@ -83,7 +85,9 @@ class AsistenteImagenesService
 
             /* Se quedan las PRIMERAS y no las últimas: en un envío múltiple de WhatsApp el orden es
              * el de captura, y la primera foto de una factura es la que trae el encabezado con el
-             * proveedor y el número — que es justamente lo que el asistente necesita leer. */
+             * proveedor y el número — que es justamente lo que el asistente necesita leer. Cuando
+             * un mensaje se lleva fotos que esperaban, la prioridad ya viene puesta en el orden de
+             * la lista: ver `AsistenteWhatsappService::fotos_que_viajan()`. */
             $medias = array_slice($medias, 0, self::MAXIMO_DE_IMAGENES);
         }
 
@@ -168,6 +172,38 @@ class AsistenteImagenesService
         return $cantidad === 1
             ? '[El dueño mandó una foto que no se pudo recibir. Pedile que la mande de nuevo.]'
             : '[El dueño mandó ' . $cantidad . ' fotos que no se pudieron recibir. Pedile que las mande de nuevo.]';
+    }
+
+    /**
+     * La línea que se le pega al texto cuando llegaron más fotos de las que viajan en un mensaje.
+     *
+     * 🔴 Es otra nota y no la de `nota_para_el_asistente()`, porque dice otra cosa: estas fotos
+     * llegaron BIEN, lo que pasa es que por este canal viajan hasta `MAXIMO_DE_IMAGENES` por
+     * mensaje. Con la foto que espera su instrucción (misión asistente-espera-foto, 27/9/2026) el
+     * caso dejó de ser teórico —una ráfaga de cuatro fotos y un audio es un solo mensaje—, y decirle
+     * al asistente que "no se pudieron recibir" le haría pedirle al dueño que reenvíe algo que no
+     * falló, sin explicarle que el problema es la cantidad.
+     *
+     * @param int $total Cuántas fotos trajo el mensaje, contando las que quedaron afuera.
+     *
+     * @return string Vacío si no se pasó del tope.
+     */
+    public function nota_por_el_tope_de_fotos(int $total): string
+    {
+        $sobrantes = $total - self::MAXIMO_DE_IMAGENES;
+        if ($sobrantes < 1) {
+            return '';
+        }
+
+        /* 🔴 Dice cuántas quedaron AFUERA y nada más: no afirma cuántas vio el asistente. Entre las
+         * que entraron puede haber una que no se pudo bajar, y de esas se ocupa la otra nota
+         * (`nota_para_el_asistente()`); "viste las primeras tres" sería mentira justo en ese caso. */
+        $afuera = $sobrantes === 1
+            ? 'una quedó afuera. Si la necesitás, pedile que te la mande aparte.'
+            : $sobrantes . ' quedaron afuera. Si las necesitás, pedile que te las mande aparte.';
+
+        return '[El dueño mandó ' . $total . ' fotos juntas y por este canal llegan hasta '
+            . self::MAXIMO_DE_IMAGENES . ' por mensaje: ' . $afuera . ']';
     }
 
     /**

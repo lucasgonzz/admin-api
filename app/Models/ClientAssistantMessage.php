@@ -19,7 +19,9 @@ use Illuminate\Database\Eloquent\Model;
  * @property string|null $reply_to_whatsapp_message_id wamid citado (solo entrantes).
  * @property int|null    $ai_conversation_id           Conversación del `empresa-api`.
  * @property int|null    $ai_message_id                Mensaje del asistente que se pollea.
- * @property string      $estado                       recibido | enviado | respondido | degradado | error
+ * @property int|null    $agrupado_en_id               Fila del mensaje con el que viajó esta foto.
+ * @property array|null  $media_en_espera              Metadata de la foto mientras espera (cifrada).
+ * @property string      $estado                       esperando | agrupado | recibido | enviado | respondido | degradado | error
  */
 class ClientAssistantMessage extends Model
 {
@@ -40,6 +42,18 @@ class ClientAssistantMessage extends Model
     const ESTADO_ERROR      = 'error';
 
     /**
+     * Los dos estados de la foto que espera su instrucción (misión asistente-espera-foto, 27/9/2026).
+     *
+     * `esperando` es una foto que llegó SIN epígrafe y todavía no salió hacia el `empresa-api`: se
+     * queda unos segundos a ver si el dueño manda la instrucción (el audio de "cargame este
+     * artículo"). `agrupado` es una foto que ya viajó, pero pegada al mensaje de OTRA fila
+     * (`agrupado_en_id`): es un estado final y el job no la vuelve a tramitar. Ver
+     * `AsistenteWhatsappService::recibir()`.
+     */
+    const ESTADO_ESPERANDO = 'esperando';
+    const ESTADO_AGRUPADO  = 'agrupado';
+
+    /**
      * Todas las filas las escribe el propio canal (webhook y job), nunca un request de usuario:
      * no hay entrada de afuera de la que protegerse con una lista blanca.
      *
@@ -51,13 +65,29 @@ class ClientAssistantMessage extends Model
      * Los identificadores del `empresa-api` viajan como enteros o como null, nunca como string:
      * el job los compara y los vuelve a mandar en el body del POST.
      *
+     * 🔴 `media_en_espera` va con `encrypted:array` y no con `array`: guarda la URL firmada de Kapso
+     * de una foto mientras espera, y una URL firmada en claro en la base es una credencial escrita.
+     * Cifrada con la APP_KEY, lo que queda en la columna no sirve para bajar nada.
+     *
      * @var array<string, string>
      */
     protected $casts = [
         'client_id'          => 'integer',
         'ai_conversation_id' => 'integer',
         'ai_message_id'      => 'integer',
+        'agrupado_en_id'     => 'integer',
+        'media_en_espera'    => 'encrypted:array',
     ];
+
+    /**
+     * Lo que nunca sale al serializar la fila.
+     *
+     * La metadata de una foto en espera no le sirve a ninguna pantalla ni a ningún log, y
+     * serializarla sería mostrar descifrada la URL que la columna guarda cifrada.
+     *
+     * @var array<int, string>
+     */
+    protected $hidden = ['media_en_espera'];
 
     /**
      * Cliente dueño del hilo.
@@ -79,6 +109,28 @@ class ClientAssistantMessage extends Model
         // Los accesores ecommerce_* del $appends de Client resuelven contra client_ecommerce:
         // sin precargarla salia una consulta por fila serializada.
         $query->with('client', 'client.client_ecommerce');
+    }
+
+    /**
+     * Las fotos de UN dueño que están esperando su instrucción.
+     *
+     * El dueño es el par `client_id` + `telefono` y no el cliente a secas: es la misma persona
+     * mandando la foto y después el audio, y nada de otro teléfono puede llevársela. Sin filtro de
+     * tiempo ni de orden a propósito: la vigencia y el "anteriores a" dependen de quién cierra
+     * (un mensaje nuevo o el vencimiento de la espera), y los pone cada llamador.
+     *
+     * @param \Illuminate\Database\Eloquent\Builder $query
+     * @param int                                   $client_id Cliente dueño del hilo.
+     * @param string                                $telefono  E.164 del dueño.
+     *
+     * @return \Illuminate\Database\Eloquent\Builder
+     */
+    public function scopeEnEsperaDelDueno($query, int $client_id, string $telefono)
+    {
+        return $query->where('client_id', $client_id)
+            ->where('telefono', $telefono)
+            ->where('direccion', self::DIRECCION_ENTRANTE)
+            ->where('estado', self::ESTADO_ESPERANDO);
     }
 
     /**
