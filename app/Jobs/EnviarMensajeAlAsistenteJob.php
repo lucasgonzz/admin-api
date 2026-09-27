@@ -443,13 +443,16 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * reserva vence (`retry_after`) el job se vuelve a levantar con `retryUntil()` ya vencido,
      * Laravel lo manda a `failed()`, y `cerrar_con_error()` cierra también las anteriores.
      *
-     * 🔴 **La ida no se hace acá: se despacha un job común con las fotos en el payload.** Es la
-     * única forma de que las fotos sobrevivan a un reintento. `release()` reencola el payload
+     * 🔴 **La ida no se hace acá: el reclamo despacha un job común con las fotos en el payload.**
+     * Es la única forma de que las fotos sobrevivan a un reintento. `release()` reencola el payload
      * ORIGINAL del job —el del temporizador, que se despachó sin fotos para no dejar la URL en claro
      * en `jobs` durante la espera—, así que si la ida siguiera en este mismo job y el sistema del
      * cliente no atendiera a la primera, el reintento volvería a entrar sin las fotos, cuya metadata
      * ya se borró de la base al reclamarlas: saldría un POST vacío. En el payload del job nuevo
-     * viajan igual que las de una foto con epígrafe, y sobreviven a cada `release()`.
+     * viajan igual que las de una foto con epígrafe, y sobreviven a cada `release()`. Ese despacho
+     * lo hace `cerrar_espera_vencida()` adentro de la transacción del reclamo, y siempre como un job
+     * común por el nombre de la clase: si el reclamo falla, se deshacen juntos, la excepción llega
+     * al `catch` de `handle()` y la foto —con las anteriores— se cierra con error.
      *
      * @param AsistenteWhatsappService $asistente
      * @param ClientAssistantMessage   $fila      Foto cuya espera venció.
@@ -467,11 +470,6 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         if ($cierre === null) {
             return;
         }
-
-        /* Por el nombre de la clase y no por `self::` ni `static::`: el job que sale es siempre un
-         * job común, sin espera, aunque el que cierra sea una subclase de prueba. */
-        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, $cierre['imagenes'])
-            ->onConnection(AsistenteWhatsappService::CONEXION_DE_COLA);
 
         Log::channel('daily')->info('AsistenteWhatsapp: se venció la espera de la foto; sale sin instrucción.', [
             'assistant_message_id' => $fila->id,

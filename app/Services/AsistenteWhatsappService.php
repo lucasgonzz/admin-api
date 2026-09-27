@@ -225,11 +225,10 @@ class AsistenteWhatsappService
          *
          * Las fotos que el dueño tenía esperando van ANTES que las propias: es el orden en que las
          * mandó, y el asistente lee la primera como la principal (el encabezado de la factura).
+         *
+         * El despacho lo hace el reclamo, adentro de su transacción: ver `reclamar_fotos_en_espera()`.
          */
-        $reclamadas = $this->reclamar_fotos_en_espera($fila);
-
-        EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, array_merge($reclamadas, $imagenes))
-            ->onConnection(self::CONEXION_DE_COLA);
+        $this->reclamar_fotos_en_espera($fila, $imagenes);
 
         return $fila;
     }
@@ -261,28 +260,45 @@ class AsistenteWhatsappService
     }
 
     /**
-     * Se lleva las fotos que el dueño tenía esperando, para que viajen con este mensaje.
+     * Se lleva las fotos que el dueño tenía esperando y despacha el job del mensaje con ellas.
      *
      * Lo llama `recibir()` con la fila del mensaje que cierra ya guardada. Reclama las fotos del
      * MISMO dueño (`client_id` + `telefono`), anteriores a este mensaje y dentro de la vigencia; las
-     * pasa a `agrupado` en esta fila, les borra `media_en_espera` y devuelve su metadata en orden de
-     * llegada. Una foto que llegó DESPUÉS de este mensaje no se toca: esa espera sus segundos y sale
-     * sola (el caso "audio primero, foto después", que el plan deja afuera a propósito).
+     * pasa a `agrupado` en esta fila, les borra `media_en_espera` y despacha el job de este mensaje
+     * con su metadata en orden de llegada, antes que las propias. Una foto que llegó DESPUÉS de
+     * este mensaje no se toca: esa espera sus segundos y sale sola (el caso "audio primero, foto
+     * después", que el plan deja afuera a propósito).
      *
      * 🔴 Transacción con `lockForUpdate`, porque el job de la última foto puede estar reclamando las
      * mismas filas en el mismo instante (se le venció la espera justo cuando llegó el audio). El que
      * toma el lock primero se las lleva; el otro las relee después del commit, ya en `agrupado` o
      * en `recibido`, y no las encuentra. Sin el lock, la misma foto podía viajar dos veces.
      *
-     * Si el reclamo falla, este mensaje sale igual sin las fotos, y las fotos salen solas cuando se
-     * les venza la espera: nada se pierde, solo se pierde el agrupamiento.
+     * 🔴 **Y el despacho va ADENTRO de esa transacción.** La conexión `database` de la cola no
+     * declara `connection` (usa la de siempre) y tiene `after_commit => false`, así que el insert en
+     * `jobs` es parte de la misma transacción que el reclamo: o quedan las dos cosas o ninguna. Si
+     * el despacho quedara afuera, un corte entre el commit y el insert dejaba las fotos `agrupado`,
+     * sin metadata y sin ningún job que las lleve; y un deadlock que reintenta la transacción
+     * despacharía una vez por intento. Si alguien cambia la cola a otra conexión, esto deja de ser
+     * atómico sin que nada lo avise.
      *
-     * @param ClientAssistantMessage $fila Fila del mensaje que cierra la espera, ya persistida.
+     * Si el reclamo falla, la transacción se deshace entera —el job que alcanzó a encolar también—,
+     * y el mensaje sale igual por el despacho de repliegue, sin las fotos. Las fotos siguen
+     * esperando y salen solas cuando se les venza la espera: nada se pierde, solo el agrupamiento.
+     * Ese despacho de repliegue es el único que queda, porque el de adentro se deshizo.
      *
-     * @return array<int, array<string, mixed>> Metadata de las fotos reclamadas, en orden de llegada.
+     * @param ClientAssistantMessage           $fila             Fila del mensaje que cierra, ya persistida.
+     * @param array<int, array<string, mixed>> $imagenes_propias Fotos que trae el propio mensaje.
+     *
+     * @return void
      */
-    public function reclamar_fotos_en_espera(ClientAssistantMessage $fila): array
+    public function reclamar_fotos_en_espera(ClientAssistantMessage $fila, array $imagenes_propias = []): void
     {
+        $despachar = function (array $reclamadas) use ($fila, $imagenes_propias) {
+            EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, array_merge($reclamadas, $imagenes_propias))
+                ->onConnection(self::CONEXION_DE_COLA);
+        };
+
         $desde = ($fila->created_at !== null ? $fila->created_at->copy() : now())
             ->subMinutes(self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA);
 
@@ -296,30 +312,32 @@ class AsistenteWhatsappService
         /* Casi ningún mensaje tiene fotos esperando: se mira primero sin lock, para no tomar locks
          * de rango en cada texto del dueño. La lectura que vale es la de adentro de la transacción. */
         if (! $en_espera()->exists()) {
-            return [];
+            $despachar([]);
+
+            return;
         }
 
         try {
-            return DB::transaction(function () use ($fila, $en_espera) {
-                $fotos = $en_espera()->orderBy('id')->lockForUpdate()->get();
+            DB::transaction(function () use ($fila, $en_espera, $despachar) {
+                $fotos      = $en_espera()->orderBy('id')->lockForUpdate()->get();
+                $reclamadas = [];
 
-                if ($fotos->isEmpty()) {
-                    return [];
+                if ($fotos->isNotEmpty()) {
+                    $reclamadas = $this->agrupar_fotos_en($fila, $fotos);
+
+                    if ($fila->isDirty()) {
+                        $fila->save();
+                    }
+
+                    Log::channel('daily')->info('AsistenteWhatsapp: el mensaje se llevó fotos que esperaban su instrucción.', [
+                        'client_id'            => $fila->client_id,
+                        'assistant_message_id' => $fila->id,
+                        'fotos_agrupadas'      => $fotos->count(),
+                    ]);
                 }
 
-                $imagenes = $this->agrupar_fotos_en($fila, $fotos);
-
-                if ($fila->isDirty()) {
-                    $fila->save();
-                }
-
-                Log::channel('daily')->info('AsistenteWhatsapp: el mensaje se llevó fotos que esperaban su instrucción.', [
-                    'client_id'            => $fila->client_id,
-                    'assistant_message_id' => $fila->id,
-                    'fotos_agrupadas'      => $fotos->count(),
-                ]);
-
-                return $imagenes;
+                /* Lo último de la transacción, a propósito: si algo falla antes, no se encoló nada. */
+                $despachar($reclamadas);
             }, self::INTENTOS_DEL_RECLAMO);
         } catch (\Throwable $exception) {
             Log::channel('daily')->warning('AsistenteWhatsapp: no se pudieron reclamar las fotos en espera; salen solas.', [
@@ -328,7 +346,7 @@ class AsistenteWhatsappService
                 'error'                => $exception->getMessage(),
             ]);
 
-            return [];
+            $despachar([]);
         }
     }
 
@@ -351,7 +369,8 @@ class AsistenteWhatsappService
      * fila. Su temporizador, si alguna vez llega, sale en silencio por la guarda de estado final.
      *
      * Si le corresponde, pasa las otras fotos a `agrupado` en esta, vuelve la propia a `recibido`,
-     * borra la metadata de todas y la devuelve en orden de llegada. Es exactamente lo que pasaba
+     * borra la metadata de todas y despacha —en la misma transacción— el job común que las lleva en
+     * orden de llegada; devuelve esa misma lista para el log. Es exactamente lo que pasaba
      * antes con una foto sola: el POST sale con las fotos y el texto vacío. Acá no se aplica
      * `fotos_que_viajan()`: ninguna de estas fotos trae la instrucción, así que con más de tres
      * viajan las primeras, que en una factura son las del encabezado.
@@ -416,6 +435,15 @@ class AsistenteWhatsappService
             $propia->estado          = ClientAssistantMessage::ESTADO_RECIBIDO;
             $propia->media_en_espera = null;
             $propia->save();
+
+            /* 🔴 El job común se despacha ADENTRO de la transacción, por lo mismo que en
+             * `reclamar_fotos_en_espera()`: el insert en `jobs` va en la misma transacción que el
+             * reclamo. Si algo falla, se deshacen juntos —las fotos siguen esperando, con su
+             * metadata— y el temporizador cierra con error; y un reintento por deadlock no deja un
+             * job por intento. Va con las fotos en el payload porque `release()` reencola el payload
+             * ORIGINAL: ver `EnviarMensajeAlAsistenteJob::cerrar_la_espera()`. */
+            EnviarMensajeAlAsistenteJob::dispatch($id_propio, $imagenes)
+                ->onConnection(self::CONEXION_DE_COLA);
 
             return [
                 'imagenes'  => $imagenes,

@@ -5,8 +5,10 @@ namespace Tests\Feature\AsistenteWhatsapp;
 use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\ClientAssistantMessage;
 use App\Services\AsistenteWhatsappService;
+use Illuminate\Queue\Events\JobQueued;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 
@@ -39,6 +41,20 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     const TELEFONO = '+5493411234567';
 
     /**
+     * La cola de verdad, guardada antes de fakearla, para las pruebas de atomicidad.
+     *
+     * @var \Illuminate\Queue\QueueManager
+     */
+    private $cola_real;
+
+    /**
+     * Último id de `jobs` antes de que la prueba empiece a encolar de verdad.
+     *
+     * @var int
+     */
+    private $ultimo_job_previo = 0;
+
+    /**
      * Cola fakeada, configuración de WhatsApp activa y el reloj quieto.
      *
      * El reloj quieto no es comodidad: el `delay` del temporizador y la vigencia de diez minutos se
@@ -50,6 +66,8 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     protected function setUp(): void
     {
         parent::setUp();
+
+        $this->cola_real = Queue::getFacadeRoot();
 
         Queue::fake();
         Carbon::setTestNow(Carbon::parse('2026-09-27 10:00:00'));
@@ -716,6 +734,82 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     }
 
     /**
+     * El reclamo del webhook y su despacho son atómicos: si algo falla después de encolar, se
+     * deshacen juntos y el mensaje sale UNA vez, por el despacho de repliegue, sin las fotos.
+     *
+     * Con la cola `database` de verdad (el insert en `jobs` va en la misma transacción) y una falla
+     * simulada justo después de encolar. Si el despacho quedara afuera de la transacción, la foto
+     * quedaría `agrupado` sin metadata y habría dos jobs del mismo mensaje.
+     *
+     * @return void
+     */
+    public function test_si_el_reclamo_falla_despues_de_encolar_el_mensaje_sale_una_vez_sin_las_fotos(): void
+    {
+        $this->usar_la_cola_de_verdad();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO1', '1'))->assertStatus(200);
+
+        $this->fallar_una_vez_al_encolar();
+
+        Carbon::setTestNow(now()->addSeconds(10));
+        $this->postear_webhook(
+            $this->payload_de_texto(self::TELEFONO, 'Cargame este artículo', 'wamid.TEXTO1')
+        )->assertStatus(200);
+
+        /* El reclamo se deshizo junto con el job que alcanzó a encolar: la foto sigue esperando. */
+        $foto = $this->fila('wamid.FOTO1');
+        $this->assertSame(ClientAssistantMessage::ESTADO_ESPERANDO, $foto->estado);
+        $this->assertNull($foto->agrupado_en_id);
+        $this->assertNotNull($this->media_cruda($foto));
+
+        $texto = $this->fila('wamid.TEXTO1');
+        $del_texto = array_values(array_filter($this->jobs_en_la_tabla(), function ($job) use ($texto) {
+            return (int) $this->propiedad($job, 'mensaje_id') === (int) $texto->id;
+        }));
+
+        $this->assertCount(1, $del_texto, 'El mensaje tiene que salir una vez, ni cero ni dos.');
+        $this->assertSame([], $this->imagenes_del_job($del_texto[0]), 'El repliegue sale sin las fotos.');
+        $this->assertCount(2, $this->jobs_en_la_tabla(), 'En `jobs` quedan el temporizador de la foto y el del texto.');
+    }
+
+    /**
+     * El cierre de la ráfaga del temporizador y su despacho son atómicos: si algo falla después de
+     * encolar, no queda en `jobs` un job común para una foto que se cerró con error.
+     *
+     * @return void
+     */
+    public function test_si_el_cierre_de_la_rafaga_falla_despues_de_encolar_no_queda_un_job_suelto(): void
+    {
+        $this->usar_la_cola_de_verdad();
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO1', '1'))->assertStatus(200);
+
+        $jobs = $this->jobs_en_la_tabla();
+        $this->assertCount(1, $jobs);
+        $temporizador = $jobs[0];
+        $this->assertSame(30, $this->segundos_del_job($temporizador));
+
+        $this->fallar_una_vez_al_encolar();
+
+        Carbon::setTestNow(now()->addSeconds(30));
+        $this->correr_job($temporizador, $espia);
+
+        $foto = $this->fila('wamid.FOTO1');
+        $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $foto->estado);
+        $this->assertNull($this->media_cruda($foto));
+        $this->assertCount(1, $espia->textos, 'La foto que no pudo salir recibe su disculpa.');
+
+        $this->assertCount(
+            1,
+            $this->jobs_en_la_tabla(),
+            'El job común se deshizo junto con el reclamo: en `jobs` queda solo el temporizador.'
+        );
+    }
+
+    /**
      * 12. La ventana de reintentos del temporizador suma la espera, y un job viejo cae en 600.
      *
      * @return void
@@ -912,6 +1006,67 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     private function jobs(): array
     {
         return Queue::pushed(EnviarMensajeAlAsistenteJob::class)->values()->all();
+    }
+
+    /**
+     * Vuelve a la cola `database` de verdad: el insert en `jobs` va en la transacción de la prueba.
+     *
+     * Hace falta para medir atomicidad: con la cola fakeada, un rollback no deshace nada de lo que
+     * la cola anotó, y la prueba no podría distinguir un despacho adentro de la transacción de uno
+     * afuera.
+     *
+     * @return void
+     */
+    private function usar_la_cola_de_verdad(): void
+    {
+        Queue::swap($this->cola_real);
+
+        $this->ultimo_job_previo = (int) DB::table('jobs')->max('id');
+    }
+
+    /**
+     * Hace fallar la PRÓXIMA vez que algo se encola, justo después del insert en `jobs`.
+     *
+     * `JobQueued` se dispara en forma sincrónica apenas la fila quedó insertada, así que tirar ahí
+     * es exactamente "se cortó todo después de encolar y antes del commit".
+     *
+     * @return void
+     */
+    private function fallar_una_vez_al_encolar(): void
+    {
+        $ya_fallo = false;
+
+        Event::listen(JobQueued::class, function () use (&$ya_fallo) {
+            if ($ya_fallo) {
+                return;
+            }
+
+            $ya_fallo = true;
+
+            throw new \RuntimeException('Se cortó la base justo después de encolar (simulado en la prueba).');
+        });
+    }
+
+    /**
+     * Los jobs del canal que quedaron en la tabla `jobs` durante esta prueba, en orden.
+     *
+     * @return array<int, EnviarMensajeAlAsistenteJob>
+     */
+    private function jobs_en_la_tabla(): array
+    {
+        $jobs = [];
+
+        $filas = DB::table('jobs')->where('id', '>', $this->ultimo_job_previo)->orderBy('id')->get();
+        foreach ($filas as $fila) {
+            $payload = json_decode((string) $fila->payload, true);
+            $job     = unserialize((string) $payload['data']['command']);
+
+            if ($job instanceof EnviarMensajeAlAsistenteJob) {
+                $jobs[] = $job;
+            }
+        }
+
+        return $jobs;
     }
 
     /**
