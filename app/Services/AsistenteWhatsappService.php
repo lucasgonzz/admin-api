@@ -107,6 +107,16 @@ class AsistenteWhatsappService
     const INTENTOS_DEL_RECLAMO = 3;
 
     /**
+     * Margen, en segundos, que se le da al temporizador de una foto más allá de su espera.
+     *
+     * Una foto más nueva "sostiene" la ráfaga —las anteriores le ceden el cierre— solo mientras su
+     * propio temporizador todavía puede llegar: su espera más este margen, que cubre la demora
+     * normal del worker en levantar un job vencido. Pasado eso, se la da por perdida y el
+     * temporizador que esté corriendo cierra la ráfaga entera. Ver `cerrar_espera_vencida()`.
+     */
+    const SEGUNDOS_DE_MARGEN_DEL_TEMPORIZADOR = 60;
+
+    /**
      * Recibe un mensaje del dueño y lo deja encaminado hacia el asistente de su sistema.
      *
      * Deja la fila entrante SIEMPRE, incluso cuando después todo falle: es lo que permite
@@ -329,16 +339,24 @@ class AsistenteWhatsappService
      * —y no toca nada— en los dos casos en que no le corresponde cerrar:
      *
      *   - su foto ya no está esperando: la reclamó un mensaje, que la lleva en su propio job;
-     *   - hay una foto MÁS NUEVA del mismo dueño esperando: la ráfaga sigue abierta y la cierra el
-     *     job de esa última foto, que se lleva a esta. Es lo que hace que la ventana se reinicie
-     *     con cada foto.
+     *   - hay una foto MÁS NUEVA del mismo dueño esperando cuyo temporizador todavía puede llegar:
+     *     la ráfaga sigue abierta y la cierra el job de esa última foto, que se lleva a esta. Es lo
+     *     que hace que la ventana se reinicie con cada foto.
      *
-     * Si le corresponde, reclama las anteriores (quedan `agrupado` en esta), vuelve la propia a
-     * `recibido`, borra la metadata de todas y la devuelve en orden de llegada, con la propia al
-     * final. Es exactamente lo que pasaba antes con una foto sola: el POST sale con las fotos y el
-     * texto vacío.
+     * 🔴 "Todavía puede llegar" es la mitad del arreglo de las fotos huérfanas. Una foto más nueva
+     * sostiene la ráfaga solo mientras no pasó su propio vencimiento (su espera más
+     * `SEGUNDOS_DE_MARGEN_DEL_TEMPORIZADOR`). Si ya pasó, su temporizador se perdió o viene muy
+     * atrasado, y ceder el cierre a él sería dejar a todas esperando para siempre: este
+     * temporizador cierra la ráfaga ENTERA, incluidas las más nuevas, que quedan `agrupado` en esta
+     * fila. Su temporizador, si alguna vez llega, sale en silencio por la guarda de estado final.
      *
-     * 🔴 Las tres lecturas salen de UNA consulta con `lockForUpdate` sobre las fotos en espera del
+     * Si le corresponde, pasa las otras fotos a `agrupado` en esta, vuelve la propia a `recibido`,
+     * borra la metadata de todas y la devuelve en orden de llegada. Es exactamente lo que pasaba
+     * antes con una foto sola: el POST sale con las fotos y el texto vacío. Acá no se aplica
+     * `fotos_que_viajan()`: ninguna de estas fotos trae la instrucción, así que con más de tres
+     * viajan las primeras, que en una factura son las del encabezado.
+     *
+     * 🔴 Las lecturas salen de UNA consulta con `lockForUpdate` sobre las fotos en espera del
      * dueño, la misma forma que la del webhook: si el webhook y este job leyeran en órdenes
      * distintos (primero la propia por id, después las demás por índice), MySQL tendría con qué
      * armar un deadlock entre los dos.
@@ -357,7 +375,12 @@ class AsistenteWhatsappService
         $desde  = $creada->copy()->subMinutes(self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA);
         $hasta  = $creada->copy()->addMinutes(self::MINUTOS_DE_VIGENCIA_DE_LA_ESPERA);
 
-        return DB::transaction(function () use ($fila, $desde, $hasta) {
+        /* Una foto creada DESPUÉS de este límite todavía tiene su temporizador en camino. */
+        $limite_de_sosten = now()->subSeconds(
+            $this->segundos_de_espera_de_foto() + self::SEGUNDOS_DE_MARGEN_DEL_TEMPORIZADOR
+        );
+
+        return DB::transaction(function () use ($fila, $desde, $hasta, $limite_de_sosten) {
             $en_espera = ClientAssistantMessage::query()
                 ->enEsperaDelDueno((int) $fila->client_id, (string) $fila->telefono)
                 ->where('created_at', '>=', $desde)
@@ -376,22 +399,19 @@ class AsistenteWhatsappService
                 return null;
             }
 
-            $hay_una_mas_nueva = $en_espera->contains(function ($foto) use ($id_propio) {
-                return (int) $foto->id > $id_propio;
+            $la_sostiene_una_mas_nueva = $en_espera->contains(function ($foto) use ($id_propio, $limite_de_sosten) {
+                return (int) $foto->id > $id_propio
+                    && $foto->created_at !== null
+                    && $foto->created_at->greaterThan($limite_de_sosten);
             });
 
-            if ($hay_una_mas_nueva) {
+            if ($la_sostiene_una_mas_nueva) {
                 return null;
             }
 
-            $anteriores = $en_espera->filter(function ($foto) use ($id_propio) {
-                return (int) $foto->id < $id_propio;
-            });
-
-            $imagenes = array_merge(
-                $this->agrupar_fotos_en($propia, $anteriores),
-                $this->media_en_espera_de($propia)
-            );
+            /* Todas las que esperan, en orden de llegada: las anteriores y, si las hay, las más
+             * nuevas cuyo temporizador ya no va a llegar. La propia va en su lugar de la fila. */
+            $imagenes = $this->agrupar_fotos_en($propia, $en_espera);
 
             $propia->estado          = ClientAssistantMessage::ESTADO_RECIBIDO;
             $propia->media_en_espera = null;
@@ -399,20 +419,74 @@ class AsistenteWhatsappService
 
             return [
                 'imagenes'  => $imagenes,
-                'agrupadas' => $anteriores->count(),
+                'agrupadas' => $en_espera->count() - 1,
             ];
         }, self::INTENTOS_DEL_RECLAMO);
+    }
+
+    /**
+     * Cierra con error las fotos que el dueño tenía esperando ANTES de una foto que se cerró con
+     * error sin viajar.
+     *
+     * 🔴 Es la otra mitad del arreglo de las fotos huérfanas. Las fotos anteriores de una ráfaga le
+     * cedieron el cierre a la última; si la última termina en error —el canal se apagó en el medio,
+     * el cliente desapareció, el reclamo agotó sus reintentos, el worker la dio por muerta—, nadie
+     * más las iba a cerrar y quedaban `esperando` para siempre, con la URL firmada guardada. Se
+     * cierran todas de una, con un update: SIN una disculpa por cada una. La que ya manda la
+     * disculpa (si corresponde) es la fila que se cerró.
+     *
+     * Va en su propio `try`: se llama desde los caminos que cierran con error, y un fallo acá no
+     * puede voltear el cierre que ya quedó escrito.
+     *
+     * @param ClientAssistantMessage $fila   Foto que se cerró con error.
+     * @param string                 $motivo Qué pasó, para el `error` de cada foto.
+     *
+     * @return int Cuántas fotos se cerraron.
+     */
+    public function cerrar_fotos_anteriores_en_espera(ClientAssistantMessage $fila, string $motivo): int
+    {
+        try {
+            $cerradas = ClientAssistantMessage::query()
+                ->enEsperaDelDueno((int) $fila->client_id, (string) $fila->telefono)
+                ->where('id', '<', (int) $fila->id)
+                ->update([
+                    'estado'          => ClientAssistantMessage::ESTADO_ERROR,
+                    'media_en_espera' => null,
+                    'error'           => mb_strimwidth($motivo, 0, 1000, '…'),
+                ]);
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('AsistenteWhatsapp: no se pudieron cerrar las fotos que esperaban.', [
+                'assistant_message_id' => $fila->id,
+                'error'                => $exception->getMessage(),
+            ]);
+
+            return 0;
+        }
+
+        if ($cerradas > 0) {
+            Log::channel('daily')->warning('AsistenteWhatsapp: se cerraron con error fotos que esperaban su instrucción.', [
+                'client_id'            => $fila->client_id,
+                'assistant_message_id' => $fila->id,
+                'fotos_cerradas'       => $cerradas,
+            ]);
+        }
+
+        return (int) $cerradas;
     }
 
     /**
      * Pasa un grupo de fotos en espera a `agrupado` en la fila que las cierra.
      *
      * Devuelve la metadata de todas, en el orden en que vienen, y deja a cada una sin
-     * `media_en_espera`. Si la fila que cierra no trae conversación deducida de una cita y alguna
-     * foto sí —el dueño mandó la foto citando una respuesta vieja del asistente y después el audio
-     * sin citar—, la fila que cierra se queda con la de la foto más reciente: la cita era la
-     * intención de seguir esa conversación, y el audio es la segunda mitad del mismo pedido. Quien
-     * llama es el que guarda la fila que cierra.
+     * `media_en_espera`. El grupo puede traer adentro a la propia fila que cierra (el temporizador
+     * que cierra la ráfaga la pasa en su lugar de llegada): su metadata se toma en ese lugar, pero
+     * no se la agrupa en sí misma —su estado lo decide quien llama—.
+     *
+     * Si la fila que cierra no trae conversación deducida de una cita y alguna foto sí —el dueño
+     * mandó la foto citando una respuesta vieja del asistente y después el audio sin citar—, la
+     * fila que cierra se queda con la de la foto más reciente: la cita era la intención de seguir
+     * esa conversación, y el audio es la segunda mitad del mismo pedido. Quien llama es el que
+     * guarda la fila que cierra.
      *
      * Se llama siempre adentro de la transacción del reclamo.
      *
@@ -428,6 +502,10 @@ class AsistenteWhatsappService
 
         foreach ($fotos as $foto) {
             $imagenes = array_merge($imagenes, $this->media_en_espera_de($foto));
+
+            if ((int) $foto->id === (int) $cierre->id) {
+                continue;
+            }
 
             if ($foto->ai_conversation_id !== null) {
                 $conversacion = (int) $foto->ai_conversation_id;

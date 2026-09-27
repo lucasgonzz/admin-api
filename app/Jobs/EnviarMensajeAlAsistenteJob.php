@@ -50,8 +50,9 @@ use Illuminate\Support\Facades\Log;
  * epígrafe no sale en el acto: su fila nace `esperando` y este job se despacha con `delay` para que
  * el dueño alcance a mandar el audio de "cargame este artículo". En ese modo el job es solo un
  * TEMPORIZADOR (`$segundos_de_espera` > 0): si al despertar la foto ya se la llevó otro mensaje, o
- * hay una foto más nueva esperando, termina en silencio; si no, cierra la ráfaga y despacha un job
- * común con todas las fotos, que es el que hace la ida y el polling. Ver `cerrar_la_espera()`.
+ * hay una foto más nueva esperando cuyo temporizador todavía puede llegar, termina en silencio; si
+ * no, cierra la ráfaga y despacha un job común con todas las fotos, que es el que hace la ida y el
+ * polling. Ver `cerrar_la_espera()`.
  */
 class EnviarMensajeAlAsistenteJob implements ShouldQueue
 {
@@ -318,14 +319,28 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         /* El interruptor se vuelve a mirar acá y no solo en el webhook: entre que el mensaje entró
          * y que el job corre pueden haber pasado minutos, y apagar la casilla tiene que frenar lo
          * que está en vuelo. Se corta en silencio —sin texto de disculpa— porque apagar el canal
-         * es una decisión deliberada, no una falla. Va ANTES del cierre de la ráfaga a propósito:
-         * así cada foto en espera la cierra su propio temporizador, y ninguna queda esperando para
-         * siempre con su URL guardada detrás de una más nueva. */
+         * es una decisión deliberada, no una falla.
+         *
+         * Va ANTES del cierre de la ráfaga, y si la fila era una foto en espera se lleva también a
+         * las fotos anteriores del dueño que seguían esperando. Sin eso, las que ya le habían
+         * cedido el cierre a esta (su temporizador vio una más nueva y salió en silencio) quedaban
+         * `esperando` para siempre con la URL guardada: ningún otro temporizador iba a volver por
+         * ellas. */
         if (! (bool) $client->asistente_whatsapp_activo) {
+            $estaba_esperando = (string) $fila->estado === ClientAssistantMessage::ESTADO_ESPERANDO;
+
             $fila->estado = ClientAssistantMessage::ESTADO_ERROR;
             $fila->error  = 'El canal del asistente se apagó para este cliente antes de mandar el mensaje.';
             $this->soltar_media_en_espera($fila);
             $fila->save();
+
+            if ($estaba_esperando) {
+                $asistente->cerrar_fotos_anteriores_en_espera(
+                    $fila,
+                    'El canal del asistente se apagó mientras la foto esperaba su instrucción '
+                        . '(se cerró junto con la foto #' . $fila->id . ').'
+                );
+            }
 
             return;
         }
@@ -418,8 +433,15 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
      * El reclamo —con su transacción y su `lockForUpdate`— vive en
      * `AsistenteWhatsappService::cerrar_espera_vencida()`, al lado del que hace el webhook, para
      * que las dos puntas que compiten por las mismas filas lean con la misma forma. Si devuelve
-     * null, a esta foto no le toca cerrar (se la llevó un mensaje, o hay una más nueva esperando) y
-     * el temporizador termina en silencio.
+     * null, a esta foto no le toca cerrar (se la llevó un mensaje, o hay una más nueva esperando
+     * cuyo temporizador todavía puede llegar) y el temporizador termina en silencio.
+     *
+     * ⚠️ Lo que queda sin cubrir, a propósito: si este temporizador cedió el cierre a una foto más
+     * nueva y el de esa foto desaparece SIN pasar por `failed()` (la fila de `jobs` borrada a mano,
+     * la base perdida), las dos quedan `esperando` hasta que el dueño mande algo dentro de la
+     * vigencia. Un worker que muere a mitad de un temporizador no entra en ese caso: cuando la
+     * reserva vence (`retry_after`) el job se vuelve a levantar con `retryUntil()` ya vencido,
+     * Laravel lo manda a `failed()`, y `cerrar_con_error()` cierra también las anteriores.
      *
      * 🔴 **La ida no se hace acá: se despacha un job común con las fotos en el payload.** Es la
      * única forma de que las fotos sobrevivan a un reintento. `release()` reencola el payload
@@ -1442,10 +1464,23 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         WhatsappSendService $sender,
         string $detalle
     ): void {
+        $estaba_esperando = (string) $fila->estado === ClientAssistantMessage::ESTADO_ESPERANDO;
+
         $fila->estado = ClientAssistantMessage::ESTADO_ERROR;
         $fila->error  = mb_strimwidth($detalle, 0, 1000, '…');
         $this->soltar_media_en_espera($fila);
         $fila->save();
+
+        /* Una foto que esperaba y se cierra con error —el temporizador que no pudo cerrar la
+         * ráfaga, o el que el worker dio por muerto en `failed()`— se lleva a las anteriores que le
+         * habían cedido el cierre. Una sola disculpa, la de abajo: no una por foto. */
+        if ($estaba_esperando) {
+            $asistente->cerrar_fotos_anteriores_en_espera(
+                $fila,
+                'Esperaba su instrucción junto con la foto #' . $fila->id
+                    . ', que se cerró con error: ' . $detalle
+            );
+        }
 
         $whatsapp_message_id = $sender->send_text(
             (string) $fila->telefono,

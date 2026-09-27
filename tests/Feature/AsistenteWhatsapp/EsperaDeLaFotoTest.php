@@ -4,6 +4,7 @@ namespace Tests\Feature\AsistenteWhatsapp;
 
 use App\Jobs\EnviarMensajeAlAsistenteJob;
 use App\Models\ClientAssistantMessage;
+use App\Services\AsistenteWhatsappService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -579,6 +580,139 @@ class EsperaDeLaFotoTest extends BaseDelCanal
         $this->assertCount(0, $espia->textos, 'Apagar el canal es una decisión, no una falla: sin disculpa.');
         $this->assertSame([], $this->posts_al_asistente());
         $this->assertCount(1, $this->jobs(), 'Con el canal apagado no se despacha ningún job.');
+    }
+
+    /**
+     * 11 bis. El canal se apaga ENTRE el temporizador de la primera foto y el de la segunda: la
+     *         primera no queda esperando para siempre.
+     *
+     * 🔴 Es el caso de la foto huérfana. El temporizador de la primera vio una más nueva y le cedió
+     * el cierre; el de la segunda encuentra el canal apagado. Si ese corte cerrara solo su fila, la
+     * primera quedaría `esperando` con la URL guardada y ningún temporizador volvería por ella.
+     *
+     * @return void
+     */
+    public function test_apagar_el_canal_entre_los_temporizadores_no_deja_fotos_huerfanas(): void
+    {
+        $espia  = $this->espiar_sender();
+        $client = $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO1', '1'))->assertStatus(200);
+        Carbon::setTestNow(now()->addSeconds(20));
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO2', '2'))->assertStatus(200);
+
+        list($temporizador_1, $temporizador_2) = $this->jobs();
+
+        Carbon::setTestNow(now()->addSeconds(10));
+        $this->correr_job($temporizador_1, $espia);
+        $this->assertSame(ClientAssistantMessage::ESTADO_ESPERANDO, $this->fila('wamid.FOTO1')->estado);
+
+        $client->asistente_whatsapp_activo = false;
+        $client->save();
+
+        Carbon::setTestNow(now()->addSeconds(20));
+        $this->correr_job($temporizador_2, $espia);
+
+        foreach (['wamid.FOTO1', 'wamid.FOTO2'] as $wamid) {
+            $foto = $this->fila($wamid);
+            $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $foto->estado, $wamid . ' no puede quedar esperando.');
+            $this->assertNull($this->media_cruda($foto), $wamid . ' no puede dejar la URL guardada.');
+        }
+
+        $this->assertStringContainsString('se apagó', (string) $this->fila('wamid.FOTO1')->error);
+        $this->assertCount(0, $espia->textos, 'Con el canal apagado no sale ninguna disculpa, tampoco por la primera.');
+        $this->assertSame([], $this->posts_al_asistente());
+        $this->assertCount(2, $this->jobs());
+    }
+
+    /**
+     * 11 ter. El worker da por muerto al temporizador de la última foto: `failed()` cierra también
+     *         la anterior, con UNA sola disculpa.
+     *
+     * @return void
+     */
+    public function test_el_failed_del_temporizador_de_la_ultima_foto_cierra_la_rafaga(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO1', '1'))->assertStatus(200);
+        Carbon::setTestNow(now()->addSeconds(20));
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO2', '2'))->assertStatus(200);
+
+        list($temporizador_1, $temporizador_2) = $this->jobs();
+
+        Carbon::setTestNow(now()->addSeconds(10));
+        $this->correr_job($temporizador_1, $espia);
+
+        $temporizador_2->failed(new \RuntimeException('El worker dio el job por muerto (simulado en la prueba).'));
+
+        $foto_1 = $this->fila('wamid.FOTO1');
+        $foto_2 = $this->fila('wamid.FOTO2');
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $foto_2->estado);
+        $this->assertSame(ClientAssistantMessage::ESTADO_ERROR, $foto_1->estado, 'La anterior no puede quedar esperando.');
+        $this->assertNull($this->media_cruda($foto_1));
+        $this->assertNull($this->media_cruda($foto_2));
+        $this->assertStringContainsString('#' . $foto_2->id, (string) $foto_1->error);
+
+        $this->assertCount(1, $espia->textos, 'Una sola disculpa por la ráfaga, no una por foto.');
+        $this->assertSame(AsistenteWhatsappService::TEXTO_DE_DISCULPA, $espia->textos[0]['body']);
+    }
+
+    /**
+     * 11 quater. El temporizador de la última foto se perdió: el de la primera, que corre tarde,
+     *            cierra la ráfaga entera y sale UN solo POST con las dos.
+     *
+     * La foto más nueva sostiene la ráfaga solo mientras su propio temporizador todavía puede
+     * llegar (su espera más un margen de 60 s). Acá la primera corre cuando ya pasó ese
+     * vencimiento, así que no le cede nada a nadie.
+     *
+     * @return void
+     */
+    public function test_si_el_temporizador_de_la_ultima_foto_se_perdio_cierra_el_de_la_primera(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO1', '1'))->assertStatus(200);
+        Carbon::setTestNow(now()->addSeconds(20));
+        $this->postear_webhook($this->payload_de_foto('wamid.FOTO2', '2'))->assertStatus(200);
+
+        list($temporizador_1, $temporizador_2) = $this->jobs();
+
+        /* La segunda vencía a los 30 s de llegar; con el margen de 60, un segundo más ya es tarde. */
+        Carbon::setTestNow(now()->addSeconds(30 + 60 + 1));
+        $this->correr_job($temporizador_1, $espia);
+
+        $foto_1 = $this->fila('wamid.FOTO1');
+        $foto_2 = $this->fila('wamid.FOTO2');
+
+        $this->assertSame(ClientAssistantMessage::ESTADO_RECIBIDO, $foto_1->estado);
+        $this->assertSame(ClientAssistantMessage::ESTADO_AGRUPADO, $foto_2->estado);
+        $this->assertSame((int) $foto_1->id, $foto_2->agrupado_en_id);
+        $this->assertNull($this->media_cruda($foto_1));
+        $this->assertNull($this->media_cruda($foto_2));
+
+        $jobs = $this->jobs();
+        $this->assertCount(3, $jobs);
+
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 7, 'ai_message_id' => 9], 202),
+            '*/media/foto-1*'      => Http::response($this->png(4), 200, ['Content-Type' => 'image/png']),
+            '*/media/foto-2*'      => Http::response($this->png(6), 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $this->correr_job($jobs[2], $espia);
+
+        /* Si el temporizador de la segunda llega igual, sale en silencio. */
+        $this->correr_job($temporizador_2, $espia);
+
+        $posts = $this->posts_al_asistente();
+        $this->assertCount(1, $posts, 'Un solo POST para toda la ráfaga.');
+        $this->assertSame([$this->png(4), $this->png(6)], $this->bytes_de_las_imagenes($posts[0]));
+        $this->assertSame('wamid.FOTO1', $this->parte($posts[0], 'whatsapp_message_id'));
+        $this->assertCount(3, $this->jobs());
     }
 
     /**
