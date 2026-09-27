@@ -567,11 +567,54 @@ class EsperaDeLaFotoTest extends BaseDelCanal
         $texto = $this->parte($posts[0], 'texto');
         $this->assertStringContainsString('Son las fotos del remito', $texto);
         $this->assertStringContainsString('por este canal llegan hasta 3 por mensaje', $texto);
-        $this->assertStringContainsString('viste las primeras 3', $texto);
+        $this->assertStringContainsString('una quedó afuera', $texto);
+        $this->assertStringNotContainsString('viste', $texto, 'La nota del tope no afirma cuántas vio el asistente.');
         $this->assertStringNotContainsString('no se pudo recibir', $texto);
         $this->assertStringNotContainsString('no se pudieron recibir', $texto);
 
         $this->assertStringContainsString('Se descartaron 1 foto(s)', (string) $this->fila('wamid.TEXTO1')->error);
+    }
+
+    /**
+     * 10 ter. Más fotos que el tope Y una de las que entran no se pudo bajar: cada nota dice lo suyo.
+     *
+     * La del tope cuenta las que quedaron afuera; la de siempre, la que falló. Ninguna afirma
+     * cuántas vio el asistente, que acá son dos y no tres.
+     *
+     * @return void
+     */
+    public function test_con_el_tope_y_una_descarga_fallida_cada_nota_dice_lo_suyo(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        for ($i = 1; $i <= 4; $i++) {
+            $this->postear_webhook($this->payload_de_foto('wamid.FOTO' . $i, (string) $i))->assertStatus(200);
+            Carbon::setTestNow(now()->addSeconds(3));
+        }
+
+        $this->postear_webhook(
+            $this->payload_de_texto(self::TELEFONO, 'Son las fotos del remito', 'wamid.TEXTO1')
+        )->assertStatus(200);
+
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 7, 'ai_message_id' => 9], 202),
+            /* La foto 2 no baja ni por su URL ni por su id de Meta (el segundo camino de la descarga). */
+            '*/media/foto-2*'      => Http::response('', 500),
+            '*media.foto.2*'       => Http::response('', 500),
+            '*'                    => Http::response($this->png(), 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $this->correr_job($this->jobs()[4], $espia);
+
+        $posts = $this->posts_al_asistente();
+        $this->assertCount(1, $posts);
+        $this->assertSame(2, $this->contar_imagenes($posts[0]));
+
+        $texto = $this->parte($posts[0], 'texto');
+        $this->assertStringContainsString('una foto que no se pudo recibir', $texto);
+        $this->assertStringContainsString('una quedó afuera', $texto);
+        $this->assertStringNotContainsString('viste', $texto);
     }
 
     /**

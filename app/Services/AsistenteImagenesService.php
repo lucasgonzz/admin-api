@@ -195,13 +195,15 @@ class AsistenteImagenesService
             return '';
         }
 
-        $pedido = $sobrantes === 1
-            ? 'Si necesitás la que quedó afuera, pedile que te la mande aparte.'
-            : 'Si necesitás las ' . $sobrantes . ' que quedaron afuera, pedile que te las mande aparte.';
+        /* 🔴 Dice cuántas quedaron AFUERA y nada más: no afirma cuántas vio el asistente. Entre las
+         * que entraron puede haber una que no se pudo bajar, y de esas se ocupa la otra nota
+         * (`nota_para_el_asistente()`); "viste las primeras tres" sería mentira justo en ese caso. */
+        $afuera = $sobrantes === 1
+            ? 'una quedó afuera. Si la necesitás, pedile que te la mande aparte.'
+            : $sobrantes . ' quedaron afuera. Si las necesitás, pedile que te las mande aparte.';
 
         return '[El dueño mandó ' . $total . ' fotos juntas y por este canal llegan hasta '
-            . self::MAXIMO_DE_IMAGENES . ' por mensaje: viste las primeras ' . self::MAXIMO_DE_IMAGENES
-            . '. ' . $pedido . ']';
+            . self::MAXIMO_DE_IMAGENES . ' por mensaje: ' . $afuera . ']';
     }
 
     /**
