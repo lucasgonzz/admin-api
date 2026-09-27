@@ -54,6 +54,8 @@ class DatabaseSeeder extends Seeder
             ComerciocityAfipConfigSeeder::class,
             // Los tres paquetes de IA del piloto (tentativos, idempotentes por nombre).
             AiPlanSeeder::class,
+            // Pipeline "Agentes" del CRM (idempotente por slug: si ya existe no lo toca).
+            PipelineAgentesSeeder::class,
         ]);
 
         // Plantilla base de variables .env de empresa-api: solo siembra si no hay filas de ese scope.
