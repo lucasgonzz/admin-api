@@ -347,6 +347,46 @@ class PipelineFieldsService
     }
 
     /**
+     * Si el campo "agenda" de la etapa VINO CON VALOR en el payload crudo (antes de validar).
+     *
+     * Es lo que decide la regla 1 de la próxima acción al mover (R1): se mira lo que mandó la SPA y
+     * no lo que pasó la validación a propósito. Si el valor vino mal formado, el error queda en
+     * `fields.<key>` y NO se evalúan las reglas 2 y 3, que sumarían un "Poné la fecha de la próxima
+     * acción" que no corresponde (la fecha vino, solo que mal).
+     *
+     * @param PipelineStage $etapa
+     * @param mixed         $valores Lo que vino en `fields`.
+     *
+     * @return bool
+     */
+    public function agenda_vino_con_valor(PipelineStage $etapa, $valores)
+    {
+        if (! is_array($valores)) {
+            return false;
+        }
+
+        foreach ($etapa->definicion_de_campos() as $campo) {
+            if (empty($campo['agenda'])) {
+                continue;
+            }
+
+            $key = (string) $campo['key'];
+            if (! array_key_exists($key, $valores)) {
+                return false;
+            }
+
+            $valor = $valores[$key];
+            if (is_string($valor)) {
+                $valor = trim($valor);
+            }
+
+            return $valor !== null && $valor !== '';
+        }
+
+        return false;
+    }
+
+    /**
      * Si la etapa tiene un campo "agenda".
      *
      * @param PipelineStage $etapa

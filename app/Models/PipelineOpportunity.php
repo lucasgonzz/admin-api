@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Models\Concerns\UsesVirtualTime;
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -30,6 +31,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property int|null                        $owner_admin_id
  * @property \Illuminate\Support\Carbon|null $next_action_at    Hora local; sin hora = 00:00:00.
  * @property string|null                     $next_action_note
+ * @property string|null                     $next_action_source agenda | manual | null.
  * @property \Illuminate\Support\Carbon|null $stage_entered_at
  * @property \Illuminate\Support\Carbon|null $closed_at
  * @property string|null                     $lost_reason
@@ -45,6 +47,12 @@ class PipelineOpportunity extends Model
 
     /** Sujeto lead. */
     const SUBJECT_LEAD = 'lead';
+
+    /** La próxima acción la fijó el campo agenda de una etapa (al mover o al dar de alta). */
+    const SOURCE_AGENDA = 'agenda';
+
+    /** La próxima acción la cargó una persona (PUT o mover con `next_action_at`). */
+    const SOURCE_MANUAL = 'manual';
 
     /**
      * @var string
@@ -116,6 +124,30 @@ class PipelineOpportunity extends Model
         }
 
         return null;
+    }
+
+    /**
+     * Si la próxima acción SOBREVIVE a un movimiento hacia una etapa abierta que no la fija ni la
+     * trae en el payload (regla 3 de la ronda de arreglos R1): solo si la cargó una persona y
+     * todavía no pasó.
+     *
+     * 🔴 ES LA ÚNICA DEFINICIÓN. La usan `PipelineOpportunityService::mover()` para decidir si la
+     * conserva o la borra, y el presenter para publicar `next_action_carries_over`, que es lo que
+     * la SPA mira para precargar (o no) el editor de próxima acción del modal de mover. Si la SPA
+     * volviera a implementar la regla, algún día mostraría "se mantiene" y el back la borraría.
+     *
+     * Una próxima acción que vino de la agenda de la etapa que se deja (la fecha de la reunión), o
+     * que ya venció, no sobrevive: el movimiento mismo es la interacción que la reemplaza.
+     *
+     * @param Carbon $ahora El reloj del request (`AppTime::now()`).
+     *
+     * @return bool
+     */
+    public function proxima_accion_se_conserva(Carbon $ahora)
+    {
+        return $this->next_action_source === self::SOURCE_MANUAL
+            && $this->next_action_at !== null
+            && $this->next_action_at->gt($ahora);
     }
 
     /**

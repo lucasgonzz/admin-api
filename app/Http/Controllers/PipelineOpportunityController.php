@@ -165,13 +165,16 @@ class PipelineOpportunityController extends Controller
         $oportunidad = $this->oportunidad_o_404($id);
 
         /* `fields` sin regla de tipo a propósito: su forma y sus valores los valida
-           PipelineFieldsService contra la definición de la etapa destino, con errores por campo. */
+           PipelineFieldsService contra la definición de la etapa destino, con errores por campo.
+           `next_action_at` tampoco lleva regla de tipo (ronda de arreglos R1): solo se valida y se
+           parsea si se va a aplicar, y eso lo decide el servicio (destino abierto sin valor de
+           agenda). Moviendo a una ganada, un valor cualquiera ahí se ignora sin 422. */
         $datos = PipelineValidator::validar($request->all(), [
             'stage_id'         => ['required', 'integer'],
             'fields'           => ['nullable'],
             'note'             => ['nullable', 'string', 'max:' . PipelineOpportunityService::MAX_NOTA],
             'lost_reason'      => ['nullable', 'string', 'max:' . PipelineOpportunityService::MAX_CORTO],
-            'next_action_at'   => ['nullable', 'string'],
+            'next_action_at'   => ['nullable'],
             'next_action_note' => ['nullable', 'string', 'max:' . PipelineOpportunityService::MAX_CORTO],
         ]);
 

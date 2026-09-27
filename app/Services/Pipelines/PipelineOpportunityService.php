@@ -44,6 +44,21 @@ class PipelineOpportunityService
     /** Largo máximo del motivo de pérdida y de la nota de la próxima acción (columnas string 255). */
     const MAX_CORTO = 255;
 
+    /** R1.1: la próxima acción la fija el campo agenda de la etapa destino. */
+    const REGLA_AGENDA = 'agenda';
+
+    /** R1.2: la próxima acción es la que trae el payload (`next_action_at`, aunque sea null). */
+    const REGLA_PAYLOAD = 'payload';
+
+    /** R1.3: sin agenda ni clave en el payload, se conserva solo la manual que no venció. */
+    const REGLA_CONSERVAR = 'conservar';
+
+    /** Una nota de próxima acción sin fecha no tiene dónde vivir: la agenda se ordena por fecha. */
+    const ERROR_NOTA_SIN_FECHA = 'Poné la fecha de la próxima acción.';
+
+    /** La fecha de la próxima acción vino, pero mal formada (o en ISO). */
+    const ERROR_FORMATO_PROXIMA = 'La fecha de la próxima acción tiene que tener formato AAAA-MM-DD o AAAA-MM-DD HH:MM.';
+
     /**
      * @var PipelineFieldsService
      */
@@ -187,12 +202,24 @@ class PipelineOpportunityService
      *  4. Reabrir (destino abierta desde una cerrada) → 422 si el sujeto ya tiene OTRA abierta en
      *     el pipeline. Si reabre: `closed_at` y `lost_reason` en null.
      *  5. Destino ganada / perdida: `closed_at = ahora`, próxima acción en null (lo que venga en el
-     *     payload se ignora), `lost_reason` el del payload (ganada → null).
-     *  6. Destino abierta: si la etapa tiene campo agenda y vino con valor, ese valor es la próxima
-     *     acción (nota: la del payload o el nombre de la etapa). Si no, y el payload TRAE la clave
-     *     `next_action_at` (aunque sea null), se aplica con `next_action_note`; si no la trae, se
-     *     conserva la que tenía.
+     *     payload se ignora, NI SE VALIDA NI SE PARSEA), `lost_reason` el del payload (ganada → null).
+     *  6. Destino abierta, la próxima acción (ronda de arreglos R1):
+     *     R1.1 si la etapa tiene campo agenda y vino con valor → ese valor (`date` → 00:00:00),
+     *          `source = agenda`, nota = `next_action_note` del payload o el nombre de la etapa. Lo
+     *          que venga en `next_action_at` se ignora sin validarlo.
+     *     R1.2 si no, y el payload TRAE la clave `next_action_at` (aunque sea null) → se aplica con
+     *          su nota; `source = manual` si hay fecha, null si se borró. Nota sin fecha → 422.
+     *     R1.3 si no la trae → se conserva SOLO si `source = manual` y todavía no venció
+     *          (`PipelineOpportunity::proxima_accion_se_conserva()`); si no, se borra entera. Una
+     *          nota de próxima acción sin clave `next_action_at` → 422 (no hay fecha a la que
+     *          pegarla).
+     *     🔴 Antes de R1 se conservaba siempre, y la fecha de la reunión de "Reunión agendada"
+     *     quedaba pegada al pasar a "Reunión hecha": al día siguiente la oportunidad figuraba
+     *     vencida en el tablero, los chips y la agenda.
      *  7. `stage_id` y `stage_entered_at = ahora`, y una actividad `stage_change` con la foto.
+     *  8. Si la próxima acción cambió por R1.2, R1.3 o por cerrar, una actividad `next_action`
+     *     más (`{from, to, note}`, como la del PUT) con el mismo `occurred_at`. Por R1.1 no: la
+     *     fecha ya está en la foto del `stage_change`.
      *
      * @param PipelineOpportunity  $oportunidad
      * @param array<string, mixed> $datos    stage_id, fields?, note?, lost_reason?, next_action_at?, next_action_note?
@@ -240,12 +267,33 @@ class PipelineOpportunityService
                 }
             }
 
-            $trae_proxima = array_key_exists('next_action_at', $datos);
-            $proxima      = null;
-            if ($trae_proxima && $datos['next_action_at'] !== null) {
-                $proxima = PipelineFieldsService::parsear_fecha_de_la_spa($datos['next_action_at']);
-                if ($proxima === null) {
-                    $errores['next_action_at'][] = 'La fecha de la próxima acción tiene que tener formato AAAA-MM-DD o AAAA-MM-DD HH:MM.';
+            /* La próxima acción (R1). Qué regla aplica se decide ANTES de validar nada de ella: la
+               clave `next_action_at` solo se valida y se parsea si se va a aplicar (R1.2). */
+            $campos_crudos = array_key_exists('fields', $datos) ? $datos['fields'] : null;
+            $nota_proxima  = self::texto_o_null(isset($datos['next_action_note']) ? $datos['next_action_note'] : null);
+            $regla         = null;
+            $proxima       = null;
+
+            if ($destino->is_open()) {
+                if ($this->campos->agenda_vino_con_valor($destino, $campos_crudos)) {
+                    $regla = self::REGLA_AGENDA;
+                } elseif (array_key_exists('next_action_at', $datos)) {
+                    $regla = self::REGLA_PAYLOAD;
+
+                    if ($datos['next_action_at'] !== null) {
+                        $proxima = PipelineFieldsService::parsear_fecha_de_la_spa($datos['next_action_at']);
+                        if ($proxima === null) {
+                            $errores['next_action_at'][] = self::ERROR_FORMATO_PROXIMA;
+                        }
+                    } elseif ($nota_proxima !== null) {
+                        $errores['next_action_at'][] = self::ERROR_NOTA_SIN_FECHA;
+                    }
+                } else {
+                    $regla = self::REGLA_CONSERVAR;
+
+                    if ($nota_proxima !== null) {
+                        $errores['next_action_at'][] = self::ERROR_NOTA_SIN_FECHA;
+                    }
                 }
             }
 
@@ -268,26 +316,38 @@ class PipelineOpportunityService
 
             $ahora = AppTime::now();
 
+            $fecha_antes = PipelinePresenter::fecha($op->next_action_at);
+            $nota_antes  = $op->next_action_note;
+
             if ($destino->is_closed()) {
-                $op->closed_at        = $ahora;
-                $op->next_action_at   = null;
-                $op->next_action_note = null;
-                $op->lost_reason      = $destino->type === PipelineStage::TYPE_LOST ? $motivo : null;
+                $op->closed_at   = $ahora;
+                $op->lost_reason = $destino->type === PipelineStage::TYPE_LOST ? $motivo : null;
+                $this->borrar_proxima_accion($op);
             } else {
                 if ($reabre) {
                     $op->closed_at = null;
                 }
                 $op->lost_reason = null;
 
-                $agenda       = $this->campos->valor_de_agenda($destino, $valores);
-                $nota_proxima = self::texto_o_null(isset($datos['next_action_note']) ? $datos['next_action_note'] : null);
+                if ($regla === self::REGLA_AGENDA) {
+                    $op->next_action_at     = $this->campos->valor_de_agenda($destino, $valores);
+                    $op->next_action_note   = $nota_proxima !== null ? $nota_proxima : $destino->name;
+                    $op->next_action_source = PipelineOpportunity::SOURCE_AGENDA;
+                } elseif ($regla === self::REGLA_PAYLOAD) {
+                    $op->next_action_at     = $proxima;
+                    $op->next_action_note   = $proxima !== null ? $nota_proxima : null;
+                    $op->next_action_source = $proxima !== null ? PipelineOpportunity::SOURCE_MANUAL : null;
+                } elseif (! $op->proxima_accion_se_conserva($ahora)) {
+                    $this->borrar_proxima_accion($op);
+                }
+            }
 
-                if ($agenda !== null) {
-                    $op->next_action_at   = $agenda;
-                    $op->next_action_note = $nota_proxima !== null ? $nota_proxima : $destino->name;
-                } elseif ($trae_proxima) {
-                    $op->next_action_at   = $proxima;
-                    $op->next_action_note = $nota_proxima;
+            /* Cambio de próxima acción por R1.2, R1.3 o por cerrar: se registra aparte (paso 8). */
+            $cambio_de_proxima = null;
+            if ($regla !== self::REGLA_AGENDA) {
+                $fecha_despues = PipelinePresenter::fecha($op->next_action_at);
+                if ($fecha_antes !== $fecha_despues || $nota_antes !== $op->next_action_note) {
+                    $cambio_de_proxima = ['from' => $fecha_antes, 'to' => $fecha_despues, 'note' => $op->next_action_note];
                 }
             }
 
@@ -297,6 +357,14 @@ class PipelineOpportunityService
             $op->stage_id         = $destino->id;
             $op->stage_entered_at = $ahora;
             $op->save();
+
+            /* 🔴 La de próxima acción se crea ANTES que el cambio de etapa, a propósito: tienen el
+               mismo `occurred_at` y el empate lo gana el id mayor, así la "última actividad" de la
+               tarjeta sigue siendo el movimiento (con la nota que escribió el operador) y no el
+               efecto secundario sobre la próxima acción. */
+            if ($cambio_de_proxima !== null) {
+                $this->actividad_simple($op, PipelineActivity::TYPE_NEXT_ACTION, $cambio_de_proxima, $admin_id, $ahora);
+            }
 
             $actividad = PipelineActivity::create([
                 'opportunity_id'  => $op->id,
@@ -393,6 +461,15 @@ class PipelineOpportunityService
      * Una oportunidad cerrada no lleva próxima acción: ponerle una es 422 (para retomarla se la
      * mueve a una etapa abierta, que es lo que la reabre).
      *
+     * La próxima acción (ronda de arreglos R1), solo si el payload la toca:
+     *  - con fecha → `source = manual` (la cargó una persona, aunque sea la misma fecha que había
+     *    puesto la agenda de la etapa);
+     *  - `next_action_at: null` → se borra ENTERA (fecha, nota y origen), salvo que en el mismo
+     *    payload venga una nota, que es el 422 de abajo;
+     *  - solo `next_action_note` → cambia la nota sobre la fecha que ya tenía;
+     *  - una nota que queda sin fecha → 422 `errors.next_action_at` "Poné la fecha de la próxima
+     *    acción." (la agenda se ordena por fecha: una nota sola no aparece en ningún lado).
+     *
      * @param PipelineOpportunity  $oportunidad
      * @param array<string, mixed> $datos    owner_admin_id?, next_action_at?, next_action_note?
      * @param int|null             $admin_id Quién hace el cambio.
@@ -411,7 +488,7 @@ class PipelineOpportunityService
         if ($trae_fecha && $datos['next_action_at'] !== null) {
             $fecha = PipelineFieldsService::parsear_fecha_de_la_spa($datos['next_action_at']);
             if ($fecha === null) {
-                throw PipelineRuleException::validacion(['next_action_at' => ['La fecha de la próxima acción tiene que tener formato AAAA-MM-DD o AAAA-MM-DD HH:MM.']]);
+                throw PipelineRuleException::validacion(['next_action_at' => [self::ERROR_FORMATO_PROXIMA]]);
             }
         }
 
@@ -446,23 +523,42 @@ class PipelineOpportunityService
                 }
             }
 
-            /* Próxima acción. */
-            $fecha_antes = PipelinePresenter::fecha($op->next_action_at);
-            $nota_antes  = $op->next_action_note;
-
-            if ($trae_fecha) {
-                $op->next_action_at = $fecha;
-            }
-            if ($trae_nota) {
-                $op->next_action_note = $nota;
-            }
-
-            $fecha_despues = PipelinePresenter::fecha($op->next_action_at);
-            $nota_despues  = $op->next_action_note;
-
+            /* Próxima acción (R1): solo si el payload la toca. Un PUT que cambia solo el
+               responsable no mira la próxima acción, aunque haya quedado rara de antes. */
             $cambio_de_proxima = null;
-            if ($fecha_antes !== $fecha_despues || $nota_antes !== $nota_despues) {
-                $cambio_de_proxima = ['from' => $fecha_antes, 'to' => $fecha_despues, 'note' => $nota_despues];
+            if ($trae_fecha || $trae_nota) {
+                $fecha_antes = PipelinePresenter::fecha($op->next_action_at);
+                $nota_antes  = $op->next_action_note;
+
+                $fecha_nueva = $trae_fecha ? $fecha : $op->next_action_at;
+
+                if ($trae_nota) {
+                    $nota_nueva = $nota;
+                } elseif ($trae_fecha && $fecha === null) {
+                    /* Borrar la fecha borra la próxima acción entera. */
+                    $nota_nueva = null;
+                } else {
+                    $nota_nueva = $op->next_action_note;
+                }
+
+                if ($nota_nueva !== null && $fecha_nueva === null) {
+                    throw PipelineRuleException::validacion(['next_action_at' => [self::ERROR_NOTA_SIN_FECHA]]);
+                }
+
+                if ($trae_fecha) {
+                    $fuente_nueva = $fecha !== null ? PipelineOpportunity::SOURCE_MANUAL : null;
+                } else {
+                    $fuente_nueva = $fecha_nueva !== null ? $op->next_action_source : null;
+                }
+
+                $op->next_action_at     = $fecha_nueva;
+                $op->next_action_note   = $nota_nueva;
+                $op->next_action_source = $fuente_nueva;
+
+                $fecha_despues = PipelinePresenter::fecha($op->next_action_at);
+                if ($fecha_antes !== $fecha_despues || $nota_antes !== $nota_nueva) {
+                    $cambio_de_proxima = ['from' => $fecha_antes, 'to' => $fecha_despues, 'note' => $nota_nueva];
+                }
             }
 
             $op->save();
@@ -663,6 +759,21 @@ class PipelineOpportunityService
         ]);
 
         return $actividad->fresh();
+    }
+
+    /**
+     * Borra la próxima acción ENTERA: fecha, nota y origen. Nunca una sola de las tres: una nota o
+     * un origen sin fecha es un estado que ninguna pantalla sabe mostrar.
+     *
+     * @param PipelineOpportunity $op
+     *
+     * @return void
+     */
+    private function borrar_proxima_accion(PipelineOpportunity $op)
+    {
+        $op->next_action_at     = null;
+        $op->next_action_note   = null;
+        $op->next_action_source = null;
     }
 
     /**

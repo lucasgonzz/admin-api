@@ -581,6 +581,12 @@ class PipelinePresenter
             'owner'            => $owner ? ['id' => (int) $owner->id, 'name' => (string) $owner->name] : null,
             'next_action_at'   => self::fecha($oportunidad->next_action_at),
             'next_action_note' => $oportunidad->next_action_note,
+            /* Ronda de arreglos R1: de dónde salió la próxima acción, y si sobrevive a un
+               movimiento que no la toca. La SPA usa `next_action_carries_over` para precargar (o
+               no) el editor del modal de mover: NO vuelve a implementar la regla, que vive en
+               PipelineOpportunity::proxima_accion_se_conserva(). */
+            'next_action_source'       => $oportunidad->next_action_source,
+            'next_action_carries_over' => $oportunidad->proxima_accion_se_conserva($ahora),
             'agenda_bucket'    => PipelineAgenda::balde($etapa ? $etapa->type : null, $oportunidad->next_action_at, $ahora),
             'stage_entered_at' => self::fecha($oportunidad->stage_entered_at),
             'days_in_stage'    => $dias_en_etapa,
