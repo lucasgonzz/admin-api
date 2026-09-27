@@ -178,9 +178,98 @@ class PipelinePresenter
             'color'               => (string) $etapa->color,
             'type'                => (string) $etapa->type,
             'sort_order'          => (int) $etapa->sort_order,
-            'fields'              => $etapa->definicion_de_campos(),
+            'fields'              => self::definicion_ordenada($etapa->definicion_de_campos()),
             'opportunities_count' => (int) $cantidad,
         ];
+    }
+
+    /**
+     * La definición de campos con las claves de cada campo en el orden del contrato:
+     * `{key, label, type, required, agenda, options}`.
+     *
+     * 🔴 No es cosmético: la columna JSON de MySQL NO conserva el orden de las claves de un objeto
+     * (las guarda ordenadas por largo y después alfabéticamente), así que lo que vuelve de la base
+     * es `{key, type, label, agenda, options, required}`. El presenter es el único productor de la
+     * forma y la devuelve siempre igual, venga de donde venga.
+     *
+     * @param array<int, array<string, mixed>> $definicion
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function definicion_ordenada(array $definicion)
+    {
+        $ordenada = [];
+
+        foreach ($definicion as $campo) {
+            if (! is_array($campo)) {
+                continue;
+            }
+
+            $ordenada[] = [
+                'key'      => isset($campo['key']) ? (string) $campo['key'] : '',
+                'label'    => isset($campo['label']) ? (string) $campo['label'] : '',
+                'type'     => isset($campo['type']) ? (string) $campo['type'] : '',
+                'required' => ! empty($campo['required']),
+                'agenda'   => ! empty($campo['agenda']),
+                'options'  => isset($campo['options']) && is_array($campo['options']) ? array_values($campo['options']) : [],
+            ];
+        }
+
+        return $ordenada;
+    }
+
+    /**
+     * El `data` de una actividad con las claves en el orden del contrato. Misma razón que
+     * `definicion_ordenada()`: la columna JSON de MySQL reordena las claves de los objetos.
+     *
+     *  - `created` / `stage_change`: lista de `{key, label, type, value}`.
+     *  - `next_action`: `{from, to, note}`.
+     *  - `owner`: `{from, to}`.
+     *
+     * @param string $tipo
+     * @param mixed  $data
+     *
+     * @return mixed
+     */
+    private static function data_ordenada($tipo, $data)
+    {
+        if (! is_array($data)) {
+            return $data;
+        }
+
+        if ($tipo === PipelineActivity::TYPE_CREATED || $tipo === PipelineActivity::TYPE_STAGE_CHANGE) {
+            $foto = [];
+            foreach ($data as $campo) {
+                if (! is_array($campo)) {
+                    continue;
+                }
+                $foto[] = [
+                    'key'   => isset($campo['key']) ? (string) $campo['key'] : '',
+                    'label' => isset($campo['label']) ? (string) $campo['label'] : '',
+                    'type'  => isset($campo['type']) ? (string) $campo['type'] : '',
+                    'value' => array_key_exists('value', $campo) ? $campo['value'] : null,
+                ];
+            }
+
+            return $foto;
+        }
+
+        if ($tipo === PipelineActivity::TYPE_NEXT_ACTION) {
+            return [
+                'from' => array_key_exists('from', $data) ? $data['from'] : null,
+                'to'   => array_key_exists('to', $data) ? $data['to'] : null,
+                'note' => array_key_exists('note', $data) ? $data['note'] : null,
+            ];
+        }
+
+        if ($tipo === PipelineActivity::TYPE_OWNER) {
+            return [
+                'from' => array_key_exists('from', $data) ? $data['from'] : null,
+                'to'   => array_key_exists('to', $data) ? $data['to'] : null,
+            ];
+        }
+
+        return $data;
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -294,7 +383,7 @@ class PipelinePresenter
             'to_stage_name'   => $actividad->to_stage_name,
             'body'            => $actividad->body,
             'channel'         => $actividad->channel,
-            'data'            => $actividad->data,
+            'data'            => self::data_ordenada((string) $actividad->type, $actividad->data),
             'occurred_at'     => self::fecha($actividad->occurred_at),
             'created_at'      => self::fecha($actividad->created_at),
         ];
