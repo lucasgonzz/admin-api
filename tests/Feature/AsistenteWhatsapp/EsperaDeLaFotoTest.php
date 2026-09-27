@@ -575,6 +575,65 @@ class EsperaDeLaFotoTest extends BaseDelCanal
     }
 
     /**
+     * 10 bis. Tres fotos esperando y una cuarta CON epígrafe: la del epígrafe entra siempre.
+     *
+     * 🔴 Es la que trae la instrucción. Con el orden de llegada a secas, `preparar()` se quedaba con
+     * las tres que esperaban y la dejaba afuera justo a ella. Los lugares que sobran se llenan con
+     * las reclamadas más viejas, y en el POST el orden sigue siendo el de llegada.
+     *
+     * @return void
+     */
+    public function test_la_foto_con_epigrafe_entra_siempre_aunque_se_pase_del_tope(): void
+    {
+        $espia = $this->espiar_sender();
+        $this->crear_cliente(self::TELEFONO);
+
+        for ($i = 1; $i <= 3; $i++) {
+            $this->postear_webhook($this->payload_de_foto('wamid.FOTO' . $i, (string) $i))->assertStatus(200);
+            Carbon::setTestNow(now()->addSeconds(3));
+        }
+
+        $this->postear_webhook(
+            $this->payload_de_foto('wamid.FOTO4', '4', 'Cargá esta compra de Distribuidora Norte')
+        )->assertStatus(200);
+
+        $jobs      = $this->jobs();
+        $de_la_4   = $jobs[3];
+        $urls      = array_map(function ($media) {
+            return $media['url'];
+        }, $this->imagenes_del_job($de_la_4));
+
+        /* Las que entran primero (en orden de llegada) y al final la que queda afuera por el tope. */
+        $this->assertSame(
+            [$this->url_de_foto('1'), $this->url_de_foto('2'), $this->url_de_foto('4'), $this->url_de_foto('3')],
+            $urls
+        );
+
+        $this->fakear_http([
+            '*/asistente/mensajes' => Http::response(['ai_conversation_id' => 7, 'ai_message_id' => 9], 202),
+            '*/media/foto-1*'      => Http::response($this->png(4), 200, ['Content-Type' => 'image/png']),
+            '*/media/foto-2*'      => Http::response($this->png(5), 200, ['Content-Type' => 'image/png']),
+            '*/media/foto-3*'      => Http::response($this->png(6), 200, ['Content-Type' => 'image/png']),
+            '*/media/foto-4*'      => Http::response($this->png(7), 200, ['Content-Type' => 'image/png']),
+        ]);
+
+        $this->correr_job($de_la_4, $espia);
+
+        $posts = $this->posts_al_asistente();
+        $this->assertCount(1, $posts);
+        $this->assertSame(
+            [$this->png(4), $this->png(5), $this->png(7)],
+            $this->bytes_de_las_imagenes($posts[0]),
+            'Viajan las dos más viejas y la del epígrafe, en orden de llegada.'
+        );
+
+        $texto = $this->parte($posts[0], 'texto');
+        $this->assertStringContainsString('Cargá esta compra de Distribuidora Norte', $texto);
+        $this->assertStringContainsString('por este canal llegan hasta 3 por mensaje', $texto);
+        $this->assertSame('imagen', $this->parte($posts[0], 'tipo'));
+    }
+
+    /**
      * 11. Si el canal se apaga mientras la foto espera, la fila queda en error, sin disculpa y sin
      *     la metadata guardada.
      *

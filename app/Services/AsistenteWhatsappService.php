@@ -295,7 +295,7 @@ class AsistenteWhatsappService
     public function reclamar_fotos_en_espera(ClientAssistantMessage $fila, array $imagenes_propias = []): void
     {
         $despachar = function (array $reclamadas) use ($fila, $imagenes_propias) {
-            EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, array_merge($reclamadas, $imagenes_propias))
+            EnviarMensajeAlAsistenteJob::dispatch((int) $fila->id, $this->fotos_que_viajan($reclamadas, $imagenes_propias))
                 ->onConnection(self::CONEXION_DE_COLA);
         };
 
@@ -348,6 +348,36 @@ class AsistenteWhatsappService
 
             $despachar([]);
         }
+    }
+
+    /**
+     * Arma la lista de fotos del job de un mensaje que se llevó fotos en espera.
+     *
+     * 🔴 **Las fotos PROPIAS del mensaje que cierra entran siempre.** El tope es de
+     * `AsistenteImagenesService::MAXIMO_DE_IMAGENES` por POST y `preparar()` se queda con las
+     * primeras de la lista. Si la lista fuera solo el orden de llegada —reclamadas primero—, con
+     * tres fotos esperando la que quedaría afuera sería justo la foto CON epígrafe, que es la que
+     * trae la instrucción ("cargá esta compra"). Así que los lugares se reparten: las propias
+     * primero, y lo que sobra hasta el tope, con las reclamadas más viejas.
+     *
+     * El orden en el POST sigue siendo el de llegada. La lista sale con las que entran —las
+     * reclamadas elegidas y después las propias, que son las más nuevas— y al final las que quedan
+     * afuera, para que `preparar()` se quede con las primeras y la nota del tope las cuente.
+     *
+     * @param array<int, array<string, mixed>> $reclamadas Fotos que esperaban, en orden de llegada.
+     * @param array<int, array<string, mixed>> $propias    Fotos del mensaje que cierra.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function fotos_que_viajan(array $reclamadas, array $propias): array
+    {
+        $lugares = max(0, AsistenteImagenesService::MAXIMO_DE_IMAGENES - count($propias));
+
+        return array_merge(
+            array_slice($reclamadas, 0, $lugares),
+            $propias,
+            array_slice($reclamadas, $lugares)
+        );
     }
 
     /**

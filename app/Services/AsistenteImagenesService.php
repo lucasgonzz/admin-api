@@ -85,7 +85,9 @@ class AsistenteImagenesService
 
             /* Se quedan las PRIMERAS y no las últimas: en un envío múltiple de WhatsApp el orden es
              * el de captura, y la primera foto de una factura es la que trae el encabezado con el
-             * proveedor y el número — que es justamente lo que el asistente necesita leer. */
+             * proveedor y el número — que es justamente lo que el asistente necesita leer. Cuando
+             * un mensaje se lleva fotos que esperaban, la prioridad ya viene puesta en el orden de
+             * la lista: ver `AsistenteWhatsappService::fotos_que_viajan()`. */
             $medias = array_slice($medias, 0, self::MAXIMO_DE_IMAGENES);
         }
 
