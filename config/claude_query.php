@@ -2874,8 +2874,11 @@ return [
             'descripcion'     => 'Oportunidades del CRM: un cliente (client_id) o un lead (lead_id), exactamente uno de los dos, parado en una etapa de un pipeline, con responsable (owner_admin_id) y próxima acción. El estado sale de la etapa (include=etapa).',
             'columnas'        => [
                 'id', 'pipeline_id', 'stage_id', 'client_id', 'lead_id', 'owner_admin_id',
-                'next_action_at', 'stage_entered_at', 'closed_at', 'created_by_admin_id',
-                'created_at', 'updated_at',
+                /* next_action_source (agenda | manual | null) entró con la ronda de arreglos R1
+                   (migración 2026_09_27_100005): de dónde salió la próxima acción. Es un valor de
+                   enumeración, no texto de una persona: va en la base y no en `contenido`. */
+                'next_action_at', 'next_action_source', 'stage_entered_at', 'closed_at',
+                'created_by_admin_id', 'created_at', 'updated_at',
             ],
             'columnas_opt_in' => [
                 /* Texto libre escrito por personas: la nota de la próxima acción y el motivo de
@@ -2929,7 +2932,7 @@ return [
                     'columnas'    => ['id', 'contact_name', 'company_name', 'status', 'promoted_client_id'],
                 ],
             ],
-            'nota' => 'Una sola abierta por sujeto y pipeline (las cerradas quedan como historia). next_action_at es hora local de Argentina; sin hora = 00:00:00. El historial está en model=pipeline_activity con opportunity_id.',
+            'nota' => 'Una sola abierta por sujeto y pipeline (las cerradas quedan como historia). next_action_at es hora local de Argentina; sin hora = 00:00:00. next_action_source dice de dónde salió: `agenda` (la fijó el campo agenda de la etapa) o `manual` (la cargó una persona); al mover a una etapa que no la fija, solo sobrevive la manual que no venció. El historial está en model=pipeline_activity con opportunity_id.',
         ],
 
         'pipeline_activity' => [
