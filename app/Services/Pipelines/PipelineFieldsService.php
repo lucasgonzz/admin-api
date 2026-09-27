@@ -500,15 +500,23 @@ class PipelineFieldsService
                 return $texto;
 
             case 'number':
+                $numero = null;
                 if (is_int($valor) || is_float($valor)) {
-                    return $valor;
+                    $numero = $valor;
+                } elseif (is_string($valor) && is_numeric($valor)) {
+                    $numero = $valor + 0;
                 }
-                if (is_string($valor) && is_numeric($valor)) {
-                    return $valor + 0;
-                }
-                $error = $label . ' tiene que ser un número.';
 
-                return null;
+                /* 🔴 `is_finite` no es paranoia: `1e999` es "numérico" para PHP y un JSON que lo trae
+                   llega decodificado como INF. Sin este corte se guardaba y el `json_encode` de la
+                   respuesta reventaba con un 500 ("Inf and NaN cannot be JSON encoded"). */
+                if ($numero === null || (is_float($numero) && ! is_finite($numero))) {
+                    $error = $label . ' tiene que ser un número.';
+
+                    return null;
+                }
+
+                return $numero;
 
             case 'boolean':
                 if (is_bool($valor)) {

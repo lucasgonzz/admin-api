@@ -90,8 +90,11 @@ class PipelineAgentesSeeder extends Seeder
                 'name'   => 'Contactado',
                 'type'   => PipelineStage::TYPE_OPEN,
                 'color'  => '#0dcaf0',
+                /* `canal` NO es obligatorio (ronda de arreglos R3): "Contactado" es el movimiento
+                   más frecuente y no tiene por qué frenar. Lucas lo puede volver obligatorio desde
+                   Configuración si lo necesita. */
                 'fields' => [
-                    ['key' => 'canal', 'label' => 'Canal', 'type' => 'select', 'required' => true, 'agenda' => false, 'options' => ['WhatsApp', 'Llamada', 'Mail', 'Presencial']],
+                    ['key' => 'canal', 'label' => 'Canal', 'type' => 'select', 'required' => false, 'agenda' => false, 'options' => ['WhatsApp', 'Llamada', 'Mail', 'Presencial']],
                 ],
             ],
             [
@@ -116,9 +119,11 @@ class PipelineAgentesSeeder extends Seeder
                 'name'   => 'Reunión hecha',
                 'type'   => PipelineStage::TYPE_OPEN,
                 'color'  => '#fd7e14',
+                /* Sin "Próximo paso" (ronda de arreglos R3): competía con la "Próxima acción" del
+                   modal de mover, que es la que alimenta la agenda. Dos lugares para decir lo mismo
+                   terminan con uno vacío y el otro sin fecha. */
                 'fields' => [
                     ['key' => 'como_fue', 'label' => 'Cómo fue', 'type' => 'textarea', 'required' => false, 'agenda' => false, 'options' => []],
-                    ['key' => 'proximo_paso', 'label' => 'Próximo paso', 'type' => 'text', 'required' => false, 'agenda' => false, 'options' => []],
                 ],
             ],
             [

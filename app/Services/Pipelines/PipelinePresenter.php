@@ -62,35 +62,22 @@ class PipelinePresenter
     }
 
     /**
-     * Estados del pipeline de LEADS, para el filtro de candidatos: `[{slug, label}]` en el orden
-     * del catálogo (o los defaults si la tabla está vacía, igual que `LeadPipelineStatus`).
+     * Estados del pipeline de LEADS, para el filtro de candidatos: `[{slug, label}]`.
      *
-     * Sin los de `LeadPipelineStatus::SLUGS_HIDDEN_FROM_SELECT` (hoy `mail2_enviado`), con el mismo
-     * criterio que el resto del admin: siguen en el catálogo por historia, pero se sacaron "de
-     * filtro y de asignación".
+     * 🔴 Sale de `LeadPipelineStatus::options_for_meta()`, que es lo que ya usan los selectores de
+     * estado de todo el admin (orden del catálogo, defaults si la tabla está vacía, sin los
+     * `SLUGS_HIDDEN_FROM_SELECT`). La primera versión de esta función copiaba esa lógica y ya se
+     * había desalineado una vez (publicaba `mail2_enviado`): una copia se queda vieja justo cuando
+     * nadie la mira, así que acá solo se renombran las claves (`value` → `slug`, `text` → `label`).
      *
      * @return array<int, array{slug: string, label: string}>
      */
     public function estados_de_lead()
     {
-        $filas = LeadPipelineStatus::query()->orderBy('sort_order')->orderBy('id')->get(['slug', 'label']);
-
-        $crudos = [];
-        if ($filas->isEmpty()) {
-            foreach (LeadPipelineStatus::DEFAULT_STATUSES as $slug => $label) {
-                $crudos[] = ['slug' => (string) $slug, 'label' => (string) $label];
-            }
-        } else {
-            foreach ($filas as $fila) {
-                $crudos[] = ['slug' => (string) $fila->slug, 'label' => (string) $fila->label];
-            }
-        }
-
         $estados = [];
-        foreach ($crudos as $estado) {
-            if (! in_array($estado['slug'], LeadPipelineStatus::SLUGS_HIDDEN_FROM_SELECT, true)) {
-                $estados[] = $estado;
-            }
+
+        foreach (LeadPipelineStatus::options_for_meta() as $opcion) {
+            $estados[] = ['slug' => (string) $opcion['value'], 'label' => (string) $opcion['text']];
         }
 
         return $estados;
@@ -727,7 +714,13 @@ class PipelinePresenter
     }
 
     /**
-     * Etiqueta de un estado de lead, con el catálogo leído una sola vez por presenter.
+     * Etiqueta de un estado de lead, con el MISMO criterio que `LeadPipelineStatus::label_for()`
+     * (la etiqueta de la fila del catálogo si existe, si no el slug humanizado), pero con el
+     * catálogo leído una sola vez por presenter: `label_for()` hace una consulta por llamada y acá
+     * se llama una vez por fila del tablero.
+     *
+     * 🔴 Si `label_for()` cambia de criterio, esto tiene que cambiar con él: es la misma pregunta
+     * ("¿cómo se llama este estado?") y dos respuestas distintas se ven en la misma pantalla.
      *
      * @param string|null $slug
      *
@@ -735,9 +728,11 @@ class PipelinePresenter
      */
     private function etiqueta_de_estado($slug)
     {
-        if ($slug === null) {
+        if ($slug === null || trim($slug) === '') {
             return null;
         }
+
+        $slug = trim($slug);
 
         if ($this->etiquetas_de_estado === null) {
             $this->etiquetas_de_estado = LeadPipelineStatus::query()->pluck('label', 'slug')->all();
@@ -745,10 +740,6 @@ class PipelinePresenter
 
         if (isset($this->etiquetas_de_estado[$slug])) {
             return (string) $this->etiquetas_de_estado[$slug];
-        }
-
-        if (isset(LeadPipelineStatus::DEFAULT_STATUSES[$slug])) {
-            return LeadPipelineStatus::DEFAULT_STATUSES[$slug];
         }
 
         return LeadPipelineStatus::humanize_slug($slug);
