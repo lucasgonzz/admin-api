@@ -2783,6 +2783,193 @@ return [
             'relaciones'      => [],
             'nota' => 'Catálogo único para todas las implementaciones de tienda: no hay una fila por cliente. Es la tabla hermana de implementation_stage_configs, pero las etapas NO son las mismas ni son la misma cantidad.',
         ],
+
+        /* ---------------------------------------------------------------
+         | CRM de pipelines (misión pipelines-crm, 27/9/2026): las cuatro tablas
+         | del módulo. Es el filtro de automatización de contexto_master.md §2:
+         | una sesión de Claude puede leer en qué etapa está cada cliente o lead
+         | de una campaña ("Agentes" es la primera), quién es el responsable y
+         | qué se habló, sin que Lucas exporte nada.
+         |
+         | 🔴 SOLO LECTURA, como todo este archivo: en esa misión NO se agregó
+         | ninguna escritura del CRM por la API de Claude. Mover, anotar y dar de
+         | alta se hace desde el panel.
+         |
+         | 🔴 NO CONFUNDIR CON EL PIPELINE DE LEADS (`lead_pipeline_status`,
+         | `leads.status`): es otra cosa y el CRM no lo toca. Un lead puede ser
+         | el sujeto de una oportunidad, pero su `status` sigue siendo el suyo.
+         |
+         | 🔴 El ESTADO de una oportunidad (abierta / ganada / perdida) NO es una
+         | columna: sale del `type` de su etapa (include=etapa en
+         | pipeline_opportunity).
+         |
+         | Texto libre escrito por personas —la nota de cada actividad (`body`),
+         | lo cargado en los campos de la etapa (`data`), la nota de la próxima
+         | acción y el motivo de pérdida— viaja sólo con include=contenido.
+         |
+         | Columnas verificadas el 27/9/2026 contra information_schema de
+         | `admin_testing_s6`, después de migrar, y enumeraciones contra las
+         | constantes de PipelineStage y PipelineActivity.
+         --------------------------------------------------------------- */
+        'pipeline' => [
+            'tabla'           => 'pipelines',
+            'descripcion'     => 'Pipelines del CRM del admin (campañas de contacto con clientes y leads, p. ej. "Agentes"): nombre, descripción, motivos de pérdida y si está archivado.',
+            'columnas'        => [
+                'id', 'name', 'slug', 'description', 'lost_reasons', 'sort_order',
+                'archived_at', 'created_by_admin_id', 'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'asc',
+            'limite_default'  => 100,
+            'limite_max'      => 300,
+            'busqueda'        => ['name'],
+            'filtros'         => [
+                'slug'         => ['columna' => 'slug',        'tipo' => 'texto_exacto'],
+                /* `sin_archivar=1` trae los activos (archived_at en NULL) y `=0` los archivados. Misma
+                   mecánica que `sin_promover` de lead: un filtro llamado `archivado` sería una trampa,
+                   porque `archivado=1` devolvería justo los que NO lo están. */
+                'sin_archivar' => ['columna' => 'archived_at', 'tipo' => 'nulo'],
+                'ids'          => ['columna' => 'id',          'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'etapas' => [
+                    'tipo'        => 'has_many', 'tabla' => 'pipeline_stages',
+                    'clave_local' => 'id', 'clave_externa' => 'pipeline_id',
+                    'columnas'    => ['id', 'name', 'type', 'color', 'sort_order'],
+                ],
+            ],
+            'nota' => 'include=etapas trae las etapas ordenadas por id: el orden del tablero es sort_order. `slug` solo lo usa el seeder (el pipeline "Agentes" tiene slug `agentes`).',
+        ],
+
+        'pipeline_stage' => [
+            'tabla'           => 'pipeline_stages',
+            'descripcion'     => 'Etapas de cada pipeline del CRM: nombre, color, orden, tipo (open | won | lost, que ES el estado de las oportunidades que están adentro) y la definición de los campos que pide al entrar.',
+            'columnas'        => [
+                'id', 'pipeline_id', 'name', 'color', 'type', 'sort_order', 'fields',
+                'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'asc',
+            'limite_default'  => 100,
+            'limite_max'      => 300,
+            'busqueda'        => ['name'],
+            'filtros'         => [
+                'pipeline_id' => ['columna' => 'pipeline_id', 'tipo' => 'entero'],
+                /* Enumeración real: las claves de PipelineStage::TYPE_LABELS. */
+                'type'        => ['columna' => 'type',        'tipo' => 'en', 'valores' => ['open', 'won', 'lost']],
+                'ids'         => ['columna' => 'id',          'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'pipeline' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'pipelines',
+                    'clave_local' => 'pipeline_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'name', 'archived_at'],
+                ],
+            ],
+            'nota' => '`fields` es la DEFINICIÓN de los campos ([{key, label, type, required, agenda, options}]); lo que se cargó en cada movimiento está en pipeline_activity.data (include=contenido).',
+        ],
+
+        'pipeline_opportunity' => [
+            'tabla'           => 'pipeline_opportunities',
+            'descripcion'     => 'Oportunidades del CRM: un cliente (client_id) o un lead (lead_id), exactamente uno de los dos, parado en una etapa de un pipeline, con responsable (owner_admin_id) y próxima acción. El estado sale de la etapa (include=etapa).',
+            'columnas'        => [
+                'id', 'pipeline_id', 'stage_id', 'client_id', 'lead_id', 'owner_admin_id',
+                'next_action_at', 'stage_entered_at', 'closed_at', 'created_by_admin_id',
+                'created_at', 'updated_at',
+            ],
+            'columnas_opt_in' => [
+                /* Texto libre escrito por personas: la nota de la próxima acción y el motivo de
+                   pérdida (viene de la lista del pipeline, pero admite texto libre). */
+                'contenido' => ['next_action_note', 'lost_reason'],
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 100,
+            'limite_max'      => 300,
+            'busqueda'        => [],
+            'filtros'         => [
+                'pipeline_id'    => ['columna' => 'pipeline_id',    'tipo' => 'entero'],
+                'stage_id'       => ['columna' => 'stage_id',       'tipo' => 'entero'],
+                'client_id'      => ['columna' => 'client_id',      'tipo' => 'entero'],
+                'lead_id'        => ['columna' => 'lead_id',        'tipo' => 'entero'],
+                'owner_admin_id' => ['columna' => 'owner_admin_id', 'tipo' => 'entero'],
+                /* `sin_cerrar=1` trae las abiertas (closed_at en NULL) y `=0` las cerradas.
+                   `closed_at` se escribe al entrar a una etapa won / lost y se limpia al reabrir, así
+                   que coincide con el tipo de la etapa; la FUENTE del estado igual es la etapa. */
+                'sin_cerrar'     => ['columna' => 'closed_at',      'tipo' => 'nulo'],
+                'sin_proxima'    => ['columna' => 'next_action_at', 'tipo' => 'nulo'],
+                'proxima_desde'  => ['columna' => 'next_action_at', 'tipo' => 'fecha_desde'],
+                'proxima_hasta'  => ['columna' => 'next_action_at', 'tipo' => 'fecha_hasta'],
+                'ids'            => ['columna' => 'id',             'tipo' => 'lista_de_enteros'],
+                'creado_desde'   => ['columna' => 'created_at',     'tipo' => 'fecha_desde'],
+                'creado_hasta'   => ['columna' => 'created_at',     'tipo' => 'fecha_hasta'],
+            ],
+            'relaciones'      => [
+                'etapa' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'pipeline_stages',
+                    'clave_local' => 'stage_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'name', 'type', 'color', 'sort_order'],
+                ],
+                'pipeline' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'pipelines',
+                    'clave_local' => 'pipeline_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'name', 'archived_at'],
+                ],
+                'cliente' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'clients',
+                    'clave_local' => 'client_id', 'clave_externa' => 'id',
+                    /* Sin api_key ni setup_data: mismo criterio que la entrada `client`. */
+                    'columnas'    => ['id', 'uuid', 'name', 'company_name', 'slug', 'is_active'],
+                ],
+                'lead' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'leads',
+                    'clave_local' => 'lead_id', 'clave_externa' => 'id',
+                    /* 🔴 Sin `uuid` (en `lead` es una credencial al portador, ver esa entrada) y sin
+                       phone / email (PII, viajan sólo con include=contacto en model=lead). */
+                    'columnas'    => ['id', 'contact_name', 'company_name', 'status', 'promoted_client_id'],
+                ],
+            ],
+            'nota' => 'Una sola abierta por sujeto y pipeline (las cerradas quedan como historia). next_action_at es hora local de Argentina; sin hora = 00:00:00. El historial está en model=pipeline_activity con opportunity_id.',
+        ],
+
+        'pipeline_activity' => [
+            'tabla'           => 'pipeline_activities',
+            'descripcion'     => 'Historial de las oportunidades del CRM: altas, cambios de etapa (con los campos cargados), notas, próxima acción y responsable, con quién (admin_id) y cuándo (occurred_at). El texto y lo cargado viajan con include=contenido.',
+            'columnas'        => [
+                'id', 'opportunity_id', 'pipeline_id', 'admin_id', 'type',
+                'from_stage_id', 'from_stage_name', 'to_stage_id', 'to_stage_name',
+                'channel', 'occurred_at', 'created_at', 'updated_at',
+            ],
+            'columnas_opt_in' => [
+                'contenido' => ['body', 'data'],
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 100,
+            'limite_max'      => 300,
+            'busqueda'        => ['body'],
+            'filtros'         => [
+                'opportunity_id' => ['columna' => 'opportunity_id', 'tipo' => 'entero'],
+                'pipeline_id'    => ['columna' => 'pipeline_id',    'tipo' => 'entero'],
+                'admin_id'       => ['columna' => 'admin_id',       'tipo' => 'entero'],
+                /* Enumeraciones reales: las claves de PipelineActivity::TYPE_LABELS y
+                   PipelineActivity::CHANNEL_LABELS. */
+                'type'           => ['columna' => 'type',           'tipo' => 'en', 'valores' => ['created', 'stage_change', 'note', 'next_action', 'owner']],
+                'channel'        => ['columna' => 'channel',        'tipo' => 'en', 'valores' => ['call', 'whatsapp', 'meeting', 'email', 'in_person', 'other']],
+                'to_stage_id'    => ['columna' => 'to_stage_id',    'tipo' => 'entero'],
+                'ocurrido_desde' => ['columna' => 'occurred_at',    'tipo' => 'fecha_desde'],
+                'ocurrido_hasta' => ['columna' => 'occurred_at',    'tipo' => 'fecha_hasta'],
+                'ids'            => ['columna' => 'id',             'tipo' => 'lista_de_enteros'],
+            ],
+            'relaciones'      => [
+                'oportunidad' => [
+                    'tipo'        => 'belongs_to', 'tabla' => 'pipeline_opportunities',
+                    'clave_local' => 'opportunity_id', 'clave_externa' => 'id',
+                    'columnas'    => ['id', 'pipeline_id', 'stage_id', 'client_id', 'lead_id', 'owner_admin_id'],
+                ],
+            ],
+            'nota' => 'from_stage_name / to_stage_name y data son FOTOS del momento: si después se renombró la etapa o se borró un campo, acá sigue lo de entonces. data: [{key, label, type, value}] en created / stage_change; {from, to, note} en next_action; {from, to} con NOMBRES de admins en owner. Las notas (type=note) pueden tener occurred_at anterior a created_at.',
+        ],
     ],
 
     /*
@@ -2854,6 +3041,14 @@ return [
      | porque no se verificaron columna por columna, y meter uno sin verificar es
      | exactamente lo que este archivo promete que no pasa. Agregar uno son ~25
      | líneas acá y un DESCRIBE de la tabla, no una misión.
+     |
+     | ⚠️ Recontado el 27/9/2026 (misión pipelines-crm): 96 archivos en
+     | app/Models/, 60 en `modelos` (los cuatro del CRM de pipelines entraron ya
+     | declarados) y 19 en `modelos_excluidos` (18 con archivo en app/Models/ más
+     | PersonalAccessToken, que es de Sanctum). Los sin declarar ya no eran 7 sino
+     | 18: entre el 3/9 y el 27/9 se sumaron 11 modelos sin pasar por este
+     | archivo. La nota de abajo los nombra a todos; ninguno de los 11 está
+     | verificado columna por columna.
      */
-    'nota_de_exclusiones' => 'Los modelos que no figuran ni en `modelos` ni en `modelos_excluidos` están fuera de la tanda: sin secreto conocido, pero sin verificar columna por columna. El 3/9/2026 entraron los cinco bloques probables (comercial y agentes, soporte, demos, implementaciones y facturación) y con eso se cerraron las tres advertencias que esta nota tenía escritas: MensualidadInvoice, Implementation y SupportTicket ya están en `modelos`, con `request`/`response`, `form_token` y la PII afuera o en opt-in. Ese mismo día Lead pasó de `modelos_excluidos` a `modelos`: los dos tokens que lo excluían (demo_ingreso_token, demo_eventos_token) y las 17 contract_* quedan afuera por lista blanca, igual que api_key y afip_* en client, y la PII viaja sólo con include=contacto. Lo que queda sin declarar son SIETE modelos y se dejaron a propósito: marcas de lectura de la SPA (client_notification_reads, lead_manual_unread_marks, lead_message_reads), estado efímero (support_typing_states), notificaciones de tareas (admin_task_notifications), plantillas de tarea (task_templates) y bloques de user_id (user_id_blocks). No cuentan como "sin declarar" las tablas pivote de modelos que ya están (admin_task_assignees, client_version_upgrade_versions, version_item_clients), que no tienen modelo propio, ni las tablas de infraestructura de Laravel (jobs, failed_jobs, migrations), que no son datos del negocio. personal_access_tokens tampoco tiene modelo en app/Models/ —la clase es de Sanctum— pero SÍ está declarada en `modelos_excluidos`, porque guarda el hash del token con el que se autentica el panel y no queremos que el próximo la sume sin pensarlo. Agregar uno son ~25 líneas acá y un DESCRIBE de la tabla, no una misión.',
+    'nota_de_exclusiones' => 'Los modelos que no figuran ni en `modelos` ni en `modelos_excluidos` están fuera de la tanda: sin secreto conocido, pero sin verificar columna por columna. El 3/9/2026 entraron los cinco bloques probables (comercial y agentes, soporte, demos, implementaciones y facturación) y con eso se cerraron las tres advertencias que esta nota tenía escritas: MensualidadInvoice, Implementation y SupportTicket ya están en `modelos`, con `request`/`response`, `form_token` y la PII afuera o en opt-in. Ese mismo día Lead pasó de `modelos_excluidos` a `modelos`: los dos tokens que lo excluían (demo_ingreso_token, demo_eventos_token) y las 17 contract_* quedan afuera por lista blanca, igual que api_key y afip_* en client, y la PII viaja sólo con include=contacto. Lo que queda sin declarar son DIECIOCHO modelos (recontado el 27/9/2026). Siete se dejaron a propósito el 3/9/2026: marcas de lectura de la SPA (client_notification_reads, lead_manual_unread_marks, lead_message_reads), estado efímero (support_typing_states), notificaciones de tareas (admin_task_notifications), plantillas de tarea (task_templates) y bloques de user_id (user_id_blocks). Los otros ONCE entraron después sin pasar por este archivo y no están verificados columna por columna: ai_plans, client_ai_token_usages, client_ai_token_usage_people, client_ai_token_usage_person_models, client_assistant_messages, client_upgrade_notices, lead_scheduled_messages, licencia_cuotas, mensualidad_actualizaciones, mensualidad_pagos y mensualidad_periodos. Las cuatro tablas del CRM de pipelines (27/9/2026) sí entraron declaradas en `modelos`. No cuentan como "sin declarar" las tablas pivote de modelos que ya están (admin_task_assignees, client_version_upgrade_versions, version_item_clients), que no tienen modelo propio, ni las tablas de infraestructura de Laravel (jobs, failed_jobs, migrations), que no son datos del negocio. personal_access_tokens tampoco tiene modelo en app/Models/ —la clase es de Sanctum— pero SÍ está declarada en `modelos_excluidos`, porque guarda el hash del token con el que se autentica el panel y no queremos que el próximo la sume sin pensarlo. Agregar uno son ~25 líneas acá y un DESCRIBE de la tabla, no una misión.',
 ];
