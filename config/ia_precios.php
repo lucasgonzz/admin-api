@@ -16,6 +16,10 @@
 | 🔴 Y por eso tampoco se guarda el costo en `client_ai_token_usages`: guardarlo congelaría el
 | precio del día en que se recolectó y obligaría a un backfill con cada cambio de lista.
 |
+| Las BÚSQUEDAS de imágenes (Serper / Google) no van acá: se cobran por búsqueda y no por token, y
+| tienen su propia tabla, en dólares cada 1.000, en `config/busquedas_precios.php` (el porqué de
+| que sean dos archivos está en su encabezado). Esta tabla es solo de modelos.
+|
 | **Un modelo que no esté en esta lista NO rompe nada**: su costo sale `null` y la respuesta lo
 | marca como "sin precio cargado". No hay precio por defecto ni estimación a ojo, a propósito: un
 | total que miente es peor que un renglón sin plata, porque el renglón sin plata se ve y el total
