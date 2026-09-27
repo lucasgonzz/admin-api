@@ -41,6 +41,10 @@ use App\Http\Controllers\FollowupTemplateController;
 use App\Http\Controllers\LeadCallController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\MetaRawWebhookController;
+use App\Http\Controllers\PipelineActivityController;
+use App\Http\Controllers\PipelineController;
+use App\Http\Controllers\PipelineOpportunityController;
+use App\Http\Controllers\PipelineStageController;
 use App\Http\Controllers\ProtocolEntryController;
 use App\Http\Controllers\SharedDatabaseGroupController;
 use App\Http\Controllers\TokensResumenController;
@@ -1089,6 +1093,35 @@ Route::prefix('admin')->group(function () {
         // Chequeo y ejecución de seeders pendientes en producción.
         Route::get('pending-seeders', [\App\Http\Controllers\Api\PendingSeedersController::class, 'index']);
         Route::post('pending-seeders/run', [\App\Http\Controllers\Api\PendingSeedersController::class, 'run']);
+
+        /* CRM de pipelines (misión pipelines-crm, 27/9/2026): campañas de contacto con clientes y
+           leads (la primera, "Agentes"). Cualquier admin. 🔴 Solo registra: ninguna de estas rutas
+           manda WhatsApp ni mail, y no toca el pipeline de leads (`leads.status`).
+           Las rutas con `{id}` van con whereNumber para que `pipeline-opportunities/agenda` (y
+           `pipelines/meta`) no los capture la de `{id}`; igual los segmentos fijos van primero. */
+        Route::get('pipelines/meta', [PipelineController::class, 'meta_json']);
+        Route::get('pipelines', [PipelineController::class, 'index_json']);
+        Route::post('pipelines', [PipelineController::class, 'store_json']);
+        Route::put('pipelines/{id}', [PipelineController::class, 'update_json'])->whereNumber('id');
+        Route::delete('pipelines/{id}', [PipelineController::class, 'destroy_json'])->whereNumber('id');
+        Route::put('pipelines/{id}/stage-order', [PipelineController::class, 'stage_order_json'])->whereNumber('id');
+        Route::post('pipelines/{id}/stages', [PipelineController::class, 'store_stage_json'])->whereNumber('id');
+        Route::get('pipelines/{id}/opportunities', [PipelineController::class, 'opportunities_json'])->whereNumber('id');
+        Route::get('pipelines/{id}/candidates', [PipelineController::class, 'candidates_json'])->whereNumber('id');
+        Route::post('pipelines/{id}/opportunities', [PipelineController::class, 'store_opportunities_json'])->whereNumber('id');
+
+        Route::put('pipeline-stages/{id}', [PipelineStageController::class, 'update_json'])->whereNumber('id');
+        Route::delete('pipeline-stages/{id}', [PipelineStageController::class, 'destroy_json'])->whereNumber('id');
+
+        Route::get('pipeline-opportunities', [PipelineOpportunityController::class, 'index_json']);
+        Route::get('pipeline-opportunities/agenda', [PipelineOpportunityController::class, 'agenda_json']);
+        Route::get('pipeline-opportunities/{id}', [PipelineOpportunityController::class, 'show_json'])->whereNumber('id');
+        Route::put('pipeline-opportunities/{id}', [PipelineOpportunityController::class, 'update_json'])->whereNumber('id');
+        Route::post('pipeline-opportunities/{id}/move', [PipelineOpportunityController::class, 'move_json'])->whereNumber('id');
+        Route::post('pipeline-opportunities/{id}/notes', [PipelineOpportunityController::class, 'store_note_json'])->whereNumber('id');
+        Route::delete('pipeline-opportunities/{id}', [PipelineOpportunityController::class, 'destroy_json'])->whereNumber('id');
+
+        Route::delete('pipeline-activities/{id}', [PipelineActivityController::class, 'destroy_json'])->whereNumber('id');
 
     });
 });
