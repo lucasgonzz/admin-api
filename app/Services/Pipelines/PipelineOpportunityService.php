@@ -83,7 +83,13 @@ class PipelineOpportunityService
      *   primera abierta por orden.
      * - Responsable: el que vino (puede ser null = sin responsable) o, si la clave no vino, el
      *   admin logueado. Esa distinción la resuelve el controlador y llega acá ya decidida.
-     * - Cada alta deja una actividad `created` con la etapa inicial y la nota.
+     * - Cada alta deja una actividad `created` con la etapa inicial, la nota y la foto de los
+     *   campos cargados.
+     * - Los campos de la etapa inicial (ronda de arreglos R2) se validan IGUAL que al mover: mismo
+     *   servicio, mismos obligatorios y formatos, mismas claves de error `fields.<key>`, un solo
+     *   juego de valores para todos los sujetos. Sin esto se podía dar de alta directo en "Reunión
+     *   agendada" sin la fecha de la reunión. Un campo agenda con valor fija la próxima acción
+     *   (`source = agenda`, nota = el nombre de la etapa), igual que la regla R1.1 del mover.
      * - Salteados: `not_found` (el cliente / lead no existe) y `already_open` (ya tiene una
      *   abierta en este pipeline; también el segundo de un sujeto repetido en el mismo pedido).
      *
@@ -93,20 +99,27 @@ class PipelineOpportunityService
      * @param int|null                                 $owner_admin_id Ya resuelto (null = sin responsable).
      * @param string|null                              $nota
      * @param int|null                                 $admin_id       Quién hace el alta.
+     * @param mixed                                    $valores        `fields` del pedido (objeto `{key: valor}` o null).
      *
      * @return array{creadas: array<int, int>, salteados: array<int, array{type: string, id: int, reason: string}>}
      *
      * @throws PipelineRuleException
      */
-    public function alta_masiva(Pipeline $pipeline, array $sujetos, $etapa_id, $owner_admin_id, $nota, $admin_id)
+    public function alta_masiva(Pipeline $pipeline, array $sujetos, $etapa_id, $owner_admin_id, $nota, $admin_id, $valores = null)
     {
         $nota = self::texto_o_null($nota);
 
-        return DB::transaction(function () use ($pipeline, $sujetos, $etapa_id, $owner_admin_id, $nota, $admin_id) {
+        return DB::transaction(function () use ($pipeline, $sujetos, $etapa_id, $owner_admin_id, $nota, $admin_id, $valores) {
             /* 🔴 El lock que serializa "¿ya tiene una abierta?" (ver el docblock de la clase). */
             Pipeline::query()->whereKey($pipeline->id)->lockForUpdate()->first();
 
             $etapa = $this->etapa_inicial($pipeline, $etapa_id);
+
+            /* R2: los campos de la etapa inicial, antes de mirar los sujetos (el 422 es del pedido
+               entero, no de un sujeto). */
+            $limpios = $this->campos->validar_valores($etapa, $valores);
+            $foto    = $this->campos->foto($etapa, $limpios);
+            $agenda  = $this->campos->valor_de_agenda($etapa, $limpios);
 
             $ids_clientes = [];
             $ids_leads    = [];
@@ -157,8 +170,9 @@ class PipelineOpportunityService
                     'client_id'           => $tipo === PipelineOpportunity::SUBJECT_CLIENT ? $id : null,
                     'lead_id'             => $tipo === PipelineOpportunity::SUBJECT_LEAD ? $id : null,
                     'owner_admin_id'      => $owner_admin_id,
-                    'next_action_at'      => null,
-                    'next_action_note'    => null,
+                    'next_action_at'      => $agenda,
+                    'next_action_note'    => $agenda !== null ? $etapa->name : null,
+                    'next_action_source'  => $agenda !== null ? PipelineOpportunity::SOURCE_AGENDA : null,
                     'stage_entered_at'    => $ahora,
                     'closed_at'           => null,
                     'lost_reason'         => null,
@@ -176,7 +190,7 @@ class PipelineOpportunityService
                     'to_stage_name'   => $etapa->name,
                     'body'            => $nota,
                     'channel'         => null,
-                    'data'            => [],
+                    'data'            => $foto,
                     'occurred_at'     => $ahora,
                 ]);
 

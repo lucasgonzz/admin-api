@@ -299,7 +299,11 @@ class PipelineController extends Controller
      * 🔴 `owner_admin_id` distingue "no vino" de "vino null": si la clave no está, el responsable
      * es el admin logueado; si viene en null, queda sin responsable.
      *
-     * @param Request                    $request   {subjects: [{type, id}], stage_id?, owner_admin_id?, note?}
+     * `fields` (ronda de arreglos R2): los campos de la etapa inicial, validados por el servicio
+     * igual que al mover (errores en `fields.<key>`). Sin regla de tipo acá por el mismo motivo que
+     * en el mover: la forma la valida PipelineFieldsService con errores por campo.
+     *
+     * @param Request                    $request   {subjects: [{type, id}], stage_id?, owner_admin_id?, note?, fields?}
      * @param int                        $id
      * @param PipelineOpportunityService $servicio
      * @param PipelinePresenter          $presenter
@@ -318,6 +322,7 @@ class PipelineController extends Controller
             'stage_id'        => ['nullable', 'integer'],
             'owner_admin_id'  => ['nullable', 'integer', 'exists:admins,id'],
             'note'            => ['nullable', 'string', 'max:5000'],
+            'fields'          => ['nullable'],
         ]);
 
         $admin_id = $this->admin_id($request);
@@ -336,7 +341,8 @@ class PipelineController extends Controller
             isset($datos['stage_id']) ? (int) $datos['stage_id'] : null,
             $owner,
             isset($datos['note']) ? $datos['note'] : null,
-            $admin_id
+            $admin_id,
+            array_key_exists('fields', $datos) ? $datos['fields'] : null
         );
 
         $creadas = PipelineOpportunity::query()
