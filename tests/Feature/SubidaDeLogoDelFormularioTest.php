@@ -181,6 +181,14 @@ class SubidaDeLogoDelFormularioTest extends TestCase
         $this->assertNotEmpty($logo_url);
         $this->assertStringContainsString('/storage/implementation_logos/' . $implementation->id . '/', $logo_url);
 
+        // Ancla contra la regresión del chequeo de contrato: la URL tiene que salir de
+        // AdminApiPublicUrl::base(), no de Storage::disk('public')->url() a secas (esa arma
+        // APP_URL + /storage sin pasar por /public en el shared hosting — 404 silencioso en
+        // producción, ver el comentario del controller). Si algún día vuelve a usarse
+        // Storage::url() acá, este assert es el que tiene que fallar primero.
+        $base_esperada = \App\Helpers\AdminApiPublicUrl::base();
+        $this->assertStringStartsWith($base_esperada . '/storage/', $logo_url);
+
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
             ->where('stage_number', 1)
             ->first();
@@ -188,10 +196,10 @@ class SubidaDeLogoDelFormularioTest extends TestCase
         $this->assertSame($logo_url, $stage->data['form_responses']['logo_url'] ?? null);
 
         // El archivo efectivamente quedó en el disco (fake), no solo la URL en la respuesta.
-        // Storage::fake('public') no trae 'url' en su config, así que Storage::url() cae al
-        // camino relativo de FilesystemAdapter::getLocalUrl(): '/storage/' + $stored_path.
-        // (Con APP_URL real, en producción, el mismo método antepone la URL absoluta en su lugar.)
-        $stored_path = preg_replace('#^/storage/#', '', $logo_url);
+        // Se descarta todo hasta '/storage/' (inclusive) en vez de anclar al principio de la
+        // cadena, porque AdminApiPublicUrl::base() puede devolver '' (sin APP_URL configurada)
+        // o una URL absoluta con o sin /public — las tres formas terminan en '.../storage/<path>'.
+        $stored_path = preg_replace('#^.*?/storage/#', '', $logo_url);
         Storage::disk('public')->assertExists($stored_path);
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Helpers\AdminApiPublicUrl;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessImplementationFormSubmit;
 use App\Models\Implementation;
@@ -355,9 +356,16 @@ class ImplementationFormController extends Controller
 
         Storage::disk('public')->put($stored_path, file_get_contents($uploaded_file->getRealPath()));
 
-        // URL pública estándar de Laravel: config/filesystems.php ya arma disks.public.url con
-        // APP_URL + /storage, no hay que inventar otro armado.
-        $logo_url = Storage::disk('public')->url($stored_path);
+        /*
+         * NO usar Storage::disk('public')->url(): arma APP_URL + /storage a secas, y en el shared
+         * hosting APP_URL no incluye /public (el subdominio apunta a la raíz del proyecto, no a
+         * public/). Es exactamente la clase de error que documenta AdminApiPublicUrl (medido el
+         * 9/9/2026 con demo_eventos_url: 404 silencioso, sin excepción, sin log). Esta URL la va a
+         * descargar empresa-api desde OTRO servidor para estampar el logo en un PDF
+         * (PdfHelper::file_exists_2()), así que tiene que ser la misma base pública que ya resuelve
+         * bien el shared hosting y el VPS.
+         */
+        $logo_url = AdminApiPublicUrl::base() . '/storage/' . $stored_path;
 
         // Persistir en form_responses, reusando el mismo método que save()/submit() (sobrescribe si
         // ya había un logo cargado antes).
