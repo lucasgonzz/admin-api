@@ -13,7 +13,8 @@ use App\Models\AdminSetting;
  * 🔴 Todas leen con AdminSetting::memo_value(): una consulta por key y por request, no una por
  * llamada. Lo pedía get_form_url() —que el $appends de Implementation dispara una vez por fila
  * serializada— y de paso lo aprovechan las demás, que en más de un flujo se leen dos veces
- * (RunDemoSetupService llama a get_google_cuota_demo() y get_google_api_key_demo() en dos lugares).
+ * (RunDemoSetupService llama a get_google_cuota_demo(), get_google_api_key_demo() y
+ * get_serper_api_key_demo() en dos lugares).
  *
  * El memo lo vacía cualquier escritura por Eloquent sobre admin_settings (los eventos saved y
  * deleted de AdminSetting), así que el request que guarda un valor y después lo vuelve a leer ve
@@ -176,5 +177,75 @@ class ImplementationSettings
         $value = (int) AdminSetting::memo_value('implementation_google_cuota_demo');
 
         return $value > 0 ? $value : 100;
+    }
+
+    /**
+     * Retorna la clave de Serper que se le asigna al User de un cliente real (no demo) al correr
+     * el user-setup (UserSetupHelper en empresa-api la guarda en users.serper_api_key).
+     *
+     * El valor se lee desde admin_settings con key 'implementation_serper_api_key_default'.
+     *
+     * Fallback intencional: cadena vacía '', con el mismo criterio que get_google_api_key_default().
+     * Si en el admin todavía no se cargó ninguna clave, RunUserSetupService no manda el campo
+     * 'serper_api_key', empresa-api deja la columna del dueño en null y el sistema sigue usando la
+     * SERPER_API_KEY de su .env, como hasta ahora. El día que se despliega esto no cambia nada
+     * hasta que se cargue el valor.
+     *
+     * @return string Clave (o cadena vacía si no está configurada).
+     */
+    public static function get_serper_api_key_default(): string
+    {
+        // Leer el valor guardado; trim para que un espacio pegado al copiarla no rompa la llamada a Serper.
+        $value = trim((string) AdminSetting::memo_value('implementation_serper_api_key_default'));
+
+        return $value;
+    }
+
+    /**
+     * Retorna la clave de Serper PROPIA de las demos tal como está guardada, sin caer a la de
+     * clientes.
+     *
+     * El valor se lee desde admin_settings con key 'implementation_serper_api_key_demo'.
+     *
+     * Es lo que muestra la pantalla de configuración (el GET de a uno y el lote de show_all): el
+     * campo de demos tiene que verse vacío cuando no hay una clave propia, que es lo que dice su
+     * etiqueta, y guardar el formulario sin tocarlo no puede copiar la de clientes como si fuera de
+     * las demos. Para lo que VIAJA a una demo se usa get_serper_api_key_demo(), que sí cae.
+     *
+     * @return string Clave propia de las demos (o cadena vacía si no hay una).
+     */
+    public static function get_serper_api_key_demo_stored(): string
+    {
+        // Leer el valor guardado; trim por el mismo motivo que get_serper_api_key_default().
+        $value = trim((string) AdminSetting::memo_value('implementation_serper_api_key_demo'));
+
+        return $value;
+    }
+
+    /**
+     * Retorna la clave de Serper que se le asigna al User de una demo al correr el demo-setup
+     * (DemoSetupHelper en empresa-api): la propia de las demos y, si está vacía, la de clientes.
+     *
+     * 🔴 La caída a get_serper_api_key_default() es la diferencia con get_google_api_key_demo(), y
+     * es a propósito. Con Google la separación protege la cuota diaria de cada key; con Serper hay
+     * UNA sola cuenta, así que separar demos de clientes es opcional, y sin la caída cargar una sola
+     * clave dejaría a todas las demos sin Serper.
+     *
+     * Fallback final: cadena vacía '' si no hay ninguna de las dos. En ese caso el demo-setup no
+     * manda el campo y la demo usa la SERPER_API_KEY de su .env.
+     *
+     * @return string Clave para las demos (o cadena vacía si no hay ninguna cargada).
+     */
+    public static function get_serper_api_key_demo(): string
+    {
+        // La propia de las demos, si se cargó una.
+        $value = self::get_serper_api_key_demo_stored();
+
+        if ($value !== '') {
+            return $value;
+        }
+
+        // Si no, la de clientes: hay una sola cuenta de Serper.
+        return self::get_serper_api_key_default();
     }
 }

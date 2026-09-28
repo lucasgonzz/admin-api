@@ -10,24 +10,24 @@ use Illuminate\Support\Str;
 use Tests\TestCase;
 
 /**
- * GET /settings/implementation: los nueve settings de implementación en una sola respuesta.
+ * GET /settings/implementation: los settings de implementación en una sola respuesta.
  *
  * La pantalla de configuración hacía 9 GET al montarse, uno por setting, todos contra la misma
- * tabla admin_settings.
+ * tabla admin_settings. Desde la misión serper-en-user-setup (28/9/2026) el lote trae once: se
+ * sumaron las dos claves de Serper.
  *
- * 🔴 Se AGREGA, no reemplaza: los nueve GET de a uno siguen existiendo y devolviendo exactamente
- * lo mismo, porque admin-spa los mantiene como camino de respaldo. Por eso el test central de
- * este archivo no compara contra valores escritos a mano: consulta los nueve endpoints viejos y
- * verifica que el nuevo devuelva, entrada por entrada, EXACTAMENTE lo mismo. Así el día que a
- * alguno se le cambie un fallback, los dos caminos no pueden desincronizarse sin que esto se
- * ponga en rojo.
+ * 🔴 Se AGREGA, no reemplaza: los GET de a uno siguen existiendo y devolviendo exactamente lo
+ * mismo, porque admin-spa los mantiene como camino de respaldo. Por eso el test central de este
+ * archivo no compara contra valores escritos a mano: consulta los endpoints de a uno y verifica
+ * que el nuevo devuelva, entrada por entrada, EXACTAMENTE lo mismo. Así el día que a alguno se le
+ * cambie un fallback, los dos caminos no pueden desincronizarse sin que esto se ponga en rojo.
  */
 class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
 {
     use DatabaseTransactions;
 
     /**
-     * Las nueve entradas, con la ruta individual de la que sale cada una.
+     * Las once entradas, con la ruta individual de la que sale cada una.
      *
      * @var array<string, string>
      */
@@ -41,6 +41,8 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
         'implementation-google-api-key-default' => '/api/admin/settings/implementation-google-api-key-default',
         'implementation-google-api-key-demo'    => '/api/admin/settings/implementation-google-api-key-demo',
         'implementation-google-cuota-demo'      => '/api/admin/settings/implementation-google-cuota-demo',
+        'implementation-serper-api-key-default' => '/api/admin/settings/implementation-serper-api-key-default',
+        'implementation-serper-api-key-demo'    => '/api/admin/settings/implementation-serper-api-key-demo',
     ];
 
     /**
@@ -82,13 +84,13 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
     }
 
     /**
-     * Deja los nueve settings cargados con valores distintos de los fallbacks.
+     * Deja todos los settings de la pantalla cargados con valores distintos de los fallbacks.
      *
      * @param Admin $admin Admin a asignar como responsable de implementaciones.
      *
      * @return void
      */
-    private function cargar_los_nueve_settings(Admin $admin): void
+    private function cargar_todos_los_settings(Admin $admin): void
     {
         AdminSetting::set('implementation_assigned_admin_id', (string) $admin->id);
         AdminSetting::set('implementation_file_wait_seconds', '42');
@@ -99,24 +101,26 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
         AdminSetting::set('implementation_google_api_key_default', 'AIza' . str_repeat('a', 35));
         AdminSetting::set('implementation_google_api_key_demo', 'AIza' . str_repeat('b', 35));
         AdminSetting::set('implementation_google_cuota_demo', '222');
+        AdminSetting::set('implementation_serper_api_key_default', str_repeat('ab12', 10));
+        AdminSetting::set('implementation_serper_api_key_demo', str_repeat('cd34', 10));
 
         AdminSetting::flush_memo();
     }
 
     /**
      * 🔴 La prueba central: el endpoint en lote devuelve, entrada por entrada, lo MISMO que los
-     * nueve de a uno.
+     * endpoints de a uno.
      *
-     * No se comparan valores escritos a mano a propósito: se consultan los nueve endpoints viejos
-     * en el mismo test y se compara contra ellos. Si mañana alguien cambia un fallback en un solo
+     * No se comparan valores escritos a mano a propósito: se consultan los endpoints de a uno en
+     * el mismo test y se compara contra ellos. Si mañana alguien cambia un fallback en un solo
      * lugar, los dos caminos se desincronizan y esto se pone en rojo.
      *
      * @return void
      */
-    public function test_devuelve_exactamente_lo_mismo_que_los_nueve_endpoints_de_a_uno(): void
+    public function test_devuelve_exactamente_lo_mismo_que_los_endpoints_de_a_uno(): void
     {
         $admin = $this->crear_admin();
-        $this->cargar_los_nueve_settings($admin);
+        $this->cargar_todos_los_settings($admin);
 
         $en_lote = $this->actingAs($admin, 'sanctum')
             ->getJson('/api/admin/settings/implementation')
@@ -127,7 +131,7 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
         $this->assertSame(
             array_keys($this->rutas_individuales),
             array_keys($en_lote),
-            'Tienen que venir las nueve entradas, con la misma clave que usa cada ruta individual.'
+            'Tienen que venir todas las entradas, con la misma clave que usa cada ruta individual.'
         );
 
         foreach ($this->rutas_individuales as $clave => $ruta) {
@@ -144,7 +148,8 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
     /**
      * Sin ningún setting cargado, el endpoint en lote aplica los mismos fallbacks que los de a uno
      * (15, 30, 60, 300, 100, cadena vacía y admin_id nulo). Es el estado de un admin recién
-     * instalado, así que no puede reventar ni inventar valores.
+     * instalado, así que no puede reventar ni inventar valores. Las dos claves de Serper vienen
+     * vacías, igual que las de Google.
      *
      * @return void
      */
@@ -162,6 +167,8 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
             'implementation_google_api_key_default',
             'implementation_google_api_key_demo',
             'implementation_google_cuota_demo',
+            'implementation_serper_api_key_default',
+            'implementation_serper_api_key_demo',
         ])->delete();
         AdminSetting::flush_memo();
 
@@ -179,6 +186,8 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
         $this->assertSame('', $en_lote['implementation-google-api-key-default']['api_key']);
         $this->assertSame('', $en_lote['implementation-google-api-key-demo']['api_key']);
         $this->assertSame(100, $en_lote['implementation-google-cuota-demo']['cuota']);
+        $this->assertSame('', $en_lote['implementation-serper-api-key-default']['api_key']);
+        $this->assertSame('', $en_lote['implementation-serper-api-key-demo']['api_key']);
 
         // Y lo mismo, entrada por entrada, que los de a uno.
         foreach ($this->rutas_individuales as $clave => $ruta) {
@@ -188,7 +197,7 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
     }
 
     /**
-     * 🔴 Los nueve endpoints de a uno siguen existiendo y respondiendo 200.
+     * 🔴 Los endpoints de a uno siguen existiendo y respondiendo 200.
      *
      * El SPA los mantiene como respaldo del nuevo, así que si alguno se rompió, el respaldo no
      * sirve. Se prueban por su ruta real: el orden de las rutas también es parte de esto (la
@@ -196,10 +205,10 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
      *
      * @return void
      */
-    public function test_los_nueve_endpoints_de_a_uno_siguen_en_pie(): void
+    public function test_los_endpoints_de_a_uno_siguen_en_pie(): void
     {
         $admin = $this->crear_admin();
-        $this->cargar_los_nueve_settings($admin);
+        $this->cargar_todos_los_settings($admin);
 
         foreach ($this->rutas_individuales as $clave => $ruta) {
             $this->actingAs($admin, 'sanctum')
@@ -232,14 +241,14 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
     }
 
     /**
-     * Las nueve entradas salen de UNA sola consulta a admin_settings, no de nueve.
+     * Todas las entradas salen de UNA sola consulta a admin_settings, no de una por entrada.
      *
      * @return void
      */
-    public function test_las_nueve_entradas_salen_de_una_sola_consulta(): void
+    public function test_todas_las_entradas_salen_de_una_sola_consulta(): void
     {
         $admin = $this->crear_admin();
-        $this->cargar_los_nueve_settings($admin);
+        $this->cargar_todos_los_settings($admin);
 
         DB::flushQueryLog();
         DB::enableQueryLog();
@@ -275,7 +284,7 @@ class SettingsDeImplementacionEnUnaSolaRespuestaTest extends TestCase
     public function test_guardar_un_setting_y_volver_a_pedir_el_lote_devuelve_el_valor_nuevo(): void
     {
         $admin = $this->crear_admin();
-        $this->cargar_los_nueve_settings($admin);
+        $this->cargar_todos_los_settings($admin);
 
         $this->assertSame(
             42,

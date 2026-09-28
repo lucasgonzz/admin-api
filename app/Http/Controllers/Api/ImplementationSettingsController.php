@@ -36,12 +36,14 @@ class ImplementationSettingsController extends Controller
         'implementation_google_api_key_default',
         'implementation_google_api_key_demo',
         'implementation_google_cuota_demo',
+        'implementation_serper_api_key_default',
+        'implementation_serper_api_key_demo',
     ];
 
     /**
-     * Devuelve los nueve settings de implementación en una sola respuesta.
+     * Devuelve los once settings de implementación en una sola respuesta.
      *
-     * 🔴 Se AGREGA, no reemplaza: los nueve GET de a uno siguen existiendo y devolviendo
+     * 🔴 Se AGREGA, no reemplaza: los once GET de a uno siguen existiendo y devolviendo
      * exactamente lo mismo. admin-spa los mantiene como camino de respaldo.
      *
      * El motivo es que la pantalla de configuración hacía 9 GET al montarse, uno por setting,
@@ -61,6 +63,8 @@ class ImplementationSettingsController extends Controller
      *   implementation-google-api-key-default => { api_key: string }
      *   implementation-google-api-key-demo    => { api_key: string }
      *   implementation-google-cuota-demo      => { cuota: int }
+     *   implementation-serper-api-key-default => { api_key: string }
+     *   implementation-serper-api-key-demo    => { api_key: string }  (la guardada, sin caer a la de clientes)
      *
      * Los valores salen de los mismos métodos que usan las rutas de a uno, así que los fallbacks
      * (15, 30, 60, 300, 100, cadena vacía) no están duplicados acá y no pueden desincronizarse.
@@ -69,7 +73,7 @@ class ImplementationSettingsController extends Controller
      */
     public function show_all(): JsonResponse
     {
-        // Las nueve keys en una consulta; los getters de abajo las leen del memo.
+        // Las once keys en una consulta; los getters de abajo las leen del memo.
         AdminSetting::prime_memo(self::KEYS_DE_LA_PANTALLA);
 
         // Mismo tratamiento que show(): entero o null si no hay admin configurado.
@@ -87,6 +91,8 @@ class ImplementationSettingsController extends Controller
                 'implementation-google-api-key-default' => ['api_key' => ImplementationSettings::get_google_api_key_default()],
                 'implementation-google-api-key-demo'    => ['api_key' => ImplementationSettings::get_google_api_key_demo()],
                 'implementation-google-cuota-demo'      => ['cuota' => ImplementationSettings::get_google_cuota_demo()],
+                'implementation-serper-api-key-default' => ['api_key' => ImplementationSettings::get_serper_api_key_default()],
+                'implementation-serper-api-key-demo'    => ['api_key' => ImplementationSettings::get_serper_api_key_demo_stored()],
             ],
         ], 200);
     }
@@ -421,5 +427,95 @@ class ImplementationSettingsController extends Controller
         AdminSetting::set('implementation_google_cuota_demo', (string) $validated['cuota']);
 
         return response()->json(['cuota' => (int) $validated['cuota']], 200);
+    }
+
+    /**
+     * Retorna la clave de Serper configurada para clientes reales.
+     *
+     * No se enmascara el valor, con el mismo criterio que las keys de Google: el panel de admin es
+     * interno y hace falta poder ver qué clave está cargada.
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function get_serper_api_key_default(): JsonResponse
+    {
+        // ImplementationSettings aplica el fallback a cadena vacía.
+        $api_key = ImplementationSettings::get_serper_api_key_default();
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Actualiza la clave de Serper para clientes reales.
+     *
+     * Las claves de Serper son alfanuméricas (hoy, 40 caracteres hexadecimales). La regex acepta de
+     * 32 a 64 letras y números para no atarse al largo exacto, y está por el mismo motivo que la de
+     * Google: que una clave mal copiada (cortada, con un espacio en el medio, u otra cosa pegada por
+     * error) se frene acá y no cuando un cliente nuevo no puede buscar imágenes.
+     *
+     * Se acepta null / cadena vacía como forma explícita de borrarla (se guarda ''): el user-setup
+     * deja de mandar el campo y los clientes nuevos usan la SERPER_API_KEY del .env de su sistema.
+     *
+     * Los espacios de los costados no llegan a la validación: los saca antes el middleware
+     * TrimStrings, así que una clave copiada con un espacio pegado se guarda limpia.
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function update_serper_api_key_default(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // "present" permite null/'' explícito para borrar; si viene con contenido, 32 a 64 letras y números.
+            'api_key' => ['present', 'nullable', 'string', 'max:100', 'regex:/^[A-Za-z0-9]{32,64}$/'],
+        ]);
+
+        // Cadena vacía si vino null (borra la setting y los setups nuevos vuelven al .env de empresa-api).
+        $api_key = (string) ($validated['api_key'] ?? '');
+        AdminSetting::set('implementation_serper_api_key_default', $api_key);
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Retorna la clave de Serper PROPIA de las demos, la guardada: si no hay una, devuelve cadena
+     * vacía aunque las demos estén recibiendo la de clientes.
+     *
+     * A propósito no devuelve la efectiva (ImplementationSettings::get_serper_api_key_demo()): el
+     * campo del panel tiene que verse vacío cuando no hay clave propia, que es lo que dice su
+     * etiqueta, y guardarlo sin tocar no puede copiar la de clientes como si fuera de las demos.
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function get_serper_api_key_demo(): JsonResponse
+    {
+        // La guardada para demos, sin la caída a la de clientes.
+        $api_key = ImplementationSettings::get_serper_api_key_demo_stored();
+
+        return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Actualiza la clave de Serper propia de las demos.
+     *
+     * Misma validación y semántica de borrado que update_serper_api_key_default(). Borrarla no deja
+     * a las demos sin Serper: pasan a recibir la de clientes (ImplementationSettings::get_serper_api_key_demo()).
+     *
+     * @param Request $request
+     *
+     * @return JsonResponse { api_key: string }
+     */
+    public function update_serper_api_key_demo(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // "present" permite null/'' explícito para borrar; si viene con contenido, 32 a 64 letras y números.
+            'api_key' => ['present', 'nullable', 'string', 'max:100', 'regex:/^[A-Za-z0-9]{32,64}$/'],
+        ]);
+
+        // Cadena vacía si vino null (borra la setting y las demos vuelven a recibir la de clientes).
+        $api_key = (string) ($validated['api_key'] ?? '');
+        AdminSetting::set('implementation_serper_api_key_demo', $api_key);
+
+        return response()->json(['api_key' => $api_key], 200);
     }
 }
