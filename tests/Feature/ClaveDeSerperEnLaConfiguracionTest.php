@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Http\Controllers\Api\ImplementationSettingsController;
 use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Services\ImplementationSettings;
@@ -17,8 +18,9 @@ use Tests\TestCase;
  * las dos entradas en el lote de GET /settings/implementation. Lo que estas pruebas protegen, en
  * orden de importancia:
  *
- *  1. 🔴 **Que una clave mal copiada NO se guarde.** El error se paga caro y tarde: un cliente nuevo
- *     que no puede buscar imágenes, días después de haberla cargado.
+ *  1. 🔴 **Que una clave mal copiada NO se guarde**, ni una API key de Google pegada en el campo
+ *     equivocado. El error se paga caro y tarde: un cliente nuevo que no puede buscar imágenes,
+ *     días después de haberla cargado.
  *  2. **Que null o vacía BORREN la clave**: es la forma de volver a la SERPER_API_KEY del .env de
  *     cada sistema.
  *  3. **Que la caída de demos a clientes viva en ImplementationSettings::get_serper_api_key_demo()**,
@@ -199,6 +201,84 @@ class ClaveDeSerperEnLaConfiguracionTest extends TestCase
             $this->guardado('implementation_serper_api_key_demo'),
             'Un PUT rechazado pisó la clave de demos que estaba cargada.'
         );
+    }
+
+    /**
+     * 🔴 Una API key de Google pegada en un campo de Serper se rechaza, en las dos rutas, con un
+     * mensaje que dice qué pasó (y uno solo), y la clave que estaba cargada queda intacta.
+     *
+     * El caso que motivó la regla: una key de Google sin "-" ni "_" son 39 letras y números, así
+     * que pasaba el formato de Serper y se guardaba sin aviso. Y una con guion se rechazaba con un
+     * "formato inválido" que no decía por qué.
+     *
+     * La regla mira solo el PRINCIPIO de la clave: una de Serper con "AIza" en el medio se acepta.
+     *
+     * @return void
+     */
+    public function test_una_clave_de_google_se_rechaza_con_un_mensaje_claro(): void
+    {
+        $admin = $this->crear_admin();
+
+        AdminSetting::set('implementation_serper_api_key_default', self::CLAVE_CLIENTES);
+        AdminSetting::set('implementation_serper_api_key_demo', self::CLAVE_DEMOS);
+
+        // 39 letras y números: el formato de Serper por sí solo no la frenaría (se verifica acá).
+        $de_google_sin_guiones = 'AIza' . str_repeat('Bc9', 11) . 'xy';
+        $this->assertSame(
+            1,
+            preg_match('/^[A-Za-z0-9]{32,64}$/', $de_google_sin_guiones),
+            'El ejemplo tiene que pasar el formato de Serper; si no, esta prueba no prueba nada.'
+        );
+
+        $claves_de_google = [
+            'sin guiones'            => $de_google_sin_guiones,
+            'con guion y guion bajo' => 'AIzaSyD-abcdefghijklmnopqrstuvwxy_12345',
+        ];
+
+        foreach ([self::RUTA_CLIENTES, self::RUTA_DEMOS] as $ruta) {
+            foreach ($claves_de_google as $caso => $valor) {
+                $respuesta = $this->actingAs($admin, 'sanctum')->putJson($ruta, ['api_key' => $valor]);
+
+                $this->assertSame(422, $respuesta->status(), "La key de Google '{$caso}' se aceptó en {$ruta}.");
+                $this->assertSame(
+                    [ImplementationSettingsController::MENSAJE_CLAVE_DE_GOOGLE_EN_SERPER],
+                    $respuesta->json('errors.api_key'),
+                    "La key de Google '{$caso}' en {$ruta} no se rechazó con el aviso de Google (y solo con ese)."
+                );
+            }
+        }
+
+        $this->assertSame(self::CLAVE_CLIENTES, $this->guardado('implementation_serper_api_key_default'));
+        $this->assertSame(self::CLAVE_DEMOS, $this->guardado('implementation_serper_api_key_demo'));
+
+        // "AIza" en el medio no es una key de Google: se acepta.
+        $con_aiza_en_el_medio = '0123456789abcdefAIza456789abcdef01234567';
+        $this->actingAs($admin, 'sanctum')
+            ->putJson(self::RUTA_CLIENTES, ['api_key' => $con_aiza_en_el_medio])
+            ->assertStatus(200)
+            ->assertExactJson(['api_key' => $con_aiza_en_el_medio]);
+    }
+
+    /**
+     * Una clave con mal formato se rechaza con UN solo mensaje, el de formato, en castellano (la
+     * app corre con locale 'en' y sin esto el panel recibía el genérico de Laravel en inglés).
+     *
+     * @return void
+     */
+    public function test_un_formato_invalido_se_rechaza_con_el_mensaje_de_formato(): void
+    {
+        $admin = $this->crear_admin();
+
+        foreach ([self::RUTA_CLIENTES, self::RUTA_DEMOS] as $ruta) {
+            $this->assertSame(
+                [ImplementationSettingsController::MENSAJE_FORMATO_DE_SERPER],
+                $this->actingAs($admin, 'sanctum')
+                    ->putJson($ruta, ['api_key' => substr(self::CLAVE_CLIENTES, 0, 31)])
+                    ->assertStatus(422)
+                    ->json('errors.api_key'),
+                "Una clave cortada en {$ruta} no se rechazó con el mensaje de formato."
+            );
+        }
     }
 
     /**

@@ -41,6 +41,23 @@ class ImplementationSettingsController extends Controller
     ];
 
     /**
+     * Mensaje de validación cuando en un campo de Serper se pega una API key de Google.
+     *
+     * admin-spa tiene su propia copia para avisarlo antes de mandar; esta es la que ve cualquier
+     * otro cliente de la API (y la que se prueba).
+     *
+     * @var string
+     */
+    const MENSAJE_CLAVE_DE_GOOGLE_EN_SERPER = 'Eso parece una clave de Google (empieza con AIza), no de Serper. Las de Google van en el bloque de Google.';
+
+    /**
+     * Mensaje de validación cuando la clave de Serper no tiene el formato esperado.
+     *
+     * @var string
+     */
+    const MENSAJE_FORMATO_DE_SERPER = 'La clave no tiene el formato de una clave de Serper (entre 32 y 64 letras y números, sin espacios ni símbolos).';
+
+    /**
      * Devuelve los once settings de implementación en una sola respuesta.
      *
      * 🔴 Se AGREGA, no reemplaza: los once GET de a uno siguen existiendo y devolviendo
@@ -451,7 +468,8 @@ class ImplementationSettingsController extends Controller
      * Las claves de Serper son alfanuméricas (hoy, 40 caracteres hexadecimales). La regex acepta de
      * 32 a 64 letras y números para no atarse al largo exacto, y está por el mismo motivo que la de
      * Google: que una clave mal copiada (cortada, con un espacio en el medio, u otra cosa pegada por
-     * error) se frene acá y no cuando un cliente nuevo no puede buscar imágenes.
+     * error) se frene acá y no cuando un cliente nuevo no puede buscar imágenes. Tampoco se acepta
+     * una API key de Google (ver validar_clave_de_serper()).
      *
      * Se acepta null / cadena vacía como forma explícita de borrarla (se guarda ''): el user-setup
      * deja de mandar el campo y los clientes nuevos usan la SERPER_API_KEY del .env de su sistema.
@@ -465,13 +483,8 @@ class ImplementationSettingsController extends Controller
      */
     public function update_serper_api_key_default(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            // "present" permite null/'' explícito para borrar; si viene con contenido, 32 a 64 letras y números.
-            'api_key' => ['present', 'nullable', 'string', 'max:100', 'regex:/^[A-Za-z0-9]{32,64}$/'],
-        ]);
-
-        // Cadena vacía si vino null (borra la setting y los setups nuevos vuelven al .env de empresa-api).
-        $api_key = (string) ($validated['api_key'] ?? '');
+        // Cadena vacía si vino null o vacía (borra la setting y los setups nuevos vuelven al .env de empresa-api).
+        $api_key = $this->validar_clave_de_serper($request);
         AdminSetting::set('implementation_serper_api_key_default', $api_key);
 
         return response()->json(['api_key' => $api_key], 200);
@@ -507,15 +520,41 @@ class ImplementationSettingsController extends Controller
      */
     public function update_serper_api_key_demo(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            // "present" permite null/'' explícito para borrar; si viene con contenido, 32 a 64 letras y números.
-            'api_key' => ['present', 'nullable', 'string', 'max:100', 'regex:/^[A-Za-z0-9]{32,64}$/'],
-        ]);
-
-        // Cadena vacía si vino null (borra la setting y las demos vuelven a recibir la de clientes).
-        $api_key = (string) ($validated['api_key'] ?? '');
+        // Cadena vacía si vino null o vacía (borra la setting y las demos vuelven a recibir la de clientes).
+        $api_key = $this->validar_clave_de_serper($request);
         AdminSetting::set('implementation_serper_api_key_demo', $api_key);
 
         return response()->json(['api_key' => $api_key], 200);
+    }
+
+    /**
+     * Valida el campo api_key de un PUT de clave de Serper y lo devuelve listo para guardar:
+     * cadena vacía si vino null o vacío (la forma explícita de borrarla).
+     *
+     * Las reglas van con "bail": se corta en la primera que falla, así la respuesta trae un solo
+     * mensaje, el más útil. En orden:
+     *
+     *  - "present": el campo tiene que venir. Un PUT sin él es un error, no un borrado.
+     *  - Nada que empiece con "AIza", el prefijo de las API keys de Google, que se pegan acá por
+     *    error porque viven en el bloque de al lado. 🔴 Va ANTES del formato a propósito: una key
+     *    de Google sin "-" ni "_" son 39 letras y números y pasaría el formato de Serper; y una con
+     *    guion se rechazaría con un "formato inválido" que no dice qué pasó.
+     *  - El formato de Serper: 32 a 64 letras y números. Los espacios de los costados ya los sacó
+     *    el middleware TrimStrings, así que una clave copiada con uno pegado pasa limpia.
+     *
+     * @param Request $request
+     *
+     * @return string Clave validada, o cadena vacía para borrar.
+     */
+    private function validar_clave_de_serper(Request $request): string
+    {
+        $validated = $request->validate([
+            'api_key' => ['bail', 'present', 'nullable', 'string', 'max:100', 'not_regex:/^AIza/', 'regex:/^[A-Za-z0-9]{32,64}$/'],
+        ], [
+            'api_key.not_regex' => self::MENSAJE_CLAVE_DE_GOOGLE_EN_SERPER,
+            'api_key.regex'     => self::MENSAJE_FORMATO_DE_SERPER,
+        ]);
+
+        return (string) ($validated['api_key'] ?? '');
     }
 }
