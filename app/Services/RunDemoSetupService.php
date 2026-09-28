@@ -502,6 +502,16 @@ class RunDemoSetupService
             $payload['google_custom_search_api_key'] = $google_api_key;
         }
 
+        /* La clave de Serper de demos viaja solo si hay alguna cargada. A diferencia de la de
+         * Google, get_serper_api_key_demo() cae a la de clientes cuando la de demos está vacía: hay
+         * una sola cuenta de Serper. Sin ninguna, la demo usa la SERPER_API_KEY de su .env.
+         * Campo nuevo y opcional: un empresa-api anterior lo ignora. Mismo criterio en
+         * payload_de_defaults(). */
+        $serper_api_key = ImplementationSettings::get_serper_api_key_demo();
+        if ($serper_api_key !== '') {
+            $payload['serper_api_key'] = $serper_api_key;
+        }
+
         // El merge va AL FINAL, después de todas las claves de siempre, y no al principio: las
         // claves recalculadas de la dinámica nueva (use_price_lists, use_deposits,
         // usan_cuentas_corrientes) tienen que pisar a las viejas, no al revés. Para la dinámica
@@ -621,6 +631,14 @@ class RunDemoSetupService
         $google_api_key = ImplementationSettings::get_google_api_key_demo();
         if ($google_api_key !== '') {
             $payload['google_custom_search_api_key'] = $google_api_key;
+        }
+
+        // La clave de Serper de demos (que cae a la de clientes si no hay una propia) sólo viaja si
+        // hay alguna cargada; si no, la demo usa la SERPER_API_KEY de su .env. Mismo criterio que
+        // build_payload().
+        $serper_api_key = ImplementationSettings::get_serper_api_key_demo();
+        if ($serper_api_key !== '') {
+            $payload['serper_api_key'] = $serper_api_key;
         }
 
         return $payload;

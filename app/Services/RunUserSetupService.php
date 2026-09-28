@@ -361,6 +361,18 @@ class RunUserSetupService
             $payload['google_custom_search_api_key'] = $google_api_key;
         }
 
+        /* La clave de Serper, con el mismo criterio que la de Google: viaja solo si está cargada en
+         * el admin. Si no viaja, empresa-api deja users.serper_api_key en null y el sistema usa la
+         * SERPER_API_KEY de su .env, como antes de este campo.
+         *
+         * Contrato aditivo: el campo es nuevo y opcional. Un empresa-api anterior lo ignora
+         * (UserSetupHelper arma el User columna por columna), y ningún campo de los que ya viajaban
+         * cambia de nombre ni de forma. */
+        $serper_api_key = ImplementationSettings::get_serper_api_key_default();
+        if ($serper_api_key !== '') {
+            $payload['serper_api_key'] = $serper_api_key;
+        }
+
         return $payload;
     }
 
