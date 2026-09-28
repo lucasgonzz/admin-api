@@ -113,6 +113,9 @@ class ImplementationUserSetupService
      * preview de la acción 'user_setup' el payload real que se va a enviar, sin duplicar
      * esta lógica de armado.
      *
+     * 🔴 Devuelve la clave de Serper ENTERA, porque es lo que viaja. El preview la tapa antes de
+     * mostrarla en el panel (ImplementationActionService::preview_user_setup()).
+     *
      * @param Client $client Cliente con setup_data poblado en la Etapa 1.
      *
      * @return array<string, mixed>
@@ -174,6 +177,26 @@ class ImplementationUserSetupService
         // payment_discounts (método + tipo + porcentaje) viajan por el spread de setup_data
         // y son consumidos por UserSetupHelper en empresa-api. Si setup_data no los trae
         // (cliente viejo), el ERP usa defaults.
+
+        /* La clave de Serper (misión serper-en-user-setup, 28/9/2026): la de clientes, con el
+         * mismo criterio que RunUserSetupService. Viaja solo si está cargada en el admin; si no,
+         * empresa-api deja users.serper_api_key en null y el sistema usa la SERPER_API_KEY de su
+         * .env. Este camino (la Etapa 3 de la implementación) es uno de los dos por donde nace un
+         * cliente, así que sin esto un sistema nuevo podía nacer sin la clave.
+         *
+         * 🔴 Sale SOLO de la configuración del admin. setup_data se desparrama entero más arriba y
+         * se mezcla sobre lo que el cliente ya tuviera, así que primero se descarta cualquier
+         * serper_api_key que haya traído: una clave que nadie validó no viaja por acá.
+         *
+         * La API key de Google no viaja por este camino; es un comportamiento previo y no se tocó.
+         *
+         * Contrato aditivo: campo nuevo y opcional, un empresa-api anterior lo ignora. */
+        unset($payload['serper_api_key']);
+
+        $serper_api_key = ImplementationSettings::get_serper_api_key_default();
+        if ($serper_api_key !== '') {
+            $payload['serper_api_key'] = $serper_api_key;
+        }
 
         return $payload;
     }

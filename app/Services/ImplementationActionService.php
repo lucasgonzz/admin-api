@@ -57,6 +57,15 @@ class ImplementationActionService
     private const WELCOME_TEMPLATE_NAME = 'cc_implementacion_bienvenida';
 
     /**
+     * Campos del payload del UserSetup que el preview del panel muestra TAPADOS: claves de
+     * servicios pagos.
+     *
+     * Hoy viaja solo la de Serper. La de Google está en la lista por si algún día se suma a este
+     * camino: así el preview ya nace tapándola y no depende de que alguien se acuerde.
+     */
+    private const CAMPOS_TAPADOS_EN_EL_PREVIEW = ['serper_api_key', 'google_custom_search_api_key'];
+
+    /**
      * @var ImplementationConversationService Fuente de los textos (build_*_body()) y del envío/persistencia.
      */
     private $conversation_service;
@@ -442,6 +451,11 @@ class ImplementationActionService
         $client  = $implementation->client ?? Client::find($implementation->client_id);
         $payload = $client !== null ? $this->user_setup_service->build_payload($client) : [];
 
+        /* 🔴 El preview se muestra en el panel: las claves de servicios pagos van TAPADAS. Taparlas
+         * acá no cambia lo que viaja de verdad: execute() no usa este body, llama a
+         * trigger_user_setup(), que arma su propio payload con la clave entera. */
+        $payload = $this->tapar_claves_del_payload($payload);
+
         return [
             'action'            => 'user_setup',
             'body'              => json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE),
@@ -454,6 +468,39 @@ class ImplementationActionService
             // No es un mensaje: no tiene sentido editarlo desde el panel.
             'editable'          => false,
         ];
+    }
+
+    /**
+     * Devuelve el payload del UserSetup con las claves de servicios pagos tapadas, para mostrarlo
+     * en el panel.
+     *
+     * Cada clave presente se reemplaza por "cargada, termina en XXXX" (sus últimos cuatro
+     * caracteres): alcanza para reconocer cuál está cargada sin exponerla. Si fuera tan corta que
+     * esos cuatro serían una parte grande de la clave, se muestra solo "cargada".
+     *
+     * Solo toca los campos de CAMPOS_TAPADOS_EN_EL_PREVIEW: el resto del payload se muestra tal
+     * cual, que es para lo que existe el preview.
+     *
+     * @param array<string, mixed> $payload Payload real del UserSetup.
+     *
+     * @return array<string, mixed> El mismo payload, con las claves tapadas.
+     */
+    private function tapar_claves_del_payload(array $payload): array
+    {
+        foreach (self::CAMPOS_TAPADOS_EN_EL_PREVIEW as $campo) {
+            if (! array_key_exists($campo, $payload)) {
+                continue;
+            }
+
+            // Solo un string puede ser una clave; cualquier otra cosa se tapa igual, sin leerla.
+            $clave = is_string($payload[$campo]) ? $payload[$campo] : '';
+
+            $payload[$campo] = strlen($clave) >= 16
+                ? 'cargada, termina en ' . substr($clave, -4)
+                : 'cargada';
+        }
+
+        return $payload;
     }
 
     /**
