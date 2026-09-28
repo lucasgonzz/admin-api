@@ -98,6 +98,7 @@ Route::prefix('form')->group(function () {
     Route::get('implementation/{token}',         [ImplementationFormController::class, 'show']);
     Route::patch('implementation/{token}',       [ImplementationFormController::class, 'save']);
     Route::post('implementation/{token}/submit', [ImplementationFormController::class, 'submit']);
+    Route::post('implementation/{token}/logo',   [ImplementationFormController::class, 'upload_logo']);
 });
 
 /*

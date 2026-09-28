@@ -111,6 +111,9 @@ class ImplementationFormMapper
             'instagram'       => (string) ($form['instagram'] ?? ''),
             'email'           => (string) ($form['email'] ?? ''),
             'doc_number'      => (string) ($form['doc_number'] ?? ''),
+            // Logo del negocio (Storage::disk('public')->url() de ImplementationFormController::upload_logo()).
+            // Opcional: si viene vacío, empresa-api usa su placeholder histórico (ver plan de la misión).
+            'logo_url'        => (string) ($form['logo_url'] ?? ''),
 
             // Precios: la bandera para el sistema y los nombres en texto para price_type_1..3.
             'use_price_lists'    => ((string) ($form['price_mode'] ?? '')) === 'lists',

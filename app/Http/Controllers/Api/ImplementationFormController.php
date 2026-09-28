@@ -10,6 +10,7 @@ use App\Models\ImplementationStage;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * Endpoints públicos del formulario de configuración de implementación.
@@ -52,6 +53,7 @@ class ImplementationFormController extends Controller
         'instagram',
         'email',
         'doc_number',
+        'logo_url',
         'employees',
         'migration_responsible',
         '_current_section',
@@ -248,6 +250,125 @@ class ImplementationFormController extends Controller
         ]);
 
         return response()->json(['success' => true], 200);
+    }
+
+    /**
+     * Sube el logo del negocio y lo persiste en form_responses.
+     *
+     * A diferencia de save()/submit(), este endpoint no espera al envío del formulario:
+     * FieldImagen.vue lo llama apenas el cliente elige el archivo, para no perder la imagen
+     * si cierra la pestaña antes de terminar el resto de las preguntas.
+     *
+     * Reglas (mismo criterio que save()/submit()):
+     * - Token inválido → 404.
+     * - Formulario ya enviado → 422 (no se puede seguir editando).
+     * - Archivo ausente, no-imagen (solo jpeg/png/webp) o mayor a 5 MB → 422 con mensaje claro.
+     * - Éxito: guarda el archivo en el disco `public`, persiste `logo_url` en form_responses
+     *   (sobrescribe uno anterior sin borrar el archivo viejo: son archivos de implementación,
+     *   no un catálogo con volumen) y lo devuelve.
+     *
+     * @param Request $request Debe incluir el archivo en `logo`.
+     * @param string  $token   Token UUID v4 del formulario.
+     *
+     * @return JsonResponse { logo_url: string } o error 404/422.
+     */
+    public function upload_logo(Request $request, string $token): JsonResponse
+    {
+        // Buscar la implementación por su token público.
+        $implementation = Implementation::byFormToken($token)->first();
+
+        if ($implementation === null) {
+            return response()->json(['message' => 'Formulario no encontrado.'], 404);
+        }
+
+        // No permitir subir un logo si el formulario ya fue enviado (mismo criterio que save()/submit()).
+        if ($implementation->form_submitted_at !== null) {
+            return response()->json(['message' => 'El formulario ya fue enviado y no puede modificarse.'], 422);
+        }
+
+        // El SPA sube el archivo en el campo `logo`.
+        $uploaded_file = $request->file('logo');
+
+        if ($uploaded_file === null || ! $uploaded_file->isValid()) {
+            return response()->json(['message' => 'No se recibió un archivo de imagen válido.'], 422);
+        }
+
+        // Mime real del archivo (mismo criterio que LeadController@send_direct_image_json: si finfo
+        // no lo pudo determinar y devuelve application/octet-stream, se usa el mime que reportó el
+        // cliente siempre que efectivamente sea una imagen).
+        $mime = strtolower((string) $uploaded_file->getMimeType());
+
+        if ($mime === 'application/octet-stream') {
+            $client_mime = strtolower((string) $uploaded_file->getClientMimeType());
+            if (strpos($client_mime, 'image/') === 0) {
+                $mime = $client_mime;
+            }
+        }
+
+        $allowed_mimes = ['image/jpeg', 'image/png', 'image/webp'];
+
+        if (! in_array($mime, $allowed_mimes, true)) {
+            return response()->json([
+                'message' => 'El logo tiene que ser una imagen JPEG, PNG o WEBP (se recibió: ' . $mime . ').',
+            ], 422);
+        }
+
+        // Tope de 5 MB.
+        $max_bytes = 5 * 1024 * 1024;
+
+        if ($uploaded_file->getSize() > $max_bytes) {
+            return response()->json(['message' => 'El logo supera el tamaño máximo permitido (5 MB).'], 422);
+        }
+
+        // Extensión derivada del mime real, no de lo que mandó el navegador.
+        switch ($mime) {
+            case 'image/png':
+                $ext = 'png';
+                break;
+            case 'image/webp':
+                $ext = 'webp';
+                break;
+            case 'image/jpeg':
+            default:
+                $ext = 'jpg';
+                break;
+        }
+
+        // Etapa 1: mismo lugar donde save()/submit() guardan el resto de las respuestas.
+        $stage = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', 1)
+            ->first();
+
+        if ($stage === null) {
+            Log::channel('daily')->error('ImplementationFormController@upload_logo: stage 1 no encontrado.', [
+                'implementation_id' => $implementation->id,
+            ]);
+
+            return response()->json(['message' => 'Etapa del formulario no encontrada.'], 404);
+        }
+
+        // Guardado con timestamp + hash corto para no pisar el logo de otra implementación ni un
+        // reintento del mismo cliente (mismo patrón que LeadController@send_direct_audio_json).
+        $directory   = 'implementation_logos/' . $implementation->id;
+        $stored_name = 'logo_' . now()->format('Ymd_His') . '_' . substr(md5(uniqid('', true)), 0, 8) . '.' . $ext;
+        $stored_path = $directory . '/' . $stored_name;
+
+        Storage::disk('public')->put($stored_path, file_get_contents($uploaded_file->getRealPath()));
+
+        // URL pública estándar de Laravel: config/filesystems.php ya arma disks.public.url con
+        // APP_URL + /storage, no hay que inventar otro armado.
+        $logo_url = Storage::disk('public')->url($stored_path);
+
+        // Persistir en form_responses, reusando el mismo método que save()/submit() (sobrescribe si
+        // ya había un logo cargado antes).
+        $this->persist_form_responses($stage, ['logo_url' => $logo_url]);
+
+        Log::channel('daily')->info('ImplementationFormController@upload_logo: logo subido.', [
+            'implementation_id' => $implementation->id,
+            'stored_path'       => $stored_path,
+        ]);
+
+        return response()->json(['logo_url' => $logo_url], 200);
     }
 
     /**
