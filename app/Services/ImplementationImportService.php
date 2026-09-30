@@ -8,6 +8,8 @@ use App\Models\ClientApi;
 use App\Models\Implementation;
 use App\Models\ImplementationStage;
 use App\Models\WhatsappConfig;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -384,27 +386,83 @@ class ImplementationImportService
                     $original_filename = 'import.xlsx';
                 }
 
-                /** Petición multipart al endpoint de análisis. */
-                $response = Http::withHeaders([
-                        'X-Admin-Api-Key' => $client->api_key,
-                        'Accept'          => 'application/json',
-                    ])
-                    /* Techo propio del análisis (misión modelos-ia-por-cliente, 30/9/2026): el
-                     * cliente analiza con DeepSeek Pro razonando y tarda más que los 15 s del
-                     * 'timeout' genérico. Ver `services.client_api.excel_analyze_timeout`. */
-                    ->timeout((int) config('services.client_api.excel_analyze_timeout', 180))
-                    ->retry((int) config('services.client_api.retries', 1), 500)
-                    ->attach(
-                        'excel_file',
-                        file_get_contents($temp_full_path),
-                        $original_filename
-                    )
-                    ->post($analyze_url, [
-                        'user_id' => $owner_user_id,
-                        'model'   => $config['model'],
-                    ]);
+                /** Techo de espera del análisis, en segundos (ver la config). */
+                $techo_segundos = (int) config('services.client_api.excel_analyze_timeout', 180);
 
-                if (! $response->successful()) {
+                try {
+                    /** Petición multipart al endpoint de análisis. */
+                    $response = Http::withHeaders([
+                            'X-Admin-Api-Key' => $client->api_key,
+                            'Accept'          => 'application/json',
+                        ])
+                        /* Techo propio del análisis (misión modelos-ia-por-cliente, 30/9/2026): el
+                         * cliente analiza con DeepSeek Pro razonando y tarda más que los 15 s del
+                         * 'timeout' genérico. Ver `services.client_api.excel_analyze_timeout`. */
+                        ->timeout($techo_segundos)
+                        /* 🔴 Se reintenta SOLO si el pedido no llegó (conexión rechazada, DNS). Ni un
+                         * timeout ni ninguna respuesta HTTP: cada análisis es una consulta paga a la
+                         * IA y deja un `excel_path` nuevo del otro lado, y hasta el 30/9/2026 un
+                         * timeout o un 5xx disparaban un segundo análisis mientras el cliente seguía
+                         * con el primero (dos cobros, dos archivos). Ver
+                         * `ReintentosDeHttpSaliente::solo_si_no_llego()`. */
+                        ->retry(
+                            (int) config('services.client_api.retries', 1),
+                            500,
+                            function ($exception) {
+                                return ReintentosDeHttpSaliente::solo_si_no_llego($exception);
+                            }
+                        )
+                        ->attach(
+                            'excel_file',
+                            file_get_contents($temp_full_path),
+                            $original_filename
+                        )
+                        ->post($analyze_url, [
+                            'user_id' => $owner_user_id,
+                            'model'   => $config['model'],
+                        ]);
+                } catch (RequestException $request_exception) {
+                    /* 🔴 En Laravel 8, con `retry()` de más de un intento, un no-2xx llega como
+                     * excepción ANTES de volver acá. Sin recuperar la respuesta real, el
+                     * `handle_http_error()` de abajo era código muerto y al admin le llegaba el
+                     * texto crudo de la excepción en vez del código y el motivo del cliente. */
+                    $response = $request_exception->response;
+                } catch (ConnectionException $connection_exception) {
+                    if (! ReintentosDeHttpSaliente::es_timeout($connection_exception)) {
+                        // Falla de conexión que ya agotó sus reintentos: la maneja el catch de afuera.
+                        throw $connection_exception;
+                    }
+
+                    /* Timeout: se dice en castellano y sin reintentar. El análisis puede seguir
+                     * corriendo del otro lado; lo que no hay que hacer es pagar otro. */
+                    Log::channel('daily')->error('ImplementationImportService::analyze_files: timeout del análisis.', [
+                        'implementation_id' => $implementation->id,
+                        'category'          => $category,
+                        'techo_segundos'    => $techo_segundos,
+                        'message'           => $connection_exception->getMessage(),
+                    ]);
+                    $this->conversation_service->notify_assigned_admin_for_implementation(
+                        $implementation,
+                        '⚠️ El sistema del cliente no terminó de analizar el Excel de '
+                        . $config['label']
+                        . ' en ' . $techo_segundos . ' s (implementación #' . $implementation->id . '). '
+                        . 'No se reintentó para no pagar dos análisis: revisalo y, si hace falta, '
+                        . 'volvé a disparar el análisis.'
+                    );
+                    continue;
+                }
+
+                if ($response === null || ! $response->successful()) {
+                    if ($response === null) {
+                        // No debería pasar (una RequestException siempre trae respuesta), pero no se asume.
+                        $this->log_and_notify_admin(
+                            $implementation,
+                            'ImplementationImportService::analyze_files: el cliente no devolvió respuesta para '
+                            . $config['label'] . '.'
+                        );
+                        continue;
+                    }
+
                     $this->handle_http_error(
                         $implementation,
                         'analyze',
@@ -1096,6 +1154,12 @@ class ImplementationImportService
             'body'              => $body_snippet,
         ]);
 
+        /* Misión modelos-ia-por-cliente (30/9/2026): el aviso lleva el motivo que dio el cliente
+         * (su `message` o sus `errors`), no solo el código. Hasta ahora este método casi nunca
+         * corría —el `retry()` convertía el no-2xx en excepción antes— y el admin recibía el texto
+         * crudo de la excepción de Laravel. */
+        $motivo = $this->motivo_de_la_respuesta($response);
+
         $this->conversation_service->notify_assigned_admin_for_implementation(
             $implementation,
             '⚠️ Error HTTP '
@@ -1107,7 +1171,47 @@ class ImplementationImportService
             . ') en implementación #'
             . $implementation->id
             . '.'
+            . ($motivo !== '' ? ' Motivo del cliente: ' . $motivo : '')
         );
+    }
+
+    /**
+     * El motivo legible de una respuesta de error del `empresa-api`: los mensajes de `errors` (un
+     * 422 de Laravel), o `message`, o el principio del cuerpo sin etiquetas HTML. Vacío si no hay nada.
+     *
+     * @param Response $response Respuesta no exitosa del cliente.
+     *
+     * @return string
+     */
+    protected function motivo_de_la_respuesta(Response $response): string
+    {
+        $cuerpo = $response->json();
+
+        if (is_array($cuerpo)) {
+            /** @var array<int, string> Mensajes de `errors`, sin repetir. */
+            $mensajes = [];
+
+            if (isset($cuerpo['errors']) && is_array($cuerpo['errors'])) {
+                array_walk_recursive($cuerpo['errors'], function ($valor) use (&$mensajes) {
+                    if (is_scalar($valor) && trim((string) $valor) !== '' && ! in_array(trim((string) $valor), $mensajes, true)) {
+                        $mensajes[] = trim((string) $valor);
+                    }
+                });
+            }
+
+            if ($mensajes !== []) {
+                return mb_substr(implode(' ', $mensajes), 0, 300);
+            }
+
+            if (isset($cuerpo['message']) && is_scalar($cuerpo['message']) && trim((string) $cuerpo['message']) !== '') {
+                return mb_substr(trim((string) $cuerpo['message']), 0, 300);
+            }
+        }
+
+        // Sin JSON: el principio del cuerpo, sin HTML y con los espacios colapsados.
+        $texto = trim((string) preg_replace('/\s+/', ' ', strip_tags((string) $response->body())));
+
+        return mb_substr($texto, 0, 300);
     }
 
     /**

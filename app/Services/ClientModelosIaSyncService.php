@@ -310,38 +310,16 @@ class ClientModelosIaSyncService
      *   duplicaría la espera para enterarse casi siempre de lo mismo.
      * - Un 5xx o una falla RÁPIDA de conexión sí: cuestan medio segundo y pueden ser un parpadeo.
      *
+     * El criterio vive en `ReintentosDeHttpSaliente::para_lectura_en_vivo()`, compartido con otros
+     * services; acá solo se delega.
+     *
      * @param \Throwable $exception Excepción que levantó el cliente HTTP.
      *
      * @return bool
      */
     protected function conviene_reintentar($exception)
     {
-        if (! ($exception instanceof RequestException)) {
-            return ! $this->es_timeout($exception);
-        }
-
-        if ($exception->response === null) {
-            return true;
-        }
-
-        $status = (int) $exception->response->status();
-
-        return $status < 400 || $status >= 500;
-    }
-
-    /**
-     * Si una falla de transporte fue un timeout ("cURL error 28" / "timed out").
-     *
-     * @param \Throwable $exception
-     *
-     * @return bool
-     */
-    protected function es_timeout($exception)
-    {
-        $mensaje = strtolower((string) $exception->getMessage());
-
-        return strpos($mensaje, 'curl error 28') !== false
-            || strpos($mensaje, 'timed out') !== false;
+        return ReintentosDeHttpSaliente::para_lectura_en_vivo($exception);
     }
 
     /**
