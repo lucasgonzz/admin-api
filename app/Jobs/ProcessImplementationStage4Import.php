@@ -29,6 +29,24 @@ class ProcessImplementationStage4Import implements ShouldQueue
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     /**
+     * Segundos que el worker le da a este job antes de matarlo.
+     *
+     * Misión modelos-ia-por-cliente (30/9/2026): hasta hoy no tenía `$timeout` propio y heredaba
+     * los 60 s por defecto de `queue:work`, que alcanzaban porque cada análisis cortaba a los 15 s
+     * del timeout genérico. Con el análisis en DeepSeek Pro razonando, cada archivo puede esperar
+     * hasta `services.client_api.excel_analyze_timeout` (180 s), con un reintento, y el job analiza
+     * de a uno los archivos de artículos, clientes y proveedores: con los 60 s heredados el worker
+     * lo mataba a mitad del primer archivo y el techo nuevo quedaba como letra muerta.
+     *
+     * 1800 alcanza para cinco archivos en el peor caso (dos intentos de 180 s cada uno) y queda por
+     * debajo del `retry_after` de 2400 de la conexión `database` (`config/queue.php`), que tiene que
+     * ser mayor para que la cola no lo dé por perdido y lo vuelva a correr mientras sigue vivo.
+     *
+     * @var int
+     */
+    public $timeout = 1800;
+
+    /**
      * @var int ID de la implementación cuyos archivos se procesarán.
      */
     private $implementation_id;

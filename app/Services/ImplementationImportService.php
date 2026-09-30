@@ -389,7 +389,10 @@ class ImplementationImportService
                         'X-Admin-Api-Key' => $client->api_key,
                         'Accept'          => 'application/json',
                     ])
-                    ->timeout((int) config('services.client_api.timeout', 60))
+                    /* Techo propio del análisis (misión modelos-ia-por-cliente, 30/9/2026): el
+                     * cliente analiza con DeepSeek Pro razonando y tarda más que los 15 s del
+                     * 'timeout' genérico. Ver `services.client_api.excel_analyze_timeout`. */
+                    ->timeout((int) config('services.client_api.excel_analyze_timeout', 180))
                     ->retry((int) config('services.client_api.retries', 1), 500)
                     ->attach(
                         'excel_file',

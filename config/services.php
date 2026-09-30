@@ -56,6 +56,25 @@ return [
          * umbrales y el orden en que tienen que estar.
          */
         'demo_setup_timeout' => env('CLIENT_API_DEMO_SETUP_TIMEOUT', 900),
+        /*
+         * Techo propio, en segundos, para el análisis de un Excel de la implementación
+         * (`ImplementationImportService::analyze_files` → `admin-sync/ai-excel-import/analyze`).
+         *
+         * Misión modelos-ia-por-cliente (30/9/2026): del lado del cliente el análisis pasa a correr
+         * en DeepSeek Pro CON razonamiento (thinking), que tarda bastante más que el Sonnet sin
+         * thinking de antes. Con el 'timeout' genérico de 15 s el admin cortaba la espera mientras
+         * el cliente seguía analizando, daba el archivo por fallado y encima lo reintentaba (otra
+         * llamada paga a la IA). 180 cubre los 120 s que el cliente le da a su propia llamada a la
+         * IA más la lectura del Excel y la red.
+         *
+         * Va aparte del genérico por lo mismo que el demo setup: subírselo a todos cambiaría el
+         * comportamiento de las operaciones cortas a cambio de nada.
+         *
+         * 🔴 Si movés este número, revisá `ProcessImplementationStage4Import::$timeout` en el MISMO
+         * commit: el worker mata el job cuando se le acaba ese techo, y tiene que alcanzar para
+         * varios archivos analizados de a uno (con su reintento), no para uno solo.
+         */
+        'excel_analyze_timeout' => env('CLIENT_API_EXCEL_ANALYZE_TIMEOUT', 180),
     ],
 
     /*
