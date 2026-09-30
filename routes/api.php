@@ -14,6 +14,7 @@ use App\Http\Controllers\ClientEmployeeController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientContratoController;
 use App\Http\Controllers\ClientImagenesController;
+use App\Http\Controllers\ClientModelosIaController;
 use App\Http\Controllers\ClientLicenciaController;
 use App\Http\Controllers\ClientMensualidadController;
 use App\Http\Controllers\CobranzasController;
@@ -572,6 +573,13 @@ Route::prefix('admin')->group(function () {
            quien los aprieta está mirando la pantalla. No colisionan con client/{clientId}/tokens. */
         Route::post('client/{clientId}/ai-plan', [AiPlanController::class, 'assign_to_client_json']);
         Route::post('client/{clientId}/ai-plan/sync', [AiPlanController::class, 'sync_to_client_json']);
+        /* Modelos de IA por tarea (misión modelos-ia-por-cliente, 30/9/2026): la solapa
+           "Inteligencia artificial" lee y cambia EN VIVO qué modelo usa el cliente para el asistente,
+           el WhatsApp, la verificación de imágenes y la importación de Excel
+           (ClientModelosIaSyncService → admin-sync/modelos-ia de su empresa-api). No se persiste nada
+           en el admin: decisión de Lucas, "gana el último" entre el admin y el modal del dueño. */
+        Route::get('client/{clientId}/modelos-ia', [ClientModelosIaController::class, 'show_json']);
+        Route::put('client/{clientId}/modelos-ia', [ClientModelosIaController::class, 'update_json']);
         // Emisión de Factura C (WSFE) por la mensualidad del cliente (prompt 331).
         Route::post('client/{clientId}/emitir-factura', [ClientMensualidadController::class, 'emitir_factura_json']);
         // Historial de Facturas C emitidas/rechazadas para este cliente, sin los SOAP crudos (prompt 364).
