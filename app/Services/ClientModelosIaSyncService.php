@@ -244,7 +244,7 @@ class ClientModelosIaSyncService
             /* El cliente rechazó una opción (no existe, o no vale para esa tarea: DeepSeek Pro no ve
              * imágenes). Su catálogo es la fuente de verdad, así que su motivo es el mensaje, y los
              * errores por tarea viajan aparte para que la solapa marque la fila que corresponde. */
-            $errores = $this->errores_por_tarea($response);
+            $errores = $this->errores_por_tarea($response, $client);
 
             return $this->resultado(
                 self::ESTADO_FAILED,
@@ -326,11 +326,16 @@ class ClientModelosIaSyncService
      * Los errores de un 422 agrupados por tarea (`{whatsapp: ['...']}`), tal cual los mandó el
      * cliente pero solo para las claves del contrato.
      *
+     * 🔴 Cada mensaje sale por `texto_seguro()`, igual que el `mensaje` general: estos textos se
+     * muestran debajo de la fila en la solapa, y un cuerpo que trajera la `api_key` la dejaría a la
+     * vista (y en cualquier captura) aunque el mensaje de arriba la tape.
+     *
      * @param \Illuminate\Http\Client\Response $response Respuesta 422 del cliente.
+     * @param Client                           $client   Cliente dueño de la clave.
      *
      * @return array<string, array<int, string>>|null Null si el cuerpo no trae `errors` por tarea.
      */
-    protected function errores_por_tarea($response)
+    protected function errores_por_tarea($response, Client $client)
     {
         $cuerpo = $response->json();
 
@@ -351,7 +356,7 @@ class ClientModelosIaSyncService
 
             foreach ($mensajes as $mensaje) {
                 if (is_scalar($mensaje) && trim((string) $mensaje) !== '') {
-                    $errores[$tarea][] = trim((string) $mensaje);
+                    $errores[$tarea][] = mb_substr($this->texto_seguro(trim((string) $mensaje), $client), 0, self::CHARS_DE_CUERPO);
                 }
             }
         }

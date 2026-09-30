@@ -418,6 +418,98 @@ class ModelosIaDelClienteTest extends BaseDelCanal
     }
 
     /**
+     * 🔴 Un 302 NO se sigue: un solo intento, ningún pedido al destino (la `X-Admin-Api-Key` viajaría
+     * a otro host) y `failed` con el destino nombrado para corregir la URL.
+     *
+     * @return void
+     */
+    public function test_un_302_no_se_sigue_ni_se_reintenta(): void
+    {
+        $this->admin_logueado();
+
+        config(['services.client_api.retries' => 3]);
+
+        $intentos_al_cliente = 0;
+        $pedidos_al_destino  = 0;
+        $payload             = $this->payload_del_cliente();
+
+        $this->fakear_http([
+            '*admin-sync/modelos-ia*' => function () use (&$intentos_al_cliente) {
+                $intentos_al_cliente++;
+
+                return Http::response('', 302, ['Location' => 'https://estacionamiento.test/cualquier-cosa']);
+            },
+            '*estacionamiento.test*'  => function () use (&$pedidos_al_destino, $payload) {
+                $pedidos_al_destino++;
+
+                return Http::response($payload, 200);
+            },
+        ]);
+
+        $client = $this->crear_cliente();
+
+        $response = $this->getJson('/api/admin/client/' . $client->id . '/modelos-ia');
+
+        $response->assertStatus(200);
+        $this->assertSame('failed', $response->json('estado'));
+        $this->assertStringContainsString('HTTP 302', (string) $response->json('mensaje'));
+        $this->assertStringContainsString('redirección', (string) $response->json('mensaje'));
+        $this->assertSame(1, $intentos_al_cliente);
+        $this->assertSame(0, $pedidos_al_destino);
+
+        Http::assertNotSent(function ($request) {
+            return Str::contains($request->url(), 'estacionamiento.test');
+        });
+    }
+
+    /**
+     * 🔴 Si el cliente devuelve su api_key en un 200 con HTML, el mensaje la tapa.
+     *
+     * @return void
+     */
+    public function test_la_clave_en_un_200_con_html_sale_tapada(): void
+    {
+        $this->admin_logueado();
+
+        $this->fakear_http(['*admin-sync/modelos-ia*' => Http::response(
+            '<html>Error de configuración: ADMIN_API_INBOUND_KEY=clave-del-cliente</html>',
+            200
+        )]);
+
+        $client = $this->crear_cliente();
+
+        $response = $this->getJson('/api/admin/client/' . $client->id . '/modelos-ia');
+
+        $this->assertSame('failed', $response->json('estado'));
+        $this->assertStringContainsString('[clave oculta]', (string) $response->json('mensaje'));
+        $this->assertStringNotContainsString('clave-del-cliente', $response->getContent());
+    }
+
+    /**
+     * 🔴 Si el cliente devuelve su api_key en un 422, la tapa el mensaje Y los errores por tarea.
+     *
+     * @return void
+     */
+    public function test_la_clave_en_un_422_sale_tapada_en_el_mensaje_y_en_los_errores(): void
+    {
+        $this->admin_logueado();
+
+        $this->fakear_http(['*admin-sync/modelos-ia*' => Http::response([
+            'message' => 'The given data was invalid.',
+            'errors'  => ['whatsapp' => ['La opción no vale para la clave clave-del-cliente.']],
+        ], 422)]);
+
+        $client = $this->crear_cliente();
+
+        $response = $this->putJson('/api/admin/client/' . $client->id . '/modelos-ia', ['whatsapp' => 'claude_opus']);
+
+        $this->assertSame('failed', $response->json('estado'));
+        $this->assertStringContainsString('[clave oculta]', (string) $response->json('mensaje'));
+        $this->assertStringContainsString('[clave oculta]', (string) $response->json('errores.whatsapp.0'));
+        $this->assertStringNotContainsString('clave-del-cliente', $response->getContent());
+    }
+
+    /**
      * Un cliente sin api_key no sale a la red y lo dice.
      *
      * @return void
