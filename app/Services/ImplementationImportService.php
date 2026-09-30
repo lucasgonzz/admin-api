@@ -238,6 +238,16 @@ class ImplementationImportService
         }
 
         if ($had_analysis_error && count($analysis_result) === 0) {
+            /* Misión modelos-ia-por-cliente (30/9/2026): antes se volvía sin tocar nada y la etapa
+             * quedaba en `analyzing` para siempre (el responsable recibía "estamos analizando" a
+             * cada mensaje). Cada archivo ya avisó su motivo al admin, así que acá no se repite. */
+            $this->marcar_analisis_fallido(
+                $implementation,
+                'No se pudo analizar ningún Excel: el sistema del cliente devolvió error en todos. '
+                . 'El detalle de cada archivo le llegó al admin asignado.',
+                false
+            );
+
             return;
         }
 
@@ -703,6 +713,88 @@ class ImplementationImportService
         $stage->save();
 
         $this->conversation_service->finish_stage_4_after_import($implementation, $data);
+    }
+
+    /**
+     * Saca la Etapa 4 de `analyzing` y la deja en un error visible, con el motivo.
+     *
+     * Misión modelos-ia-por-cliente (30/9/2026). Sin esto, un análisis que se corta (el worker mata
+     * el job por tiempo, o todos los archivos fallan) deja la etapa en `analyzing` para siempre: el
+     * responsable de la migración recibe "estamos analizando" a cada mensaje y en el panel no se ve
+     * nada raro.
+     *
+     * Usa lo que la pantalla de implementaciones ya muestra, sin inventar un estado nuevo:
+     *  - `import_status.<categoría>` en `failed` con el motivo en `error` (el badge "❌ Error" de
+     *    cada categoría con archivos, con el motivo como título) y el evento de Pusher que refresca
+     *    el detalle abierto. Solo las categorías que seguían en `pending`: una que ya se importó o
+     *    se estaba importando no se pisa.
+     *  - `current_question = 'analysis_failed'`: el mensaje entrante cae en la respuesta genérica
+     *    ("Recibí tu mensaje. En breve te respondemos.") en vez de prometer un resumen que no va a
+     *    llegar. Volver a avanzar la etapa relanza el análisis desde cero.
+     *  - `analysis_error` con el motivo, para quien mire el `data` de la etapa.
+     *  - El aviso al admin asignado, salvo que el llamador ya lo haya mandado.
+     *
+     * Nunca lanza: corre adentro del `failed()` de un job y de un camino de error.
+     *
+     * @param Implementation $implementation Implementación cuyo análisis se cortó.
+     * @param string         $motivo         Qué pasó, en castellano.
+     * @param bool           $avisar_admin   Si además hay que avisar al admin asignado.
+     *
+     * @return void
+     */
+    public function marcar_analisis_fallido(Implementation $implementation, string $motivo, bool $avisar_admin = true): void
+    {
+        try {
+            $stage = ImplementationStage::where('implementation_id', $implementation->id)
+                ->where('stage_number', 4)
+                ->first();
+
+            if ($stage !== null) {
+                /** @var array<string, mixed> $data */
+                $data = is_array($stage->data) ? $stage->data : [];
+
+                $data['current_question'] = 'analysis_failed';
+                $data['analysis_error']   = $motivo;
+                $stage->data              = $data;
+                $stage->save();
+
+                foreach (self::CATEGORY_CONFIG as $category => $config) {
+                    $files_value = $data[$config['files_key']] ?? null;
+
+                    if (! is_array($files_value) || count($files_value) === 0) {
+                        continue;
+                    }
+
+                    $estado_actual = $data['import_status'][$category]['status'] ?? 'pending';
+
+                    if ($estado_actual !== 'pending') {
+                        continue;
+                    }
+
+                    $this->set_import_status($stage, $implementation, $data, $category, 'failed', $motivo);
+                }
+            }
+
+            Log::channel('daily')->error('ImplementationImportService: análisis de la etapa 4 fallido.', [
+                'implementation_id' => $implementation->id,
+                'motivo'            => $motivo,
+            ]);
+
+            if ($avisar_admin) {
+                $this->conversation_service->notify_assigned_admin_for_implementation(
+                    $implementation,
+                    '⚠️ Se cortó el análisis de los Excel de la implementación #' . $implementation->id
+                    . '. ' . $motivo . ' La etapa quedó en error; revisala y, si hace falta, volvé a '
+                    . 'disparar el análisis.'
+                );
+            }
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('ImplementationImportService::marcar_analisis_fallido: no se pudo marcar.', [
+                'implementation_id' => $implementation->id,
+                'motivo'            => $motivo,
+                'message'           => $exception->getMessage(),
+            ]);
+        }
     }
 
     /**

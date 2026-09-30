@@ -9,6 +9,7 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\MaxAttemptsExceededException;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
@@ -34,13 +35,20 @@ class ProcessImplementationStage4Import implements ShouldQueue
      * Misión modelos-ia-por-cliente (30/9/2026): hasta hoy no tenía `$timeout` propio y heredaba
      * los 60 s por defecto de `queue:work`, que alcanzaban porque cada análisis cortaba a los 15 s
      * del timeout genérico. Con el análisis en DeepSeek Pro razonando, cada archivo puede esperar
-     * hasta `services.client_api.excel_analyze_timeout` (180 s), con un reintento, y el job analiza
-     * de a uno los archivos de artículos, clientes y proveedores: con los 60 s heredados el worker
-     * lo mataba a mitad del primer archivo y el techo nuevo quedaba como letra muerta.
+     * hasta `services.client_api.excel_analyze_timeout` (180 s) y el job analiza de a uno los
+     * archivos de artículos, clientes y proveedores: con los 60 s heredados el worker lo mataba a
+     * mitad del primer archivo y el techo nuevo quedaba como letra muerta.
      *
-     * 1800 alcanza para cinco archivos en el peor caso (dos intentos de 180 s cada uno) y queda por
-     * debajo del `retry_after` de 2400 de la conexión `database` (`config/queue.php`), que tiene que
-     * ser mayor para que la cola no lo dé por perdido y lo vuelva a correr mientras sigue vivo.
+     * La cuenta, sin prometer de más: un timeout y una respuesta HTTP no se reintentan (ver
+     * `ReintentosDeHttpSaliente::solo_si_no_llego()`), así que cada archivo tarda como máximo unos
+     * 180 s de análisis más la descarga desde Kapso (techo de 15 s del timeout genérico, dos veces
+     * si hace falta el segundo intento sin clave). Con ~210 s por archivo en el peor caso, 1800
+     * cubre ocho archivos; lo habitual es uno por categoría, tres en total. Si un cliente manda
+     * más, el worker corta y `failed()` deja la etapa en error visible en vez de colgada.
+     *
+     * Queda por debajo del `retry_after` de 2400 de la conexión `database` (`config/queue.php`),
+     * que tiene que ser mayor para que la cola no lo dé por perdido y lo vuelva a correr mientras
+     * sigue vivo. El PHP CLI del VPS tiene `pcntl`, así que este techo rige de verdad.
      *
      * @var int
      */
@@ -132,6 +140,9 @@ class ProcessImplementationStage4Import implements ShouldQueue
         // durante el análisis reciban la respuesta de espera correcta.
         $data_4['current_question'] = 'analyzing';
 
+        // Un análisis nuevo arranca sin el motivo del intento anterior (ver `failed()`).
+        unset($data_4['analysis_error']);
+
         $stage_4->data = $data_4;
         $stage_4->save();
 
@@ -141,5 +152,42 @@ class ProcessImplementationStage4Import implements ShouldQueue
 
         // Llamar a process_files() que ahora leerá el data del stage 4.
         $import_service->process_files($implementation);
+    }
+
+    /**
+     * El job falló: el worker lo mató por tiempo (`$timeout`) o `handle()` lanzó.
+     *
+     * Misión modelos-ia-por-cliente (30/9/2026). Sin esto la Etapa 4 quedaba en `analyzing` para
+     * siempre: el responsable recibía "estamos analizando" a cada mensaje y nadie se enteraba de que
+     * el análisis había muerto. Se deja la etapa en un error visible con el motivo y se avisa al admin
+     * asignado (`ImplementationImportService::marcar_analisis_fallido()`).
+     *
+     * @param \Throwable $exception Motivo del fallo que pasa el worker.
+     *
+     * @return void
+     */
+    public function failed(\Throwable $exception): void
+    {
+        $implementation = Implementation::find($this->implementation_id);
+
+        if ($implementation === null) {
+            Log::channel('daily')->warning('ProcessImplementationStage4Import::failed: implementación no encontrada.', [
+                'implementation_id' => $this->implementation_id,
+                'message'           => $exception->getMessage(),
+            ]);
+
+            return;
+        }
+
+        /* Con `pcntl`, el corte por tiempo llega como `MaxAttemptsExceededException` ("attempted too
+         * many times or run too long"): se nombra el techo en vez de citar ese texto en inglés. */
+        if ($exception instanceof MaxAttemptsExceededException) {
+            $motivo = 'El análisis superó el tiempo máximo del job (' . $this->timeout . ' s) y el '
+                . 'worker lo cortó. Puede ser un archivo muy grande o el sistema del cliente muy lento.';
+        } else {
+            $motivo = 'El análisis se cortó con un error: ' . mb_substr($exception->getMessage(), 0, 300);
+        }
+
+        app(ImplementationImportService::class)->marcar_analisis_fallido($implementation, $motivo);
     }
 }

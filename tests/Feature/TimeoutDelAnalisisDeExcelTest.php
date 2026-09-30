@@ -24,14 +24,14 @@ class TimeoutDelAnalisisDeExcelTest extends TestCase
     public function test_los_tres_umbrales_del_analisis_estan_en_orden(): void
     {
         $techo_http = (int) config('services.client_api.excel_analyze_timeout');
-        $reintentos = max(1, (int) config('services.client_api.retries', 2));
         $techo_job  = (new ProcessImplementationStage4Import(1))->timeout;
         $retry      = (int) config('queue.connections.database.retry_after');
 
         $this->assertGreaterThanOrEqual(180, $techo_http, 'El análisis con DeepSeek Pro necesita al menos 180 s.');
 
-        // Al menos dos archivos completos, cada uno con todos sus intentos.
-        $this->assertGreaterThan(2 * $reintentos * $techo_http, $techo_job);
+        /* Al menos cinco archivos esperando el techo entero. Desde el arreglo del doble cobro
+         * (30/9/2026) un timeout no se reintenta, así que cada archivo es UN intento, no varios. */
+        $this->assertGreaterThanOrEqual(5 * $techo_http, $techo_job);
 
         $this->assertGreaterThan($techo_job, $retry);
     }
