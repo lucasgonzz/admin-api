@@ -9,7 +9,9 @@ use App\Models\Client;
 use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\EcommerceVersion;
 use App\Services\ClaudeQueryService;
+use App\Services\EcommerceVersionService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -18,9 +20,14 @@ use Illuminate\Support\Facades\DB;
  * Lectura y ACTUALIZACIÓN del ecommerce (tienda) de un cliente desde `claude/*`.
  *
  * 🔴 ESTO ARRANCA PIPELINES SSH REALES CONTRA EL SERVIDOR DE UN NEGOCIO. Una corrida de
- * `EcommerceDeploymentService` clona y compila `tienda-spa` en el VPS de builds, sube la SPA y el
- * código de la API por SFTP al hosting compartido del cliente y corre `composer install` allá.
- * Entre esto y la tienda que le vende al público no hay ningún entorno intermedio.
+ * `EcommerceDeploymentService` sube la SPA y el código de la API por SFTP al hosting compartido del
+ * cliente y corre `composer install` allá. Entre esto y la tienda que le vende al público no hay
+ * ningún entorno intermedio.
+ *
+ * Desde la misión `versiones-tienda` (1/10/2026) la corrida despliega una VERSIÓN de ecommerce
+ * (`ecommerce_version_id` o `version`, opcionales; sin ninguno, la última publicada), bajando sus
+ * artefactos del release de GitHub en vez de compilar en el VPS de builds. Todo es aditivo: un
+ * pedido sin versión se comporta como antes, salvo por lo que se despliega.
  *
  * 🔴 LO QUE ESTE CONTROLADOR NO HACE, Y ES UNA DECISIÓN, NO UN OLVIDO: **no existe ninguna ruta que
  * cree una `ClientEcommerceInstallation` con `mode = 'install'`.** La instalación inicial de una
@@ -179,7 +186,16 @@ class ClaudeEcommerceOpsController extends Controller
      * regla sea mecánica y no una promesa: un `?status=active` de más no se ignora en silencio (que
      * sería lo peligroso, porque el llamador creería haber filtrado), se rechaza con 422.
      */
-    const PARAMETROS_DEL_LOTE = ['client_ids', 'dry_run', 'confirm_client_count', 'confirm_token'];
+    const PARAMETROS_DEL_LOTE = [
+        'client_ids',
+        'dry_run',
+        'confirm_client_count',
+        'confirm_token',
+        /* La versión de ecommerce del lote (misión versiones-tienda, 1/10/2026). No son filtros:
+           eligen QUÉ se despliega, no a QUIÉN, y es la misma para las N tiendas. */
+        'ecommerce_version_id',
+        'version',
+    ];
 
     /**
      * Lista blanca del alta de tienda (POST claude/ecommerce/stores).
@@ -258,7 +274,9 @@ class ClaudeEcommerceOpsController extends Controller
          * null y `puede_actualizarse: true`, y `calcular_confirm_token` hashea `client_name` sin
          * protección para null. El contrato de este listado —toda fila tiene cliente— se mantiene
          * como estaba; las tiendas de demo se miran desde el módulo Demos. */
-        $query = ClientEcommerce::query()->whereNotNull('client_id')->with('client');
+        /* `ecommerce_version` viaja eager (misión versiones-tienda): es la versión instalada hoy en
+           cada tienda, y preguntarla de a una sería una consulta por fila. */
+        $query = ClientEcommerce::query()->whereNotNull('client_id')->with('client', 'ecommerce_version');
 
         $client_id = $this->entero_o_null($request->input('client_id'));
         if ($client_id !== null) {
@@ -300,6 +318,9 @@ class ClaudeEcommerceOpsController extends Controller
                 'puede_actualizarse'   => $motivo === null,
                 'motivo'               => $motivo,
                 'en_cooldown_del_lote' => in_array($id, $contexto['en_cooldown'], true),
+                // Versión de ecommerce instalada hoy ({id, version}), o null si no se sabe: la
+                // tienda se instaló/actualizó por la vía vieja (compilando master en el VPS).
+                'ecommerce_version'    => $tienda->ecommerce_version === null ? null : $tienda->ecommerce_version->compact_payload(),
             ];
         }
 
@@ -363,11 +384,15 @@ class ClaudeEcommerceOpsController extends Controller
         $query = DB::table('client_ecommerce_installations as cei')
             ->leftJoin('client_ecommerces as ce', 'ce.id', '=', 'cei.client_ecommerce_id')
             ->leftJoin('clients as c', 'c.id', '=', 'ce.client_id')
+            /* La versión que despliega cada corrida (misión versiones-tienda): un JOIN más en la
+               misma consulta, no una por fila. leftJoin porque es null en las de la vía vieja. */
+            ->leftJoin('ecommerce_versions as ev', 'ev.id', '=', 'cei.ecommerce_version_id')
             ->select([
                 'cei.id', 'cei.uuid', 'cei.client_ecommerce_id', 'cei.mode', 'cei.status',
                 'cei.created_via', 'cei.failure_reason', 'cei.started_at', 'cei.finished_at',
-                'cei.created_at', 'cei.updated_at',
+                'cei.created_at', 'cei.updated_at', 'cei.ecommerce_version_id',
                 'ce.client_id', 'ce.domain', 'c.name as client_name',
+                'ev.version as ecommerce_version_codigo',
             ])
             /* Mismo criterio que stores_json(): este listado es de corridas de tiendas de
              * CLIENTES. Las corridas de tiendas de demo tienen `ce.client_id` en null y se miran
@@ -635,15 +660,22 @@ class ClaudeEcommerceOpsController extends Controller
      *
      * ⚠️ Tampoco hay cooldown acá: ver el docblock de `COOLDOWN_HORAS_ECOMMERCE`.
      *
-     * @param Request $request Body: client_id, confirm_client_name.
+     * Versión (misión `versiones-tienda`, 1/10/2026, ADITIVO): `ecommerce_version_id` o `version`,
+     * opcionales. Si vienen los dos tienen que ser la misma; la versión tiene que estar publicada.
+     * Sin ninguno, la corrida guarda la última publicada. Se valida al final, después de los frenos
+     * de siempre, y un rechazo tampoco encola nada.
+     *
+     * @param Request $request Body: client_id, confirm_client_name, ecommerce_version_id?, version?.
      *
      * @return \Illuminate\Http\JsonResponse
      */
     public function update_json(Request $request)
     {
         $invalido = $this->validar_o_422($request, [
-            'client_id'           => 'required|integer|min:1',
-            'confirm_client_name' => 'required|string|max:190',
+            'client_id'            => 'required|integer|min:1',
+            'confirm_client_name'  => 'required|string|max:190',
+            'ecommerce_version_id' => 'nullable|integer|min:1',
+            'version'              => 'nullable|string|max:30',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -689,13 +721,33 @@ class ClaudeEcommerceOpsController extends Controller
             );
         }
 
-        $corrida = $this->crear_corrida($tienda);
+        /* Freno 3 (misión versiones-tienda): la versión pedida, si se pidió. */
+        $resolucion = (new EcommerceVersionService())->resolve_for_run(
+            $request->input('ecommerce_version_id'),
+            $request->input('version')
+        );
+        if ($resolucion['error'] !== null) {
+            return $this->error_422(
+                $resolucion['error'] . ' No se encoló nada.',
+                [
+                    'client_id' => (int) $client->id,
+                    'ayuda'     => 'Las versiones que se pueden desplegar están en GET claude/ecommerce/versions. Sin '
+                        . 'ecommerce_version_id ni version se usa la última publicada.',
+                ]
+            );
+        }
+
+        $version = $resolucion['version'];
+        $corrida = $this->crear_corrida($tienda, $version === null ? null : (int) $version->id);
 
         /* 🔴 onConnection explícito: sin esto el pipeline SSH entero correría adentro de este
            request. Ver el docblock de la clase. */
         RunEcommerceInstallationJob::dispatch($corrida->uuid)->onConnection(self::CONEXION_DE_COLA);
 
-        return response()->json($this->respuesta_de_encolado($client, $tienda, $corrida), 202);
+        return response()->json(
+            $this->respuesta_de_encolado($client, $tienda, $corrida, $version, $resolucion['explicita']),
+            202
+        );
     }
 
     /* ==============================================================================================
@@ -757,6 +809,8 @@ class ClaudeEcommerceOpsController extends Controller
             'dry_run'              => 'nullable|boolean',
             'confirm_client_count' => 'nullable|integer|min:0',
             'confirm_token'        => 'nullable|string|max:64',
+            'ecommerce_version_id' => 'nullable|integer|min:1',
+            'version'              => 'nullable|string|max:30',
         ]);
         if ($invalido !== null) {
             return $invalido;
@@ -778,6 +832,27 @@ class ClaudeEcommerceOpsController extends Controller
                 ]
             );
         }
+
+        /* --- Freno 2 bis (misión versiones-tienda): la versión del lote, una para todas. Si se pidió
+           y no existe, no coincide o no está publicada, 422 y cero corridas, ANTES de mirar tiendas. --- */
+        $resolucion = (new EcommerceVersionService())->resolve_for_run(
+            $request->input('ecommerce_version_id'),
+            $request->input('version')
+        );
+        if ($resolucion['error'] !== null) {
+            return $this->error_422(
+                $resolucion['error'] . ' No se creó ninguna corrida.',
+                [
+                    'ayuda' => 'Las versiones que se pueden desplegar están en GET claude/ecommerce/versions. Sin '
+                        . 'ecommerce_version_id ni version se usa la última publicada.',
+                ]
+            );
+        }
+        $version_del_lote = $resolucion['version'];
+        $version_id       = $version_del_lote === null ? null : (int) $version_del_lote->id;
+        /* El token ata la confirmación a la versión SÓLO si se pidió explícita: sin versión pedida,
+           el token es exactamente el de siempre (nada de lo existente cambia). */
+        $version_del_token = $resolucion['explicita'] ? $version_id : null;
 
         /* --- Freno 3: resolución de candidatas. Todo lo que no califica sale como omitido. --- */
         $omitidos   = [];
@@ -859,7 +934,7 @@ class ClaudeEcommerceOpsController extends Controller
         }
 
         $actualizarian  = count($candidatas);
-        $confirm_token  = $this->calcular_confirm_token($candidatas);
+        $confirm_token  = $this->calcular_confirm_token($candidatas, $version_del_token);
         $tiendas_para_ver = [];
         foreach ($candidatas as $candidata) {
             unset($candidata['tienda']);
@@ -876,6 +951,8 @@ class ClaudeEcommerceOpsController extends Controller
                 'tiendas'        => $tiendas_para_ver,
                 'confirm_token'  => $confirm_token,
                 'max_lote'       => self::MAX_LOTE_ECOMMERCE,
+                'ecommerce_version' => $version_del_lote === null ? null : $version_del_lote->compact_payload(),
+                'nota_version'   => $this->nota_de_version($version_del_lote, $resolucion['explicita']),
                 'nota'           => 'Simulación: no se creó ninguna corrida ni se encoló ningún job. REVISÁ la lista de '
                     . 'tiendas antes de seguir: cada una arranca un pipeline SSH contra el hosting de ese negocio. Para '
                     . 'actualizar de verdad, repetí la misma llamada con dry_run=false, confirm_client_count='
@@ -952,12 +1029,12 @@ class ClaudeEcommerceOpsController extends Controller
          * y no una línea. Mientras tanto: el 202 devuelve las N corridas con su id, y
          * `GET claude/ecommerce/installations?created_via=claude` muestra cuáles arrancaron.
          */
-        $corridas = DB::transaction(function () use ($candidatas) {
+        $corridas = DB::transaction(function () use ($candidatas, $version_id) {
             $creadas = [];
             foreach ($candidatas as $candidata) {
                 $creadas[] = [
                     'candidata' => $candidata,
-                    'corrida'   => $this->crear_corrida($candidata['tienda']),
+                    'corrida'   => $this->crear_corrida($candidata['tienda'], $version_id),
                 ];
             }
 
@@ -989,6 +1066,8 @@ class ClaudeEcommerceOpsController extends Controller
             'conexion_de_cola'         => self::CONEXION_DE_COLA,
             'latencia_maxima_segundos' => self::LATENCIA_MAXIMA_SEGUNDOS,
             'created_via'              => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
+            'ecommerce_version'        => $version_del_lote === null ? null : $version_del_lote->compact_payload(),
+            'nota_version'             => $this->nota_de_version($version_del_lote, $resolucion['explicita']),
             'nota_precondicion'        => $this->nota_de_precondicion(),
             'nota'                     => 'Las ' . count($resultados) . ' corridas se encolaron juntas y el worker las va '
                 . 'a tomar de a una o de a varias según cuántos workers levante el scheduler. 🔴 Compiten por el lock del '
@@ -1409,11 +1488,16 @@ class ClaudeEcommerceOpsController extends Controller
      * ⚠️ Lo que NO tapa: una lista mal armada desde el principio. El token protege de que la lista
      * CAMBIE, no de que estuviera mal. Para eso hay que leer la simulación.
      *
-     * @param array<int, array<string, mixed>> $candidatas Tiendas ya resueltas.
+     * Versión (misión `versiones-tienda`): si el lote PIDIÓ una versión explícita, entra en la huella,
+     * así una simulación con la 1.0.0 no confirma un lote con la 1.1.0. Sin versión pedida, la
+     * huella es byte por byte la de siempre.
+     *
+     * @param array<int, array<string, mixed>> $candidatas        Tiendas ya resueltas.
+     * @param int|null                         $version_explicita Id de la versión pedida, o null.
      *
      * @return string
      */
-    private function calcular_confirm_token(array $candidatas)
+    private function calcular_confirm_token(array $candidatas, $version_explicita = null)
     {
         $partes = [];
         foreach ($candidatas as $candidata) {
@@ -1423,7 +1507,12 @@ class ClaudeEcommerceOpsController extends Controller
         }
         sort($partes);
 
-        return substr(hash('sha256', 'ecommerce-updates-batch|' . implode('|', $partes)), 0, 32);
+        $base = 'ecommerce-updates-batch|' . implode('|', $partes);
+        if ($version_explicita !== null) {
+            $base .= '|ecommerce_version:' . (int) $version_explicita;
+        }
+
+        return substr(hash('sha256', $base), 0, 32);
     }
 
     /* ==============================================================================================
@@ -1433,18 +1522,40 @@ class ClaudeEcommerceOpsController extends Controller
     /**
      * Crea la fila de la corrida. 🔴 Siempre `mode = update` y siempre marcada como de Claude.
      *
-     * @param ClientEcommerce $tienda Tienda a actualizar.
+     * @param ClientEcommerce $tienda               Tienda a actualizar.
+     * @param int|null        $ecommerce_version_id Versión que despliega (la pedida o la última
+     *                                              publicada); null si no hay ninguna publicada.
      *
      * @return ClientEcommerceInstallation
      */
-    private function crear_corrida(ClientEcommerce $tienda)
+    private function crear_corrida(ClientEcommerce $tienda, $ecommerce_version_id = null)
     {
         return ClientEcommerceInstallation::create([
-            'client_ecommerce_id' => $tienda->id,
-            'mode'                => self::MODO_ACTUALIZACION,
-            'status'              => self::ESTADO_INICIAL,
-            'created_via'         => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
+            'client_ecommerce_id'  => $tienda->id,
+            'mode'                 => self::MODO_ACTUALIZACION,
+            'status'               => self::ESTADO_INICIAL,
+            'created_via'          => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
+            'ecommerce_version_id' => $ecommerce_version_id,
         ]);
+    }
+
+    /**
+     * Línea de las respuestas que encolan: qué versión se va a desplegar y por qué.
+     *
+     * @param EcommerceVersion|null $version   Versión de la corrida.
+     * @param bool                  $explicita Si la pidió el llamador (o es la última publicada).
+     *
+     * @return string
+     */
+    private function nota_de_version($version, $explicita)
+    {
+        if ($version === null) {
+            return EcommerceVersionService::nota_sin_version_publicada();
+        }
+
+        return 'Se despliega la versión de ecommerce ' . $version->version
+            . ($explicita ? ' (la pedida)' : ' (la última publicada; ninguna pedida)')
+            . ', bajando sus artefactos del release de GitHub: no se compila en el VPS de builds.';
     }
 
     /**
@@ -1457,11 +1568,18 @@ class ClaudeEcommerceOpsController extends Controller
      * @param Client                      $client  Cliente dueño.
      * @param ClientEcommerce             $tienda  Tienda actualizada.
      * @param ClientEcommerceInstallation $corrida Corrida creada.
+     * @param EcommerceVersion|null       $version   Versión que despliega la corrida.
+     * @param bool                        $explicita Si la versión la pidió el llamador.
      *
      * @return array<string, mixed>
      */
-    private function respuesta_de_encolado(Client $client, ClientEcommerce $tienda, ClientEcommerceInstallation $corrida)
-    {
+    private function respuesta_de_encolado(
+        Client $client,
+        ClientEcommerce $tienda,
+        ClientEcommerceInstallation $corrida,
+        EcommerceVersion $version = null,
+        $explicita = false
+    ) {
         $id = (int) $corrida->id;
 
         return [
@@ -1478,9 +1596,14 @@ class ClaudeEcommerceOpsController extends Controller
             'conexion_de_cola'         => self::CONEXION_DE_COLA,
             'latencia_maxima_segundos' => self::LATENCIA_MAXIMA_SEGUNDOS,
             'endpoints'                => $this->endpoints_de($id),
+            // Versión de ecommerce que despliega la corrida ({id, version}), o null si no hay
+            // ninguna publicada (en ese caso la corrida falla al arrancar: ver nota_version).
+            'ecommerce_version'        => $version === null ? null : $version->compact_payload(),
+            'nota_version'             => $this->nota_de_version($version, $explicita),
             'nota_precondicion'        => $this->nota_de_precondicion(),
-            'nota'                     => 'La actualización siempre trae la última de `master`: no se elige versión ni '
-                . 'tag, igual que el botón del panel. Este endpoint NO espera a que el pipeline termine.',
+            'nota'                     => 'La actualización despliega la versión de ecommerce de la corrida (la pedida con '
+                . 'ecommerce_version_id/version, o la última publicada), bajando sus artefactos del release de GitHub. '
+                . 'Este endpoint NO espera a que el pipeline termine.',
         ];
     }
 
@@ -1560,6 +1683,7 @@ class ClaudeEcommerceOpsController extends Controller
             'finished_at'         => $this->instante($row->finished_at),
             'created_at'          => $this->instante($row->created_at),
             'updated_at'          => $this->instante($row->updated_at),
+            'ecommerce_version'   => $this->version_de_la_corrida($row),
         ];
 
         $motivo = $row->failure_reason === null ? null : (string) $row->failure_reason;
@@ -1584,6 +1708,42 @@ class ClaudeEcommerceOpsController extends Controller
         }
 
         return $fila;
+    }
+
+    /**
+     * La versión de ecommerce que despliega una corrida, como `{id, version}`, o null.
+     *
+     * Sirve a las dos formas de fila de `proyectar_corrida()`: la del listado (query builder, con el
+     * código ya traído por el JOIN como `ecommerce_version_codigo`) y la de la ficha (el modelo, que
+     * la resuelve por la relación: una sola corrida, una consulta).
+     *
+     * ⚠️ `version` puede venir null con `id` cargado: la columna no tiene FK y la versión se pudo
+     * borrar por fuera del panel (el panel no deja borrar una versión en uso).
+     *
+     * @param object $row Fila (query builder o modelo).
+     *
+     * @return array<string, mixed>|null
+     */
+    private function version_de_la_corrida($row)
+    {
+        $id = isset($row->ecommerce_version_id) && $row->ecommerce_version_id !== null
+            ? (int) $row->ecommerce_version_id
+            : null;
+
+        if ($id === null) {
+            return null;
+        }
+
+        if ($row instanceof ClientEcommerceInstallation) {
+            $version = $row->ecommerce_version;
+
+            return $version === null ? ['id' => $id, 'version' => null] : $version->compact_payload();
+        }
+
+        return [
+            'id'      => $id,
+            'version' => isset($row->ecommerce_version_codigo) ? $row->ecommerce_version_codigo : null,
+        ];
     }
 
     /**

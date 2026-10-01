@@ -926,6 +926,25 @@ return [
                 ['nombre' => 'unmark', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Con true BORRA crons_supervisor_at (vuelve a null) en vez de marcarlo.'],
             ],
         ],
+        /* ⚠️ Esta entrada faltaba en master (la ruta existe desde el 5/9/2026 y el test del catálogo
+           estaba rojo por ella). Se agregó en la misión versiones-tienda (1/10/2026) para dejar el
+           catálogo en verde, verificada contra ClaudeUpgradeOpsController::mark_vps_supervisor_json(). */
+        'POST api/claude/upgrades/{id}/mark-vps-supervisor' => [
+            'para_que'     => '🔴 SÓLO REGISTRA QUE UN HUMANO YA MUDÓ EL SUPERVISOR DEL VPS: escribe (o borra) vps_supervisor_moved_at. Es el equivalente de mark-crons para clientes con la API destino en VPS, donde no hay crons de Hostinger sino un .conf de supervisor que se reapunta con vps-supervisor.ps1 -Accion mudar (drena la cola vieja antes). El gate del post-cierre exige este campo en vez de crons_supervisor_at cuando la API destino es VPS. Marcarlo NO mueve nada.',
+            'escribe'      => true,
+            'peligrosidad' => 'media',
+            'frenos'       => [
+                'confirm_client_name exacto, sin revelar el nombre correcto cuando falla.',
+                'Sólo para upgrades con la API destino en VPS: en otro hosting es 422 y manda a mark-crons.',
+                'Su único efecto es un timestamp en el upgrade: no arranca ni detiene ningún pipeline.',
+                '⚠️ No verifica NADA sobre el supervisor real del VPS: es una afirmación humana. Marcarlo sin haber corrido la mudanza deja el worker en el frente equivocado y el post-cierre arranca igual.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El upgrade a marcar.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente del upgrade.'],
+                ['nombre' => 'unmark', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Con true BORRA vps_supervisor_moved_at (vuelve a null) en vez de marcarlo.'],
+            ],
+        ],
         'POST api/claude/upgrades/{id}/deploy/start-post-closure' => [
             'para_que'     => 'Arranca las tareas POST-CIERRE (seeders y comandos) sobre el sistema EN USO del cliente. Sólo con la jornada terminada.',
             'escribe'      => true,
@@ -1002,7 +1021,7 @@ return [
         /* ---------------------------------------------------------- Tiendas (ecommerce) */
 
         'GET api/claude/ecommerce/stores' => [
-            'para_que'     => 'Tiendas configuradas de los clientes, con su última corrida y si se pueden actualizar ahora mismo (y el motivo cuando no). Es lo que hay que mirar antes de disparar una actualización.',
+            'para_que'     => 'Tiendas configuradas de los clientes, con su última corrida, la versión de ecommerce que tienen instalada (ecommerce_version: {id, version} o null si se instalaron por la vía vieja) y si se pueden actualizar ahora mismo (y el motivo cuando no). Es lo que hay que mirar antes de disparar una actualización.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -1030,13 +1049,13 @@ return [
             ],
         ],
         'GET api/claude/ecommerce/installations' => [
-            'para_que'     => 'Corridas del pipeline de tienda (install o update), paginadas por cursor y filtrables por cliente, modo, estado y origen.',
+            'para_que'     => 'Corridas del pipeline de tienda (install o update), paginadas por cursor y filtrables por cliente, modo, estado y origen. Cada una trae ecommerce_version ({id, version} o null): la versión que despliega.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
         'GET api/claude/ecommerce/installations/{id}' => [
-            'para_que'     => 'Ficha de una corrida con la salud calculada (no persistida): minutos en curso, jobs en cola y si está colgada. Acepta id o uuid.',
+            'para_que'     => 'Ficha de una corrida con la salud calculada (no persistida): minutos en curso, jobs en cola y si está colgada, y la versión de ecommerce que despliega (ecommerce_version). Acepta id o uuid.',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
@@ -1048,7 +1067,7 @@ return [
             'frenos'       => [],
         ],
         'POST api/claude/ecommerce/updates' => [
-            'para_que'     => 'Dispara la actualización de la tienda de UN cliente: clona y compila tienda-spa en el VPS de builds y sube SPA y API por SFTP. Siempre a lo último de master: no hay selección de versión.',
+            'para_que'     => 'Dispara la actualización de la tienda de UN cliente a una VERSIÓN de ecommerce (la pedida, o la última publicada): baja tienda-spa-v{V}-dist.zip y tienda-api-v{V}.zip del release de GitHub, genera íconos y og:image en una carpeta propia de la corrida en el VPS de builds, personaliza el dist (tokens + config.js) y sube SPA y API por SFTP. No compila en el VPS. La respuesta trae ecommerce_version.',
             'escribe'      => true,
             'peligrosidad' => 'alta',
             'frenos'       => [
@@ -1056,16 +1075,20 @@ return [
                 'La tienda tiene que estar configurada: spa_url, api_url y dominio resoluble.',
                 'Tienen que estar cargadas las credenciales SSH del VPS de builds y las del hosting compartido.',
                 'No puede haber otra corrida en curso para esa tienda.',
+                'Si se pide una versión (ecommerce_version_id o version), tiene que existir y estar published, y si vienen los dos tienen que ser la misma: si no, 422 y no se encola nada.',
+                '🔴 Sin versión publicada (y con DEPLOY_PERMITIR_BUILD_EN_VPS apagada, el default) la corrida se crea igual pero FALLA al arrancar, sin tocar ningún servidor, con un mensaje que dice cómo publicar. Si al release le falta un asset, también falla al arrancar, nombrando repo, tag y asset. La respuesta lo avisa en nota_version.',
                 'Encola con onConnection("database"): nunca corre el pipeline SSH adentro del request. El panel lo despacha pelado y con QUEUE_CONNECTION=sync eso correría el pipeline entero adentro del request HTTP.',
                 '🔴 Nunca crea una instalación inicial: siempre mode="update". Es una decisión de Lucas y tiene su test.',
             ],
             'parametros'   => [
                 ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente cuya tienda se actualiza. GET claude/ecommerce/stores dice cuáles se pueden actualizar ahora y por qué no las otras.'],
                 ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente. ⚠️ Acá NO hay dry_run: el freno del endpoint individual es el nombre, igual que en send-template de a uno.'],
+                ['nombre' => 'ecommerce_version_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'La versión de ecommerce a desplegar (GET claude/ecommerce/versions). Tiene que estar published. Sin ella ni version, la última publicada.'],
+                ['nombre' => 'version', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30', 'que_es' => 'Alternativa a ecommerce_version_id: el código ("1.0.0"). Si vienen los dos y no son la misma, 422.'],
             ],
         ],
         'POST api/claude/ecommerce/updates/batch' => [
-            'para_que'     => 'Dispara la actualización de hasta cinco tiendas nombradas una por una.',
+            'para_que'     => 'Dispara la actualización de hasta cinco tiendas nombradas una por una, todas a la MISMA versión de ecommerce (la pedida, o la última publicada). La simulación y la respuesta traen ecommerce_version.',
             'escribe'      => true,
             'peligrosidad' => 'alta',
             'frenos'       => [
@@ -1073,9 +1096,10 @@ return [
                 'dry_run por defecto: si no se pide lo contrario, simula y no crea ninguna corrida.',
                 'confirm_client_count tiene que coincidir exactamente con la cantidad simulada.',
                 'confirm_token con hash_equals sobre el id y el nombre normalizado de cada cliente.',
-                '🔴 Tope MAX_LOTE_ECOMMERCE = 5, y el número es derivado y no elegido a ojo: queue:work corre cada minuto SIN withoutOverlapping(), varias corridas compiten por el lock del clone de tienda-spa, que espera hasta 1800 s y después tira RuntimeException. Con ~6 min de lock por corrida, la sexta supera los 30 minutos y muere sola.',
+                '🔴 Tope MAX_LOTE_ECOMMERCE = 5, y el número es derivado y no elegido a ojo: queue:work corre cada minuto SIN withoutOverlapping(), varias corridas compiten por el lock del clone de tienda-spa, que espera hasta 1800 s y después tira RuntimeException. Con ~6 min de lock por corrida, la sexta supera los 30 minutos y muere sola. ⚠️ Desde la misión versiones-tienda (1/10/2026) la vía de artefacto NO toma ese lock (no compila); el tope se mantiene igual porque la vía vieja sigue existiendo detrás de DEPLOY_PERMITIR_BUILD_EN_VPS.',
                 'Cooldown de 6 horas por tienda para las corridas creadas por Claude.',
                 'Todas las precondiciones del de a uno se evalúan por cliente y lo que no pasa queda como omitido, con el motivo.',
+                'La versión (ecommerce_version_id o version) es UNA para todo el lote y se valida antes de mirar las tiendas: si no existe, no está published o los dos parámetros no coinciden, 422 y cero corridas. Si se pidió explícita, entra en el confirm_token: una simulación con una versión no confirma un lote con otra.',
                 /* ⚠️ Acá decía "si el presupuesto corta a la mitad", copiado del lote de upgrades:
                    este endpoint NO tiene presupuesto de tiempo (son cinco tiendas y sólo inserts).
                    Y el orden garantiza una sola de las dos mitades, no las dos: ver el comentario de
@@ -1087,7 +1111,54 @@ return [
                 ['nombre' => 'client_ids[]', 'obligatorio' => true, 'validacion' => 'required|array|min:1, cada ítem required|integer|min:1', 'que_es' => '🔴 Los clientes, nombrados uno por uno. NO acepta filtros: acá un filtro mal escrito serían pipelines SSH sobre negocios que nadie eligió. Tope de 5.'],
                 ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito NO crea ninguna corrida: devuelve qué tiendas se actualizarían, cuáles quedan omitidas y con qué motivo, y el confirm_token.'],
                 ['nombre' => 'confirm_client_count', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:0 — obligatorio cuando dry_run=false', 'que_es' => 'Cantidad exacta de tiendas que se actualizarían. Tiene que coincidir con la simulación.'],
-                ['nombre' => 'confirm_token', 'obligatorio' => false, 'validacion' => 'nullable|string|max:64 — obligatorio cuando dry_run=false', 'que_es' => 'El token de la simulación, comparado con hash_equals sobre el id y el nombre normalizado de cada cliente.'],
+                ['nombre' => 'confirm_token', 'obligatorio' => false, 'validacion' => 'nullable|string|max:64 — obligatorio cuando dry_run=false', 'que_es' => 'El token de la simulación, comparado con hash_equals sobre el id y el nombre normalizado de cada cliente (y la versión, si se pidió una).'],
+                ['nombre' => 'ecommerce_version_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'La versión de ecommerce de TODO el lote. Tiene que estar published. Sin ella ni version, la última publicada. No es un filtro: elige qué se despliega, no a quién.'],
+                ['nombre' => 'version', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30', 'que_es' => 'Alternativa a ecommerce_version_id: el código ("1.0.0"). Si vienen los dos y no son la misma, 422.'],
+            ],
+        ],
+
+        /* ---------------------------------------------------------- Versiones de ecommerce */
+
+        'GET api/claude/ecommerce/versions' => [
+            'para_que'     => 'Versiones de ecommerce (tienda-spa + tienda-api), de la más nueva a la más vieja por orden semántico del código. status=published por defecto (las únicas que se despliegan), o draft / archived / all. Trae ultima_publicada: la que usa una actualización que no pide versión.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
+        'POST api/claude/ecommerce/versions' => [
+            'para_que'     => 'Da de alta una versión de ecommerce: el puntero a tienda-spa-v{V}-dist.zip y tienda-api-v{V}.zip del release del tag v{V} de cada repo. Es el paso que sigue al commit vacío [release:X.Y.Z] en master de los dos repos de tienda, cuando los dos workflows de GitHub Actions terminaron verdes.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'version con el formato de VersionNumberComparator (al menos tres números: 1.0.0) y única en ecommerce_versions.',
+                '🔴 Si queda published (el default) y verify_artifacts no es false, verifica en GitHub que estén los DOS assets del release: si falta uno, 422 nombrando repo, tag y asset; si GitHub falla de otra manera (token, red), 502. En los dos casos NO se escribe nada.',
+                'Un borrador (status=draft) no se verifica: se verifica al pasarlo a published con el PATCH.',
+                'Es una fila del admin: no toca ningún servidor. Desplegarla es POST claude/ecommerce/updates.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'version', 'obligatorio' => true, 'validacion' => 'required|string|max:30|regex:VersionNumberComparator::VALID_REGEX|unique:ecommerce_versions,version', 'que_es' => 'El código, IGUAL al del commit [release:X.Y.Z] de los dos repos de tienda: arma el tag (v{V}) y el nombre de los assets.'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'nullable|string|max:200', 'que_es' => 'Título corto.'],
+                ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'nullable|string|max:5000', 'que_es' => 'Qué trae la versión.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|in:draft,published,archived', 'que_es' => 'Default published (con published_at = ahora).'],
+                ['nombre' => 'verify_artifacts', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Default true. Con false publica sin mirar GitHub: si falta un asset, la primera actualización falla al arrancar.'],
+            ],
+        ],
+        'PATCH api/claude/ecommerce/versions/{id}' => [
+            'para_que'     => 'Edita título, descripción y/o estado de una versión de ecommerce. Al pasarla a published estampa published_at si no tenía.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 El código (version) NO se edita: mandarlo es 422. Arma el tag y el nombre de los assets, y las tiendas y corridas apuntan a la fila. Si está mal, se archiva y se carga la correcta.',
+                'Al pasar a published una versión que no lo estaba, verifica los dos assets del release igual que el alta (salvo verify_artifacts=false): si falta uno, 422; si GitHub falla, 502; y no se cambia nada.',
+                'Sin ningún campo editable en el cuerpo, 422.',
+                'Es una fila del admin: no toca ningún servidor.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La versión a editar.'],
+                ['nombre' => 'title', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:200', 'que_es' => 'Título corto.'],
+                ['nombre' => 'description', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|string|max:5000', 'que_es' => 'Qué trae la versión.'],
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'sometimes|required|string|in:draft,published,archived', 'que_es' => 'Nuevo estado. Archivar una versión no toca las tiendas que la tienen instalada: sólo deja de desplegarse.'],
+                ['nombre' => 'verify_artifacts', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|boolean', 'que_es' => 'Default true. Sólo cuenta al pasar a published.'],
             ],
         ],
     ],

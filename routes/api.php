@@ -394,6 +394,15 @@ Route::middleware('claude.task.key')
         Route::post('ecommerce/updates/batch', 'Api\ClaudeEcommerceOpsController@update_batch_json');
         Route::post('ecommerce/updates', 'Api\ClaudeEcommerceOpsController@update_json');
 
+        /* Versiones de ecommerce (misión versiones-tienda, 1/10/2026): el puntero a los dos
+           artefactos que GitHub Actions publica en el release v{V} de tienda-spa y tienda-api.
+           Publicar VERIFICA que estén los dos assets (verify_artifacts, default true): si falta
+           uno, 422 y no se escribe nada. Son filas del admin: no tocan ningún servidor. Lo que sí
+           toca servidores es desplegarlas, con POST claude/ecommerce/updates (arriba). */
+        Route::get('ecommerce/versions', 'Api\ClaudeEcommerceVersionsController@versions_json');
+        Route::post('ecommerce/versions', 'Api\ClaudeEcommerceVersionsController@versions_store_json');
+        Route::patch('ecommerce/versions/{id}', 'Api\ClaudeEcommerceVersionsController@versions_update_json');
+
         /* Plantillas de CLIENTE (soporte). Idempotentes por `template_name`: reenviar la misma
            plantilla actualiza la fila, nunca crea una segunda, y nunca borra las que no vinieron
            en el payload. No tienen nada que ver con las de lead (`followup_templates`), que las
