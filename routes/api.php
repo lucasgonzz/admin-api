@@ -1026,6 +1026,16 @@ Route::prefix('admin')->group(function () {
         Route::get('ecommerce-installations/{installation}/logs', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'logs_json']);
         Route::delete('ecommerce-installations/{installation}', [\App\Http\Controllers\Api\EcommerceInstallationController::class, 'destroy_json']);
 
+        // Versiones de ecommerce (misión versiones-tienda, 1/10/2026): CRUD del módulo "Versiones de
+        // ecommerce". Publicar verifica los dos assets del release (EcommerceVersionService); borrar
+        // sólo si ninguna tienda ni corrida la usa. start-install/start-update (arriba) aceptan
+        // ecommerce_version_id opcional.
+        Route::get('ecommerce-versions', [\App\Http\Controllers\Api\EcommerceVersionController::class, 'index_json']);
+        Route::get('ecommerce-versions/{id}', [\App\Http\Controllers\Api\EcommerceVersionController::class, 'show_json']);
+        Route::post('ecommerce-versions', [\App\Http\Controllers\Api\EcommerceVersionController::class, 'store_json']);
+        Route::put('ecommerce-versions/{id}', [\App\Http\Controllers\Api\EcommerceVersionController::class, 'update_json']);
+        Route::delete('ecommerce-versions/{id}', [\App\Http\Controllers\Api\EcommerceVersionController::class, 'destroy_json']);
+
         // Los nueve settings de implementación en una sola respuesta. Se AGREGA: los GET de a uno
         // de acá abajo siguen existiendo iguales y admin-spa los usa como respaldo. No colisiona
         // con ninguno porque todas estas rutas son literales, sin {parametro}.

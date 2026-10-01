@@ -12,6 +12,7 @@ use App\Models\Demo;
 use App\Models\EcommerceDeploymentLog;
 use App\Models\EnvTemplate;
 use App\Services\DemoPathResolver;
+use App\Services\EcommerceVersionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -72,8 +73,11 @@ class EcommerceInstallationController extends BaseController
     {
         // Se cargan las dos relaciones de dueño: una de las dos viene null siempre (ver el hook
         // `saving` de ClientEcommerce), y así el panel puede mostrar el dueño sin preguntar cuál.
-        $client_ecommerce->load(['client', 'demo', 'installations' => function ($query) {
-            $query->orderByDesc('id');
+        //
+        // Misión versiones-tienda (1/10/2026): suma la versión instalada hoy en la tienda y la que
+        // desplegó cada corrida, para que el panel las muestre sin pedir nada más.
+        $client_ecommerce->load(['client', 'demo', 'ecommerce_version', 'installations' => function ($query) {
+            $query->orderByDesc('id')->with('ecommerce_version');
         }]);
 
         return response()->json(['model' => $client_ecommerce]);
@@ -82,12 +86,16 @@ class EcommerceInstallationController extends BaseController
     /**
      * Dispara una instalación desde cero (`mode = 'install'`) para una tienda ya creada.
      *
+     * Acepta `ecommerce_version_id` opcional (misión versiones-tienda, 1/10/2026): ver
+     * arrancar_corrida().
+     *
+     * @param  Request          $request           { ecommerce_version_id? }
      * @param  ClientEcommerce  $client_ecommerce  Resuelta por route model binding.
      * @return JsonResponse  { model: ClientEcommerceInstallation } o { error: string } (422)
      */
-    public function start_install_json(ClientEcommerce $client_ecommerce): JsonResponse
+    public function start_install_json(Request $request, ClientEcommerce $client_ecommerce): JsonResponse
     {
-        return $this->arrancar_corrida($client_ecommerce, 'install');
+        return $this->arrancar_corrida($client_ecommerce, 'install', $request->input('ecommerce_version_id'));
     }
 
     /**
@@ -100,7 +108,10 @@ class EcommerceInstallationController extends BaseController
      * cambia solo de dónde salen el nombre, el id de comercio y la api key (ver la sección
      * "DUEÑO DE LA TIENDA" de EcommerceInstallationService).
      *
-     * @param  Request  $request  { client_id } o { demo_id }
+     * Desde la misión versiones-tienda (1/10/2026) acepta `ecommerce_version_id` opcional: la
+     * versión de ecommerce a desplegar (sin ella, la última publicada). Ver arrancar_corrida().
+     *
+     * @param  Request  $request  { client_id } o { demo_id }, y { ecommerce_version_id? }
      * @return JsonResponse  { model: ClientEcommerceInstallation } o { error: string } (404/422)
      */
     public function start_update_json(Request $request): JsonResponse
@@ -110,7 +121,7 @@ class EcommerceInstallationController extends BaseController
             return $client_ecommerce;
         }
 
-        return $this->arrancar_corrida($client_ecommerce, 'update');
+        return $this->arrancar_corrida($client_ecommerce, 'update', $request->input('ecommerce_version_id'));
     }
 
     /**
@@ -124,7 +135,7 @@ class EcommerceInstallationController extends BaseController
      * fila de `client_ecommerces` se crea acá si todavía no está, copiando las URLs del catálogo
      * de demos (ver resolve_ecommerce_de_demo()).
      *
-     * @param  Request  $request  { client_id } o { demo_id }
+     * @param  Request  $request  { client_id } o { demo_id }, y { ecommerce_version_id? }
      * @return JsonResponse  { model: ClientEcommerceInstallation } o { error: string } (404/422)
      */
     public function start_install_for_client_json(Request $request): JsonResponse
@@ -134,7 +145,7 @@ class EcommerceInstallationController extends BaseController
             return $client_ecommerce;
         }
 
-        return $this->arrancar_corrida($client_ecommerce, 'install');
+        return $this->arrancar_corrida($client_ecommerce, 'install', $request->input('ecommerce_version_id'));
     }
 
     /**
@@ -265,11 +276,19 @@ class EcommerceInstallationController extends BaseController
      * una lista de guardas es exactamente la forma de que una se quede sin la guarda nueva.
      * El orden de las verificaciones y los códigos de respuesta son los que ya tenían.
      *
+     * Versión de ecommerce (misión versiones-tienda, 1/10/2026): `$ecommerce_version_id` opcional.
+     * Si viene, tiene que existir y estar publicada (si no, 422 y no se crea nada); si no viene, la
+     * corrida guarda la última publicada. Sin ninguna publicada la corrida se crea igual —el panel
+     * se comporta como antes— y falla al arrancar con un mensaje que dice cómo publicarla, sin tocar
+     * ningún servidor (salvo `DEPLOY_PERMITIR_BUILD_EN_VPS=true`). La validación va DESPUÉS de las
+     * guardas de siempre, así un pedido sin versión responde exactamente lo mismo que antes.
+     *
      * @param  ClientEcommerce  $client_ecommerce
      * @param  string  $mode  'install' | 'update'
+     * @param  mixed   $ecommerce_version_id  Versión pedida, o null.
      * @return JsonResponse
      */
-    protected function arrancar_corrida(ClientEcommerce $client_ecommerce, string $mode): JsonResponse
+    protected function arrancar_corrida(ClientEcommerce $client_ecommerce, string $mode, $ecommerce_version_id = null): JsonResponse
     {
         // Configuración mínima de la tienda (URL de SPA/API y dominio resoluble) antes de arrancar.
         $config_response = $this->assert_ecommerce_is_configured($client_ecommerce);
@@ -291,10 +310,20 @@ class EcommerceInstallationController extends BaseController
             return $conflict_response;
         }
 
+        // La versión pedida (validada publicada) o la última publicada.
+        if ($ecommerce_version_id !== null && $ecommerce_version_id !== '' && ! ctype_digit(trim((string) $ecommerce_version_id))) {
+            return response()->json(['error' => 'ecommerce_version_id tiene que ser un número.'], 422);
+        }
+        $resolucion = (new EcommerceVersionService())->resolve_for_run($ecommerce_version_id, null);
+        if ($resolucion['error'] !== null) {
+            return response()->json(['error' => $resolucion['error']], 422);
+        }
+
         $installation = ClientEcommerceInstallation::create([
-            'client_ecommerce_id' => $client_ecommerce->id,
-            'mode'                => $mode,
-            'status'              => 'pendiente',
+            'client_ecommerce_id'  => $client_ecommerce->id,
+            'mode'                 => $mode,
+            'status'               => 'pendiente',
+            'ecommerce_version_id' => $resolucion['version'] === null ? null : $resolucion['version']->id,
         ]);
 
         // Despacha el job en background (cola por defecto del sistema).
