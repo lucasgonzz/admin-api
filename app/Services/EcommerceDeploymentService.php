@@ -23,9 +23,11 @@ namespace App\Services;
  * Espeja el mismo criterio que `DeploymentService` (empresa) para sus actualizaciones: comprime
  * todo el código excepto `.env`, `public/` y `storage/`, sin re-crear la base ni el `.env`.
  *
- * No hay selección de tag/versión: siempre se usa la última de la rama `master`, tanto para
- * tienda-spa (heredado de `step_ensure_spa_cloned`) como para tienda-api (ver `step_upload_api`
- * de abajo).
+ * 🔴 Desde la misión `versiones-tienda` (1/10/2026) la actualización despliega una VERSIÓN de
+ * ecommerce (la pedida o la última publicada) bajando sus artefactos del release de GitHub, sin
+ * compilar en el VPS de builds: ver `ArtefactosDeReleaseDeTienda`, que la clase padre resuelve en
+ * `run()`. Lo de abajo —"siempre la última de `master`"— es la VÍA VIEJA, que sólo corre con
+ * `DEPLOY_PERMITIR_BUILD_EN_VPS=true` y sin versión publicada (o con artefactos faltantes).
  */
 class EcommerceDeploymentService extends EcommerceInstallationService
 {
@@ -65,6 +67,15 @@ class EcommerceDeploymentService extends EcommerceInstallationService
      */
     protected function step_upload_api()
     {
+        // Vía de artefacto (misión versiones-tienda, 1/10/2026): baja tienda-api-v{V}.zip y lo
+        // descomprime EXCLUYENDO public/*, storage/* y .env, con el mismo criterio que el zip de
+        // abajo: en una actualización esos archivos son de la tienda y no se pisan.
+        if ($this->tienda_via_artefacto) {
+            $this->tienda_artefacto_upload_api(true);
+
+            return;
+        }
+
         $this->connect_build_vps();
 
         $api_build_path = $this->builds_api_path();

@@ -6,6 +6,8 @@ use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\EnvTemplate;
+use App\Services\Concerns\ArtefactosDeRelease;
+use App\Services\Concerns\ArtefactosDeReleaseDeTienda;
 use Illuminate\Support\Facades\Http;
 use phpseclib3\Net\SFTP;
 use phpseclib3\Net\SSH2;
@@ -45,9 +47,26 @@ use phpseclib3\Net\SSH2;
  *   5. write_env         — genera el .env de tienda-api (plantilla scope=tienda + DB/APP_KEY de
  *                          la empresa del mismo cliente).
  *   6. finalize          — bootstrap/cache, package:discover, symlink storage, limpieza de caches.
+ *
+ * 🔴 DESDE LA MISIÓN `versiones-tienda` (1/10/2026) HAY DOS VÍAS, y la de arriba es la VIEJA.
+ * Al arrancar, `run()` resuelve la versión de ecommerce de la corrida (la pedida, o la última
+ * publicada) y, si sus dos artefactos están en el release de GitHub, va por la VÍA DE ARTEFACTO:
+ * no clona, no compila, no toma el lock global del build; baja `tienda-spa-v{V}-dist.zip` y
+ * `tienda-api-v{V}.zip`, genera íconos y og:image con los mismos scripts node en una carpeta propia
+ * de la corrida y personaliza el zip localmente (`EcommerceDistCustomizer`). La lógica nueva vive en
+ * `ArtefactosDeReleaseDeTienda`; en las etapas de acá queda solamente el desvío. La vía vieja (la
+ * lista de arriba) sigue intacta y sólo corre si no hay versión publicada (o le faltan artefactos)
+ * Y `DEPLOY_PERMITIR_BUILD_EN_VPS=true`; si no, la corrida falla con un mensaje que dice qué falta.
  */
 class EcommerceInstallationService
 {
+    /*
+     * ArtefactosDeRelease: el trait de empresa (bajar un asset y verificarlo, el mensaje del freno,
+     * la bandera del VPS). Se reusa tal cual; lo de tienda va en el segundo trait.
+     */
+    use ArtefactosDeRelease;
+    use ArtefactosDeReleaseDeTienda;
+
     /**
      * Corrida de instalación del ecommerce en curso.
      *
@@ -438,22 +457,42 @@ class EcommerceInstallationService
             ]);
             $this->ecommerce->update(['status' => 'installing']);
 
-            // Lock exclusivo sobre el directorio de build compartido (grupo 208): cubre desde
-            // ensure_spa_cloned hasta el final de upload_spa (las dos etapas que tocan el clone
-            // compartido de tienda-spa), así que alcanza con tomarlo acá y soltarlo en el finally
-            // de abajo, que corre tanto si execute_steps() termina bien como si explota.
-            $this->acquire_build_lock();
-            try {
+            // Qué se despliega y por dónde (misión versiones-tienda, 1/10/2026): la versión de la
+            // corrida (la pedida o la última publicada) y sus dos artefactos del release. Va ANTES
+            // de cualquier conexión: si no hay versión publicada y el build en el VPS no está
+            // permitido, la corrida falla acá sin tocar el VPS de builds. Ver
+            // ArtefactosDeReleaseDeTienda::tienda_resolver_version_de_la_corrida().
+            $this->tienda_resolver_version_de_la_corrida();
+
+            if ($this->tienda_via_artefacto) {
+                // Vía de artefacto: no se clona ni se compila nada en el VPS de builds, así que no
+                // hay clone compartido que proteger y NO se toma el lock global del build. El VPS
+                // sólo genera los íconos y la og:image, en una carpeta propia de esta corrida.
                 $this->execute_steps();
-            } finally {
-                $this->release_build_lock();
+            } else {
+                // Lock exclusivo sobre el directorio de build compartido (grupo 208): cubre desde
+                // ensure_spa_cloned hasta el final de upload_spa (las dos etapas que tocan el clone
+                // compartido de tienda-spa), así que alcanza con tomarlo acá y soltarlo en el finally
+                // de abajo, que corre tanto si execute_steps() termina bien como si explota.
+                $this->acquire_build_lock();
+                try {
+                    $this->execute_steps();
+                } finally {
+                    $this->release_build_lock();
+                }
             }
 
             $this->installation->update([
                 'status'      => 'completada',
                 'finished_at' => now(),
             ]);
-            $this->ecommerce->update(['status' => 'active']);
+            // La versión instalada queda registrada en la tienda: la de la corrida si fue por
+            // artefacto, o null si fue por la vía vieja (compiló la última de master, que no es
+            // ninguna versión registrada).
+            $this->ecommerce->update([
+                'status'               => 'active',
+                'ecommerce_version_id' => $this->tienda_version_instalada_id(),
+            ]);
         } catch (\Throwable $e) {
             $this->log('installation', $e->getMessage(), 'error');
             $this->installation->update([
@@ -513,6 +552,17 @@ class EcommerceInstallationService
      */
     protected function step_ensure_spa_cloned()
     {
+        // Vía de artefacto: el dist viene compilado en el release, no hay nada que clonar.
+        if ($this->tienda_via_artefacto) {
+            $this->log(
+                'ensure_spa_cloned',
+                'Vía de artefacto: no se clona tienda-spa en el VPS de builds (el dist viene del release '
+                . EcommerceReleaseArtifacts::tag((string) $this->tienda_version->version) . ')'
+            );
+
+            return;
+        }
+
         $this->connect_build_vps();
 
         $this->ensure_repo_cloned(
@@ -738,6 +788,13 @@ class EcommerceInstallationService
      */
     protected function step_compile_spa()
     {
+        // Vía de artefacto: baja el dist del release y lo personaliza (ArtefactosDeReleaseDeTienda).
+        if ($this->tienda_via_artefacto) {
+            $this->tienda_artefacto_compile_spa();
+
+            return;
+        }
+
         $this->connect_build_vps();
 
         $spa_build_path = $this->builds_spa_path();
@@ -786,27 +843,8 @@ class EcommerceInstallationService
             . "Nombre: {$site_name} | Descripcion: {$description_log_label}"
         );
 
-        // Aviso (no bloqueante): si Google Maps y/o Firebase quedaron sin key configurada en el
-        // admin, el build igual sigue (una tienda sin mapa o sin push se despliega igual y frenar
-        // el deploy por esto sería peor que el síntoma), pero queda logueado para que no se pierda
-        // en silencio como pasó el 26/7/2026 (grupo 267/02).
-        $missing_tienda_env_keys = [];
-        if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_GOOGLE_MAPS_API_KEY', '')) === '') {
-            $missing_tienda_env_keys[] = 'VUE_APP_GOOGLE_MAPS_API_KEY (admin .env: DEPLOY_TIENDA_GOOGLE_MAPS_API_KEY)';
-        }
-        if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_FIREBASE_API_KEY', '')) === '') {
-            $missing_tienda_env_keys[] = 'VUE_APP_FIREBASE_API_KEY (admin .env: DEPLOY_TIENDA_FIREBASE_API_KEY)';
-        }
-        if (trim((string) config('services.deploy.spa_pusher_key', '')) === '') {
-            $missing_tienda_env_keys[] = 'VUE_APP_PUSHER_KEY (admin .env: DEPLOY_SPA_PUSHER_KEY)';
-        }
-        if (count($missing_tienda_env_keys) > 0) {
-            $this->log(
-                'compile_spa',
-                'El .env del SPA quedó con estas variables vacías: ' . implode(', ', $missing_tienda_env_keys),
-                'warning'
-            );
-        }
+        // Aviso (no bloqueante) de keys vacías en la config del admin: ver log_missing_tienda_env_keys().
+        $this->log_missing_tienda_env_keys('El .env del SPA');
 
         // c) Patchea vue.config.js: themeColor + name dentro del bloque pwa. Idempotente: solo
         // reemplaza el valor de las líneas ya existentes (no agrega ni duplica líneas).
@@ -861,6 +899,40 @@ class EcommerceInstallationService
         $this->log('compile_spa', 'Reconectado al VPS tras el build');
 
         $this->assert_spa_dist_directory_on_vps($spa_build_path, $this->spa_output_dir_name());
+    }
+
+    /**
+     * Aviso (no bloqueante): si Google Maps, Firebase y/o Pusher quedaron sin key configurada en el
+     * admin, la corrida igual sigue (una tienda sin mapa o sin push se despliega igual y frenar el
+     * deploy por esto sería peor que el síntoma), pero queda logueado para que no se pierda en
+     * silencio como pasó el 26/7/2026 (grupo 267/02).
+     *
+     * Lo usan las dos vías: la vieja (que escribe esas keys en el `.env` del build) y la de
+     * artefacto (que las escribe en `config.js`). Es el mismo bloque que vivía adentro de
+     * `step_compile_spa()`, movido para no copiarlo (misión `versiones-tienda`, 1/10/2026).
+     *
+     * @param  string  $destino  Cómo nombrar dónde quedaron vacías ("El .env del SPA", "config.js").
+     * @return void
+     */
+    protected function log_missing_tienda_env_keys(string $destino): void
+    {
+        $missing_tienda_env_keys = [];
+        if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_GOOGLE_MAPS_API_KEY', '')) === '') {
+            $missing_tienda_env_keys[] = 'VUE_APP_GOOGLE_MAPS_API_KEY (admin .env: DEPLOY_TIENDA_GOOGLE_MAPS_API_KEY)';
+        }
+        if (trim((string) config('services.deploy.tienda_build_env.VUE_APP_FIREBASE_API_KEY', '')) === '') {
+            $missing_tienda_env_keys[] = 'VUE_APP_FIREBASE_API_KEY (admin .env: DEPLOY_TIENDA_FIREBASE_API_KEY)';
+        }
+        if (trim((string) config('services.deploy.spa_pusher_key', '')) === '') {
+            $missing_tienda_env_keys[] = 'VUE_APP_PUSHER_KEY (admin .env: DEPLOY_SPA_PUSHER_KEY)';
+        }
+        if (count($missing_tienda_env_keys) > 0) {
+            $this->log(
+                'compile_spa',
+                $destino . ' quedó con estas variables vacías: ' . implode(', ', $missing_tienda_env_keys),
+                'warning'
+            );
+        }
     }
 
     /**
@@ -925,13 +997,23 @@ class EcommerceInstallationService
      * @param  string       $primary_color   Color primario del comercio, usado como fondo del placeholder.
      * @param  string       $display_name    Nombre del comercio, usado para la inicial del placeholder
      *                                        y de safari-pinned-tab.svg (en los dos modos).
+     * @param  string|null  $icons_output_dir  Carpeta de salida de los íconos en el VPS. Null (la
+     *                                        vía vieja) = `<spa_build_path>/public/img/icons`. El
+     *                                        script escribe `favicon.ico` DOS niveles arriba de esta
+     *                                        carpeta (`<salida>/../../favicon.ico`).
+     * @param  bool         $install_sharp   True (la vía vieja) = `npm install sharp` en
+     *                                        `$spa_build_path`. La vía de artefacto lo pasa en false:
+     *                                        sharp ya está instalado UNA vez en la carpeta de
+     *                                        branding y node lo resuelve subiendo directorios.
      * @return void
      */
     protected function step_generate_pwa_icons(
         string $spa_build_path,
         ?string $logo_url,
         string $primary_color,
-        string $display_name
+        string $display_name,
+        ?string $icons_output_dir = null,
+        bool $install_sharp = true
     ) {
         // Ruta remota donde quedaría el logo descargado (solo se usa/llena en el modo con logo).
         $remote_logo_path = $spa_build_path . '/.deploy_logo_tmp';
@@ -972,17 +1054,20 @@ class EcommerceInstallationService
 
         // Instala "sharp" en el clone del VPS sin persistirlo en package.json (--no-save): es una
         // dependencia solo de generación de íconos, no del bundle final de la SPA. Necesaria en los
-        // dos modos (el placeholder también se compone/rasteriza con sharp).
-        $this->log('compile_spa', 'Instalando sharp para generar íconos...');
-        $this->exec_build_ssh(
-            'compile_spa',
-            $this->build_vps_command(
-                $spa_build_path,
-                'npm install sharp --no-save --no-audit --no-fund 2>&1'
-            ),
-            true,
-            true
-        );
+        // dos modos (el placeholder también se compone/rasteriza con sharp). La vía de artefacto
+        // la saltea: ya la instaló una vez en su carpeta de branding (tienda_asegurar_sharp()).
+        if ($install_sharp) {
+            $this->log('compile_spa', 'Instalando sharp para generar íconos...');
+            $this->exec_build_ssh(
+                'compile_spa',
+                $this->build_vps_command(
+                    $spa_build_path,
+                    'npm install sharp --no-save --no-audit --no-fund 2>&1'
+                ),
+                true,
+                true
+            );
+        }
 
         // Copia el script generador al VPS (contenido versionado en admin-api/deploy/tienda/).
         $script_local_path = base_path('deploy/tienda/generate_pwa_icons.js');
@@ -997,8 +1082,11 @@ class EcommerceInstallationService
             "printf '%s' '{$script_escaped}' > " . escapeshellarg($remote_script)
         );
 
-        // Arma la invocación del script según el modo resuelto arriba.
-        $icons_output_dir = $spa_build_path . '/public/img/icons';
+        // Arma la invocación del script según el modo resuelto arriba. La salida por defecto es la
+        // de siempre (public/img/icons del clone); la vía de artefacto pasa la de su corrida.
+        if ($icons_output_dir === null) {
+            $icons_output_dir = $spa_build_path . '/public/img/icons';
+        }
         if ($use_placeholder) {
             $node_command = 'node ' . escapeshellarg($remote_script) . ' --placeholder '
                 . escapeshellarg($primary_color) . ' '
@@ -1067,6 +1155,10 @@ class EcommerceInstallationService
      * @param  string|null  $logo_url        Null si el comercio no tiene logo cargado en ningún lado.
      * @param  string       $primary_color   Color primario del comercio, usado como fondo de la imagen.
      * @param  string       $display_name    Nombre del comercio, usado para la inicial del placeholder.
+     * @param  string|null  $output_path     Ruta de salida de la imagen en el VPS. Null (la vía
+     *                                        vieja) = `<spa_build_path>/public/img/og-image.png`.
+     * @param  bool         $install_sharp   Ver `step_generate_pwa_icons()`: false en la vía de
+     *                                        artefacto, que ya tiene sharp en su carpeta de branding.
      * @return void
      * @throws \RuntimeException  Si el script node no termina OK. Preferible una corrida fallida y
      *                             visible a una tienda publicada con la og:image de otro cliente.
@@ -1075,7 +1167,9 @@ class EcommerceInstallationService
         string $spa_build_path,
         ?string $logo_url,
         string $primary_color,
-        string $display_name
+        string $display_name,
+        ?string $output_path = null,
+        bool $install_sharp = true
     ) {
         // Ruta remota donde quedaría el logo descargado (solo se usa/llena en el modo con logo).
         // Nombre de temporal DISTINTO al de step_generate_pwa_icons() (".deploy_logo_tmp"): ese
@@ -1119,17 +1213,19 @@ class EcommerceInstallationService
 
         // Instala "sharp" en el clone del VPS sin persistirlo en package.json (--no-save): ya
         // quedó instalado por step_generate_pwa_icons(), pero reinstalarlo acá es idempotente y
-        // barato (ver nota de la clase arriba).
-        $this->log('compile_spa', 'Instalando sharp para generar la og:image...');
-        $this->exec_build_ssh(
-            'compile_spa',
-            $this->build_vps_command(
-                $spa_build_path,
-                'npm install sharp --no-save --no-audit --no-fund 2>&1'
-            ),
-            true,
-            true
-        );
+        // barato (ver nota de la clase arriba). La vía de artefacto lo saltea (ver el parámetro).
+        if ($install_sharp) {
+            $this->log('compile_spa', 'Instalando sharp para generar la og:image...');
+            $this->exec_build_ssh(
+                'compile_spa',
+                $this->build_vps_command(
+                    $spa_build_path,
+                    'npm install sharp --no-save --no-audit --no-fund 2>&1'
+                ),
+                true,
+                true
+            );
+        }
 
         // Copia el script generador al VPS (contenido versionado en admin-api/deploy/tienda/).
         $script_local_path = base_path('deploy/tienda/generate_og_image.js');
@@ -1145,7 +1241,10 @@ class EcommerceInstallationService
         );
 
         // Ruta de salida final: public/img/og-image.png (Vue CLI la copia a dist/ durante el build).
-        $output_path = $spa_build_path . '/public/img/og-image.png';
+        // La vía de artefacto pasa la de su corrida, que después se mete en el zip del release.
+        if ($output_path === null) {
+            $output_path = $spa_build_path . '/public/img/og-image.png';
+        }
 
         // Arma la invocación del script según el modo resuelto arriba.
         if ($use_placeholder) {
@@ -1199,6 +1298,13 @@ class EcommerceInstallationService
      */
     protected function step_upload_spa()
     {
+        // Vía de artefacto: sube el zip que dejó personalizado compile_spa y verifica config.js.
+        if ($this->tienda_via_artefacto) {
+            $this->tienda_artefacto_upload_spa();
+
+            return;
+        }
+
         $this->connect_build_vps();
 
         $spa_build_path = $this->builds_spa_path();
@@ -1225,6 +1331,26 @@ class EcommerceInstallationService
         $this->sftp_download_file($sftp_build, $spa_zip_remote, $local_zip, $spa_zip_bytes, 'upload_spa');
         $this->log('upload_spa', 'ZIP descargado al servidor de admin');
 
+        $this->deploy_spa_zip_to_hosting($local_zip);
+
+        $this->reconnect_build_vps();
+        $this->exec_build_ssh('upload_spa', 'rm -f ' . escapeshellarg($spa_zip_remote));
+    }
+
+    /**
+     * Segunda mitad de la etapa `upload_spa`, común a las dos vías: sube un zip LOCAL del dist al
+     * hosting y lo despliega con el swap atómico de `build_spa_atomic_deploy_shell()`.
+     *
+     * Es el cuerpo que vivía adentro de `step_upload_spa()`, movido tal cual (misión
+     * `versiones-tienda`, 1/10/2026): la vía vieja le pasa el zip que bajó del VPS de builds y la
+     * de artefacto el zip del release ya personalizado para la tienda. Mismo destino temporal, mismo
+     * swap, misma preservación de `api/` y `.well-known/`.
+     *
+     * @param  string  $local_zip  Zip local del dist (con `index.html` en la raíz).
+     * @return void
+     */
+    protected function deploy_spa_zip_to_hosting(string $local_zip): void
+    {
         // Sube el ZIP a una ruta TEMPORAL en el hosting (nunca directo al docroot en vivo).
         // Se usa resolve_spa_path() (no la columna cruda spa_path, que puede estar vacía) para que
         // el dirname() no dé basura: dirname('') devolvería '.' y armaría una ruta inválida.
@@ -1260,9 +1386,6 @@ class EcommerceInstallationService
         if (is_file($local_zip)) {
             unlink($local_zip);
         }
-
-        $this->reconnect_build_vps();
-        $this->exec_build_ssh('upload_spa', 'rm -f ' . escapeshellarg($spa_zip_remote));
     }
 
     /**
@@ -1272,6 +1395,14 @@ class EcommerceInstallationService
      */
     protected function step_upload_api()
     {
+        // Vía de artefacto: baja tienda-api-v{V}.zip (con vendor/) y lo descomprime ENTERO, porque
+        // en una instalación desde cero public/ y storage/ todavía no existen en el hosting.
+        if ($this->tienda_via_artefacto) {
+            $this->tienda_artefacto_upload_api(false);
+
+            return;
+        }
+
         $this->connect_build_vps();
 
         $api_build_path = $this->builds_api_path();
@@ -2791,6 +2922,12 @@ class EcommerceInstallationService
      * (grupo 270/04): VUE_APP_SITE_NAME, VUE_APP_SITE_DESCRIPTION, VUE_APP_SITE_IMAGE y
      * VUE_APP_SITE_URL.
      *
+     * 🔴 Desde la misión `versiones-tienda` (1/10/2026) las variables NO se arman acá: salen de
+     * `build_spa_env_vars()`, que es la MISMA fuente que usa el `config.js` de la vía de artefacto
+     * (`build_spa_runtime_config_vars()`). Este método sólo las renderiza como `.env`. Si fueran dos
+     * cálculos, la tienda compilada en el VPS y la desplegada desde el release podrían terminar
+     * apuntando a APIs distintas sin que nada lo denuncie.
+     *
      * @param  string  $api_url
      * @param  string  $spa_url
      * @param  string  $site_name          Nombre del comercio (mismo valor que pwa_display_name()).
@@ -2804,6 +2941,47 @@ class EcommerceInstallationService
         string $site_name,
         string $meta_description
     ): string {
+        $env_vars = $this->build_spa_env_vars($api_url, $spa_url, $site_name, $meta_description);
+
+        $lines = [];
+        foreach ($env_vars as $env_key => $env_value) {
+            if (preg_match('/\s/', $env_value) !== 0) {
+                // Escapa primero la barra invertida y recién después las comillas dobles (en ese
+                // orden): si se escapara "\"" primero, el "\" que agrega ese escape se duplicaría
+                // al pasar por el escape de "\\" (grupo 270/04 — la descripción puede traer ambos
+                // caracteres, a diferencia de las variables que ya existían).
+                $escaped_value = str_replace('\\', '\\\\', $env_value);
+                $escaped_value = str_replace('"', '\\"', $escaped_value);
+                $lines[] = $env_key . '="' . $escaped_value . '"';
+            } else {
+                $lines[] = $env_key . '=' . $env_value;
+            }
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Variables `VUE_APP_*` de una tienda, como array: la fuente ÚNICA del `.env` del build en el
+     * VPS (`build_spa_env_file_content()`) y del `config.js` de la vía de artefacto
+     * (`build_spa_runtime_config_vars()`). Misión `versiones-tienda`, 1/10/2026.
+     *
+     * Es el cuerpo que antes vivía adentro de `build_spa_env_file_content()`, movido tal cual: las
+     * mismas claves, en el mismo orden y con los mismos valores (ver el docblock de ese método para
+     * el porqué de cada una).
+     *
+     * @param  string  $api_url
+     * @param  string  $spa_url
+     * @param  string  $site_name          Nombre del comercio (mismo valor que pwa_display_name()).
+     * @param  string  $meta_description   Descripción del branding; puede venir vacía.
+     * @return array<string, string>  Clave => valor, todos string.
+     */
+    protected function build_spa_env_vars(
+        string $api_url,
+        string $spa_url,
+        string $site_name,
+        string $meta_description
+    ): array {
         // URL de la tienda sin barra final, reusada tanto para VUE_APP_SITE_URL como para armar
         // la URL absoluta de VUE_APP_SITE_IMAGE (og:image necesita ser absoluta: los crawlers de
         // WhatsApp/Facebook no resuelven rutas relativas).
@@ -2841,22 +3019,32 @@ class EcommerceInstallationService
         $env_vars['VUE_APP_SITE_IMAGE']       = $spa_url_without_trailing_slash . '/img/og-image.png';
         $env_vars['VUE_APP_SITE_URL']         = $spa_url_without_trailing_slash;
 
-        $lines = [];
-        foreach ($env_vars as $env_key => $env_value) {
-            if (preg_match('/\s/', $env_value) !== 0) {
-                // Escapa primero la barra invertida y recién después las comillas dobles (en ese
-                // orden): si se escapara "\"" primero, el "\" que agrega ese escape se duplicaría
-                // al pasar por el escape de "\\" (grupo 270/04 — la descripción puede traer ambos
-                // caracteres, a diferencia de las variables que ya existían).
-                $escaped_value = str_replace('\\', '\\\\', $env_value);
-                $escaped_value = str_replace('"', '\\"', $escaped_value);
-                $lines[] = $env_key . '="' . $escaped_value . '"';
-            } else {
-                $lines[] = $env_key . '=' . $env_value;
+        return $env_vars;
+    }
+
+    /**
+     * Variables del `config.js` de la vía de artefacto (contrato de la misión `versiones-tienda`,
+     * sección 1.3): las MISMAS de `build_spa_env_vars()`, con los mismos valores, menos
+     * `VUE_APP_ICONS_VERSION`, que sólo la usa `vue.config.js` al compilar (cache-busting de los
+     * `<link>` de íconos que el plugin de PWA inyecta en el `<head>`) y en runtime no la lee nadie.
+     *
+     * 🔴 Todo string, sin booleanos: `SpaRuntimeConfig::render()` castea igual, pero el contrato con
+     * `tienda-spa/src/runtime_config.js` es que los valores son los de un `.env`.
+     *
+     * @param  array<string, string>  $env_vars  Salida de `build_spa_env_vars()`.
+     * @return array<string, string>
+     */
+    protected function build_spa_runtime_config_vars(array $env_vars): array
+    {
+        $config_vars = [];
+        foreach ($env_vars as $clave => $valor) {
+            if ($clave === 'VUE_APP_ICONS_VERSION') {
+                continue;
             }
+            $config_vars[(string) $clave] = (string) $valor;
         }
 
-        return implode("\n", $lines);
+        return $config_vars;
     }
 
     /**
@@ -3337,5 +3525,19 @@ class EcommerceInstallationService
     protected function log(string $step, string $line, string $level = 'info')
     {
         return $this->installation->add_log($step, $line, $level);
+    }
+
+    /**
+     * Log de los traits de artefactos (`ArtefactosDeRelease` lo declara abstracto): en este pipeline
+     * es el `log()` de siempre, con el mismo nivel.
+     *
+     * @param  string  $step   Etapa.
+     * @param  string  $linea  Texto.
+     * @param  string  $nivel  info | success | warning | error.
+     * @return void
+     */
+    protected function artefacto_log(string $step, string $linea, string $nivel = 'info'): void
+    {
+        $this->log($step, $linea, $nivel);
     }
 }

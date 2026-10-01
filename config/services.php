@@ -340,6 +340,15 @@ return [
         // 🔴 Este token no se loguea nunca, ni entero ni parcial, y no viaja jamas por query string:
         // Guzzle copia la URI completa dentro del mensaje de sus excepciones de transporte.
         'meta_scrape_token' => env('META_SCRAPE_TOKEN', ''),
+        // Versiones de ecommerce (misión versiones-tienda, 1/10/2026): repos de GitHub (sin owner;
+        // el owner es services.github.releases_owner) de donde se bajan los artefactos del release
+        // del tag v{V}: tienda-spa-v{V}-dist.zip y tienda-api-v{V}.zip. Ver EcommerceReleaseArtifacts.
+        'release_repo_spa' => env('DEPLOY_TIENDA_RELEASE_REPO_SPA', 'tienda-spa'),
+        'release_repo_api' => env('DEPLOY_TIENDA_RELEASE_REPO_API', 'tienda-api'),
+        // Carpeta de trabajo en el VPS de builds donde la vía de artefacto genera los íconos PWA y la
+        // og:image de cada corrida (runs/<uuid>/), con sharp instalado UNA vez en su node_modules.
+        // Es aparte del clone de tienda-spa a propósito: no comparte el lock global del build.
+        'branding_work_path' => env('DEPLOY_TIENDA_BRANDING_WORK_PATH', '/home/builds/tienda-branding'),
     ],
 
     // API pública de Hostinger (developers.hostinger.com): subdominios, bases de datos, cronjobs
