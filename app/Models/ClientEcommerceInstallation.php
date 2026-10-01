@@ -18,6 +18,9 @@ use Illuminate\Database\Eloquent\Model;
  * @property string      $mode              install | update
  * @property string      $status            pendiente | instalando | completada | fallida
  * @property string|null $created_via       claude | NULL (panel del admin, y todo lo anterior a la columna)
+ * @property int|null    $ecommerce_version_id Versión de ecommerce que despliega esta corrida (la
+ *                                             pedida, o la última publicada que resolvió el pipeline
+ *                                             al arrancar). Null = vía vieja (master en el VPS).
  * @property string|null $failure_reason
  * @property \Carbon\Carbon|null $started_at
  * @property \Carbon\Carbon|null $finished_at
@@ -77,6 +80,11 @@ class ClientEcommerceInstallation extends Model
          * cabecera, metido en una pantalla del camino de producción a cambio de nada. */
         $query->with([
             'client_ecommerce.demo',
+            /* La versión que la tienda tiene instalada HOY y la que despliega esta corrida (misión
+             * `versiones-tienda`, 1/10/2026): las dos son un belongsTo a una tabla de decenas de
+             * filas, así que viajan en la misma consulta agregada y el panel no pregunta de a una. */
+            'client_ecommerce.ecommerce_version',
+            'ecommerce_version',
             'logs',
         ]);
     }
@@ -89,6 +97,19 @@ class ClientEcommerceInstallation extends Model
     public function client_ecommerce()
     {
         return $this->belongsTo(ClientEcommerce::class);
+    }
+
+    /**
+     * Versión de ecommerce que despliega esta corrida (misión `versiones-tienda`, 1/10/2026).
+     *
+     * Null en las corridas anteriores a la misión y en las que fueron por la vía vieja (compilando
+     * la última de `master` en el VPS de builds, sólo con `DEPLOY_PERMITIR_BUILD_EN_VPS=true`).
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function ecommerce_version()
+    {
+        return $this->belongsTo(EcommerceVersion::class);
     }
 
     /**

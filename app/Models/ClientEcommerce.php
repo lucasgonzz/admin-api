@@ -25,6 +25,8 @@ use Illuminate\Database\Eloquent\Model;
  * @property string|null $spa_path             Path efectivo de instalación del SPA (cargado a mano o derivado).
  * @property string      $status               pending | installing | active.
  * @property array|null  $ecommerce_setup_data Configuración recolectada por WhatsApp.
+ * @property int|null    $ecommerce_version_id Versión de ecommerce instalada hoy (null = desconocida:
+ *                                             instalada por la vía vieja, compilando master en el VPS).
  */
 class ClientEcommerce extends Model
 {
@@ -41,6 +43,9 @@ class ClientEcommerce extends Model
         'spa_path',
         'status',
         'ecommerce_setup_data',
+        // Versión de ecommerce instalada (misión `versiones-tienda`, 1/10/2026). La escribe el
+        // pipeline al terminar bien una corrida; nadie la carga a mano.
+        'ecommerce_version_id',
     ];
 
     /**
@@ -187,6 +192,21 @@ class ClientEcommerce extends Model
     public function installations()
     {
         return $this->hasMany(ClientEcommerceInstallation::class);
+    }
+
+    /**
+     * Versión de ecommerce que esta tienda tiene instalada hoy (misión `versiones-tienda`,
+     * 1/10/2026).
+     *
+     * Null cuando no se sabe: la tienda se instaló o actualizó por la vía vieja (compilando la
+     * última de `master` en el VPS de builds), que no corresponde a ninguna versión registrada.
+     * Sin FK en la base: la integridad la cuida el panel, que no deja borrar una versión en uso.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\BelongsTo
+     */
+    public function ecommerce_version()
+    {
+        return $this->belongsTo(EcommerceVersion::class);
     }
 
     /**
