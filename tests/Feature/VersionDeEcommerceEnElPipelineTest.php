@@ -414,6 +414,33 @@ class VersionDeEcommerceEnElPipelineTest extends TestCase
         $this->assertFileDoesNotExist(storage_path('app/deployments/tienda_release_dist_' . $corrida->uuid . '.zip'));
     }
 
+    /**
+     * Un asset que baja pero no es un zip (o viene corrupto) corta la corrida antes de tocar el VPS,
+     * y no deja el archivo tirado en storage/app/deployments.
+     */
+    public function test_un_dist_que_no_es_un_zip_corta_y_no_queda_en_storage(): void
+    {
+        $this->version('2.1.0');
+
+        $basura    = str_repeat('esto no es un zip ', 60);
+        $url_asset = 'https://api.github.com/repos/lucasgonzz/tienda-spa/releases/assets/202';
+
+        Http::fake([
+            'api.github.com/repos/lucasgonzz/tienda-spa/releases/tags/*'   => Http::response($this->release('tienda-spa-v2.1.0-dist.zip', strlen($basura), $url_asset), 200),
+            'api.github.com/repos/lucasgonzz/tienda-api/releases/tags/*'   => Http::response($this->release('tienda-api-v2.1.0.zip'), 200),
+            'api.github.com/repos/lucasgonzz/tienda-spa/releases/assets/*' => Http::response($basura, 200),
+            '*'                                                            => Http::response([], 404),
+        ]);
+
+        $corrida  = $this->corrida('update');
+        $servicio = $this->espia($corrida);
+        $error    = (string) $this->correr($servicio);
+
+        $this->assertStringContainsString('ZIP', $error);
+        $this->assertSame([], $servicio->toques, 'Con el dist roto se tocó el VPS de builds.');
+        $this->assertFileDoesNotExist(storage_path('app/deployments/tienda_release_dist_' . $corrida->uuid . '.zip'));
+    }
+
     /* ------------------------------------------------------------------------------------------
      | 4. Al terminar
      |----------------------------------------------------------------------------------------- */

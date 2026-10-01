@@ -258,15 +258,18 @@ trait ArtefactosDeReleaseDeTienda
         $dist_release = storage_path('app/deployments/tienda_release_dist_' . $uuid . '.zip');
         $branding_dir = storage_path('app/deployments/tienda_branding_' . $uuid);
 
-        if (! $this->artefacto_bajar_asset($spa['repo'], $spa['asset'], $spa['tag'], $dist_release, 'index.html', $step)) {
-            // Se verificó al arrancar: si ahora no está, alguien lo sacó del release en el medio.
-            $mensaje = $this->artefacto_mensaje_sin_artefacto($spa['asset'], $spa['tag'], $spa['repo']);
-            $this->log($step, $mensaje, 'error');
-
-            throw new \RuntimeException($mensaje);
-        }
-
+        // La descarga va ADENTRO del try: si el zip bajó pero no pasa la verificación (no es un zip,
+        // no trae index.html en la raíz), el finally lo borra igual y no queda tirado en
+        // storage/app/deployments.
         try {
+            if (! $this->artefacto_bajar_asset($spa['repo'], $spa['asset'], $spa['tag'], $dist_release, 'index.html', $step)) {
+                // Se verificó al arrancar: si ahora no está, alguien lo sacó del release en el medio.
+                $mensaje = $this->artefacto_mensaje_sin_artefacto($spa['asset'], $spa['tag'], $spa['repo']);
+                $this->log($step, $mensaje, 'error');
+
+                throw new \RuntimeException($mensaje);
+            }
+
             // a) Branding en vivo, con la misma cadena de fuentes que la vía vieja.
             list($primary_color, $logo_url, $logo_source, $meta_description) = $this->fetch_online_configuration_branding();
 
@@ -570,14 +573,16 @@ trait ArtefactosDeReleaseDeTienda
         $zip_name  = 'tienda_api_release_' . $this->tienda_uuid_de_la_corrida() . '.zip';
         $local_zip = storage_path('app/deployments/' . $zip_name);
 
-        if (! $this->artefacto_bajar_asset($api['repo'], $api['asset'], $api['tag'], $local_zip, 'artisan', $step)) {
-            $mensaje = $this->artefacto_mensaje_sin_artefacto($api['asset'], $api['tag'], $api['repo']);
-            $this->log($step, $mensaje, 'error');
-
-            throw new \RuntimeException($mensaje);
-        }
-
+        // Descarga adentro del try, por lo mismo que en compile_spa: un zip que no pasa la
+        // verificación no queda tirado en storage/app/deployments.
         try {
+            if (! $this->artefacto_bajar_asset($api['repo'], $api['asset'], $api['tag'], $local_zip, 'artisan', $step)) {
+                $mensaje = $this->artefacto_mensaje_sin_artefacto($api['asset'], $api['tag'], $api['repo']);
+                $this->log($step, $mensaje, 'error');
+
+                throw new \RuntimeException($mensaje);
+            }
+
             // Con vendor/ adentro: el composer install de abajo es un no-op rápido, como en empresa.
             $this->artefacto_assert_zip_trae($local_zip, 'vendor/autoload.php', $step);
 
