@@ -1346,10 +1346,13 @@ class EcommerceInstallationService
      * de artefacto el zip del release ya personalizado para la tienda. Mismo destino temporal, mismo
      * swap, misma preservación de `api/` y `.well-known/`.
      *
-     * @param  string  $local_zip  Zip local del dist (con `index.html` en la raíz).
+     * @param  string       $local_zip          Zip local del dist (con `index.html` en la raíz).
+     * @param  string|null  $archivo_requerido  Archivo que tiene que estar NO vacío en el staging
+     *                                          antes del swap (la vía de artefacto pasa `config.js`).
+     *                                          Null (la vía vieja) = el script de siempre.
      * @return void
      */
-    protected function deploy_spa_zip_to_hosting(string $local_zip): void
+    protected function deploy_spa_zip_to_hosting(string $local_zip, ?string $archivo_requerido = null): void
     {
         // Sube el ZIP a una ruta TEMPORAL en el hosting (nunca directo al docroot en vivo).
         // Se usa resolve_spa_path() (no la columna cruda spa_path, que puede estar vacía) para que
@@ -1379,7 +1382,7 @@ class EcommerceInstallationService
         $this->reconnect_hosting_ssh();
         $this->exec_hosting_ssh(
             'upload_spa',
-            $this->build_spa_atomic_deploy_shell($spa_docroot, $temp_zip_path)
+            $this->build_spa_atomic_deploy_shell($spa_docroot, $temp_zip_path, $archivo_requerido)
         );
         $this->log('upload_spa', 'SPA desplegado en la raíz del dominio (mv atómico, sin downtime)', 'success');
 
@@ -3096,12 +3099,21 @@ class EcommerceInstallationService
      * ventana de downtime a un par de operaciones mv (en vez de descomprimir en vivo sobre el
      * docroot, que dejaría el dominio sirviendo contenido a medio escribir durante todo el unzip).
      *
-     * @param  string  $spa_docroot     Ruta absoluta del docroot en el hosting.
-     * @param  string  $temp_zip_path   Ruta absoluta del ZIP ya subido (fuera del docroot).
+     * @param  string       $spa_docroot        Ruta absoluta del docroot en el hosting.
+     * @param  string       $temp_zip_path      Ruta absoluta del ZIP ya subido (fuera del docroot).
+     * @param  string|null  $archivo_requerido  Misión versiones-tienda (2/10/2026): archivo (relativo
+     *                                          a la raíz del dist) que tiene que existir NO vacío en el
+     *                                          staging antes del swap; si no está, el script corta y la
+     *                                          tienda vieja sigue sirviendo. La vía de artefacto pasa
+     *                                          `config.js`. Null (default, la vía vieja) = el script de
+     *                                          siempre, byte por byte.
      * @return string
      */
-    protected function build_spa_atomic_deploy_shell(string $spa_docroot, string $temp_zip_path): string
-    {
+    protected function build_spa_atomic_deploy_shell(
+        string $spa_docroot,
+        string $temp_zip_path,
+        ?string $archivo_requerido = null
+    ): string {
         // Contenido del .htaccess de history mode, codificado en base64 para poder inyectarlo en
         // el shell (armado con escapeshellarg más abajo) sin pelear con comillas, saltos de línea
         // ni el `<IfModule>` dentro del string ya escapado que arma este método. El alfabeto
@@ -3167,6 +3179,16 @@ class EcommerceInstallationService
                 . 'fi; ';
         }
 
+        // Guarda del archivo requerido (sólo la vía de artefacto): va pegada a la de index.html, o sea
+        // ANTES del mv. Por la misma razón que $preserve_shell, el nombre viaja en una variable de
+        // shell asignada con escapeshellarg(). Sin archivo requerido queda vacía y el script es el de
+        // siempre.
+        $required_shell = '';
+        if ($archivo_requerido !== null && trim($archivo_requerido) !== '') {
+            $required_shell = 'REQUIRED=' . escapeshellarg(ltrim(trim($archivo_requerido), '/')) . '; '
+                . 'test -s "$STAGING/$REQUIRED" || (echo SPA_STAGING_MISSING_REQUIRED "$REQUIRED"; exit 1); ';
+        }
+
         return 'set -e; '
             . 'STAGING=' . escapeshellarg($staging_dir) . '; '
             . 'DOCROOT=' . escapeshellarg($spa_docroot) . '; '
@@ -3176,6 +3198,7 @@ class EcommerceInstallationService
             . 'rm -rf "$STAGING"; mkdir -p "$STAGING"; '
             . 'unzip -o "$ZIP" -d "$STAGING"; '
             . 'test -f "$STAGING/index.html" || (echo SPA_STAGING_MISSING_INDEX; exit 1); '
+            . $required_shell
             // Escribe el .htaccess de history mode dentro del staging, ANTES del swap, para que
             // llegue atómicamente como parte del docroot nuevo (prompt 193/01). Vue Router en
             // history mode necesita que Apache reescriba a index.html cualquier request que no

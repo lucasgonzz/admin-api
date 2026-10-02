@@ -23,7 +23,7 @@ use App\Services\EcommerceReleaseArtifacts;
  *    `EcommerceDistCustomizer` (tokens + `config.js` + branding).
  *  - `upload_spa`: sube ese zip con el mismo swap atómico de siempre y verifica `config.js`.
  *  - `upload_api`: baja `tienda-api-v{V}.zip` (con `vendor/` adentro), lo sube y lo descomprime —
- *    en una actualización excluyendo `public/*`, `storage/*` y `.env`— y corre el mismo
+ *    en una actualización excluyendo `public/**`, `storage/**` y `.env`— y corre el mismo
  *    `composer install` con PHP 8.4 explícito de siempre.
  *  - `ensure_spa_cloned`, `write_env` y `finalize`: no cambian (la primera no hace nada).
  *
@@ -84,14 +84,18 @@ trait ArtefactosDeReleaseDeTienda
      *
      * Orden:
      *  1. `ecommerce_version_id` de la corrida, si viene: tiene que existir y estar `published`; si
-     *     no, la corrida falla (no hay salida de emergencia: alguien pidió ESA versión).
+     *     no, la corrida falla (no hay salida de emergencia).
      *  2. Si no viene: la última publicada (por orden semántico), y se GUARDA en la corrida para que
      *     el historial diga qué se desplegó.
      *  3. Sin ninguna publicada: vía vieja si `DEPLOY_PERMITIR_BUILD_EN_VPS=true`; si no, la corrida
      *     falla diciendo que no hay versión publicada y cómo se publica.
-     *  4. Con versión: los dos assets del release tienen que existir. Si falta uno: vía vieja con la
-     *     bandera prendida (y la tienda NO va a quedar en esa versión, se avisa); si no, falla
-     *     nombrando repo, tag y asset.
+     *  4. Con versión: los dos assets del release tienen que existir. Si falta uno:
+     *     - si la versión la PIDIÓ quien creó la corrida (`ecommerce_version_requested`), falla
+     *       SIEMPRE, con la bandera prendida o apagada: a quien pidió la 1.0.0 no se le despliega
+     *       master (chequeo independiente del 2/10/2026);
+     *     - si es la última publicada resuelta sola, cae a la vía vieja con la bandera prendida (y la
+     *       corrida queda con `ecommerce_version_id` en null: no desplegó esa versión), y si no,
+     *       falla nombrando repo, tag y asset.
      *
      * @return void
      *
@@ -127,8 +131,11 @@ trait ArtefactosDeReleaseDeTienda
                 );
             }
 
-            $origen = 'pedida para esta corrida';
+            // La pidió quien creó la corrida, o el endpoint la fijó como la última publicada.
+            $pedida = (bool) $this->installation->ecommerce_version_requested;
+            $origen = $pedida ? 'pedida para esta corrida' : 'la última publicada al crear la corrida';
         } else {
+            $pedida  = false;
             $version = EcommerceVersion::latest_published();
 
             if ($version === null) {
@@ -166,7 +173,21 @@ trait ArtefactosDeReleaseDeTienda
 
             $mensaje = $this->artefacto_mensaje_sin_artefacto($artefacto['asset'], $artefacto['tag'], $artefacto['repo']);
 
+            // 🔴 Una versión PEDIDA no cae nunca a master: quien pidió la 1.0.0 recibiría una tienda
+            // compilada de otra cosa sin enterarse. La bandera es para emergencias de la última
+            // publicada, no para cambiar lo que alguien pidió.
+            if ($pedida) {
+                $mensaje .= ' La versión ' . $version->version . ' se pidió explícitamente para esta corrida: '
+                    . 'no se cae a compilar master aunque DEPLOY_PERMITIR_BUILD_EN_VPS esté prendida.';
+                $this->log($step, $mensaje, 'error');
+
+                throw new \RuntimeException($mensaje);
+            }
+
             if ($this->artefacto_build_en_vps_permitido()) {
+                // La corrida no va a desplegar esa versión: no puede quedar registrada como si sí.
+                $this->installation->update(['ecommerce_version_id' => null]);
+
                 $this->log(
                     $step,
                     $mensaje . ' Como DEPLOY_PERMITIR_BUILD_EN_VPS está prendida, se compila la última de '
@@ -302,12 +323,16 @@ trait ArtefactosDeReleaseDeTienda
             );
 
             $destino = storage_path('app/deployments/tienda_dist_' . $uuid . '.zip');
+            // El sello de ESTE deploy (mismo formato que VUE_APP_ICONS_VERSION de la vía vieja): hace
+            // que el service worker y el precache cambien en cada corrida aunque la versión sea la
+            // misma, así un cambio de branding le llega a quien ya tiene la tienda instalada.
             $resumen = (new EcommerceDistCustomizer())->customize(
                 $dist_release,
                 $destino,
                 $tokens,
                 $config_vars,
-                $branding_dir
+                $branding_dir,
+                date('YmdHis')
             );
             $this->assert_local_zip_file($destino, 0, $step);
 
@@ -318,7 +343,9 @@ trait ArtefactosDeReleaseDeTienda
                 'Dist de la versión ' . $this->tienda_version->version . ' personalizado para la tienda: '
                 . count($resumen['tokens']) . ' tokens reemplazados (color ' . $tokens[EcommerceDistCustomizer::TOKEN_THEME_COLOR]
                 . '), config.js con ' . count($resumen['claves_config_js']) . ' claves y '
-                . (int) $resumen['archivos_de_branding'] . ' archivos de branding. No se compiló nada en el VPS de builds.',
+                . (int) $resumen['archivos_de_branding'] . ' archivos de branding. Sello de deploy ' . $resumen['sello']
+                . ' en ' . (int) $resumen['urls_selladas'] . ' URLs de íconos/manifest, en service-worker.js y en '
+                . $resumen['precache_manifest'] . '. No se compiló nada en el VPS de builds.',
                 'success'
             );
         } finally {
@@ -426,16 +453,7 @@ trait ArtefactosDeReleaseDeTienda
         // Primero la carpeta: build_vps_command() hace `cd` antes del comando.
         $this->exec_build_ssh($step, 'mkdir -p ' . $this->artefacto_comillas_posix($work . '/runs') . ' 2>&1');
 
-        $instalar = 'cd ' . $this->artefacto_comillas_posix($work)
-            . ' && if [ ! -f node_modules/sharp/package.json ] || ! node -e "require(\'sharp\')" >/dev/null 2>&1; '
-            . 'then npm install sharp --no-save --no-audit --no-fund 2>&1; fi';
-
-        $comando = '{ [ -f package.json ] || printf %s ' . $this->artefacto_comillas_posix('{"name":"tienda-branding","private":true}')
-            . ' > package.json; }'
-            . ' && flock -w 600 ' . $this->artefacto_comillas_posix($work . '/.sharp.lock')
-            . ' -c ' . $this->artefacto_comillas_posix($instalar)
-            . ' && node -e ' . $this->artefacto_comillas_posix('require("sharp")')
-            . ' && echo SHARP_LISTO';
+        $comando = $this->tienda_comando_asegurar_sharp($work);
 
         $this->log($step, 'Verificando sharp en la carpeta de branding del VPS de builds (se instala una sola vez)...');
         $salida = $this->exec_build_ssh($step, $this->build_vps_command($work, $comando), true, true);
@@ -446,6 +464,31 @@ trait ArtefactosDeReleaseDeTienda
                 . 'los íconos de la tienda. ' . $this->truncate_for_log($salida, 600)
             );
         }
+    }
+
+    /**
+     * Comando remoto que deja `sharp` instalado en la carpeta de branding (se corre con `cd` a ella).
+     *
+     * 🔴 TODO lo que escribe en la carpeta va ADENTRO del `flock`: el `package.json` mínimo y el
+     * `npm install`. Afuera sólo queda la verificación final, que no escribe nada. Con el `printf`
+     * afuera, dos corridas simultáneas sobre una carpeta nueva podían escribir el `package.json` a la
+     * vez que la otra ya estaba instalando (chequeo independiente del 2/10/2026).
+     *
+     * @param  string  $work  `branding_work_path`.
+     * @return string
+     */
+    protected function tienda_comando_asegurar_sharp(string $work): string
+    {
+        $instalar = 'cd ' . $this->artefacto_comillas_posix($work)
+            . ' && { [ -f package.json ] || printf %s '
+            . $this->artefacto_comillas_posix('{"name":"tienda-branding","private":true}') . ' > package.json; }'
+            . ' && if [ ! -f node_modules/sharp/package.json ] || ! node -e "require(\'sharp\')" >/dev/null 2>&1; '
+            . 'then npm install sharp --no-save --no-audit --no-fund 2>&1; fi';
+
+        return 'flock -w 600 ' . $this->artefacto_comillas_posix($work . '/.sharp.lock')
+            . ' -c ' . $this->artefacto_comillas_posix($instalar)
+            . ' && node -e ' . $this->artefacto_comillas_posix('require("sharp")')
+            . ' && echo SHARP_LISTO';
     }
 
     /**
@@ -497,10 +540,11 @@ trait ArtefactosDeReleaseDeTienda
     /**
      * Etapa `upload_spa` de la vía de artefacto: sube el zip personalizado con el mismo
      * `deploy_spa_zip_to_hosting()` (y por lo tanto el mismo `build_spa_atomic_deploy_shell()`) que la
-     * vía vieja, y después verifica que `config.js` haya quedado en el docroot y no vacío.
+     * vía vieja, exigiendo `config.js` en el staging ANTES del swap, y después verifica igual que haya
+     * quedado en el docroot y no vacío.
      *
-     * 🔴 La verificación no es redundante con la del zip: lo que importa es lo que sirve el docroot.
-     * Un bundle de release sin `config.js` arriba arranca sin saber a qué API pegarle.
+     * 🔴 Un bundle de release sin `config.js` arriba arranca sin saber a qué API pegarle: por eso el
+     * chequeo que frena es el previo al `mv` (con la tienda vieja todavía sirviendo).
      *
      * @return void
      *
@@ -517,10 +561,22 @@ trait ArtefactosDeReleaseDeTienda
             );
         }
 
-        $this->assert_local_zip_file($local_zip, 0, $step);
-        $this->deploy_spa_zip_to_hosting($local_zip);
-        $this->tienda_dist_personalizado = null;
+        // 🔴 El freno que importa es el PREVIO al swap: `build_spa_atomic_deploy_shell()` exige
+        // `config.js` no vacío en el staging antes del `mv`, así una tienda nunca queda publicada sin
+        // él. El zip local se borra pase lo que pase (SFTP o swap fallidos incluidos): un zip
+        // personalizado huérfano en storage/app/deployments ocupa lugar y no sirve para nada.
+        try {
+            $this->assert_local_zip_file($local_zip, 0, $step);
+            $this->deploy_spa_zip_to_hosting($local_zip, 'config.js');
+        } finally {
+            if (is_file($local_zip)) {
+                @unlink($local_zip);
+            }
+            $this->tienda_dist_personalizado = null;
+        }
 
+        // Verificación posterior, informativa en la práctica (el freno previo ya lo garantizó): mira
+        // lo que efectivamente sirve el docroot.
         $docroot = $this->get_spa_docroot();
         $this->reconnect_hosting_ssh();
         $salida = $this->exec_hosting_ssh(
@@ -558,7 +614,7 @@ trait ArtefactosDeReleaseDeTienda
      * Etapa `upload_api` de la vía de artefacto.
      *
      * @param  bool  $es_actualizacion  True en `EcommerceDeploymentService` (update): el `unzip`
-     *                                  excluye `public/*`, `storage/*` y `.env`. False en la
+     *                                  excluye `public/**`, `storage/**` y `.env`. False en la
      *                                  instalación: se descomprime todo, porque esos directorios
      *                                  todavía no existen en el hosting.
      * @return void
@@ -619,10 +675,20 @@ trait ArtefactosDeReleaseDeTienda
     /**
      * Comando remoto que descomprime el zip de la API y lo borra.
      *
-     * 🔴 En una actualización excluye `public/*`, `storage/*` y `.env` (mismo criterio que el zip de
-     * la vía vieja: son de la tienda y no se pisan). El código de salida 11 de `unzip` ("un patrón
-     * no matcheó", que pasa con `.env` porque el release no lo trae) se tolera explícitamente; cualquier
-     * otro distinto de 0 corta la corrida.
+     * 🔴 En una actualización excluye todo lo que cuelga de `public/` y de `storage/`, y el `.env`
+     * (mismo criterio que el zip de la vía vieja: son de la tienda y no se pisan).
+     *
+     * 🔴 LOS PATRONES SON `public/**` Y `storage/**`, NO `public/*`. Con un `unzip` compilado con
+     * `WILD_STOP_AT_DIR` (el de Git for Windows lo trae, y es una opción común de las distros) el `*`
+     * no cruza la barra: `public/*` excluye `public/index.php` pero DESCOMPRIME `public/css/app.css`
+     * y `storage/app/x`, o sea que pisa archivos de la tienda en una actualización. `**` matchea a
+     * cualquier profundidad con y sin esa opción. Medido el 2/10/2026 con UnZip 6.00 (chequeo
+     * independiente de la misión versiones-tienda) y fijado por un test que descomprime un zip real.
+     *
+     * El código de salida 11 de `unzip` es "no matcheó un patrón de INCLUSIÓN" (un archivo pedido
+     * explícitamente que no está en el zip). Acá no se piden archivos, así que no debería aparecer;
+     * una EXCLUSIÓN sin match (`.env`, que el release no trae) sólo imprime una advertencia y
+     * devuelve 0. Se tolera el 11 igual porque no hace daño; cualquier otro distinto de 0 corta.
      *
      * @param  string  $api_path          Directorio de la API en el hosting.
      * @param  string  $zip_name          Nombre del zip subido.
@@ -638,7 +704,7 @@ trait ArtefactosDeReleaseDeTienda
             return $cd . ' && unzip -o ' . $zip . ' && rm -f ' . $zip . ' 2>&1';
         }
 
-        return $cd . ' && { unzip -o ' . $zip . " -x 'public/*' 'storage/*' '.env'; RC=\$?; "
+        return $cd . ' && { unzip -o ' . $zip . " -x 'public/**' 'storage/**' '.env'; RC=\$?; "
             . 'if [ "$RC" -ne 0 ] && [ "$RC" -ne 11 ]; then echo "UNZIP_FALLO $RC"; exit "$RC"; fi; }'
             . ' && rm -f ' . $zip . ' 2>&1';
     }

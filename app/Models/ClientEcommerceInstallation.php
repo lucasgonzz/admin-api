@@ -21,6 +21,8 @@ use Illuminate\Database\Eloquent\Model;
  * @property int|null    $ecommerce_version_id Versión de ecommerce que despliega esta corrida (la
  *                                             pedida, o la última publicada que resolvió el pipeline
  *                                             al arrancar). Null = vía vieja (master en el VPS).
+ * @property bool        $ecommerce_version_requested True si la versión la PIDIÓ quien creó la
+ *                                             corrida; false si es la última publicada resuelta sola.
  * @property string|null $failure_reason
  * @property \Carbon\Carbon|null $started_at
  * @property \Carbon\Carbon|null $finished_at
@@ -54,8 +56,10 @@ class ClientEcommerceInstallation extends Model
      * @var array<string, string>
      */
     protected $casts = [
-        'started_at'  => 'datetime',
-        'finished_at' => 'datetime',
+        'started_at'                  => 'datetime',
+        'finished_at'                 => 'datetime',
+        // Si la versión la pidió quien creó la corrida (ver la migración 2026_10_02_100000).
+        'ecommerce_version_requested' => 'boolean',
     ];
 
     /**

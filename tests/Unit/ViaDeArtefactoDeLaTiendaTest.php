@@ -184,7 +184,10 @@ class ViaDeArtefactoDeLaTiendaTest extends TestCase
         $comando = $this->invocar('tienda_comando_unzip_api', ['domains/x.com.ar/public_html/api', 'tienda_api_release_u.zip', true]);
 
         $this->assertStringStartsWith("cd 'domains/x.com.ar/public_html/api' && ", $comando);
-        $this->assertStringContainsString("unzip -o 'tienda_api_release_u.zip' -x 'public/*' 'storage/*' '.env'", $comando);
+        /* `**` y no `*` (chequeo del 2/10/2026): con un unzip compilado con WILD_STOP_AT_DIR,
+           `public/*` no excluye lo anidado. El comportamiento real lo fija el test con unzip de
+           verdad, más abajo. */
+        $this->assertStringContainsString("unzip -o 'tienda_api_release_u.zip' -x 'public/**' 'storage/**' '.env'", $comando);
         $this->assertStringContainsString('-ne 11', $comando);
         $this->assertStringContainsString("rm -f 'tienda_api_release_u.zip'", $comando);
     }
@@ -260,5 +263,250 @@ class ViaDeArtefactoDeLaTiendaTest extends TestCase
                 $this->assertStringContainsString('branding_work_path', $e->getMessage());
             }
         }
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Chequeos independientes del 2/10/2026: unzip real, config.js antes del swap y sharp
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Un `bash` que tenga `unzip` (en Windows, el de Git for Windows; si no, el del PATH), o null.
+     *
+     * @return string|null
+     */
+    private function bash_con_unzip(): ?string
+    {
+        $candidatos = [];
+        if (PHP_OS_FAMILY === 'Windows') {
+            foreach ([getenv('ProgramFiles'), 'C:\\Program Files'] as $program_files) {
+                if (is_string($program_files) && $program_files !== '') {
+                    $candidatos[] = $program_files . '\\Git\\bin\\bash.exe';
+                }
+            }
+        }
+        $candidatos[] = 'bash';
+
+        foreach ($candidatos as $bash) {
+            if ($bash !== 'bash' && ! is_file($bash)) {
+                continue;
+            }
+            $resultado = $this->correr_en_bash($bash, 'command -v unzip', sys_get_temp_dir());
+            if ($resultado['codigo'] === 0 && trim($resultado['salida']) !== '') {
+                return $bash;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Corre un script en bash parado en una carpeta.
+     *
+     * @param string $bash
+     * @param string $script
+     * @param string $cwd
+     *
+     * @return array{codigo: int, salida: string}
+     */
+    private function correr_en_bash(string $bash, string $script, string $cwd): array
+    {
+        $proceso = @proc_open([$bash, '-c', $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $tuberias, $cwd);
+        if (! is_resource($proceso)) {
+            return ['codigo' => -1, 'salida' => ''];
+        }
+        $salida = stream_get_contents($tuberias[1]) . stream_get_contents($tuberias[2]);
+        fclose($tuberias[1]);
+        fclose($tuberias[2]);
+
+        return ['codigo' => proc_close($proceso), 'salida' => $salida];
+    }
+
+    /**
+     * Carpeta temporal nueva para un test que escribe en disco.
+     *
+     * @return string
+     */
+    private function carpeta_temporal(): string
+    {
+        $dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'cc-tienda-bash-' . uniqid();
+        mkdir($dir, 0755, true);
+
+        return $dir;
+    }
+
+    /**
+     * Arma un zip con las entradas dadas.
+     *
+     * @param string                $ruta
+     * @param array<string, string> $entradas
+     *
+     * @return void
+     */
+    private function armar_zip(string $ruta, array $entradas): void
+    {
+        $zip = new \ZipArchive();
+        $zip->open($ruta, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+        foreach ($entradas as $nombre => $contenido) {
+            $zip->addFromString($nombre, $contenido);
+        }
+        $zip->close();
+    }
+
+    /**
+     * 🔴 Con un `unzip` de verdad: la actualización NO descomprime nada de lo que cuelga de public/
+     * ni de storage/ (tampoco lo anidado), no pisa el .env, y sí descomprime el código. Es el caso
+     * que el patrón viejo `public/*` rompía con un unzip compilado con WILD_STOP_AT_DIR (el de Git
+     * for Windows lo trae: en esta máquina, `public/*` descomprimía `public/css/app.css`).
+     */
+    public function test_el_unzip_real_de_la_actualizacion_no_descomprime_nada_de_public_ni_storage(): void
+    {
+        $bash = $this->bash_con_unzip();
+        if ($bash === null) {
+            $this->markTestSkipped('Hace falta bash con unzip para correr el comando real.');
+        }
+
+        $dir = $this->carpeta_temporal();
+        mkdir($dir . '/public', 0755, true);
+        mkdir($dir . '/storage/app', 0755, true);
+        file_put_contents($dir . '/public/index.php', 'INDEX-DE-LA-TIENDA');
+        file_put_contents($dir . '/storage/app/x', 'DATOS-DE-LA-TIENDA');
+        file_put_contents($dir . '/.env', 'SECRETO-DE-LA-TIENDA');
+
+        $this->armar_zip($dir . '/z.zip', [
+            'artisan'                       => 'ARTISAN-NUEVO',
+            'vendor/autoload.php'           => 'AUTOLOAD-NUEVO',
+            'app/Http/Kernel.php'           => 'KERNEL-NUEVO',
+            'public/index.php'              => 'INDEX-DEL-RELEASE',
+            'public/css/app.css'            => 'CSS-DEL-RELEASE',
+            'storage/app/x'                 => 'STORAGE-DEL-RELEASE',
+            'storage/framework/cache/a.txt' => 'CACHE-DEL-RELEASE',
+        ]);
+
+        $resultado = $this->correr_en_bash($bash, $this->invocar('tienda_comando_unzip_api', ['.', 'z.zip', true]), $dir);
+
+        $this->assertSame(0, $resultado['codigo'], 'El unzip de la actualización falló: ' . $resultado['salida']);
+        $this->assertSame('KERNEL-NUEVO', file_get_contents($dir . '/app/Http/Kernel.php'));
+        $this->assertSame('AUTOLOAD-NUEVO', file_get_contents($dir . '/vendor/autoload.php'));
+        $this->assertSame('INDEX-DE-LA-TIENDA', file_get_contents($dir . '/public/index.php'));
+        $this->assertFileDoesNotExist($dir . '/public/css/app.css', 'Se descomprimió algo anidado bajo public/.');
+        $this->assertSame('DATOS-DE-LA-TIENDA', file_get_contents($dir . '/storage/app/x'));
+        $this->assertFileDoesNotExist($dir . '/storage/framework/cache/a.txt', 'Se descomprimió algo anidado bajo storage/.');
+        $this->assertSame('SECRETO-DE-LA-TIENDA', file_get_contents($dir . '/.env'));
+        $this->assertFileDoesNotExist($dir . '/z.zip', 'El zip quedó en el directorio de la API.');
+
+        /* La instalación, en cambio, descomprime todo. */
+        $this->armar_zip($dir . '/z.zip', ['public/css/app.css' => 'CSS-DEL-RELEASE', 'storage/app/y' => 'NUEVO']);
+        $resultado = $this->correr_en_bash($bash, $this->invocar('tienda_comando_unzip_api', ['.', 'z.zip', false]), $dir);
+
+        $this->assertSame(0, $resultado['codigo'], $resultado['salida']);
+        $this->assertSame('CSS-DEL-RELEASE', file_get_contents($dir . '/public/css/app.css'));
+        $this->assertSame('NUEVO', file_get_contents($dir . '/storage/app/y'));
+    }
+
+    /**
+     * Script de deploy del SPA de una tienda con la API anidada (como las del shared).
+     *
+     * @param string|null|false $archivo_requerido False = llamarlo con dos argumentos (como la vía vieja).
+     *
+     * @return string
+     */
+    private function script_de_deploy_del_spa($archivo_requerido): string
+    {
+        $ecommerce           = new \App\Models\ClientEcommerce();
+        $ecommerce->spa_path = 'cliente.com.ar/public_html';
+        $ecommerce->api_path = 'cliente.com.ar/public_html/api';
+
+        $installation       = new \App\Models\ClientEcommerceInstallation();
+        $installation->uuid = 'uuid-de-prueba';
+
+        list($service, $reflection) = $this->servicio();
+        foreach (['installation' => $installation, 'ecommerce' => $ecommerce] as $nombre => $valor) {
+            $prop = $reflection->getProperty($nombre);
+            $prop->setAccessible(true);
+            $prop->setValue($service, $valor);
+        }
+
+        $method = $reflection->getMethod('build_spa_atomic_deploy_shell');
+        $method->setAccessible(true);
+
+        $args = ['public_html', 'dist.zip'];
+        if ($archivo_requerido !== false) {
+            $args[] = $archivo_requerido;
+        }
+
+        return $method->invokeArgs($service, $args);
+    }
+
+    /**
+     * Sin archivo requerido el script es el de siempre (la vía vieja no cambia), y con `config.js` el
+     * chequeo va ANTES del `mv` del docroot.
+     */
+    public function test_el_deploy_del_spa_chequea_config_js_antes_del_swap_solo_si_se_pide(): void
+    {
+        $de_siempre = $this->script_de_deploy_del_spa(false);
+
+        $this->assertSame($de_siempre, $this->script_de_deploy_del_spa(null), 'El default cambió el script de la vía vieja.');
+        $this->assertStringNotContainsString('REQUIRED', $de_siempre);
+
+        $con_config = $this->script_de_deploy_del_spa('config.js');
+        $chequeo    = strpos($con_config, 'test -s "$STAGING/$REQUIRED"');
+        $swap       = strpos($con_config, 'mv "$STAGING" "$DOCROOT"');
+
+        $this->assertNotFalse($chequeo);
+        $this->assertNotFalse($swap);
+        $this->assertLessThan($swap, $chequeo, 'El chequeo de config.js tiene que ir antes del swap.');
+    }
+
+    /**
+     * 🔴 Con bash y unzip de verdad: un dist sin config.js NO se publica (la tienda vieja sigue
+     * sirviendo y la API anidada intacta), y uno con config.js sí.
+     */
+    public function test_el_deploy_real_sin_config_js_no_toca_la_tienda_que_esta_sirviendo(): void
+    {
+        $bash = $this->bash_con_unzip();
+        if ($bash === null) {
+            $this->markTestSkipped('Hace falta bash con unzip para correr el script de deploy real.');
+        }
+
+        $dir = $this->carpeta_temporal();
+        mkdir($dir . '/public_html/api', 0755, true);
+        file_put_contents($dir . '/public_html/index.html', 'TIENDA-VIEJA');
+        file_put_contents($dir . '/public_html/api/artisan', 'API-DE-LA-TIENDA');
+
+        $this->armar_zip($dir . '/dist.zip', ['index.html' => 'TIENDA-NUEVA', '.htaccess' => 'RewriteEngine On']);
+        $resultado = $this->correr_en_bash($bash, $this->script_de_deploy_del_spa('config.js'), $dir);
+
+        $this->assertNotSame(0, $resultado['codigo'], 'Se publicó un dist sin config.js.');
+        $this->assertStringContainsString('SPA_STAGING_MISSING_REQUIRED', $resultado['salida']);
+        $this->assertSame('TIENDA-VIEJA', file_get_contents($dir . '/public_html/index.html'));
+        $this->assertSame('API-DE-LA-TIENDA', file_get_contents($dir . '/public_html/api/artisan'));
+
+        $this->armar_zip($dir . '/dist.zip', [
+            'index.html' => 'TIENDA-NUEVA',
+            '.htaccess'  => 'RewriteEngine On',
+            'config.js'  => 'window.__CC_CONFIG__ = {};',
+        ]);
+        $resultado = $this->correr_en_bash($bash, $this->script_de_deploy_del_spa('config.js'), $dir);
+
+        $this->assertSame(0, $resultado['codigo'], $resultado['salida']);
+        $this->assertSame('TIENDA-NUEVA', file_get_contents($dir . '/public_html/index.html'));
+        $this->assertSame('window.__CC_CONFIG__ = {};', file_get_contents($dir . '/public_html/config.js'));
+        $this->assertSame('API-DE-LA-TIENDA', file_get_contents($dir . '/public_html/api/artisan'), 'El swap se llevó la API.');
+    }
+
+    /**
+     * La instalación de sharp escribe TODO (el package.json y el npm install) adentro del flock: el
+     * comando arranca con el flock y lo único que queda afuera es la verificación final.
+     */
+    public function test_la_instalacion_de_sharp_escribe_todo_adentro_del_flock(): void
+    {
+        $comando = $this->invocar('tienda_comando_asegurar_sharp', ['/home/builds/tienda-branding']);
+
+        $this->assertStringStartsWith("flock -w 600 '/home/builds/tienda-branding/.sharp.lock' -c '", $comando);
+
+        $adentro = substr($comando, 0, strpos($comando, " && node -e 'require(\"sharp\")'"));
+        $this->assertStringContainsString('package.json', $adentro);
+        $this->assertStringContainsString('npm install sharp --no-save', $adentro);
+        $this->assertStringEndsWith(' && echo SHARP_LISTO', $comando);
     }
 }

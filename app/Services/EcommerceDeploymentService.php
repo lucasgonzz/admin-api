@@ -68,8 +68,9 @@ class EcommerceDeploymentService extends EcommerceInstallationService
     protected function step_upload_api()
     {
         // Vía de artefacto (misión versiones-tienda, 1/10/2026): baja tienda-api-v{V}.zip y lo
-        // descomprime EXCLUYENDO public/*, storage/* y .env, con el mismo criterio que el zip de
-        // abajo: en una actualización esos archivos son de la tienda y no se pisan.
+        // descomprime EXCLUYENDO public/**, storage/** y .env (con ** y no *: ver
+        // tienda_comando_unzip_api()), con el mismo criterio que el zip de abajo: en una
+        // actualización esos archivos son de la tienda y no se pisan.
         if ($this->tienda_via_artefacto) {
             $this->tienda_artefacto_upload_api(true);
 

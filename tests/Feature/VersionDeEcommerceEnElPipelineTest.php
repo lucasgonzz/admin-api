@@ -126,11 +126,12 @@ class VersionDeEcommerceEnElPipelineTest extends TestCase
      * Cliente + tienda configurada + corrida pendiente.
      *
      * @param string   $mode        install | update.
-     * @param int|null $version_id  Versión pedida para la corrida.
+     * @param int|null $version_id  Versión fijada en la corrida.
+     * @param bool     $pedida      Si la pidió quien creó la corrida (ecommerce_version_requested).
      *
      * @return ClientEcommerceInstallation
      */
-    private function corrida(string $mode = 'update', $version_id = null): ClientEcommerceInstallation
+    private function corrida(string $mode = 'update', $version_id = null, bool $pedida = false): ClientEcommerceInstallation
     {
         $client                  = new Client();
         $client->name            = 'Tienda Pipeline ' . Str::random(6);
@@ -158,6 +159,7 @@ class VersionDeEcommerceEnElPipelineTest extends TestCase
             'mode'                 => $mode,
             'status'               => 'pendiente',
             'ecommerce_version_id' => $version_id,
+            'ecommerce_version_requested' => $pedida,
         ]);
     }
 
@@ -511,5 +513,123 @@ class VersionDeEcommerceEnElPipelineTest extends TestCase
         $this->assertNull($this->correr($servicio));
         $this->assertSame(['lock', 'pasos', 'release'], $servicio->toques);
         $this->assertNull($corrida->fresh()->client_ecommerce->ecommerce_version_id);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 5. Chequeos independientes del 2/10/2026: caída a la vía vieja y zip huérfano
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * GitHub con el release del tag v{version} sin el asset de la SPA (el de la API sí está).
+     *
+     * @param string $version
+     *
+     * @return void
+     */
+    private function release_sin_el_asset_de_la_spa(string $version): void
+    {
+        Http::fake([
+            'api.github.com/repos/lucasgonzz/tienda-spa/releases/tags/v' . $version => Http::response($this->release(null), 200),
+            'api.github.com/repos/lucasgonzz/tienda-api/releases/tags/v' . $version => Http::response($this->release('tienda-api-v' . $version . '.zip'), 200),
+            '*'                                                                     => Http::response([], 404),
+        ]);
+    }
+
+    /**
+     * Con la bandera prendida y a la ÚLTIMA PUBLICADA (resuelta sola) le falta un asset: cae a la vía
+     * vieja y la corrida queda SIN versión —no desplegó esa versión, compiló master—.
+     */
+    public function test_con_la_bandera_y_un_asset_faltante_de_la_ultima_cae_a_la_via_vieja_sin_version(): void
+    {
+        config(['services.deploy.permitir_build_en_vps' => true]);
+        $this->version('3.0.0');
+        $this->release_sin_el_asset_de_la_spa('3.0.0');
+
+        $corrida  = $this->corrida('update');
+        $servicio = $this->espia($corrida);
+
+        $this->assertStringContainsString('ESPIA: se intentó tomar el lock global del build', (string) $this->correr($servicio));
+        $this->assertSame(['lock'], $servicio->toques);
+        $this->assertNull($corrida->fresh()->ecommerce_version_id, 'La corrida quedó registrada con una versión que no desplegó.');
+    }
+
+    /**
+     * Lo mismo cuando el endpoint fijó la última publicada al crear la corrida (sin que nadie la
+     * pidiera): no es una versión PEDIDA, así que con la bandera cae a la vía vieja y queda sin versión.
+     */
+    public function test_la_ultima_fijada_al_crear_la_corrida_no_es_una_version_pedida(): void
+    {
+        config(['services.deploy.permitir_build_en_vps' => true]);
+        $fijada = $this->version('3.0.0');
+        $this->release_sin_el_asset_de_la_spa('3.0.0');
+
+        $corrida  = $this->corrida('update', $fijada->id, false);
+        $servicio = $this->espia($corrida);
+
+        $this->assertStringContainsString('ESPIA: se intentó tomar el lock global del build', (string) $this->correr($servicio));
+        $this->assertNull($corrida->fresh()->ecommerce_version_id);
+    }
+
+    /**
+     * 🔴 Una versión PEDIDA explícitamente a la que le falta un asset falla SIEMPRE, aunque la bandera
+     * esté prendida: a quien pidió la 3.0.0 no se le compila master. Y no toca nada.
+     */
+    public function test_una_version_pedida_sin_asset_falla_aunque_la_bandera_este_prendida(): void
+    {
+        config(['services.deploy.permitir_build_en_vps' => true]);
+        $pedida = $this->version('3.0.0');
+        $this->release_sin_el_asset_de_la_spa('3.0.0');
+
+        $corrida  = $this->corrida('update', $pedida->id, true);
+        $servicio = $this->espia($corrida);
+        $error    = (string) $this->correr($servicio);
+
+        $this->assertStringContainsString('tienda-spa-v3.0.0-dist.zip', $error);
+        $this->assertStringContainsString('se pidió explícitamente', $error);
+        $this->assertSame([], $servicio->toques, 'Una versión pedida sin asset cayó a compilar en el VPS.');
+        $this->assertSame((int) $pedida->id, (int) $corrida->fresh()->ecommerce_version_id);
+        $this->assertSame('fallida', $corrida->fresh()->status);
+    }
+
+    /**
+     * Si la subida del SPA falla (SFTP, swap), el zip personalizado de storage/app/deployments se borra
+     * igual: no queda huérfano.
+     */
+    public function test_un_upload_spa_fallido_no_deja_el_zip_personalizado(): void
+    {
+        Http::fake();
+        $corrida  = $this->corrida('update');
+        $servicio = $this->espia($corrida);
+
+        $zip_local = storage_path('app/deployments/tienda_dist_' . $corrida->uuid . '.zip');
+        if (! is_dir(dirname($zip_local))) {
+            mkdir(dirname($zip_local), 0755, true);
+        }
+        $zip = new \ZipArchive();
+        $zip->open($zip_local, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+        $zip->addFromString('index.html', 'x');
+        $zip->addFromString('config.js', 'window.__CC_CONFIG__ = {};');
+        $zip->addFromString('img/relleno.bin', random_bytes(2048));
+        $zip->close();
+
+        $reflexion = new \ReflectionObject($servicio);
+        while ($reflexion !== false && ! $reflexion->hasProperty('tienda_dist_personalizado')) {
+            $reflexion = $reflexion->getParentClass();
+        }
+        $propiedad = $reflexion->getProperty('tienda_dist_personalizado');
+        $propiedad->setAccessible(true);
+        $propiedad->setValue($servicio, $zip_local);
+
+        $metodo = new \ReflectionMethod($servicio, 'tienda_artefacto_upload_spa');
+        $metodo->setAccessible(true);
+
+        try {
+            $metodo->invoke($servicio);
+            $this->fail('La subida tenía que fallar en el hosting espía.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('ESPIA: se intentó conectar al hosting', $e->getMessage());
+        }
+
+        $this->assertFileDoesNotExist($zip_local, 'Quedó el zip personalizado huérfano en storage/app/deployments.');
     }
 }
