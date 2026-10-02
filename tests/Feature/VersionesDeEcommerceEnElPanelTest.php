@@ -334,12 +334,17 @@ class VersionesDeEcommerceEnElPanelTest extends TestCase
             ->assertJsonPath('model.installations.0.ecommerce_version.version', '1.0.0');
     }
 
-    /** El botón del panel también marca si la versión la eligió quien lo apretó. */
+    /**
+     * El botón del panel marca si la versión la ELIGIÓ quien lo apretó. 🔴 El caso que manda la SPA
+     * real: el selector arranca con la última publicada y la manda siempre; ese id NO cuenta como
+     * elegido (si contara, la salida de emergencia de la vía vieja quedaba muerta desde el panel).
+     * Sólo un id distinto de la última es una elección.
+     */
     public function test_start_update_marca_si_la_version_fue_elegida(): void
     {
         Queue::fake();
         $elegida = $this->version('1.0.0');
-        $this->version('1.1.0');
+        $ultima  = $this->version('1.1.0');
 
         $a = $this->escenario();
         $this->postJson('/api/admin/ecommerce-installations/start-update', [
@@ -352,5 +357,16 @@ class VersionesDeEcommerceEnElPanelTest extends TestCase
 
         $this->assertTrue((bool) ClientEcommerceInstallation::where('client_ecommerce_id', $a['tienda']->id)->value('ecommerce_version_requested'));
         $this->assertFalse((bool) ClientEcommerceInstallation::where('client_ecommerce_id', $b['tienda']->id)->value('ecommerce_version_requested'));
+
+        /* Lo que manda admin-spa sin que nadie toque el selector: el id de la última publicada. */
+        $c = $this->escenario();
+        $this->postJson('/api/admin/ecommerce-installations/start-update', [
+            'client_id'            => $c['cliente']->id,
+            'ecommerce_version_id' => $ultima->id,
+        ])->assertStatus(201);
+
+        $corrida_c = ClientEcommerceInstallation::where('client_ecommerce_id', $c['tienda']->id)->first();
+        $this->assertSame((int) $ultima->id, (int) $corrida_c->ecommerce_version_id);
+        $this->assertFalse((bool) $corrida_c->ecommerce_version_requested, 'El id de la última publicada contó como versión elegida.');
     }
 }

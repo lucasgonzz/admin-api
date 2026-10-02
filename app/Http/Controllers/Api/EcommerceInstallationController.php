@@ -10,6 +10,7 @@ use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\Demo;
 use App\Models\EcommerceDeploymentLog;
+use App\Models\EcommerceVersion;
 use App\Services\DemoPathResolver;
 use App\Services\EcommerceInstallPrerequisites;
 use App\Services\EcommerceVersionService;
@@ -324,9 +325,11 @@ class EcommerceInstallationController extends BaseController
             'mode'                 => $mode,
             'status'               => 'pendiente',
             'ecommerce_version_id' => $resolucion['version'] === null ? null : $resolucion['version']->id,
-            // Si la versión la eligió quien apretó el botón: una pedida no cae nunca a compilar
-            // master aunque le falte un asset (ver ArtefactosDeReleaseDeTienda).
-            'ecommerce_version_requested' => $resolucion['version'] !== null && $resolucion['explicita'],
+            // Si la versión la ELIGIÓ quien apretó el botón: una pedida no cae nunca a compilar
+            // master aunque le falte un asset (ver ArtefactosDeReleaseDeTienda). Ver
+            // version_elegida_en_el_panel(): admin-spa manda siempre un id, y el de la última
+            // publicada no cuenta como elegida.
+            'ecommerce_version_requested' => $this->version_elegida_en_el_panel($resolucion),
         ]);
 
         // Despacha el job en background (cola por defecto del sistema).
@@ -335,6 +338,34 @@ class EcommerceInstallationController extends BaseController
         return response()->json([
             'model' => $this->fullModel('client_ecommerce_installation', $installation->id),
         ], 201);
+    }
+
+    /**
+     * ¿La versión de la corrida la ELIGIÓ quien apretó el botón del panel?
+     *
+     * 🔴 No alcanza con "vino ecommerce_version_id" (rechequeo independiente, 2/10/2026): el selector
+     * de admin-spa (EcommerceVersionSelect) arranca SIEMPRE con la última publicada elegida y la
+     * manda, así que con ese criterio todo botón del panel creaba una versión "pedida" y la salida de
+     * emergencia (con DEPLOY_PERMITIR_BUILD_EN_VPS, caer a compilar master si a la última le falta un
+     * asset) quedaba muerta desde el panel. Cuenta como elegida sólo si es DISTINTA de la última
+     * publicada: si alguien movió el selector a otra versión, esa sí es una elección.
+     *
+     * En `claude/*` el criterio sigue siendo el literal (vino en el pedido = pedida): ahí nadie manda
+     * una versión por defecto.
+     *
+     * @param  array{version: \App\Models\EcommerceVersion|null, explicita: bool, error: string|null}  $resolucion
+     *         Salida de EcommerceVersionService::resolve_for_run().
+     * @return bool
+     */
+    protected function version_elegida_en_el_panel(array $resolucion): bool
+    {
+        if ($resolucion['version'] === null || ! $resolucion['explicita']) {
+            return false;
+        }
+
+        $ultima = EcommerceVersion::latest_published();
+
+        return $ultima === null || (int) $ultima->id !== (int) $resolucion['version']->id;
     }
 
     /**
