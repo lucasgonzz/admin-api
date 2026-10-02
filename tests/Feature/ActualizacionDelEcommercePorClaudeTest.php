@@ -712,10 +712,12 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
      * fija la nueva, con las mismas tres rejas de antes apuntadas a la puerta nueva:
      *  a) Por comportamiento: updates y su lote siguen creando sólo `mode = update`; installs sin
      *     `dry_run=false` no crea nada; con `dry_run=false` crea exactamente UNA corrida `install`.
-     *  b) Por fuente: hay UN solo `ClientEcommerceInstallation::create(` en el controlador, su `mode`
-     *     es el parámetro validado contra `self::MODES`, y `self::MODO_INSTALACION` aparece en el
-     *     código SÓLO adentro de `installs_json()` (el que copie y pegue un método del panel, o le
-     *     pase el modo de instalación a `crear_corrida()` desde otro lado, rompe acá).
+     *  b) Por fuente, en TODOS los controladores de las rutas `api/claude/*` (y sus traits y padres de
+     *     app/), no sólo en éste: `self::MODO_INSTALACION` y el modo `'install'` sólo adentro de
+     *     `installs_json()`; UN solo `ClientEcommerceInstallation::create(`, adentro de `crear_corrida()`;
+     *     ningún otro camino de alta (`new`, `firstOrCreate`, `DB::table(...)->insert`, SQL crudo); y
+     *     todo `crear_corrida()` fuera de installs con `self::MODO_ACTUALIZACION`. Ver
+     *     `puertas_de_instalacion_fuera_de_installs()`.
      *  c) Por ruteo: ninguna ruta `api/claude/*` apunta a `EcommerceInstallationController` (el
      *     controlador del panel), y la única que llega a `installs_json` es
      *     `POST api/claude/ecommerce/installs`.
@@ -794,50 +796,29 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
             ClientEcommerceInstallation::query()->where('mode', 'install')->where('client_ecommerce_id', $c['tienda']->id)->count()
         );
 
-        /* (b) Fuente, sin las líneas de comentario (el docblock de la clase HABLA de la regla y no
-           puede romper el test por su propia documentación). */
-        $archivo = app_path('Http/Controllers/Api/ClaudeEcommerceOpsController.php');
-        $lineas  = file($archivo);
-        $this->assertNotFalse($lineas);
-
-        $solo_codigo = [];
-        foreach ($lineas as $numero => $linea) {
-            $recortada = ltrim($linea);
-            if ($recortada === '' || strpos($recortada, '*') === 0 || strpos($recortada, '/*') === 0 || strpos($recortada, '//') === 0) {
-                continue;
-            }
-            $solo_codigo[$numero + 1] = $linea;
-        }
-        $fuente = implode('', $solo_codigo);
-
-        $this->assertSame(
-            1,
-            substr_count($fuente, 'ClientEcommerceInstallation::create('),
-            'Hay más de un lugar que crea corridas de ecommerce: la regla tiene que poder verificarse en uno solo.'
-        );
-
-        $encontrado = preg_match("/ClientEcommerceInstallation::create\(\[(.*?)\]\);/s", $fuente, $coincidencia);
-        $this->assertSame(1, $encontrado, 'No se encontró la creación de la corrida: revisá el regex.');
-        $this->assertMatchesRegularExpression("/'mode'\s*=>\s*\\\$modo\b/", $coincidencia[1]);
-        $this->assertStringContainsString('in_array($modo, self::MODES, true)', $fuente, 'crear_corrida() dejó de validar el modo.');
+        /* (b) Fuente: TODOS los controladores de las rutas api/claude/* (más sus traits y padres de
+           app/), no sólo éste. Rechequeo independiente del 2/10/2026: la versión anterior de esta reja
+           miraba un solo archivo, y otra puerta en otro controlador no la veía. */
         $this->assertSame(['install', 'update'], ClaudeEcommerceOpsController::MODES);
         $this->assertSame('update', ClaudeEcommerceOpsController::MODO_ACTUALIZACION);
         $this->assertSame('install', ClaudeEcommerceOpsController::MODO_INSTALACION);
 
-        $metodo = new \ReflectionMethod(ClaudeEcommerceOpsController::class, 'installs_json');
-        $usos   = 0;
-        foreach ($solo_codigo as $numero => $linea) {
-            if (strpos($linea, 'self::MODO_INSTALACION') === false) {
-                continue;
-            }
-            $usos++;
-            $this->assertTrue(
-                $numero >= $metodo->getStartLine() && $numero <= $metodo->getEndLine(),
-                'self::MODO_INSTALACION se usa fuera de installs_json() (línea ' . $numero . '): la instalación '
-                    . 'inicial tiene que tener una sola puerta.'
-            );
-        }
-        $this->assertGreaterThan(0, $usos, 'installs_json() dejó de crear la corrida con self::MODO_INSTALACION.');
+        /* Que la reja mire de verdad: si el escaneo no encontrara archivos, no podría fallar nunca. */
+        $archivos = array_map('basename', $this->archivos_de_claude());
+        $this->assertContains('ClaudeEcommerceOpsController.php', $archivos);
+        $this->assertContains('ClaudeUpgradeOpsController.php', $archivos);
+        $this->assertContains('RespuestasParaClaude.php', $archivos, 'El escaneo no sigue los traits de los controladores.');
+        $this->assertGreaterThanOrEqual(20, count($archivos));
+
+        /* La única alta: crear_corrida(), con el modo como parámetro validado contra MODES. */
+        $fuente = $this->codigo_sin_comentarios(app_path('Http/Controllers/Api/ClaudeEcommerceOpsController.php'));
+        $encontrado = preg_match("/ClientEcommerceInstallation::create\(\[(.*?)\]\);/s", $fuente, $coincidencia);
+        $this->assertSame(1, $encontrado, 'No se encontró la creación de la corrida: revisá el regex.');
+        $this->assertMatchesRegularExpression('/\'mode\'\s*=>\s*\$modo\b/', $coincidencia[1]);
+        $this->assertStringContainsString('in_array($modo, self::MODES, true)', $fuente, 'crear_corrida() dejó de validar el modo.');
+
+        $violaciones = $this->puertas_de_instalacion_fuera_de_installs();
+        $this->assertSame([], $violaciones, 'Hay otra puerta para crear instalaciones por claude/*: ' . implode(' | ', $violaciones));
 
         /* (c) Ruteo. */
         $rutas_a_installs = [];
@@ -1159,5 +1140,236 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
         $this->assertStringContainsString('tiene que ser una lista', $texto);
         $this->assertStringNotContainsString('must be an array', $texto);
         $this->assertSame($antes, $this->corridas_totales());
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | La reja de fuente de la regla de instalación (rechequeo independiente del 2/10/2026)
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Archivos de app/ que atienden rutas api/claude/*: los controladores (por las rutas y por el
+     * nombre Claude*.php) y, de cada uno, sus traits y sus clases padre que vivan en app/.
+     *
+     * @return array<int, string> Rutas absolutas, sin repetir.
+     */
+    private function archivos_de_claude(): array
+    {
+        $clases = [];
+        foreach (Route::getRoutes() as $ruta) {
+            if (strpos($ruta->uri(), 'api/claude/') !== 0) {
+                continue;
+            }
+            $accion = $ruta->getActionName();
+            if (strpos($accion, '@') !== false) {
+                $clases[] = substr($accion, 0, strpos($accion, '@'));
+            }
+        }
+        foreach ((array) glob(app_path('Http/Controllers/Api/Claude*.php')) as $archivo) {
+            $clases[] = 'App\\Http\\Controllers\\Api\\' . basename($archivo, '.php');
+        }
+
+        $archivos  = [];
+        $pendientes = array_values(array_unique($clases));
+        $vistas     = [];
+        while (! empty($pendientes)) {
+            $clase = array_shift($pendientes);
+            if (isset($vistas[$clase]) || (! class_exists($clase) && ! trait_exists($clase))) {
+                continue;
+            }
+            $vistas[$clase] = true;
+
+            $reflexion = new \ReflectionClass($clase);
+            $archivo   = (string) $reflexion->getFileName();
+            if ($archivo === '' || strpos(str_replace('\\', '/', $archivo), str_replace('\\', '/', app_path())) !== 0) {
+                continue;
+            }
+            $archivos[$archivo] = true;
+
+            foreach ($reflexion->getTraitNames() as $trait) {
+                $pendientes[] = $trait;
+            }
+            if ($reflexion->getParentClass() !== false) {
+                $pendientes[] = $reflexion->getParentClass()->getName();
+            }
+        }
+
+        return array_keys($archivos);
+    }
+
+    /**
+     * Contenido de un archivo con las líneas de comentario en blanco (se conservan los saltos para
+     * que los números de línea sigan valiendo): un docblock que HABLA de la regla no la rompe.
+     *
+     * @param string $archivo
+     *
+     * @return string
+     */
+    private function codigo_sin_comentarios(string $archivo): string
+    {
+        $salida = '';
+        foreach ((array) file($archivo) as $linea) {
+            $recortada = ltrim((string) $linea);
+            $es_comentario = strpos($recortada, '*') === 0 || strpos($recortada, '/*') === 0 || strpos($recortada, '//') === 0;
+            $salida .= $es_comentario ? "\n" : rtrim((string) $linea, "\r\n") . "\n";
+        }
+
+        return $salida;
+    }
+
+    /**
+     * Número de línea (desde 1) de un offset del texto.
+     *
+     * @param string $texto
+     * @param int    $offset
+     *
+     * @return int
+     */
+    private function linea_de(string $texto, int $offset): int
+    {
+        return substr_count(substr($texto, 0, $offset), "\n") + 1;
+    }
+
+    /**
+     * Argumentos de primer nivel de una llamada, a partir del paréntesis que la abre.
+     *
+     * @param string $texto
+     * @param int    $abre  Offset del "(".
+     *
+     * @return array<int, string>
+     */
+    private function argumentos_de_la_llamada(string $texto, int $abre): array
+    {
+        $profundidad = 0;
+        $actual      = '';
+        $argumentos  = [];
+        for ($i = $abre; $i < strlen($texto); $i++) {
+            $c = $texto[$i];
+            if ($c === '(' || $c === '[') {
+                $profundidad++;
+                if ($profundidad === 1) {
+                    continue;
+                }
+            } elseif ($c === ')' || $c === ']') {
+                $profundidad--;
+                if ($profundidad === 0) {
+                    $argumentos[] = trim($actual);
+                    break;
+                }
+            } elseif ($c === ',' && $profundidad === 1) {
+                $argumentos[] = trim($actual);
+                $actual       = '';
+                continue;
+            }
+            $actual .= $c;
+        }
+
+        return $argumentos;
+    }
+
+    /**
+     * Todo lo que, en los archivos de claude/*, puede crear una corrida de instalación por fuera de
+     * `installs_json()`. Vacío = la única puerta es installs, pasando por `crear_corrida()`.
+     *
+     * Se marca:
+     *  - `self::MODO_INSTALACION` fuera de installs_json (salvo su propia declaración);
+     *  - `'install'` usado como modo (`'mode' => 'install'`, `->mode = 'install'`) en cualquier lado
+     *    fuera de installs_json, y en ClaudeEcommerceOpsController cualquier `'install'` fuera de las
+     *    declaraciones de constantes y de installs_json;
+     *  - `ClientEcommerceInstallation::create(` en cualquier lado que no sea `crear_corrida()` (y que
+     *    haya exactamente uno), `new ClientEcommerceInstallation`, `forceCreate`/`firstOrCreate`/
+     *    `updateOrCreate`/`insert` sobre el modelo, `installations()->create/save`, y
+     *    `DB::table('client_ecommerce_installations')` con insert/upsert, o un `insert into` crudo;
+     *  - cualquier `->crear_corrida(` fuera de installs_json cuyo modo no sea `self::MODO_ACTUALIZACION`
+     *    (y dentro de installs_json, cuyo modo no sea `self::MODO_INSTALACION`).
+     *
+     * @return array<int, string> Descripción de cada violación ("archivo:línea qué").
+     */
+    private function puertas_de_instalacion_fuera_de_installs(): array
+    {
+        $installs  = new \ReflectionMethod(ClaudeEcommerceOpsController::class, 'installs_json');
+        $crear     = new \ReflectionMethod(ClaudeEcommerceOpsController::class, 'crear_corrida');
+        $principal = str_replace('\\', '/', (string) $installs->getFileName());
+
+        $dentro = function (string $archivo, int $linea, \ReflectionMethod $metodo) use ($principal): bool {
+            return str_replace('\\', '/', $archivo) === $principal
+                && $linea >= $metodo->getStartLine() && $linea <= $metodo->getEndLine();
+        };
+
+        $violaciones = [];
+        $creates     = 0;
+
+        foreach ($this->archivos_de_claude() as $archivo) {
+            $codigo  = $this->codigo_sin_comentarios($archivo);
+            $nombre  = basename($archivo);
+            $lineas  = explode("\n", $codigo);
+            $es_principal = str_replace('\\', '/', $archivo) === $principal;
+
+            foreach ($lineas as $i => $texto) {
+                $numero = $i + 1;
+
+                if (strpos($texto, 'MODO_INSTALACION') !== false
+                    && strpos($texto, 'const MODO_INSTALACION') === false
+                    && ! $dentro($archivo, $numero, $installs)) {
+                    $violaciones[] = $nombre . ':' . $numero . ' usa MODO_INSTALACION fuera de installs_json';
+                }
+
+                if (preg_match('/[\'"]mode[\'"]\s*=>\s*[\'"]install[\'"]|->mode\s*=\s*[\'"]install[\'"]/', $texto) === 1
+                    && ! $dentro($archivo, $numero, $installs)) {
+                    $violaciones[] = $nombre . ':' . $numero . " escribe mode 'install'";
+                }
+
+                if ($es_principal && preg_match('/[\'"]install[\'"]/', $texto) === 1
+                    && strpos(ltrim($texto), 'const ') !== 0
+                    && ! $dentro($archivo, $numero, $installs)) {
+                    $violaciones[] = $nombre . ':' . $numero . " usa el literal 'install' fuera de installs_json";
+                }
+
+                if (strpos($texto, 'ClientEcommerceInstallation::create(') !== false) {
+                    $creates++;
+                    if (! $dentro($archivo, $numero, $crear)) {
+                        $violaciones[] = $nombre . ':' . $numero . ' crea corridas fuera de crear_corrida()';
+                    }
+                }
+
+                if (preg_match('/new\s+[\\\\\w]*ClientEcommerceInstallation\b|ClientEcommerceInstallation::(forceCreate|firstOrCreate|updateOrCreate|insert|insertGetId|upsert)\(|installations\(\)->(create|save|forceCreate|firstOrCreate|updateOrCreate)\(/', $texto) === 1) {
+                    $violaciones[] = $nombre . ':' . $numero . ' crea una corrida por otro camino';
+                }
+
+                if (preg_match('/insert\s+into\s+`?client_ecommerce_installations/i', $texto) === 1) {
+                    $violaciones[] = $nombre . ':' . $numero . ' inserta corridas con SQL crudo';
+                }
+            }
+
+            /* DB::table(...) sobre la tabla: se mira la sentencia entera (hasta el `;`), que puede
+               ocupar varias líneas. Las lecturas son legítimas; un insert/upsert no. */
+            $desde = 0;
+            while (($pos = strpos($codigo, "DB::table('client_ecommerce_installations", $desde)) !== false) {
+                $fin       = strpos($codigo, ';', $pos);
+                $sentencia = substr($codigo, $pos, $fin === false ? null : $fin - $pos);
+                if (preg_match('/->(insert|insertGetId|insertOrIgnore|upsert|updateOrInsert)\(/', $sentencia) === 1) {
+                    $violaciones[] = $nombre . ':' . $this->linea_de($codigo, $pos) . ' inserta corridas con DB::table';
+                }
+                $desde = $pos + 1;
+            }
+
+            /* Cada llamada a crear_corrida(): el segundo argumento es el modo. */
+            $desde = 0;
+            while (($pos = strpos($codigo, '->crear_corrida(', $desde)) !== false) {
+                $linea      = $this->linea_de($codigo, $pos);
+                $argumentos = $this->argumentos_de_la_llamada($codigo, $pos + strlen('->crear_corrida'));
+                $modo       = isset($argumentos[1]) ? $argumentos[1] : '';
+                $esperado   = $dentro($archivo, $linea, $installs) ? 'self::MODO_INSTALACION' : 'self::MODO_ACTUALIZACION';
+                if ($modo !== $esperado) {
+                    $violaciones[] = $nombre . ':' . $linea . ' llama crear_corrida() con modo «' . $modo . '» (se esperaba ' . $esperado . ')';
+                }
+                $desde = $pos + 1;
+            }
+        }
+
+        if ($creates !== 1) {
+            $violaciones[] = 'hay ' . $creates . ' ClientEcommerceInstallation::create( en claude/* (tiene que haber exactamente uno, en crear_corrida())';
+        }
+
+        return $violaciones;
     }
 }
