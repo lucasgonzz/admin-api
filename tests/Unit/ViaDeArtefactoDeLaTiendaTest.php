@@ -44,6 +44,14 @@ class ViaDeArtefactoDeLaTiendaTest extends TestCase
         'VUE_APP_FIREBASE_API_KEY',
     ];
 
+    /**
+     * Carpetas temporales que crearon los tests de bash real: se borran en tearDown(), pase lo que
+     * pase con el test (rechequeo independiente del 2/10/2026: quedaban `cc-tienda-bash-*` en el TEMP).
+     *
+     * @var array<int, string>
+     */
+    private $carpetas_temporales = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -56,6 +64,39 @@ class ViaDeArtefactoDeLaTiendaTest extends TestCase
                 'VUE_APP_FIREBASE_API_KEY'    => 'firebase-key',
             ],
         ]);
+    }
+
+    protected function tearDown(): void
+    {
+        foreach ($this->carpetas_temporales as $carpeta) {
+            $this->borrar_arbol($carpeta);
+        }
+        $this->carpetas_temporales = [];
+
+        parent::tearDown();
+    }
+
+    /**
+     * Borra una carpeta entera, archivos ocultos incluidos.
+     *
+     * @param string $ruta
+     *
+     * @return void
+     */
+    private function borrar_arbol(string $ruta): void
+    {
+        if (! is_dir($ruta)) {
+            return;
+        }
+
+        $iterador = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($ruta, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($iterador as $archivo) {
+            $archivo->isDir() ? @rmdir($archivo->getPathname()) : @unlink($archivo->getPathname());
+        }
+        @rmdir($ruta);
     }
 
     /**
@@ -330,6 +371,7 @@ class ViaDeArtefactoDeLaTiendaTest extends TestCase
     {
         $dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'cc-tienda-bash-' . uniqid();
         mkdir($dir, 0755, true);
+        $this->carpetas_temporales[] = $dir;
 
         return $dir;
     }
