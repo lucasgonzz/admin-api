@@ -11,6 +11,7 @@ use App\Models\ClientSshCredential;
 use App\Models\EcommerceVersion;
 use App\Models\EnvTemplate;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Tests\TestCase;
@@ -92,10 +93,11 @@ class InstalacionDelEcommercePorClaudeTest extends TestCase
      * @param string $nombre
      * @param string $status_tienda pending | active | installing.
      * @param bool   $con_api       False deja al cliente sin API de empresa activa.
+     * @param string $hosting       hosting_type de la API de empresa (shared_hosting | vps).
      *
      * @return array{cliente: Client, tienda: ClientEcommerce}
      */
-    private function escenario(string $nombre, string $status_tienda = 'pending', bool $con_api = true): array
+    private function escenario(string $nombre, string $status_tienda = 'pending', bool $con_api = true, string $hosting = 'shared_hosting'): array
     {
         $client                  = new Client();
         $client->name            = $nombre;
@@ -113,7 +115,7 @@ class InstalacionDelEcommercePorClaudeTest extends TestCase
             $api->client_id    = $client->id;
             $api->url          = 'https://api-' . Str::slug($nombre) . '.test';
             $api->path         = 'instalar/' . Str::random(6);
-            $api->hosting_type = 'shared_hosting';
+            $api->hosting_type = $hosting;
             $api->save();
 
             $client->active_client_api_id = $api->id;
@@ -423,5 +425,119 @@ class InstalacionDelEcommercePorClaudeTest extends TestCase
         $corrida = ClientEcommerceInstallation::where('client_ecommerce_id', $e['tienda']->id)->first();
         $this->assertSame((int) $pedida->id, (int) $corrida->ecommerce_version_id);
         $this->assertTrue((bool) $corrida->ecommerce_version_requested);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Rechequeo independiente del 2/10/2026
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un cliente cuya empresa vive en el VPS NO se instala por acá: el pipeline sube tienda-api al
+     * shared y le copia el .env de la empresa (DB_HOST=127.0.0.1 del MySQL del VPS), y la tienda
+     * quedaría apuntando a otro MySQL con la corrida `completada`. 422 que manda al carril manual.
+     */
+    public function test_un_cliente_con_la_empresa_en_el_vps_no_se_instala(): void
+    {
+        Queue::fake();
+        $this->version('1.0.0');
+        $e = $this->escenario('Tienda De Cliente VPS', 'pending', true, 'vps');
+
+        foreach ([true, false] as $dry_run) {
+            $respuesta = $this->postJson('/api/claude/ecommerce/installs', [
+                'client_id'           => $e['cliente']->id,
+                'confirm_client_name' => 'Tienda De Cliente VPS',
+                'dry_run'             => $dry_run,
+            ], $this->headers());
+
+            $respuesta->assertStatus(422);
+            $respuesta->assertJsonPath('hosting_type_empresa', 'vps');
+            $cuerpo = $this->cuerpo($respuesta);
+            $this->assertStringContainsString('vive en el VPS', $cuerpo);
+            $this->assertStringContainsString('hosting compartido', $cuerpo);
+            $this->assertStringContainsString('/instalar-tienda', $cuerpo);
+            $this->assertStringContainsString('Carril B', $cuerpo);
+        }
+
+        $this->assertSame(0, $this->corridas_de($e['tienda']));
+        Queue::assertNothingPushed();
+    }
+
+    /** El dry-run dice dónde vive la empresa del cliente. */
+    public function test_el_dry_run_muestra_el_hosting_de_la_empresa(): void
+    {
+        Queue::fake();
+        $this->version('1.0.0');
+        $e = $this->escenario('Tienda Con Empresa En Shared');
+
+        $this->postJson('/api/claude/ecommerce/installs', [
+            'client_id'           => $e['cliente']->id,
+            'confirm_client_name' => 'Tienda Con Empresa En Shared',
+        ], $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('hosting_type_empresa', 'shared_hosting');
+    }
+
+    /**
+     * 🔴 Dos POST simultáneos no pueden crear dos instalaciones: el re-chequeo ("pending y sin corrida
+     * en curso") y el alta van ADENTRO de una transacción, con la fila de la tienda bloqueada
+     * (SELECT ... FOR UPDATE) antes. Se mide con las consultas que efectivamente corren: el lock, el
+     * re-chequeo y el INSERT, en ese orden y a un nivel de transacción mayor que el del test.
+     */
+    public function test_el_rechequeo_y_el_alta_van_en_una_transaccion_con_la_tienda_bloqueada(): void
+    {
+        Queue::fake();
+        $this->version('1.0.0');
+        $e = $this->escenario('Tienda Bajo Lock');
+
+        $nivel_base = DB::transactionLevel();
+        $consultas  = [];
+        DB::listen(function ($consulta) use (&$consultas) {
+            $consultas[] = ['sql' => strtolower($consulta->sql), 'nivel' => $consulta->connection->transactionLevel()];
+        });
+
+        $this->postJson('/api/claude/ecommerce/installs', [
+            'client_id'           => $e['cliente']->id,
+            'confirm_client_name' => 'Tienda Bajo Lock',
+            'dry_run'             => false,
+        ], $this->headers())->assertStatus(202);
+
+        $indice = function (callable $condicion) use ($consultas) {
+            foreach ($consultas as $i => $consulta) {
+                if ($condicion($consulta['sql'])) {
+                    return $i;
+                }
+            }
+
+            return null;
+        };
+
+        $lock = $indice(function ($sql) {
+            return strpos($sql, 'from `client_ecommerces`') !== false && strpos($sql, 'for update') !== false;
+        });
+        $insert = $indice(function ($sql) {
+            return strpos($sql, 'insert into `client_ecommerce_installations`') !== false;
+        });
+
+        $this->assertNotNull($lock, 'No se bloqueó la fila de la tienda (SELECT ... FOR UPDATE).');
+        $this->assertNotNull($insert, 'No se creó la corrida.');
+        $this->assertLessThan($insert, $lock, 'El lock tiene que ir antes del alta.');
+
+        $rechequeo = null;
+        for ($i = $lock + 1; $i < $insert; $i++) {
+            if (strpos($consultas[$i]['sql'], 'from `client_ecommerce_installations`') !== false) {
+                $rechequeo = $i;
+            }
+        }
+        $this->assertNotNull($rechequeo, 'No se volvió a mirar la corrida en curso entre el lock y el alta.');
+
+        foreach ([$lock, $rechequeo, $insert] as $i) {
+            $this->assertGreaterThan(
+                $nivel_base,
+                $consultas[$i]['nivel'],
+                'Una consulta del re-chequeo o del alta corrió fuera de la transacción: ' . $consultas[$i]['sql']
+            );
+        }
+
+        $this->assertSame(1, $this->corridas_de($e['tienda']));
     }
 }

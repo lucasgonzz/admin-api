@@ -46,7 +46,10 @@ use Illuminate\Support\Facades\DB;
  *  - las mismas precondiciones que el botón del panel (configuración, credenciales SSH, ninguna corrida
  *    en curso, plantilla de `.env` de tienda y la API de empresa de donde salen DB_* y APP_KEY, en
  *    `EcommerceInstallPrerequisites`, la misma clase que usa el panel);
- *  - una versión de ecommerce publicada (sin ninguna, 422 sin crear la corrida).
+ *  - la empresa del cliente en el hosting compartido: la tienda va donde está el ERP, y este
+ *    pipeline sólo instala en el shared (un cliente de VPS va por el carril manual de CloudPanel);
+ *  - una versión de ecommerce publicada (sin ninguna, 422 sin crear la corrida);
+ *  - el re-chequeo y el alta con la fila de la tienda bloqueada (dos POST simultáneos no crean dos).
  * La regla nueva está verificada mecánicamente en
  * `ActualizacionDelEcommercePorClaudeTest::test_la_unica_instalacion_inicial_por_claude_es_installs_con_sus_frenos()`:
  * UN solo `ClientEcommerceInstallation::create()` en este fuente, `self::MODO_INSTALACION` usado sólo
@@ -1132,13 +1135,17 @@ class ClaudeEcommerceOpsController extends Controller
      *   4. Las mismas precondiciones que la actualización: configuración (dominio, spa_url, api_url),
      *      credenciales SSH y ninguna corrida pendiente o en curso.
      *   5. Las de instalación del panel (`EcommerceInstallPrerequisites`, la misma clase): plantilla
-     *      de `.env` de tienda y la API de empresa de donde salen DB_* y APP_KEY.
+     *      de `.env` de tienda y la API de empresa de donde salen DB_* y APP_KEY. Y la empresa tiene
+     *      que vivir en el hosting compartido: la tienda va donde está el ERP, y este pipeline sólo
+     *      instala en el shared (un cliente de VPS va por el carril manual de CloudPanel).
      *   6. Una versión de ecommerce publicada: la pedida (`ecommerce_version_id` / `version`) o la
      *      última. Sin ninguna, 422 acá mismo —no se crea una corrida que va a fallar—.
      *   7. `dry_run` (default TRUE): devuelve lo que haría, con los paths resueltos y la versión.
      *
-     * Con `dry_run=false` crea UNA corrida `install` marcada como de Claude y la encola con
-     * `onConnection(self::CONEXION_DE_COLA)`, igual que las actualizaciones: 202, sin esperar.
+     * Con `dry_run=false` vuelve a mirar "pending y sin corrida en curso" con la fila de la tienda
+     * BLOQUEADA (`lockForUpdate()` en una transacción), crea UNA corrida `install` marcada como de
+     * Claude y, después del commit, la encola con `onConnection(self::CONEXION_DE_COLA)`, igual que
+     * las actualizaciones: 202, sin esperar.
      *
      * @param Request $request Body: client_id, confirm_client_name, ecommerce_version_id?, version?, dry_run?.
      *
@@ -1229,6 +1236,31 @@ class ClaudeEcommerceOpsController extends Controller
             );
         }
 
+        /* --- Freno 5 bis (rechequeo independiente, 2/10/2026): la tienda va donde está el ERP. ---
+           🔴 El pipeline de ecommerce sube tienda-api SIEMPRE al hosting compartido (lo dice
+           EcommerceInstallationService::step_write_env(): "tienda-api siempre vive en el hosting
+           compartido"), y write_env le copia el .env de la empresa del cliente. Si esa empresa vive en
+           el VPS, el .env trae DB_HOST=127.0.0.1 del MySQL del VPS: la corrida termina `completada` y
+           la tienda queda en el shared apuntando a otro MySQL, sin poder leer un solo artículo. Para un
+           cliente de VPS el módulo de ecommerce del admin NO se usa: la tienda se instala a mano en
+           CloudPanel (/instalar-tienda, Carril B).
+           ⚠️ Sólo acá, no en updates: una actualización no escribe .env, y las tiendas de clientes de
+           VPS que ya viven en el shared con puente a la base del VPS se siguen actualizando. */
+        $hosting_empresa = $this->hosting_de_la_empresa($client);
+        if ($hosting_empresa !== 'shared_hosting') {
+            return $this->error_422(
+                'La empresa de este cliente vive en el VPS (client_apis.hosting_type = ' . $hosting_empresa . '): el '
+                    . 'pipeline de ecommerce del admin sólo instala tiendas en el hosting compartido, y la tienda '
+                    . 'quedaría apuntando a otro MySQL (el .env de la empresa trae DB_HOST=127.0.0.1 del VPS). Este caso '
+                    . 'va por el carril manual: /instalar-tienda, Carril B (CloudPanel). No se creó nada.',
+                [
+                    'client_id'            => (int) $client->id,
+                    'client_ecommerce_id'  => (int) $tienda->id,
+                    'hosting_type_empresa' => $hosting_empresa,
+                ]
+            );
+        }
+
         /* --- Freno 6: la versión. A diferencia de updates, sin ninguna publicada no se crea nada. --- */
         $resolucion = (new EcommerceVersionService())->resolve_for_run(
             $request->input('ecommerce_version_id'),
@@ -1272,6 +1304,7 @@ class ClaudeEcommerceOpsController extends Controller
                 'spa_url'             => $tienda->spa_url,
                 'api_url'             => $tienda->api_url,
                 'paths'               => $paths,
+                'hosting_type_empresa' => $hosting_empresa,
                 'ecommerce_version'   => $version->compact_payload(),
                 'version_pedida'      => (bool) $resolucion['explicita'],
                 'precondiciones'      => [
@@ -1293,7 +1326,39 @@ class ClaudeEcommerceOpsController extends Controller
             ], 200);
         }
 
-        $corrida = $this->crear_corrida($tienda, self::MODO_INSTALACION, (int) $version->id, $resolucion['explicita']);
+        /* 🔴 Re-chequeo y alta bajo lock (rechequeo independiente, 2/10/2026). Los frenos de arriba
+           leen sin bloquear: dos POST simultáneos con dry_run=false pasaban los dos y creaban DOS
+           instalaciones sobre la misma tienda. Adentro de la transacción se bloquea la fila de la tienda
+           con lockForUpdate(), se vuelve a mirar que siga en pending y sin corrida pendiente ni en curso,
+           y recién ahí se crea la corrida: el segundo POST espera el lock y encuentra la corrida del
+           primero. El dispatch va DESPUÉS del commit, como en el lote: ningún job apunta a una fila que
+           una transacción revirtió. */
+        $resultado = DB::transaction(function () use ($tienda, $version, $resolucion) {
+            $bloqueada = ClientEcommerce::query()->whereKey($tienda->id)->lockForUpdate()->first();
+
+            if ($bloqueada === null || $bloqueada->status !== self::ESTADO_TIENDA_SIN_INSTALAR) {
+                return 'la tienda dejó de estar sin instalar (status '
+                    . ($bloqueada === null ? 'inexistente' : $bloqueada->status) . ')';
+            }
+
+            $ocupada = ClientEcommerceInstallation::query()
+                ->where('client_ecommerce_id', $bloqueada->id)
+                ->whereIn('status', self::ESTADOS_QUE_OCUPAN_LA_TIENDA)
+                ->exists();
+            if ($ocupada) {
+                return 'ya hay una corrida en curso para esta tienda';
+            }
+
+            return $this->crear_corrida($bloqueada, self::MODO_INSTALACION, (int) $version->id, $resolucion['explicita']);
+        });
+
+        if (! $resultado instanceof ClientEcommerceInstallation) {
+            return $this->error_422(
+                'No se puede instalar la tienda de este cliente: ' . $resultado . '. No se creó nada.',
+                ['client_id' => (int) $client->id, 'client_ecommerce_id' => (int) $tienda->id]
+            );
+        }
+        $corrida = $resultado;
 
         /* 🔴 onConnection explícito, igual que las actualizaciones: nunca el pipeline adentro del request. */
         RunEcommerceInstallationJob::dispatch($corrida->uuid)->onConnection(self::CONEXION_DE_COLA);
@@ -1749,6 +1814,24 @@ class ClaudeEcommerceOpsController extends Controller
     /* ==============================================================================================
      | Escritura y armado de respuestas
      |============================================================================================= */
+
+    /**
+     * Dónde vive la empresa (ERP) de un cliente: el `hosting_type` de su API de empresa activa.
+     *
+     * La usa el freno de `installs_json()` (la tienda va donde está el ERP). La columna es NOT NULL
+     * con default `shared_hosting`; sin API activa devuelve `sin_api_activa` (no debería llegar acá:
+     * `EcommerceInstallPrerequisites` ya lo frena antes).
+     *
+     * @param Client $client Cliente dueño de la tienda.
+     *
+     * @return string `shared_hosting`, `vps` o `sin_api_activa`.
+     */
+    private function hosting_de_la_empresa(Client $client)
+    {
+        $api = $client->active_client_api;
+
+        return $api === null ? 'sin_api_activa' : (string) $api->hosting_type;
+    }
 
     /**
      * Crea la fila de la corrida, siempre marcada como de Claude. 🔴 Es el ÚNICO lugar del

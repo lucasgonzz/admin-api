@@ -1128,8 +1128,10 @@ return [
                 'La tienda tiene que estar registrada (POST claude/ecommerce/stores) y en status "pending": si está "active" ya está instalada (422: se usa POST claude/ecommerce/updates) y si está "installing" hay una corrida en curso (422).',
                 'Las precondiciones de la actualización: dominio, spa_url y api_url; credenciales SSH del VPS de builds y del hosting compartido; ninguna corrida pendiente ni en curso.',
                 'Las de instalación del panel (la misma clase, EcommerceInstallPrerequisites): plantilla de .env de tienda cargada y API de empresa activa del cliente, de donde salen DB_* y APP_KEY.',
+                '🔴 La empresa del cliente tiene que vivir en el hosting compartido (client_apis.hosting_type = shared_hosting): este pipeline sube tienda-api siempre al shared y le copia el .env de la empresa, así que con la empresa en el VPS la tienda quedaría apuntando a otro MySQL. Un cliente de VPS es 422 y va por el carril manual (/instalar-tienda, Carril B, en CloudPanel). El dry_run lo muestra en hosting_type_empresa.',
                 'Una versión de ecommerce publicada: la pedida (si no existe, no está published o id y código no coinciden, 422) o la última. Sin ninguna publicada, 422 sin crear la corrida.',
-                'Crea UNA sola corrida mode="install", created_via="claude", y la encola con onConnection("database"): nunca corre el pipeline adentro del request.',
+                'El re-chequeo (tienda en pending y sin corrida pendiente ni en curso) y el alta van en una transacción con la fila de la tienda bloqueada (lockForUpdate): dos POST simultáneos con dry_run=false no crean dos instalaciones.',
+                'Crea UNA sola corrida mode="install", created_via="claude", y la encola después del commit con onConnection("database"): nunca corre el pipeline adentro del request.',
             ],
             'parametros'   => [
                 ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente cuya tienda (ya registrada y en pending) se instala.'],
