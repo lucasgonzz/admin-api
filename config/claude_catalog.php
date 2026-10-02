@@ -1037,7 +1037,7 @@ return [
                 'El dominio va pelado y válido, y NO puede ser de comerciocity.com/.store/.com.ar: esas zonas son del ERP y de las demos.',
                 'El dominio no puede estar cargado en otra tienda, sea de cliente o de demo.',
                 'dry_run por defecto true: la primera llamada devuelve exactamente lo que escribiría, incluidos los paths derivados.',
-                '🔴 No crea ninguna instalación: registrar la tienda e instalarla son dos operaciones distintas, y la segunda sigue sin ruta claude/*.',
+                '🔴 No crea ninguna instalación: registrar la tienda e instalarla son dos operaciones distintas. La segunda es POST claude/ecommerce/installs (desde el 2/10/2026), con sus propios frenos.',
             ],
             'parametros'   => [
                 ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente dueño de la tienda. Tiene que existir y no tener ya una tienda cargada.'],
@@ -1117,6 +1117,29 @@ return [
             ],
         ],
 
+        'POST api/claude/ecommerce/installs' => [
+            'para_que'     => '🔴 INSTALA DESDE CERO la tienda de UN cliente (decisión de Lucas, 2/10/2026): es la única ruta claude/* que crea una corrida mode="install". Baja los artefactos de la versión de ecommerce (la pedida o la última publicada), sube SPA y API al hosting del negocio, ESCRIBE el .env de tienda-api (base de datos y APP_KEY copiadas de la empresa del cliente) y finaliza. La tienda tiene que estar registrada antes con POST claude/ecommerce/stores.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'dry_run por defecto true: sin dry_run=false explícito no crea nada y devuelve lo que haría (cliente, dominio, paths, versión y precondiciones).',
+                'Lista blanca de parámetros: cualquier otra clave es 422 y no se crea nada.',
+                'confirm_client_name exacto, sin revelar el nombre correcto cuando falla.',
+                'La tienda tiene que estar registrada (POST claude/ecommerce/stores) y en status "pending": si está "active" ya está instalada (422: se usa POST claude/ecommerce/updates) y si está "installing" hay una corrida en curso (422).',
+                'Las precondiciones de la actualización: dominio, spa_url y api_url; credenciales SSH del VPS de builds y del hosting compartido; ninguna corrida pendiente ni en curso.',
+                'Las de instalación del panel (la misma clase, EcommerceInstallPrerequisites): plantilla de .env de tienda cargada y API de empresa activa del cliente, de donde salen DB_* y APP_KEY.',
+                'Una versión de ecommerce publicada: la pedida (si no existe, no está published o id y código no coinciden, 422) o la última. Sin ninguna publicada, 422 sin crear la corrida.',
+                'Crea UNA sola corrida mode="install", created_via="claude", y la encola con onConnection("database"): nunca corre el pipeline adentro del request.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => true, 'validacion' => 'required|integer|min:1', 'que_es' => 'El cliente cuya tienda (ya registrada y en pending) se instala.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => true, 'validacion' => 'required|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name), comparado con trim + minúsculas.'],
+                ['nombre' => 'ecommerce_version_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'La versión de ecommerce a instalar (GET claude/ecommerce/versions). Tiene que estar published. Sin ella ni version, la última publicada.'],
+                ['nombre' => 'version', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30', 'que_es' => 'Alternativa a ecommerce_version_id: el código ("1.0.0"). Si vienen los dos y no son la misma, 422.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false crea la corrida y la encola (202). Sin él, simula y no escribe nada.'],
+            ],
+        ],
+
         /* ---------------------------------------------------------- Versiones de ecommerce */
 
         'GET api/claude/ecommerce/versions' => [
@@ -1181,7 +1204,7 @@ return [
            actualizaciones NO es "actualizar veinte clientes". */
         '🔴 NINGUNA ACTUALIZACIÓN DE EMPRESA SE COMPLETA SIN INTERVENCIÓN HUMANA. Completar una son CINCO pasos por cliente: deploy/start → MOVER LOS CRONS Y EL SUPERVISOR A MANO EN EL PANEL DE HOSTINGER → mark-crons → deploy/start-post-closure → deploy/configure-system. El paso 2 NO tiene endpoint y no lo va a tener: mark-crons sólo REGISTRA que una persona ya lo hizo. Además el paso 4 sólo corre con ESE negocio cerrado, así que cada cliente tiene su propia ventana horaria. Para veinte clientes: ~80 llamadas HTTP, 20 intervenciones manuales y 20 momentos distintos.',
         'Ninguna ruta claude/* arranca un deployment en lote. El gate de horario y allow_deploy_to_active_api son por cliente, así que después de POST claude/upgrades/batch hay que llamar deploy/start uno por uno. Y crear el lote es sólo el primero de los cinco pasos de arriba: POST claude/upgrades/batch deja actualizaciones creadas, no clientes actualizados.',
-        'Ninguna ruta claude/* hace la instalación INICIAL de una tienda ni la instalación del ERP de un cliente nuevo: sólo actualizaciones.',
+        'La instalación INICIAL de una tienda tiene UNA sola ruta, POST claude/ecommerce/installs (decisión de Lucas, 2/10/2026), con dry_run por defecto y sólo sobre una tienda registrada y en pending. La instalación del ERP de un cliente nuevo no tiene ninguna ruta claude/*.',
         'GET claude/query es sólo lectura y su lista blanca son los modelos que se verificaron columna por columna. Los que faltan no están prohibidos: están sin verificar. El motivo de cada exclusión se publica en la sección `query` de este catálogo.',
         'El limitador de tasa agrupa por IP cuando no hay usuario de Sanctum, y claude/* nunca lo tiene. Conviene hacer pocas llamadas grandes y no muchas chicas.',
     ],

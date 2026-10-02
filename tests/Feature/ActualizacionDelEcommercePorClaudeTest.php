@@ -5,9 +5,12 @@ namespace Tests\Feature;
 use App\Http\Controllers\Api\ClaudeEcommerceOpsController;
 use App\Jobs\RunEcommerceInstallationJob;
 use App\Models\Client;
+use App\Models\ClientApi;
 use App\Models\ClientEcommerce;
 use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\EcommerceVersion;
+use App\Models\EnvTemplate;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
@@ -30,9 +33,9 @@ use Tests\TestCase;
  *     así que un `assertPushed` pelado pasaría igual con un dispatch SIN `onConnection` —o sea, no
  *     probaría nada—. Está documentado en `tests/Feature/DemoSetupFueraDelRequestTest.php:148-152`.
  *     Y es exactamente la regresión más probable acá, porque el PANEL despacha pelado.
- *  2. 🔴 Que NINGUNA ruta `claude/*` cree una instalación inicial (`mode = 'install'`). Es una
- *     decisión de Lucas y acá tiene su reja: se verifica por comportamiento Y leyendo el fuente del
- *     controlador.
+ *  2. 🔴 Que la instalación inicial (`mode = 'install'`) tenga UNA sola puerta por `claude/*`:
+ *     `POST claude/ecommerce/installs`, con sus frenos (decisión de Lucas del 2/10/2026, que
+ *     reemplazó a la prohibición de antes). Se verifica por comportamiento Y leyendo el fuente.
  *  3. Que TODO freno que rechaza devuelva 422 y no escriba absolutamente nada: ni corrida, ni job.
  *  4. Que el lote simule por defecto y que `confirm_client_count` + `confirm_token` sean exactos.
  *  5. Que `confirm_client_name` no revele el nombre correcto cuando falla.
@@ -344,8 +347,8 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
     }
 
     /**
-     * Un cliente sin tienda creada tampoco arranca nada — y el error dice explícitamente que Claude
-     * no hace la instalación inicial.
+     * Un cliente sin tienda creada tampoco arranca nada — y el error dice cómo registrarla (y que
+     * registrarla no es instalarla).
      *
      * @return void
      */
@@ -696,35 +699,59 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
     }
 
     /* ------------------------------------------------------------------------------------------
-     | 5. La decisión de Lucas: nada de instalación inicial
+     | 5. La instalación inicial: UNA sola puerta, con sus frenos (decisión de Lucas, 2/10/2026)
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * 🔴 NINGUNA ruta `claude/*` crea una `ClientEcommerceInstallation` con `mode = 'install'`.
+     * 🔴 La ÚNICA forma de crear una instalación inicial (`mode = 'install'`) por `claude/*` es
+     * `POST claude/ecommerce/installs`, y sólo pasando sus frenos.
      *
-     * Tres rejas, porque una sola se puede saltear sin querer:
-     *  a) Por comportamiento: se ejercitan los dos endpoints de escritura y no aparece ninguna fila
-     *     con `mode = 'install'`.
-     *  b) Por fuente: todo `'mode' =>` del controlador tiene que ser `self::MODO_ACTUALIZACION`.
-     *     Es la que agarra al que mañana copie y pegue un método del panel.
-     *  c) Por ruteo: ninguna ruta `api/claude/*` puede apuntar a `EcommerceInstallationController`,
-     *     que es el controlador del panel y sí instala desde cero.
+     * Hasta el 2/10/2026 este test fijaba la regla vieja —"ninguna ruta claude/* crea una instalación
+     * inicial"—. Ese día Lucas pidió explícitamente poder instalar una tienda por API, así que la
+     * REGLA cambió por decisión del dueño (no se aflojó una aserción para que algo pase): este test
+     * fija la nueva, con las mismas tres rejas de antes apuntadas a la puerta nueva:
+     *  a) Por comportamiento: updates y su lote siguen creando sólo `mode = update`; installs sin
+     *     `dry_run=false` no crea nada; con `dry_run=false` crea exactamente UNA corrida `install`.
+     *  b) Por fuente: hay UN solo `ClientEcommerceInstallation::create(` en el controlador, su `mode`
+     *     es el parámetro validado contra `self::MODES`, y `self::MODO_INSTALACION` aparece en el
+     *     código SÓLO adentro de `installs_json()` (el que copie y pegue un método del panel, o le
+     *     pase el modo de instalación a `crear_corrida()` desde otro lado, rompe acá).
+     *  c) Por ruteo: ninguna ruta `api/claude/*` apunta a `EcommerceInstallationController` (el
+     *     controlador del panel), y la única que llega a `installs_json` es
+     *     `POST api/claude/ecommerce/installs`.
      *
      * @return void
      */
-    public function test_ninguna_ruta_claude_crea_una_instalacion_inicial(): void
+    public function test_la_unica_instalacion_inicial_por_claude_es_installs_con_sus_frenos(): void
     {
         Queue::fake();
 
+        EcommerceVersion::query()->delete();
+        EcommerceVersion::create(['version' => '1.0.0', 'status' => 'published', 'published_at' => now()]);
+        if (! EnvTemplate::where('scope', 'tienda')->exists()) {
+            EnvTemplate::create(['key' => 'APP_ENV', 'value' => 'production', 'scope' => 'tienda']);
+        }
+
         /* (a) Comportamiento. */
-        $a = $this->escenario_listo('Tienda Sin Install A');
-        $b = $this->escenario_listo('Tienda Sin Install B');
+        $a = $this->escenario_listo('Tienda Regla A');
+        $b = $this->escenario_listo('Tienda Regla B');
+        $c = $this->escenario_listo('Tienda Regla Install');
+
+        $api               = new ClientApi();
+        $api->client_id    = $c['cliente']->id;
+        $api->url          = 'https://api-regla-install.test';
+        $api->path         = 'regla/' . Str::random(6);
+        $api->hosting_type = 'shared_hosting';
+        $api->save();
+        $c['cliente']->active_client_api_id = $api->id;
+        $c['cliente']->save();
+        $c['tienda']->update(['status' => 'pending']);
 
         $instalaciones_antes = ClientEcommerceInstallation::query()->where('mode', 'install')->count();
 
         $this->postJson('/api/claude/ecommerce/updates', [
             'client_id'           => $a['cliente']->id,
-            'confirm_client_name' => 'Tienda Sin Install A',
+            'confirm_client_name' => 'Tienda Regla A',
         ], $this->headers())->assertStatus(202);
 
         $simulacion = $this->postJson('/api/claude/ecommerce/updates/batch', [
@@ -741,49 +768,79 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
         $this->assertSame(
             $instalaciones_antes,
             ClientEcommerceInstallation::query()->where('mode', 'install')->count(),
-            'Alguna ruta claude/* creó una instalación inicial de ecommerce.'
+            'updates o su lote crearon una instalación inicial.'
         );
 
-        /* (b) Fuente: el único `mode` que se escribe es la constante de actualización.
+        $this->postJson('/api/claude/ecommerce/installs', [
+            'client_id'           => $c['cliente']->id,
+            'confirm_client_name' => 'Tienda Regla Install',
+        ], $this->headers())->assertStatus(200)->assertJsonPath('dry_run', true);
 
-           Se sacan las líneas de comentario antes de buscar. No es cosmética: el propio docblock de
-           la clase HABLA de `'mode' =>` para explicar la regla, y sin este filtro el test rompía por
-           su propia documentación — que es la forma más tonta de que una reja termine borrada por
-           molesta en vez de arreglada. */
-        $fuente = file_get_contents(app_path('Http/Controllers/Api/ClaudeEcommerceOpsController.php'));
-        $this->assertNotFalse($fuente);
+        $this->assertSame(
+            $instalaciones_antes,
+            ClientEcommerceInstallation::query()->where('mode', 'install')->count(),
+            'installs creó una instalación sin dry_run=false.'
+        );
+
+        $this->postJson('/api/claude/ecommerce/installs', [
+            'client_id'           => $c['cliente']->id,
+            'confirm_client_name' => 'Tienda Regla Install',
+            'dry_run'             => false,
+        ], $this->headers())->assertStatus(202)->assertJsonPath('mode', 'install');
+
+        $this->assertSame($instalaciones_antes + 1, ClientEcommerceInstallation::query()->where('mode', 'install')->count());
+        $this->assertSame(
+            1,
+            ClientEcommerceInstallation::query()->where('mode', 'install')->where('client_ecommerce_id', $c['tienda']->id)->count()
+        );
+
+        /* (b) Fuente, sin las líneas de comentario (el docblock de la clase HABLA de la regla y no
+           puede romper el test por su propia documentación). */
+        $archivo = app_path('Http/Controllers/Api/ClaudeEcommerceOpsController.php');
+        $lineas  = file($archivo);
+        $this->assertNotFalse($lineas);
 
         $solo_codigo = [];
-        foreach (explode("\n", $fuente) as $linea) {
+        foreach ($lineas as $numero => $linea) {
             $recortada = ltrim($linea);
             if ($recortada === '' || strpos($recortada, '*') === 0 || strpos($recortada, '/*') === 0 || strpos($recortada, '//') === 0) {
                 continue;
             }
-            $solo_codigo[] = $linea;
+            $solo_codigo[$numero + 1] = $linea;
         }
-        $fuente = implode("\n", $solo_codigo);
+        $fuente = implode('', $solo_codigo);
 
-        /* Toda la escritura de corridas está centralizada en un solo `create()`: si mañana aparece
-           un segundo, esta aserción rompe y obliga a mirarlo. Es la reja que agarra al que copie y
-           pegue un método de EcommerceInstallationController, que es de donde saldría un `install`. */
         $this->assertSame(
             1,
             substr_count($fuente, 'ClientEcommerceInstallation::create('),
-            'Hay más de un lugar que crea corridas de ecommerce: la regla de "sólo update" tiene que poder '
-                . 'verificarse en uno solo.'
+            'Hay más de un lugar que crea corridas de ecommerce: la regla tiene que poder verificarse en uno solo.'
         );
 
         $encontrado = preg_match("/ClientEcommerceInstallation::create\(\[(.*?)\]\);/s", $fuente, $coincidencia);
         $this->assertSame(1, $encontrado, 'No se encontró la creación de la corrida: revisá el regex.');
-        $this->assertMatchesRegularExpression(
-            "/'mode'\s*=>\s*self::MODO_ACTUALIZACION/",
-            $coincidencia[1],
-            'ClaudeEcommerceOpsController escribe un `mode` que no es la constante de actualización.'
-        );
-
+        $this->assertMatchesRegularExpression("/'mode'\s*=>\s*\\\$modo\b/", $coincidencia[1]);
+        $this->assertStringContainsString('in_array($modo, self::MODES, true)', $fuente, 'crear_corrida() dejó de validar el modo.');
+        $this->assertSame(['install', 'update'], ClaudeEcommerceOpsController::MODES);
         $this->assertSame('update', ClaudeEcommerceOpsController::MODO_ACTUALIZACION);
+        $this->assertSame('install', ClaudeEcommerceOpsController::MODO_INSTALACION);
 
-        /* (c) Ruteo: el controlador del panel (que sí instala desde cero) no está colgado de claude/*. */
+        $metodo = new \ReflectionMethod(ClaudeEcommerceOpsController::class, 'installs_json');
+        $usos   = 0;
+        foreach ($solo_codigo as $numero => $linea) {
+            if (strpos($linea, 'self::MODO_INSTALACION') === false) {
+                continue;
+            }
+            $usos++;
+            $this->assertTrue(
+                $numero >= $metodo->getStartLine() && $numero <= $metodo->getEndLine(),
+                'self::MODO_INSTALACION se usa fuera de installs_json() (línea ' . $numero . '): la instalación '
+                    . 'inicial tiene que tener una sola puerta.'
+            );
+        }
+        $this->assertGreaterThan(0, $usos, 'installs_json() dejó de crear la corrida con self::MODO_INSTALACION.');
+
+        /* (c) Ruteo. */
+        $rutas_a_installs = [];
         foreach (Route::getRoutes() as $ruta) {
             if (strpos($ruta->uri(), 'api/claude/') !== 0) {
                 continue;
@@ -793,9 +850,14 @@ class ActualizacionDelEcommercePorClaudeTest extends TestCase
             $this->assertStringNotContainsString(
                 'EcommerceInstallationController',
                 $accion,
-                'La ruta ' . $ruta->uri() . ' apunta al controlador del panel, que instala tiendas desde cero.'
+                'La ruta ' . $ruta->uri() . ' apunta al controlador del panel.'
             );
+
+            if (substr($accion, -strlen('@installs_json')) === '@installs_json') {
+                $rutas_a_installs[] = implode('|', $ruta->methods()) . ' ' . $ruta->uri();
+            }
         }
+        $this->assertSame(['POST api/claude/ecommerce/installs'], $rutas_a_installs);
     }
 
     /* ------------------------------------------------------------------------------------------

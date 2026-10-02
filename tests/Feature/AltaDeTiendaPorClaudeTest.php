@@ -21,8 +21,8 @@ use Tests\TestCase;
  *     `{spa_url}/api` que usa el modal del panel cuando la dejan vacía. Esa diferencia no da ningún
  *     error: da una tienda que carga perfecto y devuelve 404 en todas las llamadas a la API.
  *  2. 🔴 Que el alta NO cree ninguna instalación. Registrar la tienda e instalarla son dos
- *     operaciones distintas y la regla de la clase —ninguna ruta claude/* instala desde cero— tiene
- *     que seguir valiendo después de agregar esta.
+ *     operaciones distintas: desde el 2/10/2026 (decisión de Lucas) la segunda tiene su propia
+ *     puerta, POST claude/ecommerce/installs, y el alta sigue sin instalar nada.
  *  3. Que todo freno que rechaza devuelva 422 y no escriba absolutamente nada.
  *  4. Que `dry_run` sea el default y que lo que simula sea exactamente lo que después escribe.
  *  5. Que los dominios de la plataforma no puedan ser el dominio de la tienda de un cliente.

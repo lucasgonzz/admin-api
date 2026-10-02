@@ -10,8 +10,8 @@ use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\Demo;
 use App\Models\EcommerceDeploymentLog;
-use App\Models\EnvTemplate;
 use App\Services\DemoPathResolver;
+use App\Services\EcommerceInstallPrerequisites;
 use App\Services\EcommerceVersionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -324,6 +324,9 @@ class EcommerceInstallationController extends BaseController
             'mode'                 => $mode,
             'status'               => 'pendiente',
             'ecommerce_version_id' => $resolucion['version'] === null ? null : $resolucion['version']->id,
+            // Si la versión la eligió quien apretó el botón: una pedida no cae nunca a compilar
+            // master aunque le falte un asset (ver ArtefactosDeReleaseDeTienda).
+            'ecommerce_version_requested' => $resolucion['version'] !== null && $resolucion['explicita'],
         ]);
 
         // Despacha el job en background (cola por defecto del sistema).
@@ -500,32 +503,14 @@ class EcommerceInstallationController extends BaseController
 
         // Las dos verificaciones siguientes solo aplican a instalaciones desde cero: el pipeline
         // de 'update' no vuelve a escribir el .env de tienda-api, así que no las necesita.
+        //
+        // Desde el 2/10/2026 viven en EcommerceInstallPrerequisites (plantilla de .env de tienda y
+        // de dónde salen DB_* y APP_KEY), con los mismos mensajes y el mismo orden: también las usa
+        // POST claude/ecommerce/installs, y una sola definición no se desincroniza.
         if ($mode === 'install') {
-            // Plantilla base del .env de tienda ('scope' = 'tienda'). Si no hay filas, el .env sale
-            // con lo mínimo indispensable y tienda-api queda instalada pero sin bootear.
-            $has_tienda_env_template = EnvTemplate::where('scope', 'tienda')->exists();
-            if (! $has_tienda_env_template) {
-                return response()->json([
-                    'error' => 'No hay una plantilla de .env de tienda cargada. Cargala o corré el seeder de plantillas de tienda en admin-api antes de arrancar la instalación.',
-                ], 422);
-            }
-
-            // De dónde salen DB_DATABASE, DB_USERNAME, DB_PASSWORD y APP_KEY para el .env de
-            // tienda-api (misma base de datos física que la empresa del mismo dueño).
-            if ($client_ecommerce->is_demo()) {
-                // Demo: se lee el .env del ERP de la demo, en la ruta que resuelve
-                // DemoPathResolver::api_path() a partir del subdominio de la «ERP SPA URL».
-                $demo = $client_ecommerce->demo;
-                if ($demo === null || trim((string) $demo->erp_spa_url) === '') {
-                    return response()->json([
-                        'error' => 'La tienda toma la base de datos y la clave de la aplicación del .env del ERP de la demo, así que la demo necesita su «ERP SPA URL» cargada en el módulo de Demos.',
-                    ], 422);
-                }
-            } elseif ($client_ecommerce->client === null || $client_ecommerce->client->active_client_api === null) {
-                // Cliente: la API de empresa activa de su perfil (comportamiento de siempre).
-                return response()->json([
-                    'error' => 'La tienda toma la base de datos y la clave de la aplicación del .env de la API de empresa del cliente, así que el cliente necesita una API activa seleccionada en su perfil.',
-                ], 422);
+            $problema = (new EcommerceInstallPrerequisites())->problem_for_install($client_ecommerce);
+            if ($problema !== null) {
+                return response()->json(['error' => $problema], 422);
             }
         }
 

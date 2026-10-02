@@ -333,4 +333,24 @@ class VersionesDeEcommerceEnElPanelTest extends TestCase
             ->assertJsonPath('model.ecommerce_version.version', '1.0.0')
             ->assertJsonPath('model.installations.0.ecommerce_version.version', '1.0.0');
     }
+
+    /** El botón del panel también marca si la versión la eligió quien lo apretó. */
+    public function test_start_update_marca_si_la_version_fue_elegida(): void
+    {
+        Queue::fake();
+        $elegida = $this->version('1.0.0');
+        $this->version('1.1.0');
+
+        $a = $this->escenario();
+        $this->postJson('/api/admin/ecommerce-installations/start-update', [
+            'client_id'            => $a['cliente']->id,
+            'ecommerce_version_id' => $elegida->id,
+        ])->assertStatus(201);
+
+        $b = $this->escenario();
+        $this->postJson('/api/admin/ecommerce-installations/start-update', ['client_id' => $b['cliente']->id])->assertStatus(201);
+
+        $this->assertTrue((bool) ClientEcommerceInstallation::where('client_ecommerce_id', $a['tienda']->id)->value('ecommerce_version_requested'));
+        $this->assertFalse((bool) ClientEcommerceInstallation::where('client_ecommerce_id', $b['tienda']->id)->value('ecommerce_version_requested'));
+    }
 }

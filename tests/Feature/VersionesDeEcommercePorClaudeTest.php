@@ -659,4 +659,31 @@ class VersionesDeEcommercePorClaudeTest extends TestCase
             ->assertJsonPath('corrida.ecommerce_version.id', (int) $version->id)
             ->assertJsonPath('corrida.ecommerce_version.version', '1.0.0');
     }
+
+    /**
+     * La corrida distingue una versión PEDIDA de la última publicada fijada sola
+     * (`ecommerce_version_requested`): el pipeline no le compila master a quien pidió una versión.
+     */
+    public function test_la_corrida_marca_si_la_version_fue_pedida(): void
+    {
+        Queue::fake();
+        $pedida = $this->version('1.0.0');
+        $this->version('1.1.0');
+
+        $a = $this->escenario('Marca Pedida');
+        $this->postJson('/api/claude/ecommerce/updates', [
+            'client_id'            => $a['cliente']->id,
+            'confirm_client_name'  => 'Marca Pedida',
+            'ecommerce_version_id' => $pedida->id,
+        ], $this->headers())->assertStatus(202);
+
+        $b = $this->escenario('Marca Sin Pedir');
+        $this->postJson('/api/claude/ecommerce/updates', [
+            'client_id'           => $b['cliente']->id,
+            'confirm_client_name' => 'Marca Sin Pedir',
+        ], $this->headers())->assertStatus(202);
+
+        $this->assertTrue((bool) ClientEcommerceInstallation::where('client_ecommerce_id', $a['tienda']->id)->value('ecommerce_version_requested'));
+        $this->assertFalse((bool) ClientEcommerceInstallation::where('client_ecommerce_id', $b['tienda']->id)->value('ecommerce_version_requested'));
+    }
 }

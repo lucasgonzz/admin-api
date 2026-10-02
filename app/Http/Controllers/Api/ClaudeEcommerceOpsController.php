@@ -11,13 +11,14 @@ use App\Models\ClientEcommerceInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\EcommerceVersion;
 use App\Services\ClaudeQueryService;
+use App\Services\EcommerceInstallPrerequisites;
 use App\Services\EcommerceVersionService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /**
- * Lectura y ACTUALIZACIÓN del ecommerce (tienda) de un cliente desde `claude/*`.
+ * Lectura, ACTUALIZACIÓN e INSTALACIÓN del ecommerce (tienda) de un cliente desde `claude/*`.
  *
  * 🔴 ESTO ARRANCA PIPELINES SSH REALES CONTRA EL SERVIDOR DE UN NEGOCIO. Una corrida de
  * `EcommerceDeploymentService` sube la SPA y el código de la API por SFTP al hosting compartido del
@@ -29,18 +30,29 @@ use Illuminate\Support\Facades\DB;
  * artefactos del release de GitHub en vez de compilar en el VPS de builds. Todo es aditivo: un
  * pedido sin versión se comporta como antes, salvo por lo que se despliega.
  *
- * 🔴 LO QUE ESTE CONTROLADOR NO HACE, Y ES UNA DECISIÓN, NO UN OLVIDO: **no existe ninguna ruta que
- * cree una `ClientEcommerceInstallation` con `mode = 'install'`.** La instalación inicial de una
- * tienda escribe el `.env` de `tienda-api` (base de datos, APP_KEY, claves del cliente), decide
- * paths de hosting y es irreversible desde afuera; la actualización sólo recompila y sobrescribe
- * código ya instalado. Son dos operaciones de riesgo distinto y acá sólo entra la segunda. La regla
- * está verificada mecánicamente en
- * `ActualizacionDelEcommercePorClaudeTest::test_ninguna_ruta_claude_crea_una_instalacion_inicial()`,
- * que además lee el fuente de esta clase y exige que haya UN solo `ClientEcommerceInstallation::create()`
- * y que su modo sea `self::MODO_ACTUALIZACION`, y que ninguna ruta `claude/*` apunte al controlador
- * del panel.
+ * 🔴 LA INSTALACIÓN INICIAL POR API: QUÉ CAMBIÓ Y POR QUÉ (decisión de Lucas, 2/10/2026).
+ * Hasta el 2/10/2026 la regla de este controlador era "ninguna ruta `claude/*` crea una
+ * `ClientEcommerceInstallation` con `mode = 'install'`": la instalación inicial escribe el `.env` de
+ * `tienda-api` (base de datos, APP_KEY, claves del cliente) y es irreversible desde afuera, mientras
+ * que la actualización sólo sobrescribe código ya instalado. **Lucas pidió explícitamente que
+ * instalar un e-commerce también se pueda por API** (misión `versiones-tienda`), así que la
+ * prohibición se reemplaza por UNA sola puerta con sus frenos: `POST claude/ecommerce/installs`
+ * (`installs_json()`). La prohibición protegía de una instalación accidental; los frenos de esa
+ * puerta protegen de lo mismo sin cerrarla:
+ *  - `dry_run` es true por defecto: la primera llamada devuelve lo que haría y no escribe nada;
+ *  - `confirm_client_name` exacto, igual que la actualización;
+ *  - la tienda tiene que existir y estar `pending` — nunca instalada (`active`) ni en curso: una
+ *    instalación sobre una tienda andando le pisaría el `.env` a un negocio que ya vende;
+ *  - las mismas precondiciones que el botón del panel (configuración, credenciales SSH, ninguna corrida
+ *    en curso, plantilla de `.env` de tienda y la API de empresa de donde salen DB_* y APP_KEY, en
+ *    `EcommerceInstallPrerequisites`, la misma clase que usa el panel);
+ *  - una versión de ecommerce publicada (sin ninguna, 422 sin crear la corrida).
+ * La regla nueva está verificada mecánicamente en
+ * `ActualizacionDelEcommercePorClaudeTest::test_la_unica_instalacion_inicial_por_claude_es_installs_con_sus_frenos()`:
+ * UN solo `ClientEcommerceInstallation::create()` en este fuente, `self::MODO_INSTALACION` usado sólo
+ * adentro de `installs_json()`, y ninguna ruta `claude/*` apuntando al controlador del panel.
  *
- * 🔴 LOS DOS `dispatch()` DE ESTE CONTROLADOR VAN CON `->onConnection(self::CONEXION_DE_COLA)`,
+ * 🔴 TODOS LOS `dispatch()` DE ESTE CONTROLADOR VAN CON `->onConnection(self::CONEXION_DE_COLA)`,
  * SIN EXCEPCIÓN. `QUEUE_CONNECTION` es `sync` en este proyecto: un `dispatch()` pelado corre el
  * pipeline SSH ENTERO (`npm ci`, `npm run build`, uploads, `composer install`) adentro del request
  * HTTP, y lo mata `max_execution_time` con un fatal que no captura ni el `catch` del job. Por eso
@@ -121,10 +133,27 @@ class ClaudeEcommerceOpsController extends Controller
     const COOLDOWN_HORAS_ECOMMERCE = 6;
 
     /**
-     * 🔴 El único `mode` que este controlador escribe. Ver el docblock de la clase: ninguna ruta de
-     * Claude crea una instalación inicial, y hay un test que lee este fuente para verificarlo.
+     * `mode` de las corridas de `POST claude/ecommerce/updates` y de su lote.
      */
     const MODO_ACTUALIZACION = 'update';
+
+    /**
+     * 🔴 `mode` de la instalación inicial (decisión de Lucas, 2/10/2026). Lo escribe UNA sola ruta,
+     * `POST claude/ecommerce/installs` (`installs_json()`), con sus frenos: ver el docblock de la
+     * clase. Hay un test que lee este fuente y exige que la constante sólo aparezca adentro de ese
+     * método.
+     */
+    const MODO_INSTALACION = 'install';
+
+    /** Estado de una tienda registrada pero nunca instalada: el ÚNICO desde el que se instala. */
+    const ESTADO_TIENDA_SIN_INSTALAR = 'pending';
+
+    /**
+     * Lista blanca de la instalación inicial (POST claude/ecommerce/installs). Cualquier otra clave
+     * es 422 y no se escribe nada: un parámetro que este endpoint no entiende (paths, `mode`, un
+     * `force`) suele ser alguien esperando que haga algo que no hace.
+     */
+    const PARAMETROS_DE_LA_INSTALACION = ['client_id', 'confirm_client_name', 'ecommerce_version_id', 'version', 'dry_run'];
 
     /** Estado con el que nace una corrida, antes de que el worker la tome. */
     const ESTADO_INICIAL = 'pendiente';
@@ -700,7 +729,7 @@ class ClaudeEcommerceOpsController extends Controller
                     'client_id' => (int) $client->id,
                     'ayuda'     => 'La tienda se registra con POST claude/ecommerce/stores (o desde la sección '
                         . '"Tienda online (ecommerce)" del perfil del cliente en el admin). 🔴 Registrarla no es '
-                        . 'instalarla: ninguna ruta claude/* hace la instalación inicial.',
+                        . 'instalarla: una tienda registrada y sin instalar se instala con POST claude/ecommerce/installs.',
                 ]
             );
         }
@@ -738,7 +767,12 @@ class ClaudeEcommerceOpsController extends Controller
         }
 
         $version = $resolucion['version'];
-        $corrida = $this->crear_corrida($tienda, $version === null ? null : (int) $version->id);
+        $corrida = $this->crear_corrida(
+            $tienda,
+            self::MODO_ACTUALIZACION,
+            $version === null ? null : (int) $version->id,
+            $resolucion['explicita']
+        );
 
         /* 🔴 onConnection explícito: sin esto el pipeline SSH entero correría adentro de este
            request. Ver el docblock de la clase. */
@@ -1029,12 +1063,13 @@ class ClaudeEcommerceOpsController extends Controller
          * y no una línea. Mientras tanto: el 202 devuelve las N corridas con su id, y
          * `GET claude/ecommerce/installations?created_via=claude` muestra cuáles arrancaron.
          */
-        $corridas = DB::transaction(function () use ($candidatas, $version_id) {
+        $version_pedida = (bool) $resolucion['explicita'];
+        $corridas = DB::transaction(function () use ($candidatas, $version_id, $version_pedida) {
             $creadas = [];
             foreach ($candidatas as $candidata) {
                 $creadas[] = [
                     'candidata' => $candidata,
-                    'corrida'   => $this->crear_corrida($candidata['tienda'], $version_id),
+                    'corrida'   => $this->crear_corrida($candidata['tienda'], self::MODO_ACTUALIZACION, $version_id, $version_pedida),
                 ];
             }
 
@@ -1074,6 +1109,202 @@ class ClaudeEcommerceOpsController extends Controller
                 . 'clone de tienda-spa en el VPS de builds: la primera compila y las demás esperan. Poleá cada 30 o 60 '
                 . 'segundos con GET claude/ecommerce/installations?created_via=claude, no cada 2 (rate limit por IP).',
         ], 202);
+    }
+
+    /* ==============================================================================================
+     | 6 bis) POST claude/ecommerce/installs — INSTALACIÓN INICIAL de UNA tienda (Lucas, 2/10/2026)
+     |============================================================================================= */
+
+    /**
+     * Instala desde cero la tienda (tienda-spa + tienda-api) de un cliente, con una versión de
+     * ecommerce publicada.
+     *
+     * 🔴 ES LA ÚNICA RUTA `claude/*` QUE CREA UNA CORRIDA `mode = install`, y existe porque Lucas lo
+     * pidió el 2/10/2026 (ver el docblock de la clase: reemplaza a la prohibición que había). Una
+     * instalación escribe el `.env` de `tienda-api` (base de datos, APP_KEY) y sube SPA y API al
+     * hosting del negocio; por eso los frenos son más que los de una actualización, y ninguno
+     * escribe nada cuando rechaza:
+     *   1. Lista blanca de parámetros.
+     *   2. El cliente existe y `confirm_client_name` coincide (sin revelar el nombre correcto).
+     *   3. La tienda está REGISTRADA (`POST claude/ecommerce/stores`) y en `pending`: una `active` ya
+     *      está instalada (se actualiza, no se reinstala: reinstalar le pisaría el `.env` a un negocio
+     *      que vende) y una `installing` está en medio de otra corrida.
+     *   4. Las mismas precondiciones que la actualización: configuración (dominio, spa_url, api_url),
+     *      credenciales SSH y ninguna corrida pendiente o en curso.
+     *   5. Las de instalación del panel (`EcommerceInstallPrerequisites`, la misma clase): plantilla
+     *      de `.env` de tienda y la API de empresa de donde salen DB_* y APP_KEY.
+     *   6. Una versión de ecommerce publicada: la pedida (`ecommerce_version_id` / `version`) o la
+     *      última. Sin ninguna, 422 acá mismo —no se crea una corrida que va a fallar—.
+     *   7. `dry_run` (default TRUE): devuelve lo que haría, con los paths resueltos y la versión.
+     *
+     * Con `dry_run=false` crea UNA corrida `install` marcada como de Claude y la encola con
+     * `onConnection(self::CONEXION_DE_COLA)`, igual que las actualizaciones: 202, sin esperar.
+     *
+     * @param Request $request Body: client_id, confirm_client_name, ecommerce_version_id?, version?, dry_run?.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function installs_json(Request $request)
+    {
+        /* --- Freno 1: lista blanca. --- */
+        $de_mas = array_values(array_diff(array_keys($request->all()), self::PARAMETROS_DE_LA_INSTALACION));
+        if (count($de_mas) > 0) {
+            return $this->error_422(
+                'Parámetros que este endpoint no acepta: ' . implode(', ', $de_mas) . '. No se creó nada.',
+                [
+                    'parametros_aceptados' => self::PARAMETROS_DE_LA_INSTALACION,
+                    'ayuda'                => 'Los paths de instalación salen de la tienda registrada (POST claude/ecommerce/stores); '
+                        . 'acá sólo se elige el cliente y la versión.',
+                ]
+            );
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'client_id'            => 'required|integer|min:1',
+            'confirm_client_name'  => 'required|string|max:190',
+            'ecommerce_version_id' => 'nullable|integer|min:1',
+            'version'              => 'nullable|string|max:30',
+            'dry_run'              => 'nullable|boolean',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        /* --- Freno 2: el cliente y su nombre. --- */
+        $client = Client::find((int) $request->input('client_id'));
+        if ($client === null) {
+            return $this->error_404('no existe el cliente ' . (int) $request->input('client_id'));
+        }
+
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se creó nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        /* --- Freno 3: la tienda registrada y sin instalar. --- */
+        $tienda = $client->client_ecommerce;
+        if ($tienda === null) {
+            return $this->error_422(
+                'El cliente no tiene una tienda registrada. No se creó nada.',
+                [
+                    'client_id' => (int) $client->id,
+                    'ayuda'     => 'Registrala primero con POST claude/ecommerce/stores (dominio + URLs) y después instalala acá.',
+                ]
+            );
+        }
+
+        if ($tienda->status === 'active') {
+            return $this->error_422(
+                'La tienda de este cliente ya está instalada (status active): no se reinstala, se actualiza. Usá '
+                    . 'POST claude/ecommerce/updates. No se creó nada.',
+                ['client_id' => (int) $client->id, 'client_ecommerce_id' => (int) $tienda->id, 'status' => $tienda->status]
+            );
+        }
+
+        if ($tienda->status !== self::ESTADO_TIENDA_SIN_INSTALAR) {
+            return $this->error_422(
+                'La tienda de este cliente no está sin instalar (status ' . $tienda->status . '): si está en "installing", '
+                    . 'hay una instalación o actualización en curso; esperá a que termine. No se creó nada.',
+                ['client_id' => (int) $client->id, 'client_ecommerce_id' => (int) $tienda->id, 'status' => $tienda->status]
+            );
+        }
+
+        /* --- Freno 4: configuración, credenciales SSH y ninguna corrida en curso (las mismas de la
+           actualización, con el MISMO método que publica GET claude/ecommerce/stores). --- */
+        $contexto = $this->contexto_de_precondiciones([(int) $tienda->id]);
+        $motivo   = $this->motivo_por_el_que_no_se_puede_actualizar($tienda, $contexto);
+        if ($motivo !== null) {
+            return $this->error_422(
+                'No se puede instalar la tienda de este cliente: ' . $motivo . '. No se creó nada.',
+                ['client_id' => (int) $client->id, 'client_ecommerce_id' => (int) $tienda->id]
+            );
+        }
+
+        /* --- Freno 5: de dónde sale el .env de tienda-api (el mismo chequeo que el botón del panel). --- */
+        $problema = (new EcommerceInstallPrerequisites())->problem_for_install($tienda);
+        if ($problema !== null) {
+            return $this->error_422(
+                'No se puede instalar la tienda de este cliente: ' . $problema . ' No se creó nada.',
+                ['client_id' => (int) $client->id, 'client_ecommerce_id' => (int) $tienda->id]
+            );
+        }
+
+        /* --- Freno 6: la versión. A diferencia de updates, sin ninguna publicada no se crea nada. --- */
+        $resolucion = (new EcommerceVersionService())->resolve_for_run(
+            $request->input('ecommerce_version_id'),
+            $request->input('version')
+        );
+        if ($resolucion['error'] !== null) {
+            return $this->error_422(
+                $resolucion['error'] . ' No se creó nada.',
+                ['ayuda' => 'Las versiones que se pueden desplegar están en GET claude/ecommerce/versions.']
+            );
+        }
+
+        $version = $resolucion['version'];
+        if ($version === null) {
+            return $this->error_422(
+                'No hay ninguna versión de ecommerce publicada: no hay nada que instalar. No se creó nada.',
+                ['ayuda' => 'Publicá la versión con POST claude/ecommerce/versions (verifica que el release tenga los dos assets).']
+            );
+        }
+
+        $paths = [
+            'spa'                   => $tienda->resolve_spa_path(),
+            'api'                   => $tienda->resolve_api_path(),
+            'api_anidada_en_el_spa' => $tienda->api_subpath_inside_spa_docroot(),
+            'relativos_a'           => 'domains/ del hosting compartido',
+        ];
+
+        /* --- Freno 7: simulación por defecto. --- */
+        $dry_run = $this->booleano_o_null($request, 'dry_run');
+        if ($dry_run === null) {
+            $dry_run = true;
+        }
+
+        if ($dry_run) {
+            return response()->json([
+                'dry_run'             => true,
+                'client_id'           => (int) $client->id,
+                'client_name'         => $client->name,
+                'client_ecommerce_id' => (int) $tienda->id,
+                'domain'              => $tienda->resolve_domain(),
+                'spa_url'             => $tienda->spa_url,
+                'api_url'             => $tienda->api_url,
+                'paths'               => $paths,
+                'ecommerce_version'   => $version->compact_payload(),
+                'version_pedida'      => (bool) $resolucion['explicita'],
+                'precondiciones'      => [
+                    'tienda registrada y sin instalar (status pending)',
+                    'configuración completa: dominio, spa_url y api_url',
+                    'credenciales SSH del VPS de builds y del hosting compartido',
+                    'ninguna corrida pendiente ni en curso para esta tienda',
+                    'plantilla de .env de tienda y API de empresa activa (de ahí salen DB_* y APP_KEY)',
+                    'versión de ecommerce publicada: ' . $version->version,
+                ],
+                'se_crearia'          => [
+                    'mode'                 => self::MODO_INSTALACION,
+                    'status'               => self::ESTADO_INICIAL,
+                    'created_via'          => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
+                    'ecommerce_version_id' => (int) $version->id,
+                ],
+                'nota'                => 'Simulacro: no se creó ninguna corrida. 🔴 Instalar escribe el .env de tienda-api y '
+                    . 'sube SPA y API al hosting del negocio en esos paths. Repetí con dry_run=false para instalar.',
+            ], 200);
+        }
+
+        $corrida = $this->crear_corrida($tienda, self::MODO_INSTALACION, (int) $version->id, $resolucion['explicita']);
+
+        /* 🔴 onConnection explícito, igual que las actualizaciones: nunca el pipeline adentro del request. */
+        RunEcommerceInstallationJob::dispatch($corrida->uuid)->onConnection(self::CONEXION_DE_COLA);
+
+        return response()->json(
+            array_merge(
+                $this->respuesta_de_encolado($client, $tienda, $corrida, $version, $resolucion['explicita']),
+                ['dry_run' => false, 'paths' => $paths]
+            ),
+            202
+        );
     }
 
     /* ==============================================================================================
@@ -1302,8 +1533,8 @@ class ClaudeEcommerceOpsController extends Controller
             ],
             'tiene_ecommerce'     => (bool) $client->tiene_ecommerce,
             'nota'                => '🔴 La tienda quedó REGISTRADA, no instalada: no se subió código, no se tocó DNS '
-                . 'y clients.tiene_ecommerce sigue como estaba (se prende cuando la tienda ya funciona). La '
-                . 'instalación inicial no la hace ninguna ruta claude/*.',
+                . 'y clients.tiene_ecommerce sigue como estaba (se prende cuando la tienda ya funciona). Para '
+                . 'instalarla: POST claude/ecommerce/installs (dry_run por defecto).',
         ], 201);
     }
 
@@ -1520,22 +1751,36 @@ class ClaudeEcommerceOpsController extends Controller
      |============================================================================================= */
 
     /**
-     * Crea la fila de la corrida. 🔴 Siempre `mode = update` y siempre marcada como de Claude.
+     * Crea la fila de la corrida, siempre marcada como de Claude. 🔴 Es el ÚNICO lugar del
+     * controlador que crea corridas (hay un test que lo cuenta), y el `mode` sólo puede ser una de
+     * las dos constantes: `MODO_ACTUALIZACION` (updates y su lote) o `MODO_INSTALACION`, que sólo
+     * pasa `installs_json()` con sus frenos.
      *
-     * @param ClientEcommerce $tienda               Tienda a actualizar.
+     * @param ClientEcommerce $tienda               Tienda a actualizar o instalar.
+     * @param string          $modo                 `self::MODO_ACTUALIZACION` o `self::MODO_INSTALACION`.
      * @param int|null        $ecommerce_version_id Versión que despliega (la pedida o la última
      *                                              publicada); null si no hay ninguna publicada.
+     * @param bool            $version_pedida       Si la versión la pidió quien llamó (una pedida
+     *                                              no cae nunca a compilar master: ver el pipeline).
      *
      * @return ClientEcommerceInstallation
+     *
+     * @throws \InvalidArgumentException Si el modo no es uno de los dos.
      */
-    private function crear_corrida(ClientEcommerce $tienda, $ecommerce_version_id = null)
+    private function crear_corrida(ClientEcommerce $tienda, $modo, $ecommerce_version_id = null, $version_pedida = false)
     {
+        // MODES es la lista de modos válidos de la tabla (la misma que usan los filtros de lectura).
+        if (! in_array($modo, self::MODES, true)) {
+            throw new \InvalidArgumentException('Modo de corrida desconocido: ' . $modo);
+        }
+
         return ClientEcommerceInstallation::create([
-            'client_ecommerce_id'  => $tienda->id,
-            'mode'                 => self::MODO_ACTUALIZACION,
-            'status'               => self::ESTADO_INICIAL,
-            'created_via'          => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
-            'ecommerce_version_id' => $ecommerce_version_id,
+            'client_ecommerce_id'         => $tienda->id,
+            'mode'                        => $modo,
+            'status'                      => self::ESTADO_INICIAL,
+            'created_via'                 => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
+            'ecommerce_version_id'        => $ecommerce_version_id,
+            'ecommerce_version_requested' => $ecommerce_version_id !== null && (bool) $version_pedida,
         ]);
     }
 
@@ -1559,7 +1804,7 @@ class ClaudeEcommerceOpsController extends Controller
     }
 
     /**
-     * Cuerpo de la respuesta 202 del endpoint de a uno.
+     * Cuerpo de la respuesta 202 del endpoint de a uno (`updates`) y de la instalación (`installs`).
      *
      * 🔴 Declara la conexión usada y la latencia esperable, y dice explícitamente que el endpoint no
      * espera a que el pipeline termine. Mismo criterio que
@@ -1590,7 +1835,8 @@ class ClaudeEcommerceOpsController extends Controller
             'client_name'              => $client->name,
             'client_ecommerce_id'      => (int) $tienda->id,
             'domain'                   => $tienda->resolve_domain(),
-            'mode'                     => self::MODO_ACTUALIZACION,
+            // El de la corrida: update para updates, install para installs (2/10/2026).
+            'mode'                     => (string) $corrida->mode,
             'status'                   => self::ESTADO_INICIAL,
             'created_via'              => ClientEcommerceInstallation::CREATED_VIA_CLAUDE,
             'conexion_de_cola'         => self::CONEXION_DE_COLA,
@@ -1601,7 +1847,8 @@ class ClaudeEcommerceOpsController extends Controller
             'ecommerce_version'        => $version === null ? null : $version->compact_payload(),
             'nota_version'             => $this->nota_de_version($version, $explicita),
             'nota_precondicion'        => $this->nota_de_precondicion(),
-            'nota'                     => 'La actualización despliega la versión de ecommerce de la corrida (la pedida con '
+            'nota'                     => ($corrida->mode === self::MODO_ACTUALIZACION ? 'La actualización' : 'La instalación')
+                . ' despliega la versión de ecommerce de la corrida (la pedida con '
                 . 'ecommerce_version_id/version, o la última publicada), bajando sus artefactos del release de GitHub. '
                 . 'Este endpoint NO espera a que el pipeline termine.',
         ];

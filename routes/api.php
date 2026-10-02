@@ -378,14 +378,17 @@ Route::middleware('claude.task.key')
            negocio (compilan tienda-spa en el VPS de builds y suben SPA + API por SFTP). Los frenos
            —confirm_client_name en el de a uno, y dry_run por defecto + confirm_client_count +
            confirm_token + tope de 5 en el lote— están en ClaudeEcommerceOpsController.
-           🔴 NINGUNA de estas rutas hace la instalación inicial de una tienda: sólo actualización.
+           🔴 La instalación INICIAL tiene UNA sola ruta, POST ecommerce/installs, desde el
+           2/10/2026 (decisión de Lucas: antes no había ninguna). Sus frenos —dry_run por defecto,
+           confirm_client_name, tienda registrada y en pending, las precondiciones del panel y una
+           versión publicada— están en ClaudeEcommerceOpsController::installs_json().
            `ecommerce/updates/batch` se declara ANTES que cualquier ruta con {id}, por lo mismo que
            `upgrades/preview`: para que ninguna la capture si mañana se agrega un
            POST claude/ecommerce/updates/{id}.
            ⚠️ POST ecommerce/stores es la excepción que confirma la regla y conviene leerla dos
            veces: da de alta la FILA de la tienda (dominio + las dos URLs) y no toca ningún
-           servidor. Registrar que el cliente tiene tienda e instalarla son dos cosas distintas;
-           la segunda sigue sin tener ruta claude/*. */
+           servidor. Registrar que el cliente tiene tienda e instalarla son dos cosas distintas:
+           primero stores (registra) y después installs (instala). */
         Route::get('ecommerce/stores', 'Api\ClaudeEcommerceOpsController@stores_json');
         Route::post('ecommerce/stores', 'Api\ClaudeEcommerceOpsController@stores_store_json');
         Route::get('ecommerce/installations', 'Api\ClaudeEcommerceOpsController@installations_json');
@@ -393,6 +396,7 @@ Route::middleware('claude.task.key')
         Route::get('ecommerce/installations/{id}/logs', 'Api\ClaudeEcommerceOpsController@installation_logs_json');
         Route::post('ecommerce/updates/batch', 'Api\ClaudeEcommerceOpsController@update_batch_json');
         Route::post('ecommerce/updates', 'Api\ClaudeEcommerceOpsController@update_json');
+        Route::post('ecommerce/installs', 'Api\ClaudeEcommerceOpsController@installs_json');
 
         /* Versiones de ecommerce (misión versiones-tienda, 1/10/2026): el puntero a los dos
            artefactos que GitHub Actions publica en el release v{V} de tienda-spa y tienda-api.
