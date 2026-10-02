@@ -676,6 +676,17 @@ final class EcommerceDistCustomizer
     /**
      * El manifiesto de precache de Workbox en la raíz del zip. Tiene que haber exactamente uno.
      *
+     * ⚠️ DEPENDE DE WORKBOX v4. `tienda-spa` compila con `@vue/cli-plugin-pwa` 4.x, que usa Workbox 4
+     * y genera el precache en un archivo aparte, `precache-manifest.<hash>.js`, que `service-worker.js`
+     * importa con `importScripts(...)` (verificado el 2/10/2026 contra el zip real del release 1.0.0).
+     * Workbox 5 en adelante (`@vue/cli-plugin-pwa` 5.x) ya no genera ese archivo: el manifiesto va
+     * ADENTRO de `service-worker.js` (`self.__WB_MANIFEST` inyectado). Si `tienda-spa` sube de versión
+     * del plugin, TODAS las corridas van a fallar cerrado acá con el mensaje de abajo ("tiene que traer
+     * UN precache-manifest...") —que es lo correcto: sin renovar las revisiones, la tienda
+     * personalizada no le llega a quien ya tiene el service worker—, y hay que adaptar este método,
+     * `update_precache_revisions()`/`precache_revisions()` y el sello del service worker EN EL MISMO
+     * cambio que sube el plugin.
+     *
      * @param  \ZipArchive  $zip
      * @return string  Nombre de la entrada.
      *
