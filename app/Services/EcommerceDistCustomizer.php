@@ -92,6 +92,24 @@ final class EcommerceDistCustomizer
     /** Archivo de configuración de runtime que se agrega (o pisa) en la raíz. */
     const ARCHIVO_CONFIG_JS = 'config.js';
 
+    /** Service worker de Workbox que genera el plugin PWA de Vue CLI (raíz del dist). */
+    const ARCHIVO_SERVICE_WORKER = 'service-worker.js';
+
+    /** Nombre del manifiesto de precache de Workbox en la raíz del dist (`precache-manifest.<hash>.js`). */
+    const PATRON_PRECACHE = '/^(?:\.\/)?precache-manifest\.[0-9a-f]+\.js$/';
+
+    /** Prefijo de la línea con la que se sella `service-worker.js` en cada deploy. */
+    const MARCA_SELLO_SW = '// cc-deploy ';
+
+    /** Forma válida de un sello de deploy: corto y sin nada que haya que escapar en HTML ni en JS. */
+    const PATRON_SELLO = '/^[A-Za-z0-9._-]{1,64}$/';
+
+    /**
+     * URL de un `<link>`/`<meta>` que inyecta el plugin PWA con `?v=`: los íconos (`img/icons/...`)
+     * y el `manifest.json`. Sólo a esos se les suma el sello: cualquier otro `?v=` queda como vino.
+     */
+    const PATRON_URL_CON_VERSION_PWA = '#^(?:[^"?]*/)?(?:img/icons/[^"?/]+|manifest\.json)\?v=#';
+
     /**
      * Los archivos de branding que generan los dos scripts node, con la ruta RELATIVA a la raíz del
      * dist (que es también la ruta relativa dentro de la carpeta de branding).
@@ -292,6 +310,168 @@ final class EcommerceDistCustomizer
         return array_values(array_unique($coincidencias[0]));
     }
 
+    /* ═════════════════════════════════════════════════════════════════════════════════════════
+     * El sello de deploy y el service worker (chequeo independiente del 2/10/2026)
+     *
+     * 🔴 POR QUÉ EXISTE. En la vía vieja cada deploy compilaba con un `VUE_APP_ICONS_VERSION` nuevo
+     * (un timestamp): cambiaban el `?v=` de los íconos, el `index.html`, su `revision` en el precache
+     * y por lo tanto el service worker, que se actualizaba en cada deploy. En la vía de artefacto el
+     * build es UNO por versión: el `?v=` es la versión fija y la `revision` de `/index.html` y
+     * `/manifest.json` en `precache-manifest.<hash>.js` es el md5 del archivo CON TOKENS. Sin esto,
+     * redesplegar la misma versión con otro logo, nombre o color no le llegaba a nadie que ya tuviera
+     * el service worker instalado: seguía viendo el index.html viejo desde el precache.
+     *
+     * Las tres piezas, con un sello por corrida:
+     *  a) `?v=<versión>` → `?v=<versión>.<sello>` en los íconos y el manifest que inyecta el plugin;
+     *  b) la `revision` de `/index.html` y `/manifest.json` en el precache = md5 del contenido FINAL,
+     *     y el archivo del precache se RENOMBRA con el md5 de su contenido nuevo (y se reapunta el
+     *     `importScripts` del service worker): con el mismo nombre, una copia vieja en la caché HTTP
+     *     del navegador podía seguir sirviendo las revisiones viejas;
+     *  c) una línea `// cc-deploy <sello>` al final de `service-worker.js`, para que TODO navegador
+     *     detecte un service worker nuevo en cada deploy (la comparación byte a byte del script
+     *     principal la hacen todos; la de los importScripts, no todos).
+     * ═════════════════════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Suma el sello al `?v=` de los íconos y del manifest que inyecta el plugin PWA en `index.html`.
+     *
+     * Sólo toca atributos `href="..."` / `content="..."` cuya URL sea `img/icons/<archivo>` o
+     * `manifest.json` (con o sin barra o publicPath adelante) y tenga `?v=`: cualquier otro `?v=`
+     * queda como vino.
+     *
+     * @param  string  $html
+     * @param  string  $sello
+     * @return array{0: string, 1: int}  [html nuevo, cuántas URLs se sellaron]
+     */
+    public static function stamp_asset_versions(string $html, string $sello): array
+    {
+        $selladas = 0;
+
+        $nuevo = preg_replace_callback(
+            '/((?:href|content)=")([^"]*)(")/',
+            function ($m) use ($sello, &$selladas) {
+                $url = $m[2];
+                if (preg_match(self::PATRON_URL_CON_VERSION_PWA, $url) !== 1) {
+                    return $m[0];
+                }
+
+                $pos     = strrpos($url, '?v=');
+                $base    = substr($url, 0, $pos);
+                $version = substr($url, $pos + 3);
+                $selladas++;
+
+                return $m[1] . $base . '?v=' . ($version === '' ? $sello : $version . '.' . $sello) . $m[3];
+            },
+            $html
+        );
+
+        if (! is_string($nuevo)) {
+            throw new \RuntimeException('No se pudo sellar el ?v= de los íconos en index.html (preg_replace_callback falló).');
+        }
+
+        return [$nuevo, $selladas];
+    }
+
+    /**
+     * Verifica el sello del `?v=` en un `index.html` ya personalizado: todo ícono/manifest con `?v=`
+     * lo lleva, y ningún otro `?v=` lo tiene.
+     *
+     * @param  string  $html
+     * @param  string  $sello
+     * @return string|null  Null si está bien; si no, qué está mal.
+     */
+    public static function asset_versions_problem(string $html, string $sello): ?string
+    {
+        preg_match_all('/(?:href|content)="([^"]*\?v=[^"]*)"/', $html, $coincidencias);
+
+        foreach ($coincidencias[1] as $url) {
+            $version  = substr($url, strrpos($url, '?v=') + 3);
+            $sellada  = $version === $sello || substr($version, -strlen('.' . $sello)) === '.' . $sello;
+            $es_de_pwa = preg_match(self::PATRON_URL_CON_VERSION_PWA, $url) === 1;
+
+            if ($es_de_pwa && ! $sellada) {
+                return 'el ?v= de ' . $url . ' no lleva el sello ' . $sello;
+            }
+            if (! $es_de_pwa && $sellada) {
+                return 'se selló un ?v= que no es de un ícono ni del manifest: ' . $url;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Las `revision` del manifiesto de precache de Workbox, por URL.
+     *
+     * Recorre cada objeto `{ ... }` del archivo y saca su `"url"` y su `"revision"`, sin depender del
+     * orden de las dos claves.
+     *
+     * @param  string  $js  Contenido de `precache-manifest.<hash>.js`.
+     * @return array<string, string>  url => revision.
+     */
+    public static function precache_revisions(string $js): array
+    {
+        $revisiones = [];
+
+        preg_match_all('/\{[^{}]*\}/', $js, $bloques);
+        foreach ($bloques[0] as $bloque) {
+            if (preg_match('/"url"\s*:\s*"([^"]*)"/', $bloque, $url) === 1
+                && preg_match('/"revision"\s*:\s*"([^"]*)"/', $bloque, $revision) === 1) {
+                $revisiones[$url[1]] = $revision[1];
+            }
+        }
+
+        return $revisiones;
+    }
+
+    /**
+     * Reemplaza la `revision` de las URLs pedidas en el manifiesto de precache de Workbox.
+     *
+     * @param  string                 $js          Contenido de `precache-manifest.<hash>.js`.
+     * @param  array<string, string>  $revisiones  URL (como figura en el precache, p. ej.
+     *                                             `/index.html`) => revision nueva.
+     * @return string
+     *
+     * @throws \RuntimeException  Si alguna de las URLs no está en el precache (o no tiene revision).
+     */
+    public static function update_precache_revisions(string $js, array $revisiones): string
+    {
+        $reemplazadas = [];
+
+        $nuevo = preg_replace_callback(
+            '/\{[^{}]*\}/',
+            function ($m) use ($revisiones, &$reemplazadas) {
+                if (preg_match('/"url"\s*:\s*"([^"]*)"/', $m[0], $url) !== 1 || ! isset($revisiones[$url[1]])) {
+                    return $m[0];
+                }
+
+                $cambiado = preg_replace(
+                    '/("revision"\s*:\s*")[^"]*(")/',
+                    '${1}' . $revisiones[$url[1]] . '${2}',
+                    $m[0],
+                    1,
+                    $cantidad
+                );
+                if ($cantidad === 1) {
+                    $reemplazadas[$url[1]] = true;
+                }
+
+                return $cambiado;
+            },
+            $js
+        );
+
+        $faltantes = array_diff(array_keys($revisiones), array_keys($reemplazadas));
+        if (! is_string($nuevo) || ! empty($faltantes)) {
+            throw new \RuntimeException(
+                'El precache del service worker no trae entrada con revision para: ' . implode(', ', $faltantes)
+                . '. Sin poder renovarla, la tienda personalizada no le llega a quien ya tiene el service worker.'
+            );
+        }
+
+        return $nuevo;
+    }
+
     /**
      * Arma el zip personalizado de una tienda a partir del zip del release.
      *
@@ -304,8 +484,12 @@ final class EcommerceDistCustomizer
      * @param  array<string, mixed>   $config_vars   Variables de `config.js` (`VUE_APP_*` => valor).
      * @param  string                 $branding_dir  Carpeta local con los archivos de
      *                                               `ARCHIVOS_DE_BRANDING`, en sus rutas relativas.
+     * @param  string|null            $sello         Sello de ESTE deploy (ver la sección "El sello de
+     *                                               deploy y el service worker"). Null = `date('YmdHis')`.
      * @return array<string, mixed>  Resumen: `archivos_de_branding` (cuántos se pisaron),
-     *                               `config_js_bytes`, `claves_config_js` y `tokens` (los reemplazados).
+     *                               `config_js_bytes`, `claves_config_js`, `tokens` (los
+     *                               reemplazados), `sello`, `urls_selladas` y `precache_manifest`
+     *                               (el nombre nuevo del archivo de precache).
      *
      * @throws \RuntimeException  Ante cualquiera de los frenos del docblock de la clase.
      */
@@ -314,12 +498,18 @@ final class EcommerceDistCustomizer
         string $target_zip,
         array $tokens,
         array $config_vars,
-        string $branding_dir
+        string $branding_dir,
+        ?string $sello = null
     ): array {
         if (! class_exists(\ZipArchive::class)) {
             throw new \RuntimeException(
                 'Falta la extensión zip de PHP en el admin: sin ZipArchive no se puede personalizar el dist de la tienda.'
             );
+        }
+
+        $sello = $sello === null ? date('YmdHis') : trim($sello);
+        if (preg_match(self::PATRON_SELLO, $sello) !== 1) {
+            throw new \RuntimeException('El sello de deploy «' . $sello . '» no es válido (letras, números, punto, guion; hasta 64).');
         }
 
         if (! is_file($source_zip)) {
@@ -343,8 +533,8 @@ final class EcommerceDistCustomizer
         }
 
         try {
-            $resumen = $this->customize_copy($target_zip, $tokens, $config_vars, $branding);
-            $this->verify_result($target_zip, $branding);
+            $resumen = $this->customize_copy($target_zip, $tokens, $config_vars, $branding, $sello);
+            $this->verify_result($target_zip, $branding, $sello);
         } catch (\Throwable $e) {
             if (is_file($target_zip)) {
                 @unlink($target_zip);
@@ -363,11 +553,12 @@ final class EcommerceDistCustomizer
      * @param  array<string, string>  $tokens       Token => valor.
      * @param  array<string, mixed>   $config_vars  Variables de `config.js`.
      * @param  array<string, string>  $branding     Ruta en el zip => ruta local.
+     * @param  string                 $sello        Sello de este deploy (ya validado).
      * @return array<string, mixed>
      *
      * @throws \RuntimeException
      */
-    private function customize_copy(string $zip_path, array $tokens, array $config_vars, array $branding): array
+    private function customize_copy(string $zip_path, array $tokens, array $config_vars, array $branding, string $sello): array
     {
         $zip = new \ZipArchive();
         if ($zip->open($zip_path) !== true) {
@@ -394,9 +585,21 @@ final class EcommerceDistCustomizer
                 );
             }
 
-            // 2) index.html: tokens escapados como HTML.
+            // El service worker y su precache también tienen que estar: sin poder sellarlos, la
+            // tienda personalizada no le llega a quien ya tiene el service worker instalado.
+            $nombre_sw = $this->locate($zip, self::ARCHIVO_SERVICE_WORKER);
+            if ($nombre_sw === null) {
+                throw new \RuntimeException(
+                    'El zip del release no trae service-worker.js en la raíz: sin él no se puede garantizar '
+                    . 'que la tienda personalizada le llegue a quien ya la tiene instalada. No se despliega.'
+                );
+            }
+            $nombre_precache = $this->locate_precache($zip);
+
+            // 2) index.html: tokens escapados como HTML, y el sello en el ?v= de íconos y manifest.
             $html = $this->read_entry($zip, $nombres[self::ARCHIVO_HTML]);
             $html = self::replace_tokens_in_html($html, $tokens);
+            list($html, $urls_selladas) = self::stamp_asset_versions($html, $sello);
             $this->assert_without_leftovers($html, self::ARCHIVO_HTML);
             $this->write_entry($zip, $nombres[self::ARCHIVO_HTML], $html);
 
@@ -405,6 +608,34 @@ final class EcommerceDistCustomizer
             $manifest = self::replace_tokens_in_json($manifest, $tokens);
             $this->assert_without_leftovers($manifest, self::ARCHIVO_MANIFEST);
             $this->write_entry($zip, $nombres[self::ARCHIVO_MANIFEST], $manifest);
+
+            // 3 bis) Precache: revision de /index.html y /manifest.json = md5 del contenido FINAL, y
+            // el archivo con un nombre nuevo (md5 de su contenido nuevo) para que ninguna copia vieja
+            // de la caché HTTP lo tape. El service worker se reapunta y se sella.
+            $precache = self::update_precache_revisions(
+                $this->read_entry($zip, $nombre_precache),
+                [
+                    '/' . self::ARCHIVO_HTML     => md5($html),
+                    '/' . self::ARCHIVO_MANIFEST => md5($manifest),
+                ]
+            );
+            $nombre_precache_nuevo = 'precache-manifest.' . md5($precache) . '.js';
+
+            $sw       = $this->read_entry($zip, $nombre_sw);
+            $viejo    = basename($nombre_precache);
+            if (substr_count($sw, $viejo) === 0) {
+                throw new \RuntimeException(
+                    'service-worker.js no importa ' . $viejo . ': no se puede reapuntar al precache personalizado.'
+                );
+            }
+            $sw = str_replace($viejo, $nombre_precache_nuevo, $sw);
+            $sw = rtrim($sw, "\n") . "\n" . self::MARCA_SELLO_SW . $sello . "\n";
+
+            if (! $zip->deleteName($nombre_precache)) {
+                throw new \RuntimeException('No se pudo reemplazar ' . $nombre_precache . ' en el zip del release.');
+            }
+            $this->write_entry($zip, $nombre_precache_nuevo, $precache);
+            $this->write_entry($zip, $nombre_sw, $sw);
 
             // 4) config.js: el de la tienda, siempre (pisa el default vacío del release).
             $config_js = SpaRuntimeConfig::render($config_vars);
@@ -436,7 +667,39 @@ final class EcommerceDistCustomizer
             'config_js_bytes'      => strlen($config_js),
             'claves_config_js'     => array_keys($config_vars),
             'tokens'               => array_keys($tokens),
+            'sello'                => $sello,
+            'urls_selladas'        => $urls_selladas,
+            'precache_manifest'    => $nombre_precache_nuevo,
         ];
+    }
+
+    /**
+     * El manifiesto de precache de Workbox en la raíz del zip. Tiene que haber exactamente uno.
+     *
+     * @param  \ZipArchive  $zip
+     * @return string  Nombre de la entrada.
+     *
+     * @throws \RuntimeException  Si no hay ninguno o hay más de uno.
+     */
+    private function locate_precache(\ZipArchive $zip): string
+    {
+        $encontrados = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $nombre = (string) $zip->getNameIndex($i);
+            if (preg_match(self::PATRON_PRECACHE, $nombre) === 1) {
+                $encontrados[] = $nombre;
+            }
+        }
+
+        if (count($encontrados) !== 1) {
+            throw new \RuntimeException(
+                'El zip del release tiene que traer UN precache-manifest.<hash>.js en la raíz y trae '
+                . count($encontrados) . ($encontrados ? ' (' . implode(', ', $encontrados) . ')' : '')
+                . '. Sin él no se puede renovar el precache del service worker.'
+            );
+        }
+
+        return $encontrados[0];
     }
 
     /**
@@ -446,13 +709,19 @@ final class EcommerceDistCustomizer
      * Es redundante con lo que hace `customize_copy()` y lo es a propósito: mide el archivo que se
      * va a subir, no lo que se creía estar escribiendo.
      *
+     * Además (chequeo del 2/10/2026) verifica las tres piezas del sello: el `?v=` de íconos y
+     * manifest con el sello y ningún otro `?v=` tocado, las `revision` de `/index.html` y
+     * `/manifest.json` iguales al md5 de lo que quedó en el zip, y `service-worker.js` sellado e
+     * importando el precache que efectivamente está en el zip.
+     *
      * @param  string                 $zip_path
      * @param  array<string, string>  $branding  Ruta en el zip => ruta local.
+     * @param  string                 $sello     Sello de este deploy.
      * @return void
      *
      * @throws \RuntimeException
      */
-    private function verify_result(string $zip_path, array $branding): void
+    private function verify_result(string $zip_path, array $branding, string $sello): void
     {
         $zip = new \ZipArchive();
         if ($zip->open($zip_path) !== true) {
@@ -460,12 +729,42 @@ final class EcommerceDistCustomizer
         }
 
         try {
+            $finales = [];
             foreach ([self::ARCHIVO_HTML, self::ARCHIVO_MANIFEST] as $archivo) {
                 $nombre = $this->locate($zip, $archivo);
                 if ($nombre === null) {
                     throw new \RuntimeException("El zip personalizado perdió {$archivo}.");
                 }
-                $this->assert_without_leftovers($this->read_entry($zip, $nombre), $archivo);
+                $finales[$archivo] = $this->read_entry($zip, $nombre);
+                $this->assert_without_leftovers($finales[$archivo], $archivo);
+            }
+
+            // a) El ?v= de íconos y manifest lleva el sello, y ningún otro ?v= lo tiene.
+            $problema = self::asset_versions_problem($finales[self::ARCHIVO_HTML], $sello);
+            if ($problema !== null) {
+                throw new \RuntimeException('index.html personalizado: ' . $problema . '.');
+            }
+
+            // b) Las revision del precache son el md5 de lo que quedó en el zip.
+            $nombre_precache = $this->locate_precache($zip);
+            $revisiones      = self::precache_revisions($this->read_entry($zip, $nombre_precache));
+            foreach ([self::ARCHIVO_HTML, self::ARCHIVO_MANIFEST] as $archivo) {
+                $url = '/' . $archivo;
+                if (! isset($revisiones[$url]) || $revisiones[$url] !== md5($finales[$archivo])) {
+                    throw new \RuntimeException(
+                        'El precache del service worker no quedó con la revision de ' . $url . ' personalizado: '
+                        . 'quien ya tiene el service worker seguiría viendo la tienda vieja.'
+                    );
+                }
+            }
+
+            // c) El service worker está sellado e importa el precache que está en el zip.
+            $nombre_sw = $this->locate($zip, self::ARCHIVO_SERVICE_WORKER);
+            $sw        = $nombre_sw === null ? '' : $this->read_entry($zip, $nombre_sw);
+            if (strpos($sw, self::MARCA_SELLO_SW . $sello) === false || strpos($sw, basename($nombre_precache)) === false) {
+                throw new \RuntimeException(
+                    'service-worker.js no quedó sellado con ' . $sello . ' o no importa ' . basename($nombre_precache) . '.'
+                );
             }
 
             $nombre_config = $this->locate($zip, self::ARCHIVO_CONFIG_JS);
