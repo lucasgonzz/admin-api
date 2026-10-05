@@ -225,7 +225,18 @@ class ClaudeImplementationOpsController extends Controller
      * un `provision_hosting_type`, un `kind` o un `force` suelen ser alguien esperando elegir lo que acá
      * está fijado a propósito (la última versión publicada, el hosting compartido, el par real + esqueleto).
      */
-    const PARAMETROS_DE_LA_INSTALACION = ['dry_run', 'confirm_client_name'];
+    const PARAMETROS_DE_LA_INSTALACION = ['dry_run', 'confirm_client_name', 'marcar_colgadas'];
+
+    /**
+     * Minutos sin actividad después de los cuales una instalación que dice `instalando` se da por colgada.
+     *
+     * "Actividad" es lo último de: que haya arrancado (`started_at`), que alguien haya escrito la fila
+     * (`updated_at`) o el último renglón de log de la instalación (`deployment_logs`). Una instalación sana
+     * tarda ~15 minutos (la peor medida, ~28) y el pipeline escribe logs a cada paso; el `$timeout` del job
+     * son 38 minutos. A los 60 sin ninguna de las tres cosas, el job no está corriendo: el worker murió con la
+     * fila `instalando` (un `kill -9`, un reinicio, un `$timeout` sin `pcntl`) y nada la va a terminar.
+     */
+    const MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION = 60;
 
     /**
      * Lista blanca de `POST claude/implementations/{id}/user-setup`. 🔴 Sin `force` ni `forzar` A
@@ -764,12 +775,18 @@ class ClaudeImplementationOpsController extends Controller
         $bloque = [];
 
         foreach ($filas as $fila) {
+            /* Solo una `instalando` puede estar colgada (y solo ahí vale la pena la consulta de los logs). */
+            $actividad = $fila->status === 'instalando' ? $this->ultima_actividad_de_la_instalacion($fila) : null;
+            $colgada   = $fila->status === 'instalando' && $this->esta_colgada_la_instalacion($fila, $actividad);
+
             $item = [
                 'id'                     => (int) $fila->id,
                 'uuid'                   => (string) $fila->uuid,
                 'group_uuid'             => $fila->group_uuid,
                 'kind'                   => (string) $fila->kind,
                 'status'                 => (string) $fila->status,
+                'colgada'                => $colgada,
+                'ultima_actividad_at'    => $this->instante($actividad),
                 'client_api_id'          => $fila->client_api_id === null ? null : (int) $fila->client_api_id,
                 'version'                => $fila->version === null ? null : [
                     'id'      => (int) $fila->version->id,
@@ -781,6 +798,12 @@ class ClaudeImplementationOpsController extends Controller
                 'failure_reason'         => $this->recortar($fila->failure_reason),
             ];
 
+            if ($colgada) {
+                $item['nota'] = 'Sin actividad hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION . ' minutos (ni logs ni escrituras de la fila): '
+                    . 'el job no está corriendo. POST claude/implementations/{id}/install con marcar_colgadas=true la pasa a fallida y deja volver a instalar '
+                    . '(solo si TODAS las instalando del cliente están colgadas).';
+            }
+
             if ($con_logs) {
                 $item['logs'] = $this->ultimas_lineas_de_log($fila);
             }
@@ -789,6 +812,49 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         return $bloque;
+    }
+
+    /**
+     * El último momento en que se supo algo de una instalación: lo más reciente entre que arrancó
+     * (`started_at`), que alguien escribió la fila (`updated_at`) y su último renglón de log.
+     *
+     * @param ClientInstallation $fila La instalación.
+     *
+     * @return Carbon|null Null si no hay ningún dato de tiempo.
+     */
+    protected function ultima_actividad_de_la_instalacion(ClientInstallation $fila)
+    {
+        $candidatas = [$fila->started_at, $fila->updated_at, DeploymentLog::where('client_installation_id', $fila->id)->max('created_at')];
+        $mayor      = null;
+
+        foreach ($candidatas as $candidata) {
+            $momento = $candidata instanceof Carbon ? $candidata : $this->parsear_o_null($candidata);
+
+            if ($momento !== null && ($mayor === null || $momento->gt($mayor))) {
+                $mayor = $momento;
+            }
+        }
+
+        return $mayor;
+    }
+
+    /**
+     * ¿Está colgada esta instalación? Solo una `instalando` puede estarlo: la que lleva más de
+     * `MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION` sin actividad. Sin ningún dato de tiempo no hay con qué
+     * probar que está viva, y se da por colgada (igual que un user setup `en_curso` sin fecha).
+     *
+     * @param ClientInstallation $fila   La instalación.
+     * @param Carbon|null        $ultima Su última actividad (`ultima_actividad_de_la_instalacion()`).
+     *
+     * @return bool
+     */
+    protected function esta_colgada_la_instalacion(ClientInstallation $fila, $ultima)
+    {
+        if ($fila->status !== 'instalando') {
+            return false;
+        }
+
+        return $ultima === null || $ultima->lt(now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION));
     }
 
     /**
@@ -2179,6 +2245,15 @@ class ClaudeImplementationOpsController extends Controller
      *      anda).
      *   5. `dry_run` (default TRUE): devuelve los chequeos y lo que crearía.
      *
+     * 🔴 UNA INSTALACIÓN `instalando` QUE NADIE VA A TERMINAR. Si el worker muere sin pasar por `failed()` (un
+     * `kill -9`, un reinicio, un `$timeout` sin `pcntl`) la fila queda `instalando` para siempre, y como el
+     * 409 frena mientras haya una, ese cliente no podría volver a instalar. El estado (GET) marca `colgada`
+     * a la que lleva más de 60 minutos sin actividad (ni logs ni escrituras de la fila), y `marcar_colgadas`
+     * la destraba: si TODAS las `instalando` del cliente están colgadas las pasa a `fallida` con "colgada: sin
+     * actividad desde <fecha>" y sigue con un par nuevo; si UNA tiene actividad reciente, 409 como siempre (no
+     * se pisa un pipeline vivo). No salta ningún otro chequeo, y con la instalación real ya completada no
+     * reinstala.
+     *
      * Con `dry_run=false` el re-chequeo y el alta van en UNA transacción con la implementación bloqueada
      * (dos POST simultáneos no crean dos pares), las filas pasan a `instalando` ahí mismo —igual que
      * `start()` del panel— y el job se despacha DESPUÉS del commit: un worker real puede levantar el job
@@ -2187,7 +2262,7 @@ class ClaudeImplementationOpsController extends Controller
      * Responde 202 y nunca espera: se mira con `GET claude/implementations/{id}` (`instalaciones[]`, con
      * `include=logs`) cada 30 o 60 segundos.
      *
-     * @param Request    $request Body: dry_run?, confirm_client_name.
+     * @param Request    $request Body: dry_run?, confirm_client_name, marcar_colgadas?.
      * @param int|string $id      Id de la implementación (segmento de la URL).
      *
      * @return \Illuminate\Http\JsonResponse
@@ -2203,10 +2278,13 @@ class ClaudeImplementationOpsController extends Controller
         $invalido = $this->validar_o_422($request, [
             'dry_run'             => 'nullable|boolean',
             'confirm_client_name' => 'required_if:dry_run,false|nullable|string|max:190',
+            'marcar_colgadas'     => 'nullable|boolean',
         ]);
         if ($invalido !== null) {
             return $invalido;
         }
+
+        $marcar_colgadas = $this->booleano_o_null($request, 'marcar_colgadas') === true;
 
         $implementation = Implementation::find((int) $id);
         if ($implementation === null) {
@@ -2219,7 +2297,7 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         $dry_run = $this->resolver_dry_run($request);
-        $plan    = $this->plan_de_la_instalacion($implementation, $client);
+        $plan    = $this->plan_de_la_instalacion($implementation, $client, $marcar_colgadas);
 
         if ($dry_run) {
             return response()->json($this->respuesta_del_dry_run_de_la_instalacion($implementation, $plan, $client), 200);
@@ -2237,24 +2315,30 @@ class ClaudeImplementationOpsController extends Controller
             return $impedimento;
         }
 
-        $resultado = DB::transaction(function () use ($implementation, $client) {
+        $resultado = DB::transaction(function () use ($implementation, $client, $marcar_colgadas) {
             $bloqueada = Implementation::query()->whereKey($implementation->id)->lockForUpdate()->first();
 
             /* Todo lo que depende de un estado que puede haber cambiado (la etapa, las instalaciones) se
                vuelve a leer con la implementación bloqueada. */
-            $plan = $this->plan_de_la_instalacion($bloqueada, $client);
+            $plan = $this->plan_de_la_instalacion($bloqueada, $client, $marcar_colgadas);
 
             $impedimento = $this->impedimento_de_la_instalacion($bloqueada, $plan);
             if ($impedimento !== null) {
                 return $impedimento;
             }
 
-            return $this->preparar_el_par_de_instalaciones($client, $plan);
+            return [
+                'filas'    => $this->preparar_el_par_de_instalaciones($client, $plan),
+                'colgadas' => $plan['estado_previo'] === 'colgadas' ? $plan['ids_colgadas'] : [],
+            ];
         });
 
         if ($resultado instanceof \Illuminate\Http\JsonResponse) {
             return $resultado;
         }
+
+        $colgadas_marcadas = $resultado['colgadas'];
+        $resultado         = $resultado['filas'];
 
         $uuids = [];
         foreach ($resultado as $fila) {
@@ -2297,6 +2381,7 @@ class ClaudeImplementationOpsController extends Controller
                 return $this->instalacion_en_corto($fila);
             }, $resultado),
             'version'                  => $this->version_en_corto($resultado[0]->version_id),
+            'colgadas_marcadas_como_fallidas' => $colgadas_marcadas,
             'conexion_de_cola'         => self::CONEXION_DE_COLA,
             'latencia_maxima_segundos' => self::LATENCIA_MAXIMA_SEGUNDOS,
             'nota'                     => 'Se encoló la instalación (la real y el esqueleto del subdominio hermano, en ese orden). 🔴 Tarda ~15 '
@@ -2312,15 +2397,22 @@ class ClaudeImplementationOpsController extends Controller
      * Lee, no escribe. Se llama dos veces en el camino real —antes de la transacción, para contestar
      * rápido, y adentro con la implementación bloqueada— y una en el dry-run.
      *
-     * @param Implementation $implementation La implementación.
-     * @param Client         $client         Su cliente.
+     * Con `$marcar_colgadas` (el parámetro del pedido), si TODAS las instalaciones `instalando` del cliente
+     * están colgadas (ver `MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION`) el plan las da por liberables:
+     * `estado_previo` es `colgadas` y el chequeo `instalaciones_previas` pasa. Con una sola viva, o sin el
+     * parámetro, sigue siendo `instalando` (409): nunca se pisa un pipeline vivo.
      *
-     * @return array<string, mixed> `chequeos`, `estado_previo` (instalando | completada | pendientes |
-     *                              nueva), `ids_instalando`, `apis` (`activa` y `otra`), `version`,
-     *                              `variables` (`se_completan`, `exentas`, `faltan`) y `existentes`
-     *                              (los valores manuales que las filas pendientes ya traen).
+     * @param Implementation $implementation   La implementación.
+     * @param Client         $client           Su cliente.
+     * @param bool           $marcar_colgadas  `marcar_colgadas` del pedido.
+     *
+     * @return array<string, mixed> `chequeos`, `estado_previo` (instalando | colgadas | completada |
+     *                              pendientes | nueva), `ids_instalando`, `ids_colgadas`, `todas_colgadas`,
+     *                              `ultimas_actividades` (id → Carbon), `apis` (`activa` y `otra`), `version`,
+     *                              `variables` (`se_completan`, `exentas`, `faltan`) y `existentes` (los valores
+     *                              manuales que las filas pendientes ya traen).
      */
-    protected function plan_de_la_instalacion(Implementation $implementation, Client $client)
+    protected function plan_de_la_instalacion(Implementation $implementation, Client $client, $marcar_colgadas = false)
     {
         $chequeos = [];
 
@@ -2435,9 +2527,34 @@ class ClaudeImplementationOpsController extends Controller
         $completada    = $previas->where('kind', ClientInstallation::KIND_COMPLETA)->where('status', 'completada')->first();
         $pendientes    = $previas->where('status', 'pendiente');
 
-        if (count($ids_instalando) > 0) {
+        /* 🔴 Cuáles de las instalando están colgadas: sin actividad hace más de 60 minutos. */
+        $ultimas_actividades = [];
+        $ids_colgadas        = [];
+        foreach ($previas->where('status', 'instalando') as $en_curso) {
+            $ultima = $this->ultima_actividad_de_la_instalacion($en_curso);
+            $ultimas_actividades[(int) $en_curso->id] = $ultima;
+
+            if ($this->esta_colgada_la_instalacion($en_curso, $ultima)) {
+                $ids_colgadas[] = (int) $en_curso->id;
+            }
+        }
+        $todas_colgadas = count($ids_instalando) > 0 && count($ids_colgadas) === count($ids_instalando);
+
+        if (count($ids_instalando) > 0 && $marcar_colgadas && $todas_colgadas && $completada === null) {
+            $estado_previo = 'colgadas';
+            $detalle       = 'Hay ' . count($ids_colgadas) . ' instalación(es) en instalando SIN ACTIVIDAD hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION
+                . ' minutos (id ' . implode(', ', $ids_colgadas) . '): están colgadas. Con marcar_colgadas=true se pasan a fallida (con el motivo) y se crea un par nuevo.';
+        } elseif (count($ids_instalando) > 0) {
             $estado_previo = 'instalando';
-            $detalle       = 'Hay una instalación en curso (id ' . implode(', ', $ids_instalando) . '): no se pisa un pipeline vivo. Esperá a que termine o falle.';
+            $detalle       = 'Hay una instalación en curso (id ' . implode(', ', $ids_instalando) . '): no se pisa un pipeline vivo. '
+                . ($todas_colgadas
+                    ? 'Todas llevan más de ' . self::MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION . ' minutos sin actividad: están colgadas. Con marcar_colgadas=true se pasan a fallida y se puede volver a instalar.'
+                    : (count($ids_colgadas) > 0
+                        ? 'Alguna (id ' . implode(', ', $ids_colgadas) . ') lleva más de ' . self::MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION . ' minutos sin actividad, pero no todas: marcar_colgadas=true no se aplica con una viva. Esperá a que termine o falle.'
+                        : 'Esperá a que termine o falle.'))
+                . ($completada !== null
+                    ? ' Y la instalación real ya está completada (id ' . (int) $completada->id . '): el sistema ya está instalado, y marcar_colgadas no abre la puerta a reinstalarlo.'
+                    : '');
         } elseif ($completada !== null) {
             $estado_previo = 'completada';
             $detalle       = 'El sistema ya está instalado (instalación ' . (int) $completada->id . ' completada): reinstalar le pisaría el .env a un negocio que ya anda.';
@@ -2452,7 +2569,7 @@ class ClaudeImplementationOpsController extends Controller
                 : 'Las instalaciones previas fallaron: se crea un par nuevo (las fallidas quedan como historial).';
         }
 
-        $chequeos[] = $this->chequeo('instalaciones_previas', in_array($estado_previo, ['pendientes', 'nueva'], true), $detalle);
+        $chequeos[] = $this->chequeo('instalaciones_previas', in_array($estado_previo, ['pendientes', 'nueva', 'colgadas'], true), $detalle);
 
         /* 8. 🔴 Que el cliente no tenga ya un sistema vivo. `instalaciones_previas` solo ve las instalaciones que
            hizo ESTE camino; un cliente instalado a mano, por /instalar-cliente o por el panel no tiene ninguna, y
@@ -2484,10 +2601,13 @@ class ClaudeImplementationOpsController extends Controller
         );
 
         return [
-            'chequeos'       => $chequeos,
-            'estado_previo'  => $estado_previo,
-            'ids_instalando' => $ids_instalando,
-            'apis'           => ['activa' => $activa, 'otra' => $otra],
+            'chequeos'            => $chequeos,
+            'estado_previo'       => $estado_previo,
+            'ids_instalando'      => $ids_instalando,
+            'ids_colgadas'        => $ids_colgadas,
+            'todas_colgadas'      => $todas_colgadas,
+            'ultimas_actividades' => $ultimas_actividades,
+            'apis'                => ['activa' => $activa, 'otra' => $otra],
             'version'        => $version,
             'variables'      => $variables,
             'existentes'     => $existentes,
@@ -2658,8 +2778,13 @@ class ClaudeImplementationOpsController extends Controller
                 'error'             => 'Hay una instalación en curso para este cliente: no se pisa un pipeline vivo. No se instaló nada.',
                 'implementation_id' => (int) $implementation->id,
                 'ids_instalando'    => $plan['ids_instalando'],
+                'colgadas'          => $plan['ids_colgadas'],
+                'todas_colgadas'    => $plan['todas_colgadas'],
                 'chequeos'          => $plan['chequeos'],
-                'ayuda'             => 'GET claude/implementations/' . (int) $implementation->id . '?include=logs dice cómo va.',
+                'ayuda'             => 'GET claude/implementations/' . (int) $implementation->id . '?include=logs dice cómo va (instalaciones[].colgada).'
+                    . ($plan['todas_colgadas']
+                        ? ' Todas llevan más de ' . self::MINUTOS_PARA_DAR_POR_COLGADA_LA_INSTALACION . ' minutos sin actividad: con marcar_colgadas=true se pasan a fallida y se puede volver a instalar.'
+                        : ''),
             ], 409);
         }
 
@@ -2712,7 +2837,10 @@ class ClaudeImplementationOpsController extends Controller
         $se_crearia = null;
         if ($activa !== null && $otra !== null) {
             $se_crearia = [
-                'modo'                   => $plan['estado_previo'] === 'pendientes' ? 'reutiliza_las_pendientes_y_completa_el_par' : 'crea_el_par',
+                'modo'                   => $plan['estado_previo'] === 'pendientes'
+                    ? 'reutiliza_las_pendientes_y_completa_el_par'
+                    : ($plan['estado_previo'] === 'colgadas' ? 'marca_las_colgadas_como_fallidas_y_crea_el_par' : 'crea_el_par'),
+                'colgadas_que_marcaria_como_fallidas' => $plan['estado_previo'] === 'colgadas' ? $plan['ids_colgadas'] : [],
                 'instalaciones'          => [
                     ['kind' => ClientInstallation::KIND_COMPLETA, 'client_api_id' => (int) $activa->id, 'url' => $activa->url, 'spa_url' => $activa->spa_url],
                     ['kind' => ClientInstallation::KIND_ESQUELETO, 'client_api_id' => (int) $otra->id, 'url' => $otra->url, 'spa_url' => $otra->spa_url],
@@ -2743,6 +2871,8 @@ class ClaudeImplementationOpsController extends Controller
                 'se_completan_con'                 => $plan['variables']['se_completan'],
                 'faltan'                           => $plan['variables']['faltan'],
             ],
+            'colgadas'          => $plan['ids_colgadas'],
+            'todas_colgadas'    => $plan['todas_colgadas'],
             'senales'           => ['version_activa' => $senal],
             'avisos'            => $avisos,
             'nota'              => 'Simulacro: no se creó ni se encoló nada. 🔴 Instalar crea los cuatro subdominios, la base y el cron en Hostinger, '
@@ -2771,6 +2901,20 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function preparar_el_par_de_instalaciones(Client $client, array $plan)
     {
+        /* 🔴 Las colgadas (solo con `marcar_colgadas` y solo si TODAS las instalando lo están: ver
+           `plan_de_la_instalacion()`) pasan a `fallida` ANTES de armar el par, con el motivo y la fecha de su última
+           actividad. Quedan de historial como cualquier fallida, y el par nuevo no las reutiliza. */
+        if ($plan['estado_previo'] === 'colgadas') {
+            foreach (ClientInstallation::whereIn('id', $plan['ids_colgadas'])->where('status', 'instalando')->lockForUpdate()->get() as $colgada) {
+                $desde = isset($plan['ultimas_actividades'][(int) $colgada->id]) ? $plan['ultimas_actividades'][(int) $colgada->id] : null;
+
+                $colgada->status         = 'fallida';
+                $colgada->finished_at    = now();
+                $colgada->failure_reason = 'colgada: sin actividad desde ' . ($desde === null ? 'una fecha desconocida' : $desde->format('d/m/Y H:i'));
+                $colgada->save();
+            }
+        }
+
         $filas       = [];
         $grupos      = [];
         $reutilizadas = 0;

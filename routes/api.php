@@ -500,8 +500,10 @@ Route::middleware('claude.task.key')
         /* INSTALAR el sistema del cliente (el admin aprovisiona: subdominios, base y cron en Hostinger, y sube SPA y
            API por SFTP). Crea o reutiliza el par real + esqueleto y lo encola en `database` con 202. 🔴 Siempre con
            la ÚLTIMA versión publicada y solo con el token de Hostinger del admin (sin él: /instalar-cliente). Frenos:
-           lista blanca, dry_run por defecto con nueve chequeos (uno es que el cliente no tenga ya un sistema vivo), confirm_client_name, 409 si ya hay una instalando y
-           422 si ya está instalado. El job tiene su propio $timeout por debajo del retry_after de la cola. */
+           lista blanca, dry_run por defecto con nueve chequeos (uno es que el cliente no tenga ya un sistema vivo),
+           confirm_client_name, 409 si ya hay una instalando (salvo `marcar_colgadas=true` con TODAS colgadas: más de
+           60 minutos sin actividad) y 422 si ya está instalado. El job tiene su propio $timeout por debajo del
+           retry_after de la cola. */
         Route::post('implementations/{id}/install', 'Api\ClaudeImplementationOpsController@instalar_json')
             ->whereNumber('id');
 
