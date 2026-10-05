@@ -24,13 +24,18 @@ class ImplementationUserSetupService
      * a `POST {client_api_url}/api/admin-sync/user-setup` y registra el resultado.
      * Cualquier error se loguea sin interrumpir el flujo de implementación.
      *
-     * @param Implementation $implementation Implementación que avanzó a la Etapa 3.
+     * @param Implementation $implementation   Implementación que avanzó a la Etapa 3.
+     * @param int|null       $timeout_segundos Techo de la llamada HTTP, en segundos (misión
+     *                                         `implementar-cliente`, 5/10/2026). Opcional: sin él —que
+     *                                         es como lo llama el panel— se usa
+     *                                         `services.client_api.timeout`, exactamente como siempre.
+     *                                         Ver resolver_timeout() para el porqué del parámetro.
      *
      * @return array{ok: bool, message: string} Resultado de la ejecución: ok según
      *     $response->successful(), message con el motivo del fallo o la confirmación de éxito.
      *     Los llamadores existentes que ignoran el retorno siguen funcionando sin cambios.
      */
-    public function trigger_user_setup(Implementation $implementation): array
+    public function trigger_user_setup(Implementation $implementation, ?int $timeout_segundos = null): array
     {
         // Cliente dueño de la implementación.
         $client = $implementation->client ?? Client::find($implementation->client_id);
@@ -62,7 +67,7 @@ class ImplementationUserSetupService
         $endpoint = rtrim($client_api_url, '/') . '/api/admin-sync/user-setup';
 
         try {
-            $timeout = (int) config('services.client_api.timeout', 60);
+            $timeout = $this->resolver_timeout($timeout_segundos);
 
             $response = Http::timeout($timeout)
                 ->acceptJson()
@@ -104,6 +109,36 @@ class ImplementationUserSetupService
 
             return ['ok' => false, 'message' => 'Error de conexión con la client_api: ' . $exception->getMessage()];
         }
+    }
+
+    /**
+     * Techo de la llamada HTTP del setup remoto: el que pidió el llamador, o el de siempre.
+     *
+     * 🔴 POR QUÉ EXISTE EL PARÁMETRO (misión `implementar-cliente`, 5/10/2026). El techo de siempre
+     * es `services.client_api.timeout`, y esa clave vale 15 s (`CLIENT_API_TIMEOUT`): el `60` del
+     * segundo argumento de `config()` NUNCA aplica porque la clave existe. Del otro lado el setup
+     * arranca con `migrate:fresh` y siembra todo, y tarda minutos (el demo setup, que hace lo mismo,
+     * está medido en ~565 s). Con 15 s el botón del panel corta la espera con "Error de conexión con
+     * la client_api" mientras el setup sigue corriendo del otro lado.
+     *
+     * El panel NO se toca: sigue llamando sin el parámetro y recibiendo exactamente el mismo número
+     * que antes. El que lo pide es el job de `POST claude/implementations/{id}/user-setup`, que corre
+     * en la cola `database` (donde esperar minutos no cuelga ningún request) y le da más aire.
+     *
+     * Un valor nulo, cero o negativo se ignora y cae al de siempre: un techo de 0 segundos en
+     * Guzzle significa "sin límite", y eso es lo último que se quiere si el llamador se equivoca.
+     *
+     * @param int|null $timeout_segundos Techo pedido por el llamador, en segundos.
+     *
+     * @return int Segundos que se le pasan a `Http::timeout()`.
+     */
+    public function resolver_timeout(?int $timeout_segundos = null): int
+    {
+        if ($timeout_segundos !== null && $timeout_segundos > 0) {
+            return $timeout_segundos;
+        }
+
+        return (int) config('services.client_api.timeout', 60);
     }
 
     /**
