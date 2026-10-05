@@ -159,13 +159,24 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * Subdominios que no puede tener un cliente porque ya existen en `comerciocity.com` o los usa la
      * plataforma: `admin` es el panel (admin.comerciocity.com), `api` es la API pública que sirve el
-     * isotipo de los mails, y el resto son nombres que Hostinger o los correos reservan. Un cliente
-     * llamado "admin" no chocaría con ninguna `client_api` —por eso no lo ve el chequeo de unicidad— y
-     * en cambio pisaría el panel de ComercioCity en la zona DNS.
+     * isotipo de los mails, `tienda` es la del ecommerce, y el resto son nombres que Hostinger o los
+     * clientes de correo (`imap`, `pop`, `pop3`, `smtp`, `autodiscover`) y de hosting (`cpanel`, `ftp`,
+     * `localhost`) reservan. Un cliente llamado "admin" no chocaría con ninguna `client_api` —por eso no
+     * lo ve el chequeo de unicidad— y en cambio pisaría el panel de ComercioCity en la zona DNS.
      *
      * @var array<int, string>
      */
-    const SUBDOMINIOS_RESERVADOS = ['admin', 'api', 'www', 'mail', 'smtp', 'ftp', 'webmail', 'demo', 'app', 'soporte', 'ns1', 'ns2'];
+    const SUBDOMINIOS_RESERVADOS = [
+        'admin', 'api', 'www', 'mail', 'smtp', 'ftp', 'webmail', 'demo', 'app', 'soporte',
+        'tienda', 'imap', 'pop', 'pop3', 'cpanel', 'autodiscover', 'localhost',
+    ];
+
+    /**
+     * Los reservados que se NUMERAN: `demo` o `ns` seguidos de dígitos (`demo2`, `ns3`). Las demos de la
+     * plataforma (`demo`, `demo2`, `demo3`...) y los servidores de nombres (`ns1`, `ns2`...) crecen en
+     * cantidad, y una lista fija se queda corta el día que aparece la siguiente.
+     */
+    const PATRON_DE_RESERVADOS_NUMERADOS = '/^(demo|ns)[0-9]+$/';
 
     /**
      * Largo máximo de un nombre de base de datos en MySQL: la base de un cliente se llama
@@ -316,11 +327,20 @@ class ClaudeImplementationOpsController extends Controller
      * ("The subdominio format is invalid."), y es silencioso: nadie se entera hasta que un error le
      * llega a Lucas en otro idioma. Es la misma trampa que el trait documenta para `exists` y `array`.
      *
+     * El mensaje de `boolean` se REEMPLAZA (el del trait dice "booleano (1, 0, true o false)"): la regla de
+     * Laravel acepta `true`, `false`, `1` y `0` pero NO el texto `"false"` o `"true"` entre comillas, que da 422,
+     * y un mensaje que lista "true o false" manda al que lo recibe a probar con lo que acaba de mandar. Acá se
+     * dice que van sin comillas y que el texto no se acepta. No se aceptan los textos a propósito: en una
+     * escritura no se adivina qué quiso decir quien mandó un texto donde va un booleano (`"dry_run": "false"`
+     * leído de más es un real que nadie pidió). El trait y los demás controladores del bloque no se tocan.
+     *
      * @return array<string, string>
      */
     protected function mensajes_de_validacion()
     {
         return array_merge($this->mensajes_de_validacion_base(), [
+            'boolean'          => 'El parámetro :attribute tiene que ser un booleano de JSON (true o false, sin comillas) o 1 o 0: el texto "true" o "false" '
+                . 'entre comillas no se acepta.',
             'required_without' => 'El parámetro :attribute es obligatorio si no mandás :values.',
             'required_if'      => 'El parámetro :attribute es obligatorio cuando :other es :value.',
             'regex'            => 'El parámetro :attribute no tiene un formato válido.',
@@ -628,11 +648,12 @@ class ClaudeImplementationOpsController extends Controller
      * El bloque `formulario`: cuándo se envió y el resumen de lo que el cliente cargó.
      *
      * 🔴 El resumen sale de `ImplementationFormMapper::build_summary()`, el mismo que muestra el
-     * panel, y esa función incluye el DNI y el teléfono de cada empleado en la sección "Equipo". Sin
-     * `include=contacto` se les saca esos dos datos ANTES de armar el resumen (y no se parchea el
-     * texto de salida): queda solo el nombre. Lo demás del resumen —precios, stock, ventas, nombre y
-     * dirección del negocio— no es un dato personal. El mail y el CUIT/documento del dueño no salen en
-     * ningún caso: `build_summary()` no los incluye.
+     * panel, y esa función incluye el DNI y el teléfono de cada empleado en la sección "Equipo" y la
+     * dirección y las redes del negocio en "Empresa". Sin `include=contacto` se les saca esos datos
+     * ANTES de armar el resumen (y no se parchea el texto de salida): de los empleados queda solo el
+     * nombre, y del negocio el nombre (sin dirección ni redes). Lo demás del resumen —precios, stock,
+     * ventas— no es un dato personal. El mail y el CUIT/documento del dueño no salen en ningún caso:
+     * `build_summary()` no los incluye.
      *
      * @param Implementation $implementation La implementación.
      * @param bool           $con_contacto   true = el resumen completo, con los datos personales.
@@ -654,6 +675,16 @@ class ClaudeImplementationOpsController extends Controller
             }
 
             $respuestas['employees'] = $solo_nombres;
+        }
+
+        /* 🔴 Y sin el contacto tampoco salen la DIRECCIÓN ni las REDES del negocio: son datos de contacto del
+           negocio, y quien lee esto es una sesión que los pega en una conversación. Se sacan ANTES de armar el
+           resumen, igual que los datos de los empleados (no se parchea el texto de salida). El nombre del negocio
+           queda: no es un dato de contacto y es con lo que se confirma la operación. */
+        if (! $con_contacto) {
+            foreach (['address_company', 'facebook', 'instagram', 'social_networks'] as $campo_de_contacto) {
+                unset($respuestas[$campo_de_contacto]);
+            }
         }
 
         return [
@@ -1238,6 +1269,17 @@ class ClaudeImplementationOpsController extends Controller
             );
         }
 
+        if (isset($resultado['subdominio_ocupado'])) {
+            return $this->error_422(
+                'No se puede dar el alta: El subdominio "' . (string) $efectivo . '" no sirve: ' . $resultado['subdominio_ocupado']
+                    . ' (se volvió a chequear con el lock tomado: otra promoción lo ocupó mientras tanto). No se creó nada.',
+                [
+                    'bloqueos'   => ['El subdominio "' . (string) $efectivo . '" no sirve: ' . $resultado['subdominio_ocupado']],
+                    'subdominio' => ['pedido' => $subdominio_pedido, 'sugerido' => $subdominio['sugerido'], 'valido' => false, 'motivo' => $resultado['subdominio_ocupado']],
+                ]
+            );
+        }
+
         if (isset($resultado['conflicto'])) {
             return $this->conflicto_de_implementacion_existente($resultado['client'], $resultado['conflicto']);
         }
@@ -1294,8 +1336,10 @@ class ClaudeImplementationOpsController extends Controller
      * @param Admin|null  $creador    Admin creador de las tareas de la promoción.
      *
      * @return array<string, mixed>|string `lock` si no se pudo tomar el lock global; si no, un array
-     *                                     con `client`, `implementation` y `promovido`, o con `client` y
-     *                                     `conflicto` si entre medio alguien creó la implementación.
+     *                                     con `client`, `implementation` y `promovido`, con `client` y
+     *                                     `conflicto` si entre medio alguien creó la implementación, o con
+     *                                     `subdominio_ocupado` (el motivo) si con el lock tomado el
+     *                                     subdominio ya no servía.
      */
     protected function ejecutar_el_alta($lead, $client, $promover, $subdominio, $creador)
     {
@@ -1312,6 +1356,19 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         try {
+            /* 🔴 El chequeo del subdominio se REPITE acá, con el lock tomado. El de antes del lock mira un estado que
+               otra promoción puede estar cambiando: dos altas con el mismo subdominio para dos leads distintos
+               pasarían las dos ese chequeo, y la segunda crearía las ClientApi de un subdominio que la primera
+               acaba de ocupar. Con el lock nadie más promueve, así que lo que se ve acá es lo que hay. (Sin
+               promoción —un cliente que ya existe— no hay subdominio que chequear.) */
+            if ($promover) {
+                $motivo = $this->motivo_por_el_que_no_sirve_el_subdominio((string) $subdominio);
+
+                if ($motivo !== null) {
+                    return ['subdominio_ocupado' => $motivo];
+                }
+            }
+
             return DB::transaction(function () use ($lead, $client, $promover, $subdominio, $creador) {
                 $promovido = false;
 
@@ -1475,8 +1532,8 @@ class ClaudeImplementationOpsController extends Controller
             return 'no puede terminar en guion.';
         }
 
-        if (in_array($subdominio, self::SUBDOMINIOS_RESERVADOS, true)) {
-            return 'es un nombre reservado de la plataforma (' . implode(', ', self::SUBDOMINIOS_RESERVADOS) . ').';
+        if (in_array($subdominio, self::SUBDOMINIOS_RESERVADOS, true) || preg_match(self::PATRON_DE_RESERVADOS_NUMERADOS, $subdominio) === 1) {
+            return 'es un nombre reservado de la plataforma (' . implode(', ', self::SUBDOMINIOS_RESERVADOS) . ', y demo o ns seguidos de números).';
         }
 
         $prefijo = (string) config('services.hostinger.database_prefix', 'u767360347_');

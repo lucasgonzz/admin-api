@@ -60,6 +60,9 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
             'apply_iva'         => 'yes',
             'company_name'      => 'Panchito S.A.',
             'address_company'   => 'San Martín 123',
+            'facebook'          => 'panchito.sa.oficial',
+            'instagram'         => '@panchito.sa',
+            'social_networks'   => 'Instagram @panchito.sa',
             'doc_number'        => '20304050607',
             'email'             => 'dueno-secreto@ejemplo.test',
             'employees'         => [
@@ -330,7 +333,7 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->assertStringContainsString('Minorista', $cuerpo, 'El resumen no trae las listas de precios.');
         $this->assertStringContainsString('Local centro', $cuerpo);
         $this->assertStringContainsString('Ana Pérez', $cuerpo, 'Tiene que quedar el nombre de los empleados.');
-        $this->assertStringContainsString('San Martín 123', $cuerpo);
+        $this->assertStringContainsString('Panchito S.A.', $cuerpo, 'Tiene que quedar el nombre del negocio.');
 
         foreach (['30111222', '28999888', '3415551234', '3415554321', '20304050607', 'dueno-secreto@ejemplo.test'] as $dato_personal) {
             $this->assertStringNotContainsString($dato_personal, $cuerpo, 'Salió un dato personal sin pedir el contacto: ' . $dato_personal);
@@ -338,8 +341,37 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * Con `include=formulario,contacto` el resumen es el completo del panel: con DNI y teléfonos. El
-     * mail y el documento del dueño siguen sin salir: `build_summary()` no los incluye.
+     * 2. 🔴 Con `include=formulario` solo, el resumen tampoco trae la DIRECCIÓN ni las REDES del negocio: son datos
+     * de contacto del negocio y esta lectura la hace una sesión que los pega en una conversación. Quedan el
+     * nombre del negocio y lo que sirve para decidir el paso (precios, stock, equipo por nombre).
+     *
+     * @return void
+     */
+    public function test_el_formulario_sin_contacto_no_trae_la_direccion_ni_las_redes_del_negocio(): void
+    {
+        $e = $this->escenario();
+        $this->escribir_data_de_la_etapa($e['implementacion'], 1, ['form_responses' => $this->respuestas_del_formulario()]);
+
+        $respuesta = $this->getJson('/api/claude/implementations/' . $e['implementacion']->id . '?include=formulario', $this->headers());
+
+        $respuesta->assertStatus(200);
+        $cuerpo = $this->cuerpo($respuesta);
+
+        foreach (['San Martín 123', 'panchito.sa.oficial', '@panchito.sa'] as $dato_del_negocio) {
+            $this->assertStringNotContainsString($dato_del_negocio, $cuerpo, 'Salió un dato de contacto del negocio sin pedir el contacto: ' . $dato_del_negocio);
+        }
+
+        $etiquetas = array_column($respuesta->json('formulario.resumen'), 'label');
+        $this->assertNotContains('Dirección', $etiquetas);
+        $this->assertNotContains('Redes sociales', $etiquetas);
+        $this->assertContains('Nombre de la empresa', $etiquetas);
+        $this->assertContains('Manejo de precios', $etiquetas);
+    }
+
+    /**
+     * Con `include=formulario,contacto` el resumen es el completo del panel: con DNI y teléfonos, y con la
+     * dirección y las redes del negocio. El mail y el documento del dueño siguen sin salir: `build_summary()`
+     * no los incluye.
      *
      * @return void
      */
@@ -353,6 +385,8 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
         $cuerpo = $this->cuerpo($respuesta);
         $this->assertStringContainsString('DNI 30111222', $cuerpo);
         $this->assertStringContainsString('3415554321', $cuerpo);
+        $this->assertStringContainsString('San Martín 123', $cuerpo, 'Con el contacto, la dirección del negocio sí sale.');
+        $this->assertStringContainsString('Instagram @panchito.sa', $cuerpo, 'Con el contacto, las redes del negocio sí salen.');
         $this->assertStringNotContainsString('20304050607', $cuerpo);
         $this->assertStringNotContainsString('dueno-secreto@ejemplo.test', $cuerpo);
     }
