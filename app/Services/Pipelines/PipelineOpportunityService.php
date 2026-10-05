@@ -865,9 +865,10 @@ class PipelineOpportunityService
      * quedó un evento colgado de una oportunidad sin próxima acción (un borrado anterior que Google
      * rechazó: se reintenta). Sin esto, mover una oportunidad que conserva su próxima acción manual,
      * o cambiarle solo el responsable, dispararía una llamada a Google por nada. La contracara
-     * conocida: si la nota está vacía (el título del evento es el nombre de la etapa) y la
-     * oportunidad se mueve conservando la acción, el título y la etapa de la descripción del evento
-     * quedan con los de cuando se fijó; se actualizan la próxima vez que cambie la acción.
+     * conocida: cada vez que la oportunidad cambia de etapa conservando la próxima acción (regla
+     * R1.3, con o sin nota) la línea `Etapa: X` de la descripción del evento queda con la etapa de
+     * cuando se fijó la acción, y, si la nota está vacía, también el título (que es el nombre de la
+     * etapa). Se refrescan la próxima vez que cambie la fecha o la nota de la acción.
      *
      * @param PipelineOpportunity               $op       Recargada, ya con el resultado final.
      * @param int|null                          $admin_id El admin que hace el cambio.
