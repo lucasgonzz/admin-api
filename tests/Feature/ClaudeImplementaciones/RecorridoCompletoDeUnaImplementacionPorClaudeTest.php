@@ -329,7 +329,8 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $setup = $this->post_de($id, '/user-setup', []);
         $setup->assertStatus(200)->assertJsonPath('listo', true);
         $this->assertSame('Almacén Rosa S.A.', $setup->json('payload.company_name'), 'El payload sale de lo que el cliente cargó en el formulario.');
-        $this->assertSame('20304050607', $setup->json('payload.doc_number'));
+        $this->assertSame('***0607', $setup->json('payload.doc_number'), 'El documento del dueño sale enmascarado salvo con include=contacto.');
+        $this->assertSame('20304050607', $this->post_de($id, '/user-setup', ['include' => 'contacto'])->json('payload.doc_number'));
 
         $this->post_de($id, '/user-setup', ['dry_run' => false, 'confirm_client_name' => 'Rosa Fernández'])
             ->assertStatus(202)

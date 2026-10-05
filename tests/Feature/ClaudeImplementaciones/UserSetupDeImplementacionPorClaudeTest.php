@@ -172,7 +172,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 
             $respuesta->assertStatus(422);
             $this->assertStringContainsString($campo, $this->cuerpo($respuesta));
-            $respuesta->assertJsonPath('parametros_aceptados', ['dry_run', 'confirm_client_name', 'reintentar', 'conciliar']);
+            $respuesta->assertJsonPath('parametros_aceptados', ['dry_run', 'confirm_client_name', 'include', 'reintentar', 'conciliar']);
         }
 
         $this->assertSame([], $this->registro($e['implementacion']));
@@ -243,8 +243,12 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         AdminSetting::set('implementation_serper_api_key_default', '0123456789abcdef0123456789abcdef01234567');
         $e = $this->escenario();
 
-        $respuesta = $this->configurar($e['implementacion'], []);
+        /* Con `include=contacto` para ver el payload TAL CUAL viaja: por defecto el mail, el documento y el
+           teléfono del dueño salen enmascarados (PayloadDelUserSetupSinDatosPersonalesPorDefectoTest). */
+        $respuesta = $this->configurar($e['implementacion'], ['include' => 'contacto']);
         $payload   = $respuesta->json('payload');
+
+        $this->assertSame('***0607', $this->configurar($e['implementacion'], [])->json('payload.doc_number'));
 
         $this->assertSame((int) $e['cliente']->user_id, $payload['user_id']);
         $this->assertSame('Panchito S.A.', $payload['company_name']);

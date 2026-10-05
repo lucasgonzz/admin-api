@@ -221,7 +221,13 @@ class ClaudeImplementationOpsController extends Controller
      * PROPÓSITO: un parámetro de más es 422 y no se aplica nada. Re-aplicar el user setup le vacía la base
      * al cliente.
      */
-    const PARAMETROS_DEL_USER_SETUP = ['dry_run', 'confirm_client_name', 'reintentar', 'conciliar'];
+    const PARAMETROS_DEL_USER_SETUP = ['dry_run', 'confirm_client_name', 'include', 'reintentar', 'conciliar'];
+
+    /**
+     * Lo que se puede pedir con `include` en el dry-run del user setup: `contacto` muestra enteros el mail, el
+     * documento y el teléfono del dueño que lleva el payload (por defecto salen enmascarados).
+     */
+    const INCLUDES_DEL_USER_SETUP = ['contacto'];
 
     /**
      * La nota que deja una conciliación del user setup (`conciliar: true`) en el registro de la etapa 2.
@@ -2812,7 +2818,7 @@ class ClaudeImplementationOpsController extends Controller
      * escribe bajo lock ANTES de despachar (así dos llamadas no despachan dos jobs), y responde 202. El
      * resultado se lee en `user_setup` de `GET claude/implementations/{id}`.
      *
-     * @param Request    $request Body: dry_run?, confirm_client_name, reintentar?, conciliar?.
+     * @param Request    $request Body: dry_run?, confirm_client_name, include?, reintentar?, conciliar?.
      * @param int|string $id      Id de la implementación (segmento de la URL).
      *
      * @return \Illuminate\Http\JsonResponse
@@ -2834,6 +2840,13 @@ class ClaudeImplementationOpsController extends Controller
         if ($invalido !== null) {
             return $invalido;
         }
+
+        $includes = $this->resolver_includes($request, self::INCLUDES_DEL_USER_SETUP);
+        if (! is_array($includes)) {
+            return $includes;
+        }
+
+        $con_contacto = in_array('contacto', $includes, true);
 
         $reintentar = $this->booleano_o_null($request, 'reintentar') === true;
         $conciliar  = $this->booleano_o_null($request, 'conciliar') === true;
@@ -2862,7 +2875,7 @@ class ClaudeImplementationOpsController extends Controller
         $plan    = $this->plan_del_user_setup($implementation, $client);
 
         if ($dry_run) {
-            return response()->json($this->respuesta_del_dry_run_del_user_setup($implementation, $plan), 200);
+            return response()->json($this->respuesta_del_dry_run_del_user_setup($implementation, $plan, $con_contacto), 200);
         }
 
         /* --- Freno 2: confirmación por nombre. --- */
@@ -3355,15 +3368,20 @@ class ClaudeImplementationOpsController extends Controller
      *
      * El payload sale de `ImplementationActionService::preview()` —el mismo preview del panel, que arma el
      * mismo payload que `trigger_user_setup()` y le tapa las claves de servicios pagos—, así que lo que se
-     * ve acá es lo que va a viajar. Incluye datos del cliente (su documento, que es el usuario con el que
-     * entra, su mail, su teléfono): es a propósito, para eso se mira antes de aplicar.
+     * ve acá es lo que va a viajar.
+     *
+     * 🔴 Lleva el mail, el documento (el usuario con el que entra el dueño) y el teléfono del dueño, y quien
+     * lo lee es una sesión de Claude que después lo pega en una conversación. Para decidir si se aplica no
+     * hace falta verlos enteros: por defecto salen ENMASCARADOS (`p***@dominio`, `***4567`) y enteros solo con
+     * `include=contacto`, igual que el contacto de `GET claude/implementations/{id}`.
      *
      * @param Implementation       $implementation La implementación.
      * @param array<string, mixed> $plan           El plan de `plan_del_user_setup()`.
+     * @param bool                 $con_contacto   true = el mail, el documento y el teléfono enteros.
      *
      * @return array<string, mixed>
      */
-    protected function respuesta_del_dry_run_del_user_setup(Implementation $implementation, array $plan)
+    protected function respuesta_del_dry_run_del_user_setup(Implementation $implementation, array $plan, $con_contacto = false)
     {
         $listo = true;
         foreach ($plan['chequeos'] as $chequeo) {
@@ -3374,6 +3392,11 @@ class ClaudeImplementationOpsController extends Controller
 
         $preview = (new ImplementationActionService())->preview($implementation, 'user_setup');
         $payload = json_decode((string) $preview['body'], true);
+        $payload = is_array($payload) ? $payload : [];
+
+        if (! $con_contacto) {
+            $payload = $this->enmascarar_los_datos_personales_del_payload($payload);
+        }
 
         /* Lo que pasó con el intento anterior y qué corresponde hacer ahora. */
         $estado      = $this->estado_del_user_setup($implementation);
@@ -3398,7 +3421,7 @@ class ClaudeImplementationOpsController extends Controller
                 'endpoint'         => $plan['endpoint'],
                 'timeout_segundos' => EjecutarUserSetupDeImplementacionJob::TIMEOUT_DE_LA_LLAMADA,
             ],
-            'payload'                 => is_array($payload) ? $payload : [],
+            'payload'                 => $payload,
             'aviso_destructivo'       => 'Del otro lado el setup arranca con migrate:fresh --force: VACÍA la base del sistema del cliente. Solo se aplica sobre una '
                 . 'instalación recién hecha y una sola vez; este camino no tiene forzar.',
         ];
@@ -3417,6 +3440,51 @@ class ClaudeImplementationOpsController extends Controller
                 : '');
 
         return $respuesta;
+    }
+
+    /**
+     * Enmascara en el payload del user setup los tres datos personales del dueño: `email`, `doc_number` y
+     * `phone`.
+     *
+     * El mail conserva la primera letra y el dominio (`p***@ejemplo.test`, el mismo formato que la casilla de
+     * los mails de hito); el documento y el teléfono, solo los últimos cuatro dígitos (`***4567`). Un dato
+     * vacío o ausente se deja como está, y uno con menos de cuatro dígitos sale tapado entero: no se muestra
+     * a medias lo que no alcanza para taparse.
+     *
+     * @param array<string, mixed> $payload El payload del user setup.
+     *
+     * @return array<string, mixed>
+     */
+    protected function enmascarar_los_datos_personales_del_payload(array $payload)
+    {
+        foreach (['email', 'doc_number', 'phone'] as $campo) {
+            if (! isset($payload[$campo]) || is_array($payload[$campo]) || trim((string) $payload[$campo]) === '') {
+                continue;
+            }
+
+            $payload[$campo] = $campo === 'email'
+                ? ImplementacionMailHelper::enmascarar((string) $payload[$campo])
+                : $this->enmascarar_un_numero((string) $payload[$campo]);
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Tapa un número (documento, teléfono) dejando los últimos cuatro dígitos: `20-30405060-7` → `***0607`.
+     *
+     * Se enmascara por los dígitos y no por el texto: un documento con puntos o guiones y un teléfono con
+     * `+`, espacios o paréntesis muestran lo mismo.
+     *
+     * @param string $valor El número tal como está.
+     *
+     * @return string
+     */
+    protected function enmascarar_un_numero($valor)
+    {
+        $digitos = preg_replace('/\D+/', '', $valor);
+
+        return strlen((string) $digitos) < 4 ? '***' : '***' . substr($digitos, -4);
     }
 
     /* ==============================================================================================
