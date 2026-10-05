@@ -10,6 +10,7 @@ use App\Models\ImplementationStage;
 use App\Models\Lead;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Str;
+use Tests\Fakes\ServidorSmtpFake;
 use Tests\TestCase;
 
 /**
@@ -44,6 +45,50 @@ abstract class BaseDelMailDeImplementacion extends TestCase
 
         // El link del formulario es URL base + token. Sin esta setting el link es null.
         AdminSetting::updateOrCreate(['key' => 'implementation_form_url'], ['value' => self::URL_DEL_FORMULARIO]);
+    }
+
+    /**
+     * Los servidores SMTP de mentira que levantó el test, para bajarlos al terminar.
+     *
+     * @var array<int, ServidorSmtpFake>
+     */
+    private $servidores_smtp = [];
+
+    /**
+     * @return void
+     */
+    protected function tearDown(): void
+    {
+        foreach ($this->servidores_smtp as $servidor) {
+            $servidor->bajar();
+        }
+
+        $this->servidores_smtp = [];
+
+        parent::tearDown();
+    }
+
+    /**
+     * Levanta un servidor SMTP de verdad (un proceso aparte, en 127.0.0.1) y apunta el mailer `admin`
+     * a él. Si en este entorno no se puede lanzar un proceso, el test se saltea.
+     *
+     * @param string $modo ServidorSmtpFake::MODO_RECHAZA (550 en cada RCPT) | MODO_ACEPTA.
+     *
+     * @return ServidorSmtpFake
+     */
+    protected function levantar_un_smtp(string $modo): ServidorSmtpFake
+    {
+        $servidor = ServidorSmtpFake::levantar($modo);
+
+        if ($servidor === null) {
+            $this->markTestSkipped('No se pudo lanzar el servidor SMTP de prueba en este entorno.');
+        }
+
+        $this->servidores_smtp[] = $servidor;
+
+        $servidor->apuntar_el_mailer('admin');
+
+        return $servidor;
     }
 
     /**

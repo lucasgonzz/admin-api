@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\ImplementacionMailException;
 use App\Mail\Helpers\ImplementacionMailHelper;
+use App\Mail\Helpers\RechazosDeCorreoHelper;
 use App\Mail\ImplementacionMail;
 use App\Models\Client;
 use App\Models\Implementation;
@@ -202,7 +203,9 @@ class ImplementacionMailService
      * `error` con el mismo mensaje que el aviso de actualización.
      *
      * Un envío fallido NO tira excepción: se contesta con `estado: error` y el motivo, y queda en la
-     * fila. Un hito en `error` se puede reintentar sin `$reenviar`.
+     * fila. Un hito en `error` se puede reintentar sin `$reenviar`. Cuenta como fallido también el
+     * mail que el servidor SMTP rechazó sin que `send()` tirara (casilla inexistente): ver
+     * `RechazosDeCorreoHelper`.
      *
      * Si el mail salió: la fila queda `enviado`; si el cliente no tenía casilla en la ficha, se la
      * guarda; y si se pasó `$email`, esa casilla queda guardada en la ficha aunque tuviera otra.
@@ -350,6 +353,37 @@ class ImplementacionMailService
             ]);
 
             return self::registrar_fallo($fila, $impl, $hito, $para, $armado['asunto'], $excepcion->getMessage());
+        }
+
+        /*
+         * OJO: que `send()` no haya tirado NO quiere decir que el mail salió. Si el servidor rechaza
+         * la casilla (550 en el RCPT TO: "User unknown", un dominio que no existe, un buzón lleno)
+         * SwiftMailer no tira excepción: `send()` vuelve normal y las rechazadas quedan en
+         * `failures()` del mailer. Sin mirarlas, el hito quedaba `enviado`, la casilla rechazada se
+         * guardaba en la ficha del cliente y la skill le avisaba por WhatsApp "te mandé un mail" a
+         * alguien que nunca lo recibió (hallazgo ALTO-4 del revisor, con un SMTP real que contesta 550).
+         *
+         * Se registra como fallo —no cuenta como enviado ni se guarda la casilla en la ficha— y el
+         * motivo lleva la casilla enmascarada: la entera ya está en la columna `email` de la fila.
+         */
+        $rechazadas = RechazosDeCorreoHelper::del_ultimo_envio(self::MAILER);
+
+        if (! empty($rechazadas)) {
+            Log::channel('daily')->error('ImplementacionMail: el servidor de correo rechazó la casilla.', [
+                'implementation_id' => $impl->id,
+                'hito'              => $hito,
+                'email'             => $para,
+                'rechazadas'        => $rechazadas,
+            ]);
+
+            return self::registrar_fallo(
+                $fila,
+                $impl,
+                $hito,
+                $para,
+                $armado['asunto'],
+                'el servidor de correo rechazó la casilla ' . ImplementacionMailHelper::enmascarar($para) . '.'
+            );
         }
 
         $resultado = self::registrar_envio($fila, $impl, $hito, $para, $armado['asunto']);
@@ -1031,6 +1065,10 @@ class ImplementacionMailService
     private static function registrar_fallo(?ImplementationMail $fila, Implementation $impl, string $hito, string $para, string $asunto, string $detalle): array
     {
         if ($fila instanceof ImplementationMail && $fila->esta_enviado()) {
+            // El motivo puede venir de un SMTP ("Timeout") sin punto final: se lo agrega para que la
+            // aclaración que sigue no quede pegada.
+            $detalle     = rtrim($detalle);
+            $detalle     = preg_match('/[.!?]$/', $detalle) === 1 ? $detalle : $detalle . '.';
             $motivo      = 'No se pudo reenviar el mail: ' . $detalle . ' El mail original sí salió el ' . self::fecha_legible($fila) . '.';
             $fila->error = $motivo;
             $fila->save();
