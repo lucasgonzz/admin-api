@@ -14,6 +14,7 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\ClientVersionUpgrade;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
 use App\Models\Implementation;
@@ -38,6 +39,7 @@ use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -125,6 +127,15 @@ class ClaudeImplementationOpsController extends Controller
         7 => 'Vinculación ARCA/AFIP',
         8 => 'Videollamada de capacitación',
     ];
+
+    /**
+     * Endpoint de empresa-api que dice qué versión tiene activa un sistema (`default_version`). Se consulta
+     * en el dry-run de `install` como señal ADICIONAL de que ya hay un sistema andando en la API del cliente.
+     */
+    const RUTA_DE_LA_VERSION_ACTIVA = '/api/version-activa';
+
+    /** Techo, en segundos, de esa consulta: un dry-run no se cuelga esperando a una API que no responde. */
+    const TIMEOUT_DE_LA_SENAL_DE_VERSION = 5;
 
     /** Lo que se puede pedir con `include` en la lectura del estado. */
     const INCLUDES_DEL_ESTADO = ['contacto', 'formulario', 'logs'];
@@ -1060,6 +1071,16 @@ class ClaudeImplementationOpsController extends Controller
                 $avisos[] = 'El lead no tiene teléfono: el cliente nacería sin teléfono y no se le va a poder escribir.';
             }
         } else {
+            /* 🔴 No se arranca una implementación sobre un negocio que ya opera: un cliente con un sistema vivo
+               (actualizaciones registradas) ya pasó por esto, y volver a "implementarlo" lo llevaría a instalar,
+               configurar y cerrar etapas sobre datos de producción. Vale para `client_id` y para un lead ya
+               promovido a ese cliente. */
+            $vivo = $this->sistema_vivo($client);
+            if ($vivo['vivo']) {
+                $bloqueos[] = 'El cliente ya tiene un sistema en producción (' . implode(' ', $vivo['motivos']) . '): no se arranca una implementación '
+                    . 'sobre un negocio que opera.';
+            }
+
             if (trim((string) $client->phone) === '') {
                 $avisos[] = 'El cliente no tiene teléfono cargado: no se le va a poder escribir por WhatsApp.';
             }
@@ -2148,10 +2169,11 @@ class ClaudeImplementationOpsController extends Controller
      * Frenos, en este orden, todos ANTES de escribir:
      *   1. Lista blanca de parámetros y tipos.
      *   2. `confirm_client_name` exacto (`clients.name`), sin revelar el correcto.
-     *   3. Ocho chequeos (`chequeos` del dry-run): la etapa y el formulario, la estructura del hosting (las
+     *   3. Nueve chequeos (`chequeos` del dry-run): la etapa y el formulario, la estructura del hosting (las
      *      cinco guardas de `HostingProvisioningStructure` más la coherencia del hosting), las URLs en
      *      https, una versión publicada, la credencial SSH del compartido, el token de Hostinger, las
-     *      instalaciones previas y las variables manuales del `.env`. Con uno en false, 422.
+     *      instalaciones previas, que el cliente no tenga ya un sistema vivo (`sin_sistema_vivo`: filas en
+     *      `client_version_upgrades`) y las variables manuales del `.env`. Con uno en false, 422.
      *   4. Las instalaciones previas: una `instalando` es 409 (no se pisa un pipeline vivo) y una
      *      `completada` es 422 (ya está instalado: reinstalar le pisa el `.env` a un negocio que ya
      *      anda).
@@ -2200,7 +2222,7 @@ class ClaudeImplementationOpsController extends Controller
         $plan    = $this->plan_de_la_instalacion($implementation, $client);
 
         if ($dry_run) {
-            return response()->json($this->respuesta_del_dry_run_de_la_instalacion($implementation, $plan), 200);
+            return response()->json($this->respuesta_del_dry_run_de_la_instalacion($implementation, $plan, $client), 200);
         }
 
         /* --- Freno 2: confirmación por nombre. --- */
@@ -2285,7 +2307,7 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
-     * Los ocho chequeos de la instalación y todo lo que hace falta para crear el par.
+     * Los nueve chequeos de la instalación y todo lo que hace falta para crear el par.
      *
      * Lee, no escribe. Se llama dos veces en el camino real —antes de la transacción, para contestar
      * rápido, y adentro con la implementación bloqueada— y una en el dry-run.
@@ -2432,7 +2454,21 @@ class ClaudeImplementationOpsController extends Controller
 
         $chequeos[] = $this->chequeo('instalaciones_previas', in_array($estado_previo, ['pendientes', 'nueva'], true), $detalle);
 
-        /* 8. Las variables manuales del .env. */
+        /* 8. 🔴 Que el cliente no tenga ya un sistema vivo. `instalaciones_previas` solo ve las instalaciones que
+           hizo ESTE camino; un cliente instalado a mano, por /instalar-cliente o por el panel no tiene ninguna, y
+           reinstalar sobre un negocio que opera le pisa el .env y la base. */
+        $vivo = $this->sistema_vivo($client);
+
+        $chequeos[] = $this->chequeo(
+            'sin_sistema_vivo',
+            ! $vivo['vivo'],
+            $vivo['vivo']
+                ? 'El cliente ya tiene un sistema en producción: ' . implode(' ', $vivo['motivos']) . ' Instalar le pisaría el .env y la base. Si de verdad es un cliente '
+                    . 'nuevo y es un dato viejo, resolvelo desde el panel; este camino no instala sobre un negocio que opera.'
+                : 'El cliente no tiene actualizaciones registradas (client_version_upgrades): no hay señal de un sistema ya instalado.'
+        );
+
+        /* 9. Las variables manuales del .env. */
         $reutilizable = $pendientes->where('kind', ClientInstallation::KIND_COMPLETA)->sortByDesc('id')->first();
         $existentes   = $reutilizable !== null && is_array($reutilizable->env_manual_values) ? $reutilizable->env_manual_values : [];
         $variables    = $this->variables_manuales_de_la_instalacion($existentes);
@@ -2459,6 +2495,104 @@ class ClaudeImplementationOpsController extends Controller
                 return (int) $valor;
             })->all(),
         ];
+    }
+
+    /**
+     * ¿Tiene el cliente un sistema vivo (ya instalado, ya en producción)?
+     *
+     * 🔴 La señal es su historial de actualizaciones (`client_version_upgrades`): un sistema al que se le
+     * actualizó la versión es un sistema que ya estuvo en producción, y CUALQUIER fila cuenta, en el estado que
+     * sea —una pendiente o una fallida también son un cliente al que el admin ya le despliega versiones—. Es lo
+     * que deja un cliente instalado por afuera de este camino (a mano, por `/instalar-cliente`, por el panel),
+     * que `instalaciones_previas` no ve porque solo mira las instalaciones que hizo éste.
+     *
+     * ⚠️ El dato "este sistema ya está configurado" vive en `client_version_upgrades.sistema_configurado_at`,
+     * NO en `clients`: la tabla `clients` no tiene esa columna. Se cuenta por las filas de actualizaciones, que
+     * incluyen a las que ya llegaron a configurar el sistema.
+     *
+     * @param Client $client El cliente.
+     *
+     * @return array{vivo: bool, motivos: array<int, string>}
+     */
+    protected function sistema_vivo(Client $client)
+    {
+        $actualizaciones = ClientVersionUpgrade::where('client_id', $client->id)->orderByDesc('id')->get(['id', 'status', 'sistema_configurado_at']);
+        $cantidad        = $actualizaciones->count();
+
+        if ($cantidad === 0) {
+            return ['vivo' => false, 'motivos' => []];
+        }
+
+        $ultima  = $actualizaciones->first();
+        $motivos = [
+            'Tiene ' . $cantidad . ' ' . ($cantidad === 1 ? 'actualización registrada' : 'actualizaciones registradas') . ' en client_version_upgrades (la última: id '
+                . (int) $ultima->id . ', estado "' . (string) $ultima->status . '").',
+        ];
+
+        if ($actualizaciones->whereNotNull('sistema_configurado_at')->count() > 0) {
+            $motivos[] = 'Alguna figura con el sistema configurado (sistema_configurado_at).';
+        }
+
+        return ['vivo' => true, 'motivos' => $motivos];
+    }
+
+    /**
+     * La señal HTTP de que ya hay un sistema andando: `GET <api del cliente>/api/version-activa`.
+     *
+     * 🔴 ES INFORMATIVA Y SOLO DEL DRY-RUN. No decide nada: una API que no responde es lo normal en un cliente
+     * sin instalar (el subdominio ni existe todavía), y una que responde puede ser cualquier cosa. Lo que sí
+     * dice, cuando contesta 200 con una `default_version`, es que hay un sistema andando ahí, y eso se avisa en
+     * `avisos` del dry-run para que quien lo lee no instale encima de un negocio sin darse cuenta. Con 5
+     * segundos de techo y sin dejar escapar ninguna excepción: un dry-run no se cuelga ni se rompe por la API
+     * del cliente. La URL sale de `ClientEmpresaApiUrlResolver`, la misma con la que el admin le habla a la
+     * API de un cliente en todo lo demás.
+     *
+     * @param Client $client El cliente.
+     *
+     * @return array<string, mixed> `consultado`, `url`, `status`, `default_version`, `responde_con_version` y,
+     *                              si la llamada falló, `error`.
+     */
+    protected function senal_de_la_version_activa(Client $client)
+    {
+        $base = (new ClientEmpresaApiUrlResolver())->resolve_base_url($client);
+
+        if ($base === '') {
+            return [
+                'consultado'           => false,
+                'url'                  => null,
+                'status'               => null,
+                'default_version'      => null,
+                'responde_con_version' => false,
+                'nota'                 => 'El cliente no tiene una URL de API válida: no se consultó.',
+            ];
+        }
+
+        $url = $base . self::RUTA_DE_LA_VERSION_ACTIVA;
+
+        try {
+            $respuesta = Http::timeout(self::TIMEOUT_DE_LA_SENAL_DE_VERSION)->acceptJson()->get($url);
+            $json      = $respuesta->json();
+            $version   = is_array($json) && isset($json['default_version']) && ! is_array($json['default_version']) && trim((string) $json['default_version']) !== ''
+                ? (string) $json['default_version']
+                : null;
+
+            return [
+                'consultado'           => true,
+                'url'                  => $url,
+                'status'               => $respuesta->status(),
+                'default_version'      => $version,
+                'responde_con_version' => $respuesta->status() === 200 && $version !== null,
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'consultado'           => true,
+                'url'                  => $url,
+                'status'               => null,
+                'default_version'      => null,
+                'responde_con_version' => false,
+                'error'                => 'no respondió: ' . (string) $this->recortar($e->getMessage()),
+            ];
+        }
     }
 
     /**
@@ -2545,7 +2679,7 @@ class ClaudeImplementationOpsController extends Controller
             [
                 'implementation_id' => (int) $implementation->id,
                 'chequeos'          => $plan['chequeos'],
-                'ayuda'             => 'El dry_run (que es el default) muestra los ocho chequeos con su detalle.',
+                'ayuda'             => 'El dry_run (que es el default) muestra los nueve chequeos con su detalle.',
             ]
         );
     }
@@ -2553,12 +2687,16 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * La respuesta del dry-run de la instalación.
      *
+     * Además de los chequeos trae `senales`: lo que se ve consultando la API del cliente, que es INFORMATIVO y
+     * no entra en `listo` (ver `senal_de_la_version_activa()`), y `avisos` con lo que esa consulta encontró.
+     *
      * @param Implementation       $implementation La implementación.
      * @param array<string, mixed> $plan           El plan de `plan_de_la_instalacion()`.
+     * @param Client               $client         Su cliente.
      *
      * @return array<string, mixed>
      */
-    protected function respuesta_del_dry_run_de_la_instalacion(Implementation $implementation, array $plan)
+    protected function respuesta_del_dry_run_de_la_instalacion(Implementation $implementation, array $plan, Client $client)
     {
         $listo = true;
         foreach ($plan['chequeos'] as $chequeo) {
@@ -2585,6 +2723,15 @@ class ClaudeImplementationOpsController extends Controller
             ];
         }
 
+        /* La señal de la API del cliente: solo en el dry-run, y solo informa (no entra en `listo`). */
+        $senal  = $this->senal_de_la_version_activa($client);
+        $avisos = [];
+
+        if ($senal['responde_con_version']) {
+            $avisos[] = 'OJO: ' . $senal['url'] . ' respondió 200 con default_version=' . $senal['default_version'] . ': ya hay un sistema andando en esa API. '
+                . 'Instalar le pisaría el .env y la base. Si es un negocio que opera, no sigas.';
+        }
+
         return [
             'dry_run'           => true,
             'implementation_id' => (int) $implementation->id,
@@ -2596,6 +2743,8 @@ class ClaudeImplementationOpsController extends Controller
                 'se_completan_con'                 => $plan['variables']['se_completan'],
                 'faltan'                           => $plan['variables']['faltan'],
             ],
+            'senales'           => ['version_activa' => $senal],
+            'avisos'            => $avisos,
             'nota'              => 'Simulacro: no se creó ni se encoló nada. 🔴 Instalar crea los cuatro subdominios, la base y el cron en Hostinger, '
                 . 'sube el SPA y la API por SFTP y escribe el .env del cliente. Repetí con dry_run=false y confirm_client_name para instalar.',
         ];

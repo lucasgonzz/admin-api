@@ -342,8 +342,10 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         });
         $this->estado($id)->assertJsonPath('user_setup.estado', 'en_curso');
 
-        /* Hasta acá, ni una sola llamada a la red: encolar no habla con el sistema del cliente. */
-        $this->assertSame([], $this->llamadas->urls);
+        /* Hasta acá, la única llamada a la red es la consulta informativa del dry-run de `install` a la API del
+           cliente (¿ya hay un sistema andando?): encolar no habla con el sistema del cliente. */
+        $consulta = 'https://api-rosa.comerciocity.com/public/api/version-activa';
+        $this->assertSame([$consulta], $this->llamadas->urls);
 
         /* Y el worker lo corre: el POST a empresa-api sale con lo que cargó el cliente. */
         $token = (string) $this->estado($id)->json('user_setup.iniciado_at');
@@ -351,7 +353,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         (new EjecutarUserSetupDeImplementacionJob($id, $token))->handle();
 
         $destino = 'https://api-rosa.comerciocity.com/api/admin-sync/user-setup';
-        $this->assertSame([$destino], $this->llamadas->urls);
+        $this->assertSame([$consulta, $destino], $this->llamadas->urls);
         $this->assertSame('Almacén Rosa S.A.', $this->llamadas->cuerpo[$destino]['company_name']);
         $this->assertSame((int) $cliente->user_id, (int) $this->llamadas->cuerpo[$destino]['user_id']);
 
@@ -366,7 +368,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $this->assertStringContainsString('VACÍA la base', (string) $reaplicar->json('error'));
         $reaplicar->assertJsonStructure(['user_setup_executed_at']);
         Queue::assertPushed(EjecutarUserSetupDeImplementacionJob::class, 1);
-        $this->assertSame([$destino], $this->llamadas->urls, 'El intento de re-aplicar no volvió a llamar al cliente.');
+        $this->assertSame([$consulta, $destino], $this->llamadas->urls, 'El intento de re-aplicar no volvió a llamar al cliente.');
 
         $this->post_de($id, '/mail', ['hito' => 'instalado', 'dry_run' => false, 'confirm_client_name' => 'Rosa Fernández'])
             ->assertStatus(200)

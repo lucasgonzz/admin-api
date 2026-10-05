@@ -9,6 +9,7 @@ use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\EnvTemplate;
 use App\Models\Implementation;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 
 /**
@@ -18,7 +19,7 @@ use Illuminate\Support\Facades\Queue;
  * Hostinger, sube el SPA y la API por SFTP y escribe su `.env`. Lo que se protege, en orden de
  * importancia:
  *
- *  1. 🔴 `dry_run` por defecto: no crea ni encola NADA y muestra los ocho chequeos.
+ *  1. 🔴 `dry_run` por defecto: no crea ni encola NADA y muestra los nueve chequeos.
  *  2. 🔴 Que sin el token de Hostinger no se instale (con el mensaje que manda a `/instalar-cliente`), y
  *     que se use SIEMPRE la última versión publicada, no la que quedó fijada al promover.
  *  3. 🔴 Que una instalación EN CURSO sea 409 y una COMPLETADA 422: no se pisa un pipeline vivo ni el
@@ -58,6 +59,10 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         EnvTemplate::create(['key' => 'APP_ENV', 'value' => 'production', 'group' => 'app', 'scope' => 'empresa', 'is_manual_on_create' => false]);
 
         ClientSshCredential::query()->delete();
+
+        /* El dry-run de `install` consulta la API del cliente (señal informativa de si ya hay un sistema andando):
+           un test no sale a internet. Contesta 404, que es lo que pasa con un subdominio que todavía no existe. */
+        Http::fake(['*' => Http::response([], 404)]);
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -227,7 +232,7 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * 1. 🔴 Sin `dry_run` explícito no se crea ni se encola NADA, y con todo en orden los ocho chequeos
+     * 1. 🔴 Sin `dry_run` explícito no se crea ni se encola NADA, y con todo en orden los nueve chequeos
      * salen en true.
      *
      * @return void
@@ -242,7 +247,7 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $respuesta->assertStatus(200);
         $respuesta->assertJsonPath('dry_run', true);
         $respuesta->assertJsonPath('listo', true);
-        $this->assertCount(8, $respuesta->json('chequeos'));
+        $this->assertCount(9, $respuesta->json('chequeos'));
 
         foreach ($respuesta->json('chequeos') as $chequeo) {
             $this->assertTrue($chequeo['ok'], 'El chequeo ' . $chequeo['chequeo'] . ' salió en false: ' . $chequeo['detalle']);
@@ -581,7 +586,7 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 
         $respuesta->assertStatus(422);
         $this->assertStringContainsString('token_de_hostinger', $this->cuerpo($respuesta));
-        $this->assertCount(8, $respuesta->json('chequeos'));
+        $this->assertCount(9, $respuesta->json('chequeos'));
         $this->assertSame(0, $this->instalaciones_de($e['cliente']));
         Queue::assertNothingPushed();
     }
