@@ -1274,6 +1274,46 @@ return [
                 ['nombre' => 'etapa', 'obligatorio' => false, 'validacion' => 'nullable|integer|between:1,8', 'que_es' => 'La etapa en cuyo registro se anota. Por defecto la actual.'],
             ],
         ],
+        'POST api/claude/implementations/{id}/install' => [
+            'para_que'     => '🔴 INSTALA el sistema (empresa-api + empresa-spa) del cliente de la implementación, y el admin aprovisiona: crea el par de instalaciones —la real en la API activa y el esqueleto del subdominio hermano— con provision_hosting_type = shared_hosting (los cuatro subdominios, la base y el cron en Hostinger), sube el SPA y la API por SFTP, escribe el .env y finaliza. Es el equivalente de "Nueva instalación" + "Iniciar" del módulo de Instalaciones del panel, de una vez. SIEMPRE con la ÚLTIMA versión publicada (no la que quedó fijada al promover, que puede tener semanas) y SOLO si el admin tiene el token de Hostinger: sin él el chequeo token_de_hostinger sale en false con "sin token de Hostinger en el admin: instalar con /instalar-cliente". Se encola en la conexión database con 202 y tarda ~15 minutos: se mira con GET claude/implementations/{id}?include=logs. Una instalación pendiente sin arrancar (la que deja el panel al avanzar a la etapa 2) se reutiliza; una fallida no (se crea un par nuevo).',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'dry_run por defecto true: sin dry_run=false explícito no crea ni encola nada y devuelve los OCHO chequeos con su detalle, lo que crearía y con qué valores completaría las variables del .env.',
+                'Lista blanca de parámetros: cualquier otra clave es 422 y no se instala nada. No se acepta version, provision_hosting_type, kind ni nada que elija lo que está fijado a propósito.',
+                'confirm_client_name exacto (clients.name, trim + minúsculas), obligatorio con dry_run=false. No revela el correcto cuando falla.',
+                'Los ocho chequeos, todos en el dry_run y TODOS tienen que dar ok para el real (si no, 422 con la lista): (1) la implementación está en la etapa 2 y el formulario se envió; (2) la estructura del hosting —las cinco guardas de HostingProvisioningStructure: exactamente 2 ClientApi, el par <slug>/<slug>2, el slug [a-z0-9-] de hasta 20, los hosts api-<slug>, la base dentro de los 32 caracteres— más que ninguna API figure en el VPS; (3) las URLs de las dos APIs en https; (4) hay una versión publicada; (5) hay credencial SSH de tipo shared_hosting; (6) el token de Hostinger del admin está cargado; (7) las instalaciones previas; (8) las variables manuales del .env.',
+                '🔴 Instalaciones previas: una instalando es 409 (no se pisa un pipeline vivo) y una completada es 422 ("ya está instalado": reinstalar le pisa el .env a un negocio que ya anda). Una pendiente se reutiliza con la última versión; una fallida queda de historial y se crea un par nuevo.',
+                'Variables manuales del .env (is_manual_on_create): con aprovisionamiento quedan exceptuadas DB_DATABASE, DB_USERNAME y DB_PASSWORD (las genera el pipeline); DB_CONNECTION, DB_HOST y DB_PORT se completan con el valor de la plantilla o, si no lo trae, el estándar del compartido (mysql, 127.0.0.1, 3306), y el dry_run muestra con qué; cualquier otra variable manual sin valor frena.',
+                'El re-chequeo y el alta van en UNA transacción con la implementación bloqueada (lockForUpdate): dos POST simultáneos no crean dos pares. Las filas pasan a instalando ahí mismo y el job se despacha DESPUÉS del commit.',
+                '🔴 Se encola con onConnection("database") y 202: nunca corre el pipeline adentro del request. El job (EjecutarInstalacionDeImplementacionJob) tiene $timeout 2300, por debajo del retry_after de la cola (2400) —el job de grupo del panel declara 5700 y en esa conexión terminaría en failed_jobs sin haber fallado—; si el worker lo corta, failed() deja las filas en fallida con el motivo en vez de dejarlas instalando para siempre (necesita pcntl en el CLI del servidor).',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación cuyo cliente se instala.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false crea el par y lo encola (202). Sin él, simula y no escribe nada.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name). Obligatorio con dry_run=false.'],
+            ],
+        ],
+        'POST api/claude/implementations/{id}/user-setup' => [
+            'para_que'     => '🔴🔴 CONFIGURA el sistema del cliente con lo que cargó en el formulario (listas de precios, sucursales, IVA, el usuario dueño con su documento, la tienda...): le pega a admin-sync/user-setup de su empresa-api con el payload armado desde clients.setup_data. DEL OTRO LADO ARRANCA CON migrate:fresh --force: LE VACÍA LA BASE AL CLIENTE. Por eso este camino NO TIENE "forzar" (el botón del panel sí): una vez aplicado (user_setup_executed_at lleno) no se vuelve a correr por acá, y no hay que agregarle un forzar. Corre en la cola database (202) y no dentro del request: la llamada HTTP va con 600 segundos de techo (el panel usa 15, con los que corta la espera mientras el setup sigue corriendo del otro lado). El dry_run devuelve el payload REAL con las claves de servicios pagos tapadas; el resultado se lee en user_setup de GET claude/implementations/{id} (en_curso → ok | error).',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'dry_run por defecto true: sin dry_run=false explícito no encola nada y devuelve los chequeos y el payload que viajaría (con las claves de Serper/Google tapadas).',
+                'Lista blanca de parámetros: cualquier otra clave es 422 y no se aplica nada. 🔴 No existe ni se acepta force/forzar.',
+                'confirm_client_name exacto (clients.name), obligatorio con dry_run=false. No revela el correcto cuando falla.',
+                'Chequeos (con uno en false el real es 422): el formulario se envió; la implementación está en la etapa 2 o después; la última instalación completa de la API activa está completada; la API activa tiene URL; user_setup_executed_at está vacío.',
+                '🔴 Ya aplicado (user_setup_executed_at lleno) es 422 sin vuelta, con la fecha y el motivo: "re-aplicarlo vacía la base del cliente (migrate:fresh): si de verdad hace falta, se hace desde el panel, con una persona mirando".',
+                'Otro user setup en curso es 409. Uno que dice en_curso hace más de 45 minutos se da por colgado (el job no pudo seguir vivo) y deja reintentar; si en realidad seguía corriendo, empresa-api contesta 409 y vuelve como error, sin reintento.',
+                'El registro en_curso (stage 2 data.user_setup) se escribe en una transacción con la implementación bloqueada ANTES de despachar: dos llamadas no despachan dos jobs.',
+                '🔴 Se encola con onConnection("database") y 202. El job (EjecutarUserSetupDeImplementacionJob, tries 1, timeout 900 < retry_after 2400) llama a ImplementationUserSetupService::trigger_user_setup con 600 s; en éxito llena user_setup_executed_at y registra la acción user_setup (canal "claude"); en error deja el motivo. Un error de conexión NO prueba que no corrió: el motivo avisa que se mire el sistema del cliente antes de reintentar.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación cuyo sistema se configura.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false encola la configuración (202). Sin él, simula y no escribe nada.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name). Obligatorio con dry_run=false.'],
+            ],
+        ],
     ],
 
     /*

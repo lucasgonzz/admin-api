@@ -496,6 +496,20 @@ Route::middleware('claude.task.key')
            null: un saliente con id nulo se lee como envío fallido). Idempotente por 10 minutos. */
         Route::post('implementations/{id}/actions', 'Api\ClaudeImplementationOpsController@actions_json')
             ->whereNumber('id');
+
+        /* INSTALAR el sistema del cliente (el admin aprovisiona: subdominios, base y cron en Hostinger, y sube SPA y
+           API por SFTP). Crea o reutiliza el par real + esqueleto y lo encola en `database` con 202. 🔴 Siempre con
+           la ÚLTIMA versión publicada y solo con el token de Hostinger del admin (sin él: /instalar-cliente). Frenos:
+           lista blanca, dry_run por defecto con ocho chequeos, confirm_client_name, 409 si ya hay una instalando y
+           422 si ya está instalado. El job tiene su propio $timeout por debajo del retry_after de la cola. */
+        Route::post('implementations/{id}/install', 'Api\ClaudeImplementationOpsController@instalar_json')
+            ->whereNumber('id');
+
+        /* CONFIGURAR el sistema con lo que el cliente cargó en el formulario (user setup). 🔴🔴 Del otro lado arranca
+           con migrate:fresh: le VACÍA la base al cliente. Por eso este camino NO tiene "forzar" (el panel sí): una
+           vez aplicado, no se vuelve a correr por acá. Encolado en `database` con 202; la llamada va con 600 s. */
+        Route::post('implementations/{id}/user-setup', 'Api\ClaudeImplementationOpsController@user_setup_json')
+            ->whereNumber('id');
     });
 
 /*

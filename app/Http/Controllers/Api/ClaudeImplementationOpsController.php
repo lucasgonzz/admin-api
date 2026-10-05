@@ -4,12 +4,16 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
+use App\Jobs\EjecutarInstalacionDeImplementacionJob;
+use App\Jobs\EjecutarUserSetupDeImplementacionJob;
 use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
+use App\Models\ClientSshCredential;
 use App\Models\DeploymentLog;
+use App\Models\EnvTemplate;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
@@ -19,6 +23,7 @@ use App\Models\Version;
 use App\Services\ArgentinePhoneNormalizer;
 use App\Services\ClientEmpresaApiUrlResolver;
 use App\Services\HostingProvisioningStructure;
+use App\Services\ImplementationActionService;
 use App\Services\ImplementationFormMapper;
 use App\Services\ImplementationSettings;
 use App\Services\ImplementationStartService;
@@ -198,6 +203,30 @@ class ClaudeImplementationOpsController extends Controller
      * texto, dentro de este tiempo, no se registra dos veces.
      */
     const MINUTOS_DE_IDEMPOTENCIA = 10;
+
+    /**
+     * Lista blanca de `POST claude/implementations/{id}/install`. Cualquier otra clave es 422: un `version`,
+     * un `provision_hosting_type`, un `kind` o un `force` suelen ser alguien esperando elegir lo que acá
+     * está fijado a propósito (la última versión publicada, el hosting compartido, el par real + esqueleto).
+     */
+    const PARAMETROS_DE_LA_INSTALACION = ['dry_run', 'confirm_client_name'];
+
+    /**
+     * Lista blanca de `POST claude/implementations/{id}/user-setup`. 🔴 Sin `force` ni `forzar` A
+     * PROPÓSITO: un parámetro de más es 422 y no se aplica nada. Re-aplicar el user setup le vacía la base
+     * al cliente.
+     */
+    const PARAMETROS_DEL_USER_SETUP = ['dry_run', 'confirm_client_name'];
+
+    /**
+     * Valores estándar de las variables de conexión del `.env` en el hosting compartido, para cuando la
+     * plantilla de variables no trae un valor: el MySQL local de la cuenta. Son las tres que el panel exige
+     * cargar a mano y que no dependen del cliente (`DB_DATABASE`, `DB_USERNAME` y `DB_PASSWORD` las genera
+     * el aprovisionamiento).
+     *
+     * @var array<string, string>
+     */
+    const VALORES_ESTANDAR_DE_CONEXION = ['DB_CONNECTION' => 'mysql', 'DB_HOST' => '127.0.0.1', 'DB_PORT' => '3306'];
 
     /** Lista blanca de la lectura del estado por id. */
     const PARAMETROS_DE_LA_LECTURA = ['include'];
@@ -2062,6 +2091,969 @@ class ClaudeImplementationOpsController extends Controller
         $crudo = trim((string) $crudo);
 
         return $crudo === '' ? null : ArgentinePhoneNormalizer::normalize($crudo);
+    }
+
+    /* ==============================================================================================
+     | 5) POST claude/implementations/{id}/install — INSTALAR el sistema (el admin aprovisiona)
+     |============================================================================================= */
+
+    /**
+     * Instala el sistema del cliente: crea (o reutiliza) el par de instalaciones —la real en la API
+     * activa y el esqueleto en la otra— con el aprovisionamiento del hosting compartido y las encola en la
+     * cola `database`.
+     *
+     * 🔴 ESTO ESCRIBE EN EL HOSTING DE UN NEGOCIO. El pipeline crea los cuatro subdominios, la base y el
+     * cron en Hostinger, sube el SPA y el código de la API por SFTP y escribe el `.env`. Es el equivalente
+     * de apretar "Nueva instalación" + "Iniciar" en el módulo de Instalaciones del panel, hecho de una vez
+     * y con más frenos, porque desde acá no hay una persona mirando la pantalla.
+     *
+     * 🔴 SIEMPRE con la ÚLTIMA versión publicada y SOLO con el token de Hostinger del admin. La versión que
+     * `ensure_client_installation()` fija al avanzar a la etapa 2 sale de `clients.current_version_id`, que
+     * se grabó al PROMOVER y puede tener semanas; el botón del panel sí usa la última publicada, y esto
+     * también. Sin token de Hostinger el pipeline no puede crear los subdominios y moriría en
+     * `provision_check`: acá se frena antes, con un mensaje que manda a `/instalar-cliente` (que los crea
+     * desde la máquina de Lucas).
+     *
+     * Frenos, en este orden, todos ANTES de escribir:
+     *   1. Lista blanca de parámetros y tipos.
+     *   2. `confirm_client_name` exacto (`clients.name`), sin revelar el correcto.
+     *   3. Ocho chequeos (`chequeos` del dry-run): la etapa y el formulario, la estructura del hosting (las
+     *      cinco guardas de `HostingProvisioningStructure` más la coherencia del hosting), las URLs en
+     *      https, una versión publicada, la credencial SSH del compartido, el token de Hostinger, las
+     *      instalaciones previas y las variables manuales del `.env`. Con uno en false, 422.
+     *   4. Las instalaciones previas: una `instalando` es 409 (no se pisa un pipeline vivo) y una
+     *      `completada` es 422 (ya está instalado: reinstalar le pisa el `.env` a un negocio que ya
+     *      anda).
+     *   5. `dry_run` (default TRUE): devuelve los chequeos y lo que crearía.
+     *
+     * Con `dry_run=false` el re-chequeo y el alta van en UNA transacción con la implementación bloqueada
+     * (dos POST simultáneos no crean dos pares), las filas pasan a `instalando` ahí mismo —igual que
+     * `start()` del panel— y el job se despacha DESPUÉS del commit: un worker real puede levantar el job
+     * antes de que la transacción cierre y encontrarse las filas todavía en `pendiente`.
+     *
+     * Responde 202 y nunca espera: se mira con `GET claude/implementations/{id}` (`instalaciones[]`, con
+     * `include=logs`) cada 30 o 60 segundos.
+     *
+     * @param Request    $request Body: dry_run?, confirm_client_name.
+     * @param int|string $id      Id de la implementación (segmento de la URL).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function instalar_json(Request $request, $id)
+    {
+        /* --- Freno 1: lista blanca y tipos. --- */
+        $rechazo = $this->rechazar_parametros_de_mas($request, self::PARAMETROS_DE_LA_INSTALACION, 'POST claude/implementations/{id}/install');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'dry_run'             => 'nullable|boolean',
+            'confirm_client_name' => 'required_if:dry_run,false|nullable|string|max:190',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $implementation = Implementation::find((int) $id);
+        if ($implementation === null) {
+            return $this->error_404('no existe la implementación ' . (int) $id);
+        }
+
+        $client = Client::find((int) $implementation->client_id);
+        if ($client === null) {
+            return $this->error_404('la implementación ' . (int) $id . ' apunta a un cliente que no existe');
+        }
+
+        $dry_run = $this->resolver_dry_run($request);
+        $plan    = $this->plan_de_la_instalacion($implementation, $client);
+
+        if ($dry_run) {
+            return response()->json($this->respuesta_del_dry_run_de_la_instalacion($implementation, $plan), 200);
+        }
+
+        /* --- Freno 2: confirmación por nombre. --- */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se instaló nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        /* --- Frenos 3 y 4, con lo que se ve ahora. Se repiten adentro del lock. --- */
+        $impedimento = $this->impedimento_de_la_instalacion($implementation, $plan);
+        if ($impedimento !== null) {
+            return $impedimento;
+        }
+
+        $resultado = DB::transaction(function () use ($implementation, $client) {
+            $bloqueada = Implementation::query()->whereKey($implementation->id)->lockForUpdate()->first();
+
+            /* Todo lo que depende de un estado que puede haber cambiado (la etapa, las instalaciones) se
+               vuelve a leer con la implementación bloqueada. */
+            $plan = $this->plan_de_la_instalacion($bloqueada, $client);
+
+            $impedimento = $this->impedimento_de_la_instalacion($bloqueada, $plan);
+            if ($impedimento !== null) {
+                return $impedimento;
+            }
+
+            return $this->preparar_el_par_de_instalaciones($client, $plan);
+        });
+
+        if ($resultado instanceof \Illuminate\Http\JsonResponse) {
+            return $resultado;
+        }
+
+        $uuids = [];
+        foreach ($resultado as $fila) {
+            $uuids[] = (string) $fila->uuid;
+        }
+
+        /* 🔴 onConnection explícito y DESPUÉS del commit. Con la conexión por defecto (`sync`) el pipeline
+           correría entero adentro de este request y lo mataría `max_execution_time`. */
+        EjecutarInstalacionDeImplementacionJob::dispatch($uuids)->onConnection(self::CONEXION_DE_COLA);
+
+        return response()->json([
+            'dry_run'                  => false,
+            'implementation_id'        => (int) $implementation->id,
+            'group_uuid'               => (string) $resultado[0]->group_uuid,
+            'instalaciones'            => array_map(function ($fila) {
+                return $this->instalacion_en_corto($fila);
+            }, $resultado),
+            'version'                  => $this->version_en_corto($resultado[0]->version_id),
+            'conexion_de_cola'         => self::CONEXION_DE_COLA,
+            'latencia_maxima_segundos' => self::LATENCIA_MAXIMA_SEGUNDOS,
+            'nota'                     => 'Se encoló la instalación (la real y el esqueleto del subdominio hermano, en ese orden). 🔴 Tarda ~15 '
+                . 'minutos: poleá cada 30 o 60 segundos con GET claude/implementations/' . (int) $implementation->id . '?include=logs '
+                . '(instalaciones[].status: instalando → completada | fallida), no cada 2 (rate limit por IP). Cuando la real esté completada, '
+                . 'sigue POST claude/implementations/' . (int) $implementation->id . '/user-setup.',
+        ], 202);
+    }
+
+    /**
+     * Los ocho chequeos de la instalación y todo lo que hace falta para crear el par.
+     *
+     * Lee, no escribe. Se llama dos veces en el camino real —antes de la transacción, para contestar
+     * rápido, y adentro con la implementación bloqueada— y una en el dry-run.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param Client         $client         Su cliente.
+     *
+     * @return array<string, mixed> `chequeos`, `estado_previo` (instalando | completada | pendientes |
+     *                              nueva), `ids_instalando`, `apis` (`activa` y `otra`), `version`,
+     *                              `variables` (`se_completan`, `exentas`, `faltan`) y `existentes`
+     *                              (los valores manuales que las filas pendientes ya traen).
+     */
+    protected function plan_de_la_instalacion(Implementation $implementation, Client $client)
+    {
+        $chequeos = [];
+
+        /* 1. La etapa y el formulario. */
+        $formulario = $this->formulario_enviado($implementation, $client);
+
+        $en_la_etapa_2 = (int) $implementation->current_stage === 2;
+        $faltantes     = [];
+        if (! $en_la_etapa_2) {
+            $faltantes[] = 'la implementación está en la etapa ' . (int) $implementation->current_stage . ' y tiene que estar en la 2 (avanzá con POST claude/implementations/{id}/advance)';
+        }
+        if (! $formulario) {
+            $faltantes[] = 'el cliente todavía no envió el formulario';
+        }
+
+        $chequeos[] = $this->chequeo(
+            'etapa_y_formulario',
+            count($faltantes) === 0,
+            count($faltantes) === 0 ? 'Está en la etapa 2 y el formulario ya se envió.' : ucfirst(implode('; ', $faltantes)) . '.'
+        );
+
+        /* 2. La estructura del hosting: las cinco guardas, la coherencia del hosting y cuál es cuál. */
+        $activa = $client->active_client_api_id === null
+            ? null
+            : ClientApi::where('id', (int) $client->active_client_api_id)->where('client_id', $client->id)->first();
+        $otra   = null;
+
+        if ($activa === null) {
+            $chequeos[] = $this->chequeo('estructura_del_hosting', false, 'El cliente no tiene una API activa (clients.active_client_api_id): no se sabe en cuál instalar.');
+        } else {
+            try {
+                $estructura = new HostingProvisioningStructure($activa, (string) config('services.hostinger.database_prefix', ''));
+                $slug       = $estructura->slug();
+                $estructura->assert_hosting_type_coherente(ClientInstallation::PROVISION_SHARED_HOSTING);
+
+                foreach ($estructura->apis() as $api) {
+                    if ((int) $api->id !== (int) $activa->id) {
+                        $otra = $api;
+                    }
+                }
+
+                if ($otra === null) {
+                    $chequeos[] = $this->chequeo('estructura_del_hosting', false, 'La API activa del cliente no es una de las dos del par <slug> / <slug>2.');
+                } else {
+                    $chequeos[] = $this->chequeo(
+                        'estructura_del_hosting',
+                        true,
+                        'Par estándar de "' . $slug . '": la real va en ' . $activa->url . ' y el esqueleto en ' . $otra->url . '. Hosting compartido.'
+                    );
+                }
+            } catch (\RuntimeException $e) {
+                $chequeos[] = $this->chequeo('estructura_del_hosting', false, $e->getMessage());
+            }
+        }
+
+        /* 3. Las URLs en https. */
+        $sin_https = [];
+        foreach (array_filter([$activa, $otra]) as $api) {
+            foreach (['url' => $api->url, 'spa_url' => $api->spa_url] as $campo => $valor) {
+                if (stripos(trim((string) $valor), 'https://') !== 0) {
+                    $sin_https[] = 'ClientApi ' . (int) $api->id . ' (' . $campo . ': "' . (string) $valor . '")';
+                }
+            }
+        }
+
+        $chequeos[] = $this->chequeo(
+            'urls_https',
+            $activa !== null && $otra !== null && count($sin_https) === 0,
+            $activa === null || $otra === null
+                ? 'No se pudieron revisar las URLs porque falta resolver el par de APIs.'
+                : (count($sin_https) === 0
+                    ? 'Las URLs de las dos APIs empiezan con https://.'
+                    : 'Tienen que ser https:// (con http el servidor redirige y la redirección convierte el PUT final en GET): ' . implode(', ', $sin_https) . '.')
+        );
+
+        /* 4. La última versión publicada (no la que quedó fijada al promover). */
+        $version = Version::where('status', 'published')->orderByDesc('id')->first();
+
+        $chequeos[] = $this->chequeo(
+            'version_publicada',
+            $version !== null,
+            $version === null
+                ? 'No hay ninguna versión publicada: no hay nada que instalar.'
+                : 'Se instala la última publicada: ' . $version->version . ' (id ' . (int) $version->id . ').'
+        );
+
+        /* 5. La credencial SSH del hosting compartido. */
+        $credencial = ClientSshCredential::where('type', ClientInstallation::PROVISION_SHARED_HOSTING)->exists();
+
+        $chequeos[] = $this->chequeo(
+            'credencial_ssh_shared',
+            $credencial,
+            $credencial ? 'Hay credencial SSH del hosting compartido.' : 'Falta la credencial SSH de tipo shared_hosting (client_ssh_credentials).'
+        );
+
+        /* 6. El token de Hostinger: sin él el pipeline no puede crear los subdominios. */
+        $token = trim((string) config('services.hostinger.api_token')) !== '';
+
+        $chequeos[] = $this->chequeo(
+            'token_de_hostinger',
+            $token,
+            $token
+                ? 'El admin tiene el token de Hostinger: el pipeline crea los cuatro subdominios, la base y el cron.'
+                : 'sin token de Hostinger en el admin: instalar con /instalar-cliente (crea los subdominios y la base desde la máquina de Lucas).'
+        );
+
+        /* 7. Las instalaciones previas del cliente. */
+        $previas       = ClientInstallation::where('client_id', $client->id)->orderBy('id')->get();
+        $ids_instalando = $previas->where('status', 'instalando')->pluck('id')->map(function ($valor) {
+            return (int) $valor;
+        })->all();
+        $completada    = $previas->where('kind', ClientInstallation::KIND_COMPLETA)->where('status', 'completada')->first();
+        $pendientes    = $previas->where('status', 'pendiente');
+
+        if (count($ids_instalando) > 0) {
+            $estado_previo = 'instalando';
+            $detalle       = 'Hay una instalación en curso (id ' . implode(', ', $ids_instalando) . '): no se pisa un pipeline vivo. Esperá a que termine o falle.';
+        } elseif ($completada !== null) {
+            $estado_previo = 'completada';
+            $detalle       = 'El sistema ya está instalado (instalación ' . (int) $completada->id . ' completada): reinstalar le pisaría el .env a un negocio que ya anda.';
+        } elseif ($pendientes->count() > 0) {
+            $estado_previo = 'pendientes';
+            $detalle       = 'Hay ' . $pendientes->count() . ' instalación(es) pendiente(s) sin arrancar (id ' . $pendientes->pluck('id')->implode(', ')
+                . '): se reutilizan, con la última versión publicada, y se crea la hermana que falte.';
+        } else {
+            $estado_previo = 'nueva';
+            $detalle       = $previas->count() === 0
+                ? 'No hay instalaciones previas: se crea el par.'
+                : 'Las instalaciones previas fallaron: se crea un par nuevo (las fallidas quedan como historial).';
+        }
+
+        $chequeos[] = $this->chequeo('instalaciones_previas', in_array($estado_previo, ['pendientes', 'nueva'], true), $detalle);
+
+        /* 8. Las variables manuales del .env. */
+        $reutilizable = $pendientes->where('kind', ClientInstallation::KIND_COMPLETA)->sortByDesc('id')->first();
+        $existentes   = $reutilizable !== null && is_array($reutilizable->env_manual_values) ? $reutilizable->env_manual_values : [];
+        $variables    = $this->variables_manuales_de_la_instalacion($existentes);
+
+        $chequeos[] = $this->chequeo(
+            'variables_manuales',
+            count($variables['faltan']) === 0,
+            count($variables['faltan']) === 0
+                ? 'Las variables manuales del .env están resueltas (' . count($variables['exentas']) . ' las genera el aprovisionamiento, '
+                    . count($variables['se_completan']) . ' se completan con el valor estándar del hosting compartido).'
+                : 'Faltan valores para estas variables manuales del .env, que el aprovisionamiento no genera: ' . implode(', ', $variables['faltan'])
+                    . '. Cargalas en el panel (Instalaciones) o en la plantilla de variables.'
+        );
+
+        return [
+            'chequeos'       => $chequeos,
+            'estado_previo'  => $estado_previo,
+            'ids_instalando' => $ids_instalando,
+            'apis'           => ['activa' => $activa, 'otra' => $otra],
+            'version'        => $version,
+            'variables'      => $variables,
+            'existentes'     => $existentes,
+            'pendientes'     => $pendientes->pluck('id')->map(function ($valor) {
+                return (int) $valor;
+            })->all(),
+        ];
+    }
+
+    /**
+     * Qué variables manuales del `.env` hay que resolver y con qué.
+     *
+     * Son las plantillas con `is_manual_on_create`. Con aprovisionamiento quedan EXENTAS las tres que el
+     * pipeline genera (`DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`): las escribe `provision_db`, y un valor
+     * viejo no puede pisar la base recién creada. Las de conexión (`DB_CONNECTION`, `DB_HOST`, `DB_PORT`)
+     * se completan con el valor de la plantilla y, si la plantilla no lo trae, con el estándar del hosting
+     * compartido —el mismo MySQL local de siempre—. Cualquier OTRA variable manual sin valor es un faltante
+     * y frena: es exactamente lo que el botón "Iniciar" del panel exige antes de despachar.
+     *
+     * @param array<string, mixed> $existentes Los valores que la fila pendiente a reutilizar ya trae.
+     *
+     * @return array<string, array> `se_completan` (clave → valor), `exentas` (claves) y `faltan` (claves).
+     */
+    protected function variables_manuales_de_la_instalacion(array $existentes)
+    {
+        $se_completan = [];
+        $exentas      = [];
+        $faltan       = [];
+
+        foreach (EnvTemplate::where('is_manual_on_create', true)->orderBy('id')->get() as $plantilla) {
+            $clave = (string) $plantilla->key;
+
+            if (in_array($clave, ClientInstallation::CLAVES_ENV_APROVISIONADAS, true)) {
+                $exentas[] = $clave;
+                continue;
+            }
+
+            if (trim((string) (isset($existentes[$clave]) ? $existentes[$clave] : '')) !== '') {
+                continue;
+            }
+
+            if (array_key_exists($clave, self::VALORES_ESTANDAR_DE_CONEXION)) {
+                $de_la_plantilla = trim((string) $plantilla->value);
+                $se_completan[$clave] = $de_la_plantilla !== '' ? $de_la_plantilla : self::VALORES_ESTANDAR_DE_CONEXION[$clave];
+                continue;
+            }
+
+            $faltan[] = $clave;
+        }
+
+        return ['se_completan' => $se_completan, 'exentas' => $exentas, 'faltan' => $faltan];
+    }
+
+    /**
+     * ¿Algo impide instalar ahora? La respuesta de error que corresponde, o null si se puede.
+     *
+     * Dos clases, y no es lo mismo: una instalación EN CURSO es 409 (el estado cambió o se pidió dos veces:
+     * no es un error de armado, es que ya hay un pipeline vivo y hay que esperarlo), y cualquier otro
+     * chequeo en false es 422, con la lista completa de chequeos para que se vea de una cuál es.
+     *
+     * @param Implementation       $implementation La implementación.
+     * @param array<string, mixed> $plan           El plan de `plan_de_la_instalacion()`.
+     *
+     * @return \Illuminate\Http\JsonResponse|null
+     */
+    protected function impedimento_de_la_instalacion(Implementation $implementation, array $plan)
+    {
+        if ($plan['estado_previo'] === 'instalando') {
+            return response()->json([
+                'error'             => 'Hay una instalación en curso para este cliente: no se pisa un pipeline vivo. No se instaló nada.',
+                'implementation_id' => (int) $implementation->id,
+                'ids_instalando'    => $plan['ids_instalando'],
+                'chequeos'          => $plan['chequeos'],
+                'ayuda'             => 'GET claude/implementations/' . (int) $implementation->id . '?include=logs dice cómo va.',
+            ], 409);
+        }
+
+        $fallidos = [];
+        foreach ($plan['chequeos'] as $chequeo) {
+            if (! $chequeo['ok']) {
+                $fallidos[] = $chequeo['chequeo'];
+            }
+        }
+
+        if (count($fallidos) === 0) {
+            return null;
+        }
+
+        return $this->error_422(
+            'No se puede instalar: ' . implode(', ', $fallidos) . '. No se instaló nada.',
+            [
+                'implementation_id' => (int) $implementation->id,
+                'chequeos'          => $plan['chequeos'],
+                'ayuda'             => 'El dry_run (que es el default) muestra los ocho chequeos con su detalle.',
+            ]
+        );
+    }
+
+    /**
+     * La respuesta del dry-run de la instalación.
+     *
+     * @param Implementation       $implementation La implementación.
+     * @param array<string, mixed> $plan           El plan de `plan_de_la_instalacion()`.
+     *
+     * @return array<string, mixed>
+     */
+    protected function respuesta_del_dry_run_de_la_instalacion(Implementation $implementation, array $plan)
+    {
+        $listo = true;
+        foreach ($plan['chequeos'] as $chequeo) {
+            if (! $chequeo['ok']) {
+                $listo = false;
+            }
+        }
+
+        $activa  = $plan['apis']['activa'];
+        $otra    = $plan['apis']['otra'];
+        $version = $plan['version'];
+
+        $se_crearia = null;
+        if ($activa !== null && $otra !== null) {
+            $se_crearia = [
+                'modo'                   => $plan['estado_previo'] === 'pendientes' ? 'reutiliza_las_pendientes_y_completa_el_par' : 'crea_el_par',
+                'instalaciones'          => [
+                    ['kind' => ClientInstallation::KIND_COMPLETA, 'client_api_id' => (int) $activa->id, 'url' => $activa->url, 'spa_url' => $activa->spa_url],
+                    ['kind' => ClientInstallation::KIND_ESQUELETO, 'client_api_id' => (int) $otra->id, 'url' => $otra->url, 'spa_url' => $otra->spa_url],
+                ],
+                'provision_hosting_type' => ClientInstallation::PROVISION_SHARED_HOSTING,
+                'version'                => $version === null ? null : ['id' => (int) $version->id, 'version' => (string) $version->version],
+                'instalaciones_pendientes_que_se_reutilizan' => $plan['estado_previo'] === 'pendientes' ? $plan['pendientes'] : [],
+            ];
+        }
+
+        return [
+            'dry_run'           => true,
+            'implementation_id' => (int) $implementation->id,
+            'listo'             => $listo,
+            'chequeos'          => $plan['chequeos'],
+            'se_crearia'        => $se_crearia,
+            'variables_env'     => [
+                'exentas_por_el_aprovisionamiento' => $plan['variables']['exentas'],
+                'se_completan_con'                 => $plan['variables']['se_completan'],
+                'faltan'                           => $plan['variables']['faltan'],
+            ],
+            'nota'              => 'Simulacro: no se creó ni se encoló nada. 🔴 Instalar crea los cuatro subdominios, la base y el cron en Hostinger, '
+                . 'sube el SPA y la API por SFTP y escribe el .env del cliente. Repetí con dry_run=false y confirm_client_name para instalar.',
+        ];
+    }
+
+    /**
+     * Crea o reutiliza el par de instalaciones, las deja en `instalando` y devuelve las dos filas (la
+     * real primero). Se llama ADENTRO de la transacción, con la implementación bloqueada.
+     *
+     * 🔴 Por cada una de las dos filas se REUTILIZA la que esté `pendiente` del mismo tipo y la misma API
+     * (la que dejó el panel al avanzar a la etapa 2, por ejemplo) y recién si no hay se crea. Una
+     * reutilizada se actualiza a la última versión publicada —la que trajo el panel puede ser vieja— y al
+     * aprovisionamiento del compartido. Las `fallida` no se tocan: quedan de historial y se crea un par
+     * nuevo, que es lo que manda el flujo de reintento del panel (borrar la fallida y crear otra).
+     *
+     * Las dos comparten `group_uuid` y los mismos valores manuales del `.env` (los dos subdominios sirven la
+     * MISMA base del cliente, así que `DB_*` son idénticas por definición): se completan solo las que
+     * faltan, sin pisar una que la fila ya traiga.
+     *
+     * @param Client               $client El cliente.
+     * @param array<string, mixed> $plan   El plan de `plan_de_la_instalacion()`, ya sin impedimentos.
+     *
+     * @return array<int, ClientInstallation> La real y el esqueleto.
+     */
+    protected function preparar_el_par_de_instalaciones(Client $client, array $plan)
+    {
+        $filas       = [];
+        $grupos      = [];
+        $reutilizadas = 0;
+
+        foreach ([[ClientInstallation::KIND_COMPLETA, $plan['apis']['activa']], [ClientInstallation::KIND_ESQUELETO, $plan['apis']['otra']]] as $destino) {
+            list($kind, $api) = $destino;
+
+            $fila = ClientInstallation::where('client_id', $client->id)
+                ->where('kind', $kind)
+                ->where('client_api_id', $api->id)
+                ->where('status', 'pendiente')
+                ->orderByDesc('id')
+                ->lockForUpdate()
+                ->first();
+
+            if ($fila !== null) {
+                $reutilizadas++;
+                $grupos[] = $fila->group_uuid;
+            } else {
+                $fila = new ClientInstallation();
+            }
+
+            $fila->client_id     = $client->id;
+            $fila->client_api_id = $api->id;
+            $fila->kind          = $kind;
+
+            $filas[] = $fila;
+        }
+
+        /* Un grupo ya armado se respeta solo si las dos filas pendientes son del mismo; en cualquier otro
+           caso se arma uno nuevo para las dos. */
+        $mismo_grupo = $reutilizadas === 2 && $grupos[0] !== null && $grupos[0] === $grupos[1];
+        $group_uuid  = $mismo_grupo ? $grupos[0] : (string) Str::uuid();
+
+        $valores = array_merge($plan['variables']['se_completan'], $plan['existentes']);
+
+        foreach ($filas as $fila) {
+            $propios = is_array($fila->env_manual_values) ? $fila->env_manual_values : [];
+
+            /* Lo que la fila ya traía gana sobre lo que se completa, salvo que esté vacío. */
+            $env = $valores;
+            foreach ($propios as $clave => $valor) {
+                if (trim((string) $valor) !== '') {
+                    $env[$clave] = $valor;
+                }
+            }
+
+            $fila->version_id             = $plan['version']->id;
+            $fila->group_uuid             = $group_uuid;
+            $fila->provision_hosting_type = ClientInstallation::PROVISION_SHARED_HOSTING;
+            $fila->env_manual_values      = $env;
+            $fila->status                 = 'instalando';
+            $fila->failure_reason         = null;
+            $fila->started_at             = null;
+            $fila->finished_at            = null;
+            $fila->save();
+        }
+
+        return $filas;
+    }
+
+    /**
+     * Una instalación en la forma corta que devuelve `install`.
+     *
+     * @param ClientInstallation $fila La instalación.
+     *
+     * @return array<string, mixed>
+     */
+    protected function instalacion_en_corto(ClientInstallation $fila)
+    {
+        return [
+            'id'                     => (int) $fila->id,
+            'uuid'                   => (string) $fila->uuid,
+            'kind'                   => (string) $fila->kind,
+            'status'                 => (string) $fila->status,
+            'client_api_id'          => (int) $fila->client_api_id,
+            'version_id'             => $fila->version_id === null ? null : (int) $fila->version_id,
+            'provision_hosting_type' => $fila->provision_hosting_type,
+        ];
+    }
+
+    /**
+     * La versión de una instalación en la forma corta, leída de la fila (la que se creó o reutilizó).
+     *
+     * Se lee de la fila y no del plan de antes del lock: entre uno y otro pudo publicarse otra versión, y
+     * la respuesta tiene que decir lo que de verdad se instala.
+     *
+     * @param int|null $version_id `client_installations.version_id`.
+     *
+     * @return array<string, mixed>|null
+     */
+    protected function version_en_corto($version_id)
+    {
+        $version = $version_id === null ? null : Version::find((int) $version_id);
+
+        return $version === null ? null : ['id' => (int) $version->id, 'version' => (string) $version->version];
+    }
+
+    /**
+     * ¿El cliente ya cargó el formulario de la implementación?
+     *
+     * 🔴 ES EL GATE DEL PANEL (`ImplementationActionService::user_setup_gate()`), CON UNA PRECISIÓN. El
+     * panel da el formulario por enviado si `form_submitted_at` está lleno O SI LA ETAPA 1 ESTÁ
+     * `completed`. Esa segunda mitad existe porque la etapa 1 se completa sola al enviarse el formulario,
+     * pero también se completa cuando alguien aprieta "Avanzar etapa" —y ahora también `advance` de
+     * Claude— SIN que el cliente haya cargado nada. En ese caso el user setup correría con un
+     * `setup_data` vacío: `migrate:fresh` sobre el sistema del cliente y todos los valores por defecto,
+     * que es justo lo que el formulario venía a evitar.
+     *
+     * Por eso acá la etapa 1 completada cuenta SOLO si además hay datos del formulario ya mapeados en
+     * `clients.setup_data` (que es lo que consume el user setup): el caso legítimo es el de Lucas
+     * cargando las respuestas desde el panel ("Editar" datos recolectados), que mapea `setup_data` pero no
+     * llena `form_submitted_at`.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param Client         $client         Su cliente.
+     *
+     * @return bool
+     */
+    protected function formulario_enviado(Implementation $implementation, Client $client)
+    {
+        if ($implementation->form_submitted_at !== null) {
+            return true;
+        }
+
+        $primera = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 1)->first();
+
+        return $primera !== null
+            && $primera->status === 'completed'
+            && is_array($client->setup_data)
+            && count($client->setup_data) > 0;
+    }
+
+    /**
+     * Un chequeo de los que devuelven `install` y `user-setup`.
+     *
+     * @param string $nombre  Qué se chequeó.
+     * @param bool   $ok      Si está bien.
+     * @param string $detalle Lo que se vio, en castellano.
+     *
+     * @return array<string, mixed>
+     */
+    protected function chequeo($nombre, $ok, $detalle)
+    {
+        return ['chequeo' => $nombre, 'ok' => (bool) $ok, 'detalle' => (string) $detalle];
+    }
+
+    /* ==============================================================================================
+     | 6) POST claude/implementations/{id}/user-setup — CONFIGURAR el sistema con el formulario
+     |============================================================================================= */
+
+    /**
+     * Aplica en el sistema del cliente la configuración que cargó en el formulario (listas de precios,
+     * sucursales, IVA, el usuario dueño con su documento, la tienda...): el "user setup".
+     *
+     * 🔴🔴 ESTO LE VACÍA LA BASE AL CLIENTE. Del otro lado (`admin-sync/user-setup` de empresa-api) el setup
+     * arranca con `migrate:fresh --force` y después siembra todo: "solo debe correrse sobre instancias
+     * recién instaladas". Por eso este camino NO TIENE "FORZAR", a diferencia del botón del panel, y NO
+     * hay que agregarle uno: una vez aplicado (`user_setup_executed_at` lleno), re-aplicarlo borraría todo
+     * lo que se cargó después —artículos, clientes, ventas—. Si de verdad hace falta, se hace desde el
+     * panel, con una persona mirando. Y el panel tiene además un hint que empuja a re-aplicar cada vez que
+     * se edita una respuesta del formulario: no es una razón para hacerlo.
+     *
+     * Hace lo que el botón "Configuración del sistema (UserSetup)" del panel
+     * (`ImplementationActionService::execute()`), con dos diferencias: corre en la cola `database` y no
+     * dentro del request, y la llamada HTTP va con 600 segundos de techo y no los 15 de
+     * `services.client_api.timeout` (con 15 el panel corta la espera mientras el setup sigue corriendo
+     * del otro lado). Lo hace `EjecutarUserSetupDeImplementacionJob`.
+     *
+     * Chequeos (todos en el dry-run, como `chequeos`; con uno en false el real es 422, salvo el que se
+     * dice):
+     *   1. El formulario se envió.
+     *   2. La implementación está en la etapa 2 o después.
+     *   3. La última instalación `completa` de la API activa está `completada` (la API responde).
+     *   4. La API activa tiene URL.
+     *   5. `user_setup_executed_at` está vacío: si no, 422 sin vuelta, con la fecha.
+     *   6. No hay otro user setup `en_curso` (409). Uno que dice `en_curso` hace más de 45 minutos se da
+     *      por colgado y deja reintentar: el cliente igual frena un setup doble con su propio 409.
+     *
+     * El dry-run devuelve el payload REAL que se va a mandar, con las claves de servicios pagos tapadas (el
+     * mismo preview del panel). Con `dry_run=false`: `confirm_client_name`, el registro `en_curso` se
+     * escribe bajo lock ANTES de despachar (así dos llamadas no despachan dos jobs), y responde 202. El
+     * resultado se lee en `user_setup` de `GET claude/implementations/{id}`.
+     *
+     * @param Request    $request Body: dry_run?, confirm_client_name.
+     * @param int|string $id      Id de la implementación (segmento de la URL).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function user_setup_json(Request $request, $id)
+    {
+        /* --- Freno 1: lista blanca y tipos. --- */
+        $rechazo = $this->rechazar_parametros_de_mas($request, self::PARAMETROS_DEL_USER_SETUP, 'POST claude/implementations/{id}/user-setup');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'dry_run'             => 'nullable|boolean',
+            'confirm_client_name' => 'required_if:dry_run,false|nullable|string|max:190',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $implementation = Implementation::find((int) $id);
+        if ($implementation === null) {
+            return $this->error_404('no existe la implementación ' . (int) $id);
+        }
+
+        $client = Client::find((int) $implementation->client_id);
+        if ($client === null) {
+            return $this->error_404('la implementación ' . (int) $id . ' apunta a un cliente que no existe');
+        }
+
+        $dry_run = $this->resolver_dry_run($request);
+        $plan    = $this->plan_del_user_setup($implementation, $client);
+
+        if ($dry_run) {
+            return response()->json($this->respuesta_del_dry_run_del_user_setup($implementation, $plan), 200);
+        }
+
+        /* --- Freno 2: confirmación por nombre. --- */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se aplicó nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        /* --- Frenos 3 a 6, con lo que se ve ahora. Se repiten adentro del lock. --- */
+        $impedimento = $this->impedimento_del_user_setup($implementation, $plan);
+        if ($impedimento !== null) {
+            return $impedimento;
+        }
+
+        $resultado = DB::transaction(function () use ($implementation, $client) {
+            $bloqueada = Implementation::query()->whereKey($implementation->id)->lockForUpdate()->first();
+
+            $plan = $this->plan_del_user_setup($bloqueada, $client);
+
+            $impedimento = $this->impedimento_del_user_setup($bloqueada, $plan);
+            if ($impedimento !== null) {
+                return $impedimento;
+            }
+
+            $etapa = ImplementationStage::where('implementation_id', $bloqueada->id)->where('stage_number', 2)->lockForUpdate()->first();
+            if ($etapa === null) {
+                return 'sin_etapa';
+            }
+
+            $iniciado_at = now()->toISOString();
+            $datos       = is_array($etapa->data) ? $etapa->data : [];
+
+            $datos['user_setup'] = ['estado' => 'en_curso', 'iniciado_at' => $iniciado_at, 'terminado_at' => null, 'error' => null];
+            $etapa->data         = $datos;
+            $etapa->save();
+
+            return ['iniciado_at' => $iniciado_at];
+        });
+
+        if ($resultado instanceof \Illuminate\Http\JsonResponse) {
+            return $resultado;
+        }
+
+        if ($resultado === 'sin_etapa') {
+            return $this->error_422(
+                'La implementación ' . (int) $implementation->id . ' no tiene la etapa 2 cargada, que es donde queda el registro del user setup. No se aplicó nada.',
+                ['implementation_id' => (int) $implementation->id]
+            );
+        }
+
+        /* 🔴 onConnection explícito y DESPUÉS del commit: el job tiene que encontrar el `en_curso` ya escrito. */
+        EjecutarUserSetupDeImplementacionJob::dispatch((int) $implementation->id)->onConnection(self::CONEXION_DE_COLA);
+
+        return response()->json([
+            'dry_run'                  => false,
+            'implementation_id'        => (int) $implementation->id,
+            'user_setup'               => ['estado' => 'en_curso', 'iniciado_at' => $resultado['iniciado_at']],
+            'conexion_de_cola'         => self::CONEXION_DE_COLA,
+            'latencia_maxima_segundos' => self::LATENCIA_MAXIMA_SEGUNDOS,
+            'nota'                     => 'Se encoló la configuración del sistema. 🔴 Tarda varios minutos (migrate:fresh + seeders, ~10): poleá cada 30 o '
+                . '60 segundos con GET claude/implementations/' . (int) $implementation->id . ' (user_setup.estado: en_curso → ok | error), '
+                . 'no cada 2 (rate limit por IP). Si termina en error por una conexión cortada, NO reintentes sin mirar el sistema del cliente: '
+                . 'pudo haber seguido corriendo, y un reintento le vuelve a vaciar la base.',
+        ], 202);
+    }
+
+    /**
+     * Los seis chequeos del user setup.
+     *
+     * Lee, no escribe. Los tres primeros son los del `user_setup_gate()` del panel, con una precisión: el
+     * tercero mira la última instalación REAL (`completa`) de la API activa y no "la última del cliente",
+     * porque con el par de filas (real + esqueleto) la última por id es el esqueleto, que termina después
+     * y no tiene nada que ver con el sistema al que se le va a pegar.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param Client         $client         Su cliente.
+     *
+     * @return array<string, mixed> `chequeos`, `aplicado` (bool: el candado está lleno), `en_curso` (bool:
+     *                              hay uno corriendo y no está colgado), `endpoint` (string|null).
+     */
+    protected function plan_del_user_setup(Implementation $implementation, Client $client)
+    {
+        $chequeos = [];
+
+        /* 1. El formulario. */
+        $formulario = $this->formulario_enviado($implementation, $client);
+
+        $chequeos[] = $this->chequeo(
+            'formulario_enviado',
+            $formulario,
+            $formulario ? 'El cliente envió el formulario.' : 'Todavía no se completó el formulario (etapa 1): el payload no tendría datos reales.'
+        );
+
+        /* 2. La etapa. */
+        $etapa_ok = (int) $implementation->current_stage >= 2;
+
+        $chequeos[] = $this->chequeo(
+            'etapa_2_o_posterior',
+            $etapa_ok,
+            $etapa_ok ? 'La implementación está en la etapa ' . (int) $implementation->current_stage . '.' : 'La implementación todavía no avanzó a la etapa 2.'
+        );
+
+        /* 3 y 4. La instalación real de la API activa y la URL a la que se le pega. */
+        $activa = $client->active_client_api_id === null
+            ? null
+            : ClientApi::where('id', (int) $client->active_client_api_id)->where('client_id', $client->id)->first();
+
+        $instalacion = $activa === null
+            ? null
+            : ClientInstallation::where('client_id', $client->id)
+                ->where('kind', ClientInstallation::KIND_COMPLETA)
+                ->where('client_api_id', $activa->id)
+                ->orderByDesc('id')
+                ->first();
+
+        $instalada = $instalacion !== null && $instalacion->status === 'completada';
+
+        $chequeos[] = $this->chequeo(
+            'instalacion_completada',
+            $instalada,
+            $instalacion === null
+                ? 'No hay ninguna instalación completa sobre la API activa: instalá primero (POST claude/implementations/{id}/install).'
+                : ($instalada
+                    ? 'La instalación ' . (int) $instalacion->id . ' de la API activa está completada.'
+                    : 'La última instalación completa de la API activa (' . (int) $instalacion->id . ') está en "' . $instalacion->status . '", no en completada.')
+        );
+
+        $url = $activa === null ? '' : trim((string) $activa->url);
+
+        $chequeos[] = $this->chequeo(
+            'client_api_activa',
+            $url !== '',
+            $url !== '' ? 'La API activa del cliente es ' . $url . '.' : 'El cliente no tiene una API activa con URL (clients.active_client_api_id).'
+        );
+
+        /* 5. El candado: ya aplicado = nunca más por acá. */
+        $aplicado = $implementation->user_setup_executed_at !== null;
+
+        $chequeos[] = $this->chequeo(
+            'sin_aplicar_antes',
+            ! $aplicado,
+            $aplicado
+                ? 'El user setup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. 🔴 Re-aplicarlo VACÍA la base del cliente '
+                    . '(migrate:fresh): este camino no tiene forzar. Si de verdad hace falta, se hace desde el panel, con una persona mirando.'
+                : 'Todavía no se aplicó.'
+        );
+
+        /* 6. Otro en curso. Uno colgado (más de 45 minutos) no cuenta: ver MINUTOS_PARA_DAR_POR_COLGADO. */
+        $registro = $this->registro_del_user_setup($implementation);
+        $en_curso = ! $aplicado && (isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso' && ! $this->esta_colgado($registro);
+
+        $chequeos[] = $this->chequeo(
+            'sin_setup_en_curso',
+            ! $en_curso,
+            $en_curso
+                ? 'Ya hay un user setup en curso (arrancó ' . (isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : 'sin fecha') . '): esperá a que termine.'
+                : (! $aplicado && (isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso'
+                    ? 'El registro dice en_curso desde hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos: se da por colgado y se puede volver a intentar.'
+                    : 'No hay ninguno en curso.')
+        );
+
+        return [
+            'chequeos' => $chequeos,
+            'aplicado' => $aplicado,
+            'en_curso' => $en_curso,
+            'endpoint' => $url === '' ? null : rtrim($url, '/') . '/api/admin-sync/user-setup',
+        ];
+    }
+
+    /**
+     * ¿Algo impide aplicar el user setup ahora? La respuesta de error que corresponde, o null si se puede.
+     *
+     * Tres clases:
+     *   - ya aplicado: 422 con el motivo largo y SIN vuelta (no hay forzar);
+     *   - otro en curso: 409 (no es un error de armado: hay que esperarlo);
+     *   - cualquier otro chequeo en false: 422 con la lista de chequeos.
+     *
+     * @param Implementation       $implementation La implementación.
+     * @param array<string, mixed> $plan           El plan de `plan_del_user_setup()`.
+     *
+     * @return \Illuminate\Http\JsonResponse|null
+     */
+    protected function impedimento_del_user_setup(Implementation $implementation, array $plan)
+    {
+        if ($plan['aplicado']) {
+            return $this->error_422(
+                'El user setup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. Re-aplicarlo VACÍA la base del cliente '
+                    . '(migrate:fresh): este camino no tiene "forzar". Si de verdad hace falta, se hace desde el panel, con una persona mirando. '
+                    . 'No se aplicó nada.',
+                [
+                    'implementation_id'      => (int) $implementation->id,
+                    'user_setup_executed_at' => $this->instante($implementation->user_setup_executed_at),
+                    'chequeos'               => $plan['chequeos'],
+                ]
+            );
+        }
+
+        if ($plan['en_curso']) {
+            return response()->json([
+                'error'             => 'Ya hay un user setup en curso para esta implementación: esperá a que termine. No se aplicó nada.',
+                'implementation_id' => (int) $implementation->id,
+                'user_setup'        => $this->estado_del_user_setup($implementation),
+                'chequeos'          => $plan['chequeos'],
+                'ayuda'             => 'GET claude/implementations/' . (int) $implementation->id . ' dice cómo va (user_setup.estado).',
+            ], 409);
+        }
+
+        $fallidos = [];
+        foreach ($plan['chequeos'] as $chequeo) {
+            if (! $chequeo['ok']) {
+                $fallidos[] = $chequeo['chequeo'];
+            }
+        }
+
+        if (count($fallidos) === 0) {
+            return null;
+        }
+
+        return $this->error_422(
+            'No se puede aplicar el user setup: ' . implode(', ', $fallidos) . '. No se aplicó nada.',
+            [
+                'implementation_id' => (int) $implementation->id,
+                'chequeos'          => $plan['chequeos'],
+                'ayuda'             => 'El dry_run (que es el default) muestra los chequeos con su detalle.',
+            ]
+        );
+    }
+
+    /**
+     * La respuesta del dry-run del user setup: los chequeos y el payload REAL con las claves tapadas.
+     *
+     * El payload sale de `ImplementationActionService::preview()` —el mismo preview del panel, que arma el
+     * mismo payload que `trigger_user_setup()` y le tapa las claves de servicios pagos—, así que lo que se
+     * ve acá es lo que va a viajar. Incluye datos del cliente (su documento, que es el usuario con el que
+     * entra, su mail, su teléfono): es a propósito, para eso se mira antes de aplicar.
+     *
+     * @param Implementation       $implementation La implementación.
+     * @param array<string, mixed> $plan           El plan de `plan_del_user_setup()`.
+     *
+     * @return array<string, mixed>
+     */
+    protected function respuesta_del_dry_run_del_user_setup(Implementation $implementation, array $plan)
+    {
+        $listo = true;
+        foreach ($plan['chequeos'] as $chequeo) {
+            if (! $chequeo['ok']) {
+                $listo = false;
+            }
+        }
+
+        $preview = (new ImplementationActionService())->preview($implementation, 'user_setup');
+        $payload = json_decode((string) $preview['body'], true);
+
+        return [
+            'dry_run'           => true,
+            'implementation_id' => (int) $implementation->id,
+            'listo'             => $listo,
+            'chequeos'          => $plan['chequeos'],
+            'destino'           => [
+                'endpoint'         => $plan['endpoint'],
+                'timeout_segundos' => EjecutarUserSetupDeImplementacionJob::TIMEOUT_DE_LA_LLAMADA,
+            ],
+            'payload'           => is_array($payload) ? $payload : [],
+            'aviso_destructivo' => 'Del otro lado el setup arranca con migrate:fresh --force: VACÍA la base del sistema del cliente. Solo se aplica sobre una '
+                . 'instalación recién hecha y una sola vez; este camino no tiene forzar.',
+            'nota'              => 'Simulacro: no se encoló nada. Repetí con dry_run=false y confirm_client_name para aplicar la configuración.',
+        ];
     }
 
     /* ==============================================================================================
