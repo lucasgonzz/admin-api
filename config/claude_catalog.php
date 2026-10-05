@@ -1186,6 +1186,30 @@ return [
                 ['nombre' => 'verify_artifacts', 'obligatorio' => false, 'validacion' => 'sometimes|nullable|boolean', 'que_es' => 'Default true. Sólo cuenta al pasar a published.'],
             ],
         ],
+
+        /* ---------------------------------------------------------- Implementaciones de clientes nuevos (misión implementar-cliente, 5/10/2026) */
+
+        'GET api/claude/implementations/{id}' => [
+            'para_que'     => 'El estado completo de UNA implementación de cliente nuevo, en una sola llamada: la etapa en la que está y cómo va cada una de las ocho (con las acciones que se registraron), dónde vive el sistema del cliente, las instalaciones y su estado, si el user setup corrió (sin_correr | en_curso | ok | error), los mails de hito que ya salieron y si el cliente escribió algo que nadie contestó (`entrantes`: mientras la implementación está abierta, lo que el cliente le escribe al número del sistema cae al hilo de la implementación y nadie lo mira). Trae el form_link (el link del formulario que se le manda al cliente). El contacto y el resumen del formulario NO vienen por defecto: se piden con include.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación (implementation.id).'],
+                ['nombre' => 'include', 'obligatorio' => false, 'validacion' => 'csv o lista; cada valor en contacto, formulario o logs', 'que_es' => 'contacto: teléfono y mail del cliente y el teléfono del responsable de migración. formulario: el resumen de lo que el cliente cargó (sin DNI ni teléfonos de los empleados salvo que también pidas contacto; el mail y el documento del dueño no salen nunca). logs: las últimas 40 líneas del log de cada instalación.'],
+            ],
+        ],
+        'GET api/claude/implementations' => [
+            'para_que'     => 'Lo mismo que GET claude/implementations/{id}, pero buscando por client_id o por lead_id (exactamente uno) cuando no se conoce el id de la implementación: la skill arranca con un negocio o un lead, no con un id. Con lead_id se resuelve por el cliente al que se promovió ese lead. 404 si el lead todavía no se promovió o si el cliente no tiene implementación.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => 'client_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'El cliente cuya implementación se quiere ver. Exactamente uno de client_id o lead_id.'],
+                ['nombre' => 'lead_id', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1', 'que_es' => 'El lead que compró: se resuelve por su cliente promovido. Exactamente uno de client_id o lead_id.'],
+                ['nombre' => 'include', 'obligatorio' => false, 'validacion' => 'csv o lista; cada valor en contacto, formulario o logs', 'que_es' => 'Igual que en GET claude/implementations/{id}.'],
+            ],
+        ],
     ],
 
     /*

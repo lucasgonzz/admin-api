@@ -458,6 +458,23 @@ Route::middleware('claude.task.key')
            salida era el demo-setup, que arranca con migrate:fresh y le vacia la base a la
            instancia. Es SINCRONO: estos comandos tardan segundos, no minutos. */
         Route::post('demo-commands', 'Api\ClaudeDemoOpsController@run_command_json');
+
+        /* Implementaciones de clientes nuevos (misión `implementar-cliente`, 5/10/2026): las ocho
+           etapas desde que un lead compra hasta que el sistema queda entregado, operadas desde la
+           skill `/implementar` en vez de desde el panel. Todo vive en ClaudeImplementationOpsController.
+           🔴 Hasta esta misión NO había ninguna ruta claude/* que operara implementaciones: lo único
+           posible era leerlas por `query`. Los frenos son los de siempre —lista blanca de parámetros,
+           dry_run por defecto, confirmación por nombre en lo que toca el sistema de un cliente, y todo
+           lo largo encolado en `database` con 202— y se detallan en el docblock del controlador y en
+           claude_catalog.php.
+           🔴 El user setup por acá NO tiene "forzar": del otro lado arranca con migrate:fresh y
+           re-aplicarlo le vacía la base al cliente. Si de verdad hace falta, es desde el panel.
+           `implementations` (sin id) va ANTES de las rutas con {id} por la convención de este bloque: todo
+           segmento fijo primero. `{id}` se restringe a dígitos, como en `leads/{id}`: sin eso,
+           `implementations/12-borrame` operaba la implementación 12 (el cast a int se come la cola). */
+        Route::get('implementations', 'Api\ClaudeImplementationOpsController@index_json');
+        Route::get('implementations/{id}', 'Api\ClaudeImplementationOpsController@show_json')
+            ->whereNumber('id');
     });
 
 /*
