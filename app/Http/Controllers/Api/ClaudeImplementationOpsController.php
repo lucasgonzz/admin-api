@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Exceptions\ImplementacionMailException;
+use App\Helpers\WhatsappNormalizer;
 use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Jobs\EjecutarInstalacionDeImplementacionJob;
@@ -24,11 +25,11 @@ use App\Models\ImplementationStage;
 use App\Models\ImplementationStageConfig;
 use App\Models\Lead;
 use App\Models\Version;
-use App\Services\ArgentinePhoneNormalizer;
 use App\Services\ClientEmpresaApiUrlResolver;
 use App\Services\HostingProvisioningStructure;
 use App\Services\ImplementacionMailService;
 use App\Services\ImplementationActionService;
+use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationFormMapper;
 use App\Services\ImplementationSettings;
 use App\Services\ImplementationStartService;
@@ -2069,6 +2070,11 @@ class ClaudeImplementationOpsController extends Controller
 
         $mensaje = $resultado['mensaje'];
 
+        /* El panel se entera del saliente recién creado (el evento Pusher del hilo), DESPUÉS del commit. */
+        if ($mensaje !== null) {
+            $this->avisar_al_hilo($implementation, $mensaje);
+        }
+
         return response()->json([
             'registrada'    => true,
             'ya_registrada' => false,
@@ -2079,9 +2085,36 @@ class ClaudeImplementationOpsController extends Controller
             'mensaje'       => $mensaje === null ? null : [
                 'id'                  => (int) $mensaje->id,
                 'whatsapp_message_id' => (string) $mensaje->whatsapp_message_id,
-                'telefono'            => $mensaje->phone,
+                /* Enmascarado: lo lee una sesión que lo pega en una conversación, y para saber a quién salió
+                   alcanza con el final. Entero queda en la base (lo necesita el hilo). */
+                'telefono'            => $mensaje->phone === null ? null : $this->enmascarar_un_numero((string) $mensaje->phone),
             ],
         ], 201);
+    }
+
+    /**
+     * Avisa al panel que el hilo de la implementación tiene un mensaje nuevo (el evento Pusher del hilo, el
+     * mismo que emite el panel cuando manda uno), para que lo agregue al hilo abierto sin recargar.
+     *
+     * 🔴 Nunca rompe el registro: lo que se registra es algo que YA pasó (el WhatsApp ya salió) y no se puede
+     * deshacer porque falle un aviso. Un Pusher caído o sin credencial se loguea y se sigue.
+     *
+     * @param Implementation        $implementation La implementación.
+     * @param ImplementationMessage $mensaje        El saliente recién creado.
+     *
+     * @return void
+     */
+    protected function avisar_al_hilo(Implementation $implementation, ImplementationMessage $mensaje)
+    {
+        try {
+            ImplementationBroadcastService::emit_message_received((int) $implementation->id, (int) $mensaje->id);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->warning('ClaudeImplementationOpsController: no se pudo avisar al panel del mensaje registrado.', [
+                'implementation_id' => (int) $implementation->id,
+                'mensaje_id'        => (int) $mensaje->id,
+                'error'             => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -2094,7 +2127,13 @@ class ClaudeImplementationOpsController extends Controller
      *
      * La igualdad de "la misma acción" es: mismo `action`, mismo `canal`, misma `stage`, mismo texto (por
      * su `sha1`, que se guarda en la entrada como `texto_hash` para no repetir hasta 4000 caracteres por
-     * cada registro) y `origen = claude`. Las entradas del panel no cuentan: las escribe otro camino.
+     * cada registro), MISMO DESTINATARIO (el `sha1` del teléfono ya normalizado, en `telefono_hash`) y
+     * `origen = claude`. Las entradas del panel no cuentan: las escribe otro camino.
+     *
+     * 🔴 El destinatario es parte de la clave: el mismo texto a DOS teléfonos distintos (el dueño y el
+     * responsable de migración, por ejemplo) son dos mensajes, y el segundo no puede descartarse como
+     * repetición del primero —no se registraría ni su huella ni su saliente, y nadie se enteraría—. Se guarda
+     * el hash y no el teléfono para no dejar el número suelto en el JSON de la etapa.
      *
      * @param Implementation $implementation La implementación.
      * @param string         $accion         Una de ACCIONES.
@@ -2121,6 +2160,7 @@ class ClaudeImplementationOpsController extends Controller
         $datos    = is_array($registro->data) ? $registro->data : [];
         $entradas = isset($datos['actions']) && is_array($datos['actions']) ? $datos['actions'] : [];
         $hash     = sha1($texto === null ? '' : $texto);
+        $hash_tel = $telefono === null ? null : sha1($telefono);
         $limite   = now()->subMinutes(self::MINUTOS_DE_IDEMPOTENCIA);
 
         foreach ($entradas as $existente) {
@@ -2129,7 +2169,8 @@ class ClaudeImplementationOpsController extends Controller
                 || (isset($existente['action']) ? $existente['action'] : null) !== $accion
                 || (isset($existente['canal']) ? $existente['canal'] : null) !== $canal
                 || (int) (isset($existente['stage']) ? $existente['stage'] : 0) !== (int) $etapa
-                || (isset($existente['texto_hash']) ? $existente['texto_hash'] : null) !== $hash) {
+                || (isset($existente['texto_hash']) ? $existente['texto_hash'] : null) !== $hash
+                || (isset($existente['telefono_hash']) ? $existente['telefono_hash'] : null) !== $hash_tel) {
                 continue;
             }
 
@@ -2148,6 +2189,10 @@ class ClaudeImplementationOpsController extends Controller
             'origen'     => 'claude',
             'texto_hash' => $hash,
         ];
+
+        if ($hash_tel !== null) {
+            $entrada['telefono_hash'] = $hash_tel;
+        }
 
         /* El texto de una nota es la nota: no hay otro lugar donde guardarlo. El de un WhatsApp vive en el
            mensaje del hilo, y el de un mail o una llamada no hace falta repetirlo. */
@@ -2182,10 +2227,14 @@ class ClaudeImplementationOpsController extends Controller
      * destinatario que corresponde.
      *
      * Mismo criterio que `ImplementationActionService::resolve_recipient_phone()`: el pedido de archivos
-     * va al RESPONSABLE DE MIGRACIÓN (y si no lo hay, al dueño) y todo lo demás al dueño. Se normaliza
-     * con `ArgentinePhoneNormalizer`, la misma que usa el webhook al guardar lo que entra: el hilo
-     * compara teléfonos como texto exacto (la ventana de 24 h, por ejemplo), y un saliente guardado con
-     * otro formato que el entrante de la misma persona los trata como dos personas.
+     * va al RESPONSABLE DE MIGRACIÓN (y si no lo hay, al dueño) y todo lo demás al dueño.
+     *
+     * 🔴 Se normaliza con `WhatsappNormalizer`, el MISMO con el que el webhook (`WhatsappWebhookController`)
+     * normaliza el `from` de lo que ENTRA antes de guardarlo en el hilo: el hilo compara teléfonos como texto
+     * exacto (la ventana de 24 h, por ejemplo), y un saliente guardado con otro formato que el entrante de la
+     * misma persona los trata como dos personas. Esta ruta usaba `ArgentinePhoneNormalizer`, que el webhook
+     * NO usa (lo usan el mapeo del formulario y la conversación automática): no saca el 0 de marcado local y
+     * trata distinto el 15.
      *
      * @param Implementation $implementation La implementación.
      * @param string         $accion         La acción que se registra.
@@ -2208,7 +2257,13 @@ class ClaudeImplementationOpsController extends Controller
 
         $crudo = trim((string) $crudo);
 
-        return $crudo === '' ? null : ArgentinePhoneNormalizer::normalize($crudo);
+        if ($crudo === '') {
+            return null;
+        }
+
+        $normalizado = WhatsappNormalizer::normalize($crudo);
+
+        return $normalizado === '' ? null : $normalizado;
     }
 
     /* ==============================================================================================

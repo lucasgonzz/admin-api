@@ -260,7 +260,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         });
         $this->assertSame('rosa@ejemplo.test', $cliente->refresh()->email, 'La casilla del lead (la que dejó en la demo) se guarda en la ficha cuando el mail sale.');
 
-        $this->registrar($id, 'presentacion', 'Hola Rosa, soy Lucas de ComercioCity.')->assertJsonPath('mensaje.telefono', '+5493415551234');
+        $this->registrar($id, 'presentacion', 'Hola Rosa, soy Lucas de ComercioCity.')->assertJsonPath('mensaje.telefono', '***1234');
         $this->registrar($id, 'form_link', 'Este es el formulario: ' . $link);
 
         /* El cliente contesta a las 10:05 y la skill lo ve en `entrantes`. */
@@ -379,7 +379,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
 
         /* El pedido de archivos va al responsable de migración que cargó el cliente, no al dueño. */
         $this->registrar($id, 'pedir_archivos', 'Mandame los Excel de artículos, clientes y proveedores.')
-            ->assertJsonPath('mensaje.telefono', '+5493415554321');
+            ->assertJsonPath('mensaje.telefono', '***4321');
 
         $this->avanzar($id, 3);
         $this->avanzar($id, 4);

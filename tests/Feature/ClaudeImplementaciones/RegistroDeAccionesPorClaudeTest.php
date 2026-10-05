@@ -214,7 +214,7 @@ class RegistroDeAccionesPorClaudeTest extends BaseDeImplementaciones
 
         $respuesta->assertJsonPath('mensaje.id', (int) $mensaje->id);
         $respuesta->assertJsonPath('mensaje.whatsapp_message_id', $mensaje->whatsapp_message_id);
-        $respuesta->assertJsonPath('mensaje.telefono', '+5493415559999');
+        $respuesta->assertJsonPath('mensaje.telefono', '***9999'); // enmascarado: el entero queda solo en la base
     }
 
     /**
