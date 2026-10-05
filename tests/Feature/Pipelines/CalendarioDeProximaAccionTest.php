@@ -6,7 +6,9 @@ use App\Models\Admin;
 use App\Models\AdminCalendarConnection;
 use App\Models\Client;
 use App\Models\PipelineOpportunity;
+use App\Services\Pipelines\PipelineCalendarSync;
 use App\Services\Pipelines\PipelineOpportunityService;
+use Carbon\Carbon;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
@@ -55,6 +57,15 @@ class CalendarioDeProximaAccionTest extends BaseDePipelines
     private $token_revocado = false;
 
     /**
+     * Si el endpoint de tokens tiene que dar un 500 (error transitorio, la conexión sigue activa).
+     * A diferencia de `invalid_grant`, no desactiva la conexión: sirve para probar que la falla del
+     * refresco se recuerda durante el request.
+     *
+     * @var bool
+     */
+    private $token_con_error = false;
+
+    /**
      * Contador de ids de evento que inventa el Google fakeado (`evt-1`, `evt-2`, ...).
      *
      * @var int
@@ -73,6 +84,7 @@ class CalendarioDeProximaAccionTest extends BaseDePipelines
 
         $this->estado_de_google    = ['POST' => 200, 'PATCH' => 200, 'DELETE' => 204];
         $this->token_revocado      = false;
+        $this->token_con_error     = false;
         $this->contador_de_eventos = 0;
 
         Http::swap(new Factory());
@@ -822,6 +834,200 @@ class CalendarioDeProximaAccionTest extends BaseDePipelines
     }
 
     /* ------------------------------------------------------------------------------------------
+     | Arreglos de la verificación independiente
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Carrera (doble click en Guardar): el segundo request cargó la oportunidad ANTES de que el
+     * primero creara el evento, así que su instancia en memoria dice "sin evento" (y otra fecha).
+     * El sync relee la base: ve el evento del primero y hace un PATCH con la fecha que quedó
+     * guardada, no un segundo POST.
+     *
+     * @return void
+     */
+    public function test_una_instancia_vieja_no_duplica_el_evento_porque_manda_el_estado_de_la_base(): void
+    {
+        $admin = $this->admin_logueado();
+        $this->conectar_calendario($admin);
+
+        $op    = $this->alta_de_uno($this->crear_pipeline(), $this->crear_cliente());
+        $vieja = $this->oportunidad($op['id']);
+
+        /* El "primer request" termina: crea el evento. */
+        $this->actualizar($op['id'], ['next_action_at' => '2026-09-30 15:00'])->assertStatus(200);
+        $this->assertCount(1, $this->llamadas_a_google('POST'));
+
+        /* El "segundo request" llega con su copia vieja: sin evento anotado y con otra fecha. */
+        $vieja->next_action_at = Carbon::parse('2026-10-04 09:00', self::ZONA);
+        $this->assertNull($vieja->next_action_calendar_event_id);
+
+        app(PipelineCalendarSync::class)->sincronizar($vieja, $admin->id);
+
+        $this->assertCount(1, $this->llamadas_a_google('POST'), 'No se crea un segundo evento.');
+        $parches = $this->llamadas_a_google('PATCH');
+        $this->assertCount(1, $parches);
+        $this->assertSame($this->url_eventos(self::CALENDARIO) . '/evt-1', $parches[0]->url());
+        $this->assertSame('2026-09-30T15:00:00', $parches[0]->data()['start']['dateTime'], 'Manda la fecha que quedó guardada.');
+
+        /* La instancia vieja quedó al día con el evento anotado. */
+        $this->assertSame('evt-1', $vieja->next_action_calendar_event_id);
+        $this->assertSame($admin->id, (int) $vieja->next_action_calendar_admin_id);
+    }
+
+    /**
+     * Un cliente sin nombre (vacío o de puros espacios) no deja un guion colgando en el título ni un
+     * "Cliente: " vacío en la descripción.
+     *
+     * @return void
+     */
+    public function test_un_sujeto_sin_nombre_no_deja_restos_en_el_titulo_ni_en_la_descripcion(): void
+    {
+        $admin = $this->admin_logueado();
+        $this->conectar_calendario($admin);
+
+        $pipeline = $this->crear_pipeline();
+        $con_nota = $this->alta_de_uno($pipeline, $this->crear_cliente(['name' => '']));
+        $sin_nota = $this->alta_de_uno($pipeline, $this->crear_cliente(['name' => '   ']));
+
+        $this->actualizar($con_nota['id'], ['next_action_at' => '2026-09-30 15:00', 'next_action_note' => 'Llamar'])->assertStatus(200);
+        $this->actualizar($sin_nota['id'], ['next_action_at' => '2026-09-30 16:00'])->assertStatus(200);
+
+        $posts = $this->llamadas_a_google('POST');
+        $this->assertCount(2, $posts);
+
+        $this->assertSame('Llamar', $posts[0]->data()['summary']);
+        $this->assertSame('Por contactar', $posts[1]->data()['summary']);
+
+        foreach ($posts as $post) {
+            $this->assertStringNotContainsString('—', $post->data()['summary']);
+            $this->assertStringNotContainsString('Cliente:', $post->data()['description']);
+            $this->assertStringContainsString('Etapa: Por contactar', $post->data()['description']);
+        }
+    }
+
+    /**
+     * Si el refresco del token falla (500 del endpoint de tokens, la conexión sigue activa), un alta
+     * masiva NO lo reintenta por cada oportunidad: una sola llamada al endpoint de tokens, ningún
+     * evento, y el alta sale igual.
+     *
+     * @return void
+     */
+    public function test_la_falla_del_token_se_recuerda_durante_el_request(): void
+    {
+        $admin = $this->admin_logueado();
+        $this->conectar_calendario($admin);
+
+        $pipeline = $this->crear_pipeline();
+        $sujetos  = [];
+        for ($i = 0; $i < 4; $i++) {
+            $sujetos[] = ['type' => 'client', 'id' => $this->crear_cliente()->id];
+        }
+
+        $this->token_con_error = true;
+
+        $respuesta = $this->alta($pipeline, $sujetos, [
+            'stage_id' => $this->etapa($pipeline, 'Reunión agendada')->id,
+            'fields'   => ['fecha_reunion' => '2026-10-01 11:00'],
+        ]);
+
+        $respuesta->assertStatus(201);
+        $this->assertCount(4, $respuesta->json('created'));
+        $this->assertSame([], $this->llamadas_a_google(), 'Sin token no sale ningún evento.');
+
+        $tokens = array_filter($this->todas_las_llamadas_a_google(), function ($llamada) {
+            return strpos($llamada->url(), 'oauth2.googleapis.com/token') !== false;
+        });
+        $this->assertCount(1, $tokens, 'El refresco fallido no se reintenta por cada oportunidad.');
+
+        $this->assertTrue((bool) AdminCalendarConnection::query()->where('admin_id', $admin->id)->value('is_active'), 'Un 500 no desactiva la conexión.');
+    }
+
+    /**
+     * Mover a una etapa abierta con `next_action_at` en el payload (regla R1.2) crea el evento si no
+     * había, y lo actualiza (PATCH) si ya había.
+     *
+     * @return void
+     */
+    public function test_mover_con_proxima_accion_en_el_payload_crea_o_actualiza_el_evento(): void
+    {
+        $admin = $this->admin_logueado();
+        $this->conectar_calendario($admin);
+
+        $pipeline = $this->crear_pipeline();
+        $cliente  = $this->crear_cliente();
+        $sin      = $this->alta_de_uno($pipeline, $cliente);
+        $con      = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        /* Sin evento previo: se crea. */
+        $this->mover($sin['id'], [
+            'stage_id'         => $this->etapa($pipeline, 'Contactado')->id,
+            'fields'           => ['canal' => 'WhatsApp'],
+            'next_action_at'   => '2026-10-05 10:00',
+            'next_action_note' => 'Mandar el video',
+        ])->assertStatus(200);
+
+        $posts = $this->llamadas_a_google('POST');
+        $this->assertCount(1, $posts);
+        $this->assertSame('2026-10-05T10:00:00', $posts[0]->data()['start']['dateTime']);
+        $this->assertSame('Mandar el video — ' . $cliente->name, $posts[0]->data()['summary']);
+        $this->assertSame('evt-1', $this->oportunidad($sin['id'])->next_action_calendar_event_id);
+
+        /* Con evento previo: se actualiza. */
+        $this->actualizar($con['id'], ['next_action_at' => '2026-10-01 09:00'])->assertStatus(200);
+        $this->assertSame('evt-2', $this->oportunidad($con['id'])->next_action_calendar_event_id);
+
+        $this->mover($con['id'], [
+            'stage_id'       => $this->etapa($pipeline, 'Calificado')->id,
+            'fields'         => ['usa_sistema' => true],
+            'next_action_at' => '2026-10-08 17:00',
+        ])->assertStatus(200);
+
+        $this->assertCount(2, $this->llamadas_a_google('POST'), 'No se crea un tercer evento.');
+        $parches = $this->llamadas_a_google('PATCH');
+        $this->assertCount(1, $parches);
+        $this->assertSame($this->url_eventos(self::CALENDARIO) . '/evt-2', $parches[0]->url());
+        $this->assertSame('2026-10-08T17:00:00', $parches[0]->data()['start']['dateTime']);
+        $this->assertSame('evt-2', $this->oportunidad($con['id'])->next_action_calendar_event_id);
+    }
+
+    /**
+     * Mover a una etapa abierta SIN conservar la próxima acción (una manual que ya venció no
+     * sobrevive: regla R1.3) borra la próxima acción y, con ella, el evento.
+     *
+     * @return void
+     */
+    public function test_mover_sin_conservar_una_manual_vencida_borra_el_evento(): void
+    {
+        $admin = $this->admin_logueado();
+        $this->conectar_calendario($admin);
+
+        $pipeline = $this->crear_pipeline();
+        $op       = $this->alta_de_uno($pipeline, $this->crear_cliente());
+
+        $this->actualizar($op['id'], ['next_action_at' => '2026-09-30 15:00'])->assertStatus(200);
+        $this->assertSame('evt-1', $this->oportunidad($op['id'])->next_action_calendar_event_id);
+
+        /* Pasa el tiempo: la acción manual ya venció y un movimiento no la conserva. */
+        $this->clavar_reloj('2026-10-05 10:00:00');
+
+        $respuesta = $this->mover($op['id'], [
+            'stage_id' => $this->etapa($pipeline, 'Contactado')->id,
+            'fields'   => ['canal' => 'WhatsApp'],
+        ]);
+
+        $respuesta->assertStatus(200);
+        $this->assertNull($respuesta->json('opportunity.next_action_at'), 'La vencida no se conservó.');
+
+        $borrados = $this->llamadas_a_google('DELETE');
+        $this->assertCount(1, $borrados);
+        $this->assertSame($this->url_eventos(self::CALENDARIO) . '/evt-1', $borrados[0]->url());
+
+        $guardada = $this->oportunidad($op['id']);
+        $this->assertNull($guardada->next_action_calendar_event_id);
+        $this->assertNull($guardada->next_action_calendar_admin_id);
+    }
+
+    /* ------------------------------------------------------------------------------------------
      | Ayudantes
      |----------------------------------------------------------------------------------------- */
 
@@ -838,6 +1044,10 @@ class CalendarioDeProximaAccionTest extends BaseDePipelines
         $metodo = $request->method();
 
         if (strpos($url, 'oauth2.googleapis.com/token') !== false) {
+            if ($this->token_con_error) {
+                return Http::response(['error' => 'backend_error'], 500);
+            }
+
             if ($this->token_revocado) {
                 return Http::response(['error' => 'invalid_grant', 'error_description' => 'Token has been expired or revoked.'], 400);
             }
