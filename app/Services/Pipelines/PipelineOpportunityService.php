@@ -12,13 +12,14 @@ use App\Models\PipelineOpportunity;
 use App\Models\PipelineStage;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Las escrituras sobre oportunidades del CRM (misión pipelines-crm, 27/9/2026): alta masiva,
  * mover de etapa, notas, próxima acción, responsable y borrar. Toda regla de negocio del módulo
  * vive acá (o en `PipelineConfigService` para el ABM), no en los controladores.
  *
- * Tres invariantes que sostiene esta clase y que no hay que "simplificar":
+ * Cuatro invariantes que sostiene esta clase y que no hay que "simplificar":
  *
  * 1. 🔴 UNA SOLA OPORTUNIDAD ABIERTA POR SUJETO Y PIPELINE. MySQL no tiene índices únicos parciales
  *    y "abierta" depende del tipo de la etapa, así que no hay índice que lo garantice. Lo garantiza
@@ -34,7 +35,15 @@ use Illuminate\Support\Facades\DB;
  *    guarda la foto de lo cargado. La respuesta es la oportunidad RECARGADA de la base, no la
  *    instancia en memoria (clase "relación de Eloquent que queda vieja en memoria").
  *
- * 🔴 Este módulo NO manda ningún mensaje: ni WhatsApp, ni mail, ni nada. Solo registra.
+ * 4. 🔴 GOOGLE CALENDAR SE SINCRONIZA DESPUÉS DEL COMMIT, NUNCA ADENTRO DE LA TRANSACCIÓN (misión
+ *    pipelines-calendario-proxima-accion, 5/10/2026). La próxima acción de una oportunidad tiene un
+ *    evento en el calendario del admin que la fijó, si lo tiene vinculado (`PipelineCalendarSync`).
+ *    Las transacciones de acá tienen el lock de la fila del pipeline: una llamada a Google con el
+ *    lock tomado frenaría a todos los demás admins. Y el sync es best-effort y nunca propaga: un
+ *    Google caído no puede romper el guardado del admin.
+ *
+ * 🔴 Este módulo NO manda ningún mensaje: ni WhatsApp, ni mail, ni nada. Solo registra (el evento
+ * del calendario es un recordatorio en el calendario del propio admin, sin invitados).
  */
 class PipelineOpportunityService
 {
@@ -60,16 +69,34 @@ class PipelineOpportunityService
     const ERROR_FORMATO_PROXIMA = 'La fecha de la próxima acción tiene que tener formato AAAA-MM-DD o AAAA-MM-DD HH:MM.';
 
     /**
+     * Tope de oportunidades de un alta masiva a las que se les crea el evento de Google Calendar.
+     *
+     * 🔴 La cola es `sync` en producción: cada evento es una llamada HTTP a Google dentro del request
+     * del admin (más el refresco del token, que se reutiliza). Un alta de 500 sujetos con una
+     * etapa con agenda dejaría el request colgado minutos. Pasado el tope no se hace nada más: se
+     * loguea cuántas quedaron sin evento. No es un error: el evento es un recordatorio, y la
+     * próxima acción de esas oportunidades sigue guardada en el CRM.
+     */
+    const MAX_EVENTOS_EN_ALTA_MASIVA = 25;
+
+    /**
      * @var PipelineFieldsService
      */
     private $campos;
 
     /**
-     * @param PipelineFieldsService $campos
+     * @var PipelineCalendarSync
      */
-    public function __construct(PipelineFieldsService $campos)
+    private $calendario;
+
+    /**
+     * @param PipelineFieldsService $campos
+     * @param PipelineCalendarSync  $calendario Sincroniza la próxima acción con Google Calendar (best-effort, nunca propaga).
+     */
+    public function __construct(PipelineFieldsService $campos, PipelineCalendarSync $calendario)
     {
-        $this->campos = $campos;
+        $this->campos     = $campos;
+        $this->calendario = $calendario;
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -109,7 +136,7 @@ class PipelineOpportunityService
     {
         $nota = self::texto_o_null($nota);
 
-        return DB::transaction(function () use ($pipeline, $sujetos, $etapa_id, $owner_admin_id, $nota, $admin_id, $valores) {
+        $resultado = DB::transaction(function () use ($pipeline, $sujetos, $etapa_id, $owner_admin_id, $nota, $admin_id, $valores) {
             /* 🔴 El lock que serializa "¿ya tiene una abierta?" (ver el docblock de la clase). */
             Pipeline::query()->whereKey($pipeline->id)->lockForUpdate()->first();
 
@@ -200,6 +227,13 @@ class PipelineOpportunityService
 
             return ['creadas' => $creadas, 'salteados' => $salteados];
         });
+
+        /* 🔴 Google Calendar va DESPUÉS del commit, nunca adentro de la transacción: tiene tomado el
+           lock de la fila del pipeline y una llamada a Google con el lock tomado frena a todos los
+           demás admins. Si algo falla ahí, el alta ya quedó hecha (el sync nunca propaga). */
+        $this->sincronizar_calendario_del_alta($resultado['creadas'], $admin_id);
+
+        return $resultado;
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -245,7 +279,9 @@ class PipelineOpportunityService
      */
     public function mover(PipelineOpportunity $oportunidad, array $datos, $admin_id)
     {
-        return DB::transaction(function () use ($oportunidad, $datos, $admin_id) {
+        $antes = ['fecha' => null, 'nota' => null];
+
+        $resultado = DB::transaction(function () use ($oportunidad, $datos, $admin_id, &$antes) {
             /* Mismo lock que el alta masiva: la reapertura también mira "¿hay otra abierta?". */
             Pipeline::query()->whereKey($oportunidad->pipeline_id)->lockForUpdate()->first();
 
@@ -333,6 +369,10 @@ class PipelineOpportunityService
             $fecha_antes = PipelinePresenter::fecha($op->next_action_at);
             $nota_antes  = $op->next_action_note;
 
+            /* Cómo estaba la próxima acción, para decidir DESPUÉS del commit si el calendario tiene
+               algo que hacer (ver `sincronizar_calendario()`). */
+            $antes = ['fecha' => $fecha_antes, 'nota' => $nota_antes];
+
             if ($destino->is_closed()) {
                 $op->closed_at   = $ahora;
                 $op->lost_reason = $destino->type === PipelineStage::TYPE_LOST ? $motivo : null;
@@ -397,6 +437,12 @@ class PipelineOpportunityService
 
             return [$op->fresh(), $actividad->fresh()];
         });
+
+        /* 🔴 Después del commit (el 422 de arriba sale de la transacción y no llega hasta acá). La
+           respuesta es la misma que antes: el sync no la toca y nunca propaga. */
+        $this->sincronizar_calendario($resultado[0], $admin_id, $antes);
+
+        return $resultado;
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -508,11 +554,17 @@ class PipelineOpportunityService
 
         $nota = $trae_nota ? self::texto_o_null($datos['next_action_note']) : null;
 
-        return DB::transaction(function () use ($oportunidad, $datos, $admin_id, $trae_fecha, $trae_nota, $fecha, $nota) {
+        $antes = ['fecha' => null, 'nota' => null];
+
+        $resultado = DB::transaction(function () use ($oportunidad, $datos, $admin_id, $trae_fecha, $trae_nota, $fecha, $nota, &$antes) {
             $op = PipelineOpportunity::query()->whereKey($oportunidad->id)->lockForUpdate()->first();
             if ($op === null) {
                 throw PipelineRuleException::no_existe('La oportunidad');
             }
+
+            /* Cómo estaba la próxima acción ANTES de tocar nada, para decidir DESPUÉS del commit si
+               el calendario tiene algo que hacer (ver `sincronizar_calendario()`). */
+            $antes = ['fecha' => PipelinePresenter::fecha($op->next_action_at), 'nota' => $op->next_action_note];
 
             $etapa   = PipelineStage::query()->whereKey($op->stage_id)->first();
             $cerrada = $etapa !== null && $etapa->is_closed();
@@ -592,6 +644,11 @@ class PipelineOpportunityService
 
             return [$op->fresh(), $nuevas];
         });
+
+        /* 🔴 Después del commit (los 422 de arriba salen de la transacción y no llegan hasta acá). */
+        $this->sincronizar_calendario($resultado[0], $admin_id, $antes);
+
+        return $resultado;
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -607,10 +664,20 @@ class PipelineOpportunityService
      */
     public function borrar(PipelineOpportunity $oportunidad)
     {
+        /* El evento hay que anotarlo ANTES de borrar la fila: después las columnas ya no existen. */
+        $evento_admin = $oportunidad->next_action_calendar_admin_id;
+        $evento_id    = $oportunidad->next_action_calendar_event_id;
+        $fecha        = PipelinePresenter::fecha($oportunidad->next_action_at);
+
         DB::transaction(function () use ($oportunidad) {
             PipelineActivity::query()->where('opportunity_id', $oportunidad->id)->delete();
             $oportunidad->delete();
         });
+
+        /* Después del commit, como en el resto (nunca Google adentro de la transacción). */
+        if ($evento_admin !== null && $evento_id !== null) {
+            $this->calendario->borrar_evento((int) $evento_admin, (string) $evento_id, $fecha);
+        }
     }
 
     /**
@@ -788,6 +855,77 @@ class PipelineOpportunityService
         $op->next_action_at     = null;
         $op->next_action_note   = null;
         $op->next_action_source = null;
+    }
+
+    /**
+     * Le avisa al calendario que la próxima acción puede haber cambiado (`mover` y `actualizar`),
+     * y solo si de verdad cambió.
+     *
+     * 🔴 Se llama SOLO si la fecha o la nota de la próxima acción cambiaron respecto de `$antes`, o si
+     * quedó un evento colgado de una oportunidad sin próxima acción (un borrado anterior que Google
+     * rechazó: se reintenta). Sin esto, mover una oportunidad que conserva su próxima acción manual,
+     * o cambiarle solo el responsable, dispararía una llamada a Google por nada. La contracara
+     * conocida: si la nota está vacía (el título del evento es el nombre de la etapa) y la
+     * oportunidad se mueve conservando la acción, el título y la etapa de la descripción del evento
+     * quedan con los de cuando se fijó; se actualizan la próxima vez que cambie la acción.
+     *
+     * @param PipelineOpportunity               $op       Recargada, ya con el resultado final.
+     * @param int|null                          $admin_id El admin que hace el cambio.
+     * @param array{fecha: string|null, nota: string|null} $antes Fecha (`Y-m-d H:i:s`) y nota de antes del cambio.
+     *
+     * @return void
+     */
+    private function sincronizar_calendario(PipelineOpportunity $op, $admin_id, array $antes)
+    {
+        $fecha_ahora = PipelinePresenter::fecha($op->next_action_at);
+
+        $cambio   = $fecha_ahora !== $antes['fecha'] || $op->next_action_note !== $antes['nota'];
+        $colgado  = $fecha_ahora === null && $op->next_action_calendar_event_id !== null;
+
+        if (! $cambio && ! $colgado) {
+            return;
+        }
+
+        $this->calendario->sincronizar($op, $admin_id, $antes['fecha']);
+    }
+
+    /**
+     * Crea el evento de las oportunidades que un alta masiva acaba de crear CON próxima acción (las
+     * de una etapa inicial con campo agenda), hasta `MAX_EVENTOS_EN_ALTA_MASIVA`.
+     *
+     * @param array<int, int> $ids      Ids de las oportunidades creadas, en orden de creación.
+     * @param int|null        $admin_id Quién hace el alta.
+     *
+     * @return void
+     */
+    private function sincronizar_calendario_del_alta(array $ids, $admin_id)
+    {
+        if ($ids === []) {
+            return;
+        }
+
+        $con_proxima = PipelineOpportunity::query()
+            ->whereIn('id', $ids)
+            ->whereNotNull('next_action_at')
+            ->orderBy('id')
+            ->get();
+
+        if ($con_proxima->isEmpty()) {
+            return;
+        }
+
+        foreach ($con_proxima->take(self::MAX_EVENTOS_EN_ALTA_MASIVA) as $oportunidad) {
+            $this->calendario->sincronizar($oportunidad, $admin_id);
+        }
+
+        $sin_evento = $con_proxima->count() - self::MAX_EVENTOS_EN_ALTA_MASIVA;
+        if ($sin_evento > 0) {
+            Log::channel('disponibilidad')->info(
+                PipelineCalendarSync::LOG . ' Alta masiva: se crearon ' . self::MAX_EVENTOS_EN_ALTA_MASIVA
+                . ' eventos (el tope) y ' . $sin_evento . ' oportunidades con próxima acción quedaron sin evento en el calendario.'
+                . ' admin_id=' . ($admin_id === null ? 'null' : $admin_id)
+            );
+        }
     }
 
     /**
