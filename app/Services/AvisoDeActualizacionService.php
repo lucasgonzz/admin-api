@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Mail\ClientVersionUpgradeMail;
+use App\Mail\Helpers\RechazosDeCorreoHelper;
 use App\Models\Client;
 use App\Models\ClientUpgradeNotice;
 use App\Models\ClientVersionUpgrade;
@@ -296,6 +297,30 @@ class AvisoDeActualizacionService
                 ]);
 
                 return $this->cerrar_con_error($aviso, 'No se pudo mandar el mail: ' . $exception->getMessage());
+            }
+
+            /* 4.bis. Que `send()` no tire NO quiere decir que el mail salió. Si el servidor rechaza la
+               casilla (550 en el RCPT TO: "User unknown", un dominio que no existe) SwiftMailer no tira
+               excepción: `send()` vuelve normal y las rechazadas quedan en `failures()` del mailer.
+               Sin mirarlas, el aviso quedaba `enviado` y el WhatsApp de abajo le decía al dueño "te
+               mandamos un mail" sobre un mail que no existe: justo lo que el paso 5 promete no hacer.
+               Es un error como cualquier otro: `mail_enviado_at` queda vacío, así que el reintento
+               manda el mail cuando se corrija la casilla. La casilla rechazada queda en la columna
+               `email` de la fila (ya se escribió arriba, en `$aviso->email`). */
+            $rechazadas = RechazosDeCorreoHelper::del_ultimo_envio(self::MAILER);
+
+            if (! empty($rechazadas)) {
+                Log::channel('daily')->error('AvisoDeActualizacion: el servidor de correo rechazó la casilla.', [
+                    'client_id'  => $client->id,
+                    'email'      => $casilla,
+                    'rechazadas' => $rechazadas,
+                ]);
+
+                return $this->cerrar_con_error(
+                    $aviso,
+                    'No se pudo mandar el mail: el servidor de correo rechazó la casilla del dueño. '
+                    . 'Corregila en la ficha del cliente y reintentá el aviso.'
+                );
             }
 
             $aviso->estado          = ClientUpgradeNotice::ESTADO_ENVIADO;
