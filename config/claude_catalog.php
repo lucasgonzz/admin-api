@@ -1210,6 +1210,29 @@ return [
                 ['nombre' => 'include', 'obligatorio' => false, 'validacion' => 'csv o lista; cada valor en contacto, formulario o logs', 'que_es' => 'Igual que en GET claude/implementations/{id}.'],
             ],
         ],
+        'POST api/claude/implementations' => [
+            'para_que'     => '"Tal lead compró": da de alta una implementación. Con lead_id promueve el lead a cliente (el mismo servicio del botón "Promover a cliente": crea el Client con su user_id, las tres tareas de lead_a_cliente y las DOS ClientApi estándar <sub> y <sub>2, ambas en el hosting compartido) y arranca la implementación (las ocho etapas, la etapa 1 en curso y el token del formulario); si el lead ya estaba promovido, usa ese cliente. Con client_id arranca la implementación de un cliente que ya existe y no tiene. 🔴 La implementación nace SIEMPRE en modo manual y sin plantilla de bienvenida: los mensajes al cliente los manda la skill por WhatsApp Web, con el ok de Lucas. El subdominio (de él salen las cuatro URLs del cliente) lo definen Lucas y la skill juntos: el dry_run sugiere uno y dice si el pedido sirve. Solo escribe filas del admin: no toca ningún servidor.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'dry_run por defecto true: sin dry_run=false explícito no crea nada y devuelve lo que haría —el cliente, el subdominio pedido y el sugerido, las cuatro URLs, la versión que se instalaría y los avisos— y en `bloqueos` todo lo que haría fallar al alta real.',
+                'Lista blanca de parámetros: cualquier otra clave es 422 y no se crea nada.',
+                'Exactamente uno de lead_id o client_id: los dos juntos pueden apuntar a negocios distintos (422).',
+                'confirm_nombre exacto (razón social del lead o del cliente, o el nombre del contacto si está vacía; trim + minúsculas), obligatorio con dry_run=false. No revela el correcto cuando falla.',
+                '409 si el cliente ya tiene una implementación, con su id y su etapa: no se crea otra. La tabla no tiene índice único por cliente, así que el alta real bloquea la fila del cliente y vuelve a mirar adentro de la transacción: dos POST simultáneos no crean dos.',
+                'El subdominio, si hay que promover, es obligatorio para confirmar y tiene que: ser [a-z0-9-] de 1 a 20 caracteres y empezar por letra o número; no terminar en guion; no ser un nombre reservado (admin, api, www, mail, demo, app...); dejar la base u767360347_<sub> dentro de los 32 caracteres de MySQL; y no estar usado por ninguna ClientApi del admin ni como <sub> ni como <sub>2. 🔴 Se chequea solo contra el admin, no contra Hostinger: lo vuelve a verificar la instalación.',
+                'Sin ningún admin que pueda figurar como creador de las tareas de la promoción (CLAUDE_TASK_INGEST_CREATOR_ADMIN_ID, el admin por defecto de tareas o el primero), 422.',
+                'La promoción y la implementación van en UNA transacción: si algo falla no queda un cliente sin tareas ni ClientApis (el panel sí puede dejarlo así). Y mientras promueve toma un lock global, porque el bloque de user_id del cliente nuevo se calcula sin lock.',
+                'Si la URL base del formulario (implementation_form_url) está vacía, el alta se hace pero form_link sale null y va un aviso explícito.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'lead_id', 'obligatorio' => false, 'validacion' => 'required_without:client_id|nullable|integer|min:1', 'que_es' => 'El lead que compró. Si ya tiene cliente promovido se usa ese y el subdominio se ignora.'],
+                ['nombre' => 'client_id', 'obligatorio' => false, 'validacion' => 'required_without:lead_id|nullable|integer|min:1', 'que_es' => 'Un cliente que ya existe y todavía no tiene implementación. Exactamente uno de lead_id o client_id.'],
+                ['nombre' => 'subdominio', 'obligatorio' => false, 'validacion' => 'nullable|string|regex:/^[a-z0-9][a-z0-9-]{0,19}$/', 'que_es' => 'El slug de las URLs: <sub>.comerciocity.com, <sub>2, api-<sub> y api-<sub>2. Solo cuando hay que promover; obligatorio para el alta real, y el dry_run sugiere uno si falta.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false da el alta (201). Sin él, simula y no escribe nada.'],
+                ['nombre' => 'confirm_nombre', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre del negocio del lead o del cliente (company_name, o el del contacto si está vacío). Obligatorio con dry_run=false.'],
+            ],
+        ],
     ],
 
     /*

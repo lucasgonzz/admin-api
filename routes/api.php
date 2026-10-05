@@ -475,6 +475,13 @@ Route::middleware('claude.task.key')
         Route::get('implementations', 'Api\ClaudeImplementationOpsController@index_json');
         Route::get('implementations/{id}', 'Api\ClaudeImplementationOpsController@show_json')
             ->whereNumber('id');
+
+        /* Alta: lead → cliente → implementación. Promueve el lead con PromoteLeadToClientService (el
+           mismo servicio del botón "Promover a cliente") y arranca la implementación con
+           ImplementationStartService (el mismo del botón "Iniciar implementación"). Solo escribe filas
+           del admin: no toca ningún servidor. Frenos en el controlador: dry_run por defecto,
+           confirm_nombre y un subdominio validado y libre. */
+        Route::post('implementations', 'Api\ClaudeImplementationOpsController@store_json');
     });
 
 /*
