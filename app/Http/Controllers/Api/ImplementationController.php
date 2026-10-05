@@ -3,7 +3,6 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\AdminSetting;
 use App\Models\Client;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
@@ -12,6 +11,7 @@ use App\Models\WhatsappConfig;
 use App\Services\ImplementationActionService;
 use App\Services\ImplementationBroadcastService;
 use App\Services\ImplementationConversationService;
+use App\Services\ImplementationStartService;
 use App\Services\KapsoHttpClient;
 use App\Services\WhatsappInboundMediaService;
 use App\Services\WhatsappSendService;
@@ -483,6 +483,11 @@ class ImplementationController extends Controller
     /**
      * Inicia la implementación de un cliente: crea el registro y las 8 etapas.
      *
+     * 🔴 La creación vive en `ImplementationStartService` desde la misión `implementar-cliente`
+     * (5/10/2026), porque ahora la comparten este botón y `POST claude/implementations`. Lo que
+     * queda acá es lo que es del panel y no cambió: la guarda de "ya tiene implementación" con su
+     * 422 y su mensaje de siempre, y la forma de la respuesta.
+     *
      * @param Client $client Cliente destino (route model binding).
      *
      * @return JsonResponse
@@ -496,68 +501,8 @@ class ImplementationController extends Controller
             ], 422);
         }
 
-        /**
-         * Admin asignado por defecto leído del setting global.
-         * Se convierte a entero; si es 0 o no existe se guarda como null.
-         */
-        $assigned_admin_id = (int) AdminSetting::get('implementation_assigned_admin_id', 0) ?: null;
-
-        // Modo de automatización por defecto para implementaciones nuevas ('manual' | 'auto').
-        // Se lee de un setting global para poder reactivar la automatización sin deploy (prompt 342).
-        $automation_mode = (string) AdminSetting::get('implementation_automation_mode', 'manual');
-
-        if ($automation_mode !== 'auto') {
-            $automation_mode = 'manual';
-        }
-
-        /** Implementación creada con etapa 1 en curso. */
-        $implementation = DB::transaction(function () use ($client, $assigned_admin_id, $automation_mode) {
-            $implementation = Implementation::create([
-                'client_id'          => $client->id,
-                'status'             => 'in_progress',
-                'current_stage'      => 1,
-                'started_at'         => now(),
-                'assigned_admin_id'  => $assigned_admin_id,
-                'automation_mode'    => $automation_mode,
-            ]);
-
-            // Crear las ocho etapas en estado pendiente.
-            for ($stage_number = 1; $stage_number <= 8; $stage_number++) {
-                ImplementationStage::create([
-                    'implementation_id' => $implementation->id,
-                    'stage_number'        => $stage_number,
-                    'status'              => 'pending',
-                ]);
-            }
-
-            // Activar la etapa 1.
-            ImplementationStage::where('implementation_id', $implementation->id)
-                ->where('stage_number', 1)
-                ->update([
-                    'status'     => 'in_progress',
-                    'started_at' => now(),
-                ]);
-
-            return $implementation;
-        });
-
-        // Generar token único (UUID v4) para acceso público al formulario de configuración.
-        // Se genera fuera de la transacción para evitar colisiones de unique constraint.
-        $implementation->form_token = \Illuminate\Support\Str::uuid()->toString();
-        $implementation->save();
-
-        // Plantilla de bienvenida por WhatsApp: best-effort, no bloquea la respuesta JSON.
-        // En modo manual la presentación la envía Martín desde el panel (prompt 343).
-        if ($implementation->is_automated()) {
-            try {
-                (new ImplementationConversationService())->send_welcome_template($implementation);
-            } catch (\Throwable $exception) {
-                Log::error('ImplementationController@start: fallo envío plantilla bienvenida.', [
-                    'implementation_id' => $implementation->id,
-                    'error'             => $exception->getMessage(),
-                ]);
-            }
-        }
+        /** Implementación creada con etapa 1 en curso, su token y (solo en modo auto) la bienvenida. */
+        $implementation = (new ImplementationStartService())->start($client);
 
         return response()->json([
             'model' => $implementation->load(['stages', 'client']),
