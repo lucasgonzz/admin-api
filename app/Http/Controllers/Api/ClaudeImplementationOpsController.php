@@ -159,6 +159,13 @@ class ClaudeImplementationOpsController extends Controller
     const LOCK_DE_ALTAS_ESPERA = 10;
     const LOCK_DE_ALTAS_TTL    = 120;
 
+    /**
+     * Lista blanca de `POST claude/implementations/{id}/advance`. Cualquier otra clave es 422: un
+     * `forzar`, un `a_etapa` o un `handle_stage_advance` suelen ser alguien esperando que este endpoint
+     * salte etapas o dispare lo que el panel dispara, y no lo hace.
+     */
+    const PARAMETROS_DEL_AVANCE = ['etapa_actual', 'saltar', 'nota', 'dry_run'];
+
     /** Lista blanca de la lectura del estado por id. */
     const PARAMETROS_DE_LA_LECTURA = ['include'];
 
@@ -1497,6 +1504,279 @@ class ClaudeImplementationOpsController extends Controller
         $dry_run = $this->booleano_o_null($request, 'dry_run');
 
         return $dry_run === null ? true : $dry_run;
+    }
+
+    /* ==============================================================================================
+     | 3) POST claude/implementations/{id}/advance — AVANZAR (o cerrar) la etapa actual
+     |============================================================================================= */
+
+    /**
+     * Avanza la implementación a la etapa siguiente: cierra la actual (`completed`, o `skipped` si no
+     * aplica) y deja en curso la que sigue. Desde la etapa 8 cierra la implementación entera.
+     *
+     * Hace lo que hace "Avanzar etapa" del panel (`ImplementationController::advance_stage`), con DOS
+     * diferencias deliberadas:
+     *
+     * 🔴 NO dispara `handle_stage_advance`. En el panel, entrar a la etapa 2 crea una `ClientInstallation`
+     * en `pendiente` (y en modo `auto` además manda mensajes y encola jobs). En este camino la
+     * instalación la crea `install`, con la versión y el aprovisionamiento correctos; si avanzar también
+     * la creara, `install` se encontraría con una fila que armó otro con la versión que quedó fijada al
+     * promover, que puede ser vieja.
+     *
+     * 🔴 Desde la etapa 8 CIERRA y deja `current_stage` en 8. El panel la deja en 9, y además oculta el
+     * botón en la 8 ("la última etapa cierra automáticamente"), con lo que una implementación no se
+     * podía cerrar desde la interfaz. Importa: mientras esté `in_progress`, TODO lo que el cliente le
+     * escribe al número de WhatsApp del sistema cae al hilo de la implementación y no llega a soporte ni
+     * al asistente, así que una implementación que se queda abierta le deja mudo el WhatsApp.
+     *
+     * Frenos:
+     *   1. Lista blanca de parámetros y tipos.
+     *   2. `etapa_actual` tiene que ser la real (409 con la verdadera): es lo que impide avanzar dos veces
+     *      por un reintento o por dos sesiones que miraron el mismo estado.
+     *   3. Una implementación ya `completed` no avanza (409).
+     *   4. `dry_run` por defecto TRUE.
+     * Con `dry_run=false` el cierre y la apertura van en una transacción con la fila de la implementación
+     * bloqueada, y se vuelve a mirar la etapa adentro: dos POST simultáneos no avanzan dos etapas.
+     *
+     * ⚠️ NO valida que la etapa esté "lista" (el panel tampoco): la skill decide cuándo. Lo que sí hace es
+     * AVISAR, sin frenar, lo que detecta que falta (formulario sin enviar, sistema sin instalar o sin
+     * configurar).
+     *
+     * @param Request    $request Body: etapa_actual, saltar?, nota?, dry_run?.
+     * @param int|string $id      Id de la implementación (segmento de la URL).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function advance_json(Request $request, $id)
+    {
+        $rechazo = $this->rechazar_parametros_de_mas($request, self::PARAMETROS_DEL_AVANCE, 'POST claude/implementations/{id}/advance');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'etapa_actual' => 'required|integer|between:1,8',
+            'saltar'       => 'nullable|boolean',
+            'nota'         => 'nullable|string|max:500',
+            'dry_run'      => 'nullable|boolean',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $implementation = Implementation::find((int) $id);
+        if ($implementation === null) {
+            return $this->error_404('no existe la implementación ' . (int) $id);
+        }
+
+        $etapa_pedida = (int) $request->input('etapa_actual');
+        $saltar       = $this->booleano_o_null($request, 'saltar') === true;
+        $nota         = $this->texto_o_null($request->input('nota'));
+        $dry_run      = $this->resolver_dry_run($request);
+
+        /* Frenos 2 y 3, con lo que se ve ahora. Se repiten adentro del lock para el caso real. */
+        $conflicto = $this->conflicto_de_avance($implementation, $etapa_pedida);
+        if ($conflicto !== null) {
+            return $conflicto;
+        }
+
+        $nombres = $this->nombres_de_etapas();
+        $cierra  = $etapa_pedida === 8;
+        $avisos  = $this->avisos_del_avance($implementation, $etapa_pedida, $saltar);
+
+        if ($dry_run) {
+            return response()->json([
+                'dry_run'                  => true,
+                'implementation_id'        => (int) $implementation->id,
+                'de'                       => ['numero' => $etapa_pedida, 'nombre' => $nombres[$etapa_pedida]],
+                'marca_la_etapa_como'      => $saltar ? 'skipped' : 'completed',
+                'a'                        => $cierra ? null : ['numero' => $etapa_pedida + 1, 'nombre' => $nombres[$etapa_pedida + 1]],
+                'cierra_la_implementacion' => $cierra,
+                'guarda_nota'              => $nota !== null,
+                'avisos'                   => $avisos,
+                'nota'                     => 'Simulacro: no se avanzó nada. Repetí con dry_run=false para avanzar. Avanzar por acá NO crea la '
+                    . 'instalación ni manda ningún mensaje: la instalación es POST claude/implementations/{id}/install.',
+            ], 200);
+        }
+
+        $resultado = DB::transaction(function () use ($implementation, $etapa_pedida, $saltar, $nota) {
+            $bloqueada = Implementation::query()->whereKey($implementation->id)->lockForUpdate()->first();
+
+            $conflicto = $this->conflicto_de_avance($bloqueada, $etapa_pedida);
+            if ($conflicto !== null) {
+                return $conflicto;
+            }
+
+            return $this->aplicar_el_avance($bloqueada, $etapa_pedida, $saltar, $nota);
+        });
+
+        if ($resultado instanceof \Illuminate\Http\JsonResponse) {
+            return $resultado;
+        }
+
+        $cerrada   = $resultado['cerrada'];
+        $siguiente = $resultado['siguiente'];
+
+        return response()->json([
+            'dry_run'                  => false,
+            'implementation'           => [
+                'id'            => (int) $resultado['implementation']->id,
+                'current_stage' => (int) $resultado['implementation']->current_stage,
+                'status'        => (string) $resultado['implementation']->status,
+                'completed_at'  => $this->instante($resultado['implementation']->completed_at),
+            ],
+            'etapa_cerrada'            => ['numero' => $etapa_pedida, 'nombre' => $nombres[$etapa_pedida], 'estado' => $saltar ? 'skipped' : 'completed'],
+            'etapa_actual'             => $siguiente === null ? null : ['numero' => (int) $siguiente->stage_number, 'nombre' => $nombres[(int) $siguiente->stage_number], 'estado' => (string) $siguiente->status],
+            'cierra_la_implementacion' => $cerrada,
+            'nota_guardada'            => $nota !== null,
+            'avisos'                   => $avisos,
+        ], 200);
+    }
+
+    /**
+     * ¿Se puede avanzar con esta etapa pedida? Si no, el 409 que corresponde.
+     *
+     * Dos casos, los dos 409 y no 422: no es que el pedido esté mal armado, es que el estado de la
+     * implementación ya no es el que el que llama miró.
+     *   - Ya está completada: no hay etapa a la que avanzar.
+     *   - `etapa_actual` no es la real: se devuelve la real para que la skill relea y decida, en vez de
+     *     avanzar dos veces por un reintento.
+     *
+     * @param Implementation $implementation La implementación (bloqueada, si se llama adentro del lock).
+     * @param int            $etapa_pedida   La etapa que dice el que llama.
+     *
+     * @return \Illuminate\Http\JsonResponse|null Null si se puede avanzar.
+     */
+    protected function conflicto_de_avance(Implementation $implementation, $etapa_pedida)
+    {
+        if ($implementation->status === 'completed') {
+            return response()->json([
+                'error'             => 'La implementación ' . (int) $implementation->id . ' ya está completada: no hay etapa a la que avanzar. No se hizo nada.',
+                'implementation_id' => (int) $implementation->id,
+                'status'            => 'completed',
+                'current_stage'     => (int) $implementation->current_stage,
+            ], 409);
+        }
+
+        if ((int) $implementation->current_stage !== (int) $etapa_pedida) {
+            return response()->json([
+                'error'             => 'La implementación ' . (int) $implementation->id . ' no está en la etapa ' . (int) $etapa_pedida . ': está en la '
+                    . (int) $implementation->current_stage . '. No se hizo nada (es lo que evita avanzar dos veces). Releé el estado y decidí de nuevo.',
+                'implementation_id' => (int) $implementation->id,
+                'status'            => (string) $implementation->status,
+                'current_stage'     => (int) $implementation->current_stage,
+                'etapa_pedida'      => (int) $etapa_pedida,
+            ], 409);
+        }
+
+        return null;
+    }
+
+    /**
+     * Lo que se avisa al avanzar, sin frenar: lo que se detecta que probablemente falta.
+     *
+     * 🔴 Son AVISOS y no frenos a propósito: el panel no valida nada al avanzar y hay casos legítimos de
+     * avanzar sin eso (un cliente que cargó el formulario a mano, una instalación hecha por afuera). Lo
+     * que no se puede es avanzar sin enterarse.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param int            $etapa          La etapa que se cierra.
+     * @param bool           $saltar         true = se marca skipped en vez de completed.
+     *
+     * @return array<int, string>
+     */
+    protected function avisos_del_avance(Implementation $implementation, $etapa, $saltar)
+    {
+        $avisos = [];
+
+        if ($etapa === 1 && $implementation->form_submitted_at === null && ! $saltar) {
+            $avisos[] = 'El cliente todavía no envió el formulario: se cierra la etapa 1 sin sus respuestas.';
+        }
+
+        if ($etapa === 2 && ! $saltar) {
+            $instalada = ClientInstallation::where('client_id', $implementation->client_id)
+                ->where('kind', ClientInstallation::KIND_COMPLETA)
+                ->where('status', 'completada')
+                ->exists();
+
+            if (! $instalada) {
+                $avisos[] = 'El sistema del cliente todavía no figura instalado (ninguna instalación completa en estado completada): se cierra la etapa 2 igual.';
+            }
+
+            if ($implementation->user_setup_executed_at === null) {
+                $avisos[] = 'El user setup todavía no se aplicó (user_setup_executed_at vacío): el sistema del cliente no tiene la configuración del formulario.';
+            }
+        }
+
+        if ($saltar) {
+            $avisos[] = 'La etapa ' . (int) $etapa . ' queda marcada como skipped (no aplica) y no como completed.';
+        }
+
+        if ($etapa === 8) {
+            $avisos[] = 'Es la etapa 8: avanzar CIERRA la implementación (status completed, current_stage queda en 8). Desde ese momento lo que el '
+                . 'cliente le escriba al número de WhatsApp del sistema vuelve a soporte y al asistente, en vez de caer al hilo de la implementación.';
+        }
+
+        return $avisos;
+    }
+
+    /**
+     * Aplica el avance sobre una implementación YA bloqueada y verificada: cierra la etapa, abre la
+     * siguiente (o cierra la implementación) y guarda la nota.
+     *
+     * 🔴 NO llama a `handle_stage_advance` y no hay que agregárselo: ver el docblock de advance_json().
+     *
+     * @param Implementation $implementation La implementación, bloqueada.
+     * @param int            $etapa          La etapa que se cierra (1 a 8), ya verificada contra la real.
+     * @param bool           $saltar         true = la etapa queda skipped.
+     * @param string|null    $nota           Nota a guardar en `data.notas` de la etapa que se cierra.
+     *
+     * @return array<string, mixed> `implementation`, `cerrada` (bool) y `siguiente` (la etapa que quedó en curso, o null).
+     */
+    protected function aplicar_el_avance(Implementation $implementation, $etapa, $saltar, $nota)
+    {
+        $actual = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', $etapa)
+            ->lockForUpdate()
+            ->first();
+
+        if ($actual !== null) {
+            $actual->status       = $saltar ? 'skipped' : 'completed';
+            $actual->completed_at = now();
+
+            if ($nota !== null) {
+                $datos           = is_array($actual->data) ? $actual->data : [];
+                $datos['notas']  = isset($datos['notas']) && is_array($datos['notas']) ? $datos['notas'] : [];
+                $datos['notas'][] = ['texto' => $nota, 'at' => now()->toISOString(), 'origen' => 'claude'];
+                $actual->data    = $datos;
+            }
+
+            $actual->save();
+        }
+
+        if ($etapa >= 8) {
+            $implementation->status       = 'completed';
+            $implementation->completed_at = now();
+            $implementation->save();
+
+            return ['implementation' => $implementation, 'cerrada' => true, 'siguiente' => null];
+        }
+
+        $implementation->current_stage = $etapa + 1;
+        $implementation->save();
+
+        $siguiente = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', $etapa + 1)
+            ->lockForUpdate()
+            ->first();
+
+        if ($siguiente !== null) {
+            $siguiente->status     = 'in_progress';
+            $siguiente->started_at = now();
+            $siguiente->save();
+        }
+
+        return ['implementation' => $implementation, 'cerrada' => false, 'siguiente' => $siguiente];
     }
 
     /* ==============================================================================================

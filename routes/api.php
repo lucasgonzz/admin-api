@@ -482,6 +482,13 @@ Route::middleware('claude.task.key')
            del admin: no toca ningún servidor. Frenos en el controlador: dry_run por defecto,
            confirm_nombre y un subdominio validado y libre. */
         Route::post('implementations', 'Api\ClaudeImplementationOpsController@store_json');
+
+        /* Avanzar (o cerrar) la etapa actual. 🔴 Hace lo que "Avanzar etapa" del panel SIN `handle_stage_advance`
+           (entrar a la etapa 2 no crea la instalación: la crea `install`) y, desde la etapa 8, CIERRA la
+           implementación dejando current_stage en 8: el panel no puede cerrarla, y mientras está abierta el
+           WhatsApp del cliente cae al hilo de la implementación. `etapa_actual` tiene que ser la real (409). */
+        Route::post('implementations/{id}/advance', 'Api\ClaudeImplementationOpsController@advance_json')
+            ->whereNumber('id');
     });
 
 /*

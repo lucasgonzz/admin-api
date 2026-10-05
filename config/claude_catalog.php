@@ -1233,6 +1233,26 @@ return [
                 ['nombre' => 'confirm_nombre', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre del negocio del lead o del cliente (company_name, o el del contacto si está vacío). Obligatorio con dry_run=false.'],
             ],
         ],
+        'POST api/claude/implementations/{id}/advance' => [
+            'para_que'     => 'Avanza la implementación a la etapa siguiente: cierra la actual (completed, o skipped si no aplica —p. ej. ARCA— con saltar=true), deja en curso la que sigue y guarda una nota opcional en esa etapa. Hace lo que "Avanzar etapa" del panel, con DOS diferencias deliberadas: 🔴 NO dispara handle_stage_advance (entrar a la etapa 2 no crea la instalación: la crea POST claude/implementations/{id}/install, con la versión y el aprovisionamiento correctos) y 🔴 desde la etapa 8 CIERRA la implementación (status=completed, completed_at) dejando current_stage en 8 —el panel no la puede cerrar y la deja en 9—. Cerrarla importa: mientras esté abierta, todo lo que el cliente le escribe al número de WhatsApp del sistema cae al hilo de la implementación y no llega a soporte ni al asistente. No manda ningún mensaje ni toca ningún servidor.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'dry_run por defecto true: sin dry_run=false explícito no avanza nada y devuelve de qué etapa a cuál pasaría, cómo la marcaría y si cerraría la implementación.',
+                'Lista blanca de parámetros: cualquier otra clave es 422 y no se avanza nada.',
+                '🔴 etapa_actual (obligatoria) tiene que ser la etapa real: si no, 409 con la verdadera y no se hace nada. Es lo que evita avanzar dos veces por un reintento o por dos sesiones que miraron el mismo estado.',
+                'Una implementación ya completed no avanza: 409.',
+                'El cierre de la etapa y la apertura de la siguiente van en una transacción con la fila de la implementación bloqueada, y se vuelve a verificar la etapa adentro: dos POST simultáneos no avanzan dos etapas.',
+                'No valida que la etapa esté lista (el panel tampoco), pero AVISA en `avisos`, sin frenar, lo que detecta que falta: formulario sin enviar al cerrar la 1; sistema sin instalar o user setup sin aplicar al cerrar la 2; y que cerrar la 8 cierra la implementación.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+                ['nombre' => 'etapa_actual', 'obligatorio' => true, 'validacion' => 'required|integer|between:1,8', 'que_es' => 'La etapa que se está cerrando. Tiene que coincidir con current_stage: si no, 409.'],
+                ['nombre' => 'saltar', 'obligatorio' => false, 'validacion' => 'nullable|boolean — default false', 'que_es' => 'true = la etapa queda skipped en vez de completed (no aplica). Se avanza igual.'],
+                ['nombre' => 'nota', 'obligatorio' => false, 'validacion' => 'nullable|string|max:500', 'que_es' => 'Se agrega a data.notas[] de la etapa que se cierra, con la fecha y origen "claude".'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false avanza (200). Sin él, simula y no escribe nada.'],
+            ],
+        ],
     ],
 
     /*
