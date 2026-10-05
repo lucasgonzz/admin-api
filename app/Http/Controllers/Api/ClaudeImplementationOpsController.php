@@ -259,12 +259,16 @@ class ClaudeImplementationOpsController extends Controller
      * que el job reemplaza por `ok` o `error` al terminar. Si el worker muere sin pasar ni por `handle()` ni por `failed()`
      * (un `kill -9`, un reinicio del servidor) el estado se queda en `en_curso` PARA SIEMPRE, y como
      * `user-setup` frena con 409 mientras haya uno en curso, la implementación quedaría trabada sin
-     * que ninguna llamada pueda destrabarla. 45 minutos son tres veces el techo del job (900 s) y
-     * cubren de sobra el peor setup medido (~565 s). Pasado ese tiempo el estado se REPORTA igual
-     * (con `colgado: true`) y el endpoint deja volver a intentar.
+     * que ninguna llamada pueda destrabarla. 45 minutos son casi el doble del techo del job (1500 s) y
+     * quedan por encima del `retry_after` de la cola (2400 s): para entonces el worker ya tuvo ocasión
+     * de recuperar el job y descartarlo. Pasado ese tiempo el estado se REPORTA igual (con
+     * `colgado: true`) y el endpoint deja volver a intentar.
      *
-     * ⚠️ Darlo por colgado NO es riesgo de pisar un setup vivo: del otro lado empresa-api toma un
-     * candado y contesta 409 si hay otro corriendo, y ese 409 vuelve como error, sin reintento.
+     * ⚠️ "Colgado" es "no hubo señal en 45 minutos", NO "el job no pudo seguir vivo": no se sabe qué pasó
+     * con el proceso, y afirmarlo sería mentir. Lo que hace seguro reintentar es otra cosa: cada intento
+     * lleva un token (su `iniciado_at`) y un job viejo que arranque tarde se descarta solo, sin llamar al
+     * cliente, porque el registro ya es de otro intento. Y del otro lado empresa-api toma un candado y
+     * contesta 409 si hay otro corriendo, y ese 409 vuelve como error, sin reintento.
      */
     const MINUTOS_PARA_DAR_POR_COLGADO = 45;
 
@@ -656,11 +660,24 @@ class ClaudeImplementationOpsController extends Controller
             'error'        => isset($registro['error']) ? (string) $registro['error'] : null,
         ];
 
+        /* En un error: ¿pudo haber corrido del otro lado? (null cuando no hay error, o en un registro que
+           no lo dice). Es lo que decide si corresponde conciliar o reintentar. */
+        if ($estado === 'error') {
+            $respuesta['puede_haber_corrido'] = isset($registro['puede_haber_corrido']) ? (bool) $registro['puede_haber_corrido'] : null;
+        }
+
+        /* La nota que dejó quien concilió ("conciliado: el dueño ya existía en el sistema del cliente"). */
+        if ($estado === 'ok' && isset($registro['nota']) && trim((string) $registro['nota']) !== '') {
+            $respuesta['nota'] = (string) $registro['nota'];
+        }
+
         if ($colgado) {
             $respuesta['colgado'] = true;
-            $respuesta['nota']    = 'Dice en_curso desde hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADO
-                . ' minutos: el job no pudo haber seguido vivo. POST claude/implementations/{id}/user-setup deja volver '
-                . 'a intentar (si el setup en realidad seguía corriendo, el cliente contesta 409 y vuelve como error).';
+            $respuesta['nota']    = 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos: el registro sigue en en_curso sin '
+                . 'resultado. POST claude/implementations/{id}/user-setup deja volver a intentar, y es seguro: cada intento lleva su token y '
+                . 'el job viejo, si llega a arrancar, se descarta solo sin llamar al cliente. Si sospechás que el setup sí llegó a correr del '
+                . 'otro lado (el cliente tiene un setup lento), mirá si el dueño existe en el sistema del cliente antes de reintentar: un '
+                . 'reintento le vuelve a vaciar la base. Si el cliente seguía corriendo uno, contesta 409 y vuelve como error, sin reintento.';
         }
 
         return $respuesta;
@@ -2757,7 +2774,7 @@ class ClaudeImplementationOpsController extends Controller
      *
      * Hace lo que el botón "Configuración del sistema (UserSetup)" del panel
      * (`ImplementationActionService::execute()`), con dos diferencias: corre en la cola `database` y no
-     * dentro del request, y la llamada HTTP va con 600 segundos de techo y no los 15 de
+     * dentro del request, y la llamada HTTP va con 1200 segundos de techo y no los 15 de
      * `services.client_api.timeout` (con 15 el panel corta la espera mientras el setup sigue corriendo
      * del otro lado). Lo hace `EjecutarUserSetupDeImplementacionJob`.
      *
@@ -2841,8 +2858,17 @@ class ClaudeImplementationOpsController extends Controller
                 return 'sin_etapa';
             }
 
+            $datos    = is_array($etapa->data) ? $etapa->data : [];
+            $anterior = isset($datos['user_setup']['iniciado_at']) ? (string) $datos['user_setup']['iniciado_at'] : null;
+
+            /* 🔴 El `iniciado_at` es el TOKEN del job (ver EjecutarUserSetupDeImplementacionJob): lo que lo
+               distingue del intento anterior. Con microsegundos no se repite, salvo con el reloj congelado
+               de un test; por eso, si coincide con el del intento anterior, se corre un microsegundo: dos
+               intentos con el mismo token no se podrían distinguir y el viejo pisaría al nuevo. */
             $iniciado_at = now()->toISOString();
-            $datos       = is_array($etapa->data) ? $etapa->data : [];
+            if ($iniciado_at === $anterior) {
+                $iniciado_at = now()->addMicroseconds(1)->toISOString();
+            }
 
             $datos['user_setup'] = ['estado' => 'en_curso', 'iniciado_at' => $iniciado_at, 'terminado_at' => null, 'error' => null];
             $etapa->data         = $datos;
@@ -2867,7 +2893,7 @@ class ClaudeImplementationOpsController extends Controller
            🔴 Y con red: si encolar falla, el registro ya dice `en_curso` y nadie lo va a terminar (esperaría
            45 minutos a darse por colgado). Se deja como `error`, que no bloquea reintentar. */
         try {
-            EjecutarUserSetupDeImplementacionJob::dispatch((int) $implementation->id)->onConnection(self::CONEXION_DE_COLA);
+            EjecutarUserSetupDeImplementacionJob::dispatch((int) $implementation->id, $resultado['iniciado_at'])->onConnection(self::CONEXION_DE_COLA);
         } catch (\Throwable $e) {
             $this->dejar_el_user_setup_en_error($implementation, 'No se pudo encolar el job: ' . $e->getMessage());
 
@@ -3019,7 +3045,7 @@ class ClaudeImplementationOpsController extends Controller
             $en_curso
                 ? 'Ya hay un user setup en curso (arrancó ' . (isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : 'sin fecha') . '): esperá a que termine.'
                 : (! $aplicado && (isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso'
-                    ? 'El registro dice en_curso desde hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos: se da por colgado y se puede volver a intentar.'
+                    ? 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos (el registro sigue en en_curso sin resultado): se da por colgado y se puede volver a intentar; el job viejo, si arranca, se descarta solo.'
                     : 'No hay ninguno en curso.')
         );
 

@@ -345,7 +345,9 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $this->assertSame([], $this->llamadas->urls);
 
         /* Y el worker lo corre: el POST a empresa-api sale con lo que cargó el cliente. */
-        (new EjecutarUserSetupDeImplementacionJob($id))->handle();
+        $token = (string) $this->estado($id)->json('user_setup.iniciado_at');
+        $this->assertNotSame('', $token, 'El registro en_curso tiene que traer el token con el que se despachó el job.');
+        (new EjecutarUserSetupDeImplementacionJob($id, $token))->handle();
 
         $destino = 'https://api-rosa.comerciocity.com/api/admin-sync/user-setup';
         $this->assertSame([$destino], $this->llamadas->urls);

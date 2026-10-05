@@ -18,7 +18,7 @@ use Tests\TestCase;
  * 5/10/2026).
  *
  * `ImplementationUserSetupService::trigger_user_setup()` ganó un segundo parámetro, OPCIONAL, con el
- * techo en segundos. Lo usa el job de `POST claude/implementations/{id}/user-setup` (600 s, porque
+ * techo en segundos. Lo usa el job de `POST claude/implementations/{id}/user-setup` (1200 s, porque
  * del otro lado el setup arranca con `migrate:fresh` y tarda minutos); el panel sigue llamando sin
  * él. Lo que se protege acá, en orden de importancia:
  *

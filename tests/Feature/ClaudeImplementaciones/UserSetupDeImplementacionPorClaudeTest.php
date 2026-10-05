@@ -27,7 +27,7 @@ use Illuminate\Support\Facades\Queue;
  *     advertencia de que pudo haber corrido).
  *  5. Que el chequeo de la instalación mire la REAL de la API activa y no "la última por id" (que con el
  *     par real + esqueleto es el esqueleto).
- *  6. Que la llamada HTTP salga con 600 s de techo.
+ *  6. Que la llamada HTTP salga con 1200 s de techo.
  */
 class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 {
@@ -202,7 +202,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 
     /**
      * 2. 🔴 Sin `dry_run` explícito no se encola ni se escribe nada: los seis chequeos en true, el
-     * destino, el techo de 600 segundos, el payload y el aviso de que vacía la base.
+     * destino, el techo de 1200 segundos, el payload y el aviso de que vacía la base.
      *
      * @return void
      */
@@ -223,7 +223,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         }
 
         $respuesta->assertJsonPath('destino.endpoint', self::URL_API . '/api/admin-sync/user-setup');
-        $respuesta->assertJsonPath('destino.timeout_segundos', 600);
+        $respuesta->assertJsonPath('destino.timeout_segundos', 1200);
         $this->assertStringContainsString('migrate:fresh', $respuesta->json('aviso_destructivo'));
         $this->assertStringContainsString('no tiene forzar', $respuesta->json('aviso_destructivo'));
 
@@ -429,11 +429,17 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->assertNull($e['implementacion']->refresh()->user_setup_executed_at, 'El candado lo llena el job al terminar bien, no el endpoint.');
 
         Queue::assertPushed(EjecutarUserSetupDeImplementacionJob::class, 1);
-        Queue::assertPushed(EjecutarUserSetupDeImplementacionJob::class, function ($job) use ($e) {
+        /* 🔴 El job lleva como token el `iniciado_at` del registro que lo despachó: es lo que lo distingue de
+           un intento anterior y lo que le permite descartarse solo si ya no le toca. */
+        Queue::assertPushed(EjecutarUserSetupDeImplementacionJob::class, function ($job) use ($e, $registro) {
             $id = new \ReflectionProperty($job, 'implementation_id');
             $id->setAccessible(true);
+            $token = new \ReflectionProperty($job, 'token');
+            $token->setAccessible(true);
 
-            return $job->connection === 'database' && $id->getValue($job) === (int) $e['implementacion']->id;
+            return $job->connection === 'database'
+                && $id->getValue($job) === (int) $e['implementacion']->id
+                && $token->getValue($job) === $registro['iniciado_at'];
         });
 
         /* Y el estado lo lee en curso. */
@@ -568,6 +574,21 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
      |----------------------------------------------------------------------------------------- */
 
     /**
+     * El job de un escenario con el user setup en curso, con el token (`iniciado_at`) de su registro, que es
+     * como lo despacha el endpoint.
+     *
+     * @param array{cliente: Client, implementacion: Implementation} $e El escenario.
+     *
+     * @return EjecutarUserSetupDeImplementacionJob
+     */
+    private function job_de(array $e): EjecutarUserSetupDeImplementacionJob
+    {
+        $registro = $this->registro($e['implementacion']->refresh());
+
+        return new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id, (string) $registro['iniciado_at']);
+    }
+
+    /**
      * Deja el escenario con el user setup en curso, como lo deja el endpoint antes de despachar.
      *
      * @return array{cliente: Client, implementacion: Implementation}
@@ -581,7 +602,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
-     * 4, 6. El job en éxito: el POST sale a la URL de la API activa con el payload y con 600 segundos de
+     * 4, 6. El job en éxito: el POST sale a la URL de la API activa con el payload y con 1200 segundos de
      * techo, y deja el candado, el registro `ok` y la acción `user_setup` con `canal: claude`.
      *
      * @return void
@@ -602,9 +623,9 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
             return Http::response(['ok' => true], 200);
         });
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
-        $this->assertSame([600], $llamadas->techos);
+        $this->assertSame([1200], $llamadas->techos);
         $this->assertSame([self::URL_API . '/api/admin-sync/user-setup'], $llamadas->urls);
         $this->assertSame((int) $e['cliente']->user_id, $llamadas->cuerpo['user_id']);
         $this->assertSame('20304050607', $llamadas->cuerpo['doc_number']);
@@ -640,7 +661,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $e = $this->escenario_en_curso();
         Http::fake(['*' => Http::response(['ok' => true], 200)]);
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
         $estado = $this->actingAs($this->crear_admin(), 'sanctum')->getJson('/api/admin/implementation/' . $e['implementacion']->id . '/actions');
         $estado->assertStatus(200);
@@ -669,7 +690,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $e = $this->escenario_en_curso();
         Http::fake(['*' => Http::response(['error' => 'internal error: Class not found'], 500)]);
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
         $implementacion = $e['implementacion']->refresh();
         $this->assertNull($implementacion->user_setup_executed_at, 'Un error no llena el candado.');
@@ -700,7 +721,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $e = $this->escenario_en_curso();
         Http::fake(['*' => Http::response(['error' => 'otro setup en curso'], 409)]);
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
         $registro = $this->registro($e['implementacion']->refresh());
         $this->assertSame('error', $registro['estado']);
@@ -720,10 +741,10 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     {
         $e = $this->escenario_en_curso();
         Http::fake(function () {
-            throw new ConnectionException('cURL error 28: Operation timed out after 600001 milliseconds');
+            throw new ConnectionException('cURL error 28: Operation timed out after 1200001 milliseconds');
         });
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
         $registro = $this->registro($e['implementacion']->refresh());
         $this->assertSame('error', $registro['estado']);
@@ -746,7 +767,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
             throw new \LogicException('algo que nadie previó');
         });
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
         $registro = $this->registro($e['implementacion']->refresh());
         $this->assertSame('error', $registro['estado']);
@@ -765,7 +786,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $e['cliente']->save();
         Http::fake();
 
-        (new EjecutarUserSetupDeImplementacionJob($e['implementacion']->id))->handle();
+        $this->job_de($e)->handle();
 
         $this->assertSame('error', $this->registro($e['implementacion']->refresh())['estado']);
         Http::assertNothingSent();
@@ -780,7 +801,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     {
         Http::fake();
 
-        (new EjecutarUserSetupDeImplementacionJob(99999999))->handle();
+        (new EjecutarUserSetupDeImplementacionJob(99999999, '2026-10-05T10:00:00.000000Z'))->handle();
 
         Http::assertNothingSent();
         $this->assertTrue(true);
@@ -795,16 +816,16 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     public function test_failed_deja_error_solo_si_sigue_en_curso(): void
     {
         $en_curso = $this->escenario_en_curso();
-        (new EjecutarUserSetupDeImplementacionJob($en_curso['implementacion']->id))->failed(new \RuntimeException('timeout de 900 s'));
+        $this->job_de($en_curso)->failed(new \RuntimeException('timeout de 1500 s'));
 
         $registro = $this->registro($en_curso['implementacion']->refresh());
         $this->assertSame('error', $registro['estado']);
-        $this->assertStringContainsString('timeout de 900 s', $registro['error']);
+        $this->assertStringContainsString('timeout de 1500 s', $registro['error']);
         $this->assertNull($en_curso['implementacion']->refresh()->user_setup_executed_at);
 
         $terminado = $this->escenario();
-        $this->escribir_data_de_la_etapa($terminado['implementacion'], 2, ['user_setup' => ['estado' => 'ok', 'terminado_at' => '2026-10-05T14:09:00.000000Z']]);
-        (new EjecutarUserSetupDeImplementacionJob($terminado['implementacion']->id))->failed(new \RuntimeException('MaxAttemptsExceededException'));
+        $this->escribir_data_de_la_etapa($terminado['implementacion'], 2, ['user_setup' => ['estado' => 'ok', 'iniciado_at' => '2026-10-05T14:00:00.000000Z', 'terminado_at' => '2026-10-05T14:09:00.000000Z']]);
+        $this->job_de($terminado)->failed(new \RuntimeException('MaxAttemptsExceededException'));
 
         $this->assertSame('ok', $this->registro($terminado['implementacion']->refresh())['estado'], 'failed() pisó un resultado ya escrito.');
     }
@@ -821,9 +842,9 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $retry_after = (int) config('queue.connections.database.retry_after');
 
         $this->assertSame(1, $defaults['tries'], 'Un segundo intento sería otro migrate:fresh.');
-        $this->assertSame(900, $defaults['timeout']);
+        $this->assertSame(1500, $defaults['timeout']);
         $this->assertLessThan($retry_after, $defaults['timeout']);
-        $this->assertSame(600, EjecutarUserSetupDeImplementacionJob::TIMEOUT_DE_LA_LLAMADA);
+        $this->assertSame(1200, EjecutarUserSetupDeImplementacionJob::TIMEOUT_DE_LA_LLAMADA);
         $this->assertLessThan($defaults['timeout'], EjecutarUserSetupDeImplementacionJob::TIMEOUT_DE_LA_LLAMADA);
     }
 }
