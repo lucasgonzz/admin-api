@@ -208,4 +208,29 @@ return [
         'video_ecommerce'  => env('COMMERCIOCITY_DEMO_VIDEO_ECOMMERCE', 'https://drive.google.com/file/d/15F1lB-goQK5J3YfrJdDVDHrQYyFhnCau/view?usp=sharing'),
         'video_cierre'     => env('COMMERCIOCITY_DEMO_VIDEO_CIERRE', 'https://drive.google.com/file/d/15F1lB-goQK5J3YfrJdDVDHrQYyFhnCau/view?usp=sharing'),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Mails de la implementación (misión implementar-cliente, 5/10/2026)
+    |--------------------------------------------------------------------------
+    |
+    | Lo que lee `ImplementacionMailService` para armar el mail de cada hito de la implementación
+    | (bienvenida, sistema instalado, acceso, fotos, categorías y sistema listo).
+    |
+    | OJO: los valores van ESCRITOS ACÁ y no con `env()`. El deploy del admin no toca el `.env` de
+    | producción, así que una variable de entorno nueva nunca llegaría y el mail saldría con el
+    | default de todos modos. Para cambiarlos, se edita este archivo.
+    |
+    | El logo sale de `commerciocity.logo_url` (el isotipo), igual que en la carta de acceso a la
+    | demo, y las medidas del mail son las del prototipo aprobado (56 px).
+    */
+    'implementacion_mail' => [
+        // Quién firma el mail: la persona que le habla al cliente por WhatsApp durante la implementación.
+        'firma_nombre' => 'Lucas González',
+        'firma_rol' => 'Fundador de ComercioCity',
+
+        // Carpeta del centro de recursos (tutoriales). Es el botón secundario del mail "listo"; en un
+        // mail puntual se puede pisar con el dato `recursos_url`.
+        'recursos_url' => 'https://drive.google.com/drive/folders/1pGWyUekgBok-ShmRWbXNrDhuxXMQvElp?usp=drive_link',
+    ],
 ];
