@@ -489,6 +489,13 @@ Route::middleware('claude.task.key')
            WhatsApp del cliente cae al hilo de la implementación. `etapa_actual` tiene que ser la real (409). */
         Route::post('implementations/{id}/advance', 'Api\ClaudeImplementationOpsController@advance_json')
             ->whereNumber('id');
+
+        /* Registrar lo que se hizo POR FUERA (un WhatsApp mandado por WhatsApp Web, un mail, una llamada). 🔴 Solo
+           REGISTRA: no manda nada. Escribe la huella en data.actions[] de la etapa (así el checklist del panel se
+           tilda) y, con canal=whatsapp_web, el saliente del hilo con whatsapp_message_id "waweb-<uuid>" (nunca
+           null: un saliente con id nulo se lee como envío fallido). Idempotente por 10 minutos. */
+        Route::post('implementations/{id}/actions', 'Api\ClaudeImplementationOpsController@actions_json')
+            ->whereNumber('id');
     });
 
 /*

@@ -16,6 +16,7 @@ use App\Models\ImplementationStage;
 use App\Models\ImplementationStageConfig;
 use App\Models\Lead;
 use App\Models\Version;
+use App\Services\ArgentinePhoneNormalizer;
 use App\Services\ClientEmpresaApiUrlResolver;
 use App\Services\HostingProvisioningStructure;
 use App\Services\ImplementationFormMapper;
@@ -30,6 +31,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 /**
  * Operar las IMPLEMENTACIONES de clientes nuevos desde `claude/*` (misión `implementar-cliente`,
@@ -165,6 +167,37 @@ class ClaudeImplementationOpsController extends Controller
      * salte etapas o dispare lo que el panel dispara, y no lo hace.
      */
     const PARAMETROS_DEL_AVANCE = ['etapa_actual', 'saltar', 'nota', 'dry_run'];
+
+    /**
+     * Lista blanca de `POST claude/implementations/{id}/actions`. Cualquier otra clave es 422: un
+     * `content`, un `enviar` o un `force` suelen ser alguien esperando que este endpoint MANDE el
+     * mensaje, y no lo manda: solo registra que ya salió.
+     */
+    const PARAMETROS_DE_LA_ACCION = ['accion', 'canal', 'texto', 'telefono', 'etapa'];
+
+    /**
+     * Las acciones que se pueden registrar. Las cuatro primeras más `progreso` son las del panel con
+     * mensaje (las que lee el checklist de la SPA); `acceso`, `imagenes`, `categorias`, `descripciones` y
+     * `listo` son los hitos de la migración y la entrega que el panel no tiene; `nota` es una anotación
+     * libre. `user_setup` y `crear_instalacion` NO están a propósito: las escriben sus propios endpoints.
+     *
+     * @var array<int, string>
+     */
+    const ACCIONES = ['presentacion', 'form_link', 'progreso', 'pedir_archivos', 'entrega', 'acceso', 'imagenes', 'categorias', 'descripciones', 'listo', 'nota'];
+
+    /**
+     * Por dónde se hizo lo que se registra. `whatsapp_web` es el único que además crea el saliente del
+     * hilo.
+     *
+     * @var array<int, string>
+     */
+    const CANALES = ['whatsapp_web', 'mail', 'llamada', 'otro'];
+
+    /**
+     * Ventana de idempotencia de `actions`, en minutos: la misma acción por el mismo canal con el mismo
+     * texto, dentro de este tiempo, no se registra dos veces.
+     */
+    const MINUTOS_DE_IDEMPOTENCIA = 10;
 
     /** Lista blanca de la lectura del estado por id. */
     const PARAMETROS_DE_LA_LECTURA = ['include'];
@@ -1777,6 +1810,258 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         return ['implementation' => $implementation, 'cerrada' => false, 'siguiente' => $siguiente];
+    }
+
+    /* ==============================================================================================
+     | 4) POST claude/implementations/{id}/actions — REGISTRAR lo que se hizo por fuera
+     |============================================================================================= */
+
+    /**
+     * Registra una acción que se hizo por fuera del admin —un WhatsApp mandado por WhatsApp Web, un mail,
+     * una llamada— para que el panel y el estado la vean.
+     *
+     * 🔴 ESTO SOLO REGISTRA. No manda nada, ni WhatsApp ni mail ni nada: el mensaje ya salió, desde la
+     * skill, por WhatsApp Web y con el ok de Lucas. Lo que hace este endpoint es dejar la huella.
+     *
+     * Dos efectos:
+     *  1. Agrega `{action, stage, at, canal, origen: "claude"}` a `data.actions[]` de la etapa
+     *     (`etapa`, por defecto la actual). Es el mismo registro que escriben las acciones del panel, así
+     *     que el checklist del panel se tilda (`presentacion`, `form_link`, `pedir_archivos` y `entrega`
+     *     son las claves que lee la SPA) y `GET claude/implementations/{id}` la muestra con su origen.
+     *  2. Con `canal=whatsapp_web`, además crea el `implementation_messages` SALIENTE con el texto: así
+     *     el hilo del panel muestra lo que se le mandó al cliente y `entrantes` sabe que ya se le
+     *     respondió.
+     *
+     * 🔴 EL `whatsapp_message_id` DEL SALIENTE NUNCA ES NULL: es `waweb-<uuid>`. Un saliente con id nulo
+     * se lee como un envío FALLIDO (la tabla no tiene columna de estado; `send_outbound` persiste igual
+     * lo que no salió y el único rastro es el id vacío), y no cuenta como respuesta en `entrantes`.
+     * Lo que se mandó por WhatsApp Web sí salió, así que tiene que llevar id.
+     *
+     * 🔴 ES IDEMPOTENTE: la misma acción, por el mismo canal, para la misma etapa y con el mismo texto,
+     * en los últimos 10 minutos, devuelve 200 `{ya_registrada: true}` sin duplicar nada. Es lo que hace
+     * seguro reintentar una llamada que cortó el timeout: sin esto, el reintento duplicaba la fila del
+     * hilo y dejaba dos entradas en el registro. Pasados los 10 minutos es otro envío (el mismo texto
+     * puede mandarse de nuevo a propósito, p. ej. un recordatorio). La comprobación y el alta van en una
+     * transacción con la fila de la etapa bloqueada: dos llamadas simultáneas tampoco duplican.
+     *
+     * No tiene `dry_run`: lo único que escribe es la huella de algo que ya pasó, y no hay nada que
+     * simular.
+     *
+     * @param Request    $request Body: accion, canal, texto?, telefono?, etapa?.
+     * @param int|string $id      Id de la implementación (segmento de la URL).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function actions_json(Request $request, $id)
+    {
+        $rechazo = $this->rechazar_parametros_de_mas($request, self::PARAMETROS_DE_LA_ACCION, 'POST claude/implementations/{id}/actions');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'accion'   => 'required|string|in:' . implode(',', self::ACCIONES),
+            'canal'    => 'required|string|in:' . implode(',', self::CANALES),
+            'texto'    => 'required_if:canal,whatsapp_web|nullable|string|max:4000',
+            'telefono' => 'nullable|string|max:30',
+            'etapa'    => 'nullable|integer|between:1,8',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $implementation = Implementation::find((int) $id);
+        if ($implementation === null) {
+            return $this->error_404('no existe la implementación ' . (int) $id);
+        }
+
+        $accion = (string) $request->input('accion');
+        $canal  = (string) $request->input('canal');
+        $texto  = $this->texto_o_null($request->input('texto'));
+        $etapa  = $this->entero_o_null($request->input('etapa'));
+        $etapa  = $etapa === null ? (int) $implementation->current_stage : $etapa;
+
+        /* El teléfono del mensaje, resuelto ANTES de abrir la transacción: sin teléfono no hay forma de
+           que el hilo muestre a quién se le mandó, y es mejor decirlo ahora que escribir la mitad. */
+        $telefono = null;
+        if ($canal === 'whatsapp_web') {
+            $telefono = $this->telefono_del_mensaje($implementation, $accion, $this->texto_o_null($request->input('telefono')));
+
+            if ($telefono === null) {
+                return $this->error_422(
+                    'No hay un teléfono al que se le mandó el mensaje: el cliente no tiene teléfono cargado y no mandaste `telefono`. No se registró nada.',
+                    ['ayuda' => 'Pasá `telefono` (se normaliza a E.164) o cargale el teléfono al cliente.']
+                );
+            }
+        }
+
+        $resultado = DB::transaction(function () use ($implementation, $accion, $canal, $texto, $etapa, $telefono) {
+            return $this->registrar_la_accion($implementation, $accion, $canal, $texto, $etapa, $telefono);
+        });
+
+        if ($resultado === 'sin_etapa') {
+            return $this->error_422(
+                'La implementación ' . (int) $implementation->id . ' no tiene la etapa ' . $etapa . ' cargada. No se registró nada.',
+                ['implementation_id' => (int) $implementation->id, 'etapa' => $etapa]
+            );
+        }
+
+        if (isset($resultado['ya_registrada'])) {
+            return response()->json([
+                'registrada'    => false,
+                'ya_registrada' => true,
+                'accion'        => $accion,
+                'canal'         => $canal,
+                'etapa'         => $etapa,
+                'at'            => isset($resultado['ya_registrada']['at']) ? (string) $resultado['ya_registrada']['at'] : null,
+                'mensaje'       => null,
+                'nota'          => 'Es la misma acción por el mismo canal, con el mismo texto, registrada hace menos de '
+                    . self::MINUTOS_DE_IDEMPOTENCIA . ' minutos: no se duplicó nada.',
+            ], 200);
+        }
+
+        $mensaje = $resultado['mensaje'];
+
+        return response()->json([
+            'registrada'    => true,
+            'ya_registrada' => false,
+            'accion'        => $accion,
+            'canal'         => $canal,
+            'etapa'         => $etapa,
+            'at'            => (string) $resultado['entrada']['at'],
+            'mensaje'       => $mensaje === null ? null : [
+                'id'                  => (int) $mensaje->id,
+                'whatsapp_message_id' => (string) $mensaje->whatsapp_message_id,
+                'telefono'            => $mensaje->phone,
+            ],
+        ], 201);
+    }
+
+    /**
+     * Escribe la huella de la acción en la etapa (y, con WhatsApp Web, el saliente del hilo), salvo que ya
+     * esté registrada. Se llama ADENTRO de una transacción.
+     *
+     * Bloquea la fila de la etapa con `lockForUpdate()` y recién ahí mira si ya existe la misma entrada
+     * reciente: el chequeo de idempotencia y el alta tienen que ser una sola operación, o dos llamadas
+     * simultáneas pasarían las dos el chequeo y duplicarían.
+     *
+     * La igualdad de "la misma acción" es: mismo `action`, mismo `canal`, misma `stage`, mismo texto (por
+     * su `sha1`, que se guarda en la entrada como `texto_hash` para no repetir hasta 4000 caracteres por
+     * cada registro) y `origen = claude`. Las entradas del panel no cuentan: las escribe otro camino.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param string         $accion         Una de ACCIONES.
+     * @param string         $canal          Uno de CANALES.
+     * @param string|null    $texto          Texto del mensaje (o de la nota).
+     * @param int            $etapa          Etapa en la que se registra (1 a 8).
+     * @param string|null    $telefono       Teléfono E.164 del mensaje (solo con whatsapp_web).
+     *
+     * @return array<string, mixed>|string `sin_etapa` si la etapa no existe; si no, un array con
+     *                                     `ya_registrada` (la entrada que ya estaba) o con `entrada` y
+     *                                     `mensaje` (el saliente creado, o null).
+     */
+    protected function registrar_la_accion(Implementation $implementation, $accion, $canal, $texto, $etapa, $telefono)
+    {
+        $registro = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', $etapa)
+            ->lockForUpdate()
+            ->first();
+
+        if ($registro === null) {
+            return 'sin_etapa';
+        }
+
+        $datos    = is_array($registro->data) ? $registro->data : [];
+        $entradas = isset($datos['actions']) && is_array($datos['actions']) ? $datos['actions'] : [];
+        $hash     = sha1($texto === null ? '' : $texto);
+        $limite   = now()->subMinutes(self::MINUTOS_DE_IDEMPOTENCIA);
+
+        foreach ($entradas as $existente) {
+            if (! is_array($existente)
+                || (isset($existente['origen']) ? $existente['origen'] : null) !== 'claude'
+                || (isset($existente['action']) ? $existente['action'] : null) !== $accion
+                || (isset($existente['canal']) ? $existente['canal'] : null) !== $canal
+                || (int) (isset($existente['stage']) ? $existente['stage'] : 0) !== (int) $etapa
+                || (isset($existente['texto_hash']) ? $existente['texto_hash'] : null) !== $hash) {
+                continue;
+            }
+
+            $cuando = $this->parsear_o_null(isset($existente['at']) ? $existente['at'] : null);
+
+            if ($cuando !== null && $cuando->gte($limite)) {
+                return ['ya_registrada' => $existente];
+            }
+        }
+
+        $entrada = [
+            'action'     => $accion,
+            'stage'      => (int) $etapa,
+            'at'         => now()->toISOString(),
+            'canal'      => $canal,
+            'origen'     => 'claude',
+            'texto_hash' => $hash,
+        ];
+
+        /* El texto de una nota es la nota: no hay otro lugar donde guardarlo. El de un WhatsApp vive en el
+           mensaje del hilo, y el de un mail o una llamada no hace falta repetirlo. */
+        if ($accion === 'nota' && $texto !== null) {
+            $entrada['texto'] = $texto;
+        }
+
+        $entradas[]      = $entrada;
+        $datos['actions'] = $entradas;
+        $registro->data  = $datos;
+        $registro->save();
+
+        $mensaje = null;
+
+        if ($canal === 'whatsapp_web') {
+            $mensaje = ImplementationMessage::create([
+                'implementation_id'   => $implementation->id,
+                'stage_number'        => (int) $etapa,
+                'direction'           => 'outbound',
+                'phone'               => $telefono,
+                'body'                => (string) $texto,
+                'whatsapp_message_id' => 'waweb-' . Str::uuid()->toString(),
+                'sent_at'             => now(),
+            ]);
+        }
+
+        return ['entrada' => $entrada, 'mensaje' => $mensaje];
+    }
+
+    /**
+     * El teléfono (E.164) al que se le mandó un mensaje de WhatsApp Web: el que se pasó o, si no, el del
+     * destinatario que corresponde.
+     *
+     * Mismo criterio que `ImplementationActionService::resolve_recipient_phone()`: el pedido de archivos
+     * va al RESPONSABLE DE MIGRACIÓN (y si no lo hay, al dueño) y todo lo demás al dueño. Se normaliza
+     * con `ArgentinePhoneNormalizer`, la misma que usa el webhook al guardar lo que entra: el hilo
+     * compara teléfonos como texto exacto (la ventana de 24 h, por ejemplo), y un saliente guardado con
+     * otro formato que el entrante de la misma persona los trata como dos personas.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param string         $accion         La acción que se registra.
+     * @param string|null    $pedido         `telefono` tal como llegó.
+     *
+     * @return string|null El teléfono, o null si no hay ninguno.
+     */
+    protected function telefono_del_mensaje(Implementation $implementation, $accion, $pedido)
+    {
+        $crudo = $pedido;
+
+        if ($crudo === null) {
+            $implementation->loadMissing('client');
+
+            $del_dueno = $implementation->client === null ? '' : trim((string) $implementation->client->phone);
+            $del_resp  = trim((string) $implementation->migration_contact_phone);
+
+            $crudo = $accion === 'pedir_archivos' && $del_resp !== '' ? $del_resp : $del_dueno;
+        }
+
+        $crudo = trim((string) $crudo);
+
+        return $crudo === '' ? null : ArgentinePhoneNormalizer::normalize($crudo);
     }
 
     /* ==============================================================================================

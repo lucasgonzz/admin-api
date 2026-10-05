@@ -1253,6 +1253,27 @@ return [
                 ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Con false avanza (200). Sin él, simula y no escribe nada.'],
             ],
         ],
+        'POST api/claude/implementations/{id}/actions' => [
+            'para_que'     => 'REGISTRA una acción que se hizo por fuera del admin —un WhatsApp mandado por WhatsApp Web, un mail, una llamada— para que el panel y el estado la vean. 🔴 NO manda nada: el mensaje ya salió, desde la skill y con el ok de Lucas. Agrega {action, stage, at, canal, origen:"claude"} a data.actions[] de la etapa (por defecto la actual): es el mismo registro que escriben las acciones del panel, así que su checklist se tilda (presentacion, form_link, pedir_archivos y entrega son las claves que lee la SPA). Con canal=whatsapp_web además crea el implementation_messages SALIENTE con el texto, para que el hilo muestre lo que se le mandó al cliente y `entrantes` sepa que ya se le respondió. Es idempotente por 10 minutos.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'No tiene dry_run: solo escribe la huella de algo que ya pasó, y no manda ningún mensaje ni toca ningún servidor.',
+                'Lista blanca de parámetros: cualquier otra clave es 422 (un `content` o un `enviar` suelen ser alguien esperando que acá se mande el mensaje).',
+                '🔴 El saliente del hilo lleva SIEMPRE whatsapp_message_id = "waweb-<uuid>", nunca null: un saliente con id nulo se lee como envío fallido (la tabla no tiene columna de estado) y no contaría como respuesta en `entrantes`.',
+                '🔴 Idempotente: la misma acción, por el mismo canal, para la misma etapa y con el mismo texto, en los últimos 10 minutos devuelve 200 {ya_registrada:true} sin duplicar ni la entrada ni el mensaje; vale reintentar una llamada que cortó el timeout. La comprobación y el alta van en una transacción con la fila de la etapa bloqueada: dos llamadas simultáneas tampoco duplican.',
+                'Con whatsapp_web hace falta un teléfono: el de `telefono` (se normaliza a E.164, igual que el webhook, para que el hilo compare teléfonos iguales) o, si no, el del cliente —el pedido de archivos va al responsable de migración, como en el panel—. Sin ninguno, 422 y no se registra nada.',
+                'user_setup y crear_instalacion NO se pueden registrar por acá: las escriben sus propios endpoints.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; id numérico', 'que_es' => 'La implementación.'],
+                ['nombre' => 'accion', 'obligatorio' => true, 'validacion' => 'required|string|in:presentacion,form_link,progreso,pedir_archivos,entrega,acceso,imagenes,categorias,descripciones,listo,nota', 'que_es' => 'Qué se hizo.'],
+                ['nombre' => 'canal', 'obligatorio' => true, 'validacion' => 'required|string|in:whatsapp_web,mail,llamada,otro', 'que_es' => 'Por dónde. Solo whatsapp_web crea además el saliente del hilo.'],
+                ['nombre' => 'texto', 'obligatorio' => false, 'validacion' => 'required_if:canal,whatsapp_web|nullable|string|max:4000', 'que_es' => 'El texto que se mandó. Obligatorio con whatsapp_web (es el cuerpo del mensaje del hilo). Con accion=nota es la nota.'],
+                ['nombre' => 'telefono', 'obligatorio' => false, 'validacion' => 'nullable|string|max:30', 'que_es' => 'A quién se le mandó (solo cuenta con whatsapp_web). Se normaliza a E.164. Sin él, el del cliente.'],
+                ['nombre' => 'etapa', 'obligatorio' => false, 'validacion' => 'nullable|integer|between:1,8', 'que_es' => 'La etapa en cuyo registro se anota. Por defecto la actual.'],
+            ],
+        ],
     ],
 
     /*
