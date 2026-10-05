@@ -32,7 +32,7 @@ use Illuminate\Support\Facades\Queue;
 class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 {
     /** URL de la empresa-api del cliente de prueba (la API activa). */
-    const URL_API = 'https://api-panchito.comerciocity.com';
+    const URL_API = 'https://api-panchito.ejemplo.test';
 
     /**
      * Sin clave de Serper cargada para que cada test decida.

@@ -37,6 +37,19 @@ abstract class BaseDeImplementaciones extends TestCase
     const CLAVE = 'clave-de-prueba-claude-implementaciones';
 
     /**
+     * Dominio de las APIs y los SPA de los clientes de los tests.
+     *
+     * 🔴 Es `.test` A PROPÓSITO y no `comerciocity.com` (5/10/2026): una fixture con `api-panchito.
+     * comerciocity.com` es una URL REAL, y un test que llegó a llamarla (avanzar una implementación a la
+     * etapa 2 dispara el user setup remoto, que del otro lado hace `migrate:fresh`) le vació la base de
+     * producción a un cliente. Un host `.test` no resuelve en ningún lado. Con `crear_las_dos_apis()` las
+     * URLs salen de acá, y `setUp()` apunta `services.hostinger.domain` al mismo dominio para que las
+     * guardas de `HostingProvisioningStructure` (que comparan los hosts con `<sub>.<dominio>`) sigan viendo
+     * una estructura válida.
+     */
+    const DOMINIO = 'ejemplo.test';
+
+    /**
      * `versions.version` es UNIQUE: cada versión de cada test necesita su propio código.
      *
      * @var int
@@ -53,7 +66,10 @@ abstract class BaseDeImplementaciones extends TestCase
     {
         parent::setUp();
 
-        config(['services.claude_task_ingest.key' => self::CLAVE]);
+        config([
+            'services.claude_task_ingest.key' => self::CLAVE,
+            'services.hostinger.domain'       => self::DOMINIO,
+        ]);
 
         AdminSetting::whereIn('key', [
             'implementation_form_url',
@@ -148,17 +164,17 @@ abstract class BaseDeImplementaciones extends TestCase
     {
         $uno                = new ClientApi();
         $uno->client_id     = $client->id;
-        $uno->url           = 'https://api-' . $sub . '.comerciocity.com';
+        $uno->url           = 'https://api-' . $sub . '.' . self::DOMINIO;
         $uno->path          = $sub . '/api';
-        $uno->spa_url       = 'https://' . $sub . '.comerciocity.com';
+        $uno->spa_url       = 'https://' . $sub . '.' . self::DOMINIO;
         $uno->hosting_type  = $hosting;
         $uno->save();
 
         $dos                = new ClientApi();
         $dos->client_id     = $client->id;
-        $dos->url           = 'https://api-' . $sub . '2.comerciocity.com';
+        $dos->url           = 'https://api-' . $sub . '2.' . self::DOMINIO;
         $dos->path          = $sub . '2/api';
-        $dos->spa_url       = 'https://' . $sub . '2.comerciocity.com';
+        $dos->spa_url       = 'https://' . $sub . '2.' . self::DOMINIO;
         $dos->hosting_type  = $hosting;
         $dos->save();
 

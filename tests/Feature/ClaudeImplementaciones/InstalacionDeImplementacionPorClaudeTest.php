@@ -279,10 +279,10 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->assertNotSame((int) $vieja->id, (int) $respuesta->json('se_crearia.version.id'));
         $respuesta->assertJsonPath('se_crearia.instalaciones.0.kind', 'completa');
         $respuesta->assertJsonPath('se_crearia.instalaciones.0.client_api_id', (int) $apis[0]->id);
-        $respuesta->assertJsonPath('se_crearia.instalaciones.0.url', 'https://api-panchito.comerciocity.com');
+        $respuesta->assertJsonPath('se_crearia.instalaciones.0.url', 'https://api-panchito.ejemplo.test');
         $respuesta->assertJsonPath('se_crearia.instalaciones.1.kind', 'esqueleto');
         $respuesta->assertJsonPath('se_crearia.instalaciones.1.client_api_id', (int) $apis[1]->id);
-        $respuesta->assertJsonPath('se_crearia.instalaciones.1.url', 'https://api-panchito2.comerciocity.com');
+        $respuesta->assertJsonPath('se_crearia.instalaciones.1.url', 'https://api-panchito2.ejemplo.test');
     }
 
     /**
@@ -411,12 +411,12 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     public function test_las_urls_tienen_que_ser_https(): void
     {
         $e = $this->escenario();
-        ClientApi::where('client_id', $e['cliente']->id)->orderBy('id')->first()->update(['spa_url' => 'http://panchito.comerciocity.com']);
+        ClientApi::where('client_id', $e['cliente']->id)->orderBy('id')->first()->update(['spa_url' => 'http://panchito.ejemplo.test']);
 
         $chequeo = $this->chequeo($this->instalar($e['implementacion'], []), 'urls_https');
 
         $this->assertFalse($chequeo['ok']);
-        $this->assertStringContainsString('http://panchito.comerciocity.com', $chequeo['detalle']);
+        $this->assertStringContainsString('http://panchito.ejemplo.test', $chequeo['detalle']);
     }
 
     /**
@@ -444,7 +444,7 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     public function test_un_par_con_nombres_no_estandar_no_pasa(): void
     {
         $e = $this->escenario();
-        ClientApi::where('client_id', $e['cliente']->id)->orderByDesc('id')->first()->update(['spa_url' => 'https://otro-nombre.comerciocity.com']);
+        ClientApi::where('client_id', $e['cliente']->id)->orderByDesc('id')->first()->update(['spa_url' => 'https://otro-nombre.' . self::DOMINIO]);
 
         $chequeo = $this->chequeo($this->instalar($e['implementacion'], []), 'estructura_del_hosting');
 

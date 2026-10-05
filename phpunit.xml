@@ -45,5 +45,20 @@
         <server name="QUEUE_CONNECTION" value="sync"/>
         <server name="SESSION_DRIVER" value="array"/>
         <server name="TELESCOPE_ENABLED" value="false"/>
+        <!--
+            🔴 Los tests NO salen a internet (5/10/2026: un test de ClaudeImplementaciones hizo un POST real al
+            user setup de un cliente en producción y le vació la base). La primera barrera es el cliente HTTP de
+            tests/TestCase.php (Tests\Fakes\HttpFactorySinSalida: un pedido sin Http::fake() se frena). Esta es
+            la segunda, para lo que usa Guzzle sin pasar por la fachada Http o desarma esa primera barrera con
+            un Http::swap(new Factory()): un proxy que no existe. Guzzle lee HTTP_PROXY / HTTPS_PROXY / NO_PROXY de
+            $_SERVER, así que todo pedido HTTP(S) a un host que no sea loopback termina en "conexión rechazada"
+            en vez de en el servidor real. El puerto 9 (discard) no tiene a nadie escuchando.
+        -->
+        <server name="HTTP_PROXY" value="http://127.0.0.1:9"/>
+        <server name="HTTPS_PROXY" value="http://127.0.0.1:9"/>
+        <server name="NO_PROXY" value="localhost,127.0.0.1,::1"/>
+        <!-- El token real de Hostinger vive en una variable de entorno de esta máquina: con force="true" 
+             ningún test lo ve (tests/TestCase.php también lo vacía en config). -->
+        <env name="HOSTINGER_API_TOKEN" value="" force="true"/>
     </php>
 </phpunit>

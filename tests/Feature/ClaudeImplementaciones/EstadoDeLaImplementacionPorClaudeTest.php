@@ -183,13 +183,13 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
 
         $respuesta->assertJsonPath('cliente.id', (int) $e['cliente']->id);
         $respuesta->assertJsonPath('cliente.name', 'Panchito Gómez');
-        $respuesta->assertJsonPath('cliente.sistema.spa_url', 'https://panchito.comerciocity.com');
+        $respuesta->assertJsonPath('cliente.sistema.spa_url', 'https://panchito.ejemplo.test');
         $respuesta->assertJsonPath('cliente.sistema.path', 'panchito/api');
         $respuesta->assertJsonPath('cliente.sistema.hosting_type', 'shared_hosting');
         $respuesta->assertJsonPath('cliente.sistema.active_client_api_id', (int) $e['cliente']->active_client_api_id);
 
         /* La URL de la API sale normalizada como el resto del admin: en el hosting compartido lleva /public. */
-        $respuesta->assertJsonPath('cliente.sistema.api_url', 'https://api-panchito.comerciocity.com/public');
+        $respuesta->assertJsonPath('cliente.sistema.api_url', 'https://api-panchito.ejemplo.test/public');
 
         $this->assertArrayNotHasKey('contacto', $respuesta->json('cliente'));
         $this->assertArrayNotHasKey('formulario', $respuesta->json());

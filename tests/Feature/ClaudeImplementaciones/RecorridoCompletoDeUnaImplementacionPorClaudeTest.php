@@ -7,6 +7,7 @@ use App\Jobs\EjecutarUserSetupDeImplementacionJob;
 use App\Mail\ImplementacionMail;
 use App\Models\AdminSetting;
 use App\Models\Client;
+use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
 use App\Models\EnvTemplate;
@@ -85,6 +86,11 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         config([
             'services.anthropic.api_key'                           => '',
             'services.hostinger.api_token'                         => 'token-de-prueba',
+            /* El alta (`PromoteLeadToClientService`) escribe URLs de `comerciocity.com`, y las guardas de
+               `HostingProvisioningStructure` comparan los hosts contra este dominio: el recorrido promueve de
+               verdad, así que acá vale el real y no el `.test` de las fixtures. (Antes de llamar al cliente se
+               apuntan las dos APIs a un host de pruebas: ver el paso 6.) */
+            'services.hostinger.domain'                            => 'comerciocity.com',
             'services.claude_task_ingest.default_creator_admin_id' => null,
         ]);
 
@@ -347,12 +353,25 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $consulta = 'https://api-rosa.comerciocity.com/public/api/version-activa';
         $this->assertSame([$consulta], $this->llamadas->urls);
 
-        /* Y el worker lo corre: el POST a empresa-api sale con lo que cargó el cliente. */
+        /* Y el worker lo corre: el POST a empresa-api sale con lo que cargó el cliente.
+
+           🔴 Las URLs que escribió el alta son de `comerciocity.com`, o sea REALES, y el user setup hace
+           `migrate:fresh` del otro lado: el freno de `ImplementationUserSetupService::destino_permitido_en_
+           este_entorno()` no deja llamar desde un test a un host que no sea `.test` (el 5/10/2026 un test
+           le vació la base de producción a un cliente). Por eso, justo antes de que corra el job, se
+           apuntan las dos APIs a un dominio de pruebas. Todo lo anterior —el alta, la instalación y sus
+           guardas— ya se probó con las URLs que genera el sistema. */
+        ClientApi::where('client_id', $cliente->id)->get()->each(function (ClientApi $api) {
+            $api->url     = str_replace('.comerciocity.com', '.' . self::DOMINIO, (string) $api->url);
+            $api->spa_url = str_replace('.comerciocity.com', '.' . self::DOMINIO, (string) $api->spa_url);
+            $api->save();
+        });
+
         $token = (string) $this->estado($id)->json('user_setup.iniciado_at');
         $this->assertNotSame('', $token, 'El registro en_curso tiene que traer el token con el que se despachó el job.');
         (new EjecutarUserSetupDeImplementacionJob($id, $token))->handle();
 
-        $destino = 'https://api-rosa.comerciocity.com/api/admin-sync/user-setup';
+        $destino = 'https://api-rosa.' . self::DOMINIO . '/api/admin-sync/user-setup';
         $this->assertSame([$consulta, $destino], $this->llamadas->urls);
         $this->assertSame('Almacén Rosa S.A.', $this->llamadas->cuerpo[$destino]['company_name']);
         $this->assertSame((int) $cliente->user_id, (int) $this->llamadas->cuerpo[$destino]['user_id']);

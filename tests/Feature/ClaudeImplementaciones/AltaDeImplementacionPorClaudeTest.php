@@ -49,6 +49,13 @@ class AltaDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         config(['services.anthropic.api_key' => '']);
         config(['services.claude_task_ingest.default_creator_admin_id' => null]);
 
+        /* El alta PROMUEVE de verdad (`PromoteLeadToClientService` escribe URLs de `comerciocity.com`) y su
+           dry-run arma las cuatro URLs con `services.hostinger.domain`: acá tiene que valer el dominio real,
+           el mismo que en producción, y no el `.test` de las fixtures de la base. Este test nunca llama al
+           sistema del cliente (el alta no habla con nadie salvo la consulta de "¿ya hay un sistema vivo?",
+           que se falsea): no hay nada que pueda salir. */
+        config(['services.hostinger.domain' => 'comerciocity.com']);
+
         TaskTemplate::where('proceso', 'lead_a_cliente')->delete();
         foreach (['Reunión de kickoff', 'Instalar sistemas', 'Enviar pasos de implementación'] as $orden => $titulo) {
             TaskTemplate::create([

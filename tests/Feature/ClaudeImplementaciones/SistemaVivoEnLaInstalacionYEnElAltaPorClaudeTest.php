@@ -219,7 +219,7 @@ class SistemaVivoEnLaInstalacionYEnElAltaPorClaudeTest extends BaseDeImplementac
         $llamadas = new \stdClass();
         $llamadas->pedidos = [];
 
-        Http::swap(new \Illuminate\Http\Client\Factory());
+        Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
         Http::fake(function ($request, $opciones) use ($llamadas) {
             $llamadas->pedidos[] = ['metodo' => $request->method(), 'url' => $request->url(), 'techo' => isset($opciones['timeout']) ? $opciones['timeout'] : null];
 
@@ -232,7 +232,7 @@ class SistemaVivoEnLaInstalacionYEnElAltaPorClaudeTest extends BaseDeImplementac
         $this->assertCount(1, $llamadas->pedidos);
         $this->assertSame('GET', $llamadas->pedidos[0]['metodo']);
         $this->assertStringEndsWith(self::RUTA_DE_LA_VERSION_ACTIVA, $llamadas->pedidos[0]['url']);
-        $this->assertStringContainsString('api-panchito.comerciocity.com', $llamadas->pedidos[0]['url']);
+        $this->assertStringContainsString('api-panchito.ejemplo.test', $llamadas->pedidos[0]['url']);
         $this->assertSame(5, $llamadas->pedidos[0]['techo']);
 
         $respuesta->assertJsonPath('senales.version_activa.consultado', true);
@@ -262,7 +262,7 @@ class SistemaVivoEnLaInstalacionYEnElAltaPorClaudeTest extends BaseDeImplementac
         $con_404->assertJsonPath('senales.version_activa.responde_con_version', false);
         $this->assertSame([], $con_404->json('avisos'));
 
-        Http::swap(new \Illuminate\Http\Client\Factory());
+        Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
         Http::fake(function () {
             throw new ConnectionException('cURL error 6: Could not resolve host');
         });
@@ -286,7 +286,7 @@ class SistemaVivoEnLaInstalacionYEnElAltaPorClaudeTest extends BaseDeImplementac
     {
         $e = $this->escenario();
 
-        Http::swap(new \Illuminate\Http\Client\Factory());
+        Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
         Http::fake(['*' => Http::response(['ok' => true], 200)]);
 
         $respuesta = $this->instalar($e['implementacion'], []);

@@ -18,6 +18,12 @@ use Illuminate\Support\Facades\Log;
 class ImplementationUserSetupService
 {
     /**
+     * Con lo que empieza el mensaje de `trigger_user_setup()` cuando se NEGÓ a llamar (un test que
+     * apuntaba a un host real). El job del user setup lo reconoce para decir que el setup no corrió.
+     */
+    const PREFIJO_BLOQUEADO = 'Bloqueado: ';
+
+    /**
      * Ejecuta el setup remoto del sistema del cliente vía empresa-api.
      *
      * Construye el payload a partir de client.setup_data y datos del cliente, lo envía
@@ -66,6 +72,24 @@ class ImplementationUserSetupService
         // Endpoint del setup remoto en empresa-api.
         $endpoint = rtrim($client_api_url, '/') . '/api/admin-sync/user-setup';
 
+        // 🔴 Freno de seguridad (5/10/2026): este pedido hace `migrate:fresh` del otro lado. Un test que
+        // llegó acá con la URL de un cliente real le vació la base de producción. Con APP_ENV=testing solo
+        // se llama a un host .test, .localhost o de loopback; cualquier otro se niega ANTES de armar el
+        // pedido, aunque haya un Http::fake() (un fake que cubre un host real es justo el error).
+        if (! self::destino_permitido_en_este_entorno($endpoint)) {
+            Log::channel('daily')->error('ImplementationUserSetupService: BLOQUEADO el user setup a un host real desde un test.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $client->id,
+                'host'              => (string) parse_url($endpoint, PHP_URL_HOST),
+            ]);
+
+            return [
+                'ok'      => false,
+                'message' => self::PREFIJO_BLOQUEADO . 'con APP_ENV=testing el user setup solo puede apuntar a un host .test, .localhost o de '
+                    . 'loopback (el destino era «' . (string) parse_url($endpoint, PHP_URL_HOST) . '»). Un test no puede vaciar la base de un sistema real.',
+            ];
+        }
+
         try {
             $timeout = $this->resolver_timeout($timeout_segundos);
 
@@ -109,6 +133,36 @@ class ImplementationUserSetupService
 
             return ['ok' => false, 'message' => 'Error de conexión con la client_api: ' . $exception->getMessage()];
         }
+    }
+
+    /**
+     * ¿Se puede llamar a esta URL desde el entorno en el que corre la aplicación?
+     *
+     * Fuera de `testing` siempre sí (es el comportamiento de siempre). Con `APP_ENV=testing`, solo si el
+     * host es de pruebas: `localhost`, `127.0.0.1`, `::1`, o cualquier nombre terminado en `.test` o
+     * `.localhost`. Los mismos que el resto de las herramientas de la casa consideran "desarrollo local".
+     *
+     * @param string $url URL a la que se va a llamar.
+     *
+     * @return bool
+     */
+    public static function destino_permitido_en_este_entorno(string $url): bool
+    {
+        if (! app()->environment('testing')) {
+            return true;
+        }
+
+        $host = strtolower(trim((string) parse_url($url, PHP_URL_HOST), '[]'));
+
+        if ($host === '') {
+            return false;
+        }
+
+        if ($host === 'localhost' || $host === '127.0.0.1' || $host === '::1') {
+            return true;
+        }
+
+        return substr($host, -5) === '.test' || substr($host, -10) === '.localhost';
     }
 
     /**

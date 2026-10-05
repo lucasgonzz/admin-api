@@ -338,7 +338,8 @@ class EjecutarUserSetupDeImplementacionJob implements ShouldQueue
             return ['texto' => $mensaje . ' — ' . $espera_cortada . self::ANTES_DE_REINTENTAR, 'puede_haber_corrido' => true];
         }
 
-        if (strpos($mensaje, 'No se encontró el cliente') !== false || strpos($mensaje, 'todavía no tiene una client_api activa') !== false) {
+        if (strpos($mensaje, 'No se encontró el cliente') !== false || strpos($mensaje, 'todavía no tiene una client_api activa') !== false
+            || strpos($mensaje, ImplementationUserSetupService::PREFIJO_BLOQUEADO) === 0) {
             return ['texto' => $mensaje . ' — El setup no llegó a salir: no corrió.', 'puede_haber_corrido' => false];
         }
 

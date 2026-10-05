@@ -34,7 +34,7 @@ class EjecucionDelUserSetupPorElJobTest extends BaseDeImplementaciones
     const TOKEN = '2026-10-05T10:00:00.000000Z';
 
     /** URL de la empresa-api del cliente de prueba (la API activa). */
-    const URL_API = 'https://api-panchito.comerciocity.com';
+    const URL_API = 'https://api-panchito.ejemplo.test';
 
     /* ------------------------------------------------------------------------------------------
      | Escenario
@@ -106,7 +106,7 @@ class EjecucionDelUserSetupPorElJobTest extends BaseDeImplementaciones
         /* Una fábrica nueva en cada llamada: con `Http::fake()` los stubs se ACUMULAN y gana el primero que
            matchea, así que un test que falsea varias veces (un status distinto por vuelta) se quedaría con
            la primera respuesta. */
-        Http::swap(new \Illuminate\Http\Client\Factory());
+        Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
 
         Http::fake(function ($request, $opciones) use ($llamadas, $status, $en_el_medio) {
             $llamadas->urls[]   = $request->url();
