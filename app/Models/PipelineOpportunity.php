@@ -32,6 +32,8 @@ use Illuminate\Database\Eloquent\Model;
  * @property \Illuminate\Support\Carbon|null $next_action_at    Hora local; sin hora = 00:00:00.
  * @property string|null                     $next_action_note
  * @property string|null                     $next_action_source agenda | manual | null.
+ * @property int|null                        $next_action_calendar_admin_id   Admin dueño del calendario donde está el evento de la próxima acción (Google Calendar); null = sin evento.
+ * @property string|null                     $next_action_calendar_event_id   Id del evento en Google Calendar; null = sin evento. Lo escribe solo `PipelineCalendarSync`.
  * @property \Illuminate\Support\Carbon|null $stage_entered_at
  * @property \Illuminate\Support\Carbon|null $closed_at
  * @property string|null                     $lost_reason
