@@ -98,6 +98,14 @@ class PipelineCalendarSync
     private $tokens = [];
 
     /**
+     * Conexiones cuyo refresco de token falló en este request, con el mensaje del error. Se
+     * consulta antes de pedir un token para no reintentar un refresco que ya falló (ver `llamar()`).
+     *
+     * @var array<int, string>
+     */
+    private $tokens_fallidos = [];
+
+    /**
      * @param GoogleCalendarOAuthService      $oauth Refresco del access token de la conexión.
      * @param CloserGoogleCalendarBusyService $busy  Para invalidar la caché de disponibilidad.
      */
@@ -137,7 +145,16 @@ class PipelineCalendarSync
     public function sincronizar(PipelineOpportunity $op, $admin_id, $fecha_anterior = null)
     {
         try {
-            $this->sincronizar_interno($op, $admin_id === null ? null : (int) $admin_id, $this->fecha_a_texto($fecha_anterior));
+            $fresca = $this->sincronizar_interno($op, $admin_id === null ? null : (int) $admin_id, $this->fecha_a_texto($fecha_anterior));
+
+            /* El trabajo se hizo sobre una copia fresca de la base: la instancia que recibió el
+               llamador se pone al día con lo que quedó anotado del evento. */
+            if ($fresca !== null) {
+                $op->next_action_calendar_admin_id = $fresca->next_action_calendar_admin_id;
+                $op->next_action_calendar_event_id = $fresca->next_action_calendar_event_id;
+                $op->syncOriginalAttribute('next_action_calendar_admin_id');
+                $op->syncOriginalAttribute('next_action_calendar_event_id');
+            }
         } catch (\Throwable $e) {
             Log::channel('disponibilidad')->error(
                 self::LOG . ' Excepción al sincronizar la próxima acción con Google Calendar.'
@@ -187,28 +204,50 @@ class PipelineCalendarSync
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * El cuerpo de `sincronizar()`, sin el try/catch.
+     * El cuerpo de `sincronizar()`, sin el try/catch. Relee la oportunidad de la base y trabaja con
+     * ese estado (ver el comentario adentro).
      *
      * @param PipelineOpportunity $op
      * @param int|null            $admin_id
      * @param string|null         $fecha_anterior `Y-m-d H:i:s` o null.
      *
-     * @return void
+     * @return PipelineOpportunity|null La copia fresca con la que se trabajó (con el evento ya anotado), o null si la oportunidad ya no existe.
      */
     private function sincronizar_interno(PipelineOpportunity $op, $admin_id, $fecha_anterior)
     {
+        /* 🔴 Se trabaja con el estado FRESCO de la base, no con la instancia en memoria. Dos requests
+           casi simultáneos sobre la misma oportunidad (doble click en Guardar) cargaron la fila
+           antes de que el otro terminara: el segundo creía "sin evento" cuando el primero ya había
+           creado uno, y hacía un segundo POST (evento duplicado). Releyendo acá, justo antes de
+           llamar a Google, el segundo ve el evento del primero y hace un PATCH. Si la fecha de la
+           base ya no es la que venía a sincronizar, manda la de la base: es la que quedó guardada.
+           Honestamente: esto REDUCE la ventana de la carrera, no la cierra del todo; entre esta
+           lectura y el guardado del id del evento siguen pasando unas decenas de milisegundos (la
+           llamada a Google) en los que otro request podría leer "sin evento". Cerrarla de verdad
+           exigiría un lock de la fila durante la llamada a Google, que es justo lo que decisión 5
+           de la clase prohíbe. Un evento duplicado en un calendario es molesto, no destructivo. */
+        $fresca = PipelineOpportunity::query()->whereKey($op->id)->first();
+        if ($fresca === null) {
+            /* La oportunidad se borró entre el commit y acá: no hay nada que sincronizar. */
+            return null;
+        }
+        $op = $fresca;
+
         $evento_id    = $this->texto($op->next_action_calendar_event_id);
         $evento_admin = $op->next_action_calendar_admin_id === null ? null : (int) $op->next_action_calendar_admin_id;
         $tiene_evento = $evento_id !== null && $evento_admin !== null;
 
-        /* Estado deseado: NO hay próxima acción. Lo único que puede haber que hacer es borrar. */
+        /* Estado deseado: NO hay próxima acción. Lo único que puede haber que hacer es borrar.
+           Nota: si esto es el reintento de un borrado que había fallado, `$fecha_anterior` es null
+           (la próxima acción ya estaba vacía) y la caché de disponibilidad de la fecha que tenía el
+           evento no se invalida: esa fecha no se guarda en ningún lado. Vence sola a los 5 minutos. */
         if ($op->next_action_at === null) {
             if ($tiene_evento && $this->borrar_en_google($evento_admin, $evento_id, $op->id)) {
                 $this->guardar_evento($op, null, null);
                 $this->invalidar_cache([$this->fecha_que_bloquea($fecha_anterior)]);
             }
 
-            return;
+            return $op;
         }
 
         $fecha_nueva = $op->next_action_at->format('Y-m-d H:i:s');
@@ -225,7 +264,7 @@ class PipelineCalendarSync
                 }
             }
 
-            return;
+            return $op;
         }
 
         $url_eventos = $this->url_eventos($conexion);
@@ -243,7 +282,7 @@ class PipelineCalendarSync
                     . ' opportunity_id=' . $op->id . ' admin_id=' . $admin_id . ' google_event_id=' . $evento_id
                 );
 
-                return;
+                return $op;
             }
 
             if ($respuesta === null || ! in_array($respuesta->status(), [404, 410], true)) {
@@ -252,7 +291,7 @@ class PipelineCalendarSync
                     $this->loguear_falla('actualizar', $respuesta, $admin_id, $op->id);
                 }
 
-                return;
+                return $op;
             }
 
             /* 404 / 410: el admin borró el evento a mano en su calendario. Se recrea más abajo. */
@@ -275,7 +314,7 @@ class PipelineCalendarSync
         $respuesta = $this->llamar($conexion, 'POST', $url_eventos, $this->cuerpo_del_evento($op, false), $op->id);
 
         if ($respuesta === null) {
-            return;
+            return $op;
         }
 
         $nuevo_id = $respuesta->successful() ? $this->texto($respuesta->json('id')) : null;
@@ -283,7 +322,7 @@ class PipelineCalendarSync
         if ($nuevo_id === null) {
             $this->loguear_falla('crear', $respuesta, $admin_id, $op->id);
 
-            return;
+            return $op;
         }
 
         $this->guardar_evento($op, $nuevo_id, $admin_id);
@@ -294,6 +333,8 @@ class PipelineCalendarSync
             . ' opportunity_id=' . $op->id . ' admin_id=' . $admin_id . ' google_event_id=' . $nuevo_id
             . ' inicio=' . $fecha_nueva
         );
+
+        return $op;
     }
 
     /**
@@ -379,7 +420,9 @@ class PipelineCalendarSync
 
     /**
      * Nombre y rótulo ("Cliente" / "Lead") del sujeto de la oportunidad, con el mismo criterio que
-     * el tablero (`PipelinePresenter`): así el evento dice lo mismo que la tarjeta.
+     * el tablero (`PipelinePresenter`): así el evento dice lo mismo que la tarjeta. Un nombre vacío
+     * (o de puros espacios) cuenta como sin nombre: el título no queda con un guion colgando ni la
+     * descripción con un "Cliente: " vacío.
      *
      * @param PipelineOpportunity $op
      *
@@ -390,13 +433,13 @@ class PipelineCalendarSync
         $presenter = new PipelinePresenter();
 
         if ($op->client_id !== null) {
-            $nombre = $op->client ? $presenter->subject_de_cliente($op->client, false)['name'] : null;
+            $nombre = $op->client ? $this->texto($presenter->subject_de_cliente($op->client, false)['name']) : null;
 
             return ['name' => $nombre, 'label' => 'Cliente'];
         }
 
         if ($op->lead_id !== null) {
-            $nombre = $op->lead ? $presenter->subject_de_lead($op->lead, false)['name'] : null;
+            $nombre = $op->lead ? $this->texto($presenter->subject_de_lead($op->lead, false)['name']) : null;
 
             return ['name' => $nombre, 'label' => 'Lead'];
         }
@@ -453,8 +496,21 @@ class PipelineCalendarSync
     private function llamar(AdminCalendarConnection $conexion, $metodo, $url, array $cuerpo, $oportunidad_id)
     {
         try {
+            /* Si el refresco de ESTA conexión ya falló en este request, no se reintenta: un alta
+               masiva con el endpoint de tokens caído haría 25 intentos (cada uno hasta su timeout)
+               con el request del admin esperando. La falla se recuerda por conexión. */
+            if (isset($this->tokens_fallidos[$conexion->id])) {
+                return null;
+            }
+
             if (! isset($this->tokens[$conexion->id])) {
-                $this->tokens[$conexion->id] = $this->oauth->get_fresh_access_token($conexion);
+                try {
+                    $this->tokens[$conexion->id] = $this->oauth->get_fresh_access_token($conexion);
+                } catch (\Throwable $e) {
+                    $this->tokens_fallidos[$conexion->id] = $e->getMessage();
+
+                    throw $e;
+                }
             }
 
             $cliente = Http::withToken($this->tokens[$conexion->id])->timeout(self::TIMEOUT_SEGUNDOS);
