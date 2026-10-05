@@ -78,7 +78,10 @@ use Illuminate\Support\Str;
  *
  * 🔴 LO QUE ESTE CONTROLADOR NUNCA HACE (cada una está escrita donde corresponde):
  *  - Re-aplicar el user setup. Del otro lado el setup arranca con `migrate:fresh --force` y le
- *    vacía la base al cliente; el panel ofrece "forzar" y esta puerta NO. Si de verdad hace falta
+ *    vacía la base al cliente; el panel ofrece "forzar" y esta puerta NO: con el candado lleno es 422
+ *    sin vuelta, y solo se aplica en la etapa 2. Lo único que hay es una salida tras un ERROR del
+ *    job —que casi nunca prueba que no corrió—: `reintentar` (vuelve a despachar) o `conciliar` (el
+ *    dueño ya existe: lo da por aplicado SIN llamar al cliente), excluyentes. Si de verdad hace falta
  *    re-aplicarlo, se hace desde el panel, con una persona mirando.
  *  - Disparar `handle_stage_advance` al avanzar de etapa. En este camino la instalación la crea
  *    `install`, no la entrada a la etapa 2.
