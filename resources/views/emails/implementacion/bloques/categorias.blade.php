@@ -2,8 +2,8 @@
   Hito "categorias": las tres formas de ordenar el catálogo, para que el cliente elija una.
 
   Cada opción es una tarjeta con su número y cuántas categorías tiene, su nombre, en qué se basa y,
-  si hay, hasta cuatro ejemplos como fichas. No lleva botón: la elección se hace contestando por
-  WhatsApp o en el sistema. El cierre es el de siempre, salvo que el dato `como_elegir` lo reemplace.
+  si hay, hasta cuatro ejemplos como fichas. No lleva botón: la elección se hace en el sistema
+  del cliente (Alertas → Catálogo → Categorías). El cierre es el de siempre, salvo que el dato `como_elegir` lo reemplace.
 
   Variables de este hito: $opciones (indice, categorias_texto, categorias_leyenda, nombre, base,
   ejemplos) y $como_elegir. Hereda de `hito.blade.php`: $font.
@@ -28,6 +28,6 @@
 </tr>
 <tr>
   <td class="cc-lado" style="padding:28px 48px 0 48px;">
-    <p style="margin:0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;word-break:break-word;">{{ $como_elegir !== '' ? $como_elegir : 'Contestanos por WhatsApp con el número de la que elegís. Si te gustan partes de dos, también se pueden combinar.' }}</p>
+    <p style="margin:0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;word-break:break-word;">{{ $como_elegir !== '' ? $como_elegir : 'Las ves completas y elegís desde tu sistema, en Alertas → Catálogo → Categorías: ahí ves los productos de cada una y cómo quedaría el menú de tu tienda. La elección la hace el dueño de la cuenta.' }}</p>
   </td>
 </tr>

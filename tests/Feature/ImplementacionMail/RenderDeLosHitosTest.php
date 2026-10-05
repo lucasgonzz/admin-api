@@ -321,7 +321,7 @@ class RenderDeLosHitosTest extends BaseDelMailDeImplementacion
         $this->assertStringContainsString('Agrupa por lo que el cliente quiere hacer.', $html);
         $this->assertStringContainsString('Fijaciones', $html);
         $this->assertStringContainsString('Tornillería &gt; Autoperforantes', $html, 'El texto con ">" sale escapado.');
-        $this->assertStringContainsString('Contestanos por WhatsApp con el número de la que elegís.', $html);
+        $this->assertStringContainsString('elegís desde tu sistema, en Alertas → Catálogo → Categorías', $html);
         $this->assertStringNotContainsString('class="cc-boton"', $html);
     }
 
@@ -350,7 +350,7 @@ class RenderDeLosHitosTest extends BaseDelMailDeImplementacion
 
         $this->assertStringContainsString('Opción 1 &middot; 1 categoría<', $html);
         $this->assertStringContainsString('Elegí con el número y lo dejamos armado esta semana.', $html);
-        $this->assertStringNotContainsString('Contestanos por WhatsApp con el número de la que elegís.', $html);
+        $this->assertStringNotContainsString('elegís desde tu sistema, en Alertas → Catálogo → Categorías', $html);
         $this->assertStringNotContainsString('border:1px solid #e1e5ef', $html, 'Sin ejemplos no hay fichas.');
     }
 

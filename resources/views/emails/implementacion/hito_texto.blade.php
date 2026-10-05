@@ -79,7 +79,7 @@ Por ejemplo: {{ implode(', ', $opcion['ejemplos']) }}
 @endif
 
 @endforeach
-{{ $como_elegir !== '' ? $como_elegir : 'Contestanos por WhatsApp con el número de la que elegís. Si te gustan partes de dos, también se pueden combinar.' }}
+{{ $como_elegir !== '' ? $como_elegir : 'Las ves completas y elegís desde tu sistema, en Alertas → Catálogo → Categorías: ahí ves los productos de cada una y cómo quedaría el menú de tu tienda. La elección la hace el dueño de la cuenta.' }}
 @elseif($hito === 'listo')
 @if(count($resumen) > 0)
 Lo que quedó cargado:
