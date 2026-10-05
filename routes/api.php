@@ -510,6 +510,13 @@ Route::middleware('claude.task.key')
            vez aplicado, no se vuelve a correr por acá. Encolado en `database` con 202; la llamada va con 600 s. */
         Route::post('implementations/{id}/user-setup', 'Api\ClaudeImplementationOpsController@user_setup_json')
             ->whereNumber('id');
+
+        /* El MAIL de cada hito (bienvenida, instalado, acceso, imagenes, categorias, listo) al dueño del negocio, con la
+           línea de progreso de las ocho etapas. Síncrono, por el mailer `admin` (admin@comerciocity.com), y registrado en
+           `implementation_mails`. El armado y el envío viven en ImplementacionMailService: acá solo están los frenos —
+           lista blanca, datos validados por hito, dry_run por defecto y confirm_client_name— y la respuesta. */
+        Route::post('implementations/{id}/mail', 'Api\ClaudeImplementationOpsController@mail_json')
+            ->whereNumber('id');
     });
 
 /*

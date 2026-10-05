@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\ImplementacionMailException;
 use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Jobs\EjecutarInstalacionDeImplementacionJob;
@@ -15,6 +16,7 @@ use App\Models\ClientSshCredential;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
 use App\Models\Implementation;
+use App\Models\ImplementationMail;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
 use App\Models\ImplementationStageConfig;
@@ -23,6 +25,7 @@ use App\Models\Version;
 use App\Services\ArgentinePhoneNormalizer;
 use App\Services\ClientEmpresaApiUrlResolver;
 use App\Services\HostingProvisioningStructure;
+use App\Services\ImplementacionMailService;
 use App\Services\ImplementationActionService;
 use App\Services\ImplementationFormMapper;
 use App\Services\ImplementationSettings;
@@ -227,6 +230,13 @@ class ClaudeImplementationOpsController extends Controller
      * @var array<string, string>
      */
     const VALORES_ESTANDAR_DE_CONEXION = ['DB_CONNECTION' => 'mysql', 'DB_HOST' => '127.0.0.1', 'DB_PORT' => '3306'];
+
+    /**
+     * Lista blanca de `POST claude/implementations/{id}/mail`. Cualquier otra clave es 422: un `para`, un
+     * `asunto`, un `html` o un `from` suelen ser alguien esperando armar el mail a mano, y el mail de
+     * cada hito lo arma el servicio (el texto, la casilla y el remitente no se eligen desde afuera).
+     */
+    const PARAMETROS_DEL_MAIL = ['hito', 'datos', 'email', 'reenviar', 'dry_run', 'confirm_client_name'];
 
     /** Lista blanca de la lectura del estado por id. */
     const PARAMETROS_DE_LA_LECTURA = ['include'];
@@ -3053,6 +3063,192 @@ class ClaudeImplementationOpsController extends Controller
             'aviso_destructivo' => 'Del otro lado el setup arranca con migrate:fresh --force: VACÍA la base del sistema del cliente. Solo se aplica sobre una '
                 . 'instalación recién hecha y una sola vez; este camino no tiene forzar.',
             'nota'              => 'Simulacro: no se encoló nada. Repetí con dry_run=false y confirm_client_name para aplicar la configuración.',
+        ];
+    }
+
+    /* ==============================================================================================
+     | 7) POST claude/implementations/{id}/mail — el MAIL de cada hito
+     |============================================================================================= */
+
+    /**
+     * Manda (o simula) el mail de un hito de la implementación al dueño del negocio: bienvenida, sistema
+     * instalado, acceso, fotos, categorías o sistema listo. Cada uno lleva la línea de progreso con el
+     * estado real de las ocho etapas.
+     *
+     * 🔴 ESTE ENDPOINT SOLO ARMA LA RESPUESTA Y PONE LOS FRENOS. El armado del mail, el envío, la casilla
+     * y el registro viven en `ImplementacionMailService`: acá no hay ni una regla de qué dice cada mail ni
+     * de a quién le llega. Es la misma separación que el resto del bloque: el controlador frena y contesta,
+     * el servicio hace.
+     *
+     * Qué hace cada llamada:
+     *   - `dry_run` (default TRUE): `previa()` — el mail armado, con su asunto, su HTML, la casilla
+     *     enmascarada y lo que le FALTA para poder mandarse (`faltan`: `email`, `form_link`, `url_sistema`),
+     *     tal cual lo devuelve el servicio. No manda ni escribe NADA. Un hito que ya salió se avisa en
+     *     `ya_enviado` (el real pediría `reenviar=true`).
+     *   - `dry_run=false`: `enviar()`, con `confirm_client_name`. Síncrono, por el mailer `admin`
+     *     (`admin@comerciocity.com`), y registrado en `implementation_mails`.
+     *
+     * Frenos: lista blanca de parámetros y tipos; los datos del hito se validan por hito ANTES de armar
+     * nada (`validar_datos()`); `confirm_client_name` exacto; y los del servicio —un solo envío por
+     * (implementación, hito) salvo `reenviar`, un lock por hito contra el doble envío, y la casilla—.
+     *
+     * 🔴 Las excepciones de negocio del servicio (`ImplementacionMailException`) se contestan con SU
+     * status —422, o 409 si hay otro envío del mismo hito en vuelo— y su `motivo` corto y estable
+     * (`sin_mail`, `ya_enviado`, `faltan_datos`, `hito_invalido`, `envio_en_curso`), para decidir sin
+     * parsear el texto. Un envío que FALLA (SMTP caído, sin credencial en el `.env`) NO tira: vuelve 200
+     * con `estado: error` y el motivo, porque el intento quedó registrado y es lo que hay que mirar.
+     *
+     * 🔴 Una casilla pasada en `email` pisa a las demás y, si el mail sale, se guarda en `clients.email`:
+     * así el aviso de actualización tampoco queda en `sin_mail`. Es varchar(150): por eso el tope.
+     *
+     * @param Request    $request Body: hito, datos?, email?, reenviar?, dry_run?, confirm_client_name.
+     * @param int|string $id      Id de la implementación (segmento de la URL).
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function mail_json(Request $request, $id)
+    {
+        /* --- Freno 1: lista blanca y tipos. --- */
+        $rechazo = $this->rechazar_parametros_de_mas($request, self::PARAMETROS_DEL_MAIL, 'POST claude/implementations/{id}/mail');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        $invalido = $this->validar_o_422($request, [
+            'hito'                => 'required|string|in:' . implode(',', ImplementacionMailService::HITOS),
+            'datos'               => 'nullable|array',
+            'email'               => 'nullable|email:rfc|max:' . ImplementacionMailService::MAX_CASILLA,
+            'reenviar'            => 'nullable|boolean',
+            'dry_run'             => 'nullable|boolean',
+            'confirm_client_name' => 'required_if:dry_run,false|nullable|string|max:190',
+        ]);
+        if ($invalido !== null) {
+            return $invalido;
+        }
+
+        $implementation = Implementation::find((int) $id);
+        if ($implementation === null) {
+            return $this->error_404('no existe la implementación ' . (int) $id);
+        }
+
+        $client = Client::find((int) $implementation->client_id);
+        if ($client === null) {
+            return $this->error_404('la implementación ' . (int) $id . ' apunta a un cliente que no existe');
+        }
+
+        $hito     = (string) $request->input('hito');
+        $datos    = is_array($request->input('datos')) ? $request->input('datos') : [];
+        $email    = $this->texto_o_null($request->input('email'));
+        $reenviar = $this->booleano_o_null($request, 'reenviar') === true;
+        $dry_run  = $this->resolver_dry_run($request);
+
+        /* --- Freno 2: los datos del hito, por hito, antes de armar nada. --- */
+        $errores = ImplementacionMailService::validar_datos($hito, $datos);
+        if (count($errores) > 0) {
+            return $this->respuesta_del_error_del_mail(ImplementacionMailException::faltan_datos(array_keys($errores), $errores));
+        }
+
+        if ($dry_run) {
+            try {
+                $previa = ImplementacionMailService::previa($implementation, $hito, $datos, $email);
+            } catch (ImplementacionMailException $e) {
+                return $this->respuesta_del_error_del_mail($e);
+            }
+
+            $previo = $this->mail_previo($implementation, $hito);
+            $ya_salio = $previo !== null && $previo['estado'] === 'enviado';
+
+            return response()->json([
+                'dry_run'          => true,
+                'hito'             => $hito,
+                'listo'            => count($previa['faltan']) === 0 && (! $ya_salio || $reenviar),
+                'asunto'           => $previa['asunto'],
+                'para_enmascarado' => $previa['para_enmascarado'],
+                'html'             => $previa['html'],
+                'faltan'           => $previa['faltan'],
+                'ya_enviado'       => $previo,
+                'nota'             => 'Simulacro: no se mandó ni se escribió nada. '
+                    . ($ya_salio && ! $reenviar ? 'Este hito YA salió: el real pide reenviar=true. ' : '')
+                    . 'Repetí con dry_run=false y confirm_client_name para mandarlo.',
+            ], 200);
+        }
+
+        /* --- Freno 3: confirmación por nombre. --- */
+        $rechazo = $this->rechazar_si_el_nombre_del_cliente_no_confirma($request, $client, 'No se mandó nada.');
+        if ($rechazo !== null) {
+            return $rechazo;
+        }
+
+        try {
+            $resultado = ImplementacionMailService::enviar($implementation, $hito, $datos, $email, $reenviar);
+        } catch (ImplementacionMailException $e) {
+            return $this->respuesta_del_error_del_mail($e);
+        }
+
+        return response()->json([
+            'dry_run'          => false,
+            'hito'             => $hito,
+            'enviado'          => $resultado['estado'] === 'enviado',
+            'estado'           => $resultado['estado'],
+            'para_enmascarado' => $resultado['para_enmascarado'],
+            'enviado_at'       => $resultado['enviado_at'],
+            'reenvios'         => (int) $resultado['reenvios'],
+            'error'            => $resultado['error'],
+        ], 200);
+    }
+
+    /**
+     * La respuesta de una `ImplementacionMailException`: su status (422, o 409 si hay otro envío en
+     * vuelo) y el cuerpo con el `motivo` corto y estable.
+     *
+     * Lleva el texto dos veces —`error` y `message`— a propósito: `error` es la forma que promete todo el
+     * bloque `claude/*` y `message` es la que ya devuelve la propia excepción cuando nadie la atrapa
+     * (`render()`), y la skill lee una u otra según de dónde venga la respuesta. Son idénticas.
+     *
+     * @param ImplementacionMailException $e La excepción.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    protected function respuesta_del_error_del_mail(ImplementacionMailException $e)
+    {
+        return response()->json([
+            'error'   => $e->getMessage(),
+            'message' => $e->getMessage(),
+            'motivo'  => $e->getMotivo(),
+            'errores' => $e->errores,
+            'faltan'  => $e->faltan,
+        ], (int) $e->getCode());
+    }
+
+    /**
+     * Lo que ya pasó con el mail de un hito: la fila de `implementation_mails`, o null si nunca se
+     * intentó (o si la tabla todavía no existe).
+     *
+     * La casilla sale enmascarada, con el mismo formato que `para_enmascarado`.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param string         $hito           El hito.
+     *
+     * @return array<string, mixed>|null
+     */
+    protected function mail_previo(Implementation $implementation, $hito)
+    {
+        if (! $this->existe_la_tabla_de_mails()) {
+            return null;
+        }
+
+        $fila = ImplementationMail::where('implementation_id', $implementation->id)->where('hito', $hito)->first();
+
+        if ($fila === null) {
+            return null;
+        }
+
+        return [
+            'estado'           => (string) $fila->estado,
+            'enviado_at'       => $this->instante($fila->enviado_at),
+            'reenvios'         => (int) $fila->reenvios,
+            'para_enmascarado' => ImplementacionMailHelper::enmascarar((string) $fila->email),
+            'error'            => $this->recortar($fila->error),
         ];
     }
 
