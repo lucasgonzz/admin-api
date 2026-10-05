@@ -512,6 +512,45 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
+     * 🔴 Si encolar el job FALLA, el registro —que ya decía `en_curso`— queda en `error` con el motivo:
+     * sin un job que lo termine quedaría `en_curso` hasta darse por colgado, 45 minutos después. No toca el
+     * candado (nada se aplicó) y el reintento, con la cola andando, sale.
+     *
+     * @return void
+     */
+    public function test_si_no_se_puede_encolar_el_registro_queda_en_error_y_se_puede_reintentar(): void
+    {
+        $e = $this->escenario();
+
+        /* Se reemplaza el despachador CONCRETO y no el contrato: `instance()` borra el alias del contrato al
+           concreto, y después de restaurarlo ya no se podría resolver. */
+        $roto = \Mockery::mock(\Illuminate\Bus\Dispatcher::class);
+        $roto->shouldReceive('dispatch')->andThrow(new \RuntimeException('la tabla jobs no existe'));
+        $this->app->instance(\Illuminate\Bus\Dispatcher::class, $roto);
+
+        $respuesta = $this->configurar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez']);
+
+        $respuesta->assertStatus(500);
+        $respuesta->assertJsonPath('reintentable', true);
+        $this->assertStringContainsString('la tabla jobs no existe', $respuesta->json('error'));
+
+        $registro = $this->registro($e['implementacion']);
+        $this->assertSame('error', $registro['estado']);
+        $this->assertStringContainsString('No se pudo encolar el job', $registro['error']);
+        $this->assertNotEmpty($registro['terminado_at']);
+        $this->assertNull($e['implementacion']->refresh()->user_setup_executed_at);
+
+        $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers())->assertJsonPath('user_setup.estado', 'error');
+
+        /* Con la cola andando otra vez, el reintento sale. */
+        $this->app->forgetInstance(\Illuminate\Bus\Dispatcher::class);
+        Queue::fake();
+
+        $this->configurar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez'])->assertStatus(202);
+        Queue::assertPushed(EjecutarUserSetupDeImplementacionJob::class, 1);
+    }
+
+    /**
      * La confirmación acepta el nombre con otras mayúsculas y espacios.
      *
      * @return void

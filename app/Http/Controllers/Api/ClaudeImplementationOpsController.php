@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Jobs\EjecutarInstalacionDeImplementacionJob;
 use App\Jobs\EjecutarUserSetupDeImplementacionJob;
+use App\Mail\Helpers\ImplementacionMailHelper;
 use App\Models\Admin;
 use App\Models\AdminSetting;
 use App\Models\Client;
@@ -32,12 +33,12 @@ use App\Services\ImplementationSettings;
 use App\Services\ImplementationStartService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\SubdomainSuggestionService;
-use App\Mail\Helpers\ImplementacionMailHelper;
 use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
@@ -184,10 +185,11 @@ class ClaudeImplementationOpsController extends Controller
     const PARAMETROS_DE_LA_ACCION = ['accion', 'canal', 'texto', 'telefono', 'etapa'];
 
     /**
-     * Las acciones que se pueden registrar. Las cuatro primeras más `progreso` son las del panel con
-     * mensaje (las que lee el checklist de la SPA); `acceso`, `imagenes`, `categorias`, `descripciones` y
-     * `listo` son los hitos de la migración y la entrega que el panel no tiene; `nota` es una anotación
-     * libre. `user_setup` y `crear_instalacion` NO están a propósito: las escriben sus propios endpoints.
+     * Las acciones que se pueden registrar. Las cinco primeras son las acciones con mensaje del panel
+     * (`presentacion`, `form_link`, `progreso`, `pedir_archivos` y `entrega`; las que lee el checklist de
+     * la SPA); `acceso`, `imagenes`, `categorias`, `descripciones` y `listo` son los hitos de la
+     * migración y la entrega que el panel no tiene; `nota` es una anotación libre. `user_setup` y
+     * `crear_instalacion` NO están a propósito: las escriben sus propios endpoints.
      *
      * @var array<int, string>
      */
@@ -251,17 +253,10 @@ class ClaudeImplementationOpsController extends Controller
     const CARACTERES_POR_LINEA = 500;
 
     /**
-     * Estados de la implementación que se leen de `implementation_stages.status`, tal cual.
-     * `skipped` existe en el enum aunque el panel no lo escribe nunca: lo escribe `advance` con
-     * `saltar=true`.
-     */
-    const ESTADOS_DE_ETAPA = ['pending', 'in_progress', 'completed', 'skipped'];
-
-    /**
      * Minutos después de los cuales un user setup que dice `en_curso` se da por colgado.
      *
      * 🔴 Existe porque `en_curso` es un estado que escribe el endpoint ANTES de despachar el job y
-     * que borra el job al terminar. Si el worker muere sin pasar ni por `handle()` ni por `failed()`
+     * que el job reemplaza por `ok` o `error` al terminar. Si el worker muere sin pasar ni por `handle()` ni por `failed()`
      * (un `kill -9`, un reinicio del servidor) el estado se queda en `en_curso` PARA SIEMPRE, y como
      * `user-setup` frena con 409 mientras haya uno en curso, la implementación quedaría trabada sin
      * que ninguna llamada pueda destrabarla. 45 minutos son tres veces el techo del job (900 s) y
@@ -432,10 +427,10 @@ class ClaudeImplementationOpsController extends Controller
     {
         $implementation->loadMissing(['client', 'stages']);
 
-        $client        = $implementation->client;
-        $con_contacto  = in_array('contacto', $includes, true);
+        $client         = $implementation->client;
+        $con_contacto   = in_array('contacto', $includes, true);
         $con_formulario = in_array('formulario', $includes, true);
-        $con_logs      = in_array('logs', $includes, true);
+        $con_logs       = in_array('logs', $includes, true);
 
         $respuesta = [
             'implementation' => $this->bloque_de_la_implementacion($implementation),
@@ -547,7 +542,7 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function bloque_de_etapas(Implementation $implementation)
     {
-        $nombres  = $this->nombres_de_etapas();
+        $nombres   = $this->nombres_de_etapas();
         $por_etapa = [];
 
         foreach ($implementation->stages as $etapa) {
@@ -654,11 +649,11 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         $respuesta = [
-            'estado'      => $estado,
+            'estado'       => $estado,
             'ejecutado_at' => $this->instante($implementation->user_setup_executed_at),
-            'iniciado_at' => isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : null,
+            'iniciado_at'  => isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : null,
             'terminado_at' => isset($registro['terminado_at']) ? (string) $registro['terminado_at'] : null,
-            'error'       => isset($registro['error']) ? (string) $registro['error'] : null,
+            'error'        => isset($registro['error']) ? (string) $registro['error'] : null,
         ];
 
         if ($colgado) {
@@ -796,8 +791,7 @@ class ClaudeImplementationOpsController extends Controller
      * 🔴 La tabla la crea otra migración de la misma misión. Si todavía no está en la base (un slot
      * que no la corrió, un entorno de tests viejo) se devuelve lista vacía en vez de romper: un estado
      * que contesta 500 porque falta una tabla de mails dejaría a la skill sin poder ver nada, y esto es
-     * lo único que depende de ella. Se lee con el query builder y no con el modelo por lo mismo: esta
-     * lectura no tiene por qué cargar una clase para saber si hay algo que mostrar.
+     * lo único que depende de ella.
      *
      * La casilla sale enmascarada ("l***@gmail.com"), con el mismo formato que `para_enmascarado` de las
      * respuestas del mail: este listado no es el lugar donde mostrarla entera.
@@ -812,10 +806,7 @@ class ClaudeImplementationOpsController extends Controller
             return [];
         }
 
-        $filas = DB::table('implementation_mails')
-            ->where('implementation_id', $implementation->id)
-            ->orderBy('id')
-            ->get(['hito', 'email', 'estado', 'enviado_at', 'reenvios', 'error']);
+        $filas = ImplementationMail::where('implementation_id', $implementation->id)->orderBy('id')->get();
 
         $bloque = [];
 
@@ -2219,8 +2210,32 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         /* 🔴 onConnection explícito y DESPUÉS del commit. Con la conexión por defecto (`sync`) el pipeline
-           correría entero adentro de este request y lo mataría `max_execution_time`. */
-        EjecutarInstalacionDeImplementacionJob::dispatch($uuids)->onConnection(self::CONEXION_DE_COLA);
+           correría entero adentro de este request y lo mataría `max_execution_time`.
+
+           🔴 Y con red: las filas YA están en `instalando` (commiteadas), así que si encolar falla (la tabla
+           `jobs`, la base, lo que sea) quedarían así para siempre sin ningún job que las corra, y como `install`
+           frena con 409 mientras haya una instalando, ese cliente no podría reintentar. Se vuelven a
+           `pendiente` —que es lo que eran: nunca arrancaron— y se dice. */
+        try {
+            EjecutarInstalacionDeImplementacionJob::dispatch($uuids)->onConnection(self::CONEXION_DE_COLA);
+        } catch (\Throwable $e) {
+            ClientInstallation::query()
+                ->whereIn('uuid', $uuids)
+                ->where('status', 'instalando')
+                ->update(['status' => 'pendiente', 'started_at' => null, 'finished_at' => null]);
+
+            Log::channel('daily')->error('ClaudeImplementationOpsController: no se pudo encolar la instalación.', [
+                'implementation_id' => (int) $implementation->id,
+                'error'             => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'error'             => 'No se pudo encolar la instalación: ' . $e->getMessage() . '. Las instalaciones volvieron a pendiente (nunca '
+                    . 'arrancaron): se puede reintentar la misma llamada.',
+                'implementation_id' => (int) $implementation->id,
+                'reintentable'      => true,
+            ], 500);
+        }
 
         return response()->json([
             'dry_run'                  => false,
@@ -2847,8 +2862,27 @@ class ClaudeImplementationOpsController extends Controller
             );
         }
 
-        /* 🔴 onConnection explícito y DESPUÉS del commit: el job tiene que encontrar el `en_curso` ya escrito. */
-        EjecutarUserSetupDeImplementacionJob::dispatch((int) $implementation->id)->onConnection(self::CONEXION_DE_COLA);
+        /* 🔴 onConnection explícito y DESPUÉS del commit: el job tiene que encontrar el `en_curso` ya escrito.
+
+           🔴 Y con red: si encolar falla, el registro ya dice `en_curso` y nadie lo va a terminar (esperaría
+           45 minutos a darse por colgado). Se deja como `error`, que no bloquea reintentar. */
+        try {
+            EjecutarUserSetupDeImplementacionJob::dispatch((int) $implementation->id)->onConnection(self::CONEXION_DE_COLA);
+        } catch (\Throwable $e) {
+            $this->dejar_el_user_setup_en_error($implementation, 'No se pudo encolar el job: ' . $e->getMessage());
+
+            Log::channel('daily')->error('ClaudeImplementationOpsController: no se pudo encolar el user setup.', [
+                'implementation_id' => (int) $implementation->id,
+                'error'             => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'error'             => 'No se pudo encolar la configuración: ' . $e->getMessage() . '. No se aplicó nada: el registro quedó en error y se puede '
+                    . 'reintentar la misma llamada.',
+                'implementation_id' => (int) $implementation->id,
+                'reintentable'      => true,
+            ], 500);
+        }
 
         return response()->json([
             'dry_run'                  => false,
@@ -2861,6 +2895,37 @@ class ClaudeImplementationOpsController extends Controller
                 . 'no cada 2 (rate limit por IP). Si termina en error por una conexión cortada, NO reintentes sin mirar el sistema del cliente: '
                 . 'pudo haber seguido corriendo, y un reintento le vuelve a vaciar la base.',
         ], 202);
+    }
+
+    /**
+     * Deja el registro del user setup en `error` con ese motivo (la etapa 2, `data.user_setup`).
+     *
+     * Lo usa `user_setup_json()` cuando el job no se pudo encolar: el registro ya decía `en_curso` y no hay
+     * nadie que lo termine. No toca el candado (`user_setup_executed_at`): nada se aplicó.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param string         $motivo         Qué pasó.
+     *
+     * @return void
+     */
+    protected function dejar_el_user_setup_en_error(Implementation $implementation, $motivo)
+    {
+        $etapa = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 2)->first();
+
+        if ($etapa === null) {
+            return;
+        }
+
+        $datos    = is_array($etapa->data) ? $etapa->data : [];
+        $registro = isset($datos['user_setup']) && is_array($datos['user_setup']) ? $datos['user_setup'] : [];
+
+        $registro['estado']       = 'error';
+        $registro['terminado_at'] = now()->toISOString();
+        $registro['error']        = $motivo;
+
+        $datos['user_setup'] = $registro;
+        $etapa->data         = $datos;
+        $etapa->save();
     }
 
     /**
@@ -3156,7 +3221,7 @@ class ClaudeImplementationOpsController extends Controller
             }
 
             $previo = $this->mail_previo($implementation, $hito);
-            $ya_salio = $previo !== null && $previo['estado'] === 'enviado';
+            $ya_salio = $previo !== null && $previo['estado'] === ImplementationMail::ESTADO_ENVIADO;
 
             return response()->json([
                 'dry_run'          => true,

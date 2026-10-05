@@ -759,6 +759,44 @@ class InstalacionDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
+     * 🔴 Si encolar el job FALLA (la tabla `jobs`, la base...), las filas —que ya habían pasado a
+     * `instalando`— vuelven a `pendiente`: sin un job que las corra quedarían así para siempre, y como
+     * `install` frena con 409 mientras haya una instalando, ese cliente no podría reintentar. La respuesta
+     * dice que se puede reintentar, y el reintento (con la cola andando) sale.
+     *
+     * @return void
+     */
+    public function test_si_no_se_puede_encolar_las_filas_vuelven_a_pendiente_y_se_puede_reintentar(): void
+    {
+        $e = $this->escenario();
+
+        /* Se reemplaza el despachador CONCRETO y no el contrato: `instance()` borra el alias del contrato al
+           concreto, y después de restaurarlo ya no se podría resolver. */
+        $roto = \Mockery::mock(\Illuminate\Bus\Dispatcher::class);
+        $roto->shouldReceive('dispatch')->andThrow(new \RuntimeException('la tabla jobs no existe'));
+        $this->app->instance(\Illuminate\Bus\Dispatcher::class, $roto);
+
+        $respuesta = $this->instalar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez']);
+
+        $respuesta->assertStatus(500);
+        $respuesta->assertJsonPath('reintentable', true);
+        $this->assertStringContainsString('la tabla jobs no existe', $respuesta->json('error'));
+        $this->assertStringContainsString('volvieron a pendiente', $respuesta->json('error'));
+
+        $estados = ClientInstallation::where('client_id', $e['cliente']->id)->pluck('status')->all();
+        $this->assertSame(['pendiente', 'pendiente'], $estados, 'Las filas quedaron en un estado que ningún job va a resolver.');
+
+        /* Con la cola andando otra vez, el reintento sale y reutiliza las dos filas. */
+        $this->app->forgetInstance(\Illuminate\Bus\Dispatcher::class);
+        Queue::fake();
+
+        $this->instalar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez'])->assertStatus(202);
+
+        $this->assertSame(2, $this->instalaciones_de($e['cliente']), 'Tiene que reutilizar las dos pendientes y no crear otro par.');
+        Queue::assertPushed(EjecutarInstalacionDeImplementacionJob::class, 1);
+    }
+
+    /**
      * La confirmación acepta el nombre con otras mayúsculas y espacios.
      *
      * @return void
