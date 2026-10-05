@@ -221,7 +221,14 @@ class ClaudeImplementationOpsController extends Controller
      * PROPÓSITO: un parámetro de más es 422 y no se aplica nada. Re-aplicar el user setup le vacía la base
      * al cliente.
      */
-    const PARAMETROS_DEL_USER_SETUP = ['dry_run', 'confirm_client_name'];
+    const PARAMETROS_DEL_USER_SETUP = ['dry_run', 'confirm_client_name', 'reintentar', 'conciliar'];
+
+    /**
+     * La nota que deja una conciliación del user setup (`conciliar: true`) en el registro de la etapa 2.
+     * Es textual a propósito: es lo que la skill y el panel leen para saber que el candado se llenó SIN
+     * que este camino llamara al cliente.
+     */
+    const NOTA_DE_CONCILIACION = 'conciliado: el dueño ya existía en el sistema del cliente';
 
     /**
      * Valores estándar de las variables de conexión del `.env` en el hosting compartido, para cuando la
@@ -2781,19 +2788,31 @@ class ClaudeImplementationOpsController extends Controller
      * Chequeos (todos en el dry-run, como `chequeos`; con uno en false el real es 422, salvo el que se
      * dice):
      *   1. El formulario se envió.
-     *   2. La implementación está en la etapa 2 o después.
+     *   2. 🔴 La implementación está EXACTAMENTE en la etapa 2 (como `install`): antes no hay sistema
+     *      instalado, y después el negocio puede estar operando —`migrate:fresh` le borraría lo que cargó—.
      *   3. La última instalación `completa` de la API activa está `completada` (la API responde).
      *   4. La API activa tiene URL.
      *   5. `user_setup_executed_at` está vacío: si no, 422 sin vuelta, con la fecha.
      *   6. No hay otro user setup `en_curso` (409). Uno que dice `en_curso` hace más de 45 minutos se da
-     *      por colgado y deja reintentar: el cliente igual frena un setup doble con su propio 409.
+     *      por colgado y deja reintentar: es seguro porque el job viejo, si arranca, se descarta solo (cada
+     *      intento lleva su token), y el cliente igual frena un setup doble con su propio 409.
+     *
+     * 🔴 TRAS UN ERROR NO SE REPITE LA LLAMADA SIN DECIR QUÉ SE HACE. Un error del job casi nunca prueba que el
+     * setup no corrió (un 502, un timeout, un worker muerto: el origen sigue), y repetir la llamada era
+     * despachar OTRO `migrate:fresh`. Si el último estado es `error`, el real responde 422 explicando eso y
+     * solo sigue con UNO de dos parámetros, excluyentes y con `confirm_client_name`:
+     *   - `reintentar: true` vuelve a despachar el job (con un token nuevo);
+     *   - `conciliar: true` NO llama al cliente: llena el candado, deja el estado en `ok` con la nota
+     *     "conciliado: el dueño ya existía en el sistema del cliente" y registra la acción `user_setup`
+     *     (canal `claude`). Es para cuando se verificó que el dueño YA existe en el sistema del cliente.
+     * Sin un error previo los dos son 422. El dry-run dice cuál corresponde (`corresponde`, `opciones`).
      *
      * El dry-run devuelve el payload REAL que se va a mandar, con las claves de servicios pagos tapadas (el
      * mismo preview del panel). Con `dry_run=false`: `confirm_client_name`, el registro `en_curso` se
      * escribe bajo lock ANTES de despachar (así dos llamadas no despachan dos jobs), y responde 202. El
      * resultado se lee en `user_setup` de `GET claude/implementations/{id}`.
      *
-     * @param Request    $request Body: dry_run?, confirm_client_name.
+     * @param Request    $request Body: dry_run?, confirm_client_name, reintentar?, conciliar?.
      * @param int|string $id      Id de la implementación (segmento de la URL).
      *
      * @return \Illuminate\Http\JsonResponse
@@ -2809,9 +2828,24 @@ class ClaudeImplementationOpsController extends Controller
         $invalido = $this->validar_o_422($request, [
             'dry_run'             => 'nullable|boolean',
             'confirm_client_name' => 'required_if:dry_run,false|nullable|string|max:190',
+            'reintentar'          => 'nullable|boolean',
+            'conciliar'           => 'nullable|boolean',
         ]);
         if ($invalido !== null) {
             return $invalido;
+        }
+
+        $reintentar = $this->booleano_o_null($request, 'reintentar') === true;
+        $conciliar  = $this->booleano_o_null($request, 'conciliar') === true;
+
+        /* Excluyentes: reintentar vuelve a correr el setup y conciliar da por hecho que ya corrió. Pedir las dos
+           cosas a la vez no tiene una lectura segura, y no se simula en el dry-run lo que el real rechaza. */
+        if ($reintentar && $conciliar) {
+            return $this->error_422(
+                '`reintentar` y `conciliar` son excluyentes: reintentar vuelve a correr el setup del otro lado y conciliar da por hecho que ya '
+                    . 'corrió. Mandá uno solo. No se aplicó nada.',
+                ['parametros_aceptados' => self::PARAMETROS_DEL_USER_SETUP]
+            );
         }
 
         $implementation = Implementation::find((int) $id);
@@ -2837,18 +2871,18 @@ class ClaudeImplementationOpsController extends Controller
             return $rechazo;
         }
 
-        /* --- Frenos 3 a 6, con lo que se ve ahora. Se repiten adentro del lock. --- */
-        $impedimento = $this->impedimento_del_user_setup($implementation, $plan);
+        /* --- Frenos 3 a 7, con lo que se ve ahora. Se repiten adentro del lock. --- */
+        $impedimento = $this->impedimento_del_user_setup($implementation, $plan, $reintentar, $conciliar);
         if ($impedimento !== null) {
             return $impedimento;
         }
 
-        $resultado = DB::transaction(function () use ($implementation, $client) {
+        $resultado = DB::transaction(function () use ($implementation, $client, $reintentar, $conciliar) {
             $bloqueada = Implementation::query()->whereKey($implementation->id)->lockForUpdate()->first();
 
             $plan = $this->plan_del_user_setup($bloqueada, $client);
 
-            $impedimento = $this->impedimento_del_user_setup($bloqueada, $plan);
+            $impedimento = $this->impedimento_del_user_setup($bloqueada, $plan, $reintentar, $conciliar);
             if ($impedimento !== null) {
                 return $impedimento;
             }
@@ -2856,6 +2890,12 @@ class ClaudeImplementationOpsController extends Controller
             $etapa = ImplementationStage::where('implementation_id', $bloqueada->id)->where('stage_number', 2)->lockForUpdate()->first();
             if ($etapa === null) {
                 return 'sin_etapa';
+            }
+
+            /* 🔴 Conciliar NO llama al cliente ni despacha nada: solo deja el registro y el candado como si el
+               setup hubiera terminado bien. Va adentro de la misma transacción y con los mismos chequeos. */
+            if ($conciliar) {
+                return $this->conciliar_el_user_setup($bloqueada, $etapa);
             }
 
             $datos    = is_array($etapa->data) ? $etapa->data : [];
@@ -2888,6 +2928,17 @@ class ClaudeImplementationOpsController extends Controller
             );
         }
 
+        if (isset($resultado['conciliado'])) {
+            return response()->json([
+                'dry_run'           => false,
+                'implementation_id' => (int) $implementation->id,
+                'conciliado'        => true,
+                'user_setup'        => ['estado' => 'ok', 'ejecutado_at' => $resultado['ejecutado_at'], 'nota' => self::NOTA_DE_CONCILIACION],
+                'nota'              => 'NO se llamó al sistema del cliente: el user setup quedó como aplicado (user_setup_executed_at) con la nota "'
+                    . self::NOTA_DE_CONCILIACION . '" y la acción user_setup registrada. Desde acá no se vuelve a aplicar. Siguiente paso: avanzar la etapa.',
+            ], 200);
+        }
+
         /* 🔴 onConnection explícito y DESPUÉS del commit: el job tiene que encontrar el `en_curso` ya escrito.
 
            🔴 Y con red: si encolar falla, el registro ya dice `en_curso` y nadie lo va a terminar (esperaría
@@ -2903,8 +2954,8 @@ class ClaudeImplementationOpsController extends Controller
             ]);
 
             return response()->json([
-                'error'             => 'No se pudo encolar la configuración: ' . $e->getMessage() . '. No se aplicó nada: el registro quedó en error y se puede '
-                    . 'reintentar la misma llamada.',
+                'error'             => 'No se pudo encolar la configuración: ' . $e->getMessage() . '. No se aplicó nada: el registro quedó en error '
+                    . '(puede_haber_corrido=false: la llamada ni salió) y se puede reintentar con `reintentar: true`.',
                 'implementation_id' => (int) $implementation->id,
                 'reintentable'      => true,
             ], 500);
@@ -2945,9 +2996,10 @@ class ClaudeImplementationOpsController extends Controller
         $datos    = is_array($etapa->data) ? $etapa->data : [];
         $registro = isset($datos['user_setup']) && is_array($datos['user_setup']) ? $datos['user_setup'] : [];
 
-        $registro['estado']       = 'error';
-        $registro['terminado_at'] = now()->toISOString();
-        $registro['error']        = $motivo;
+        $registro['estado']              = 'error';
+        $registro['terminado_at']        = now()->toISOString();
+        $registro['error']               = $motivo;
+        $registro['puede_haber_corrido'] = false;
 
         $datos['user_setup'] = $registro;
         $etapa->data         = $datos;
@@ -2955,12 +3007,60 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
+     * Concilia el user setup: lo deja como aplicado SIN llamar al cliente.
+     *
+     * Es para cuando el último intento terminó en error pero el dueño YA existe en el sistema del cliente
+     * (el setup corrió del otro lado aunque acá se cortó la espera). Hace lo mismo que el job cuando termina
+     * bien —llena el candado `user_setup_executed_at`, deja el registro en `ok` y registra la acción
+     * `user_setup` con `canal: claude`, que es la huella que lee el checklist del panel—, más la nota que dice
+     * que fue una conciliación y no una corrida.
+     *
+     * Se llama ADENTRO de la transacción, con la implementación y la etapa 2 bloqueadas.
+     *
+     * @param Implementation  $implementation La implementación, bloqueada.
+     * @param ImplementationStage $etapa      La etapa 2, bloqueada.
+     *
+     * @return array<string, mixed> `conciliado` (true) y `ejecutado_at` (ISO 8601).
+     */
+    protected function conciliar_el_user_setup(Implementation $implementation, ImplementationStage $etapa)
+    {
+        $datos    = is_array($etapa->data) ? $etapa->data : [];
+        $registro = isset($datos['user_setup']) && is_array($datos['user_setup']) ? $datos['user_setup'] : [];
+        $ahora    = now();
+
+        $registro['estado']       = 'ok';
+        $registro['terminado_at'] = $ahora->toISOString();
+        $registro['error']        = null;
+        $registro['nota']         = self::NOTA_DE_CONCILIACION;
+        $registro['conciliado']   = true;
+        unset($registro['puede_haber_corrido']);
+
+        $implementation->user_setup_executed_at = $ahora;
+        $implementation->save();
+
+        $acciones         = isset($datos['actions']) && is_array($datos['actions']) ? $datos['actions'] : [];
+        $acciones[]       = ['action' => 'user_setup', 'stage' => 2, 'at' => $ahora->toISOString(), 'canal' => 'claude', 'origen' => 'claude'];
+        $datos['actions'] = $acciones;
+
+        $datos['user_setup'] = $registro;
+        $etapa->data         = $datos;
+        $etapa->save();
+
+        Log::channel('daily')->info('ClaudeImplementationOpsController: user setup conciliado (sin llamar al cliente).', [
+            'implementation_id' => (int) $implementation->id,
+        ]);
+
+        return ['conciliado' => true, 'ejecutado_at' => $this->instante($ahora)];
+    }
+
+    /**
      * Los seis chequeos del user setup.
      *
-     * Lee, no escribe. Los tres primeros son los del `user_setup_gate()` del panel, con una precisión: el
-     * tercero mira la última instalación REAL (`completa`) de la API activa y no "la última del cliente",
-     * porque con el par de filas (real + esqueleto) la última por id es el esqueleto, que termina después
-     * y no tiene nada que ver con el sistema al que se le va a pegar.
+     * Lee, no escribe. Los tres primeros son los del `user_setup_gate()` del panel, con dos precisiones: el
+     * segundo exige la etapa 2 EXACTA (el panel acepta cualquiera desde la 2, y re-aplicar en la 3 o después le
+     * borra al cliente lo que ya cargó) y el tercero mira la última instalación REAL (`completa`) de la API
+     * activa y no "la última del cliente", porque con el par de filas (real + esqueleto) la última por id es el
+     * esqueleto, que termina después y no tiene nada que ver con el sistema al que se le va a pegar.
      *
      * @param Implementation $implementation La implementación.
      * @param Client         $client         Su cliente.
@@ -2981,13 +3081,17 @@ class ClaudeImplementationOpsController extends Controller
             $formulario ? 'El cliente envió el formulario.' : 'Todavía no se completó el formulario (etapa 1): el payload no tendría datos reales.'
         );
 
-        /* 2. La etapa. */
-        $etapa_ok = (int) $implementation->current_stage >= 2;
+        /* 2. La etapa: EXACTAMENTE la 2, como `install`. Antes no hay sistema instalado; después el negocio puede
+           estar operando y `migrate:fresh` le borraría lo que cargó. */
+        $etapa_ok = (int) $implementation->current_stage === 2;
 
         $chequeos[] = $this->chequeo(
-            'etapa_2_o_posterior',
+            'etapa_2',
             $etapa_ok,
-            $etapa_ok ? 'La implementación está en la etapa ' . (int) $implementation->current_stage . '.' : 'La implementación todavía no avanzó a la etapa 2.'
+            $etapa_ok
+                ? 'La implementación está en la etapa 2.'
+                : 'La implementación está en la etapa ' . (int) $implementation->current_stage . ': el user setup solo se aplica en la etapa 2 (antes no hay sistema '
+                    . 'instalado; después el negocio puede estar operando y migrate:fresh le borraría lo que cargó).'
         );
 
         /* 3 y 4. La instalación real de la API activa y la URL a la que se le pega. */
@@ -3060,17 +3164,21 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * ¿Algo impide aplicar el user setup ahora? La respuesta de error que corresponde, o null si se puede.
      *
-     * Tres clases:
+     * Cuatro clases, en este orden:
      *   - ya aplicado: 422 con el motivo largo y SIN vuelta (no hay forzar);
      *   - otro en curso: 409 (no es un error de armado: hay que esperarlo);
-     *   - cualquier otro chequeo en false: 422 con la lista de chequeos.
+     *   - cualquier otro chequeo en false (la etapa incluida): 422 con la lista de chequeos;
+     *   - el intento anterior (`impedimento_por_el_intento_anterior()`): tras un error hace falta `reintentar` o
+     *     `conciliar`, y sin un error esos dos parámetros no se aceptan.
      *
      * @param Implementation       $implementation La implementación.
      * @param array<string, mixed> $plan           El plan de `plan_del_user_setup()`.
+     * @param bool                 $reintentar     `reintentar` del pedido.
+     * @param bool                 $conciliar      `conciliar` del pedido.
      *
      * @return \Illuminate\Http\JsonResponse|null
      */
-    protected function impedimento_del_user_setup(Implementation $implementation, array $plan)
+    protected function impedimento_del_user_setup(Implementation $implementation, array $plan, $reintentar = false, $conciliar = false)
     {
         if ($plan['aplicado']) {
             return $this->error_422(
@@ -3102,18 +3210,144 @@ class ClaudeImplementationOpsController extends Controller
             }
         }
 
-        if (count($fallidos) === 0) {
+        if (count($fallidos) > 0) {
+            return $this->error_422(
+                'No se puede aplicar el user setup: ' . implode(', ', $fallidos) . '. No se aplicó nada.',
+                [
+                    'implementation_id' => (int) $implementation->id,
+                    'chequeos'          => $plan['chequeos'],
+                    'ayuda'             => 'El dry_run (que es el default) muestra los chequeos con su detalle.',
+                ]
+            );
+        }
+
+        return $this->impedimento_por_el_intento_anterior($implementation, $reintentar, $conciliar);
+    }
+
+    /**
+     * ¿Qué dice el intento anterior sobre lo que se puede hacer ahora? La respuesta de error, o null.
+     *
+     * 🔴 Tras un `error` NO se repite la llamada tal cual: el intento anterior pudo haber corrido del otro
+     * lado (un 502, un timeout o un worker muerto no prueban lo contrario) y repetirlo es otro `migrate:fresh`.
+     * Se pide `reintentar: true` (el dueño NO existe en el sistema del cliente: se vuelve a despachar) o
+     * `conciliar: true` (el dueño YA existe: se da por aplicado sin llamar a nadie), y hay que elegir.
+     *
+     * Y al revés: sin un error previo esos dos parámetros no tienen sentido —`conciliar` marcaría como
+     * aplicado algo que nunca se intentó— y se rechazan, en vez de ignorarlos en silencio.
+     *
+     * @param Implementation $implementation La implementación.
+     * @param bool           $reintentar     `reintentar` del pedido.
+     * @param bool           $conciliar      `conciliar` del pedido.
+     *
+     * @return \Illuminate\Http\JsonResponse|null
+     */
+    protected function impedimento_por_el_intento_anterior(Implementation $implementation, $reintentar, $conciliar)
+    {
+        $estado   = $this->estado_del_user_setup($implementation);
+        $en_error = $estado['estado'] === 'error';
+
+        if (! $en_error) {
+            if (! $reintentar && ! $conciliar) {
+                return null;
+            }
+
+            return $this->error_422(
+                '`' . ($conciliar ? 'conciliar' : 'reintentar') . '` solo se acepta cuando el último intento del user setup terminó en error, y este no '
+                    . '(estado: ' . $estado['estado'] . '). Sin ese parámetro la llamada normal aplica. No se aplicó nada.',
+                [
+                    'implementation_id' => (int) $implementation->id,
+                    'user_setup'        => $estado,
+                ]
+            );
+        }
+
+        if ($reintentar || $conciliar) {
             return null;
         }
 
+        $opciones = $this->opciones_tras_un_error($estado);
+        $puede    = $estado['puede_haber_corrido'] !== false;
+
         return $this->error_422(
-            'No se puede aplicar el user setup: ' . implode(', ', $fallidos) . '. No se aplicó nada.',
+            'El último intento del user setup terminó en error' . ($puede ? ' y PUDO HABER CORRIDO del otro lado' : '') . ' ('
+                . (string) $this->recortar($estado['error']) . '). Repetir la llamada tal cual no alcanza: reintentar le vuelve a vaciar la base al cliente '
+                . '(migrate:fresh) y conciliar da por aplicado lo que ya corrió. Mirá si el dueño existe en el sistema del cliente y mandá EXACTAMENTE UNO de '
+                . 'estos dos parámetros, con dry_run=false y confirm_client_name: `conciliar: true` (el dueño ya existe: no llama al cliente) o '
+                . '`reintentar: true` (no existe o quedó a medias: vuelve a despachar). No se aplicó nada.',
             [
-                'implementation_id' => (int) $implementation->id,
-                'chequeos'          => $plan['chequeos'],
-                'ayuda'             => 'El dry_run (que es el default) muestra los chequeos con su detalle.',
+                'implementation_id'   => (int) $implementation->id,
+                'user_setup'          => $estado,
+                'puede_haber_corrido' => $estado['puede_haber_corrido'],
+                'sugerida'            => $opciones['sugerida'],
+                'opciones'            => $opciones['opciones'],
+                'ayuda'               => 'El dry_run (que es el default) dice cuál corresponde (`corresponde`) y qué hace cada una (`opciones`).',
             ]
         );
+    }
+
+    /**
+     * Las dos salidas que hay tras un error del user setup y cuál se sugiere.
+     *
+     * Se sugiere `conciliar` cuando el error PUDO HABER CORRIDO (o el registro no lo dice: un registro viejo
+     * se lee como "pudo") y `reintentar` cuando se sabe que no corrió. Es una sugerencia, no una decisión: la
+     * que vale es la de quien mira el sistema del cliente.
+     *
+     * @param array<string, mixed> $estado El bloque `user_setup` de `estado_del_user_setup()`.
+     *
+     * @return array{sugerida: string, opciones: array<int, array<string, mixed>>}
+     */
+    protected function opciones_tras_un_error(array $estado)
+    {
+        $puede = ! isset($estado['puede_haber_corrido']) || $estado['puede_haber_corrido'] !== false;
+
+        return [
+            'sugerida' => $puede ? 'conciliar' : 'reintentar',
+            'opciones' => [
+                [
+                    'parametro' => 'conciliar',
+                    'cuando'    => 'El dueño YA existe en el sistema del cliente: el intento anterior llegó a correr (un 502, un timeout o un worker muerto '
+                        . 'no prueban lo contrario).',
+                    'que_hace'  => 'NO llama al sistema del cliente: llena user_setup_executed_at, deja el estado en ok con la nota "'
+                        . self::NOTA_DE_CONCILIACION . '" y registra la acción user_setup (canal claude).',
+                ],
+                [
+                    'parametro' => 'reintentar',
+                    'cuando'    => 'El dueño NO existe en el sistema del cliente, o quedó a medias: el intento anterior no llegó a terminar.',
+                    'que_hace'  => 'Vuelve a despachar el job con un token nuevo: del otro lado corre migrate:fresh otra vez y VACÍA la base.',
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * Qué corresponde hacer con el user setup según cómo está, para el dry-run.
+     *
+     * `ninguna` (ya aplicado: no se vuelve a aplicar por acá), `esperar` (hay uno en curso), `conciliar` o
+     * `reintentar` (el último intento terminó en error: ver `opciones_tras_un_error()`) o `aplicar` (nada
+     * antes, o uno colgado que se puede volver a intentar).
+     *
+     * @param array<string, mixed> $plan   El plan de `plan_del_user_setup()`.
+     * @param array<string, mixed> $estado El bloque `user_setup` de `estado_del_user_setup()`.
+     *
+     * @return string
+     */
+    protected function que_corresponde_hacer(array $plan, array $estado)
+    {
+        if ($plan['aplicado']) {
+            return 'ninguna';
+        }
+
+        if ($plan['en_curso']) {
+            return 'esperar';
+        }
+
+        if ($estado['estado'] === 'error') {
+            $opciones = $this->opciones_tras_un_error($estado);
+
+            return $opciones['sugerida'];
+        }
+
+        return 'aplicar';
     }
 
     /**
@@ -3141,20 +3375,48 @@ class ClaudeImplementationOpsController extends Controller
         $preview = (new ImplementationActionService())->preview($implementation, 'user_setup');
         $payload = json_decode((string) $preview['body'], true);
 
-        return [
-            'dry_run'           => true,
-            'implementation_id' => (int) $implementation->id,
-            'listo'             => $listo,
-            'chequeos'          => $plan['chequeos'],
-            'destino'           => [
+        /* Lo que pasó con el intento anterior y qué corresponde hacer ahora. */
+        $estado      = $this->estado_del_user_setup($implementation);
+        $corresponde = $this->que_corresponde_hacer($plan, $estado);
+        $en_error    = $estado['estado'] === 'error' && ! $plan['aplicado'];
+
+        $respuesta = [
+            'dry_run'                 => true,
+            'implementation_id'       => (int) $implementation->id,
+            'listo'                   => $listo,
+            'chequeos'                => $plan['chequeos'],
+            'ultimo_intento'          => $estado['estado'] === 'sin_correr' ? null : [
+                'estado'              => $estado['estado'],
+                'iniciado_at'         => $estado['iniciado_at'],
+                'terminado_at'        => $estado['terminado_at'],
+                'error'               => $estado['error'],
+                'puede_haber_corrido' => isset($estado['puede_haber_corrido']) ? $estado['puede_haber_corrido'] : null,
+            ],
+            'corresponde'             => $corresponde,
+            'parametros_para_aplicar' => $en_error ? [$corresponde => true] : [],
+            'destino'                 => [
                 'endpoint'         => $plan['endpoint'],
                 'timeout_segundos' => EjecutarUserSetupDeImplementacionJob::TIMEOUT_DE_LA_LLAMADA,
             ],
-            'payload'           => is_array($payload) ? $payload : [],
-            'aviso_destructivo' => 'Del otro lado el setup arranca con migrate:fresh --force: VACÍA la base del sistema del cliente. Solo se aplica sobre una '
+            'payload'                 => is_array($payload) ? $payload : [],
+            'aviso_destructivo'       => 'Del otro lado el setup arranca con migrate:fresh --force: VACÍA la base del sistema del cliente. Solo se aplica sobre una '
                 . 'instalación recién hecha y una sola vez; este camino no tiene forzar.',
-            'nota'              => 'Simulacro: no se encoló nada. Repetí con dry_run=false y confirm_client_name para aplicar la configuración.',
         ];
+
+        if ($en_error) {
+            $opciones = $this->opciones_tras_un_error($estado);
+
+            $respuesta['sugerida'] = $opciones['sugerida'];
+            $respuesta['opciones'] = $opciones['opciones'];
+        }
+
+        $respuesta['nota'] = 'Simulacro: no se encoló ni se escribió nada. Repetí con dry_run=false y confirm_client_name para aplicar la configuración.'
+            . ($en_error
+                ? ' 🔴 Como el último intento terminó en error' . ($estado['puede_haber_corrido'] === false ? '' : ' y pudo haber corrido del otro lado')
+                    . ', mirá si el dueño existe en el sistema del cliente y mandá además `' . $corresponde . ': true` (o el otro: ver `opciones`): sin uno de los dos, el real es 422.'
+                : '');
+
+        return $respuesta;
     }
 
     /* ==============================================================================================

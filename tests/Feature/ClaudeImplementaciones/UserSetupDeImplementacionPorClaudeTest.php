@@ -172,7 +172,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 
             $respuesta->assertStatus(422);
             $this->assertStringContainsString($campo, $this->cuerpo($respuesta));
-            $respuesta->assertJsonPath('parametros_aceptados', ['dry_run', 'confirm_client_name']);
+            $respuesta->assertJsonPath('parametros_aceptados', ['dry_run', 'confirm_client_name', 'reintentar', 'conciliar']);
         }
 
         $this->assertSame([], $this->registro($e['implementacion']));
@@ -263,7 +263,8 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
     {
         $casos = [
             ['chequeo' => 'formulario_enviado', 'escenario' => ['formulario' => false], 'texto' => 'Todavía no se completó el formulario'],
-            ['chequeo' => 'etapa_2_o_posterior', 'escenario' => ['etapa' => 1], 'texto' => 'todavía no avanzó a la etapa 2'],
+            ['chequeo' => 'etapa_2', 'escenario' => ['etapa' => 1], 'texto' => 'solo se aplica en la etapa 2'],
+            ['chequeo' => 'etapa_2', 'escenario' => ['etapa' => 3], 'texto' => 'está en la etapa 3'],
             ['chequeo' => 'instalacion_completada', 'escenario' => ['instalacion' => null], 'texto' => 'No hay ninguna instalación completa'],
             ['chequeo' => 'instalacion_completada', 'escenario' => ['instalacion' => 'instalando'], 'texto' => 'está en "instalando"'],
             ['chequeo' => 'instalacion_completada', 'escenario' => ['instalacion' => 'fallida'], 'texto' => 'está en "fallida"'],
@@ -544,15 +545,21 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->assertSame('error', $registro['estado']);
         $this->assertStringContainsString('No se pudo encolar el job', $registro['error']);
         $this->assertNotEmpty($registro['terminado_at']);
+        $this->assertFalse($registro['puede_haber_corrido'], 'La llamada ni salió: se sabe que no corrió.');
         $this->assertNull($e['implementacion']->refresh()->user_setup_executed_at);
 
-        $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers())->assertJsonPath('user_setup.estado', 'error');
+        $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers())
+            ->assertJsonPath('user_setup.estado', 'error')
+            ->assertJsonPath('user_setup.puede_haber_corrido', false);
 
-        /* Con la cola andando otra vez, el reintento sale. */
+        /* Con la cola andando otra vez, el reintento sale: tras un error hace falta `reintentar: true` (sin él, 422). */
         $this->app->forgetInstance(\Illuminate\Bus\Dispatcher::class);
         Queue::fake();
 
-        $this->configurar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez'])->assertStatus(202);
+        $this->configurar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez'])->assertStatus(422);
+        Queue::assertNothingPushed();
+
+        $this->configurar($e['implementacion'], ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez', 'reintentar' => true])->assertStatus(202);
         Queue::assertPushed(EjecutarUserSetupDeImplementacionJob::class, 1);
     }
 
@@ -706,8 +713,12 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
             ->assertJsonPath('user_setup.estado', 'error')
             ->assertJsonPath('user_setup.ejecutado_at', null);
 
-        /* Un error no es "ya aplicado": se puede volver a intentar. */
-        $this->configurar($implementacion, ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez'])->assertStatus(202);
+        /* Un error no es "ya aplicado": se puede volver a intentar, pero diciendo cómo (reintentar o conciliar):
+           un 500 pudo haber vaciado la base y dejado el sembrado a medias. */
+        $this->assertTrue($registro['puede_haber_corrido']);
+        $this->configurar($implementacion, ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez'])->assertStatus(422);
+        Queue::assertNothingPushed();
+        $this->configurar($implementacion, ['dry_run' => false, 'confirm_client_name' => 'Panchito Gómez', 'reintentar' => true])->assertStatus(202);
     }
 
     /**

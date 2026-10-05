@@ -507,7 +507,9 @@ Route::middleware('claude.task.key')
 
         /* CONFIGURAR el sistema con lo que el cliente cargó en el formulario (user setup). 🔴🔴 Del otro lado arranca
            con migrate:fresh: le VACÍA la base al cliente. Por eso este camino NO tiene "forzar" (el panel sí): una
-           vez aplicado, no se vuelve a correr por acá. Encolado en `database` con 202; la llamada va con 1200 s. */
+           vez aplicado, no se vuelve a correr por acá. Solo en la etapa 2. Encolado en `database` con 202; la llamada va con
+           1200 s. Tras un error no se repite la llamada tal cual: `reintentar=true` (vuelve a despachar) o `conciliar=true`
+           (el dueño ya existe: lo da por aplicado SIN llamar al cliente), excluyentes y con confirm_client_name. */
         Route::post('implementations/{id}/user-setup', 'Api\ClaudeImplementationOpsController@user_setup_json')
             ->whereNumber('id');
 
