@@ -1000,6 +1000,184 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * Paths de shared que `ClientApiPathResolver` resuelve a OTRO lado del que parecen, con la frase que
+     * tiene que decir el motivo.
+     *
+     * El resolver CONCATENA el path que cargó una persona, sin normalizarlo: `x/..` cae en la raíz de la
+     * cuenta compartida (donde viven las carpetas de todos los clientes), `../x` sale de ella, `./` es la
+     * raíz y `a//b` no es lo que alguien quiso escribir. Vacío, `/` y `//` los frena la guarda de la
+     * raíz; el resto, la de los segmentos.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function paths_de_shared_que_no_se_pueden_identificar(): array
+    {
+        $raiz      = 'raíz de la cuenta compartida';
+        $segmentos = 'segmentos vacíos';
+
+        return [
+            'vacío'                       => ['', $raiz],
+            'solo una barra'              => ['/', $raiz],
+            'varias barras'               => ['//', $raiz],
+            'un punto'                    => ['.', $segmentos],
+            'punto y barra'               => ['./', $segmentos],
+            'dos puntos'                  => ['..', $segmentos],
+            'subir un nivel adentro'      => ['x/..', $segmentos],
+            'subir un nivel y bajar'      => ['x/../y', $segmentos],
+            'subir antes de bajar'        => ['../x', $segmentos],
+            'subir dos niveles'           => ['a/../..', $segmentos],
+            'un punto adentro'            => ['a/./b', $segmentos],
+            'barra doble adentro'         => ['a//b', $segmentos],
+            'solo espacios'               => ['   ', $segmentos],
+            'un segmento de solo espacios' => ['a/ /b', $segmentos],
+        ];
+    }
+
+    /**
+     * 🔴 Un frente de shared con un path que no se puede identificar queda `estado: error` con el motivo y
+     * NO se toca: ni se respalda ni se escribe su `.env` (aunque exista uno). El otro frente se escribe
+     * igual.
+     *
+     * @dataProvider paths_de_shared_que_no_se_pueden_identificar
+     *
+     * @param string $path  `client_apis.path` del frente roto.
+     * @param string $frase Lo que tiene que decir el motivo.
+     *
+     * @return void
+     */
+    public function test_un_path_de_shared_que_no_se_puede_identificar_no_se_toca(string $path, string $frase): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes();
+
+        $dos->path = $path;
+        $dos->save();
+
+        $antes = $this->ssh->envs[$dos->id];
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $fila = $this->fila($respuesta, $dos);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertSame('ninguna', $fila['accion']);
+        $this->assertStringContainsString($frase, (string) $fila['error']);
+
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->escrituras, 'No se escribe en una carpeta que no se puede identificar.');
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->backups);
+        $this->assertSame($antes, $this->ssh->envs[$dos->id]);
+
+        $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion'], 'El otro frente se escribió igual.');
+    }
+
+    /**
+     * Paths de shared que SÍ sirven: las barras de los extremos no cambian dónde cae la carpeta, y un
+     * nombre con puntos o guiones (o que EMPIEZA con dos puntos) no es un segmento `.` ni `..`.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function paths_de_shared_que_si_sirven(): array
+    {
+        return [
+            'normal'                                  => ['doblep/api'],
+            'con barra al final'                      => ['doblep/api/'],
+            'con barra al principio'                  => ['/doblep/api'],
+            'con punto y guion en el nombre'          => ['dob.lep-2/api'],
+            'un segmento que empieza con dos puntos'  => ['..oculta/api'],
+            'un segmento de tres puntos'              => ['.../api'],
+        ];
+    }
+
+    /**
+     * La guarda de los segmentos no frena lo que sirve.
+     *
+     * @dataProvider paths_de_shared_que_si_sirven
+     *
+     * @param string $path `client_apis.path` del frente.
+     *
+     * @return void
+     */
+    public function test_un_path_de_shared_que_sirve_se_escribe(string $path): void
+    {
+        [$cliente, $uno] = $this->cliente_con_dos_frentes();
+
+        $uno->path = $path;
+        $uno->save();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+
+        $fila = $this->fila($respuesta, $uno);
+        $this->assertSame('escrita', $fila['accion']);
+        $this->assertNull($fila['error']);
+        $this->assertTrue($respuesta->json('listo'));
+    }
+
+    /**
+     * `vps_path` que no son un nombre simple: se pegan entre `/home/api-` y `/empresa-api`, y con una barra
+     * o un `..` adentro la carpeta cae fuera de `/home/api-<nombre>`.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function vps_paths_que_no_son_un_nombre_simple(): array
+    {
+        return [
+            'con una barra'        => ['a/b'],
+            'subiendo niveles'     => ['x/../..'],
+            'dos puntos'           => ['..'],
+            'un punto'             => ['.'],
+            'con barra invertida'  => ['a\\b'],
+        ];
+    }
+
+    /**
+     * 🔴 Un frente de VPS con un `vps_path` que no es un nombre simple queda `estado: error` y no se toca.
+     *
+     * @dataProvider vps_paths_que_no_son_un_nombre_simple
+     *
+     * @param string $vps_path `client_apis.vps_path` del frente roto.
+     *
+     * @return void
+     */
+    public function test_un_vps_path_que_no_es_un_nombre_simple_no_se_toca(string $vps_path): void
+    {
+        $cliente = $this->crear_cliente();
+        $bueno   = $this->crear_frente($cliente, 'doblep', 'shared_hosting', null, true);
+        $malo    = $this->crear_frente($cliente, 'doblep-vps', 'vps', $vps_path);
+
+        $this->ssh->envs[$bueno->id] = "APP_ENV=production\n";
+        $this->ssh->envs[$malo->id]  = "APP_ENV=production\n";
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $fila = $this->fila($respuesta, $malo);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertSame('ninguna', $fila['accion']);
+        $this->assertStringContainsString('vps_path', (string) $fila['error']);
+
+        $this->assertArrayNotHasKey($malo->id, $this->ssh->escrituras);
+        $this->assertArrayNotHasKey($malo->id, $this->ssh->backups);
+        $this->assertSame('escrita', $this->fila($respuesta, $bueno)['accion']);
+    }
+
+    /**
      * Un frente de VPS con su `vps_path` se resuelve a la carpeta del VPS y se escribe.
      *
      * @return void

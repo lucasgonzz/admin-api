@@ -226,6 +226,16 @@ class ClientInboundKeySyncService
                 return $fila;
             }
 
+            /* 🔴 Y tampoco en un path que no se pueda identificar con certeza: segmentos vacíos, `.` o `..`
+               (`x/..` se resuelve a la raíz de la cuenta, `../x` sale de la carpeta de los clientes). */
+            $motivo_del_path = $this->motivo_de_path_no_confiable($frente, $clave);
+
+            if ($motivo_del_path !== null) {
+                $fila['error'] = $motivo_del_path;
+
+                return $fila;
+            }
+
             /* Existir se pregunta aparte de leer: un .env que no está NO es un error de lectura, y
                crearlo desde acá dejaría un archivo en el servidor equivocado (bug del 22/8/2026). */
             if (! $this->env_ssh_service->env_exists_for($frente)) {
@@ -316,6 +326,52 @@ class ClientInboundKeySyncService
         }
 
         return $con_la_clave > 0;
+    }
+
+    /**
+     * Por qué el path de este frente no es confiable para operar sobre su `.env`, o null si lo es.
+     *
+     * 🔴 `ClientApiPathResolver::resolve()` arma la carpeta CONCATENANDO el path que cargó una persona en
+     * el admin, sin normalizarlo. Un `path` con segmentos `.`, `..` o vacíos se resuelve a otro lado del
+     * que parece: `x/..` es la raíz de la cuenta compartida (donde viven las carpetas de TODOS los
+     * clientes), `../x` sale de ella, `./` es la raíz y `a//b` no es lo que alguien quiso escribir. En
+     * VPS el `vps_path` es texto libre del CRUD y se pega entre `/home/api-` y `/empresa-api`: con una
+     * barra o un `..` adentro la carpeta resuelta cae fuera de `/home/api-<nombre>`.
+     *
+     * Reglas:
+     *  - shared: el path, sin las barras de los extremos (que no cambian dónde cae), no puede tener
+     *    ningún segmento vacío, solo espacios, `.` ni `..`. Un path vacío o `/` ya lo frena antes la guarda
+     *    de la raíz de la cuenta, con su propio mensaje.
+     *  - vps: el `vps_path` tiene que ser un nombre simple: sin `/` ni `\`, y distinto de `.` y `..`.
+     *
+     * @param ClientApi $frente Frente (carpeta) del cliente.
+     * @param string    $clave  Clave del cliente (el path sale en el mensaje, por las dudas, tapado).
+     *
+     * @return string|null El motivo, o null si el path sirve.
+     */
+    protected function motivo_de_path_no_confiable(ClientApi $frente, $clave)
+    {
+        if (($frente->hosting_type ? $frente->hosting_type : 'shared_hosting') === 'vps') {
+            $vps_path = (string) $frente->vps_path;
+
+            if (strpos($vps_path, '/') !== false || strpos($vps_path, '\\') !== false || in_array(trim($vps_path), ['.', '..'], true)) {
+                return 'El vps_path de esta API ("' . $this->texto_seguro($vps_path, $clave, 60) . '") no es un nombre de carpeta simple '
+                    . '(lleva "/" o "\\", o es "." o ".."): no se opera ahí. Corregí el vps_path de la API en el admin.';
+            }
+
+            return null;
+        }
+
+        foreach (explode('/', trim((string) $frente->path, '/')) as $segmento) {
+            $segmento = trim($segmento);
+
+            if ($segmento === '' || $segmento === '.' || $segmento === '..') {
+                return 'El path de esta API ("' . $this->texto_seguro((string) $frente->path, $clave, 80) . '") tiene segmentos vacíos, "." o "..": '
+                    . 'no se opera sobre una carpeta que no se puede identificar con certeza. Corregí el path de la API en el admin.';
+            }
+        }
+
+        return null;
     }
 
     /**
