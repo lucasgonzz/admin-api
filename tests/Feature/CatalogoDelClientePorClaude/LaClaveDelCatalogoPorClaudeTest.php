@@ -704,6 +704,43 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * 🔴 Un frente de shared con el path VACÍO se resuelve a la raíz de la cuenta compartida, donde viven
+     * las carpetas de todos los clientes: ahí no se opera, aunque exista un `.env`. Queda `error` y no
+     * frena al otro frente.
+     *
+     * @return void
+     */
+    public function test_un_frente_de_shared_con_el_path_vacio_no_se_toca(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes();
+
+        $dos->path = '';
+        $dos->save();
+
+        $antes = $this->ssh->envs[$dos->id];
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $fila = $this->fila($respuesta, $dos);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertSame('ninguna', $fila['accion']);
+        $this->assertStringContainsString('raíz de la cuenta compartida', (string) $fila['error']);
+
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->escrituras, 'No se escribe en la raíz de la cuenta.');
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->backups);
+        $this->assertSame($antes, $this->ssh->envs[$dos->id]);
+
+        $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion'], 'El otro frente se escribió igual.');
+    }
+
+    /**
      * Un frente de VPS con su `vps_path` se resuelve a la carpeta del VPS y se escribe.
      *
      * @return void

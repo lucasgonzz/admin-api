@@ -200,6 +200,17 @@ class ClientInboundKeySyncService
         try {
             $fila['path'] = $this->env_ssh_service->get_api_path($frente);
 
+            /* 🔴 Un frente de shared con el path vacío se resuelve a la RAÍZ de la cuenta compartida
+               (`domains/comerciocity.com/public_html/`), donde viven las carpetas de TODOS los clientes
+               —es cómo quedaron dos clientes en la migración al VPS, ver `ClientApiPathResolver`—. Ahí
+               no se lee ni se escribe un .env, aunque exista uno. */
+            if ($this->es_la_raiz_de_la_cuenta_compartida($fila['path'])) {
+                $fila['error'] = 'El path de esta API está vacío y se resuelve a la raíz de la cuenta compartida: '
+                    . 'no se opera ahí. Completá el path de la API en el admin.';
+
+                return $fila;
+            }
+
             /* Existir se pregunta aparte de leer: un .env que no está NO es un error de lectura, y
                crearlo desde acá dejaría un archivo en el servidor equivocado (bug del 22/8/2026). */
             if (! $this->env_ssh_service->env_exists_for($frente)) {
@@ -246,6 +257,18 @@ class ClientInboundKeySyncService
         }
 
         return $fila;
+    }
+
+    /**
+     * ¿Es este directorio la raíz de la cuenta de hosting compartido, y no la carpeta de un cliente?
+     *
+     * @param string $path Directorio que resolvió `ClientApiPathResolver`.
+     *
+     * @return bool
+     */
+    protected function es_la_raiz_de_la_cuenta_compartida($path)
+    {
+        return rtrim((string) $path, '/') === rtrim(ClientApiPathResolver::PREFIJO_SHARED, '/');
     }
 
     /**

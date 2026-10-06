@@ -75,19 +75,6 @@ return [
          * varios archivos analizados de a uno (con su reintento), no para uno solo.
          */
         'excel_analyze_timeout' => env('CLIENT_API_EXCEL_ANALYZE_TIMEOUT', 180),
-        /*
-         * Techo, en segundos, de UNA llamada del puente `POST claude/clients/{id}/catalogo/puente` al
-         * `admin-sync/catalogo/*` del empresa-api del cliente (`ClientCatalogoPuenteService`; misión
-         * implementacion-dos-sistemas, 6/10/2026).
-         *
-         * Va aparte del 'timeout' genérico de 15 s: el motor de /categorizar trae páginas de artículos
-         * y manda lotes de asignaciones de a cientos, y con el catálogo de un cliente grande (miles de
-         * artículos) una llamada tarda bastante más que una sincronización de configuración. 60 s cubre
-         * un lote en un cliente lento sin dejar colgada la conexión de quien llama. Un timeout NO se
-         * reintenta (un POST del catálogo no es idempotente del otro lado): el puente contesta 502
-         * `cliente_no_responde` y el motor decide.
-         */
-        'catalogo_timeout' => env('CLIENT_API_CATALOGO_TIMEOUT', 60),
     ],
 
     /*
