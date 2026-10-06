@@ -4,8 +4,10 @@ namespace App\Services;
 
 use App\Exceptions\AprobacionEnCursoException;
 use App\Exceptions\HorarioYaNoDisponibleException;
+use App\Exceptions\MailRechazadoPorElServidorException;
 use App\Exceptions\SinDemoLibreException;
 use App\Events\LeadSuggestionCreated;
+use App\Mail\Helpers\RechazosDeCorreoHelper;
 use App\Services\CloserGoogleCalendarBusyService;
 use App\Services\CloserGoogleCalendarEventService;
 use App\Services\GoogleCalendarOAuthService;
@@ -7833,7 +7835,19 @@ TXT;
                 $lead->loadMissing('demo');
                 $mailable = \App\Mail\Helpers\LeadDemoMailHelper::build($lead);
                 \Illuminate\Support\Facades\Mail::to($lead->email)->send($mailable);
-                $lead->update(['demo_mail_sent_at' => AppTime::now()]);
+
+                /* 🔴 Que `send()` no tire NO quiere decir que el mail salió. Si el servidor rechaza la casilla
+                 * (550 en el RCPT TO) SwiftMailer no tira nada y la deja en `failures()`. Esta línea lo
+                 * convierte en una excepción, que cae en el `catch` de abajo como cualquier otro fallo: sin
+                 * `demo_mail_sent_at`, sin el evento "enviado" y con el motivo en `demo_mail_last_error`. Va
+                 * ANTES de anotar el éxito, no después: con un rechazo anotado como enviado, el recordatorio
+                 * de la demo le dice al lead "los accesos están en el mail que te mandamos". */
+                RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
+                /* `demo_mail_last_error => null`: un envío que salió limpia el fallo de uno anterior. Sin
+                 * esto, un mail que falló una vez y después salió dejaría la tarjeta del panel en "Fallido"
+                 * para siempre (el SPA le da prioridad al error sobre la fecha de envío). */
+                $lead->update(['demo_mail_sent_at' => AppTime::now(), 'demo_mail_last_error' => null]);
                 Log::info('LeadAiService: Mail 1 enviado.', [
                     'lead_id'       => $lead->id,
                     'email'         => $lead->email,
@@ -7849,6 +7863,10 @@ TXT;
                     'lead_id' => $lead->id,
                     'error'   => $e->getMessage(),
                 ]);
+
+                /* Antes este `catch` era SOLO el log de arriba: la ficha no se enteraba. Ahora deja el motivo
+                 * en la ficha y un evento en el mensaje (ver `anotar_el_mail_que_no_salio()`). */
+                $this->anotar_el_mail_que_no_salio($lead, $e, 'Mail de demo no enviado', $admin_notifications_log);
             }
         }
 
@@ -7890,7 +7908,13 @@ TXT;
                         $lead->loadMissing('demo');
                         $mailable = \App\Mail\Helpers\LeadDemoMailHelper::build($lead);
                         \Illuminate\Support\Facades\Mail::to($lead->email)->send($mailable);
-                        $lead->update(['demo_mail_sent_at' => AppTime::now()]);
+
+                        /* 🔴 Que `send()` no tire NO quiere decir que el mail salió (un 550 en el RCPT TO no
+                         * tira nada): si el servidor rechazó la casilla esto tira, y el `catch` de abajo
+                         * deja la fecha del envío ANTERIOR como estaba. Ver el primer bloque de Mail 1. */
+                        RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
+                        $lead->update(['demo_mail_sent_at' => AppTime::now(), 'demo_mail_last_error' => null]);
                         Log::info('LeadAiService: Mail 1 reenviado a pedido del lead.', [
                             'lead_id' => $lead->id,
                             'email'   => $lead->email,
@@ -7904,6 +7928,8 @@ TXT;
                             'lead_id' => $lead->id,
                             'error'   => $e->getMessage(),
                         ]);
+
+                        $this->anotar_el_mail_que_no_salio($lead, $e, 'Mail de demo no enviado', $admin_notifications_log);
                     }
                 }
             } else {
@@ -7984,7 +8010,15 @@ TXT;
                     $lead->load('demo');
                     $carta = \App\Mail\Helpers\LeadDemoAccesoMailHelper::build($lead);
                     \Illuminate\Support\Facades\Mail::to($lead->email)->send($carta);
-                    $lead->update(['demo_mail_sent_at' => AppTime::now()]);
+
+                    /* 🔴 Que `send()` no tire NO quiere decir que el mail salió (un 550 en el RCPT TO no tira
+                     * nada): si el servidor rechazó la casilla esto tira, y el `catch` de abajo deja
+                     * `demo_mail_sent_at` como estaba. Acá pesa más que en cualquier otro lado: esa marca decide
+                     * `$carta_ya_enviada` (más arriba), la guardia anti-ráfaga, el contexto que ve el agente
+                     * ("Carta de acceso por mail: ya enviada") y el texto del recordatorio de la demo. */
+                    RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
+                    $lead->update(['demo_mail_sent_at' => AppTime::now(), 'demo_mail_last_error' => null]);
 
                     $motivo_carta = $carta_por_reenvio && ! $carta_por_asignacion && ! $carta_por_email_nuevo
                         ? 'Carta de acceso reenviada (pedido del lead)'
@@ -8000,6 +8034,8 @@ TXT;
                         'lead_id' => $lead->id,
                         'error'   => $e->getMessage(),
                     ]);
+
+                    $this->anotar_el_mail_que_no_salio($lead, $e, 'Carta de acceso no enviada', $admin_notifications_log);
                 }
             } elseif ($reenviar_mail_flag) {
                 /* Sin correo, o sin demo asignada (estado fuera del ciclo): no hay nada que
@@ -8072,6 +8108,67 @@ TXT;
         LeadBroadcastService::emit_conversation_updated((int) $lead->id, (int) $msg->id);
 
         return $msg;
+    }
+
+    /**
+     * Deja anotado que un mail al lead NO salió: el motivo en la ficha y un evento en el mensaje.
+     *
+     * Lo llaman los `catch` de los tres envíos de mail de `apply_parsed_response()` (el Mail 1 automático o
+     * forzado por el admin, el Mail 1 reenviado a pedido del lead y la carta de acceso). Hasta la misión
+     * mails-a-leads-rechazados-por-smtp (6/10/2026) esos `catch` eran SOLO un `Log::error`: la ficha no se
+     * enteraba y quedaba en "Pendiente" sin explicación. Y el rechazo del servidor ni siquiera llegaba al
+     * `catch`, porque SwiftMailer no tira cuando contesta 550 (ver `RechazosDeCorreoHelper`).
+     *
+     * Qué deja:
+     *   - `demo_mail_last_error` = el mensaje de la falla. Para un rechazo es el motivo fijo de
+     *     `MailRechazadoPorElServidorException` (sin la casilla); para cualquier otra falla, lo que tiró el
+     *     envío. El SPA lo lee y pinta la tarjeta del mail en "Fallido".
+     *   - Un evento en `admin_notifications` del mensaje ("<mail> no enviado: ...") con `admins` vacío, igual
+     *     que los de "enviado": la burbuja del panel los dibuja como un badge `evento → admins`.
+     *   - 🔴 **`demo_mail_sent_at` NO se toca**: si ya había salido un mail antes, esa fecha sigue siendo verdad.
+     *
+     * Se anota CUALQUIER falla del envío y no solo el rechazo: es el mismo `catch`, y una ficha que dice
+     * "Pendiente" cuando el SMTP no respondió es tan engañosa como una que dice "Exitoso" cuando lo rechazó.
+     *
+     * 🔴 **Tiene su propio `try/catch` que loguea y traga, y no es defensividad de más.** Quien llama es un
+     * `catch` que hoy no puede romper el flujo de la IA (es solo un log), y este método no puede empezar a
+     * poder. Si anotar el fallo tirara —la base caída justo ahí—, la excepción subiría hasta
+     * `apply_pending_actions()` y el admin vería un 500 al aprobar un paquete cuyo mail ni siquiera era lo
+     * importante: el mensaje, el estado y la demo ya están aplicados. Por la misma razón el evento se arma
+     * ANTES de tocar la base: si la ficha no se puede escribir, el evento igual llega al mensaje.
+     *
+     * No cambia nada de lo que se le manda al lead ni a quién, no toca el prompt ni el contexto del agente
+     * y no escala el caso a intervención humana (sería una regla de negocio nueva).
+     *
+     * @param Lead                             $lead                    Lead al que no le llegó el mail.
+     * @param \Throwable                       $falla                   Lo que tiró el envío, o `MailRechazadoPorElServidorException`
+     *                                                                  si el servidor rechazó la casilla.
+     * @param string                           $titulo_del_evento       El nombre del mail con su participio, tal como se titula el evento:
+     *                                                                  `Mail de demo no enviado` o `Carta de acceso no enviada`. Va completo
+     *                                                                  y no se arma acá porque el participio concuerda con el nombre (los de
+     *                                                                  éxito ya dicen "Mail de demo enviado" y "Carta de acceso enviada").
+     * @param array<int, array<string, mixed>> $admin_notifications_log Los eventos del mensaje, por referencia: acá se agrega el de fallo.
+     *
+     * @return void
+     */
+    private function anotar_el_mail_que_no_salio(Lead $lead, \Throwable $falla, string $titulo_del_evento, array &$admin_notifications_log): void
+    {
+        try {
+            // Qué pasó, para que el evento distinga "el servidor no aceptó la casilla" de "no se pudo ni mandar".
+            $fue_rechazo = $falla instanceof MailRechazadoPorElServidorException;
+
+            $admin_notifications_log[] = [
+                'evento' => $titulo_del_evento . ': ' . ($fue_rechazo ? 'el servidor de correo rechazó la casilla' : 'falló el envío'),
+                'admins' => [],
+            ];
+
+            $lead->update(['demo_mail_last_error' => $falla->getMessage()]);
+        } catch (\Throwable $segunda_falla) {
+            Log::error('LeadAiService: no se pudo anotar que el mail al lead no salió.', [
+                'lead_id' => $lead->id,
+                'error'   => $segunda_falla->getMessage(),
+            ]);
+        }
     }
 
     /**

@@ -6,6 +6,8 @@ use App\Exceptions\MailRechazadoPorElServidorException;
 use App\Models\Admin;
 use App\Models\Demo;
 use App\Models\Lead;
+use App\Models\LeadMessage;
+use App\Services\LeadAiService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
@@ -290,5 +292,93 @@ abstract class BaseDeMailsDeLead extends TestCase
 
         $this->assertNotNull($fresco->{$col_enviado}, 'El mail salió: tiene que tener fecha de envío.');
         $this->assertNull($fresco->{$col_error}, 'El mail salió: no puede quedar un error.');
+    }
+
+    /**
+     * Las acciones que el panel manda al aprobar, todas apagadas: cada disparador prende lo suyo.
+     *
+     * @param array<string, mixed> $prendidas Lo que este caso activa.
+     *
+     * @return array<string, mixed>
+     */
+    protected function final_actions(array $prendidas = []): array
+    {
+        return array_merge([
+            'estado_sugerido'              => 'demo_agendada',
+            'agendar_demo'                 => null,
+            'forzar_slot'                  => false,
+            'enviar_mail_demo'             => false,
+            'reenviar_mail_demo'           => false,
+            'guardar_nombre'               => null,
+            'guardar_email'                => null,
+            'cancelar_demo'                => false,
+            'requiere_intervencion_humana' => false,
+            'motivo_intervencion'          => null,
+        ], $prendidas);
+    }
+
+    /**
+     * Le da al lead un mensaje entrante, como tiene todo lead real que llegó hasta acá.
+     *
+     * @param Lead $lead
+     *
+     * @return Lead El mismo lead.
+     */
+    protected function con_un_mensaje_entrante(Lead $lead): Lead
+    {
+        $entrante              = new LeadMessage();
+        $entrante->lead_id     = $lead->id;
+        $entrante->sender      = 'lead';
+        $entrante->status      = 'enviado';
+        $entrante->is_followup = false;
+        $entrante->content     = 'Dale, mandame todo por mail.';
+        $entrante->save();
+
+        return $lead;
+    }
+
+    /**
+     * Un mensaje `sugerido` con su paquete de acciones, tal cual lo deja `generate_suggestion()`.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $extra Acciones del paquete original (`agendar_demo`, por ejemplo).
+     *
+     * @return LeadMessage
+     */
+    protected function crear_mensaje_pendiente(Lead $lead, array $extra = []): LeadMessage
+    {
+        $mensaje                        = new LeadMessage();
+        $mensaje->lead_id               = $lead->id;
+        $mensaje->sender                = 'sistema';
+        $mensaje->status                = 'sugerido';
+        $mensaje->is_followup           = false;
+        $mensaje->requiere_verificacion = true;
+        $mensaje->content               = 'Dale, te mando todo por mail.';
+        $mensaje->pending_actions       = array_merge([
+            'mensaje_sugerido' => $mensaje->content,
+            'estado_sugerido'  => 'demo_agendada',
+            'razonamiento'     => '',
+        ], $extra);
+        $mensaje->save();
+
+        return $mensaje;
+    }
+
+    /**
+     * Aprueba un paquete de acciones como lo hace el panel: crea el mensaje pendiente y lo aplica.
+     *
+     * @param Lead                 $lead
+     * @param array<string, mixed> $pendientes    Acciones del paquete original de la IA.
+     * @param array<string, mixed> $final_actions Lo que aprobó el panel.
+     *
+     * @return LeadMessage El mensaje ya aplicado, releído de la base.
+     */
+    protected function aprobar(Lead $lead, array $pendientes, array $final_actions): LeadMessage
+    {
+        $mensaje = $this->crear_mensaje_pendiente($lead, $pendientes);
+
+        (new LeadAiService())->apply_pending_actions($mensaje, $final_actions);
+
+        return $mensaje->fresh();
     }
 }
