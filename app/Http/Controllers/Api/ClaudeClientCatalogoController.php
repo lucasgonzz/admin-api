@@ -103,7 +103,9 @@ class ClaudeClientCatalogoController extends Controller
      * `pisar_distintas` (opcional, default false, igual de estricto que `dry_run`): aplicando, un frente cuyo
      * `.env` ya tiene OTRA clave NO se escribe salvo que venga en true; queda `estado: distinta`,
      * `accion: ninguna`, `error: "tiene otra clave; para reemplazarla, pisar_distintas: true"` y `listo` en
-     * false. En dry_run no cambia nada.
+     * false. El dry_run PREDICE lo mismo que haría aplicar con los mismos parámetros: sin el campo (o en
+     * false) el frente `distinta` sale con `accion: ninguna` y ese mismo motivo; con el campo en true, con
+     * `accion: escribir`.
      *
      * Aplicando, antes de cada escritura se respalda el `.env` del frente (`.env.bak-<fecha>`) y
      * `EnvSshService` relee el archivo y verifica que la variable haya quedado: si no quedó, ese

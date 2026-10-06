@@ -315,9 +315,11 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertSame('escribir', $fila_uno['accion']);
         $this->assertNull($fila_uno['error']);
 
+        /* El frente con OTRA clave no se pisaría sin `pisar_distintas`: el dry_run lo dice igual que aplicar. */
         $fila_dos = $this->fila($respuesta, $dos);
         $this->assertSame('distinta', $fila_dos['estado']);
-        $this->assertSame('escribir', $fila_dos['accion']);
+        $this->assertSame('ninguna', $fila_dos['accion']);
+        $this->assertSame('tiene otra clave; para reemplazarla, pisar_distintas: true', $fila_dos['error']);
 
         /* Lo que importa: ni respaldo, ni escritura, ni un byte cambiado. */
         $this->assertSame([], $this->ssh->escrituras);
@@ -927,7 +929,14 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertSame($listo_en_dry_run, $dry->json('listo'), 'dry_run con ' . implode(', ', $estados));
 
         foreach ($frentes as $indice => $frente) {
-            $this->assertSame($estados[$indice], $this->fila($dry, $frente)['estado'], 'El estado del frente ' . ($indice + 1) . ' en el dry_run.');
+            $fila = $this->fila($dry, $frente);
+
+            $this->assertSame($estados[$indice], $fila['estado'], 'El estado del frente ' . ($indice + 1) . ' en el dry_run.');
+            $this->assertSame(
+                $this->accion_esperada_en_dry_run($estados[$indice], false),
+                $fila['accion'],
+                'La acción del frente ' . ($indice + 1) . ' (' . $estados[$indice] . ') en el dry_run sin pisar_distintas.'
+            );
         }
 
         $this->assertSame([], $this->ssh->escrituras, 'El dry_run no escribe.');
@@ -937,17 +946,26 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $aplicado->assertStatus(200);
         $this->assertSame($listo_aplicando, $aplicado->json('listo'), 'aplicando con ' . implode(', ', $estados));
 
+        $this->assertElDryRunPredijoLoQueHizoAplicar($dry, $aplicado, $frentes, 'sin pisar_distintas, con ' . implode(', ', $estados));
+
         $this->assertSinLaClave($dry, $clave);
         $this->assertSinLaClave($aplicado, $clave);
 
         /* Con `pisar_distintas: true`: otro cliente con los mismos estados (el aplicado de arriba ya escribió
            lo suyo). En dry_run el campo no cambia nada; aplicando, autoriza a reemplazar la clave distinta. */
-        [$otro, , $clave_del_otro] = $this->cliente_con_frentes_en_estado($estados);
+        [$otro, $frentes_del_otro, $clave_del_otro] = $this->cliente_con_frentes_en_estado($estados);
 
         $dry_con_el_campo = $this->postJson($this->url($otro), ['pisar_distintas' => true], $this->headers());
 
         $this->assertSame($listo_en_dry_run, $dry_con_el_campo->json('listo'), 'dry_run con pisar_distintas y ' . implode(', ', $estados));
-        $this->assertSame($dry->json('frentes.0.accion'), $dry_con_el_campo->json('frentes.0.accion'));
+
+        foreach ($frentes_del_otro as $indice => $frente) {
+            $this->assertSame(
+                $this->accion_esperada_en_dry_run($estados[$indice], true),
+                $this->fila($dry_con_el_campo, $frente)['accion'],
+                'La acción del frente ' . ($indice + 1) . ' (' . $estados[$indice] . ') en el dry_run con pisar_distintas.'
+            );
+        }
 
         $pisando = $this->postJson(
             $this->url($otro),
@@ -957,6 +975,9 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
         $pisando->assertStatus(200);
         $this->assertSame($listo_pisando_distintas, $pisando->json('listo'), 'pisando distintas con ' . implode(', ', $estados));
+
+        $this->assertElDryRunPredijoLoQueHizoAplicar($dry_con_el_campo, $pisando, $frentes_del_otro, 'con pisar_distintas, con ' . implode(', ', $estados));
+
         $this->assertSinLaClave($pisando, $clave_del_otro);
     }
 
@@ -1114,12 +1135,14 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
-     * En dry_run `pisar_distintas` no cambia nada: el frente `distinta` sigue diciendo `escribir`, sin
-     * error, con o sin el campo, y no se escribe ni se respalda nada.
+     * 🔴 El dry_run PREDICE lo mismo que haría aplicar con los mismos parámetros. Sin `pisar_distintas` (o en
+     * false) el frente `distinta` sale `accion: ninguna` con el motivo exacto en `error`; con
+     * `pisar_distintas: true` sale `accion: escribir`. En los dos `listo` es false (un dry_run nunca está
+     * listo con un `distinta`), el frente `falta` siempre sale `escribir`, y no se respalda ni se escribe nada.
      *
      * @return void
      */
-    public function test_en_dry_run_pisar_distintas_no_cambia_nada(): void
+    public function test_el_dry_run_predice_lo_que_haria_aplicar_con_y_sin_pisar_distintas(): void
     {
         [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [
             "APP_ENV=production\n",
@@ -1127,25 +1150,86 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         ]);
 
         $sin_el_campo = $this->postJson($this->url($cliente), [], $this->headers());
-        $con_el_campo = $this->postJson($this->url($cliente), ['pisar_distintas' => true], $this->headers());
+        $en_false     = $this->postJson($this->url($cliente), ['pisar_distintas' => false], $this->headers());
+        $en_true      = $this->postJson($this->url($cliente), ['pisar_distintas' => true], $this->headers());
 
-        foreach ([$sin_el_campo, $con_el_campo] as $respuesta) {
+        foreach ([$sin_el_campo, $en_false] as $respuesta) {
             $respuesta->assertStatus(200);
             $this->assertTrue($respuesta->json('dry_run'));
             $this->assertFalse($respuesta->json('listo'));
 
             $distinta = $this->fila($respuesta, $dos);
             $this->assertSame('distinta', $distinta['estado']);
-            $this->assertSame('escribir', $distinta['accion']);
-            $this->assertNull($distinta['error']);
-
-            $this->assertSame('falta', $this->fila($respuesta, $uno)['estado']);
-            $this->assertSame('escribir', $this->fila($respuesta, $uno)['accion']);
+            $this->assertSame('ninguna', $distinta['accion'], 'Sin pisar_distintas, aplicar no la escribiría.');
+            $this->assertSame('tiene otra clave; para reemplazarla, pisar_distintas: true', $distinta['error']);
         }
 
-        $this->assertSame($sin_el_campo->json('frentes'), $con_el_campo->json('frentes'));
+        $this->assertSame($sin_el_campo->json('frentes'), $en_false->json('frentes'), 'Sin el campo y en false es lo mismo.');
+
+        $en_true->assertStatus(200);
+        $this->assertTrue($en_true->json('dry_run'));
+        $this->assertFalse($en_true->json('listo'), 'Un dry_run nunca está listo con un distinta.');
+
+        $pisaria = $this->fila($en_true, $dos);
+        $this->assertSame('distinta', $pisaria['estado']);
+        $this->assertSame('escribir', $pisaria['accion']);
+        $this->assertNull($pisaria['error']);
+
+        $this->assertNotSame($sin_el_campo->json('frentes'), $en_true->json('frentes'));
+
+        /* El frente sin la variable se escribe con o sin el campo: no depende de él. */
+        foreach ([$sin_el_campo, $en_false, $en_true] as $respuesta) {
+            $this->assertSame('falta', $this->fila($respuesta, $uno)['estado']);
+            $this->assertSame('escribir', $this->fila($respuesta, $uno)['accion']);
+            $this->assertNull($this->fila($respuesta, $uno)['error']);
+        }
+
         $this->assertSame([], $this->ssh->escrituras);
         $this->assertSame([], $this->ssh->backups);
+    }
+
+    /**
+     * Lo que dice el dry_run de un frente, según cómo se lo encuentra y si se autoriza a pisar.
+     *
+     * @param string $estado  `igual` | `falta` | `distinta` | `sin_env` | `error`.
+     * @param bool   $pisando Si el pedido lleva `pisar_distintas: true`.
+     *
+     * @return string `escribir` o `ninguna`.
+     */
+    private function accion_esperada_en_dry_run(string $estado, bool $pisando): string
+    {
+        if ($estado === 'falta') {
+            return 'escribir';
+        }
+
+        if ($estado === 'distinta') {
+            return $pisando ? 'escribir' : 'ninguna';
+        }
+
+        return 'ninguna';
+    }
+
+    /**
+     * 🔴 El dry_run predijo lo que de verdad hizo aplicar con los mismos parámetros: cada frente sale igual
+     * (mismo estado, mismo motivo, mismo path) salvo que `escribir` pasa a ser `escrita`.
+     *
+     * @param \Illuminate\Testing\TestResponse $dry      Respuesta del dry_run.
+     * @param \Illuminate\Testing\TestResponse $aplicado Respuesta de aplicar, sobre los mismos frentes.
+     * @param array<int, ClientApi>              $frentes  Los frentes del cliente.
+     * @param string                             $donde    Para el mensaje de la falla.
+     *
+     * @return void
+     */
+    private function assertElDryRunPredijoLoQueHizoAplicar($dry, $aplicado, array $frentes, string $donde): void
+    {
+        foreach ($frentes as $indice => $frente) {
+            $previsto = $this->fila($dry, $frente);
+            $real     = $this->fila($aplicado, $frente);
+
+            $previsto['accion'] = $previsto['accion'] === 'escribir' ? 'escrita' : $previsto['accion'];
+
+            $this->assertSame($previsto, $real, 'El dry_run no predijo lo que hizo aplicar en el frente ' . ($indice + 1) . ' (' . $donde . ').');
+        }
     }
 
     /**

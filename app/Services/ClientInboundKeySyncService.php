@@ -33,8 +33,10 @@ use Illuminate\Support\Str;
  * 🔴 Un frente cuyo `.env` ya tiene OTRA clave (`estado: distinta`) NO se pisa si no se pidió: aplicando sin
  * `pisar_distintas: true` queda `accion: ninguna` con el motivo en `error`, y `listo` en false. Esa otra
  * clave la puede estar usando alguien (una integración que el admin no conoce): reemplazarla es una decisión
- * que se toma a propósito. Un frente `falta` (sin la variable, o vacía) se escribe siempre. En `dry_run` no
- * cambia nada: sigue diciendo qué se escribiría.
+ * que se toma a propósito. Un frente `falta` (sin la variable, o vacía) se escribe siempre. El `dry_run`
+ * PREDICE lo mismo que haría aplicar con los mismos parámetros: sin el campo (o en false) un frente
+ * `distinta` sale con `accion: ninguna` y ese mismo motivo; con `pisar_distintas: true`, con
+ * `accion: escribir`.
  *
  * 🔴 Antes de escribir se verifica que el `.env` sea de ESTE cliente: si trae `USER_ID` y no coincide con
  * `clients.user_id` (comparado como texto y sin espacios), el frente queda `estado: error`
@@ -83,8 +85,9 @@ class ClientInboundKeySyncService
     const VARIABLE_DEL_DUENO = 'USER_ID';
 
     /**
-     * Lo que dice `error` de un frente `distinta` que NO se escribió porque no vino `pisar_distintas: true`.
-     * El texto es parte del contrato con el motor: se lo muestra a quien opera, tal cual.
+     * Lo que dice `error` de un frente `distinta` que NO se escribe (aplicando) ni se escribiría (en dry_run)
+     * porque no vino `pisar_distintas: true`. El texto es parte del contrato con el motor: se lo muestra a quien
+     * opera, tal cual.
      *
      * @var string
      */
@@ -171,8 +174,9 @@ class ClientInboundKeySyncService
      *
      * @param Client $client          Cliente dueño de la clave.
      * @param bool   $dry_run         true: solo mira y dice qué haría. false: escribe de verdad.
-     * @param bool   $pisar_distintas true: aplicando, también reemplaza la clave de un frente que ya tiene
-     *                                OTRA. false (default): ese frente no se escribe. No cambia el dry_run.
+     * @param bool   $pisar_distintas true: también reemplaza la clave de un frente que ya tiene OTRA (en
+     *                                dry_run, dice que la escribiría). false (default): ese frente no se
+     *                                escribe, y el dry_run lo dice igual que aplicar.
      *
      * @return array{client_id: int, dry_run: bool, api_key_en_el_admin: string, frentes: array<int, array<string, mixed>>, listo: bool}
      */
@@ -230,7 +234,7 @@ class ClientInboundKeySyncService
      * @param bool      $dry_run   true: no respalda ni escribe.
      * @param string    $timestamp Marca que nombra el respaldo del `.env`.
      * @param string    $user_id_del_cliente `clients.user_id` como texto y sin espacios ('' si no tiene).
-     * @param bool      $pisar_distintas     true: un frente `distinta` también se escribe (solo aplicando).
+     * @param bool      $pisar_distintas     true: un frente `distinta` también se escribe (o se escribiría, en dry_run).
      *
      * @return array<string, mixed> `{client_api_id, hosting_type, path, estado, accion, error}`.
      */
@@ -307,18 +311,21 @@ class ClientInboundKeySyncService
             return $fila;
         }
 
-        /* 3. Falta o es distinta: en dry_run se dice lo que se haría y se corta ahí. */
-        if ($dry_run) {
-            $fila['accion'] = self::ACCION_ESCRIBIR;
+        /* 🔴 Un frente que ya tiene OTRA clave no se pisa si no se pidió: esa clave la puede estar usando alguien
+           que el admin no conoce. Queda `distinta` (lo que se encontró), `accion: ninguna` y el motivo en
+           `error`; `listo` queda en false porque ese frente no tiene la clave de este cliente. Va ANTES del corte
+           del dry_run a propósito: el dry_run tiene que predecir lo mismo que haría aplicar con los mismos
+           parámetros, y si dijera `escribir` para algo que aplicar no escribe, el que mira antes de aplicar se
+           enteraría recién después. */
+        if ($fila['estado'] === self::ESTADO_DISTINTA && ! $pisar_distintas) {
+            $fila['error'] = self::MENSAJE_DISTINTA_SIN_PISAR;
 
             return $fila;
         }
 
-        /* 🔴 Aplicando, un frente que ya tiene OTRA clave no se pisa si no se pidió: esa clave la puede estar
-           usando alguien que el admin no conoce. Queda `distinta` (lo que se encontró), `accion: ninguna` y el
-           motivo en `error`; `listo` queda en false porque ese frente no tiene la clave de este cliente. */
-        if ($fila['estado'] === self::ESTADO_DISTINTA && ! $pisar_distintas) {
-            $fila['error'] = self::MENSAJE_DISTINTA_SIN_PISAR;
+        /* 3. Falta, o es distinta y se pidió pisarla: en dry_run se dice lo que se haría y se corta ahí. */
+        if ($dry_run) {
+            $fila['accion'] = self::ACCION_ESCRIBIR;
 
             return $fila;
         }
