@@ -1178,6 +1178,143 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * 🔴 Un `.env` con un `USER_ID` que NO es el de este cliente (`clients.user_id`) es el sistema de OTRO
+     * dueño —una carpeta mal cargada en el admin—: ese frente queda `estado: error` con el motivo
+     * `dueno_distinto` y no se respalda ni se escribe, ni en dry_run ni aplicando. El otro frente (cuyo
+     * `.env` sí es de este cliente) se escribe igual.
+     *
+     * @return void
+     */
+    public function test_un_env_de_otro_dueno_no_se_toca(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [
+            "APP_ENV=production\nUSER_ID=1200\n",
+            "APP_ENV=production\nUSER_ID=999900\nDB_DATABASE=de_otro\n",
+        ]);
+
+        $cliente->user_id = 1200;
+        $cliente->save();
+
+        $antes = $this->ssh->envs[$dos->id];
+
+        /* En dry_run ya lo dice: el que mira antes de aplicar se entera. */
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertFalse($dry->json('listo'));
+        $this->assertSame('falta', $this->fila($dry, $uno)['estado']);
+
+        $ajeno = $this->fila($dry, $dos);
+        $this->assertSame('error', $ajeno['estado']);
+        $this->assertSame('ninguna', $ajeno['accion']);
+        $this->assertStringContainsString('dueno_distinto', (string) $ajeno['error']);
+        $this->assertStringContainsString('999900', (string) $ajeno['error']);
+        $this->assertStringContainsString('1200', (string) $ajeno['error']);
+
+        /* Aplicando: el ajeno no se toca; el propio sí se escribe. */
+        $aplicado = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $aplicado->assertStatus(200);
+        $this->assertFalse($aplicado->json('listo'));
+
+        $fila = $this->fila($aplicado, $dos);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertSame('ninguna', $fila['accion']);
+
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->escrituras, 'No se le escribe la clave al sistema de otro dueño.');
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->backups);
+        $this->assertSame($antes, $this->ssh->envs[$dos->id]);
+
+        $this->assertSame('escrita', $this->fila($aplicado, $uno)['accion']);
+    }
+
+    /**
+     * El `USER_ID` del `.env` que COINCIDE con el del cliente no frena nada, escrito como se escriba
+     * (con comillas, con espacios adentro de las comillas o después del valor), y tampoco frena un `.env`
+     * que no trae `USER_ID` (los de base propia no lo necesitan) o que lo trae vacío.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function envs_que_son_de_este_cliente(): array
+    {
+        return [
+            'igual'                              => ["APP_ENV=production\nUSER_ID=1200\n"],
+            'entre comillas dobles'              => ["APP_ENV=production\nUSER_ID=\"1200\"\n"],
+            'entre comillas simples con espacios' => ["APP_ENV=production\nUSER_ID=' 1200 '\n"],
+            'con espacios después del valor'     => ["APP_ENV=production\nUSER_ID=1200   \n"],
+            'sin USER_ID'                        => ["APP_ENV=production\nDB_DATABASE=propia\n"],
+            'USER_ID vacío'                      => ["APP_ENV=production\nUSER_ID=\n"],
+            'USER_ID solo con espacios'          => ["APP_ENV=production\nUSER_ID=\"   \"\n"],
+        ];
+    }
+
+    /**
+     * @dataProvider envs_que_son_de_este_cliente
+     *
+     * @param string $env Contenido del `.env` del frente.
+     *
+     * @return void
+     */
+    public function test_un_env_de_este_cliente_o_sin_user_id_se_escribe(string $env): void
+    {
+        [$cliente, $uno] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [$env]);
+
+        $cliente->user_id = 1200;
+        $cliente->save();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+
+        $fila = $this->fila($respuesta, $uno);
+        $this->assertSame('escrita', $fila['accion']);
+        $this->assertNull($fila['error']);
+    }
+
+    /**
+     * La comparación es de TEXTO: `01200` no es `1200`. Y un cliente sin `user_id` cargado en el admin con
+     * un `.env` que sí trae `USER_ID` también es `dueno_distinto` (no hay con qué verificar que sea suyo), y
+     * el mensaje dice que no tiene uno cargado.
+     *
+     * @return void
+     */
+    public function test_el_user_id_se_compara_como_texto_y_un_cliente_sin_user_id_con_env_que_lo_trae_es_error(): void
+    {
+        [$cliente, $uno] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [
+            "APP_ENV=production\nUSER_ID=01200\n",
+        ]);
+
+        $cliente->user_id = 1200;
+        $cliente->save();
+
+        $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $this->assertSame('error', $this->fila($respuesta, $uno)['estado'], '01200 no es 1200: se compara como texto.');
+        $this->assertStringContainsString('dueno_distinto', (string) $this->fila($respuesta, $uno)['error']);
+
+        /* Sin user_id en el admin. */
+        $cliente->user_id = null;
+        $cliente->save();
+
+        $this->ssh->envs[$uno->id] = "APP_ENV=production\nUSER_ID=1200\n";
+
+        $sin_user_id = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $fila = $this->fila($sin_user_id, $uno);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertStringContainsString('dueno_distinto', (string) $fila['error']);
+        $this->assertStringContainsString('sin cargar', (string) $fila['error']);
+    }
+
+    /**
      * Un frente de VPS con su `vps_path` se resuelve a la carpeta del VPS y se escribe.
      *
      * @return void

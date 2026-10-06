@@ -30,6 +30,12 @@ use Illuminate\Support\Str;
  *
  * Un frente que falla (SSH caído, sin permisos) queda como `estado: error` y NO frena a los demás.
  *
+ * 🔴 Antes de escribir se verifica que el `.env` sea de ESTE cliente: si trae `USER_ID` y no coincide con
+ * `clients.user_id` (comparado como texto y sin espacios), el frente queda `estado: error`
+ * (`dueno_distinto`) y no se toca. Es la clase de error de una carpeta mal cargada en el admin, que apunta
+ * al sistema de OTRO dueño: escribirle ahí la clave de este cliente sería pisar la de aquél. Un `.env` sin
+ * `USER_ID` (los de base propia no lo necesitan) o con la variable vacía se sigue como siempre.
+ *
  * 🔴 `listo` (ver `calcular_listo()`) es true cuando hay AL MENOS UN frente con la clave igual o recién
  * escrita y NINGUNO en `falta`, `distinta` o `error`; un frente `sin_env` no cuenta ni a favor ni en
  * contra. Así una carpeta que nunca se instaló (la segunda de un cliente de shared) no deja al cliente
@@ -60,6 +66,15 @@ class ClientInboundKeySyncService
      * @var string
      */
     const VARIABLE = 'ADMIN_API_INBOUND_KEY';
+
+    /**
+     * La variable del `.env` que dice de qué dueño es el sistema (el `User` de `empresa-api`): tiene que
+     * coincidir con `clients.user_id`. La usan las bases compartidas por varios comercios para saber a
+     * qué dueño leerle los datos.
+     *
+     * @var string
+     */
+    const VARIABLE_DEL_DUENO = 'USER_ID';
 
     /** Estado de la clave en el admin: ya estaba cargada. */
     const CLAVE_PRESENTE = 'presente';
@@ -163,10 +178,11 @@ class ClientInboundKeySyncService
 
         $resultado_de_frentes = [];
         $timestamp            = Carbon::now()->format('YmdHis');
+        $user_id_del_cliente  = trim((string) $client->user_id);
 
         try {
             foreach ($frentes as $frente) {
-                $resultado_de_frentes[] = $this->procesar_frente($frente, $clave, $dry_run, $timestamp);
+                $resultado_de_frentes[] = $this->procesar_frente($frente, $clave, $dry_run, $timestamp, $user_id_del_cliente);
             }
         } finally {
             /* La sesión SSH se cierra pase lo que pase: si algo revienta a mitad, no queda colgada. */
@@ -197,10 +213,11 @@ class ClientInboundKeySyncService
      * @param string    $clave     Clave vigente del cliente (puede ser '' en `dry_run` sin clave).
      * @param bool      $dry_run   true: no respalda ni escribe.
      * @param string    $timestamp Marca que nombra el respaldo del `.env`.
+     * @param string    $user_id_del_cliente `clients.user_id` como texto y sin espacios ('' si no tiene).
      *
      * @return array<string, mixed> `{client_api_id, hosting_type, path, estado, accion, error}`.
      */
-    protected function procesar_frente(ClientApi $frente, $clave, $dry_run, $timestamp)
+    protected function procesar_frente(ClientApi $frente, $clave, $dry_run, $timestamp, $user_id_del_cliente = '')
     {
         $fila = [
             'client_api_id' => (int) $frente->id,
@@ -249,6 +266,18 @@ class ClientInboundKeySyncService
             $env = $this->env_ssh_service->read_env_for($frente);
         } catch (\Throwable $e) {
             $fila['error'] = $this->texto_seguro($e->getMessage(), $clave);
+
+            return $fila;
+        }
+
+        /* 🔴 De quién es este .env. Si trae USER_ID y no es el de ESTE cliente, la carpeta apunta al sistema de
+           otro dueño (mal cargada en el admin): no se toca. Sin USER_ID, o vacío, se sigue como siempre. */
+        $user_id_del_env = isset($env[self::VARIABLE_DEL_DUENO]) ? trim((string) $env[self::VARIABLE_DEL_DUENO]) : '';
+
+        if ($user_id_del_env !== '' && $user_id_del_env !== $user_id_del_cliente) {
+            $fila['error'] = 'dueno_distinto: el .env de esta carpeta tiene USER_ID ' . $this->texto_seguro($user_id_del_env, $clave, 40)
+                . ' y este cliente tiene user_id ' . ($user_id_del_cliente === '' ? '(sin cargar)' : $this->texto_seguro($user_id_del_cliente, $clave, 40))
+                . ' en el admin: es el sistema de otro dueño, o la carpeta está mal cargada. No se escribe nada.';
 
             return $fila;
         }
