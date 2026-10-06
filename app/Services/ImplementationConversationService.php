@@ -824,6 +824,17 @@ class ImplementationConversationService
     }
 
     /**
+     * El servicio del candado del user setup. Un método aparte para que un test pueda reemplazarlo por uno que falle (el único camino para
+     * probar que una excepción al evaluar el candado no tira abajo el aviso al admin ni la creación de la instalación).
+     *
+     * @return UserSetupCandadoService
+     */
+    protected function crear_candado(): UserSetupCandadoService
+    {
+        return new UserSetupCandadoService();
+    }
+
+    /**
      * ¿Puede el modo automático aplicar el user setup ahora? Evalúa el candado con el plan estricto (los nueve chequeos de
      * `claude/implementations/{id}/user-setup`) y NO llama a nadie: lee y decide.
      *
@@ -845,13 +856,27 @@ class ImplementationConversationService
     private function evaluar_el_user_setup_automatico(Implementation $implementation, ?Client $client): array
     {
         // El servicio que define "este sistema ya opera o todavía no está listo".
-        $candado = new UserSetupCandadoService();
+        $candado = $this->crear_candado();
 
         // Sin cliente no hay a quién configurarle nada.
         if ($client === null) {
             $bloqueos = [$candado->chequeo('cliente_de_la_implementacion', false, 'No se encontró el cliente de la implementación.')];
         } else {
-            $bloqueos = $candado->bloqueos($candado->plan_estricto($implementation, $client)['chequeos']);
+            // 🔴 Evaluar el candado no puede tirar abajo el resto de la etapa 2. Los dos llamadores de `handle_stage_advance()` ya persistieron el avance
+            // antes de entrar acá, y lo que viene después (el aviso al admin y la creación de la instalación) no depende del user setup. Antes de esta misión
+            // `trigger_user_setup()` se tragaba casi cualquier error; ahora se evalúa un plan con consultas, y una excepción (la base, un `data` raro) dejaba la
+            // etapa avanzada SIN aviso y SIN instalación. Ante cualquier error el criterio es el conservador de siempre: NO se aplica, y el motivo queda dicho.
+            try {
+                $bloqueos = $candado->bloqueos($candado->plan_estricto($implementation, $client)['chequeos']);
+            } catch (\Throwable $e) {
+                Log::channel('daily')->error('ImplementationConversationService: modo automático — no se pudo evaluar el candado del user setup; NO se aplica.', [
+                    'implementation_id' => $implementation->id,
+                    'client_id'         => $implementation->client_id,
+                    'error'             => $e->getMessage(),
+                ]);
+
+                $bloqueos = [$candado->chequeo('evaluacion_del_candado', false, 'No se pudo evaluar si el sistema del cliente ya opera (' . $e->getMessage() . '): por las dudas no se aplicó.')];
+            }
         }
 
         if (count($bloqueos) === 0) {

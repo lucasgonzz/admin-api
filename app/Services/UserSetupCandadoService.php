@@ -58,8 +58,15 @@ class UserSetupCandadoService
     /**
      * Los estados de `leads.user_setup_status` que dicen "el setup del sistema de este cliente ya salió o está saliendo" por el
      * camino de LEADS: `ejecutandose` (la llamada está en vuelo, o se cortó sin terminar), `exitoso` y `sin_confirmar` (la llamada
-     * salió y no se sabe cómo terminó). Los demás (`pendiente`, `fallido`, o ninguno) NO frenan: el setup no se aplicó, y reintentarlo
-     * es el flujo de `/instalar-cliente`.
+     * salió y no se sabe cómo terminó). Los demás (`pendiente`, `fallido`, o ninguno) NO frenan: reintentar tras un `fallido` es el
+     * flujo de `/instalar-cliente`.
+     *
+     * 🔴 `fallido` NO prueba que el setup no corrió. `RunUserSetupService::run()` también lo escribe cuando se corta la espera (la
+     * llamada tiene un techo de 300 s y un setup real puede tardar más) o cuando el sistema del cliente contesta un 5xx después de
+     * haber vaciado y sembrado: ahí el `migrate:fresh` pudo haber corrido y el estado dice `fallido`. Es un hueco conocido de ese
+     * camino (el job de `claude/*` sí lo trata: "un error no significa que no corrió") y queda como seguimiento: clasificar esos
+     * errores como `sin_confirmar`. Hasta entonces, reintentar tras un `fallido` por una espera cortada lo decide quien mira el
+     * sistema del cliente.
      *
      * @var array<int, string>
      */
@@ -398,7 +405,9 @@ class UserSetupCandadoService
             $estado_que_frena !== null
                 ? $de_quien . ' está en estado "' . $estado_que_frena . '": el sistema del cliente ya se configuró (o se está configurando, o la llamada salió y no se sabe '
                     . 'cómo terminó) por este camino. 🔴 Volver a aplicarlo VACÍA la base del cliente (migrate:fresh). Verificá el sistema del cliente (`motor <cliente> '
-                    . 'metricas`: ¿existe el dueño?): este botón no re-aplica un setup que ya salió.'
+                    . 'metricas`: ¿existe el dueño?): este botón no re-aplica un setup que ya salió. Si el lead quedó en "ejecutandose" o "sin_confirmar" porque se '
+                    . 'cortó el pedido y el sistema NO tiene al dueño, desde este botón no hay forma de destrabarlo: el estado (`leads.user_setup_status`) se corrige a '
+                    . 'mano en la base del admin, con una persona mirando el sistema del cliente.'
                 : 'El user setup no se aplicó por el camino de leads.'
         );
 

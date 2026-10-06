@@ -226,7 +226,8 @@ class BotonDelPanelDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
 
         $this->assertTrue($boton['blocked']);
         $this->assertTrue($boton['can_force']);
-        $this->assertSame('El sistema del cliente ya se configuró o ya opera (1 motivo): para aplicarlo de nuevo hay que forzarlo y confirmar.', $boton['blocked_reason']);
+        // 🔴 Lo único que frena es la etapa: el texto no dice "ya se configuró o ya opera" (no hay nada configurado), dice la etapa.
+        $this->assertSame('La implementación ya pasó de la etapa 2 (está en la etapa 3): el user setup solo se aplica en la etapa 2. Para aplicarlo igual hay que forzarlo y confirmar.', $boton['blocked_reason']);
         $this->assertStringContainsString('etapa 3', $boton['force_reasons'][0]);
         $this->assertFalse($boton['live_system']);
     }
@@ -507,6 +508,8 @@ class BotonDelPanelDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
         $respuesta->assertJsonPath('codigo', 'falta_confirmar_sistema_en_uso');
         $this->assertStringContainsString('sistema vivo', $respuesta->json('message'));
         $this->assertStringContainsString(self::NEGOCIO, $respuesta->json('message'));
+        // Lo lee una persona: no nombra el parámetro de la API (el modal le muestra la casilla que tiene que tildar).
+        $this->assertStringNotContainsString('confirm_live_system', $respuesta->json('message'));
         $this->assertSame([], $sistema->pedidos, 'Forzó sobre un sistema en uso sin reconocerlo.');
         $this->assertNull($e['implementacion']->refresh()->user_setup_executed_at);
     }
@@ -543,7 +546,13 @@ class BotonDelPanelDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
         $sistema = $this->falsear_el_sistema_del_cliente();
         $e       = $this->escenario(['etapa' => 3]);
 
-        $this->apretar_el_boton($e['implementacion'])->assertStatus(422);
+        $sin_forzar = $this->apretar_el_boton($e['implementacion']);
+        $sin_forzar->assertStatus(422);
+
+        // 🔴 El mensaje dice la verdad: lo único que frena es la etapa, no hay nada configurado que "ya opere" (antes decía "ya se configuró o ya opera").
+        $this->assertStringContainsString('ya pasó de la etapa 2 (está en la etapa 3)', $sin_forzar->json('message'));
+        $this->assertStringNotContainsString('ya se configuró o ya opera', $sin_forzar->json('message'));
+
         $this->apretar_el_boton($e['implementacion'], ['force' => true])->assertStatus(422)->assertJsonPath('codigo', 'confirmacion_requerida');
         $this->assertSame([], $sistema->pedidos);
 

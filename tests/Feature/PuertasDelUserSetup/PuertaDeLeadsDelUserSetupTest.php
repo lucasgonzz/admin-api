@@ -397,6 +397,8 @@ class PuertaDeLeadsDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
         $respuesta->assertSessionHas('error');
         $this->assertStringStartsWith('No se creó el sistema: ', session('error'));
         $this->assertStringContainsString('lead_sin_user_setup', session('error'));
+        // Quien lo lee tiene que saber cómo se destraba un lead que quedó cortado: el estado se corrige a mano, no desde el botón.
+        $this->assertStringContainsString('leads.user_setup_status', session('error'));
         $this->assertSame([], $sistema->pedidos);
         $this->assertSame('exitoso', $e['lead']->refresh()->user_setup_status);
         $this->assertSame($antes, $this->datos_del_cliente($e['cliente']));

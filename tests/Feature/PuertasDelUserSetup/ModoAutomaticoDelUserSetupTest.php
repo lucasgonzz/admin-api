@@ -3,9 +3,11 @@
 namespace Tests\Feature\PuertasDelUserSetup;
 
 use App\Models\Admin;
+use App\Models\Client;
 use App\Models\ClientInstallation;
 use App\Models\Implementation;
 use App\Services\ImplementationConversationService;
+use App\Services\UserSetupCandadoService;
 use App\Services\WhatsappSendService;
 
 /**
@@ -159,6 +161,49 @@ class ModoAutomaticoDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
 
         /* El resto del flujo no cambia: la instalación se crea para que aparezca en el módulo de Instalaciones. */
         $this->assertSame(1, ClientInstallation::where('client_id', $e['cliente']->id)->where('status', 'pendiente')->count());
+    }
+
+    /**
+     * (a2) 🔴 Si evaluar el candado revienta (la base, un `data` raro), el modo automático NO aplica el user setup y NO tira abajo el resto de la
+     * etapa 2: el avance ya está persistido (lo hacen `advance_stage` y el envío del formulario ANTES de entrar acá) y el aviso al admin y la creación
+     * de la instalación no dependen del user setup. Antes de esta misión `trigger_user_setup()` se tragaba casi cualquier error; sin este resguardo una
+     * excepción del plan dejaba la etapa avanzada SIN aviso y SIN instalación. El motivo queda en el rastro y en el aviso.
+     *
+     * @return void
+     */
+    public function test_si_se_cae_la_evaluacion_del_candado_no_aplica_y_el_resto_del_flujo_sigue(): void
+    {
+        $sistema  = $this->falsear_el_sistema_del_cliente();
+        $e        = $this->escenario(['automation_mode' => 'auto', 'instalacion' => false]);
+        $whatsapp = $this->whatsapp_que_anota();
+
+        $this->con_admin_asignado($e['implementacion']);
+
+        // Un servicio de conversación cuyo candado revienta al evaluar el plan (el único camino para provocarlo sin romper la base de verdad).
+        $servicio = new class($whatsapp) extends ImplementationConversationService {
+            protected function crear_candado(): UserSetupCandadoService
+            {
+                return new class extends UserSetupCandadoService {
+                    public function plan_estricto(Implementation $implementation, Client $client): array
+                    {
+                        throw new \RuntimeException('se cayó la base');
+                    }
+                };
+            }
+        };
+
+        $servicio->handle_stage_advance($e['implementacion']->refresh(), 2);
+
+        $this->assertSame([], $sistema->pedidos, 'Con el candado caído el modo automático le pegó al sistema del cliente.');
+        $this->assertSame(['evaluacion_del_candado'], $this->motivos_del_rastro($e['implementacion']));
+        $this->assertSame('no_aplicado', $this->rastro($e['implementacion'])['estado']);
+        $this->assertStringContainsString('se cayó la base', $this->rastro($e['implementacion'])['motivos'][0]['detalle']);
+        $this->assertNull($e['implementacion']->refresh()->user_setup_executed_at);
+
+        /* El resto de la etapa 2 sigue: se crea la instalación y el admin asignado recibe su aviso (con la línea de que no se aplicó solo). */
+        $this->assertSame(1, ClientInstallation::where('client_id', $e['cliente']->id)->where('status', 'pendiente')->count());
+        $this->assertCount(1, $whatsapp->enviados);
+        $this->assertStringContainsString('NO se aplicó sola', $whatsapp->enviados[0]['body']);
     }
 
     /**

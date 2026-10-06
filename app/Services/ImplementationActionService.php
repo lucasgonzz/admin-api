@@ -7,6 +7,7 @@ use App\Models\ClientInstallation;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Orquesta las acciones manuales del panel de implementación (modo `manual`).
@@ -682,9 +683,19 @@ class ImplementationActionService
                 'ok'      => false,
                 'codigo'  => 'falta_confirmar_sistema_en_uso',
                 'message' => '«' . $nombre . '» tiene un sistema en uso: ' . implode(' ', $evaluacion['senales_de_uso']) . ' Para volver a aplicar la configuración hay '
-                    . 'que reconocer, además de escribir el nombre, que se van a perder todos sus datos (confirm_live_system). No se aplicó nada.',
+                    . 'que reconocer, además de escribir el nombre, que se van a perder todos sus datos (tildá la casilla de confirmación). No se aplicó nada.',
             ];
         }
+
+        // 🔴 Queda asentado quién re-aplicó, sobre qué cliente y qué se salteó: es el único rastro de que una persona vació a mano un sistema que ya
+        // se había configurado. El punto de llamada solo loguea las protecciones que él evalúa (la etapa es de esta puerta y no la ve), y no sabe quién fue.
+        Log::channel('daily')->warning('ImplementationActionService: una persona confirmó re-aplicar el user setup desde el panel.', [
+            'implementation_id' => $implementation->id,
+            'client_id'         => $client->id,
+            'admin_id'          => auth()->id(),
+            'se_salteo'         => $this->candado->frase_de_bloqueos($evaluacion['forzables']),
+            'sistema_en_uso'    => count($evaluacion['senales_de_uso']) > 0,
+        ]);
 
         // Confirmado por una persona: el candado del punto de llamada no frena, y lo salteado queda en el log.
         return $this->llamar_y_cerrar_el_candado($implementation, true);
@@ -789,6 +800,29 @@ class ImplementationActionService
     }
 
     /**
+     * ¿Lo ÚNICO que frena es que la implementación ya pasó de la etapa 2? Es el caso en que se avanzó sin aplicar el user setup: no se
+     * configuró nada ni hay señales de que el sistema esté en uso, así que decir "ya se configuró o ya opera" sería mentir sobre la causa.
+     *
+     * @param array<int, array<string, mixed>> $forzables Las protecciones que fallaron.
+     *
+     * @return bool
+     */
+    private function solo_frena_la_etapa(array $forzables): bool
+    {
+        if (count($forzables) === 0) {
+            return false;
+        }
+
+        foreach ($forzables as $forzable) {
+            if ($forzable['chequeo'] !== 'etapa_2') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * La razón con la que el panel muestra el botón bloqueado cuando solo fallan protecciones (se puede forzar).
      *
      * @param Implementation                   $implementation La implementación.
@@ -801,6 +835,12 @@ class ImplementationActionService
         // El de siempre: lo único que falla es el candado, y el panel viejo ya lo mostraba así.
         if ($this->solo_frena_el_candado($forzables)) {
             return 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. Usá "Forzar" para volver a aplicarlo.';
+        }
+
+        // Lo único que frena es la etapa: se avanzó sin aplicar el user setup. No se configuró nada ni hay señales de que el sistema esté en uso.
+        if ($this->solo_frena_la_etapa($forzables)) {
+            return 'La implementación ya pasó de la etapa 2 (está en la etapa ' . (int) $implementation->current_stage . '): el user setup solo se aplica en la etapa 2. '
+                . 'Para aplicarlo igual hay que forzarlo y confirmar.';
         }
 
         // Cuántos motivos hay.
@@ -824,6 +864,13 @@ class ImplementationActionService
         if ($this->solo_frena_el_candado($forzables)) {
             return 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i')
                 . ". Reintentá con \"Forzar\" si necesitás re-aplicarlo.";
+        }
+
+        // Lo único que frena es la etapa: se avanzó sin aplicar el user setup, así que no hay nada configurado que "ya opere".
+        if ($this->solo_frena_la_etapa($forzables)) {
+            return 'No se aplicó la configuración: la implementación ya pasó de la etapa 2 (está en la etapa ' . (int) $implementation->current_stage . ') y el user setup solo '
+                . 'se aplica en la etapa 2 (después el negocio puede estar operando y migrate:fresh le borraría lo que cargó). Para aplicarla igual hay que forzarla y '
+                . 'confirmar el nombre del cliente.';
         }
 
         // Lo que falló, con su detalle.
