@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\Concerns\RespuestasParaClaude;
 use App\Http\Controllers\Controller;
 use App\Models\Client;
 use App\Models\ClientApi;
+use App\Services\ClientCatalogoPuenteService;
 use App\Services\ClientInboundKeySyncService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -64,11 +65,26 @@ class ClaudeClientCatalogoController extends Controller
     const PARAMETROS_DE_LA_CLAVE = ['dry_run', 'confirm_client_name'];
 
     /**
+     * Parámetros de C2 (lista cerrada).
+     *
+     * @var array<int, string>
+     */
+    const PARAMETROS_DEL_PUENTE = ['metodo', 'ruta', 'cuerpo'];
+
+    /**
      * Máximo de caracteres de `confirm_client_name` (lo que entra en `clients.name`).
      *
      * @var int
      */
     const MAX_NOMBRE = 190;
+
+    /**
+     * Máximo de caracteres de la `ruta` del puente (path + query). Una query de filtros entra de
+     * sobra; más que esto es un error de quien arma el pedido.
+     *
+     * @var int
+     */
+    const MAX_RUTA = 2000;
 
     /* ==============================================================================================
      | C1 — POST claude/clients/{id}/catalogo/clave
@@ -141,8 +157,167 @@ class ClaudeClientCatalogoController extends Controller
     }
 
     /* ==============================================================================================
+     | C2 — POST claude/clients/{id}/catalogo/puente
+     |============================================================================================= */
+
+    /**
+     * Reenvía UN pedido de la lista blanca al `admin-sync/catalogo/*` del `empresa-api` del cliente,
+     * con la clave del cliente, y devuelve lo que contestó.
+     *
+     * Pedido: `{metodo: GET|POST, ruta: "/<ruta>[?query]", cuerpo?: objeto|lista (solo POST)}`. La
+     * `ruta` es relativa a `/api/admin-sync/catalogo` y su query se reenvía tal cual; el PATH tiene
+     * que estar en `ClientCatalogoPuenteService::LISTA_BLANCA` (9 rutas), sino 422 `validacion` y NO
+     * se le pega al cliente.
+     *
+     * 🔴 Cuando el admin LLEGÓ al cliente, SIEMPRE contesta 200 con
+     * `{puente: true, status, cuerpo, cuerpo_crudo}`: el HTTP del cliente (un 401, un 404, un 422, un
+     * 500) viaja adentro, en `status`. Cuando NO pudo llegar: 409 `sin_api_key`, 409 `sin_url` o 502
+     * `cliente_no_responde` (timeout o conexión). Nunca lleva la clave del cliente.
+     *
+     * @param Request                    $request Request entrante.
+     * @param int|string                 $id      Id numérico o uuid del cliente.
+     * @param ClientCatalogoPuenteService $puente Inyectado por el contenedor.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function puente_json(Request $request, $id, ClientCatalogoPuenteService $puente)
+    {
+        $client = $this->cargar_cliente($id);
+
+        if ($client === null) {
+            return $this->responder_cliente_inexistente($id);
+        }
+
+        $pedido = $this->leer_el_pedido_del_puente($request);
+
+        if (count($pedido['errores']) > 0) {
+            return $this->responder_validacion($pedido['errores'], $pedido['extra']);
+        }
+
+        $resultado = $puente->reenviar($client, $pedido['metodo'], $pedido['ruta'], $pedido['cuerpo']);
+
+        switch ($resultado['estado']) {
+            case ClientCatalogoPuenteService::ESTADO_SIN_API_KEY:
+                return $this->responder_error('sin_api_key', 409, (string) $resultado['mensaje']);
+
+            case ClientCatalogoPuenteService::ESTADO_SIN_URL:
+                return $this->responder_error('sin_url', 409, (string) $resultado['mensaje']);
+
+            case ClientCatalogoPuenteService::ESTADO_NO_RESPONDE:
+                return $this->responder_error('cliente_no_responde', 502, (string) $resultado['mensaje']);
+        }
+
+        return response()->json([
+            'puente'       => true,
+            'status'       => (int) $resultado['status'],
+            'cuerpo'       => $resultado['cuerpo'],
+            'cuerpo_crudo' => $resultado['cuerpo_crudo'],
+        ], 200);
+    }
+
+    /* ==============================================================================================
      | Helpers
      |============================================================================================= */
+
+    /**
+     * Lee y valida a mano el pedido de C2. No le pega a nadie.
+     *
+     * Todo lo que se puede decidir sin llamar al cliente se decide acá: método, forma de la ruta,
+     * lista blanca y forma del cuerpo. Un pedido fuera de la lista blanca NUNCA llega al servicio.
+     *
+     * @param Request $request Request entrante.
+     *
+     * @return array{errores: array<string, string>, extra: array<string, mixed>, metodo: string|null, ruta: string|null, cuerpo: mixed}
+     */
+    protected function leer_el_pedido_del_puente(Request $request)
+    {
+        $errores = $this->parametros_de_mas($request, self::PARAMETROS_DEL_PUENTE);
+        $extra   = [];
+
+        /* El método: GET o POST, sin importar mayúsculas. Cualquier otro no está en la lista blanca. */
+        $metodo     = null;
+        $metodo_raw = $request->input('metodo');
+
+        if ($metodo_raw === null || $metodo_raw === '') {
+            $errores['metodo'] = 'Es obligatorio. Tiene que ser GET o POST.';
+        } elseif (! is_string($metodo_raw)) {
+            $errores['metodo'] = 'Tiene que ser un texto: GET o POST.';
+        } elseif (! in_array(strtoupper(trim($metodo_raw)), ['GET', 'POST'], true)) {
+            $errores['metodo'] = 'Tiene que ser GET o POST: el puente no reenvía ningún otro método (llegó "' . mb_substr($metodo_raw, 0, 20) . '").';
+        } else {
+            $metodo = strtoupper(trim($metodo_raw));
+        }
+
+        /* La ruta: relativa, con `/` inicial, sin caracteres raros y dentro de la lista blanca. */
+        $ruta     = null;
+        $ruta_raw = $request->input('ruta');
+
+        if ($ruta_raw === null || $ruta_raw === '') {
+            $errores['ruta'] = 'Es obligatoria: la ruta relativa a /api/admin-sync/catalogo, con `/` inicial (por ejemplo /resumen).';
+        } elseif (! is_string($ruta_raw)) {
+            $errores['ruta'] = 'Tiene que ser un texto: la ruta relativa a /api/admin-sync/catalogo.';
+        } elseif (mb_strlen($ruta_raw) > self::MAX_RUTA) {
+            $errores['ruta'] = 'Es demasiado larga (máximo ' . self::MAX_RUTA . ' caracteres).';
+        } elseif (preg_match('/[\x00-\x1f\x7f#]/', $ruta_raw) === 1) {
+            $errores['ruta'] = 'Lleva caracteres de control o un `#`: una ruta del puente es un path con su query y nada más.';
+        } elseif (substr($ruta_raw, 0, 1) !== '/') {
+            $errores['ruta'] = 'Tiene que empezar con `/` (es relativa a /api/admin-sync/catalogo, por ejemplo /resumen).';
+        } elseif ($metodo !== null) {
+            list($path) = ClientCatalogoPuenteService::separar_la_ruta($ruta_raw);
+
+            if (ClientCatalogoPuenteService::ruta_permitida($metodo, $path)) {
+                $ruta = $ruta_raw;
+            } else {
+                $errores['ruta'] = $metodo . ' ' . mb_substr($path, 0, 120) . ' no está en la lista blanca del puente: solo reenvía las rutas del catálogo.';
+                $extra['rutas_permitidas'] = ClientCatalogoPuenteService::rutas_permitidas();
+            }
+        }
+
+        /* El cuerpo: objeto o lista, solo en un POST. */
+        $cuerpo     = null;
+        $cuerpo_raw = $request->input('cuerpo');
+
+        if ($cuerpo_raw !== null) {
+            if (! is_array($cuerpo_raw)) {
+                $errores['cuerpo'] = 'Tiene que ser un objeto o una lista JSON.';
+            } elseif ($metodo === 'GET' && count($cuerpo_raw) > 0) {
+                $errores['cuerpo'] = 'Un GET no lleva cuerpo: los filtros van en la query de la ruta (/articulos?desde_id=100).';
+            } elseif ($metodo === 'POST') {
+                $cuerpo = $this->cuerpo_original($request);
+            }
+        }
+
+        return ['errores' => $errores, 'extra' => $extra, 'metodo' => $metodo, 'ruta' => $ruta, 'cuerpo' => $cuerpo];
+    }
+
+    /**
+     * El `cuerpo` del pedido tal como lo mandó el motor, SIN las transformaciones de Laravel.
+     *
+     * Los objetos quedan como `stdClass` (decodificar sin `assoc`): un objeto con claves numéricas
+     * (`{"12": "Fijaciones"}`, artículo → categoría) sigue siendo un objeto y no una lista, y los
+     * middlewares de recorte y de "texto vacío es null" no le tocan nada. Los valida igual el cliente.
+     *
+     * @param Request $request Request entrante.
+     *
+     * @return array|\stdClass|null
+     */
+    protected function cuerpo_original(Request $request)
+    {
+        if ($request->isJson()) {
+            $decodificado = json_decode((string) $request->getContent());
+
+            if ($decodificado instanceof \stdClass && property_exists($decodificado, 'cuerpo')) {
+                $cuerpo = $decodificado->cuerpo;
+
+                return ($cuerpo instanceof \stdClass || is_array($cuerpo)) ? $cuerpo : null;
+            }
+        }
+
+        /* No es JSON (formulario): lo único que hay es lo que Laravel ya leyó. */
+        $leido = $request->input('cuerpo');
+
+        return is_array($leido) ? $leido : null;
+    }
 
     /**
      * Lee y valida a mano el pedido de C1. No toca nada.

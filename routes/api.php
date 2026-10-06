@@ -333,8 +333,13 @@ Route::middleware('claude.task.key')
            respuesta, un error ni un log.
            `catalogo/clave` ESCRIBE `ADMIN_API_INBOUND_KEY` = `clients.api_key` en el `.env` de cada
            frente del cliente por SSH (dry_run por defecto + confirm_client_name; respaldo del .env y
-           relectura antes de darlo por escrito). */
+           relectura antes de darlo por escrito).
+           `catalogo/puente` reenvía UN pedido de una lista blanca de nueve rutas (método + ruta,
+           regex anclada) a `admin-sync/catalogo/*` del empresa-api del cliente CON la clave del
+           cliente, y contesta siempre 200 `puente: true` con el HTTP del cliente adentro. Es lo que
+           deja al motor usar el catálogo de un cliente sin tener nunca su clave. */
         Route::post('clients/{id}/catalogo/clave', 'Api\ClaudeClientCatalogoController@clave_json');
+        Route::post('clients/{id}/catalogo/puente', 'Api\ClaudeClientCatalogoController@puente_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
         Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');
