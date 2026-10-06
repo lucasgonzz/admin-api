@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\UserSetupBloqueadoException;
 use App\Http\Controllers\CommonLaravel\Helpers\ModelPropertiesHelper;
 use App\Mail\Helpers\LeadPresentationMailHelper;
 use App\Mail\Helpers\LeadFollowupMailHelper;
 use App\Mail\Helpers\LeadDemoMailHelper;
+use App\Mail\Helpers\RechazosDeCorreoHelper;
 use App\Models\Client;
 use App\Models\Admin;
 use App\Models\AdminCalendarConnection;
@@ -238,6 +240,9 @@ class LeadController extends Controller
      * El disparo es manual desde la vista show. Se registra el momento de
      * éxito en `presentation_mail_sent_at` y, si falla, el mensaje queda en
      * `presentation_mail_last_error` para inspección.
+     *
+     * Un mail que el servidor SMTP RECHAZA (casilla inexistente) cuenta como fallo, no como éxito:
+     * ver `RechazosDeCorreoHelper`.
      */
     public function send_presentation_mail($id)
     {
@@ -251,6 +256,13 @@ class LeadController extends Controller
 
         try {
             Mail::to($lead->email)->send(LeadPresentationMailHelper::build($lead));
+
+            /* 🔴 Que `send()` no tire NO quiere decir que el mail salió. Si el servidor rechaza la casilla
+               (550 en el RCPT TO) SwiftMailer no tira nada y la deja en `failures()`. Esta línea lo convierte
+               en una excepción, que cae en el `catch` de abajo como cualquier otro fallo: sin fecha de envío
+               y con el motivo en `presentation_mail_last_error`. Va ANTES de anotar el éxito, no después. */
+            RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
             $lead->update([
                 'presentation_mail_sent_at' => now(),
                 'presentation_mail_last_error' => null,
@@ -292,6 +304,12 @@ class LeadController extends Controller
 
         try {
             Mail::to($lead->email)->send(LeadFollowupMailHelper::build($lead));
+
+            /* 🔴 Que `send()` no tire NO quiere decir que el mail salió: un 550 en el RCPT TO no tira nada
+               (ver `RechazosDeCorreoHelper`). La excepción cae en el `catch` de abajo y la ficha queda sin
+               fecha de envío y con el motivo en `followup_mail_last_error`. Va ANTES de anotar el éxito. */
+            RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
             $lead->update([
                 'followup_mail_sent_at' => now(),
                 'followup_mail_last_error' => null,
@@ -387,13 +405,21 @@ class LeadController extends Controller
     /**
      * Dispara el user-setup en el empresa-api de producción del Lead promovido.
      *
+     * 🔴 Si el candado frena (el sistema del cliente ya opera o ya se configuró: el user setup hace `migrate:fresh` del otro lado) no
+     * se llamó a nadie ni se tocó nada: se vuelve al lead con el motivo (`UserSetupBloqueadoException`).
+     *
      * @param RunUserSetupService $service
      */
     public function run_user_setup($id, RunUserSetupService $service)
     {
         $lead = Lead::findOrFail($id);
 
-        $lead = $service->run($lead);
+        try {
+            $lead = $service->run($lead);
+        } catch (UserSetupBloqueadoException $bloqueo) {
+            return redirect()->route('leads.show', $lead->id)
+                             ->with('error', 'No se creó el sistema: ' . $bloqueo->getMessage());
+        }
 
         if ($lead->user_setup_status === 'exitoso') {
             return redirect()->route('leads.show', $lead->id)
@@ -905,6 +931,13 @@ class LeadController extends Controller
 
         try {
             Mail::to($lead->email)->send(LeadPresentationMailHelper::build($lead));
+
+            /* 🔴 Que `send()` no tire NO quiere decir que el mail salió: un 550 en el RCPT TO no tira nada
+               (ver `RechazosDeCorreoHelper`). La excepción cae en el `catch` de abajo, que contesta el 422
+               con el `model` y deja el motivo en `presentation_mail_last_error`: la tarjeta del panel pasa
+               a "Fallido". Va ANTES de anotar el éxito. */
+            RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
             $lead->update([
                 'presentation_mail_sent_at' => now(),
                 'presentation_mail_last_error' => null,
@@ -949,17 +982,18 @@ class LeadController extends Controller
             Mail::to($lead->email)->send(LeadFollowupMailHelper::build($lead));
 
             /**
-             * En Laravel con transportes tipo SwiftMailer, puede haber fallas de
-             * destinatario sin excepción. Si el método existe, validamos el array
-             * de failures para evitar marcar "éxito" cuando el envío fue rechazado.
+             * En Laravel con transportes tipo SwiftMailer, un destinatario rechazado por el servidor
+             * (550 en el RCPT TO) NO tira excepción: queda en `failures()` del mailer. Si el servidor
+             * lo rechazó, esto tira `MailRechazadoPorElServidorException`, que cae en el `catch` de
+             * abajo: sin fecha de envío y con el motivo en `followup_mail_last_error`.
+             *
+             * 🔴 Acá había un chequeo con `method_exists(Mail::getFacadeRoot(), 'failures')` que NUNCA
+             * corrió: la raíz de la fachada es el `MailManager`, que no tiene `failures()` (le llega por
+             * `__call`, que `method_exists` no ve), así que daba siempre `false` y el rechazo pasaba como
+             * un envío exitoso. No se vuelve a escribir: un chequeo que parece correcto y no se ejecuta
+             * nunca es peor que no tenerlo. La lectura vive en `RechazosDeCorreoHelper`.
              */
-            if (method_exists(Mail::getFacadeRoot(), 'failures')) {
-                // Lista de direcciones rechazadas por el transporte.
-                $mailer_failures = Mail::failures();
-                if (!empty($mailer_failures)) {
-                    throw new \RuntimeException('Destinatario rechazado por el servidor SMTP: ' . implode(', ', $mailer_failures));
-                }
-            }
+            RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
 
             // Registro de éxito real: fecha de envío y limpieza de error previo.
             $lead->update([
@@ -1026,6 +1060,14 @@ class LeadController extends Controller
             try {
                 $lead->loadMissing('demo');
                 Mail::to($lead->email)->send(\App\Mail\Helpers\LeadDemoAccesoMailHelper::build($lead));
+
+                /* 🔴 Que `send()` no tire NO quiere decir que el mail salió: un 550 en el RCPT TO no tira
+                   nada (ver `RechazosDeCorreoHelper`). La excepción cae en el `catch` de abajo y deja el
+                   motivo en `demo_mail_last_error`. Y esa marca importa más que las otras: el recordatorio de
+                   la demo (`SendDemoReminders`) le dice al lead "los accesos están en el mail que te
+                   mandamos" según `demo_mail_sent_at`, así que un rechazo anotado como enviado le miente. */
+                RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
                 $lead->update([
                     'demo_mail_sent_at'    => now(),
                     'demo_mail_last_error' => null,
@@ -1066,6 +1108,12 @@ class LeadController extends Controller
 
         try {
             Mail::to($lead->email)->send(LeadDemoMailHelper::build($lead));
+
+            /* 🔴 Que `send()` no tire NO quiere decir que el mail salió: un 550 en el RCPT TO no tira nada
+               (ver `RechazosDeCorreoHelper`). La excepción cae en el `catch` de abajo y deja el motivo en
+               `demo_mail_last_error`, sin tocar `demo_mail_sent_at`. Va ANTES de anotar el éxito. */
+            RechazosDeCorreoHelper::fallar_si_hubo_rechazos();
+
             $lead->update([
                 'demo_mail_sent_at'   => now(),
                 'demo_mail_last_error' => null,
@@ -2494,6 +2542,11 @@ class LeadController extends Controller
     /**
      * Ejecuta user-setup del sistema real desde admin-spa.
      *
+     * 🔴 Es el endpoint que usa la skill `/instalar-cliente`. Si el candado frena (el sistema del cliente ya opera o ya se configuró: el
+     * user setup hace `migrate:fresh` del otro lado) responde 422 con `bloqueado: true` y los `chequeos` que fallaron, y NO se llamó a
+     * nadie ni se tocó nada: quien lo recibe no reintenta, mira el sistema del cliente. La skill ya trata un no-200 con `message`; las
+     * claves nuevas son aditivas.
+     *
      * @param int|string $id
      * @param RunUserSetupService $service
      *
@@ -2504,7 +2557,16 @@ class LeadController extends Controller
         // Lead promovido objetivo para el setup de producción.
         $lead = Lead::findOrFail($id);
         // Ejecución encapsulada en servicio de provisioning.
-        $lead = $service->run($lead);
+        try {
+            $lead = $service->run($lead);
+        } catch (UserSetupBloqueadoException $bloqueo) {
+            return response()->json([
+                'message'   => 'No se creó el sistema: ' . $bloqueo->getMessage(),
+                'model'     => $this->fullModel('lead', $lead->id),
+                'bloqueado' => true,
+                'chequeos'  => $bloqueo->chequeos(),
+            ], 422);
+        }
 
         if ($lead->user_setup_status === 'exitoso') {
             return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);

@@ -15,9 +15,27 @@ use Illuminate\Support\Facades\Log;
  *   1. **`clients.email`** — la fuente de verdad. Lo que está escrito acá le gana a todo, así que
  *      corregirlo a mano en la ficha del cliente alcanza para redirigir el aviso.
  *   2. **`GET admin-sync/contacto-dueno` al `empresa-api` de ese cliente** — el dato real vive
- *      allá, en el `User` dueño de la instancia. Si vuelve un mail válido se ESCRIBE en
- *      `clients.email` y no se vuelve a preguntar nunca más.
+ *      allá, en el `User` dueño de la instancia. Si vuelve un mail válido se DEVUELVE, y quien le
+ *      manda el mail lo guarda en `clients.email` con `recordar()` —para no volver a preguntar—
+ *      recién cuando el servidor de correo lo ACEPTÓ.
  *   3. **Nada** — devuelve null.
+ *
+ * 🔴 **`resolve()` solo LEE. No escribe en la ficha, y no es un detalle de prolijidad.** Hasta la
+ * misión mails-a-leads-rechazados-por-smtp (6/10/2026) guardaba la casilla que traía del cliente ahí
+ * mismo, ANTES de que nadie mandara nada. Si esa casilla era justo la que el servidor SMTP rechaza
+ * (un 550 en el RCPT TO, que SwiftMailer no convierte en excepción), quedaba guardada igual: la ficha
+ * pasaba a decir que el dueño se escribe a una dirección que no existe, y todo envío siguiente la
+ * leía de ahí sin volver a preguntar. Guardar solo una casilla que ya demostró funcionar es lo que
+ * evita eso. El costo, asumido: si el servidor rechaza la casilla que trajo el cliente, el
+ * reintento le vuelve a preguntar al `empresa-api` (una llamada HTTP más) en vez de leerla de la ficha.
+ * Lo mismo para un aviso que quedó `sin_novedades` o sin credencial en el mailer: el mail no salió, así que
+ * la casilla traída tampoco se guarda (antes sí, porque se guardaba antes de saber nada).
+ *
+ * 🔴 **Una excepción deliberada, y no es un olvido:** `aviso-actualizacion:reintentar --email=<casilla>
+ * --aplicar` (`ReintentarAvisoDeActualizacionCommand`) SÍ escribe la casilla en la ficha ANTES de reintentar.
+ * Ahí no es una casilla que trajo un sistema ajeno sino una que el operador dicta a mano por consola, y la
+ * misma salida le muestra `Mail: no salió` con el motivo si el servidor la rechaza. Es una orden explícita de
+ * quien está mirando, no un efecto colateral de resolver una casilla.
  *
  * 🔴 **El paso 2 degrada sin romper, y eso no es defensividad genérica: es el estado normal
  * durante semanas.** Ese endpoint es nuevo del lado de `empresa-api` y los ~45 clientes corren
@@ -58,6 +76,12 @@ class ClientContactEmailResolver
     /**
      * La casilla del dueño de este cliente, o null si no hay ninguna en ningún lado.
      *
+     * 🔴 **Solo lee: no guarda nada en `clients.email`, ni siquiera la casilla que trae del cliente.**
+     * Guardarla es de `recordar()`, y lo llama quien manda el mail DESPUÉS de que el servidor lo
+     * aceptó (`AvisoDeActualizacionService::trabajar()`). Si alguien "simplifica" esto de vuelta a
+     * guardar acá, una casilla que el servidor rechaza queda grabada en la ficha como si fuera la
+     * del dueño (ver el docblock de la clase).
+     *
      * @param Client $client Cliente del admin.
      *
      * @return string|null Dirección válida, ya recortada.
@@ -69,14 +93,7 @@ class ClientContactEmailResolver
             return $propio;
         }
 
-        $remoto = $this->preguntarle_al_cliente($client);
-        if ($remoto === null) {
-            return null;
-        }
-
-        $this->recordar($client, $remoto);
-
-        return $remoto;
+        return $this->preguntarle_al_cliente($client);
     }
 
     /**
@@ -189,18 +206,50 @@ class ClientContactEmailResolver
     /**
      * Guarda en `clients.email` la casilla que trajo el cliente, para no volver a preguntar.
      *
+     * 🔴 **Se llama recién cuando el servidor de correo ACEPTÓ el mail a esa casilla**, no antes (ver el
+     * docblock de la clase): una casilla que el servidor rechaza, o a la que el mail ni siquiera llegó
+     * a mandarse, nunca demostró que sirve y no puede quedar grabada como la del dueño.
+     *
+     * No pisa una casilla válida que la ficha ya tenga: lo que está escrito en `clients.email` le gana
+     * a lo que trajo el cliente (es la fuente de verdad, el paso 1 de `resolve()`). Y no se fía de la
+     * instancia que recibe: entre el `resolve()` y el fin del `send()` pasan segundos (la consulta de
+     * novedades, el SMTP) y alguien pudo cargar la casilla a mano en ese rato, así que se RELEE de la
+     * base. Sin esa relectura, guardar después del envío —que es lo que se hace ahora— pisaría una
+     * corrección manual. Si la ficha no tiene una casilla válida (vacía, o con basura que `resolve()`
+     * ya ignoraba), se escribe.
+     *
      * Se escribe por el query builder y se sincroniza el atributo a mano en vez de hacer
      * `$client->save()`: la instancia que llega acá puede venir con otros atributos tocados por el
      * llamador, y este servicio no tiene por qué persistirlos de rebote.
+     *
+     * 🔴 **No tira excepción por ningún camino**: atrapa todo y lo anota en el log. Quien lo llama lo
+     * hace con el mail YA enviado y el aviso ya marcado como tal, y una falla al guardar la casilla no
+     * puede ensuciarlo (un `catch` más arriba lo daría vuelta a `error`, y el dueño ya recibió el mail).
      *
      * @param Client $client Cliente del admin.
      * @param string $mail   Dirección ya validada.
      *
      * @return void
      */
-    private function recordar(Client $client, string $mail): void
+    public function recordar(Client $client, string $mail): void
     {
         try {
+            // La instancia ya tiene una casilla válida (la que se usó salió de ahí, o ya se guardó): no hay nada que hacer.
+            if (self::mail_valido($client->email) !== null) {
+                return;
+            }
+
+            // Lo que la ficha tiene AHORA en la base, no lo que dice la instancia (ver el docblock).
+            $en_la_ficha = Client::where('id', $client->id)->value('email');
+
+            if (self::mail_valido($en_la_ficha) !== null) {
+                Log::channel('daily')->info('ClientContactEmailResolver: la ficha ya tiene una casilla válida, no se pisa.', [
+                    'client_id' => $client->id,
+                ]);
+
+                return;
+            }
+
             Client::where('id', $client->id)->update(['email' => $mail]);
 
             $client->setAttribute('email', $mail);

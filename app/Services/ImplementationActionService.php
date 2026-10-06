@@ -7,6 +7,7 @@ use App\Models\ClientInstallation;
 use App\Models\Implementation;
 use App\Models\ImplementationMessage;
 use App\Models\ImplementationStage;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Orquesta las acciones manuales del panel de implementación (modo `manual`).
@@ -38,8 +39,8 @@ class ImplementationActionService
 
     /**
      * Etapa típica de cada acción (solo sugerencia para la UI vía `available`; ninguna
-     * acción se bloquea por etapa, salvo `user_setup` que además tiene el gate real de
-     * `user_setup_gate()`). `progreso` no tiene etapa fija: siempre disponible.
+     * acción se bloquea por etapa, salvo `user_setup` que además pasa por el candado
+     * (`UserSetupCandadoService::evaluar_para_el_panel()`). `progreso` no tiene etapa fija: siempre disponible.
      */
     private const TYPICAL_STAGE = [
         'presentacion'      => 1,
@@ -81,18 +82,26 @@ class ImplementationActionService
     private $whatsapp_send_service;
 
     /**
+     * @var UserSetupCandadoService El candado del user setup: qué se puede forzar, qué no, y la confirmación por nombre.
+     */
+    private $candado;
+
+    /**
      * @param ImplementationConversationService|null $conversation_service  Inyección opcional para tests.
      * @param ImplementationUserSetupService|null    $user_setup_service    Inyección opcional para tests.
      * @param WhatsappSendService|null               $whatsapp_send_service Inyección opcional para tests.
+     * @param UserSetupCandadoService|null           $candado               Inyección opcional para tests.
      */
     public function __construct(
         ?ImplementationConversationService $conversation_service = null,
         ?ImplementationUserSetupService $user_setup_service = null,
-        ?WhatsappSendService $whatsapp_send_service = null
+        ?WhatsappSendService $whatsapp_send_service = null,
+        ?UserSetupCandadoService $candado = null
     ) {
         $this->conversation_service  = $conversation_service ?? new ImplementationConversationService();
         $this->user_setup_service    = $user_setup_service ?? new ImplementationUserSetupService();
         $this->whatsapp_send_service = $whatsapp_send_service ?? new WhatsappSendService();
+        $this->candado               = $candado ?? new UserSetupCandadoService();
     }
 
     /**
@@ -141,27 +150,25 @@ class ImplementationActionService
             $can_force      = false;
             $executed_at    = null;
 
+            // Las claves de la confirmación fuerte del re-aplicado: SOLO las lleva `user_setup` (ver estado_del_boton_user_setup()).
+            $confirmacion = [];
+
             if ($action === 'user_setup') {
                 $executed_at = $implementation->user_setup_executed_at !== null
                     ? $implementation->user_setup_executed_at->toISOString()
                     : null;
 
-                if ($executed_at !== null) {
-                    // Ya se aplicó con éxito: bloqueado, pero se puede re-aplicar con force (el front confirma).
-                    $blocked        = true;
-                    $blocked_reason = 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. Usá "Forzar" para volver a aplicarlo.';
-                    $can_force      = true;
-                } else {
-                    $gate = $this->user_setup_gate($implementation);
-                    if (! $gate['enabled']) {
-                        $blocked        = true;
-                        $blocked_reason = $gate['reason'];
-                        $can_force      = false;
-                    }
-                }
+                // Lo que dice el candado: si se puede aplicar, si se puede forzar y qué hay que confirmar.
+                $boton = $this->estado_del_boton_user_setup($implementation);
+
+                $blocked        = $boton['blocked'];
+                $blocked_reason = $boton['blocked_reason'];
+                $can_force      = $boton['can_force'];
+                $confirmacion   = $boton['confirmacion'];
             }
 
-            $actions[] = [
+            // 🔴 Las claves de `$confirmacion` van al FINAL y son ADITIVAS: un SPA viejo las ignora y las que ya existían conservan nombre y tipo.
+            $actions[] = array_merge([
                 'key'              => $action,
                 'label'            => self::LABELS[$action],
                 'available'        => $this->is_available_for_stage($action, $current_stage),
@@ -175,7 +182,7 @@ class ImplementationActionService
                 'executed_at'      => $executed_at,
                 'typical_stage'    => self::TYPICAL_STAGE[$action] ?? null,
                 'kind'             => in_array($action, self::SIDE_EFFECT_ACTIONS, true) ? 'side_effect' : 'message',
-            ];
+            ], $confirmacion);
         }
 
         return [
@@ -253,44 +260,31 @@ class ImplementationActionService
      * @param string         $action
      * @param string|null    $content Texto editado por el admin; si es null se usa el del preview.
      * @param int|null       $stage   Solo para 'progreso'.
-     * @param bool           $force   Override del lock de 'user_setup' (re-aplicar aunque ya se haya aplicado).
+     * @param bool           $force   Override del candado de 'user_setup' (re-aplicar aunque el sistema ya se haya configurado o ya opere).
+     *                                Solo sirve con la confirmación fuerte: ver `$confirm_client_name` y `$confirm_live_system`.
+     * @param string|null    $confirm_client_name El nombre del cliente que escribió la persona (solo 'user_setup' con `$force`).
+     * @param bool           $confirm_live_system true = la persona reconoció que el sistema está en uso y que se van a perder todos sus
+     *                                datos (solo 'user_setup' con `$force`, y solo hace falta si hay señales de que el sistema está en uso).
      *
-     * @return array{ok: bool, message: string}
+     * @return array{ok: bool, message: string, codigo?: string} `codigo` aparece solo en los dos casos de la confirmación fuerte:
+     *         `confirmacion_requerida` y `falta_confirmar_sistema_en_uso`.
      */
-    public function execute(Implementation $implementation, string $action, ?string $content = null, ?int $stage = null, bool $force = false): array
-    {
+    public function execute(
+        Implementation $implementation,
+        string $action,
+        ?string $content = null,
+        ?int $stage = null,
+        bool $force = false,
+        ?string $confirm_client_name = null,
+        bool $confirm_live_system = false
+    ): array {
         $this->assert_valid_action($action);
 
         $implementation->loadMissing(['client', 'stages']);
 
-        // 'user_setup' no manda WhatsApp: valida gate + lock y delega en el servicio de setup remoto.
+        // 'user_setup' no manda WhatsApp: pasa por el candado (los duros, lo forzable y la confirmación) y delega en el servicio de setup remoto.
         if ($action === 'user_setup') {
-            // El gate (formulario + Etapa 2 + instalación completada) se exige SIEMPRE, incluso con force:
-            // forzar saltea el lock de "ya se aplicó", no la condición de que la API tiene que responder.
-            $gate = $this->user_setup_gate($implementation);
-            if (! $gate['enabled']) {
-                return ['ok' => false, 'message' => $gate['reason']];
-            }
-
-            // Lock: si ya se aplicó con éxito y no viene force, no se re-ejecuta.
-            if ($implementation->user_setup_executed_at !== null && ! $force) {
-                return [
-                    'ok'      => false,
-                    'message' => 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i')
-                        . ". Reintentá con \"Forzar\" si necesitás re-aplicarlo.",
-                ];
-            }
-
-            $result = $this->user_setup_service->trigger_user_setup($implementation);
-
-            if ($result['ok']) {
-                // Registrar el momento de aplicación (lock) y la acción para los checklists.
-                $implementation->user_setup_executed_at = now();
-                $implementation->save();
-                $this->register_action($implementation, $action);
-            }
-
-            return $result;
+            return $this->execute_user_setup($implementation, $force, $confirm_client_name, $confirm_live_system);
         }
 
         // 'crear_instalacion' no manda WhatsApp: crea la ClientInstallation de forma idempotente.
@@ -617,51 +611,276 @@ class ImplementationActionService
     // -------------------------------------------------------------------------
 
     /**
-     * Condiciones para poder aplicar el UserSetup.
+     * Aplica la acción `user_setup` del panel: pasa por el candado y, si corresponde, llama al sistema del cliente.
      *
-     * El UserSetup le pega a la client_api del cliente con la config del formulario, así que
-     * exige TRES cosas (el gate real; el lock por user_setup_executed_at se evalúa aparte):
-     *   1) El formulario de la Etapa 1 ya se completó (si no, el payload no tiene datos reales).
-     *   2) La implementación avanzó a la Etapa 2 (current_stage >= 2) — el UserSetup corre DENTRO
-     *      de la Etapa 2, después de instalar; no requiere que la Etapa 2 esté "completada"
-     *      (eso sería contradictorio: la Etapa 2 se cierra recién después de aplicar el UserSetup).
-     *   3) La ClientInstallation del cliente está en 'completada' (la API ya responde).
+     * 🔴 El user setup hace `migrate:fresh` del otro lado: re-aplicarlo sobre un negocio que opera le BORRA TODO. Antes el `force` de
+     * este botón saltaba el candado de "ya se aplicó" y NADA más (y sin `force` con el candado vacío no se miraba si el sistema ya
+     * operaba). Ahora, en este orden (misión `puertas-del-user-setup`, 6/10/2026):
+     *  1. Los DUROS (formulario, etapa 2 o más, última instalación completada, nada en curso) no se saltean ni con `force`.
+     *  2. Si no falla ninguna protección, es el camino de siempre: se llama y, si salió bien, se cierra el candado.
+     *  3. Si alguna falla y no hay `force`, no se llama: el mensaje de siempre si lo único que falla es el candado, o uno que dice qué.
+     *  4. Con `force`: hace falta el nombre del cliente (`confirmacion_requerida`) y, si hay señales de que el sistema está EN USO,
+     *     reconocerlo (`falta_confirmar_sistema_en_uso`). Recién ahí se llama con `$confirmado_por_una_persona = true`: el único lugar
+     *     del admin que lo pasa.
      *
-     * Devuelve el primer motivo de bloqueo encontrado, o enabled=true si se cumplen las tres.
+     * @param Implementation $implementation      La implementación (con su cliente y sus etapas).
+     * @param bool           $force               El panel pidió re-aplicar.
+     * @param string|null    $confirm_client_name Lo que escribió la persona como nombre del cliente.
+     * @param bool           $confirm_live_system La persona reconoció que el sistema está en uso.
      *
-     * @param Implementation $implementation
-     *
-     * @return array{enabled: bool, reason: string|null}
+     * @return array{ok: bool, message: string, codigo?: string}
      */
-    private function user_setup_gate(Implementation $implementation): array
+    private function execute_user_setup(Implementation $implementation, bool $force, ?string $confirm_client_name, bool $confirm_live_system): array
     {
-        // 1) Formulario de la Etapa 1 completo.
-        $form_done = $implementation->form_submitted_at !== null;
-        if (! $form_done) {
-            $stage_1 = ImplementationStage::where('implementation_id', $implementation->id)
-                ->where('stage_number', 1)
-                ->first();
-            $form_done = $stage_1 !== null && $stage_1->status === 'completed';
-        }
-        if (! $form_done) {
-            return ['enabled' => false, 'reason' => 'Todavía no se completó el formulario (Etapa 1).'];
+        // Lo que dice el candado: qué falla y de qué clase.
+        $evaluacion = $this->candado->evaluar_para_el_panel($implementation);
+
+        // 1. 🔴 Los duros se exigen SIEMPRE, incluso con force: forzar saltea una protección, no la condición de que la API tiene que responder.
+        if (count($evaluacion['duros']) > 0) {
+            return ['ok' => false, 'message' => $evaluacion['duros'][0]['detalle']];
         }
 
-        // 2) La implementación llegó a la Etapa 2.
-        if ((int) $implementation->current_stage < 2) {
-            return ['enabled' => false, 'reason' => 'La implementación todavía no avanzó a la Etapa 2.'];
+        // 2. Nada que forzar: el camino de siempre.
+        if (count($evaluacion['forzables']) === 0) {
+            return $this->llamar_y_cerrar_el_candado($implementation, false);
         }
 
-        // 3) La instalación del cliente terminó (la API responde).
-        $installation = ClientInstallation::where('client_id', $implementation->client_id)
-            ->orderByDesc('id')
-            ->first();
-
-        if ($installation === null || $installation->status !== 'completada') {
-            return ['enabled' => false, 'reason' => "El sistema todavía no terminó de instalarse (la instalación no está en 'completada')."];
+        // 3. Algo frena y no se pidió forzar.
+        if (! $force) {
+            return ['ok' => false, 'message' => $this->mensaje_sin_forzar($implementation, $evaluacion['forzables'])];
         }
 
-        return ['enabled' => true, 'reason' => null];
+        // El cliente (existe: sin cliente falla el duro de arriba) y su nombre.
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+        $nombre = $this->candado->nombre_para_confirmar($client);
+
+        // 4a. 🔴 La confirmación por nombre. Se pide en la API y no solo en la pantalla: un panel viejo (una pestaña sin recargar) que
+        // fuerza sin nombre recibe este 422 en el mismo modal, que lo manda a recargar. Es el freno funcionando, no una ruptura.
+        $escrito = trim((string) $confirm_client_name);
+
+        if ($escrito === '') {
+            return [
+                'ok'      => false,
+                'codigo'  => 'confirmacion_requerida',
+                'message' => 'Falta la confirmación: volver a aplicar la configuración le BORRA toda la base de datos a «' . $nombre . '» y la arma de nuevo con '
+                    . 'los datos del formulario. Para hacerlo hay que escribir el nombre del cliente. Si el panel no te lo pidió, recargá el panel: la versión '
+                    . 'nueva pide la confirmación. No se aplicó nada.',
+            ];
+        }
+
+        if (! $this->candado->confirma_el_nombre($client, $confirm_client_name)) {
+            return [
+                'ok'      => false,
+                'codigo'  => 'confirmacion_requerida',
+                'message' => 'El nombre que escribiste no coincide con el del cliente («' . $nombre . '»). Volver a aplicar la configuración le BORRA toda la base de '
+                    . 'datos: tiene que escribirse el nombre exacto. No se aplicó nada.',
+            ];
+        }
+
+        // 4b. Con señales de que el sistema está EN USO, además del nombre hay que reconocerlo.
+        if (count($evaluacion['senales_de_uso']) > 0 && ! $confirm_live_system) {
+            return [
+                'ok'      => false,
+                'codigo'  => 'falta_confirmar_sistema_en_uso',
+                'message' => '«' . $nombre . '» tiene un sistema en uso: ' . implode(' ', $evaluacion['senales_de_uso']) . ' Para volver a aplicar la configuración hay '
+                    . 'que reconocer, además de escribir el nombre, que se van a perder todos sus datos (tildá la casilla de confirmación). No se aplicó nada.',
+            ];
+        }
+
+        // 🔴 Queda asentado quién re-aplicó, sobre qué cliente y qué se salteó: es el único rastro de que una persona vació a mano un sistema que ya
+        // se había configurado. El punto de llamada solo loguea las protecciones que él evalúa (la etapa es de esta puerta y no la ve), y no sabe quién fue.
+        Log::channel('daily')->warning('ImplementationActionService: una persona confirmó re-aplicar el user setup desde el panel.', [
+            'implementation_id' => $implementation->id,
+            'client_id'         => $client->id,
+            'admin_id'          => auth()->id(),
+            'se_salteo'         => $this->candado->frase_de_bloqueos($evaluacion['forzables']),
+            'sistema_en_uso'    => count($evaluacion['senales_de_uso']) > 0,
+        ]);
+
+        // Confirmado por una persona: el candado del punto de llamada no frena, y lo salteado queda en el log.
+        return $this->llamar_y_cerrar_el_candado($implementation, true);
+    }
+
+    /**
+     * Llama al sistema del cliente y, si salió bien, cierra el candado (`user_setup_executed_at`) y registra la acción para los checklists.
+     *
+     * @param Implementation $implementation              La implementación.
+     * @param bool           $confirmado_por_una_persona  true = una persona confirmó el re-aplicado (ver `trigger_user_setup()`).
+     *
+     * @return array{ok: bool, message: string}
+     */
+    private function llamar_y_cerrar_el_candado(Implementation $implementation, bool $confirmado_por_una_persona): array
+    {
+        $result = $this->user_setup_service->trigger_user_setup($implementation, null, $confirmado_por_una_persona);
+
+        if ($result['ok']) {
+            // Registrar el momento de aplicación (lock) y la acción para los checklists.
+            $this->candado->marcar_aplicado($implementation, 'panel');
+        }
+
+        return $result;
+    }
+
+    /**
+     * El estado del botón `user_setup` para `state()`: si está bloqueado, por qué, si se puede forzar y los datos de la confirmación fuerte.
+     *
+     *  - Falla un DURO: `blocked`, el `detalle` del primero (el texto de siempre del gate) y `can_force` en false.
+     *  - Fallan solo FORZABLES: `blocked` y `can_force` en true; la razón es el texto de siempre si lo único que falla es el candado
+     *    (compatibilidad con el panel viejo) o una frase corta con la cantidad de motivos.
+     *  - No falla nada: no está bloqueado.
+     *
+     * 🔴 Las claves de `confirmacion` son el CONTRATO con el SPA y son aditivas (un SPA viejo las ignora): `force_requires_confirmation`
+     * (= `can_force`), `force_confirm_name` (lo que hay que escribir), `force_reasons` (el `detalle` de cada forzable), `live_system`
+     * (hay señales de que el sistema está en uso: hay que reconocerlo) y `live_system_reasons` (esas señales).
+     *
+     * @param Implementation $implementation La implementación.
+     *
+     * @return array{blocked: bool, blocked_reason: string|null, can_force: bool, confirmacion: array<string, mixed>}
+     */
+    private function estado_del_boton_user_setup(Implementation $implementation): array
+    {
+        // Lo que dice el candado.
+        $evaluacion = $this->candado->evaluar_para_el_panel($implementation);
+
+        // El cliente y el nombre que hay que escribir para confirmar (vacío si el cliente ya no existe: falla el duro).
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+
+        // Por qué el aplicado normal está frenado: el detalle de cada forzable.
+        $force_reasons = [];
+        foreach ($evaluacion['forzables'] as $forzable) {
+            $force_reasons[] = $forzable['detalle'];
+        }
+
+        $blocked        = false;
+        $blocked_reason = null;
+        $can_force      = false;
+
+        if (count($evaluacion['duros']) > 0) {
+            // No se puede aplicar todavía, ni forzando.
+            $blocked        = true;
+            $blocked_reason = $evaluacion['duros'][0]['detalle'];
+        } elseif (count($evaluacion['forzables']) > 0) {
+            // Se puede forzar, con la confirmación fuerte.
+            $blocked        = true;
+            $can_force      = true;
+            $blocked_reason = $this->motivo_del_bloqueo($implementation, $evaluacion['forzables']);
+        }
+
+        return [
+            'blocked'        => $blocked,
+            'blocked_reason' => $blocked_reason,
+            'can_force'      => $can_force,
+            'confirmacion'   => [
+                'force_requires_confirmation' => $can_force,
+                'force_confirm_name'          => $client !== null ? $this->candado->nombre_para_confirmar($client) : '',
+                'force_reasons'               => $force_reasons,
+                'live_system'                 => count($evaluacion['senales_de_uso']) > 0,
+                'live_system_reasons'         => $evaluacion['senales_de_uso'],
+            ],
+        ];
+    }
+
+    /**
+     * ¿Lo ÚNICO que frena es el candado de "ya se aplicó" (y a lo sumo que la implementación ya pasó de la etapa 2)? Es el "re-aplicar"
+     * clásico de siempre, sin ninguna señal de que el sistema esté en uso.
+     *
+     * @param array<int, array<string, mixed>> $forzables Las protecciones que fallaron.
+     *
+     * @return bool
+     */
+    private function solo_frena_el_candado(array $forzables): bool
+    {
+        // Los nombres de lo que falla.
+        $nombres = [];
+        foreach ($forzables as $forzable) {
+            $nombres[] = $forzable['chequeo'];
+        }
+
+        return in_array('sin_aplicar_antes', $nombres, true) && count(array_diff($nombres, ['sin_aplicar_antes', 'etapa_2'])) === 0;
+    }
+
+    /**
+     * ¿Lo ÚNICO que frena es que la implementación ya pasó de la etapa 2? Es el caso en que se avanzó sin aplicar el user setup: no se
+     * configuró nada ni hay señales de que el sistema esté en uso, así que decir "ya se configuró o ya opera" sería mentir sobre la causa.
+     *
+     * @param array<int, array<string, mixed>> $forzables Las protecciones que fallaron.
+     *
+     * @return bool
+     */
+    private function solo_frena_la_etapa(array $forzables): bool
+    {
+        if (count($forzables) === 0) {
+            return false;
+        }
+
+        foreach ($forzables as $forzable) {
+            if ($forzable['chequeo'] !== 'etapa_2') {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * La razón con la que el panel muestra el botón bloqueado cuando solo fallan protecciones (se puede forzar).
+     *
+     * @param Implementation                   $implementation La implementación.
+     * @param array<int, array<string, mixed>> $forzables      Las protecciones que fallaron.
+     *
+     * @return string
+     */
+    private function motivo_del_bloqueo(Implementation $implementation, array $forzables): string
+    {
+        // El de siempre: lo único que falla es el candado, y el panel viejo ya lo mostraba así.
+        if ($this->solo_frena_el_candado($forzables)) {
+            return 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. Usá "Forzar" para volver a aplicarlo.';
+        }
+
+        // Lo único que frena es la etapa: se avanzó sin aplicar el user setup. No se configuró nada ni hay señales de que el sistema esté en uso.
+        if ($this->solo_frena_la_etapa($forzables)) {
+            return 'La implementación ya pasó de la etapa 2 (está en la etapa ' . (int) $implementation->current_stage . '): el user setup solo se aplica en la etapa 2. '
+                . 'Para aplicarlo igual hay que forzarlo y confirmar.';
+        }
+
+        // Cuántos motivos hay.
+        $cantidad = count($forzables);
+
+        return 'El sistema del cliente ya se configuró o ya opera (' . $cantidad . ($cantidad === 1 ? ' motivo' : ' motivos')
+            . '): para aplicarlo de nuevo hay que forzarlo y confirmar.';
+    }
+
+    /**
+     * El mensaje cuando algo frena y NO se pidió forzar: el de siempre si lo único que falla es el candado, o uno que dice qué.
+     *
+     * @param Implementation                   $implementation La implementación.
+     * @param array<int, array<string, mixed>> $forzables      Las protecciones que fallaron.
+     *
+     * @return string
+     */
+    private function mensaje_sin_forzar(Implementation $implementation, array $forzables): string
+    {
+        // El de siempre: lo único que falla es el candado.
+        if ($this->solo_frena_el_candado($forzables)) {
+            return 'El UserSetup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i')
+                . ". Reintentá con \"Forzar\" si necesitás re-aplicarlo.";
+        }
+
+        // Lo único que frena es la etapa: se avanzó sin aplicar el user setup, así que no hay nada configurado que "ya opere".
+        if ($this->solo_frena_la_etapa($forzables)) {
+            return 'No se aplicó la configuración: la implementación ya pasó de la etapa 2 (está en la etapa ' . (int) $implementation->current_stage . ') y el user setup solo '
+                . 'se aplica en la etapa 2 (después el negocio puede estar operando y migrate:fresh le borraría lo que cargó). Para aplicarla igual hay que forzarla y '
+                . 'confirmar el nombre del cliente.';
+        }
+
+        // Lo que falló, con su detalle.
+        $detalles = [];
+        foreach ($forzables as $forzable) {
+            $detalles[] = $forzable['detalle'];
+        }
+
+        return 'No se aplicó la configuración: el sistema del cliente ya se configuró o ya opera (' . $this->candado->frase_de_bloqueos($forzables)
+            . '). Para aplicarla de nuevo hay que forzarla y confirmar el nombre del cliente. ' . implode(' ', $detalles);
     }
 
     /**

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\UserSetupBloqueadoException;
 use App\Models\Client;
 use App\Models\Lead;
 use Illuminate\Support\Facades\Http;
@@ -18,12 +19,28 @@ class RunUserSetupService
      * Ejecuta el user-setup remotamente y actualiza los campos de trazabilidad
      * del Lead (user_setup_status / user_setup_last_error / user_setup_last_run_at).
      *
+     * 🔴 ESTA ES UNA DE LAS PUERTAS AL ENDPOINT QUE HACE `migrate:fresh` (misión `puertas-del-user-setup`, 6/10/2026). Antes de tocar
+     * nada pasa por el candado (`UserSetupCandadoService::protecciones_de_lead()`): si el sistema del cliente ya opera o ya se configuró
+     * —un sistema vivo, el user setup de este lead o del lead del que salió el cliente ya aplicado, una implementación que ya lo aplicó
+     * o lo tiene en curso— NO se llama a nadie y se lanza `UserSetupBloqueadoException`, y no se escribe NADA: ni el estado del lead ni
+     * los datos del cliente. Sin `force` a propósito: rehacer un setup se decide mirando el sistema, no apretando este botón.
+     * `fallido` y `pendiente` siguen pudiendo reintentar: es el flujo de `/instalar-cliente`.
+     *
      * @param Lead $lead Debe estar en status cerrado_ganado y el Client vinculado debe tener api_url
      *
      * @return Lead El mismo Lead refrescado
+     *
+     * @throws UserSetupBloqueadoException Si el candado frena: el sistema del cliente ya opera o ya se configuró.
      */
     public function run(Lead $lead)
     {
+        /* 🔴 El candado va PRIMERO, antes que todo lo que escribe. Antes de `ensure_production_client()` porque ése PISA el nombre, la
+           razón social y `is_active` del cliente: frenar después de eso ya tocó a un cliente que opera. Y antes del chequeo del estado
+           del lead porque `mark_failed()` sobrescribe `user_setup_status`: un lead que dice `exitoso` no puede pasar a `fallido` por
+           un intento frenado (o por uno que ni siquiera está en cerrado_ganado), porque esa columna es la señal que leen los demás
+           candados. */
+        $this->frenar_si_el_candado_lo_pide($lead);
+
         if ($lead->status !== 'cerrado_ganado') {
             return $this->mark_failed($lead, 'Primero promové el lead a cliente (estado cerrado ganado).');
         }
@@ -130,6 +147,56 @@ class RunUserSetupService
 
             return $this->mark_failed($lead, 'Excepción: ' . $e->getMessage());
         }
+    }
+
+    /**
+     * Evalúa el candado de la puerta de leads y, si frena, lanza `UserSetupBloqueadoException` SIN haber escrito nada.
+     *
+     * Mira al cliente ya promovido del lead (si lo tiene; si no, solo el estado del propio lead: el cliente se va a crear recién al
+     * aplicar el setup y no tiene historia).
+     *
+     * @param Lead $lead El lead al que se le va a crear el sistema.
+     *
+     * @return void
+     *
+     * @throws UserSetupBloqueadoException Si alguna protección falla.
+     */
+    private function frenar_si_el_candado_lo_pide(Lead $lead): void
+    {
+        // El servicio que define "este sistema ya opera o ya se configuró".
+        $candado = new UserSetupCandadoService();
+
+        // El cliente ya promovido de este lead (null = todavía no existe).
+        $client = $lead->promoted_client_id ? Client::find($lead->promoted_client_id) : null;
+
+        // Las protecciones que fallaron.
+        $bloqueos = $candado->bloqueos($candado->protecciones_de_lead($lead, $client));
+
+        if (count($bloqueos) === 0) {
+            return;
+        }
+
+        // Los nombres de lo que falló, para el log y el mensaje.
+        $frase = $candado->frase_de_bloqueos($bloqueos);
+
+        Log::warning('RunUserSetupService: FRENADO por el candado, no se llama al sistema del cliente.', [
+            'lead_id'      => $lead->id,
+            'client_id'    => $client !== null ? $client->id : null,
+            'protecciones' => $frase,
+        ]);
+
+        // Lo que se vio de cada protección que falló, para quien lee el motivo.
+        $detalles = [];
+
+        foreach ($bloqueos as $bloqueo) {
+            $detalles[] = $bloqueo['detalle'];
+        }
+
+        throw new UserSetupBloqueadoException(
+            'el sistema de este cliente ya opera o ya se configuró (' . $frase . '), y volver a aplicarle el user setup le vaciaría la base (migrate:fresh). '
+            . 'No se llamó al sistema del cliente ni se tocó nada. ' . implode(' ', $detalles),
+            $bloqueos
+        );
     }
 
     /**

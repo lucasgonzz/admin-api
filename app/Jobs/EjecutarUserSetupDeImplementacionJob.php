@@ -375,7 +375,8 @@ class EjecutarUserSetupDeImplementacionJob implements ShouldQueue
      *   - un 408 es un timeout, y un 409 es "hay otro setup corriendo (o ya corrió)".
      * Lo único de lo que se sabe que NO corrió es un 4xx (empresa-api rechazó el pedido antes de ejecutar
      * nada: sin credencial, sin la ruta, validación) o que el servicio ni llegó a llamar (sin cliente, sin
-     * `client_api` activa). Ante un texto que no se reconoce se asume que pudo haber corrido: equivocarse
+     * `client_api` activa, un host de test negado o el candado que lo frenó: `PREFIJO_BLOQUEADO` y
+     * `PREFIJO_FRENADO_POR_EL_CANDADO`). Ante un texto que no se reconoce se asume que pudo haber corrido: equivocarse
      * para ese lado cuesta una mirada al sistema del cliente; para el otro, otro `migrate:fresh`.
      *
      * Los casos se reconocen por el texto que arma `ImplementationUserSetupService::trigger_user_setup()`.
@@ -393,8 +394,12 @@ class EjecutarUserSetupDeImplementacionJob implements ShouldQueue
             return ['texto' => $mensaje . ' — ' . $espera_cortada . self::ANTES_DE_REINTENTAR, 'puede_haber_corrido' => true];
         }
 
+        /* 🔴 El candado frenó el pedido (`PREFIJO_FRENADO_POR_EL_CANDADO`: el sistema del cliente ya opera o ya se configuró) y el
+           servicio no llamó a nadie: no corrió. Sin reconocer este prefijo caía al final ("ante un texto que no se reconoce se
+           asume que pudo haber corrido") y mandaba a conciliar o reintentar un setup que ni salió. */
         if (strpos($mensaje, 'No se encontró el cliente') !== false || strpos($mensaje, 'todavía no tiene una client_api activa') !== false
-            || strpos($mensaje, ImplementationUserSetupService::PREFIJO_BLOQUEADO) === 0) {
+            || strpos($mensaje, ImplementationUserSetupService::PREFIJO_BLOQUEADO) === 0
+            || strpos($mensaje, ImplementationUserSetupService::PREFIJO_FRENADO_POR_EL_CANDADO) === 0) {
             return ['texto' => $mensaje . ' — El setup no llegó a salir: no corrió.', 'puede_haber_corrido' => false];
         }
 
