@@ -62,7 +62,7 @@ class ClaudeClientCatalogoController extends Controller
      *
      * @var array<int, string>
      */
-    const PARAMETROS_DE_LA_CLAVE = ['dry_run', 'confirm_client_name'];
+    const PARAMETROS_DE_LA_CLAVE = ['dry_run', 'confirm_client_name', 'pisar_distintas'];
 
     /**
      * Parámetros de C2 (lista cerrada).
@@ -99,6 +99,11 @@ class ClaudeClientCatalogoController extends Controller
      *   2. `confirm_client_name`, obligatorio con `dry_run=false`: tiene que coincidir con
      *      `clients.name` (recorte y minúsculas). El error NO revela el nombre correcto: es un freno,
      *      no un formulario a completar.
+     *
+     * `pisar_distintas` (opcional, default false, igual de estricto que `dry_run`): aplicando, un frente cuyo
+     * `.env` ya tiene OTRA clave NO se escribe salvo que venga en true; queda `estado: distinta`,
+     * `accion: ninguna`, `error: "tiene otra clave; para reemplazarla, pisar_distintas: true"` y `listo` en
+     * false. En dry_run no cambia nada.
      *
      * Aplicando, antes de cada escritura se respalda el `.env` del frente (`.env.bak-<fecha>`) y
      * `EnvSshService` relee el archivo y verifica que la variable haya quedado: si no quedó, ese
@@ -158,7 +163,7 @@ class ClaudeClientCatalogoController extends Controller
         }
 
         try {
-            $resultado = $sincronizador->sincronizar($client, $pedido['dry_run']);
+            $resultado = $sincronizador->sincronizar($client, $pedido['dry_run'], $pedido['pisar_distintas']);
         } catch (\RuntimeException $e) {
             /* Solo el fallo de guardar la clave generada tiene respuesta propia; cualquier otra
                excepción es un error de verdad y sigue su camino. */
@@ -360,7 +365,7 @@ class ClaudeClientCatalogoController extends Controller
      *
      * @param Request $request Request entrante.
      *
-     * @return array{errores: array<string, string>, dry_run: bool}
+     * @return array{errores: array<string, string>, dry_run: bool, pisar_distintas: bool}
      */
     protected function leer_el_pedido_de_la_clave(Request $request)
     {
@@ -379,13 +384,28 @@ class ClaudeClientCatalogoController extends Controller
             }
         }
 
+        /* `pisar_distintas` se lee igual de estricto que `dry_run`: un valor que no se entiende es 422 y NO un
+           `true` (el lado peligroso: reemplazar una clave que alguien puede estar usando). */
+        $pisar_distintas = false;
+        $bruto_de_pisar  = $request->input('pisar_distintas');
+
+        if ($bruto_de_pisar !== null && $bruto_de_pisar !== '') {
+            $leido_de_pisar = $this->leer_booleano($bruto_de_pisar);
+
+            if ($leido_de_pisar === null) {
+                $errores['pisar_distintas'] = 'Tiene que ser booleano (true, false, 1 o 0). Sin él es false: un frente que ya tiene otra clave no se pisa.';
+            } else {
+                $pisar_distintas = $leido_de_pisar;
+            }
+        }
+
         $nombre = $request->input('confirm_client_name');
 
         if ($nombre !== null && (! is_string($nombre) || mb_strlen($nombre) > self::MAX_NOMBRE)) {
             $errores['confirm_client_name'] = 'Tiene que ser un texto de hasta ' . self::MAX_NOMBRE . ' caracteres.';
         }
 
-        return ['errores' => $errores, 'dry_run' => $dry_run];
+        return ['errores' => $errores, 'dry_run' => $dry_run, 'pisar_distintas' => $pisar_distintas];
     }
 
     /**

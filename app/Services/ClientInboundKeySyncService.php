@@ -30,6 +30,12 @@ use Illuminate\Support\Str;
  *
  * Un frente que falla (SSH caído, sin permisos) queda como `estado: error` y NO frena a los demás.
  *
+ * 🔴 Un frente cuyo `.env` ya tiene OTRA clave (`estado: distinta`) NO se pisa si no se pidió: aplicando sin
+ * `pisar_distintas: true` queda `accion: ninguna` con el motivo en `error`, y `listo` en false. Esa otra
+ * clave la puede estar usando alguien (una integración que el admin no conoce): reemplazarla es una decisión
+ * que se toma a propósito. Un frente `falta` (sin la variable, o vacía) se escribe siempre. En `dry_run` no
+ * cambia nada: sigue diciendo qué se escribiría.
+ *
  * 🔴 Antes de escribir se verifica que el `.env` sea de ESTE cliente: si trae `USER_ID` y no coincide con
  * `clients.user_id` (comparado como texto y sin espacios), el frente queda `estado: error`
  * (`dueno_distinto`) y no se toca. Es la clase de error de una carpeta mal cargada en el admin, que apunta
@@ -75,6 +81,14 @@ class ClientInboundKeySyncService
      * @var string
      */
     const VARIABLE_DEL_DUENO = 'USER_ID';
+
+    /**
+     * Lo que dice `error` de un frente `distinta` que NO se escribió porque no vino `pisar_distintas: true`.
+     * El texto es parte del contrato con el motor: se lo muestra a quien opera, tal cual.
+     *
+     * @var string
+     */
+    const MENSAJE_DISTINTA_SIN_PISAR = 'tiene otra clave; para reemplazarla, pisar_distintas: true';
 
     /** Estado de la clave en el admin: ya estaba cargada. */
     const CLAVE_PRESENTE = 'presente';
@@ -155,12 +169,14 @@ class ClientInboundKeySyncService
     /**
      * Mira (o escribe) la clave en el `.env` de todos los frentes del cliente.
      *
-     * @param Client $client  Cliente dueño de la clave.
-     * @param bool   $dry_run true: solo mira y dice qué haría. false: escribe de verdad.
+     * @param Client $client          Cliente dueño de la clave.
+     * @param bool   $dry_run         true: solo mira y dice qué haría. false: escribe de verdad.
+     * @param bool   $pisar_distintas true: aplicando, también reemplaza la clave de un frente que ya tiene
+     *                                OTRA. false (default): ese frente no se escribe. No cambia el dry_run.
      *
      * @return array{client_id: int, dry_run: bool, api_key_en_el_admin: string, frentes: array<int, array<string, mixed>>, listo: bool}
      */
-    public function sincronizar(Client $client, bool $dry_run): array
+    public function sincronizar(Client $client, bool $dry_run, bool $pisar_distintas = false): array
     {
         $this->levantar_limite_de_tiempo();
 
@@ -182,7 +198,7 @@ class ClientInboundKeySyncService
 
         try {
             foreach ($frentes as $frente) {
-                $resultado_de_frentes[] = $this->procesar_frente($frente, $clave, $dry_run, $timestamp, $user_id_del_cliente);
+                $resultado_de_frentes[] = $this->procesar_frente($frente, $clave, $dry_run, $timestamp, $user_id_del_cliente, $pisar_distintas);
             }
         } finally {
             /* La sesión SSH se cierra pase lo que pase: si algo revienta a mitad, no queda colgada. */
@@ -192,7 +208,7 @@ class ClientInboundKeySyncService
         $listo = $this->calcular_listo($resultado_de_frentes);
 
         if (! $dry_run) {
-            $this->registrar_en_el_log($client, $api_key_en_el_admin, $resultado_de_frentes, $listo);
+            $this->registrar_en_el_log($client, $api_key_en_el_admin, $resultado_de_frentes, $listo, $pisar_distintas);
         }
 
         return [
@@ -214,10 +230,11 @@ class ClientInboundKeySyncService
      * @param bool      $dry_run   true: no respalda ni escribe.
      * @param string    $timestamp Marca que nombra el respaldo del `.env`.
      * @param string    $user_id_del_cliente `clients.user_id` como texto y sin espacios ('' si no tiene).
+     * @param bool      $pisar_distintas     true: un frente `distinta` también se escribe (solo aplicando).
      *
      * @return array<string, mixed> `{client_api_id, hosting_type, path, estado, accion, error}`.
      */
-    protected function procesar_frente(ClientApi $frente, $clave, $dry_run, $timestamp, $user_id_del_cliente = '')
+    protected function procesar_frente(ClientApi $frente, $clave, $dry_run, $timestamp, $user_id_del_cliente = '', $pisar_distintas = false)
     {
         $fila = [
             'client_api_id' => (int) $frente->id,
@@ -293,6 +310,15 @@ class ClientInboundKeySyncService
         /* 3. Falta o es distinta: en dry_run se dice lo que se haría y se corta ahí. */
         if ($dry_run) {
             $fila['accion'] = self::ACCION_ESCRIBIR;
+
+            return $fila;
+        }
+
+        /* 🔴 Aplicando, un frente que ya tiene OTRA clave no se pisa si no se pidió: esa clave la puede estar
+           usando alguien que el admin no conoce. Queda `distinta` (lo que se encontró), `accion: ninguna` y el
+           motivo en `error`; `listo` queda en false porque ese frente no tiene la clave de este cliente. */
+        if ($fila['estado'] === self::ESTADO_DISTINTA && ! $pisar_distintas) {
+            $fila['error'] = self::MENSAJE_DISTINTA_SIN_PISAR;
 
             return $fila;
         }
@@ -515,10 +541,11 @@ class ClientInboundKeySyncService
      * @param string                           $api_key_en_el_admin  presente | falta | generada.
      * @param array<int, array<string, mixed>> $frentes              Resultado por frente.
      * @param bool                             $listo                Si la clave quedó lista (ver `calcular_listo()`).
+     * @param bool                             $pisar_distintas      Si el pedido autorizó reemplazar una clave distinta.
      *
      * @return void
      */
-    protected function registrar_en_el_log(Client $client, $api_key_en_el_admin, array $frentes, $listo)
+    protected function registrar_en_el_log(Client $client, $api_key_en_el_admin, array $frentes, $listo, $pisar_distintas = false)
     {
         $resumen = [];
 
@@ -533,6 +560,7 @@ class ClientInboundKeySyncService
         Log::info('ClientInboundKeySyncService: se aplicó la clave del admin en los frentes del cliente.', [
             'client_id'           => (int) $client->id,
             'api_key_en_el_admin' => $api_key_en_el_admin,
+            'pisar_distintas'     => (bool) $pisar_distintas,
             'frentes'             => $resumen,
             'listo'               => $listo,
         ]);

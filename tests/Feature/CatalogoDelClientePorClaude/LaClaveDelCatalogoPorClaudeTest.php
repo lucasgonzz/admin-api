@@ -511,6 +511,9 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
      * 🔴 Aplicar escribe la clave en los DOS frentes, con respaldo de cada `.env`, deja el resto del
      * archivo como estaba, contesta `listo: true` y NO lleva la clave en la respuesta.
      *
+     * El segundo frente tenía OTRA clave (`distinta`): por eso el pedido lleva `pisar_distintas: true`,
+     * que es lo único que autoriza a reemplazarla.
+     *
      * @return void
      */
     public function test_aplicar_escribe_en_los_dos_frentes_con_respaldo(): void
@@ -526,7 +529,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
         $respuesta = $this->postJson(
             $this->url($cliente),
-            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones', 'pisar_distintas' => true],
             $this->headers()
         );
 
@@ -868,47 +871,53 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * La regla de `listo` en todas las combinaciones que importan. Cada fila: los estados de los frentes
-     * (cómo se los ENCUENTRA), `listo` en dry_run y `listo` aplicando.
+     * (cómo se los ENCUENTRA), `listo` en dry_run, `listo` aplicando SIN `pisar_distintas` y `listo`
+     * aplicando CON `pisar_distintas: true`.
      *
      * La regla: al menos un frente `igual` o `escrita`, ninguno en `falta`, `distinta` o `error`; el
      * `sin_env` no cuenta ni a favor ni en contra. En dry_run no se escribió nada, así que un `falta` o
-     * `distinta` deja `listo` en false; aplicando, esos mismos quedan `escrita` y cuentan a favor. Un
-     * `error` cuenta en contra en los dos casos.
+     * `distinta` deja `listo` en false. Aplicando, un `falta` queda `escrita` y cuenta a favor; un
+     * `distinta` solo se escribe si se pidió pisarla, y sin eso queda sin escribir y en contra. Un `error`
+     * cuenta en contra siempre.
      *
      * @return array<string, array<int, mixed>>
      */
     public function escenarios_de_listo(): array
     {
         return [
-            'igual y sin_env'                       => [['igual', 'sin_env'], true, true],
-            'sin_env e igual (el orden no importa)' => [['sin_env', 'igual'], true, true],
-            'dos igual'                             => [['igual', 'igual'], true, true],
-            'todos sin_env'                         => [['sin_env', 'sin_env'], false, false],
-            'falta y sin_env'                       => [['falta', 'sin_env'], false, true],
-            'distinta y sin_env'                    => [['distinta', 'sin_env'], false, true],
-            'igual y falta'                         => [['igual', 'falta'], false, true],
-            'igual y distinta'                      => [['igual', 'distinta'], false, true],
-            'falta y distinta'                      => [['falta', 'distinta'], false, true],
-            'igual y error'                         => [['igual', 'error'], false, false],
-            'falta y error'                         => [['falta', 'error'], false, false],
-            'sin_env y error'                       => [['sin_env', 'error'], false, false],
-            'tres: igual, sin_env y falta'          => [['igual', 'sin_env', 'falta'], false, true],
-            'tres: igual, sin_env y error'          => [['igual', 'sin_env', 'error'], false, false],
-            'tres: igual, sin_env y sin_env'        => [['igual', 'sin_env', 'sin_env'], true, true],
-            'tres: todos sin_env'                   => [['sin_env', 'sin_env', 'sin_env'], false, false],
+            'igual y sin_env'                       => [['igual', 'sin_env'], true, true, true],
+            'sin_env e igual (el orden no importa)' => [['sin_env', 'igual'], true, true, true],
+            'dos igual'                             => [['igual', 'igual'], true, true, true],
+            'todos sin_env'                         => [['sin_env', 'sin_env'], false, false, false],
+            'falta y sin_env'                       => [['falta', 'sin_env'], false, true, true],
+            'distinta y sin_env'                    => [['distinta', 'sin_env'], false, false, true],
+            'igual y falta'                         => [['igual', 'falta'], false, true, true],
+            'igual y distinta'                      => [['igual', 'distinta'], false, false, true],
+            'falta y distinta'                      => [['falta', 'distinta'], false, false, true],
+            'dos distinta'                          => [['distinta', 'distinta'], false, false, true],
+            'igual y error'                         => [['igual', 'error'], false, false, false],
+            'falta y error'                         => [['falta', 'error'], false, false, false],
+            'distinta y error'                      => [['distinta', 'error'], false, false, false],
+            'sin_env y error'                       => [['sin_env', 'error'], false, false, false],
+            'tres: igual, sin_env y falta'          => [['igual', 'sin_env', 'falta'], false, true, true],
+            'tres: igual, sin_env y distinta'       => [['igual', 'sin_env', 'distinta'], false, false, true],
+            'tres: igual, sin_env y error'          => [['igual', 'sin_env', 'error'], false, false, false],
+            'tres: igual, sin_env y sin_env'        => [['igual', 'sin_env', 'sin_env'], true, true, true],
+            'tres: todos sin_env'                   => [['sin_env', 'sin_env', 'sin_env'], false, false, false],
         ];
     }
 
     /**
      * @dataProvider escenarios_de_listo
      *
-     * @param array<int, string> $estados          Estado en el que se encuentra cada frente.
-     * @param bool               $listo_en_dry_run `listo` esperado sin escribir.
-     * @param bool               $listo_aplicando  `listo` esperado después de aplicar.
+     * @param array<int, string> $estados                  Estado en el que se encuentra cada frente.
+     * @param bool               $listo_en_dry_run         `listo` esperado sin escribir.
+     * @param bool               $listo_aplicando          `listo` esperado después de aplicar SIN `pisar_distintas`.
+     * @param bool               $listo_pisando_distintas  `listo` esperado después de aplicar CON `pisar_distintas: true`.
      *
      * @return void
      */
-    public function test_la_regla_de_listo(array $estados, bool $listo_en_dry_run, bool $listo_aplicando): void
+    public function test_la_regla_de_listo(array $estados, bool $listo_en_dry_run, bool $listo_aplicando, bool $listo_pisando_distintas): void
     {
         [$cliente, $frentes, $clave] = $this->cliente_con_frentes_en_estado($estados);
 
@@ -930,6 +939,25 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
         $this->assertSinLaClave($dry, $clave);
         $this->assertSinLaClave($aplicado, $clave);
+
+        /* Con `pisar_distintas: true`: otro cliente con los mismos estados (el aplicado de arriba ya escribió
+           lo suyo). En dry_run el campo no cambia nada; aplicando, autoriza a reemplazar la clave distinta. */
+        [$otro, , $clave_del_otro] = $this->cliente_con_frentes_en_estado($estados);
+
+        $dry_con_el_campo = $this->postJson($this->url($otro), ['pisar_distintas' => true], $this->headers());
+
+        $this->assertSame($listo_en_dry_run, $dry_con_el_campo->json('listo'), 'dry_run con pisar_distintas y ' . implode(', ', $estados));
+        $this->assertSame($dry->json('frentes.0.accion'), $dry_con_el_campo->json('frentes.0.accion'));
+
+        $pisando = $this->postJson(
+            $this->url($otro),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones', 'pisar_distintas' => true],
+            $this->headers()
+        );
+
+        $pisando->assertStatus(200);
+        $this->assertSame($listo_pisando_distintas, $pisando->json('listo'), 'pisando distintas con ' . implode(', ', $estados));
+        $this->assertSinLaClave($pisando, $clave_del_otro);
     }
 
     /**
@@ -997,6 +1025,232 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertSame($antes, $this->ssh->envs[$dos->id]);
 
         $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion'], 'El otro frente se escribió igual.');
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | `pisar_distintas`: un frente con OTRA clave no se reemplaza si no se pidió
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Aplicando SIN `pisar_distintas`, un frente cuyo `.env` ya tiene OTRA clave NO se escribe: queda
+     * `estado: distinta` (lo que se encontró), `accion: ninguna`, el motivo EXACTO en `error` y `listo`
+     * en false. No se respalda, su `.env` no cambia ni un byte, y el valor viejo no sale en la respuesta.
+     * El otro frente (sin la variable) se escribe igual.
+     *
+     * @return void
+     */
+    public function test_aplicando_sin_pisar_distintas_un_frente_con_otra_clave_no_se_escribe(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave, [
+            "APP_ENV=production\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n",
+        ]);
+
+        $antes = $this->ssh->envs[$dos->id];
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $distinta = $this->fila($respuesta, $dos);
+        $this->assertSame('distinta', $distinta['estado']);
+        $this->assertSame('ninguna', $distinta['accion']);
+        $this->assertSame('tiene otra clave; para reemplazarla, pisar_distintas: true', $distinta['error']);
+
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->escrituras, 'No se reemplaza una clave que alguien puede estar usando.');
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->backups);
+        $this->assertSame($antes, $this->ssh->envs[$dos->id]);
+
+        $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion'], 'Un frente sin la variable se escribe siempre.');
+
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertStringNotContainsString('otro-valor-viejo-1234567890', $this->cuerpo($respuesta));
+    }
+
+    /**
+     * Con `pisar_distintas: true` el frente `distinta` se respalda y se escribe, como siempre, y `listo`
+     * es true. Los `igual` no se tocan y los `falta` se escriben, con o sin el campo.
+     *
+     * @return void
+     */
+    public function test_con_pisar_distintas_un_frente_con_otra_clave_se_respalda_y_se_escribe(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave, [
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=" . $clave . "\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n",
+        ]);
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones', 'pisar_distintas' => true],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertTrue($respuesta->json('listo'));
+
+        $this->assertSame('ninguna', $this->fila($respuesta, $uno)['accion'], 'El frente igual no se toca.');
+        $this->assertArrayNotHasKey($uno->id, $this->ssh->backups);
+
+        $pisada = $this->fila($respuesta, $dos);
+        $this->assertSame('distinta', $pisada['estado'], '`estado` sigue diciendo lo que se encontró.');
+        $this->assertSame('escrita', $pisada['accion']);
+        $this->assertNull($pisada['error']);
+
+        $this->assertSame($clave, $this->valor_en_el_env($dos, self::VARIABLE));
+        $this->assertArrayHasKey($dos->id, $this->ssh->backups, 'Antes de reemplazar la clave vieja se respalda el .env.');
+
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertStringNotContainsString('otro-valor-viejo-1234567890', $this->cuerpo($respuesta));
+    }
+
+    /**
+     * En dry_run `pisar_distintas` no cambia nada: el frente `distinta` sigue diciendo `escribir`, sin
+     * error, con o sin el campo, y no se escribe ni se respalda nada.
+     *
+     * @return void
+     */
+    public function test_en_dry_run_pisar_distintas_no_cambia_nada(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [
+            "APP_ENV=production\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n",
+        ]);
+
+        $sin_el_campo = $this->postJson($this->url($cliente), [], $this->headers());
+        $con_el_campo = $this->postJson($this->url($cliente), ['pisar_distintas' => true], $this->headers());
+
+        foreach ([$sin_el_campo, $con_el_campo] as $respuesta) {
+            $respuesta->assertStatus(200);
+            $this->assertTrue($respuesta->json('dry_run'));
+            $this->assertFalse($respuesta->json('listo'));
+
+            $distinta = $this->fila($respuesta, $dos);
+            $this->assertSame('distinta', $distinta['estado']);
+            $this->assertSame('escribir', $distinta['accion']);
+            $this->assertNull($distinta['error']);
+
+            $this->assertSame('falta', $this->fila($respuesta, $uno)['estado']);
+            $this->assertSame('escribir', $this->fila($respuesta, $uno)['accion']);
+        }
+
+        $this->assertSame($sin_el_campo->json('frentes'), $con_el_campo->json('frentes'));
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+    }
+
+    /**
+     * Valores de `pisar_distintas` que SÍ se entienden, con lo que significan.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function formas_de_pisar_distintas_que_se_entienden(): array
+    {
+        return [
+            'true booleano'  => [true, true],
+            'texto true'     => ['true', true],
+            'uno'            => [1, true],
+            'texto uno'      => ['1', true],
+            'false booleano' => [false, false],
+            'texto false'    => ['false', false],
+            'cero'           => [0, false],
+            'texto cero'     => ['0', false],
+            'vacío'          => ['', false],
+            'null'           => [null, false],
+        ];
+    }
+
+    /**
+     * @dataProvider formas_de_pisar_distintas_que_se_entienden
+     *
+     * @param mixed $valor    Valor de `pisar_distintas`.
+     * @param bool  $se_pisa  Si eso autoriza a reemplazar la clave distinta.
+     *
+     * @return void
+     */
+    public function test_pisar_distintas_se_lee_estricto_y_por_defecto_es_false($valor, bool $se_pisa): void
+    {
+        [$cliente, , $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [
+            "APP_ENV=production\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n",
+        ]);
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones', 'pisar_distintas' => $valor],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertSame($se_pisa ? 'escrita' : 'ninguna', $this->fila($respuesta, $dos)['accion']);
+    }
+
+    /**
+     * 🔴 Un `pisar_distintas` que no se entiende es 422 y NO un `true` (que es el lado peligroso: reemplazar
+     * una clave que alguien puede estar usando), igual que `dry_run`. No se escribe nada.
+     *
+     * @return void
+     */
+    public function test_un_pisar_distintas_que_no_se_entiende_es_422_y_no_escribe(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        foreach (['maybe', 'si', 2, -1, [true]] as $valor) {
+            $respuesta = $this->postJson(
+                $this->url($cliente),
+                ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones', 'pisar_distintas' => $valor],
+                $this->headers()
+            );
+
+            $respuesta->assertStatus(422);
+            $this->assertSame('validacion', $respuesta->json('error'), json_encode($valor));
+            $this->assertArrayHasKey('pisar_distintas', $respuesta->json('detalle'), json_encode($valor));
+        }
+
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+    }
+
+    /**
+     * Con la clave del admin vacía, aplicando SIN `pisar_distintas`: la clave se genera y se guarda (como
+     * siempre), pero un frente que ya tenía otra no se reemplaza, y `listo` queda en false. El frente sin
+     * clave sí recibe la nueva.
+     *
+     * @return void
+     */
+    public function test_con_la_clave_vacia_y_un_frente_con_otra_clave_se_genera_pero_no_se_pisa(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', '', [
+            "APP_ENV=production\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n",
+        ]);
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('generada', $respuesta->json('api_key_en_el_admin'));
+        $this->assertFalse($respuesta->json('listo'));
+
+        $generada = (string) $cliente->fresh()->api_key;
+
+        $this->assertSame(40, strlen($generada));
+        $this->assertSame($generada, $this->valor_en_el_env($uno, self::VARIABLE));
+        $this->assertSame('otro-valor-viejo-1234567890', $this->valor_en_el_env($dos, self::VARIABLE), 'La clave que ya tenía el otro frente sigue ahí.');
+        $this->assertSame('ninguna', $this->fila($respuesta, $dos)['accion']);
+        $this->assertSinLaClave($respuesta, $generada);
     }
 
     /**
