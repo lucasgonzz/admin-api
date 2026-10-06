@@ -15,7 +15,6 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
-use App\Models\ClientVersionUpgrade;
 use App\Models\DeploymentLog;
 use App\Models\EnvTemplate;
 use App\Models\Implementation;
@@ -35,6 +34,7 @@ use App\Services\ImplementationSettings;
 use App\Services\ImplementationStartService;
 use App\Services\PromoteLeadToClientService;
 use App\Services\SubdomainSuggestionService;
+use App\Services\UserSetupCandadoService;
 use Carbon\Carbon;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
@@ -320,7 +320,7 @@ class ClaudeImplementationOpsController extends Controller
      * cliente, porque el registro ya es de otro intento. Y del otro lado empresa-api toma un candado y
      * contesta 409 si hay otro corriendo, y ese 409 vuelve como error, sin reintento.
      */
-    const MINUTOS_PARA_DAR_POR_COLGADO = 45;
+    const MINUTOS_PARA_DAR_POR_COLGADO = UserSetupCandadoService::MINUTOS_PARA_DAR_POR_COLGADO;
 
     /**
      * Mensajes de validación en español: los del trait MÁS las reglas que este controlador usa y el
@@ -764,9 +764,7 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * ¿Un user setup que quedó `en_curso` llegó a llamar al sistema del cliente antes de colgarse?
      *
-     * 🔴 Lo dice `llamada_iniciada_at`, que el job escribe bajo lock ANTES de llamar (ver `tomar_el_turno()`). Sin la
-     * marca el job nunca arrancó (cola parada o atrasada) y no salió nada; con ella, la llamada pudo estar en vuelo o
-     * haber terminado cuando se cortó la ejecución, y el setup PUDO HABER CORRIDO del otro lado.
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`): es la única definición.
      *
      * @param array<string, mixed> $registro El registro de la etapa 2.
      *
@@ -774,7 +772,7 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function llamo_antes_de_colgarse(array $registro)
     {
-        return isset($registro['llamada_iniciada_at']) && trim((string) $registro['llamada_iniciada_at']) !== '';
+        return $this->candado()->llamo_antes_de_colgarse($registro);
     }
 
     /**
@@ -802,34 +800,22 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * El registro del user setup guardado en la etapa 2 (`data.user_setup`), o un array vacío.
      *
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`): es la única definición.
+     *
      * @param Implementation $implementation La implementación, con sus etapas cargadas.
      *
      * @return array<string, mixed>
      */
     protected function registro_del_user_setup(Implementation $implementation)
     {
-        $implementation->loadMissing('stages');
-
-        $etapa_2 = $implementation->stages->firstWhere('stage_number', 2);
-        if ($etapa_2 === null || ! is_array($etapa_2->data)) {
-            return [];
-        }
-
-        return isset($etapa_2->data['user_setup']) && is_array($etapa_2->data['user_setup'])
-            ? $etapa_2->data['user_setup']
-            : [];
+        return $this->candado()->registro_del_user_setup($implementation);
     }
 
     /**
      * ¿Hace más de `MINUTOS_PARA_DAR_POR_COLGADO` que corre el user setup que dice `en_curso`?
      *
-     * 🔴 Los minutos se cuentan desde que el job LLAMÓ al cliente (`llamada_iniciada_at`) y no desde que se encoló
-     * (`iniciado_at`): con la cola atrasada el job puede tardar en arrancar, y darlo por colgado con la llamada recién salida
-     * mandaría a reintentar un setup que está corriendo. Sin la marca (el job todavía no llamó, o nunca llamó) se cuenta desde
-     * que se encoló. Una marca ilegible no cuenta: se cae al encolado.
-     *
-     * Un `en_curso` sin ninguna de las dos fechas (no debería pasar: las escribe el endpoint y el job) se da por colgado: sin
-     * fecha no hay forma de saber desde cuándo corre y dejarlo trabado para siempre es peor que dejar reintentar.
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`): es la única definición. Los minutos se cuentan
+     * desde que el job LLAMÓ al cliente (`llamada_iniciada_at`) y no desde que se encoló; el porqué está escrito allá.
      *
      * @param array<string, mixed> $registro El registro de la etapa 2.
      *
@@ -837,15 +823,7 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function esta_colgado(array $registro)
     {
-        $desde = $this->parsear_o_null(isset($registro['llamada_iniciada_at']) ? $registro['llamada_iniciada_at'] : null);
-        if ($desde === null) {
-            $desde = $this->parsear_o_null(isset($registro['iniciado_at']) ? $registro['iniciado_at'] : null);
-        }
-        if ($desde === null) {
-            return true;
-        }
-
-        return $desde->lt(now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADO));
+        return $this->candado()->esta_colgado($registro);
     }
 
     /**
@@ -2818,15 +2796,9 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * ¿Tiene el cliente un sistema vivo (ya instalado, ya en producción)?
      *
-     * 🔴 La señal es su historial de actualizaciones (`client_version_upgrades`): un sistema al que se le
-     * actualizó la versión es un sistema que ya estuvo en producción, y CUALQUIER fila cuenta, en el estado que
-     * sea —una pendiente o una fallida también son un cliente al que el admin ya le despliega versiones—. Es lo
-     * que deja un cliente instalado por afuera de este camino (a mano, por `/instalar-cliente`, por el panel),
-     * que `instalaciones_previas` no ve porque solo mira las instalaciones que hizo éste.
-     *
-     * ⚠️ El dato "este sistema ya está configurado" vive en `client_version_upgrades.sistema_configurado_at`,
-     * NO en `clients`: la tabla `clients` no tiene esa columna. Se cuenta por las filas de actualizaciones, que
-     * incluyen a las que ya llegaron a configurar el sistema.
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`): es la única definición, y la usan el alta, `install`
+     * y el user setup —en este controlador— y las demás puertas del user setup. La señal es su historial de actualizaciones
+     * (`client_version_upgrades`): CUALQUIER fila cuenta, en el estado que sea.
      *
      * @param Client $client El cliente.
      *
@@ -2834,34 +2806,15 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function sistema_vivo(Client $client)
     {
-        $actualizaciones = ClientVersionUpgrade::where('client_id', $client->id)->orderByDesc('id')->get(['id', 'status', 'sistema_configurado_at']);
-        $cantidad        = $actualizaciones->count();
-
-        if ($cantidad === 0) {
-            return ['vivo' => false, 'motivos' => []];
-        }
-
-        $ultima  = $actualizaciones->first();
-        $motivos = [
-            'Tiene ' . $cantidad . ' ' . ($cantidad === 1 ? 'actualización registrada' : 'actualizaciones registradas') . ' en client_version_upgrades (la última: id '
-                . (int) $ultima->id . ', estado "' . (string) $ultima->status . '").',
-        ];
-
-        if ($actualizaciones->whereNotNull('sistema_configurado_at')->count() > 0) {
-            $motivos[] = 'Alguna figura con el sistema configurado (sistema_configurado_at).';
-        }
-
-        return ['vivo' => true, 'motivos' => $motivos];
+        return $this->candado()->sistema_vivo($client);
     }
 
     /**
-     * El estado del user setup que dejó el camino de LEADS (`RunUserSetupService`) en el lead del que salió el
-     * cliente: `pendiente`, `ejecutandose`, `exitoso`, `fallido` o `sin_confirmar`. Null si el cliente no salió de un
-     * lead (se creó directo) o el lead no tiene estado.
+     * El estado del user setup que dejó el camino de LEADS (`RunUserSetupService`) en el lead del que salió el cliente:
+     * `pendiente`, `ejecutandose`, `exitoso`, `fallido` o `sin_confirmar`. Null si el cliente no salió de un lead o el lead no
+     * tiene estado.
      *
-     * Lo mira el chequeo `lead_sin_user_setup` del user setup: ese camino llama al MISMO endpoint remoto
-     * (`admin-sync/user-setup`, que hace `migrate:fresh`) y no escribe el candado de la implementación, así que sin
-     * este dato el candado no se entera de que el sistema ya se configuró.
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`): es la única definición.
      *
      * @param Client $client El cliente.
      *
@@ -2869,13 +2822,7 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function estado_del_user_setup_del_lead(Client $client)
     {
-        $lead = Lead::where('promoted_client_id', $client->id)->orderByDesc('id')->first();
-
-        if ($lead === null || $lead->user_setup_status === null || trim((string) $lead->user_setup_status) === '') {
-            return null;
-        }
-
-        return (string) $lead->user_setup_status;
+        return $this->candado()->estado_del_user_setup_del_lead($client);
     }
 
     /**
@@ -3236,20 +3183,11 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
-     * ¿El cliente ya cargó el formulario de la implementación?
+     * ¿El cliente envió el formulario?
      *
-     * 🔴 ES EL GATE DEL PANEL (`ImplementationActionService::user_setup_gate()`), CON UNA PRECISIÓN. El
-     * panel da el formulario por enviado si `form_submitted_at` está lleno O SI LA ETAPA 1 ESTÁ
-     * `completed`. Esa segunda mitad existe porque la etapa 1 se completa sola al enviarse el formulario,
-     * pero también se completa cuando alguien aprieta "Avanzar etapa" —y ahora también `advance` de
-     * Claude— SIN que el cliente haya cargado nada. En ese caso el user setup correría con un
-     * `setup_data` vacío: `migrate:fresh` sobre el sistema del cliente y todos los valores por defecto,
-     * que es justo lo que el formulario venía a evitar.
-     *
-     * Por eso acá la etapa 1 completada cuenta SOLO si además hay datos del formulario ya mapeados en
-     * `clients.setup_data` (que es lo que consume el user setup): el caso legítimo es el de Lucas
-     * cargando las respuestas desde el panel ("Editar" datos recolectados), que mapea `setup_data` pero no
-     * llena `form_submitted_at`.
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`): es la única definición. Es el gate del panel con una
+     * precisión: la etapa 1 completada cuenta SOLO si además hay datos del formulario en `clients.setup_data` (el porqué está
+     * escrito allá).
      *
      * @param Implementation $implementation La implementación.
      * @param Client         $client         Su cliente.
@@ -3258,20 +3196,13 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function formulario_enviado(Implementation $implementation, Client $client)
     {
-        if ($implementation->form_submitted_at !== null) {
-            return true;
-        }
-
-        $primera = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 1)->first();
-
-        return $primera !== null
-            && $primera->status === 'completed'
-            && is_array($client->setup_data)
-            && count($client->setup_data) > 0;
+        return $this->candado()->formulario_enviado($implementation, $client);
     }
 
     /**
      * Un chequeo de los que devuelven `install` y `user-setup`.
+     *
+     * Delegado en `UserSetupCandadoService` (misión `puertas-del-user-setup`), que arma los del user setup: la forma es una sola.
      *
      * @param string $nombre  Qué se chequeó.
      * @param bool   $ok      Si está bien.
@@ -3281,7 +3212,7 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function chequeo($nombre, $ok, $detalle)
     {
-        return ['chequeo' => $nombre, 'ok' => (bool) $ok, 'detalle' => (string) $detalle];
+        return $this->candado()->chequeo($nombre, $ok, $detalle);
     }
 
     /* ==============================================================================================
@@ -3592,11 +3523,9 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * Los nueve chequeos del user setup.
      *
-     * Lee, no escribe. Los tres primeros son los del `user_setup_gate()` del panel, con dos precisiones: el
-     * segundo exige la etapa 2 EXACTA (el panel acepta cualquiera desde la 2, y re-aplicar en la 3 o después le
-     * borra al cliente lo que ya cargó) y el tercero mira la última instalación REAL (`completa`) de la API
-     * activa y no "la última del cliente", porque con el par de filas (real + esqueleto) la última por id es el
-     * esqueleto, que termina después y no tiene nada que ver con el sistema al que se le va a pegar.
+     * 🔴 Delegado en `UserSetupCandadoService::plan_estricto()` (misión `puertas-del-user-setup`, 6/10/2026): el plan se MOVIÓ tal
+     * cual —mismos nombres de chequeo, mismos textos, mismo orden, mismas claves— para que las demás puertas del user setup (el
+     * modo automático, el botón del panel y el de leads) usen la misma definición de "este sistema ya opera". Lee, no escribe.
      *
      * @param Implementation $implementation La implementación.
      * @param Client         $client         Su cliente.
@@ -3606,150 +3535,17 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function plan_del_user_setup(Implementation $implementation, Client $client)
     {
-        $chequeos = [];
+        return $this->candado()->plan_estricto($implementation, $client);
+    }
 
-        /* 1. El formulario. */
-        $formulario = $this->formulario_enviado($implementation, $client);
-
-        $chequeos[] = $this->chequeo(
-            'formulario_enviado',
-            $formulario,
-            $formulario ? 'El cliente envió el formulario.' : 'Todavía no se completó el formulario (etapa 1): el payload no tendría datos reales.'
-        );
-
-        /* 2. La etapa: EXACTAMENTE la 2, como `install`. Antes no hay sistema instalado; después el negocio puede
-           estar operando y `migrate:fresh` le borraría lo que cargó. */
-        $etapa_ok = (int) $implementation->current_stage === 2;
-
-        $chequeos[] = $this->chequeo(
-            'etapa_2',
-            $etapa_ok,
-            $etapa_ok
-                ? 'La implementación está en la etapa 2.'
-                : 'La implementación está en la etapa ' . (int) $implementation->current_stage . ': el user setup solo se aplica en la etapa 2 (antes no hay sistema '
-                    . 'instalado; después el negocio puede estar operando y migrate:fresh le borraría lo que cargó).'
-        );
-
-        /* 3 y 4. La instalación real de la API activa y la URL a la que se le pega. */
-        $activa = $client->active_client_api_id === null
-            ? null
-            : ClientApi::where('id', (int) $client->active_client_api_id)->where('client_id', $client->id)->first();
-
-        $instalacion = $activa === null
-            ? null
-            : ClientInstallation::where('client_id', $client->id)
-                ->where('kind', ClientInstallation::KIND_COMPLETA)
-                ->where('client_api_id', $activa->id)
-                ->orderByDesc('id')
-                ->first();
-
-        $instalada = $instalacion !== null && $instalacion->status === 'completada';
-
-        $chequeos[] = $this->chequeo(
-            'instalacion_completada',
-            $instalada,
-            $instalacion === null
-                ? 'No hay ninguna instalación completa sobre la API activa: instalá primero (POST claude/implementations/{id}/install).'
-                : ($instalada
-                    ? 'La instalación ' . (int) $instalacion->id . ' de la API activa está completada.'
-                    : 'La última instalación completa de la API activa (' . (int) $instalacion->id . ') está en "' . $instalacion->status . '", no en completada.')
-        );
-
-        /* 🔴 La misma URL que va a usar `trigger_user_setup()`: normalizada (con `/public` en hosting compartido, sin él en
-           VPS). Con la URL cruda de un cliente nuevo de shared el POST daba 404; el dry-run tiene que mostrar el destino REAL. */
-        $url = $activa === null ? '' : (new ClientEmpresaApiUrlResolver())->normalize_api_base_url($activa->url, $activa->hosting_type);
-
-        $chequeos[] = $this->chequeo(
-            'client_api_activa',
-            $url !== '',
-            $url !== '' ? 'La API activa del cliente es ' . $url . '.' : 'El cliente no tiene una API activa con URL (clients.active_client_api_id).'
-        );
-
-        /* 4b. 🔴 La instalación es de ESTA implementación. Una instalación completada ANTERIOR al arranque de la
-           implementación es un sistema que ya existía (instalado por afuera de este camino, por /instalar-cliente, a mano o
-           por otra implementación): puede estar operando, y migrate:fresh le borraría todo. Sin instalación completada
-           todavía no aplica (el chequeo de arriba ya está en false). */
-        $posterior = ! $instalada
-            || $implementation->started_at === null
-            || $instalacion->created_at === null
-            || $instalacion->created_at->gte($implementation->started_at);
-
-        $chequeos[] = $this->chequeo(
-            'instalacion_de_esta_implementacion',
-            $posterior,
-            ! $instalada
-                ? 'No aplica todavía: no hay una instalación completada.'
-                : ($posterior
-                    ? 'La instalación ' . (int) $instalacion->id . ' es posterior al arranque de la implementación: la hizo este camino.'
-                    : 'La instalación completada (' . (int) $instalacion->id . ', del ' . $instalacion->created_at->format('d/m/Y H:i') . ') es ANTERIOR al arranque de la '
-                        . 'implementación (' . $implementation->started_at->format('d/m/Y H:i') . '): es un sistema que ya existía y puede estar operando. 🔴 migrate:fresh '
-                        . 'le borraría todo. Si de verdad hace falta, se hace desde el panel, con una persona mirando.')
-        );
-
-        /* 4c. 🔴 Que no tenga ya un sistema vivo (el mismo chequeo que el alta y `install`: un cliente al que el admin ya le
-           desplegó versiones). El user setup es la acción que VACÍA la base, y es la que más lo necesita. */
-        $vivo = $this->sistema_vivo($client);
-
-        $chequeos[] = $this->chequeo(
-            'sin_sistema_vivo',
-            ! $vivo['vivo'],
-            $vivo['vivo']
-                ? 'El cliente ya tiene un sistema vivo: ' . implode(' ', $vivo['motivos']) . ' 🔴 migrate:fresh le borraría lo que tiene. Si de verdad hace '
-                    . 'falta, se hace desde el panel, con una persona mirando.'
-                : 'Sin señales de un sistema ya instalado (el cliente no tiene actualizaciones registradas).'
-        );
-
-        /* 4d. 🔴 Que el user setup no se haya aplicado ya por el camino de LEADS (`RunUserSetupService`: el que usa
-           /instalar-cliente para crear al dueño). Ese camino no escribe el candado de la implementación, así que sin
-           esto el candado de abajo no se entera. `sin_confirmar` es "la llamada salió y no se sabe cómo terminó". */
-        $estado_del_lead = $this->estado_del_user_setup_del_lead($client);
-        $lead_aplicado   = in_array($estado_del_lead, ['ejecutandose', 'exitoso', \App\Services\RunDemoSetupService::ESTADO_SIN_CONFIRMAR], true);
-
-        $chequeos[] = $this->chequeo(
-            'lead_sin_user_setup',
-            ! $lead_aplicado,
-            $lead_aplicado
-                ? 'El lead del que salió este cliente tiene el user setup en estado "' . $estado_del_lead . '": el sistema ya se configuró (o se está configurando) '
-                    . 'por el camino de leads. 🔴 Aplicarlo de nuevo VACÍA la base del cliente (migrate:fresh). Verificá el sistema del cliente (`motor <cliente> '
-                    . 'metricas`: ¿existe el dueño?) y seguí con la verificación; si de verdad hace falta re-aplicar, se hace desde el panel, con una persona mirando.'
-                : 'El user setup no se aplicó por el camino de leads.'
-        );
-
-        /* 5. El candado: ya aplicado = nunca más por acá. */
-        $aplicado = $implementation->user_setup_executed_at !== null;
-
-        $chequeos[] = $this->chequeo(
-            'sin_aplicar_antes',
-            ! $aplicado,
-            $aplicado
-                ? 'El user setup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. 🔴 Re-aplicarlo VACÍA la base del cliente '
-                    . '(migrate:fresh): este camino no tiene forzar. Si de verdad hace falta, se hace desde el panel, con una persona mirando.'
-                : 'Todavía no se aplicó.'
-        );
-
-        /* 6. Otro en curso. Uno colgado (más de 45 minutos) no cuenta: ver MINUTOS_PARA_DAR_POR_COLGADO. */
-        $registro = $this->registro_del_user_setup($implementation);
-        $en_curso = ! $aplicado && (isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso' && ! $this->esta_colgado($registro);
-
-        $chequeos[] = $this->chequeo(
-            'sin_setup_en_curso',
-            ! $en_curso,
-            $en_curso
-                ? 'Ya hay un user setup en curso (arrancó ' . (isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : 'sin fecha') . '): esperá a que termine.'
-                : (! $aplicado && (isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso'
-                    ? 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos (el registro sigue en en_curso sin resultado): se da por colgado. '
-                        . ($this->llamo_antes_de_colgarse($registro)
-                            ? 'El job SÍ llegó a llamar al cliente (llamada_iniciada_at): pudo haber corrido, así que hay que elegir `conciliar` o `reintentar`.'
-                            : 'El job nunca llegó a llamar al cliente: se puede volver a intentar con la llamada normal; el job viejo, si arranca, se descarta solo.')
-                    : 'No hay ninguno en curso.')
-        );
-
-        return [
-            'chequeos' => $chequeos,
-            'aplicado' => $aplicado,
-            'en_curso' => $en_curso,
-            'endpoint' => $url === '' ? null : rtrim($url, '/') . '/api/admin-sync/user-setup',
-        ];
+    /**
+     * El servicio del candado del user setup: la única definición de "este sistema ya opera o ya se configuró".
+     *
+     * @return UserSetupCandadoService
+     */
+    protected function candado()
+    {
+        return new UserSetupCandadoService();
     }
 
     /**
