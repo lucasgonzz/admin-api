@@ -72,7 +72,7 @@ class UserSetupCandadoService
     /**
      * Los nueve chequeos del user setup.
      *
-     * Lee, no escribe. Los tres primeros son los del `user_setup_gate()` del panel, con dos precisiones: el segundo exige
+     * Lee, no escribe. Los tres primeros son los del gate del panel (los duros de `evaluar_para_el_panel()`), con dos precisiones: el segundo exige
      * la etapa 2 EXACTA (el panel acepta cualquiera desde la 2, y re-aplicar en la 3 o después le borra al cliente lo que
      * ya cargó) y el tercero mira la última instalación REAL (`completa`) de la API activa y no "la última del cliente",
      * porque con el par de filas (real + esqueleto) la última por id es el esqueleto, que termina después y no tiene nada
@@ -803,7 +803,7 @@ class UserSetupCandadoService
     /**
      * ¿El cliente envió el formulario?
      *
-     * 🔴 ES EL GATE DEL PANEL (`user_setup_gate()` de `ImplementationActionService`), CON UNA PRECISIÓN. El panel da el
+     * 🔴 ES EL GATE DEL PANEL (el duro `formulario_enviado` de `evaluar_para_el_panel()`), CON UNA PRECISIÓN. El panel da el
      * formulario por enviado si `form_submitted_at` está lleno O SI LA ETAPA 1 ESTÁ `completed`. Esa segunda mitad existe
      * porque la etapa 1 se completa sola al enviarse el formulario, pero también se completa cuando alguien aprieta "Avanzar
      * etapa" —y ahora también `advance` de Claude— SIN que el cliente haya cargado nada. En ese caso el user setup correría
