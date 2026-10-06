@@ -33,7 +33,9 @@ use Illuminate\Support\Facades\Log;
  *
  * 🔴 NUNCA lleva la clave del cliente ni en el resultado ni en el log. El cuerpo que devuelve el
  * cliente pasa por `tapar_clave()` ANTES de decodificarse, y las excepciones de HTTP también. El log
- * lleva método, ruta SIN query, status y milisegundos: nunca el cuerpo.
+ * lleva método, ruta SIN query, status y milisegundos: nunca el cuerpo. Y las URLs que cita el mensaje de
+ * una falla de red (Guzzle repite la URL entera) salen SIN su query (`sin_la_query_de_las_urls()`): la
+ * query de `/articulos?filtro=...` es dato del negocio del cliente y el catálogo promete solo el path.
  *
  * 🔴 FIDELIDAD. El cuerpo de un POST viaja como el JSON ORIGINAL (decodificado sin `assoc` y
  * recodificado), no como el array de PHP: `Http::post($url, $array)` pasa por `array_merge`, que
@@ -240,6 +242,24 @@ class ClientCatalogoPuenteService
     }
 
     /**
+     * Saca la query (y el fragmento) de TODA URL que aparezca en un texto: `for https://h/x?a=1&b=2` queda
+     * `for https://h/x`.
+     *
+     * 🔴 Es para el mensaje de una excepción de red: Guzzle y cURL repiten la URL entera, query incluida, y
+     * el catálogo y el log del puente prometen solo el path. Una URL sin query (`https://curl.haxx.se/...`)
+     * no se toca, y un `?` que no está pegado a una URL tampoco. La URL termina en el primer espacio o
+     * comilla, que es donde la deja el mensaje.
+     *
+     * @param string|null $texto Mensaje de la excepción.
+     *
+     * @return string
+     */
+    public static function sin_la_query_de_las_urls($texto)
+    {
+        return (string) preg_replace('~(https?://[^\s"\'<>?#]*)[?#][^\s"\'<>]*~i', '$1', (string) $texto);
+    }
+
+    /**
      * La lista blanca en forma legible (`GET /resumen`, `POST /categorias/propuestas/{n}/listo`...),
      * para los mensajes de error y el catálogo.
      *
@@ -331,13 +351,17 @@ class ClientCatalogoPuenteService
             // ConnectionException, timeout, DNS: no hay respuesta HTTP asociada.
             $ms = $this->milisegundos_desde($inicio);
 
+            /* 🔴 El mensaje de Guzzle/cURL repite la URL ENTERA ("... for https://host/path?filtro=..."): sin la
+               query, que es dato del negocio del cliente. Va antes de tapar la clave y de recortar. */
+            $error = self::sin_la_query_de_las_urls($e->getMessage());
+
             Log::warning('ClientCatalogoPuenteService: no se pudo contactar al empresa-api del cliente.', [
                 'client_id' => (int) $client->id,
                 'metodo'    => $metodo,
                 'ruta'      => $path_del_log,
                 'status'    => null,
                 'ms'        => $ms,
-                'error'     => $this->texto_seguro($e->getMessage(), $clave),
+                'error'     => $this->texto_seguro($error, $clave),
             ]);
 
             return $this->resultado(
@@ -346,8 +370,7 @@ class ClientCatalogoPuenteService
                 null,
                 null,
                 $this->texto_seguro(
-                    'No se pudo contactar al empresa-api del cliente (timeout de ' . $timeout . ' s o falla de conexión): '
-                    . $e->getMessage(),
+                    'No se pudo contactar al empresa-api del cliente (timeout de ' . $timeout . ' s o falla de conexión): ' . $error,
                     $clave
                 )
             );

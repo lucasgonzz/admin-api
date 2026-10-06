@@ -1013,6 +1013,97 @@ class ElPuenteDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * 🔴 Ante una falla de red, ni el mensaje ni el log llevan la QUERY de la URL (solo el path, como
+     * promete el catálogo): Guzzle/cURL repiten la URL entera en el mensaje ("... for https://host/path?
+     * filtro=..."), y la query de `/articulos?filtro=...` es dato del negocio del cliente. Se conservan el
+     * host y el path (sirven para diagnosticar) y una URL sin query (el link de libcurl) no se toca.
+     *
+     * @return void
+     */
+    public function test_una_falla_de_red_no_lleva_la_query_de_la_url_ni_en_el_mensaje_ni_en_el_log(): void
+    {
+        $clave = $this->clave;
+
+        $this->http_falso(['*' => function () use ($clave) {
+            throw new ConnectionException(
+                'cURL error 28: Operation timed out (see https://curl.haxx.se/libcurl/c/libcurl-errors.html) for '
+                . 'https://api-doblep.ejemplo.test/public/api/admin-sync/catalogo/articulos?desde_id=100&filtro=SECRETO-DE-NEGOCIO&t=' . $clave
+            );
+        }]);
+
+        $registro = $this->capturar_el_log();
+
+        $respuesta = $this->puente(['metodo' => 'GET', 'ruta' => '/articulos?desde_id=100&filtro=SECRETO-DE-NEGOCIO']);
+
+        $respuesta->assertStatus(502);
+        $this->assertSame('cliente_no_responde', $respuesta->json('error'));
+
+        $mensaje = (string) $respuesta->json('mensaje');
+        $todo    = $mensaje . "\n" . implode("\n", $registro->lineas);
+
+        foreach (['desde_id', 'SECRETO-DE-NEGOCIO', '?'] as $de_la_query) {
+            $this->assertStringNotContainsString($de_la_query, $mensaje, 'El mensaje lleva la query de la URL: ' . $de_la_query);
+            $this->assertStringNotContainsString($de_la_query, implode("\n", $registro->lineas), 'El log lleva la query de la URL: ' . $de_la_query);
+        }
+
+        /* Sí queda lo que sirve para diagnosticar: el motivo, el host y el path; y el link de libcurl entero. */
+        $this->assertStringContainsString('timed out', $mensaje);
+        $this->assertStringContainsString('https://api-doblep.ejemplo.test/public/api/admin-sync/catalogo/articulos', $mensaje);
+        $this->assertStringContainsString('https://curl.haxx.se/libcurl/c/libcurl-errors.html', $mensaje);
+
+        $propias = array_values(array_filter($registro->registros, function ($r) {
+            return strpos($r['mensaje'], 'ClientCatalogoPuenteService') === 0 && $r['nivel'] === 'warning';
+        }));
+
+        $this->assertCount(1, $propias);
+        $this->assertSame('/articulos', $propias[0]['contexto']['ruta']);
+        $this->assertStringContainsString('catalogo/articulos', (string) $propias[0]['contexto']['error']);
+
+        $this->assertSinLaClave($respuesta, $this->clave);
+        $this->assertLogSinLaClave($registro, $this->clave);
+        $this->assertStringNotContainsString($this->clave, $todo);
+    }
+
+    /**
+     * Textos con URLs y lo que tiene que quedar sin su query: varias URLs, entre comillas, con fragmento,
+     * con puerto, en mayúsculas y con la query codificada. Lo que no es una URL con query no se toca.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function textos_con_urls_y_su_resultado(): array
+    {
+        return [
+            'al final del texto'            => ['for https://h.test/a/b?x=1&y=2', 'for https://h.test/a/b'],
+            'entre comillas'                => ['url "https://h.test/a?x=1" fin', 'url "https://h.test/a" fin'],
+            'entre comillas simples'        => ["url 'https://h.test/a?x=1' fin", "url 'https://h.test/a' fin"],
+            'con fragmento'                 => ['https://h.test/a?x=1#frag y', 'https://h.test/a y'],
+            'solo con fragmento'            => ['https://h.test/a#frag y', 'https://h.test/a y'],
+            'con puerto'                    => ['http://h.test:8080/a/b?x=1', 'http://h.test:8080/a/b'],
+            'dos URLs'                      => ['a https://h.test/1?q=1 b https://h.test/2?q=2 c', 'a https://h.test/1 b https://h.test/2 c'],
+            'esquema en mayúsculas'         => ['HTTPS://H.TEST/A?X=1', 'HTTPS://H.TEST/A'],
+            'query codificada'              => ['https://h.test/a?q=c%C3%A1mara&z=%E2%82%AC', 'https://h.test/a'],
+            'entre paréntesis angulares'    => ['<https://h.test/a?x=1> y', '<https://h.test/a> y'],
+            'URL sin query: no se toca'     => ['https://curl.haxx.se/libcurl/c/libcurl-errors.html', 'https://curl.haxx.se/libcurl/c/libcurl-errors.html'],
+            'un ? que no es de una URL'     => ['¿Qué pasó? https://h.test/x y?', '¿Qué pasó? https://h.test/x y?'],
+            'texto sin URLs'                => ['cURL error 6: Could not resolve host', 'cURL error 6: Could not resolve host'],
+            'vacío'                         => ['', ''],
+        ];
+    }
+
+    /**
+     * @dataProvider textos_con_urls_y_su_resultado
+     *
+     * @param string $texto    Texto con (o sin) URLs.
+     * @param string $esperado Lo que tiene que quedar.
+     *
+     * @return void
+     */
+    public function test_sin_la_query_de_las_urls(string $texto, string $esperado): void
+    {
+        $this->assertSame($esperado, ClientCatalogoPuenteService::sin_la_query_de_las_urls($texto));
+    }
+
+    /**
      * Una falla de conexión (DNS, conexión rechazada) también es 502 `cliente_no_responde`.
      *
      * @return void
