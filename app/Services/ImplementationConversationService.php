@@ -721,7 +721,8 @@ class ImplementationConversationService
     /**
      * Ejecuta las acciones automáticas al avanzar a una nueva etapa desde el controller.
      *
-     * - Etapa 2: envía el primer mensaje al cliente (dueño).
+     * - Etapa 2: avisa al admin asignado, aplica el user setup SOLO si el candado lo deja (ver evaluar_el_user_setup_automatico())
+     *   y crea la ClientInstallation.
      * - Etapa 3: notifica al admin asignado que debe ejecutar la instalación.
      * - Etapa 4: envía el primer mensaje al responsable de migración (recolección de archivos).
      * - Etapa 5: dispara el análisis IA en background (migración de datos).
@@ -749,18 +750,34 @@ class ImplementationConversationService
         }
 
         if ($new_stage === 2) {
-            // Etapa 2: instalación manual. Notificar al admin + disparar UserSetup + crear ClientInstallation.
+            // Etapa 2: instalación manual. Notificar al admin + disparar UserSetup (si el candado lo deja) + crear ClientInstallation.
             $client      = $implementation->client ?? Client::find($implementation->client_id);
             $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
+            // 🔴 El candado, ANTES de avisar y de llamar: el user setup hace `migrate:fresh` en el sistema del cliente. Acá no hay
+            // nadie mirando, así que rige el criterio más conservador (los nueve chequeos de `claude/*`). Ver
+            // evaluar_el_user_setup_automatico().
+            $decision = $this->evaluar_el_user_setup_automatico($implementation, $client);
+
             $admin_message = "🛠️ {$client_name} lista para instalar. Etapa 2: instalación del sistema.";
+
+            // Un solo mensaje al admin: si la configuración NO se aplica sola, lo dice en una línea más (y por qué).
+            if (! $decision['aplicar']) {
+                $admin_message .= "\n\n⚠️ La configuración del sistema (user setup) NO se aplicó sola ({$decision['frase']}). "
+                    . 'Se aplica desde el panel, en «Configuración del sistema», una vez que se revisó el motivo.';
+            }
+
             $this->notify_assigned_admin($implementation, $admin_message);
 
-            // Disparar el UserSetup remoto en empresa-api con los datos del formulario de la Etapa 1.
-            // No bloquea el flujo si falla (el servicio captura y loguea cualquier error).
-            // Importante: solo se dispara en modo automático (ver ensure_client_installation() para
-            // el comportamiento manual, que no lo llama porque la client_api todavía no existe).
-            (new ImplementationUserSetupService())->trigger_user_setup($implementation);
+            if ($decision['aplicar']) {
+                // Disparar el UserSetup remoto en empresa-api con los datos del formulario de la Etapa 1.
+                // No bloquea el flujo si falla (el servicio captura y loguea cualquier error).
+                // Importante: solo se dispara en modo automático (ver ensure_client_installation() para
+                // el comportamiento manual, que no lo llama porque la client_api todavía no existe).
+                $this->aplicar_el_user_setup_automatico($implementation);
+            } else {
+                $this->dejar_el_rastro_del_user_setup_automatico($implementation, 'no_aplicado', ['motivos' => $decision['motivos']]);
+            }
 
             // Crear automáticamente la ClientInstallation para que aparezca en el módulo de Instalaciones.
             $this->ensure_client_installation($implementation);
@@ -804,6 +821,116 @@ class ImplementationConversationService
             $this->send_stage_opening_message($implementation, 8);
             return;
         }
+    }
+
+    /**
+     * ¿Puede el modo automático aplicar el user setup ahora? Evalúa el candado con el plan estricto (los nueve chequeos de
+     * `claude/implementations/{id}/user-setup`) y NO llama a nadie: lee y decide.
+     *
+     * 🔴 POR QUÉ ESTRICTO (misión `puertas-del-user-setup`, 6/10/2026). Antes esta puerta le pegaba al endpoint `admin-sync/user-setup`
+     * sin mirar nada —ni siquiera si el sistema existía—, y el user setup hace `migrate:fresh` del otro lado: un test que avanzó una
+     * implementación `auto` a la etapa 2 con la URL de un cliente real le vació la base (5/10/2026). En el modo automático no hay
+     * nadie mirando, así que vale el criterio más conservador: lo que el job de `claude/*` exige.
+     *
+     * Consecuencia que se declara y no es un descuido: en un cliente NUEVO la instalación todavía no existe al entrar a la etapa 2
+     * (la crea `ensure_client_installation()` justo después), así que acá el user setup no se aplica solo —antes tampoco podía
+     * hacerlo bien: le pegaba a una API sin instalar—. Se aplica desde el panel o por `claude/*`, cuando el sistema está instalado.
+     *
+     * @param Implementation $implementation La implementación que acaba de entrar a la etapa 2.
+     * @param Client|null    $client         Su cliente (null si no existe).
+     *
+     * @return array{aplicar: bool, frase: string, motivos: array<int, array<string, string>>} `aplicar` (true = el candado lo
+     *         deja), `frase` (los chequeos que fallaron, en castellano corrido) y `motivos` (cada uno con `chequeo` y `detalle`).
+     */
+    private function evaluar_el_user_setup_automatico(Implementation $implementation, ?Client $client): array
+    {
+        // El servicio que define "este sistema ya opera o todavía no está listo".
+        $candado = new UserSetupCandadoService();
+
+        // Sin cliente no hay a quién configurarle nada.
+        if ($client === null) {
+            $bloqueos = [$candado->chequeo('cliente_de_la_implementacion', false, 'No se encontró el cliente de la implementación.')];
+        } else {
+            $bloqueos = $candado->bloqueos($candado->plan_estricto($implementation, $client)['chequeos']);
+        }
+
+        if (count($bloqueos) === 0) {
+            return ['aplicar' => true, 'frase' => '', 'motivos' => []];
+        }
+
+        $frase = $candado->frase_de_bloqueos($bloqueos);
+
+        // Lo que se guarda como rastro: cada chequeo que falló con su detalle.
+        $motivos = [];
+        foreach ($bloqueos as $bloqueo) {
+            $motivos[] = ['chequeo' => (string) $bloqueo['chequeo'], 'detalle' => (string) $bloqueo['detalle']];
+        }
+
+        Log::channel('daily')->warning('ImplementationConversationService: modo automático — el user setup NO se aplica solo (el candado lo frenó).', [
+            'implementation_id' => $implementation->id,
+            'client_id'         => $implementation->client_id,
+            'chequeos'          => $frase,
+        ]);
+
+        return ['aplicar' => false, 'frase' => $frase, 'motivos' => $motivos];
+    }
+
+    /**
+     * Aplica el user setup en el modo automático (el candado ya dio el visto bueno) y deja dicho cómo salió.
+     *
+     * Si salió bien llena el candado de la implementación (`user_setup_executed_at`) y registra la acción `user_setup` con el canal
+     * `automatico`: 🔴 hasta esta misión esta puerta ignoraba el resultado y no lo escribía, así que el botón del panel y `claude/*`
+     * podían volver a aplicarlo encima (otro `migrate:fresh`). Si no salió bien no toca el candado y deja el motivo en el rastro.
+     *
+     * No bloquea el flujo si falla: el servicio captura y loguea cualquier error. Y es el propio servicio el que vuelve a evaluar el
+     * candado al llamar (defensa en profundidad): este llamador pasa `false` en la confirmación, o sea que queda protegido.
+     *
+     * @param Implementation $implementation La implementación en la etapa 2.
+     *
+     * @return void
+     */
+    private function aplicar_el_user_setup_automatico(Implementation $implementation): void
+    {
+        // Cómo salió el pedido al sistema del cliente.
+        $resultado = (new ImplementationUserSetupService())->trigger_user_setup($implementation);
+
+        if ($resultado['ok']) {
+            (new UserSetupCandadoService())->marcar_aplicado($implementation, 'automatico');
+            $this->dejar_el_rastro_del_user_setup_automatico($implementation, 'aplicado');
+
+            return;
+        }
+
+        $this->dejar_el_rastro_del_user_setup_automatico($implementation, 'error', ['error' => (string) $resultado['message']]);
+    }
+
+    /**
+     * Deja en la etapa 2 el rastro de lo que hizo el modo automático con el user setup: `data.user_setup_automatico`.
+     *
+     * 🔴 La clave es A PROPÓSITO distinta de `data.user_setup`, que es el registro del job de `claude/*` (con su token y su
+     * `en_curso`): este rastro lo escribe otra puerta y no tiene que confundirse con aquél ni pisarlo.
+     *
+     * @param Implementation       $implementation La implementación.
+     * @param string               $estado         `no_aplicado` (el candado lo frenó), `aplicado` o `error` (se llamó y no salió bien).
+     * @param array<string, mixed> $extra          Lo que se suma al rastro (los `motivos` o el `error`).
+     *
+     * @return void
+     */
+    private function dejar_el_rastro_del_user_setup_automatico(Implementation $implementation, string $estado, array $extra = []): void
+    {
+        // La etapa 2: donde se asientan las cosas del user setup.
+        $etapa = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 2)->first();
+
+        if ($etapa === null) {
+            return;
+        }
+
+        $datos = is_array($etapa->data) ? $etapa->data : [];
+
+        $datos['user_setup_automatico'] = array_merge(['estado' => $estado, 'at' => now()->toISOString()], $extra);
+
+        $etapa->data = $datos;
+        $etapa->save();
     }
 
     /**

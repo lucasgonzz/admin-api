@@ -344,6 +344,48 @@ class UserSetupCandadoService
     }
 
     /**
+     * Marca el user setup como APLICADO: llena el candado de la implementación y registra la acción `user_setup`.
+     *
+     * 🔴 Es lo que cierra la puerta DESPUÉS de una corrida buena, y la tienen que llamar todas las puertas que aplican el setup por su
+     * cuenta. Hasta esta misión el modo automático ignoraba el resultado de `trigger_user_setup()` y no escribía el candado: el
+     * botón del panel y `claude/*` podían volver a aplicarlo encima (otro `migrate:fresh`). El job de `claude/*` escribe lo suyo
+     * dentro de su propia transacción con lock y no pasa por acá.
+     *
+     * La acción queda en `data.actions[]` de la etapa ACTUAL de la implementación (la huella que lee el checklist del panel), con el
+     * `canal` por donde se aplicó (`panel` o `automatico`).
+     *
+     * @param Implementation $implementation La implementación a la que se le aplicó el user setup.
+     * @param string         $canal          Por dónde se aplicó: `panel` o `automatico`.
+     *
+     * @return void
+     */
+    public function marcar_aplicado(Implementation $implementation, string $canal): void
+    {
+        // El momento de aplicación: es el candado y es el de la acción registrada.
+        $ahora = now();
+
+        $implementation->user_setup_executed_at = $ahora;
+        $implementation->save();
+
+        // La etapa activa: ahí se asienta la acción, como las demás acciones del panel.
+        $etapa = ImplementationStage::where('implementation_id', $implementation->id)
+            ->where('stage_number', $implementation->current_stage)
+            ->first();
+
+        if ($etapa === null) {
+            return;
+        }
+
+        $datos            = is_array($etapa->data) ? $etapa->data : [];
+        $acciones         = isset($datos['actions']) && is_array($datos['actions']) ? $datos['actions'] : [];
+        $acciones[]       = ['action' => 'user_setup', 'stage' => (int) $implementation->current_stage, 'at' => $ahora->toISOString(), 'canal' => $canal];
+        $datos['actions'] = $acciones;
+
+        $etapa->data = $datos;
+        $etapa->save();
+    }
+
+    /**
      * Los chequeos que fallaron (los que tienen `ok === false`), en el mismo orden.
      *
      * @param array<int, array<string, mixed>> $chequeos Una lista de chequeos (`chequeo`, `ok`, `detalle`).

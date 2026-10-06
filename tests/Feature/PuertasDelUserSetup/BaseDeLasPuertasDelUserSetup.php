@@ -41,7 +41,8 @@ abstract class BaseDeLasPuertasDelUserSetup extends BaseDeImplementaciones
      * @param array<string, mixed> $opciones `etapa` (default 2), `automation_mode` (manual|auto, default manual), `hosting`
      *                                       (shared_hosting|vps, default shared_hosting), `formulario` (bool, default true: llena
      *                                       `form_submitted_at`), `instalacion` (bool, default true: la instalación completada),
-     *                                       `setup_data` (se suma al del formulario) y `cliente` (atributos del cliente a pisar).
+     *                                       `setup_data` (se suma al del formulario), `sin_datos_del_formulario` (bool: el cliente no cargó nada,
+     *                                       `setup_data` vacío) y `cliente` (atributos del cliente a pisar).
      *
      * @return array{cliente: Client, implementacion: Implementation}
      */
@@ -53,7 +54,8 @@ abstract class BaseDeLasPuertasDelUserSetup extends BaseDeImplementaciones
             isset($opciones['cliente']) ? $opciones['cliente'] : []
         ));
 
-        $cliente->setup_data = array_merge([
+        // Con `sin_datos_del_formulario` el cliente NO cargó nada: el `setup_data` queda vacío (la etapa 1 pudo completarse con "Avanzar etapa").
+        $cliente->setup_data = ! empty($opciones['sin_datos_del_formulario']) ? [] : array_merge([
             'company_name'    => self::NEGOCIO,
             'email'           => 'panchito@ejemplo.test',
             'doc_number'      => '20304050607',
