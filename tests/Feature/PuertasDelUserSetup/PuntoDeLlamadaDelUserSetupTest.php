@@ -201,7 +201,10 @@ class PuntoDeLlamadaDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
         $sistema = $this->falsear_el_sistema_del_cliente();
         $e       = $this->escenario();
 
-        ClientApi::where('id', $e['cliente']->active_client_api_id)->update(['url' => 'https://api-panchito.comerciocity.com']);
+        // 🔴 Un host que NO es de pruebas, pero tampoco de un cliente real: `example.com` es de documentación (IANA). El freno del entorno solo
+        // mira que el host no sea `.test`/`.localhost`/loopback, así que prueba lo mismo que la URL real del incidente sin ponerla en juego: si
+        // alguien debilitara esta barrera y la fábrica HTTP que frena, un test con el dominio de Panchito le vaciaría la base de producción.
+        ClientApi::where('id', $e['cliente']->active_client_api_id)->update(['url' => 'https://api-panchito.example.com']);
         $this->agregar_un_sistema_vivo($e['cliente']);
 
         $resultado = (new ImplementationUserSetupService())->trigger_user_setup($e['implementacion'], null, true);
