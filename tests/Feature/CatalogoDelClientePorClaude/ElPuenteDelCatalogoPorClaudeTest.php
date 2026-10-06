@@ -618,6 +618,98 @@ class ElPuenteDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /* ------------------------------------------------------------------------------------------
+     | 4 bis. `_method`: el método simulado de Laravel no se cuela por la query ni por el cuerpo
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Pedidos que traen `_method` por la query de la `ruta` o por el primer nivel del `cuerpo`, escrito
+     * de todas las formas en las que PHP o Laravel lo van a reconocer del lado del cliente.
+     *
+     * El `empresa-api` del cliente es una app Laravel con el "method override" prendido: en un POST,
+     * `_method` pasa a ser el método REAL con el que se resuelve la ruta. Un `POST .../listo?_method=DELETE`
+     * esquivaría la lista blanca de métodos. Cada fila: método, ruta, cuerpo y el campo del 422.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function pedidos_con_method_override(): array
+    {
+        $propuesta = '/categorias/propuestas/7/listo';
+
+        return [
+            'query _method'                              => ['POST', $propuesta . '?_method=DELETE', null, 'ruta'],
+            'query _METHOD en mayúsculas'                => ['POST', $propuesta . '?_METHOD=delete', null, 'ruta'],
+            'query _MeThOd mezclado'                     => ['POST', $propuesta . '?_MeThOd=PUT', null, 'ruta'],
+            'query con otros parámetros antes'           => ['POST', $propuesta . '?forzar=0&_method=PUT', null, 'ruta'],
+            'query en un GET (igual se rechaza)'         => ['GET', '/articulos?desde_id=1&_method=PUT', null, 'ruta'],
+            'query con la barra baja codificada'         => ['POST', $propuesta . '?%5Fmethod=DELETE', null, 'ruta'],
+            'query con la barra baja codificada y mayús' => ['POST', $propuesta . '?%5fMeThOd=DELETE', null, 'ruta'],
+            'query con una letra codificada'             => ['POST', $propuesta . '?_met%68od=DELETE', null, 'ruta'],
+            'query con punto: PHP lo convierte en _'     => ['POST', $propuesta . '?.method=PATCH', null, 'ruta'],
+            'query con un espacio adelante'              => ['POST', $propuesta . '?%20_method=PUT', null, 'ruta'],
+            'query con corchetes'                        => ['POST', $propuesta . '?_method[]=PUT', null, 'ruta'],
+            'query con el nombre cortado por un nulo'    => ['POST', $propuesta . '?_method%00x=DELETE', null, 'ruta'],
+            'cuerpo con _method'                         => ['POST', '/categorias/propuestas', ['_method' => 'DELETE'], 'cuerpo'],
+            'cuerpo con _METHOD en mayúsculas'           => ['POST', '/categorias/propuestas', ['_METHOD' => 'PUT'], 'cuerpo'],
+            'cuerpo con _Method y otras claves'          => ['POST', '/categorias/propuestas/7/asignaciones', ['asignaciones' => [], '_Method' => 'PATCH'], 'cuerpo'],
+        ];
+    }
+
+    /**
+     * 🔴 `_method` en la query de la `ruta` o en el primer nivel del `cuerpo` es 422 `validacion` (sin
+     * importar mayúsculas ni cómo venga escrito) y NO se le pega al cliente.
+     *
+     * @dataProvider pedidos_con_method_override
+     *
+     * @param string                    $metodo Método del pedido.
+     * @param string                    $ruta   Ruta del pedido.
+     * @param array<string, mixed>|null $cuerpo Cuerpo del pedido.
+     * @param string                    $campo  Campo del 422 donde se espera el motivo.
+     *
+     * @return void
+     */
+    public function test_method_en_la_query_o_en_el_cuerpo_es_422_y_no_llama_al_cliente(string $metodo, string $ruta, $cuerpo, string $campo): void
+    {
+        Http::fake();
+
+        $pedido = ['metodo' => $metodo, 'ruta' => $ruta];
+
+        if ($cuerpo !== null) {
+            $pedido['cuerpo'] = $cuerpo;
+        }
+
+        $respuesta = $this->puente($pedido);
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertSame([$campo], array_keys($respuesta->json('detalle')));
+        $this->assertStringContainsString('_method', (string) $respuesta->json('detalle.' . $campo));
+
+        Http::assertNothingSent();
+        $this->assertSinLaClave($respuesta, $this->clave);
+    }
+
+    /**
+     * Lo que se parece a `_method` pero no lo es, y el `_method` que está más adentro del cuerpo (donde
+     * Laravel no lo lee), NO se rechazan: el 422 es solo para el que de verdad cambiaría el método.
+     *
+     * @return void
+     */
+    public function test_lo_que_no_es_method_o_esta_mas_adentro_del_cuerpo_pasa(): void
+    {
+        $this->el_cliente_contesta(['ok' => true]);
+
+        $this->puente(['metodo' => 'GET', 'ruta' => '/articulos?x_method=1&metodo=GET&method=PUT'])->assertStatus(200);
+
+        $this->puente([
+            'metodo' => 'POST',
+            'ruta'   => '/categorias/propuestas/7/asignaciones',
+            'cuerpo' => ['asignaciones' => [['articulo_id' => 1, '_method' => 'no-es-del-primer-nivel']], 'metodo' => 'DELETE'],
+        ])->assertStatus(200);
+
+        Http::assertSentCount(2);
+    }
+
+    /* ------------------------------------------------------------------------------------------
      | 5. Lo que contesta el cliente viaja adentro
      |----------------------------------------------------------------------------------------- */
 

@@ -172,6 +172,74 @@ class ClientCatalogoPuenteService
     }
 
     /**
+     * ¿La query trae el parámetro de método simulado de Laravel (`_method`), escrito como se escriba?
+     *
+     * 🔴 POR QUÉ. El `empresa-api` del cliente es una app Laravel que tiene prendido el "method override":
+     * en un POST, el valor de `_method` (de la query o del cuerpo) pasa a ser el método REAL con el que se
+     * resuelve la ruta. Con `POST /categorias/propuestas/7/listo?_method=DELETE` el puente creería estar
+     * reenviando un POST de la lista blanca y el cliente lo trataría como un DELETE: se esquiva la lista
+     * de MÉTODOS, que es la mitad de la defensa.
+     *
+     * Se parsea con `parse_str()` y no a mano porque PHP le cambia los nombres a lo que llega por la
+     * query ANTES de que Laravel lo vea (es lo que termina en `$_GET`): `.method` pasa a `_method`,
+     * `%5Fmethod` y `%20_method` también, `_method[]` es el mismo nombre y un `%00` corta el nombre. Con
+     * un `strpos` sobre el texto crudo, todo eso pasaría. Y se compara sin importar mayúsculas: no
+     * cuesta nada y no deja una variante para probar.
+     *
+     * @param string $query La query de la ruta, sin el `?` (`desde_id=100&_method=PUT`).
+     *
+     * @return bool
+     */
+    public static function query_trae_method_override($query)
+    {
+        $query = (string) $query;
+
+        if ($query === '') {
+            return false;
+        }
+
+        parse_str($query, $parseada);
+
+        foreach (array_keys($parseada) as $nombre) {
+            if (strtolower((string) $nombre) === '_method') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * ¿El PRIMER NIVEL del cuerpo trae `_method`, sin importar mayúsculas?
+     *
+     * Es el mismo método simulado de `query_trae_method_override()`, pero por el cuerpo: Laravel lo lee
+     * de las claves de arriba del JSON de un POST. Más adentro (`{"asignaciones": [{"_method": ...}]}`)
+     * no tiene ningún efecto y no se mira.
+     *
+     * @param array|\stdClass|null $cuerpo El cuerpo del pedido (objeto o lista).
+     *
+     * @return bool
+     */
+    public static function cuerpo_trae_method_override($cuerpo)
+    {
+        if (is_object($cuerpo)) {
+            $claves = array_keys(get_object_vars($cuerpo));
+        } elseif (is_array($cuerpo)) {
+            $claves = array_keys($cuerpo);
+        } else {
+            return false;
+        }
+
+        foreach ($claves as $clave) {
+            if (strtolower((string) $clave) === '_method') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * La lista blanca en forma legible (`GET /resumen`, `POST /categorias/propuestas/{n}/listo`...),
      * para los mensajes de error y el catálogo.
      *

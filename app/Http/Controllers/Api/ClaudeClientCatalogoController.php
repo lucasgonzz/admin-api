@@ -280,13 +280,18 @@ class ClaudeClientCatalogoController extends Controller
         } elseif (substr($ruta_raw, 0, 1) !== '/') {
             $errores['ruta'] = 'Tiene que empezar con `/` (es relativa a /api/admin-sync/catalogo, por ejemplo /resumen).';
         } elseif ($metodo !== null) {
-            list($path) = ClientCatalogoPuenteService::separar_la_ruta($ruta_raw);
+            list($path, $query) = ClientCatalogoPuenteService::separar_la_ruta($ruta_raw);
 
-            if (ClientCatalogoPuenteService::ruta_permitida($metodo, $path)) {
-                $ruta = $ruta_raw;
-            } else {
+            if (! ClientCatalogoPuenteService::ruta_permitida($metodo, $path)) {
                 $errores['ruta'] = $metodo . ' ' . mb_substr($path, 0, 120) . ' no está en la lista blanca del puente: solo reenvía las rutas del catálogo.';
                 $extra['rutas_permitidas'] = ClientCatalogoPuenteService::rutas_permitidas();
+            } elseif (ClientCatalogoPuenteService::query_trae_method_override($query)) {
+                /* 🔴 `_method` en la query: el cliente (Laravel) lo toma como el método REAL de un POST y
+                   esquivaría la lista blanca de métodos. */
+                $errores['ruta'] = 'La query lleva `_method`: Laravel lo toma como el método real de un POST, y el puente '
+                    . 'solo reenvía GET y POST tal cual. Sacalo de la query.';
+            } else {
+                $ruta = $ruta_raw;
             }
         }
 
@@ -299,6 +304,10 @@ class ClaudeClientCatalogoController extends Controller
                 $errores['cuerpo'] = 'Tiene que ser un objeto o una lista JSON.';
             } elseif ($metodo === 'GET' && count($cuerpo_raw) > 0) {
                 $errores['cuerpo'] = 'Un GET no lleva cuerpo: los filtros van en la query de la ruta (/articulos?desde_id=100).';
+            } elseif (ClientCatalogoPuenteService::cuerpo_trae_method_override($cuerpo_raw)) {
+                /* 🔴 Lo mismo por el cuerpo: Laravel lee `_method` de las claves de arriba del JSON. */
+                $errores['cuerpo'] = 'El primer nivel del cuerpo lleva `_method`: Laravel lo toma como el método real de un POST, '
+                    . 'y el puente solo reenvía GET y POST tal cual. Sacalo del cuerpo.';
             } elseif ($metodo === 'POST') {
                 $cuerpo = $this->cuerpo_original($request);
             }
