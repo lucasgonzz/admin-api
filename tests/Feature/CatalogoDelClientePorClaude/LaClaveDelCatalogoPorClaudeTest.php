@@ -23,6 +23,8 @@ use Tests\Fakes\EnvSshServiceFake;
  *     obligatorio al aplicar sin revelar el nombre correcto, y `dry_run` estricto (un valor que no
  *     se entiende NO es "aplicar").
  *  3. **Se escribe en TODOS los frentes, con respaldo**, y un frente que falla no frena al otro.
+ *     `listo` es true con al menos un frente `igual` o `escrita` y ninguno en `falta`, `distinta` o
+ *     `error`; un `sin_env` no cuenta ni a favor ni en contra.
  *  4. **La forma del contrato con el motor** (`client_id`, `dry_run`, `api_key_en_el_admin`,
  *     `frentes[]`, `listo`) y sus códigos de error (`cliente_inexistente`, `sin_frentes`,
  *     `validacion`).
@@ -87,6 +89,57 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->ssh->envs[$dos->id] = isset($envs[1]) ? $envs[1] : "APP_ENV=production\nDB_DATABASE=doblep\n";
 
         return [$cliente, $uno, $dos];
+    }
+
+    /**
+     * Un cliente con un frente por cada estado pedido, con su `.env` en memoria dispuesto para que el
+     * frente se ENCUENTRE en ese estado: `igual` (ya tiene la clave), `falta` (no tiene la variable),
+     * `distinta` (tiene otro valor), `sin_env` (el servidor no tiene `.env`) y `error` (el SSH se cae al
+     * leerlo). El primer frente queda como el activo.
+     *
+     * @param array<int, string> $estados Un estado por frente.
+     *
+     * @return array{0: Client, 1: array<int, ClientApi>, 2: string} El cliente, sus frentes y la clave.
+     */
+    private function cliente_con_frentes_en_estado(array $estados): array
+    {
+        $clave   = Str::random(40);
+        $cliente = $this->crear_cliente('Doblep Distribuciones', $clave);
+        $frentes = [];
+
+        foreach (array_values($estados) as $indice => $estado) {
+            $frente = $this->crear_frente($cliente, 'doblep' . ($indice + 1), 'shared_hosting', null, $indice === 0);
+
+            switch ($estado) {
+                case 'igual':
+                    $this->ssh->envs[$frente->id] = "APP_ENV=production\nADMIN_API_INBOUND_KEY=" . $clave . "\n";
+                    break;
+
+                case 'falta':
+                    $this->ssh->envs[$frente->id] = "APP_ENV=production\n";
+                    break;
+
+                case 'distinta':
+                    $this->ssh->envs[$frente->id] = "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n";
+                    break;
+
+                case 'sin_env':
+                    /* El servidor no tiene .env en esa carpeta: no se carga nada. */
+                    break;
+
+                case 'error':
+                    $this->ssh->envs[$frente->id]           = "APP_ENV=production\n";
+                    $this->ssh->fallan_al_leer[$frente->id] = 'SSH caído en la prueba';
+                    break;
+
+                default:
+                    $this->fail('Estado de frente desconocido en el test: ' . $estado);
+            }
+
+            $frentes[] = $frente;
+        }
+
+        return [$cliente, $frentes, $clave];
     }
 
     /**
@@ -644,11 +697,11 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * Un frente sin `.env` NO se crea (escribir ahí dejaría un archivo en el servidor equivocado) y no
-     * cuenta como listo, aunque el otro sí se escriba.
+     * cuenta ni a favor ni en contra de `listo`: con el otro frente escrito, el cliente queda listo.
      *
      * @return void
      */
-    public function test_un_frente_sin_env_no_se_crea_y_no_cuenta_como_listo(): void
+    public function test_un_frente_sin_env_no_se_crea_y_no_cuenta_ni_a_favor_ni_en_contra(): void
     {
         [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes();
 
@@ -661,7 +714,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $respuesta->assertStatus(200);
-        $this->assertFalse($respuesta->json('listo'));
+        $this->assertTrue($respuesta->json('listo'), 'El frente escrito alcanza: el que nunca se instaló no cuenta en contra.');
 
         $sin_env = $this->fila($respuesta, $dos);
         $this->assertSame('sin_env', $sin_env['estado']);
@@ -671,6 +724,142 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertArrayNotHasKey($dos->id, $this->ssh->envs, 'No se crea ningún .env.');
         $this->assertArrayNotHasKey($dos->id, $this->ssh->escrituras);
         $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion']);
+    }
+
+    /**
+     * 🔴 Un frente `igual` y otro `sin_env` dan `listo: true`: la segunda carpeta de un cliente de shared
+     * que nunca se instaló no puede dejarlo sin `listo` para siempre cuando el frente que sirve tráfico
+     * ya tiene la clave (el motor quedaría en el ciclo "corré clave --aplicar"). Ni en dry_run ni
+     * aplicando se escribe nada: el `igual` ya está y el `sin_env` no se crea.
+     *
+     * @return void
+     */
+    public function test_un_frente_igual_y_otro_sin_env_dan_listo(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave, [
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=" . $clave . "\n",
+        ]);
+
+        unset($this->ssh->envs[$dos->id]);
+
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertTrue($dry->json('listo'));
+        $this->assertSame('igual', $this->fila($dry, $uno)['estado']);
+        $this->assertSame('sin_env', $this->fila($dry, $dos)['estado']);
+
+        $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $aplicado->assertStatus(200);
+        $this->assertTrue($aplicado->json('listo'));
+        $this->assertSame('ninguna', $this->fila($aplicado, $uno)['accion']);
+        $this->assertSame('ninguna', $this->fila($aplicado, $dos)['accion']);
+
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->envs, 'No se crea ningún .env.');
+
+        $this->assertSinLaClave($dry, $clave);
+        $this->assertSinLaClave($aplicado, $clave);
+    }
+
+    /**
+     * 🔴 Con TODOS los frentes `sin_env` no hay nada que esté listo: `listo: false`, en dry_run y
+     * aplicando, y no se escribe ni se crea nada. Un `sin_env` no cuenta en contra, pero tampoco a
+     * favor: sin ningún frente con la clave no hay con qué hablarle al cliente.
+     *
+     * @return void
+     */
+    public function test_con_todos_los_frentes_sin_env_no_hay_nada_listo(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes();
+
+        unset($this->ssh->envs[$uno->id], $this->ssh->envs[$dos->id]);
+
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertFalse($dry->json('listo'));
+        $this->assertSame('sin_env', $this->fila($dry, $uno)['estado']);
+        $this->assertSame('sin_env', $this->fila($dry, $dos)['estado']);
+
+        $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $aplicado->assertStatus(200);
+        $this->assertFalse($aplicado->json('listo'));
+
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+        $this->assertSame([], $this->ssh->envs, 'No se crea ningún .env.');
+    }
+
+    /**
+     * La regla de `listo` en todas las combinaciones que importan. Cada fila: los estados de los frentes
+     * (cómo se los ENCUENTRA), `listo` en dry_run y `listo` aplicando.
+     *
+     * La regla: al menos un frente `igual` o `escrita`, ninguno en `falta`, `distinta` o `error`; el
+     * `sin_env` no cuenta ni a favor ni en contra. En dry_run no se escribió nada, así que un `falta` o
+     * `distinta` deja `listo` en false; aplicando, esos mismos quedan `escrita` y cuentan a favor. Un
+     * `error` cuenta en contra en los dos casos.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function escenarios_de_listo(): array
+    {
+        return [
+            'igual y sin_env'                       => [['igual', 'sin_env'], true, true],
+            'sin_env e igual (el orden no importa)' => [['sin_env', 'igual'], true, true],
+            'dos igual'                             => [['igual', 'igual'], true, true],
+            'todos sin_env'                         => [['sin_env', 'sin_env'], false, false],
+            'falta y sin_env'                       => [['falta', 'sin_env'], false, true],
+            'distinta y sin_env'                    => [['distinta', 'sin_env'], false, true],
+            'igual y falta'                         => [['igual', 'falta'], false, true],
+            'igual y distinta'                      => [['igual', 'distinta'], false, true],
+            'falta y distinta'                      => [['falta', 'distinta'], false, true],
+            'igual y error'                         => [['igual', 'error'], false, false],
+            'falta y error'                         => [['falta', 'error'], false, false],
+            'sin_env y error'                       => [['sin_env', 'error'], false, false],
+            'tres: igual, sin_env y falta'          => [['igual', 'sin_env', 'falta'], false, true],
+            'tres: igual, sin_env y error'          => [['igual', 'sin_env', 'error'], false, false],
+            'tres: igual, sin_env y sin_env'        => [['igual', 'sin_env', 'sin_env'], true, true],
+            'tres: todos sin_env'                   => [['sin_env', 'sin_env', 'sin_env'], false, false],
+        ];
+    }
+
+    /**
+     * @dataProvider escenarios_de_listo
+     *
+     * @param array<int, string> $estados          Estado en el que se encuentra cada frente.
+     * @param bool               $listo_en_dry_run `listo` esperado sin escribir.
+     * @param bool               $listo_aplicando  `listo` esperado después de aplicar.
+     *
+     * @return void
+     */
+    public function test_la_regla_de_listo(array $estados, bool $listo_en_dry_run, bool $listo_aplicando): void
+    {
+        [$cliente, $frentes, $clave] = $this->cliente_con_frentes_en_estado($estados);
+
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertSame($listo_en_dry_run, $dry->json('listo'), 'dry_run con ' . implode(', ', $estados));
+
+        foreach ($frentes as $indice => $frente) {
+            $this->assertSame($estados[$indice], $this->fila($dry, $frente)['estado'], 'El estado del frente ' . ($indice + 1) . ' en el dry_run.');
+        }
+
+        $this->assertSame([], $this->ssh->escrituras, 'El dry_run no escribe.');
+
+        $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $aplicado->assertStatus(200);
+        $this->assertSame($listo_aplicando, $aplicado->json('listo'), 'aplicando con ' . implode(', ', $estados));
+
+        $this->assertSinLaClave($dry, $clave);
+        $this->assertSinLaClave($aplicado, $clave);
     }
 
     /**

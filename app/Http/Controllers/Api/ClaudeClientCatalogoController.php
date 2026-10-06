@@ -105,7 +105,10 @@ class ClaudeClientCatalogoController extends Controller
      * frente es `estado: error` y los demás siguen.
      *
      * Respuesta 200: `{client_id, dry_run, api_key_en_el_admin, frentes[], listo}`. NUNCA lleva el
-     * valor de ninguna clave. Errores: 404 `cliente_inexistente`, 409 `sin_frentes`, 422 `validacion`.
+     * valor de ninguna clave. `listo` es true con AL MENOS UN frente `igual` o `escrita` y NINGUNO en
+     * `falta`, `distinta` o `error`; un frente `sin_env` no cuenta (ver
+     * `ClientInboundKeySyncService::calcular_listo()`). Errores: 404 `cliente_inexistente`, 409
+     * `sin_frentes`, 422 `validacion`.
      *
      * @param Request                      $request      Request entrante (`dry_run`, `confirm_client_name`).
      * @param int|string                   $id           Id numérico o uuid del cliente.

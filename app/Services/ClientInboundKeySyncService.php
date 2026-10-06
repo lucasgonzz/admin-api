@@ -30,6 +30,11 @@ use Illuminate\Support\Str;
  *
  * Un frente que falla (SSH caído, sin permisos) queda como `estado: error` y NO frena a los demás.
  *
+ * 🔴 `listo` (ver `calcular_listo()`) es true cuando hay AL MENOS UN frente con la clave igual o recién
+ * escrita y NINGUNO en `falta`, `distinta` o `error`; un frente `sin_env` no cuenta ni a favor ni en
+ * contra. Así una carpeta que nunca se instaló (la segunda de un cliente de shared) no deja al cliente
+ * sin `listo` para siempre cuando el frente que sirve tráfico ya tiene la clave.
+ *
  * 🔴 NUNCA lleva el valor de ninguna clave ni en la respuesta, ni en un mensaje de error, ni en un
  * log. Los textos que salen de excepciones de SSH pasan por `texto_seguro()`; el log lleva ids,
  * estados y acciones, nunca valores.
@@ -151,14 +156,7 @@ class ClientInboundKeySyncService
             $this->env_ssh_service->disconnect();
         }
 
-        $listo = count($resultado_de_frentes) > 0;
-
-        foreach ($resultado_de_frentes as $fila) {
-            /* Listo = quedó (o ya estaba) con la clave igual. Un frente sin .env o con error no cuenta. */
-            if ($fila['estado'] !== self::ESTADO_IGUAL && $fila['accion'] !== self::ACCION_ESCRITA) {
-                $listo = false;
-            }
-        }
+        $listo = $this->calcular_listo($resultado_de_frentes);
 
         if (! $dry_run) {
             $this->registrar_en_el_log($client, $api_key_en_el_admin, $resultado_de_frentes, $listo);
@@ -260,6 +258,50 @@ class ClientInboundKeySyncService
     }
 
     /**
+     * ¿Quedó lista la clave para que el motor use el catálogo del cliente?
+     *
+     * 🔴 La regla es la del contrato con el motor (6/10/2026):
+     *
+     *   - `listo` es true cuando hay AL MENOS UN frente con la clave igual (`estado: igual`) o recién
+     *     escrita (`accion: escrita`), y NINGÚN frente en `falta`, `distinta` o `error`.
+     *   - Un frente `sin_env` no cuenta ni a favor ni en contra: es una carpeta que nunca se instaló
+     *     (la segunda de un cliente de shared), no un fallo. Si contara en contra, el cliente
+     *     quedaría sin `listo` para siempre aunque el frente que sirve tráfico tenga la clave, y el
+     *     motor se quedaría en el ciclo "corré clave --aplicar".
+     *   - Con todos los frentes `sin_env` (o ninguno) no hay nada que esté listo: false.
+     *   - En `dry_run` un frente en `falta` o `distinta` deja `listo` en false: no se escribió nada.
+     *
+     * Ojo con la lectura de `estado`: es lo que se ENCONTRÓ antes de actuar. Un frente que estaba en
+     * `falta` o `distinta` y se escribió bien trae `accion: escrita` y cuenta a favor; uno que quedó
+     * en `error` (no se pudo leer o escribir) cuenta en contra, escriba lo que escriba el resto.
+     *
+     * @param array<int, array<string, mixed>> $frentes Resultado por frente (`estado` y `accion`).
+     *
+     * @return bool
+     */
+    protected function calcular_listo(array $frentes)
+    {
+        $con_la_clave = 0;
+
+        foreach ($frentes as $fila) {
+            if ($fila['estado'] === self::ESTADO_SIN_ENV) {
+                continue;
+            }
+
+            if ($fila['estado'] === self::ESTADO_IGUAL || $fila['accion'] === self::ACCION_ESCRITA) {
+                $con_la_clave++;
+
+                continue;
+            }
+
+            /* falta o distinta sin escribir (dry_run), o error: en contra. */
+            return false;
+        }
+
+        return $con_la_clave > 0;
+    }
+
+    /**
      * ¿Es este directorio la raíz de la cuenta de hosting compartido, y no la carpeta de un cliente?
      *
      * @param string $path Directorio que resolvió `ClientApiPathResolver`.
@@ -335,7 +377,7 @@ class ClientInboundKeySyncService
      * @param Client                           $client               Cliente.
      * @param string                           $api_key_en_el_admin  presente | falta | generada.
      * @param array<int, array<string, mixed>> $frentes              Resultado por frente.
-     * @param bool                             $listo                Si todos quedaron con la clave igual.
+     * @param bool                             $listo                Si la clave quedó lista (ver `calcular_listo()`).
      *
      * @return void
      */
