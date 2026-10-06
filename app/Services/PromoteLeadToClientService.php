@@ -67,10 +67,17 @@ class PromoteLeadToClientService
     {
         // Marcar el lead como cerrado_ganado si aún no lo está (sin tocar api_url del lead).
         if ($lead->status !== 'cerrado_ganado') {
-            $lead->update([
-                'status'            => 'cerrado_ganado',
-                'user_setup_status' => 'pendiente',
-            ]);
+            $cambios = ['status' => 'cerrado_ganado'];
+
+            // 🔴 El estado del user setup solo vuelve a `pendiente` si el setup NUNCA corrió. Un lead que salió de `cerrado_ganado`
+            // (un arrastre equivocado en el pipeline, un cambio de estado) y se vuelve a promover conserva `ejecutandose`, `exitoso` o
+            // `sin_confirmar`: esa columna es la señal que leen los candados del user setup (`lead_sin_user_setup`) para no volver a vaciar
+            // el sistema de un cliente que ya se configuró. Pisarla con `pendiente` le reabría la puerta de leads a un `migrate:fresh`.
+            if (! in_array((string) $lead->user_setup_status, UserSetupCandadoService::ESTADOS_DEL_LEAD_QUE_YA_CONFIGURARON, true)) {
+                $cambios['user_setup_status'] = 'pendiente';
+            }
+
+            $lead->update($cambios);
             $lead->refresh();
         }
 

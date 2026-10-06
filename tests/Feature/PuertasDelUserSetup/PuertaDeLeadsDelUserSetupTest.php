@@ -6,6 +6,7 @@ use App\Exceptions\UserSetupBloqueadoException;
 use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\Lead;
+use App\Services\PromoteLeadToClientService;
 use App\Services\RunUserSetupService;
 
 /**
@@ -416,5 +417,51 @@ class PuertaDeLeadsDelUserSetupTest extends BaseDeLasPuertasDelUserSetup
         $respuesta->assertRedirect(route('leads.show', $e['lead']->id));
         $respuesta->assertSessionHas('success', 'Sistema real creado correctamente.');
         $this->assertSame([self::PEDIDO], $sistema->pedidos);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | La señal no se pisa al volver a promover
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un lead que salió de `cerrado_ganado` (un arrastre equivocado en el pipeline, un cambio de estado) y se vuelve a promover NO pierde
+     * el estado del user setup si ya corrió: esa columna es la señal que leen los candados (`lead_sin_user_setup`), y pisarla con `pendiente`
+     * le reabría la puerta de leads a un `migrate:fresh` sobre un sistema ya configurado. Si el setup nunca corrió (`pendiente`
+     * o `fallido`), vuelve a `pendiente` como siempre. (La columna no admite `null`: un lead sin estado nace en `pendiente`.)
+     *
+     * @dataProvider estados_del_lead_al_volver_a_promover
+     *
+     * @param string $antes   El `user_setup_status` del lead antes de volver a promoverlo.
+     * @param string $despues El que tiene que quedar.
+     *
+     * @return void
+     */
+    public function test_volver_a_promover_un_lead_no_pisa_el_user_setup_que_ya_corrio(string $antes, string $despues): void
+    {
+        $cliente = $this->crear_cliente('Panchito Gómez');
+        $lead    = $this->crear_lead(['status' => 'closer_activo', 'promoted_client_id' => $cliente->id, 'user_setup_status' => $antes]);
+
+        app(PromoteLeadToClientService::class)->run($lead, $this->crear_admin(), 'panchito');
+
+        $lead->refresh();
+
+        $this->assertSame('cerrado_ganado', $lead->status);
+        $this->assertSame($despues, $lead->user_setup_status);
+    }
+
+    /**
+     * Los estados con los que llega el lead a la re-promoción y el que tiene que quedar.
+     *
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public function estados_del_lead_al_volver_a_promover(): array
+    {
+        return [
+            'exitoso se conserva'         => ['exitoso', 'exitoso'],
+            'ejecutandose se conserva'    => ['ejecutandose', 'ejecutandose'],
+            'sin_confirmar se conserva'   => ['sin_confirmar', 'sin_confirmar'],
+            'fallido vuelve a pendiente'  => ['fallido', 'pendiente'],
+            'pendiente sigue pendiente'   => ['pendiente', 'pendiente'],
+        ];
     }
 }
