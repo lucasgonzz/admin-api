@@ -5,6 +5,7 @@ namespace Tests;
 use App\Models\AdminSetting;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\AssertionFailedError;
 use Tests\Fakes\HttpFactorySinSalida;
 
 abstract class TestCase extends BaseTestCase
@@ -38,16 +39,31 @@ abstract class TestCase extends BaseTestCase
     }
 
     /**
-     * Anota los pedidos que el freno de HTTP detuvo durante el test, para que un test que se tragó la
-     * excepción (la aplicación atrapa `\Throwable` casi en todas partes) no pase desapercibido.
+     * Si el freno de HTTP detuvo algún pedido durante el test, el test FALLA.
+     *
+     * 🔴 Lanzar `PedidoHttpRealBloqueado` no alcanza: la aplicación atrapa `\Throwable` casi en todas partes, así que un servicio
+     * que se traga la excepción deja el test en verde (es lo que pasó el 5/10/2026: el test "pasó" y el pedido salió). Por eso
+     * cada pedido frenado se anota (`storage/logs/http-frenado-en-tests.log`) y, además, hace fallar al test que lo intentó.
+     *
+     * `parent::tearDown()` corre SIEMPRE, antes de levantar la falla: ahí se deshace la transacción de la base.
      *
      * @return void
      */
     protected function tearDown(): void
     {
-        $this->anotar_los_pedidos_frenados();
+        $alarma = null;
+
+        try {
+            $this->exigir_que_no_se_haya_frenado_ningun_pedido();
+        } catch (AssertionFailedError $falla) {
+            $alarma = $falla;
+        }
 
         parent::tearDown();
+
+        if ($alarma !== null) {
+            throw $alarma;
+        }
     }
 
     /**
@@ -84,6 +100,37 @@ abstract class TestCase extends BaseTestCase
         Http::swap(new HttpFactorySinSalida());
 
         config(['services.hostinger.api_token' => '']);
+    }
+
+    /**
+     * Lo que corre en `tearDown()`: si `HttpFactorySinSalida` frenó pedidos en este test, los anota, vacía la lista (para que no
+     * se le cuenten al test siguiente) y levanta la falla, con la lista de pedidos y qué hacer.
+     *
+     * Un test que frena pedidos A PROPÓSITO (los de las barreras mismas) vacía la lista él antes de terminar:
+     * `HttpFactorySinSalida::vaciar()`.
+     *
+     * @return void
+     *
+     * @throws AssertionFailedError Si se frenó algún pedido.
+     */
+    protected function exigir_que_no_se_haya_frenado_ningun_pedido(): void
+    {
+        $frenados = HttpFactorySinSalida::frenados();
+
+        if ($frenados === []) {
+            return;
+        }
+
+        $this->anotar_los_pedidos_frenados();
+
+        HttpFactorySinSalida::vaciar();
+
+        throw new AssertionFailedError(
+            'Este test intentó ' . count($frenados) . ' pedido(s) HTTP que ningún Http::fake() atiende, y el freno los detuvo: '
+            . implode('; ', $frenados) . '. No salieron, pero el código bajo prueba se tragó la excepción y el test siguió. '
+            . 'Falseá cada uno con Http::fake([...]) o apuntá la fixture a un host .test. Un test no puede tener a mano un pedido real '
+            . '(el 5/10/2026 uno le vació la base de producción a un cliente).'
+        );
     }
 
     /**

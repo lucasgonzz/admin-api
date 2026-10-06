@@ -6,6 +6,7 @@ use App\Services\ImplementationUserSetupService;
 use GuzzleHttp\Client as GuzzleClient;
 use Illuminate\Http\Client\Factory as FabricaDeLaravel;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\AssertionFailedError;
 use Tests\Fakes\HttpFactorySinSalida;
 use Tests\Fakes\PedidoHttpRealBloqueado;
 use Tests\TestCase;
@@ -236,6 +237,67 @@ class SalidaAInternetDeLosTestsTest extends TestCase
         foreach ($negados as $url) {
             $this->assertFalse(ImplementationUserSetupService::destino_permitido_en_este_entorno($url), 'Tendría que negar «' . $url . '»');
         }
+    }
+
+    /**
+     * 🔴 La alarma: un pedido frenado que el código bajo prueba SE TRAGÓ (como hace el servicio del incidente: atrapa todo y
+     * sigue) hace FALLAR al test, con la lista de pedidos y qué hacer. Es lo que corre en el `tearDown()` del `TestCase`;
+     * acá se llama a mano porque este test vacía la lista en su propio `tearDown()` (frena a propósito).
+     *
+     * @return void
+     */
+    public function test_un_pedido_frenado_que_el_codigo_se_trago_hace_fallar_al_test(): void
+    {
+        try {
+            Http::post('https://api-trago.ejemplo.test/api/admin-sync/user-setup', ['a' => 1]);
+        } catch (\Throwable $excepcion) {
+            // Lo que hace la aplicación casi en todas partes: se lo traga y sigue. El test "pasaría".
+        }
+
+        $salto   = false;
+        $mensaje = '';
+
+        // La alarma también anota el pedido en el registro de auditoría (`http-frenado-en-tests.log`): acá se deja ese archivo
+        // como estaba, porque su sola existencia después de una corrida es la señal de que ALGÚN test intentó salir.
+        $registro = storage_path('logs/http-frenado-en-tests.log');
+        $existia  = file_exists($registro);
+        $tamano   = $existia ? filesize($registro) : 0;
+
+        try {
+            $this->exigir_que_no_se_haya_frenado_ningun_pedido();
+        } catch (AssertionFailedError $falla) {
+            $salto   = true;
+            $mensaje = $falla->getMessage();
+        } finally {
+            if (! $existia) {
+                @unlink($registro);
+            } elseif (file_exists($registro)) {
+                $manejador = fopen($registro, 'r+');
+                ftruncate($manejador, $tamano);
+                fclose($manejador);
+            }
+        }
+
+        $this->assertTrue($salto, 'Un pedido frenado y tragado no hizo fallar al test: el freno es solo un registro.');
+        $this->assertStringContainsString('POST https://api-trago.ejemplo.test/api/admin-sync/user-setup', $mensaje);
+        $this->assertStringContainsString('Http::fake', $mensaje);
+        $this->assertSame([], HttpFactorySinSalida::frenados(), 'La alarma tiene que vaciar la lista: si no, se le cuenta al test siguiente.');
+    }
+
+    /**
+     * Sin pedidos frenados la alarma no salta (el caso de todos los tests de la suite).
+     *
+     * @return void
+     */
+    public function test_sin_pedidos_frenados_la_alarma_no_salta(): void
+    {
+        Http::fake(['https://api-ok.ejemplo.test/*' => Http::response([], 200)]);
+
+        Http::get('https://api-ok.ejemplo.test/x');
+
+        $this->exigir_que_no_se_haya_frenado_ningun_pedido();
+
+        $this->assertSame([], HttpFactorySinSalida::frenados());
     }
 
     /**

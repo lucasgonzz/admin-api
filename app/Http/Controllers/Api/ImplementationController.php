@@ -526,7 +526,11 @@ class ImplementationController extends Controller
             // Los mails de hito de ESTA implementación (misión implementar-cliente): la tabla no tiene foreign key y sus filas
             // quedarían huérfanas, con un único (implementation_id, hito) que una implementación nueva podría heredar si MySQL
             // reutiliza el id (el AUTO_INCREMENT de una versión vieja) y leer como "ya enviado" un mail que nunca salió.
-            \App\Models\ImplementationMail::where('implementation_id', $implementation->id)->delete();
+            // Con la guarda de la tabla: en un entorno donde la migración todavía no corrió (un slot sin migrar) borrar una
+            // implementación del panel no puede dar 500.
+            if (\Illuminate\Support\Facades\Schema::hasTable('implementation_mails')) {
+                \App\Models\ImplementationMail::where('implementation_id', $implementation->id)->delete();
+            }
 
             $implementation->delete();
         });

@@ -821,11 +821,15 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
-     * ¿Hace más de `MINUTOS_PARA_DAR_POR_COLGADO` que arrancó el user setup que dice `en_curso`?
+     * ¿Hace más de `MINUTOS_PARA_DAR_POR_COLGADO` que corre el user setup que dice `en_curso`?
      *
-     * Un `en_curso` sin fecha de arranque (no debería pasar: lo escribe el endpoint junto con ella) se
-     * da por colgado: sin fecha no hay forma de saber desde cuándo corre y dejarlo trabado para
-     * siempre es peor que dejar reintentar.
+     * 🔴 Los minutos se cuentan desde que el job LLAMÓ al cliente (`llamada_iniciada_at`) y no desde que se encoló
+     * (`iniciado_at`): con la cola atrasada el job puede tardar en arrancar, y darlo por colgado con la llamada recién salida
+     * mandaría a reintentar un setup que está corriendo. Sin la marca (el job todavía no llamó, o nunca llamó) se cuenta desde
+     * que se encoló. Una marca ilegible no cuenta: se cae al encolado.
+     *
+     * Un `en_curso` sin ninguna de las dos fechas (no debería pasar: las escribe el endpoint y el job) se da por colgado: sin
+     * fecha no hay forma de saber desde cuándo corre y dejarlo trabado para siempre es peor que dejar reintentar.
      *
      * @param array<string, mixed> $registro El registro de la etapa 2.
      *
@@ -833,12 +837,15 @@ class ClaudeImplementationOpsController extends Controller
      */
     protected function esta_colgado(array $registro)
     {
-        $iniciado = $this->parsear_o_null(isset($registro['iniciado_at']) ? $registro['iniciado_at'] : null);
-        if ($iniciado === null) {
+        $desde = $this->parsear_o_null(isset($registro['llamada_iniciada_at']) ? $registro['llamada_iniciada_at'] : null);
+        if ($desde === null) {
+            $desde = $this->parsear_o_null(isset($registro['iniciado_at']) ? $registro['iniciado_at'] : null);
+        }
+        if ($desde === null) {
             return true;
         }
 
-        return $iniciado->lt(now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADO));
+        return $desde->lt(now()->subMinutes(self::MINUTOS_PARA_DAR_POR_COLGADO));
     }
 
     /**
@@ -1826,7 +1833,8 @@ class ClaudeImplementationOpsController extends Controller
      *   2. `etapa_actual` tiene que ser la real (409 con la verdadera): es lo que impide avanzar dos veces
      *      por un reintento o por dos sesiones que miraron el mismo estado.
      *   3. Una implementación ya `completed` no avanza (409).
-     *   4. `dry_run` por defecto TRUE.
+     *   4. Cerrar la etapa 2 con un user setup EN CURSO (no colgado) es 409: se espera a que termine (ver `conflicto_de_avance`).
+     *   5. `dry_run` por defecto TRUE.
      * Con `dry_run=false` el cierre y la apertura van en una transacción con la fila de la implementación
      * bloqueada, y se vuelve a mirar la etapa adentro: dos POST simultáneos no avanzan dos etapas.
      *

@@ -423,7 +423,7 @@ class ImplementacionMailService
             'implementation_id' => $impl->id,
             'hito'              => $hito,
             'email'             => ImplementacionMailHelper::enmascarar($para),
-            'error'             => $excepcion->getMessage(),
+            'error'             => self::mensaje_sin_valores($excepcion),
         ]);
 
         $enviado_at = now();
@@ -457,11 +457,30 @@ class ImplementacionMailService
         ];
 
         if (! $anotado) {
-            $resultado['aviso'] = 'El mail SALIÓ, pero no se pudo anotar en implementation_mails (' . self::recortar_texto($excepcion->getMessage(), 160)
+            $resultado['aviso'] = 'El mail SALIÓ, pero no se pudo anotar en implementation_mails (' . self::recortar_texto(self::mensaje_sin_valores($excepcion), 160)
                 . '). NO lo reenvíes: el dueño ya lo tiene. Mirá el log de la aplicación (crítico) y, si hace falta, dejalo registrado a mano.';
         }
 
         return $resultado;
+    }
+
+    /**
+     * El mensaje de una excepción SIN el SQL ni sus valores.
+     *
+     * Un `QueryException` trae la consulta con sus bindings (`... (SQL: insert into implementation_mails (...) values (..., la
+     * casilla entera, ...))`): ni el log ni la respuesta tienen por qué repetir la dirección entera, que ya está en la columna
+     * `email` de la fila.
+     *
+     * @param \Throwable $excepcion Lo que falló.
+     *
+     * @return string
+     */
+    private static function mensaje_sin_valores(\Throwable $excepcion): string
+    {
+        $mensaje = (string) $excepcion->getMessage();
+        $corte   = strpos($mensaje, ' (SQL:');
+
+        return $corte === false ? $mensaje : substr($mensaje, 0, $corte);
     }
 
     /**

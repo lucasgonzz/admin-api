@@ -95,9 +95,22 @@ class EjecutarInstalacionDeImplementacionJob implements ShouldQueue
      */
     public function handle()
     {
-        (new RunClientInstallationGroupJob($this->installation_uuids))->handle();
+        $this->correr_el_grupo_de_instalaciones();
 
         $this->alinear_la_version_del_cliente();
+    }
+
+    /**
+     * Corre el pipeline de las instalaciones del grupo (el mismo job de grupo del panel).
+     *
+     * Está aparte para que un test lo reemplace y mire lo que `handle()` hace DESPUÉS: el pipeline real (SSH, Hostinger) no se
+     * puede correr en un test, y sin esto nada probaba que `handle()` alinea la versión del cliente.
+     *
+     * @return void
+     */
+    protected function correr_el_grupo_de_instalaciones()
+    {
+        (new RunClientInstallationGroupJob($this->installation_uuids))->handle();
     }
 
     /**
@@ -110,6 +123,12 @@ class EjecutarInstalacionDeImplementacionJob implements ShouldQueue
      *
      * Solo si la fila `completa` terminó `completada` y trae versión; si no, no toca nada. Por query builder (sin eventos del
      * modelo) y sin dejar escapar ninguna excepción: un fallo acá no puede ensuciar el resultado de una instalación que anduvo.
+     *
+     * A diferencia de `ClientVersionUpgrade::alinear_version_del_cliente()`, que NUNCA baja la versión (marcar terminada una
+     * actualización vieja no puede retroceder a un cliente que ya subió por otro camino), acá se escribe SIEMPRE la instalada: es
+     * un sistema recién creado, `install` frena si el cliente ya tiene uno vivo, y la fila `completada` es la verdad de lo que
+     * quedó corriendo. La versión que instala `install` es la última publicada por `id`, como en el resto de los flujos de
+     * instalación (el panel, `RunUserSetupService`), así que lo escrito coincide con lo instalado.
      *
      * @return void
      */
