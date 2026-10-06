@@ -8,8 +8,10 @@ use App\Models\ClientApi;
 use App\Services\ClientInboundKeySyncService;
 use App\Services\EnvSshService;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\Fakes\EnvSshServiceFake;
+use Tests\Fakes\HttpFactorySinSalida;
 
 /**
  * `POST claude/clients/{id}/catalogo/clave` (C1, misión `implementacion-dos-sistemas`, 6/10/2026): el
@@ -25,11 +27,13 @@ use Tests\Fakes\EnvSshServiceFake;
  *     obligatorio al aplicar sin revelar el nombre correcto, y `dry_run` estricto (un valor que no
  *     se entiende NO es "aplicar").
  *  3. **Se escribe en TODOS los frentes, con respaldo**, y un frente que falla no frena al otro.
- *     `listo` es true con al menos un frente `igual` o `escrita` y ninguno en `falta`, `distinta` o
- *     `error`; un `sin_env` no cuenta ni a favor ni en contra.
+ *     `listo` mira al frente ACTIVO (`es_la_activa`: el MISMO al que le habla el puente): es true cuando
+ *     ese frente tiene la clave y ningún frente quedó en `falta` o `distinta` sin escribir; un frente
+ *     INACTIVO en `error` o `sin_env` se informa pero no traba. Sin un activo determinable vale la regla
+ *     de siempre (al menos uno con la clave y ninguno en `falta`, `distinta` o `error`).
  *  4. **La forma del contrato con el motor** (`client_id`, `dry_run`, `api_key_en_el_admin`,
- *     `frentes[]`, `listo`) y sus códigos de error (`cliente_inexistente`, `sin_frentes`,
- *     `validacion`).
+ *     `frentes[]` —con `es_la_activa` en cada uno—, `listo`) y sus códigos de error
+ *     (`cliente_inexistente`, `sin_frentes`, `validacion`).
  *
  * Todo el SSH es un fake en memoria (`EnvSshServiceFake`): ningún test abre una conexión.
  */
@@ -97,20 +101,29 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
      * Un cliente con un frente por cada estado pedido, con su `.env` en memoria dispuesto para que el
      * frente se ENCUENTRE en ese estado: `igual` (ya tiene la clave), `falta` (no tiene la variable),
      * `distinta` (tiene otro valor), `sin_env` (el servidor no tiene `.env`) y `error` (el SSH se cae al
-     * leerlo). El primer frente queda como el activo.
+     * leerlo). El frente `$indice_activo` queda como el activo (el primero por defecto). Con `null` ningún
+     * frente es el activo NI tiene una URL válida (ni el cliente una legacy): el resolver no puede
+     * determinar a cuál le habla el admin, que es el caso en que `listo` vuelve a la regla de siempre.
      *
-     * @param array<int, string> $estados Un estado por frente.
+     * @param array<int, string> $estados       Un estado por frente.
+     * @param int|null           $indice_activo Índice (desde 0) del frente activo; null: no determinable.
      *
      * @return array{0: Client, 1: array<int, ClientApi>, 2: string} El cliente, sus frentes y la clave.
      */
-    private function cliente_con_frentes_en_estado(array $estados): array
+    private function cliente_con_frentes_en_estado(array $estados, $indice_activo = 0): array
     {
         $clave   = Str::random(40);
         $cliente = $this->crear_cliente('Doblep Distribuciones', $clave);
         $frentes = [];
 
         foreach (array_values($estados) as $indice => $estado) {
-            $frente = $this->crear_frente($cliente, 'doblep' . ($indice + 1), 'shared_hosting', null, $indice === 0);
+            $frente = $this->crear_frente($cliente, 'doblep' . ($indice + 1), 'shared_hosting', null, $indice_activo !== null && $indice === $indice_activo);
+
+            if ($indice_activo === null) {
+                /* Sin una URL válida en ningún frente, el resolver no tiene a quién elegir. */
+                $frente->url = '';
+                $frente->save();
+            }
 
             switch ($estado) {
                 case 'igual':
@@ -176,6 +189,61 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         }
 
         $this->fail('La respuesta no trae el frente ' . $frente->id . '.');
+    }
+
+    /**
+     * 🔴 `es_la_activa` es un booleano en TODAS las filas y es true solo en la del frente activo (en ninguna
+     * si no se puede determinar cuál es).
+     *
+     * @param \Illuminate\Testing\TestResponse $respuesta     Respuesta de C1.
+     * @param array<int, ClientApi>             $frentes       Los frentes del cliente, en orden.
+     * @param int|null                          $indice_activo Índice (desde 0) del activo; null: ninguno.
+     * @param string                            $donde         Para el mensaje de la falla.
+     *
+     * @return void
+     */
+    private function assertSoloEsLaActiva($respuesta, array $frentes, $indice_activo, string $donde): void
+    {
+        foreach ($frentes as $indice => $frente) {
+            $this->assertSame(
+                $indice_activo !== null && $indice === $indice_activo,
+                $this->fila($respuesta, $frente)['es_la_activa'],
+                '`es_la_activa` del frente ' . ($indice + 1) . ' (' . $donde . ').'
+            );
+        }
+    }
+
+    /**
+     * El host al que le pega el puente de catálogo de un cliente, o null si el puente no tiene a quién
+     * hablarle (409 `sin_url`: no sale ningún pedido).
+     *
+     * Falsea el HTTP con una fábrica limpia (los stubs de `Http::fake()` se acumulan y los pedidos de una
+     * llamada anterior no tienen que contar en esta) y, igual que el resto de los tests, nada sale a
+     * internet.
+     *
+     * @param Client $cliente Cliente.
+     *
+     * @return string|null
+     */
+    private function a_quien_le_pega_el_puente(Client $cliente): ?string
+    {
+        Http::swap(new HttpFactorySinSalida());
+        Http::fake(['*' => Http::response(['ok' => true], 200)]);
+
+        $respuesta = $this->postJson('/api/claude/clients/' . $cliente->id . '/catalogo/puente', ['metodo' => 'GET', 'ruta' => '/resumen'], $this->headers());
+        $pedidos   = Http::recorded();
+
+        if ($pedidos->isEmpty()) {
+            $respuesta->assertStatus(409);
+            $this->assertSame('sin_url', $respuesta->json('error'));
+
+            return null;
+        }
+
+        $respuesta->assertStatus(200);
+        $this->assertCount(1, $pedidos);
+
+        return (string) parse_url($pedidos->first()[0]->url(), PHP_URL_HOST);
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -308,15 +376,17 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertCount(2, $respuesta->json('frentes'));
 
         $fila_uno = $this->fila($respuesta, $uno);
-        $this->assertSame(['client_api_id', 'hosting_type', 'path', 'estado', 'accion', 'error'], array_keys($fila_uno));
+        $this->assertSame(['client_api_id', 'hosting_type', 'path', 'es_la_activa', 'estado', 'accion', 'error'], array_keys($fila_uno));
         $this->assertSame('shared_hosting', $fila_uno['hosting_type']);
         $this->assertSame('domains/comerciocity.com/public_html/doblep/api', $fila_uno['path']);
+        $this->assertTrue($fila_uno['es_la_activa'], '`es_la_activa` es un booleano: true en el frente al que le habla el admin (acá, la API activa del cliente).');
         $this->assertSame('falta', $fila_uno['estado']);
         $this->assertSame('escribir', $fila_uno['accion']);
         $this->assertNull($fila_uno['error']);
 
         /* El frente con OTRA clave no se pisaría sin `pisar_distintas`: el dry_run lo dice igual que aplicar. */
         $fila_dos = $this->fila($respuesta, $dos);
+        $this->assertFalse($fila_dos['es_la_activa'], 'Y false en el otro.');
         $this->assertSame('distinta', $fila_dos['estado']);
         $this->assertSame('ninguna', $fila_dos['accion']);
         $this->assertSame('tiene otra clave; para reemplazarla, pisar_distintas: true', $fila_dos['error']);
@@ -588,6 +658,8 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertTrue($propias[0]['contexto']['listo']);
         $this->assertSame((int) $uno->id, $propias[0]['contexto']['frentes'][0]['client_api_id']);
         $this->assertSame('escrita', $propias[0]['contexto']['frentes'][0]['accion']);
+        $this->assertTrue($propias[0]['contexto']['frentes'][0]['es_la_activa'], 'El log dice cuál era el frente activo.');
+        $this->assertFalse($propias[0]['contexto']['frentes'][1]['es_la_activa']);
 
         $this->assertLogSinLaClave($registro, $clave);
     }
@@ -691,7 +763,9 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * Un frente que falla AL ESCRIBIR queda `estado: error` + `accion: fallo`, sin filtrar la clave, y
-     * el otro frente queda escrito.
+     * el otro frente queda escrito. Acá el que falla es el INACTIVO (`$dos`): se informa con su motivo
+     * pero NO traba `listo`, porque el puente no le habla; si fallara el activo, `listo` sería false (ver
+     * `test_un_fallo_de_ssh_traba_listo_solo_si_es_en_el_frente_activo`).
      *
      * @return void
      */
@@ -710,9 +784,10 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $respuesta->assertStatus(200);
-        $this->assertFalse($respuesta->json('listo'));
+        $this->assertTrue($respuesta->json('listo'), 'El que falló es el frente inactivo: se informa, pero no traba listo.');
 
         $roto = $this->fila($respuesta, $dos);
+        $this->assertFalse($roto['es_la_activa']);
         $this->assertSame('error', $roto['estado']);
         $this->assertSame('fallo', $roto['accion']);
         $this->assertStringContainsString('[clave oculta]', (string) $roto['error']);
@@ -771,8 +846,8 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
-     * Un frente sin `.env` NO se crea (escribir ahí dejaría un archivo en el servidor equivocado) y no
-     * cuenta ni a favor ni en contra de `listo`: con el otro frente escrito, el cliente queda listo.
+     * Un frente sin `.env` NO se crea (escribir ahí dejaría un archivo en el servidor equivocado) y, siendo
+     * el inactivo, no traba `listo`: con el frente activo escrito, el cliente queda listo.
      *
      * @return void
      */
@@ -843,8 +918,9 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * 🔴 Con TODOS los frentes `sin_env` no hay nada que esté listo: `listo: false`, en dry_run y
-     * aplicando, y no se escribe ni se crea nada. Un `sin_env` no cuenta en contra, pero tampoco a
-     * favor: sin ningún frente con la clave no hay con qué hablarle al cliente.
+     * aplicando, y no se escribe ni se crea nada. El frente ACTIVO sin `.env` deja `listo` en false (el
+     * puente le habla a un frente sin clave) y, sin ningún frente con la clave, no hay con qué hablarle
+     * al cliente.
      *
      * @return void
      */
@@ -873,39 +949,78 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * La regla de `listo` en todas las combinaciones que importan. Cada fila: los estados de los frentes
-     * (cómo se los ENCUENTRA), `listo` en dry_run, `listo` aplicando SIN `pisar_distintas` y `listo`
-     * aplicando CON `pisar_distintas: true`.
+     * (cómo se los ENCUENTRA), cuál es el frente ACTIVO (índice desde 0; null = no se puede determinar,
+     * porque ningún frente tiene una URL válida), `listo` en dry_run, `listo` aplicando SIN
+     * `pisar_distintas` y `listo` aplicando CON `pisar_distintas: true`.
      *
-     * La regla: al menos un frente `igual` o `escrita`, ninguno en `falta`, `distinta` o `error`; el
-     * `sin_env` no cuenta ni a favor ni en contra. En dry_run no se escribió nada, así que un `falta` o
-     * `distinta` deja `listo` en false. Aplicando, un `falta` queda `escrita` y cuenta a favor; un
-     * `distinta` solo se escribe si se pidió pisarla, y sin eso queda sin escribir y en contra. Un `error`
-     * cuenta en contra siempre.
+     * 🔴 La regla con un frente activo determinado: ESE frente tiene que tener la clave (`igual`, o
+     * `escrita` aplicando) y ningún frente puede quedar en `falta` o `distinta` sin escribir. Un frente
+     * INACTIVO en `error` o `sin_env` se informa pero no traba (el puente no le habla); el ACTIVO en
+     * `error` o `sin_env` deja `listo` en false. Sin un activo determinable vale la regla de siempre: al
+     * menos un frente `igual` o `escrita` y ninguno en `falta`, `distinta` o `error`, con el `sin_env`
+     * neutral. En dry_run no se escribió nada, así que un `falta` o `distinta` (activo o no) deja `listo`
+     * en false. Aplicando, un `falta` queda `escrita` y cuenta a favor; un `distinta` solo se escribe si
+     * se pidió pisarla, y sin eso queda sin escribir y en contra.
      *
      * @return array<string, array<int, mixed>>
      */
     public function escenarios_de_listo(): array
     {
         return [
-            'igual y sin_env'                       => [['igual', 'sin_env'], true, true, true],
-            'sin_env e igual (el orden no importa)' => [['sin_env', 'igual'], true, true, true],
-            'dos igual'                             => [['igual', 'igual'], true, true, true],
-            'todos sin_env'                         => [['sin_env', 'sin_env'], false, false, false],
-            'falta y sin_env'                       => [['falta', 'sin_env'], false, true, true],
-            'distinta y sin_env'                    => [['distinta', 'sin_env'], false, false, true],
-            'igual y falta'                         => [['igual', 'falta'], false, true, true],
-            'igual y distinta'                      => [['igual', 'distinta'], false, false, true],
-            'falta y distinta'                      => [['falta', 'distinta'], false, false, true],
-            'dos distinta'                          => [['distinta', 'distinta'], false, false, true],
-            'igual y error'                         => [['igual', 'error'], false, false, false],
-            'falta y error'                         => [['falta', 'error'], false, false, false],
-            'distinta y error'                      => [['distinta', 'error'], false, false, false],
-            'sin_env y error'                       => [['sin_env', 'error'], false, false, false],
-            'tres: igual, sin_env y falta'          => [['igual', 'sin_env', 'falta'], false, true, true],
-            'tres: igual, sin_env y distinta'       => [['igual', 'sin_env', 'distinta'], false, false, true],
-            'tres: igual, sin_env y error'          => [['igual', 'sin_env', 'error'], false, false, false],
-            'tres: igual, sin_env y sin_env'        => [['igual', 'sin_env', 'sin_env'], true, true, true],
-            'tres: todos sin_env'                   => [['sin_env', 'sin_env', 'sin_env'], false, false, false],
+            /* El activo es el primero y los inactivos están sanos o sin .env: lo que ya valía antes. */
+            'activo igual, inactivo sin_env'                        => [['igual', 'sin_env'], 0, true, true, true],
+            'dos igual'                                             => [['igual', 'igual'], 0, true, true, true],
+            'activo falta, inactivo sin_env'                        => [['falta', 'sin_env'], 0, false, true, true],
+            'activo distinta, inactivo sin_env'                     => [['distinta', 'sin_env'], 0, false, false, true],
+            'activo igual, inactivo falta'                          => [['igual', 'falta'], 0, false, true, true],
+            'activo igual, inactivo distinta'                       => [['igual', 'distinta'], 0, false, false, true],
+            'activo falta, inactivo distinta'                       => [['falta', 'distinta'], 0, false, false, true],
+            'dos distinta'                                          => [['distinta', 'distinta'], 0, false, false, true],
+            'tres: activo igual, sin_env y falta'                   => [['igual', 'sin_env', 'falta'], 0, false, true, true],
+            'tres: activo igual, sin_env y distinta'                => [['igual', 'sin_env', 'distinta'], 0, false, false, true],
+            'tres: activo igual, sin_env y sin_env'                 => [['igual', 'sin_env', 'sin_env'], 0, true, true, true],
+
+            /* 🔴 Lo que cambia con el frente activo: un inactivo en error o sin_env se informa y no traba. */
+            'activo igual, inactivo en error'                       => [['igual', 'error'], 0, true, true, true],
+            'activo falta, inactivo en error'                       => [['falta', 'error'], 0, false, true, true],
+            'activo distinta, inactivo en error'                    => [['distinta', 'error'], 0, false, false, true],
+            'tres: activo igual, sin_env y error'                   => [['igual', 'sin_env', 'error'], 0, true, true, true],
+            'inactivo en error, activo igual'                       => [['error', 'igual'], 1, true, true, true],
+            'inactivo sin_env, activo igual (el orden no importa)'  => [['sin_env', 'igual'], 1, true, true, true],
+            'inactivo falta, activo igual'                          => [['falta', 'igual'], 1, false, true, true],
+            'inactivo distinta, activo igual'                       => [['distinta', 'igual'], 1, false, false, true],
+            'inactivo en error, activo falta'                       => [['error', 'falta'], 1, false, true, true],
+            'inactivo en error, activo distinta'                    => [['error', 'distinta'], 1, false, false, true],
+            'tres: activo en el medio, error y sin_env alrededor'   => [['error', 'igual', 'sin_env'], 1, true, true, true],
+            'tres: activo al final, igual, error y falta'           => [['igual', 'error', 'falta'], 2, false, true, true],
+
+            /* 🔴 El activo en error o sin_env deja listo en false, esté como esté el otro. */
+            'todos sin_env'                                         => [['sin_env', 'sin_env'], 0, false, false, false],
+            'tres: todos sin_env'                                   => [['sin_env', 'sin_env', 'sin_env'], 0, false, false, false],
+            'activo sin_env, inactivo igual'                        => [['sin_env', 'igual'], 0, false, false, false],
+            'activo en error, inactivo igual'                       => [['error', 'igual'], 0, false, false, false],
+            'activo en error, inactivo falta'                       => [['error', 'falta'], 0, false, false, false],
+            'activo en error, inactivo distinta'                    => [['error', 'distinta'], 0, false, false, false],
+            'activo sin_env, inactivo en error'                     => [['sin_env', 'error'], 0, false, false, false],
+            'activo en error, inactivo sin_env'                     => [['error', 'sin_env'], 0, false, false, false],
+            'inactivo igual, activo en error'                       => [['igual', 'error'], 1, false, false, false],
+            'inactivo igual, activo sin_env'                        => [['igual', 'sin_env'], 1, false, false, false],
+            'tres: activo al final en error, igual y sin_env antes' => [['igual', 'sin_env', 'error'], 2, false, false, false],
+            'tres: activo al final sin_env, igual y error antes'    => [['igual', 'error', 'sin_env'], 2, false, false, false],
+
+            /* 🔴 Sin un activo determinable vale la regla de siempre: un error traba y el sin_env es neutral. */
+            'sin activo: igual y sin_env'                           => [['igual', 'sin_env'], null, true, true, true],
+            'sin activo: sin_env e igual'                           => [['sin_env', 'igual'], null, true, true, true],
+            'sin activo: dos igual'                                 => [['igual', 'igual'], null, true, true, true],
+            'sin activo: todos sin_env'                             => [['sin_env', 'sin_env'], null, false, false, false],
+            'sin activo: falta y sin_env'                           => [['falta', 'sin_env'], null, false, true, true],
+            'sin activo: igual y falta'                             => [['igual', 'falta'], null, false, true, true],
+            'sin activo: igual y distinta'                          => [['igual', 'distinta'], null, false, false, true],
+            'sin activo: igual y error (el error traba)'            => [['igual', 'error'], null, false, false, false],
+            'sin activo: error e igual'                             => [['error', 'igual'], null, false, false, false],
+            'sin activo: falta y error'                             => [['falta', 'error'], null, false, false, false],
+            'sin activo: tres: igual, sin_env y error'              => [['igual', 'sin_env', 'error'], null, false, false, false],
+            'sin activo: tres: igual, sin_env y sin_env'            => [['igual', 'sin_env', 'sin_env'], null, true, true, true],
         ];
     }
 
@@ -913,20 +1028,24 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
      * @dataProvider escenarios_de_listo
      *
      * @param array<int, string> $estados                  Estado en el que se encuentra cada frente.
+     * @param int|null           $indice_activo            Índice (desde 0) del frente activo; null: no determinable.
      * @param bool               $listo_en_dry_run         `listo` esperado sin escribir.
      * @param bool               $listo_aplicando          `listo` esperado después de aplicar SIN `pisar_distintas`.
      * @param bool               $listo_pisando_distintas  `listo` esperado después de aplicar CON `pisar_distintas: true`.
      *
      * @return void
      */
-    public function test_la_regla_de_listo(array $estados, bool $listo_en_dry_run, bool $listo_aplicando, bool $listo_pisando_distintas): void
+    public function test_la_regla_de_listo(array $estados, $indice_activo, bool $listo_en_dry_run, bool $listo_aplicando, bool $listo_pisando_distintas): void
     {
-        [$cliente, $frentes, $clave] = $this->cliente_con_frentes_en_estado($estados);
+        $donde = implode(', ', $estados) . ' (activo: ' . ($indice_activo === null ? 'ninguno' : (string) ($indice_activo + 1)) . ')';
+
+        [$cliente, $frentes, $clave] = $this->cliente_con_frentes_en_estado($estados, $indice_activo);
 
         $dry = $this->postJson($this->url($cliente), [], $this->headers());
 
         $dry->assertStatus(200);
-        $this->assertSame($listo_en_dry_run, $dry->json('listo'), 'dry_run con ' . implode(', ', $estados));
+        $this->assertSame($listo_en_dry_run, $dry->json('listo'), 'dry_run con ' . $donde);
+        $this->assertSoloEsLaActiva($dry, $frentes, $indice_activo, 'dry_run con ' . $donde);
 
         foreach ($frentes as $indice => $frente) {
             $fila = $this->fila($dry, $frente);
@@ -944,20 +1063,22 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
 
         $aplicado->assertStatus(200);
-        $this->assertSame($listo_aplicando, $aplicado->json('listo'), 'aplicando con ' . implode(', ', $estados));
+        $this->assertSame($listo_aplicando, $aplicado->json('listo'), 'aplicando con ' . $donde);
+        $this->assertSoloEsLaActiva($aplicado, $frentes, $indice_activo, 'aplicando con ' . $donde);
 
-        $this->assertElDryRunPredijoLoQueHizoAplicar($dry, $aplicado, $frentes, 'sin pisar_distintas, con ' . implode(', ', $estados));
+        $this->assertElDryRunPredijoLoQueHizoAplicar($dry, $aplicado, $frentes, 'sin pisar_distintas, con ' . $donde);
 
         $this->assertSinLaClave($dry, $clave);
         $this->assertSinLaClave($aplicado, $clave);
 
         /* Con `pisar_distintas: true`: otro cliente con los mismos estados (el aplicado de arriba ya escribió
            lo suyo). En dry_run el campo no cambia nada; aplicando, autoriza a reemplazar la clave distinta. */
-        [$otro, $frentes_del_otro, $clave_del_otro] = $this->cliente_con_frentes_en_estado($estados);
+        [$otro, $frentes_del_otro, $clave_del_otro] = $this->cliente_con_frentes_en_estado($estados, $indice_activo);
 
         $dry_con_el_campo = $this->postJson($this->url($otro), ['pisar_distintas' => true], $this->headers());
 
-        $this->assertSame($listo_en_dry_run, $dry_con_el_campo->json('listo'), 'dry_run con pisar_distintas y ' . implode(', ', $estados));
+        $this->assertSame($listo_en_dry_run, $dry_con_el_campo->json('listo'), 'dry_run con pisar_distintas y ' . $donde);
+        $this->assertSoloEsLaActiva($dry_con_el_campo, $frentes_del_otro, $indice_activo, 'dry_run con pisar_distintas y ' . $donde);
 
         foreach ($frentes_del_otro as $indice => $frente) {
             $this->assertSame(
@@ -974,16 +1095,440 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $pisando->assertStatus(200);
-        $this->assertSame($listo_pisando_distintas, $pisando->json('listo'), 'pisando distintas con ' . implode(', ', $estados));
+        $this->assertSame($listo_pisando_distintas, $pisando->json('listo'), 'pisando distintas con ' . $donde);
+        $this->assertSoloEsLaActiva($pisando, $frentes_del_otro, $indice_activo, 'pisando distintas con ' . $donde);
 
-        $this->assertElDryRunPredijoLoQueHizoAplicar($dry_con_el_campo, $pisando, $frentes_del_otro, 'con pisar_distintas, con ' . implode(', ', $estados));
+        $this->assertElDryRunPredijoLoQueHizoAplicar($dry_con_el_campo, $pisando, $frentes_del_otro, 'con pisar_distintas, con ' . $donde);
 
         $this->assertSinLaClave($pisando, $clave_del_otro);
     }
 
+    /* ------------------------------------------------------------------------------------------
+     | `listo` según el frente ACTIVO (`es_la_activa`)
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un frente INACTIVO que no se puede leer (`error`) se informa con su motivo pero NO traba `listo`: el
+     * puente no le habla, y si trabara, un SSH caído o una carpeta vieja mal cargada dejarían al cliente sin
+     * `listo` para siempre (`--aplicar` no lo arregla) y `/categorizar` quedaría frenado por un frente al que
+     * nunca se le pide nada. Vale en dry_run y aplicando, y no se escribe nada (el activo ya tiene la clave).
+     *
+     * @return void
+     */
+    public function test_un_frente_inactivo_en_error_no_traba_listo_pero_se_informa_con_su_error(): void
+    {
+        [$cliente, [$activo, $inactivo], $clave] = $this->cliente_con_frentes_en_estado(['igual', 'error']);
+
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertTrue($dry->json('listo'), 'dry_run: el inactivo en error no traba.');
+
+        $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $aplicado->assertStatus(200);
+        $this->assertTrue($aplicado->json('listo'), 'Aplicando: el inactivo en error no traba.');
+
+        foreach ([$dry, $aplicado] as $respuesta) {
+            $fila_activo   = $this->fila($respuesta, $activo);
+            $fila_inactivo = $this->fila($respuesta, $inactivo);
+
+            $this->assertTrue($fila_activo['es_la_activa']);
+            $this->assertSame('igual', $fila_activo['estado']);
+
+            $this->assertFalse($fila_inactivo['es_la_activa']);
+            $this->assertSame('error', $fila_inactivo['estado'], 'El inactivo se informa como siempre.');
+            $this->assertSame('ninguna', $fila_inactivo['accion']);
+            $this->assertStringContainsString('SSH caído en la prueba', (string) $fila_inactivo['error'], 'Y con su motivo.');
+        }
+
+        $this->assertSame([], $this->ssh->escrituras);
+
+        $this->assertSinLaClave($dry, $clave);
+        $this->assertSinLaClave($aplicado, $clave);
+    }
+
+    /**
+     * 🔴 El frente ACTIVO en `error` deja `listo` en false aunque el otro frente esté `igual`: el puente le
+     * habla al activo, y ahí no hay clave que se pueda confirmar.
+     *
+     * @return void
+     */
+    public function test_el_frente_activo_en_error_deja_listo_en_false_aunque_el_otro_este_igual(): void
+    {
+        [$cliente, [$activo, $inactivo]] = $this->cliente_con_frentes_en_estado(['error', 'igual']);
+
+        foreach (['dry_run' => [], 'aplicando' => ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones']] as $modo => $pedido) {
+            $respuesta = $this->postJson($this->url($cliente), $pedido, $this->headers());
+
+            $respuesta->assertStatus(200);
+            $this->assertFalse($respuesta->json('listo'), $modo);
+
+            $this->assertTrue($this->fila($respuesta, $activo)['es_la_activa'], $modo);
+            $this->assertSame('error', $this->fila($respuesta, $activo)['estado'], $modo);
+
+            $this->assertFalse($this->fila($respuesta, $inactivo)['es_la_activa'], $modo);
+            $this->assertSame('igual', $this->fila($respuesta, $inactivo)['estado'], $modo);
+        }
+    }
+
+    /**
+     * 🔴 Un frente INACTIVO en `falta` SÍ traba `listo` en dry_run (quedaría a medias: el día que lo activen
+     * no tiene la clave), y aplicando se escribe y `listo` pasa a true.
+     *
+     * @return void
+     */
+    public function test_un_frente_inactivo_en_falta_deja_listo_en_false_en_dry_run_y_aplicando_lo_deja_en_true(): void
+    {
+        [$cliente, [$activo, $inactivo], $clave] = $this->cliente_con_frentes_en_estado(['igual', 'falta']);
+
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertFalse($dry->json('listo'), 'dry_run: el inactivo en falta todavía no tiene la clave.');
+        $this->assertSame('falta', $this->fila($dry, $inactivo)['estado']);
+        $this->assertSame('escribir', $this->fila($dry, $inactivo)['accion']);
+        $this->assertSame([], $this->ssh->escrituras);
+
+        $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $aplicado->assertStatus(200);
+        $this->assertTrue($aplicado->json('listo'), 'Aplicando, el inactivo en falta se escribe y el cliente queda listo.');
+        $this->assertSame('escrita', $this->fila($aplicado, $inactivo)['accion']);
+        $this->assertSame($clave, $this->valor_en_el_env($inactivo, self::VARIABLE));
+        $this->assertArrayNotHasKey($activo->id, $this->ssh->escrituras, 'El activo ya tenía la clave: no se toca.');
+
+        $this->assertElDryRunPredijoLoQueHizoAplicar($dry, $aplicado, [$activo, $inactivo], 'inactivo en falta');
+        $this->assertSinLaClave($dry, $clave);
+        $this->assertSinLaClave($aplicado, $clave);
+    }
+
+    /**
+     * 🔴 Si no se puede determinar cuál es el frente activo (ningún frente tiene una URL válida y el cliente
+     * no tiene una legacy: el puente tampoco sabría a quién hablarle), `listo` vuelve a la regla de siempre y
+     * NINGUNA fila trae `es_la_activa` en true: un `error` traba, el `sin_env` es neutral y con todos
+     * `sin_env` no hay nada listo.
+     *
+     * @return void
+     */
+    public function test_sin_un_frente_activo_determinable_vale_la_regla_de_siempre(): void
+    {
+        $casos = [
+            'igual y sin_env'                => [['igual', 'sin_env'], true],
+            'sin_env e igual'                => [['sin_env', 'igual'], true],
+            'igual y error (el error traba)' => [['igual', 'error'], false],
+            'error e igual'                  => [['error', 'igual'], false],
+            'todos sin_env'                  => [['sin_env', 'sin_env'], false],
+        ];
+
+        foreach ($casos as $nombre => $caso) {
+            [$estados, $listo] = $caso;
+
+            [$cliente, $frentes] = $this->cliente_con_frentes_en_estado($estados, null);
+
+            $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+            $respuesta->assertStatus(200);
+            $this->assertSame($listo, $respuesta->json('listo'), $nombre);
+            $this->assertSoloEsLaActiva($respuesta, $frentes, null, $nombre);
+
+            $this->assertNull($this->a_quien_le_pega_el_puente($cliente), 'El puente tampoco tiene a quién hablarle: ' . $nombre);
+        }
+    }
+
+    /**
+     * Qué se le cambia al cliente de `test_es_la_activa_es_el_frente_al_que_le_pega_el_puente` (arranca con dos
+     * frentes sanos, `doblep1` y `doblep2`, con URL, y ninguna API activa cargada).
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function escenarios_de_a_quien_le_habla_el_admin(): array
+    {
+        return [
+            'la API activa del cliente'                                   => ['activa_del_cliente'],
+            'sin API activa cargada: la primera con URL válida'           => ['sin_activa'],
+            'la API activa sin URL válida: cae a la primera que la tiene' => ['activa_sin_url'],
+            'ningún frente con URL válida: gana el valor legacy'          => ['legacy'],
+            'ninguna URL en ningún lado'                                  => ['ninguna_url'],
+        ];
+    }
+
+    /**
+     * 🔴 `es_la_activa` no es una copia de la regla del puente: es LA MISMA. El frente que C1 marca como activo
+     * es exactamente aquel al que le pega el puente (los dos salen de `ClientEmpresaApiUrlResolver`); y si el
+     * puente le habla a algo que no es un frente (el valor legacy `clients.api_url`) o no tiene a quién, C1 no
+     * marca ninguno.
+     *
+     * Cubre los casos donde la ficha (`claude/clients/{id}`, que mira solo `clients.active_client_api_id`) y
+     * el resolver NO coinciden: sin API activa cargada, y con una activa sin URL válida.
+     *
+     * @dataProvider escenarios_de_a_quien_le_habla_el_admin
+     *
+     * @param string $escenario Qué se le cambia al cliente.
+     *
+     * @return void
+     */
+    public function test_es_la_activa_es_el_frente_al_que_le_pega_el_puente(string $escenario): void
+    {
+        $cliente = $this->crear_cliente();
+        $uno     = $this->crear_frente($cliente, 'doblep1');
+        $dos     = $this->crear_frente($cliente, 'doblep2');
+
+        $this->ssh->envs[$uno->id] = "APP_ENV=production\n";
+        $this->ssh->envs[$dos->id] = "APP_ENV=production\n";
+
+        $marcado        = null;
+        $host_esperado  = null;
+
+        switch ($escenario) {
+            case 'activa_del_cliente':
+                $cliente->active_client_api_id = $dos->id;
+                $cliente->save();
+
+                $marcado = $dos;
+                break;
+
+            case 'sin_activa':
+                /* `active_client_api_id` queda en null: el resolver sigue con la primera ClientApi con URL válida. */
+                $marcado = $uno;
+                break;
+
+            case 'activa_sin_url':
+                $cliente->active_client_api_id = $dos->id;
+                $cliente->save();
+
+                $dos->url = '';
+                $dos->save();
+
+                $this->assertSame((int) $dos->id, (int) $cliente->fresh()->active_client_api_id, 'La ficha del cliente diría que el activo es doblep2.');
+
+                $marcado = $uno;
+                break;
+
+            case 'legacy':
+                $uno->url = '';
+                $uno->save();
+                $dos->url = '';
+                $dos->save();
+
+                $cliente->api_url = 'https://api-legado.' . self::DOMINIO;
+                $cliente->save();
+
+                $host_esperado = 'api-legado.' . self::DOMINIO;
+                break;
+
+            case 'ninguna_url':
+                $uno->url = '';
+                $uno->save();
+                $dos->url = '';
+                $dos->save();
+                break;
+
+            default:
+                $this->fail('Escenario desconocido en el test: ' . $escenario);
+        }
+
+        if ($marcado !== null) {
+            $host_esperado = parse_url($marcado->url, PHP_URL_HOST);
+        }
+
+        $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $respuesta->assertStatus(200);
+
+        $marcados = [];
+
+        foreach ([$uno, $dos] as $frente) {
+            if ($this->fila($respuesta, $frente)['es_la_activa'] === true) {
+                $marcados[] = (int) $frente->id;
+            }
+        }
+
+        $this->assertSame($marcado === null ? [] : [(int) $marcado->id], $marcados, 'Los frentes marcados con es_la_activa en "' . $escenario . '".');
+        $this->assertSame($host_esperado, $this->a_quien_le_pega_el_puente($cliente), 'A quién le pega el puente en "' . $escenario . '".');
+    }
+
+    /**
+     * Las formas de dejar a un frente sin poder tocarse (la guarda se dispara ANTES de leer ningún `.env`), con
+     * lo que tiene que decir el motivo.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function formas_de_dejar_sin_tocar_a_un_frente(): array
+    {
+        return [
+            'path de shared vacío'                => ['path_vacio', 'raíz de la cuenta compartida'],
+            'path de shared con segmentos de más' => ['path_con_puntos', 'segmentos vacíos'],
+            'vps sin vps_path'                    => ['vps_sin_carpeta', 'vps_path'],
+            'vps_path que no es un nombre simple' => ['vps_con_barra', 'vps_path'],
+            'USER_ID de otro dueño'               => ['otro_dueno', 'dueno_distinto'],
+        ];
+    }
+
+    /**
+     * Rompe a un frente de la forma pedida (ver `formas_de_dejar_sin_tocar_a_un_frente()`).
+     *
+     * @param string    $forma   Una de las formas del proveedor.
+     * @param Client    $cliente Cliente dueño del frente.
+     * @param ClientApi $frente  Frente a romper.
+     *
+     * @return void
+     */
+    private function dejar_sin_tocar(string $forma, Client $cliente, ClientApi $frente): void
+    {
+        switch ($forma) {
+            case 'path_vacio':
+                $frente->path = '';
+                $frente->save();
+                break;
+
+            case 'path_con_puntos':
+                $frente->path = 'x/..';
+                $frente->save();
+                break;
+
+            case 'vps_sin_carpeta':
+                $frente->hosting_type = 'vps';
+                $frente->vps_path     = null;
+                $frente->save();
+                break;
+
+            case 'vps_con_barra':
+                $frente->hosting_type = 'vps';
+                $frente->vps_path     = 'a/b';
+                $frente->save();
+                break;
+
+            case 'otro_dueno':
+                $this->ssh->envs[$frente->id] = "APP_ENV=production\nUSER_ID=" . ((int) $cliente->user_id + 1) . "\n";
+                break;
+
+            default:
+                $this->fail('Forma de romper un frente desconocida en el test: ' . $forma);
+        }
+    }
+
+    /**
+     * 🔴 Un frente que no se puede tocar (carpeta que no se identifica, `.env` de otro dueño) traba `listo`
+     * SOLO si es el activo: ahí el puente le habla a un frente sin clave. Si es el inactivo se informa con su
+     * motivo y no traba. En los dos casos no se respalda ni se escribe nada en él, y el otro frente se escribe.
+     *
+     * @dataProvider formas_de_dejar_sin_tocar_a_un_frente
+     *
+     * @param string $forma Cómo se rompe el frente.
+     * @param string $frase Lo que tiene que decir el motivo.
+     *
+     * @return void
+     */
+    public function test_un_frente_que_no_se_puede_tocar_traba_listo_solo_si_es_el_activo(string $forma, string $frase): void
+    {
+        /* Roto el frente ACTIVO. */
+        [$cliente, $activo, $inactivo] = $this->cliente_con_dos_frentes();
+
+        $this->dejar_sin_tocar($forma, $cliente, $activo);
+
+        $antes = $this->ssh->envs[$activo->id];
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'), 'Roto el frente ACTIVO (' . $forma . ').');
+
+        $fila = $this->fila($respuesta, $activo);
+        $this->assertTrue($fila['es_la_activa']);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertSame('ninguna', $fila['accion']);
+        $this->assertStringContainsString($frase, (string) $fila['error']);
+
+        $this->assertArrayNotHasKey($activo->id, $this->ssh->escrituras);
+        $this->assertArrayNotHasKey($activo->id, $this->ssh->backups);
+        $this->assertSame($antes, $this->ssh->envs[$activo->id]);
+        $this->assertSame('escrita', $this->fila($respuesta, $inactivo)['accion'], 'El frente sano se escribió igual.');
+
+        /* Roto el frente INACTIVO. */
+        [$otro, $sano, $roto] = $this->cliente_con_dos_frentes();
+
+        $this->dejar_sin_tocar($forma, $otro, $roto);
+
+        $antes_del_roto = $this->ssh->envs[$roto->id];
+
+        $respuesta = $this->postJson($this->url($otro), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertTrue($respuesta->json('listo'), 'Roto el frente INACTIVO (' . $forma . '): se informa, pero no traba.');
+
+        $fila = $this->fila($respuesta, $roto);
+        $this->assertFalse($fila['es_la_activa']);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertSame('ninguna', $fila['accion']);
+        $this->assertStringContainsString($frase, (string) $fila['error'], 'Se informa con su motivo.');
+
+        $this->assertArrayNotHasKey($roto->id, $this->ssh->escrituras);
+        $this->assertArrayNotHasKey($roto->id, $this->ssh->backups);
+        $this->assertSame($antes_del_roto, $this->ssh->envs[$roto->id]);
+
+        $this->assertTrue($this->fila($respuesta, $sano)['es_la_activa']);
+        $this->assertSame('escrita', $this->fila($respuesta, $sano)['accion']);
+    }
+
+    /**
+     * Los fallos de SSH que puede tener un frente, con la propiedad del fake que los provoca.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function fallos_de_ssh_de_un_frente(): array
+    {
+        return [
+            'no se puede leer el .env'      => ['fallan_al_leer'],
+            'no se puede respaldar el .env' => ['fallan_al_respaldar'],
+            'no se puede escribir el .env'  => ['fallan_al_escribir'],
+        ];
+    }
+
+    /**
+     * 🔴 Un fallo de SSH (al leer, al respaldar o al escribir) traba `listo` SOLO si es en el frente activo: en
+     * el inactivo queda `estado: error` con su motivo, pero el cliente sigue listo.
+     *
+     * @dataProvider fallos_de_ssh_de_un_frente
+     *
+     * @param string $falla Propiedad de `EnvSshServiceFake` que provoca el fallo.
+     *
+     * @return void
+     */
+    public function test_un_fallo_de_ssh_traba_listo_solo_si_es_en_el_frente_activo(string $falla): void
+    {
+        /* Falla en el frente ACTIVO. */
+        [$cliente, $activo, $inactivo] = $this->cliente_con_dos_frentes();
+
+        $this->ssh->{$falla}[$activo->id] = 'SSH caído en la prueba';
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'), 'Falla en el ACTIVO (' . $falla . ').');
+        $this->assertTrue($this->fila($respuesta, $activo)['es_la_activa']);
+        $this->assertSame('error', $this->fila($respuesta, $activo)['estado']);
+        $this->assertSame('escrita', $this->fila($respuesta, $inactivo)['accion']);
+
+        /* Falla en el INACTIVO. */
+        [$otro, $sano, $roto] = $this->cliente_con_dos_frentes();
+
+        $this->ssh->{$falla}[$roto->id] = 'SSH caído en la prueba';
+
+        $respuesta = $this->postJson($this->url($otro), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertTrue($respuesta->json('listo'), 'Falla en el INACTIVO (' . $falla . '): se informa, pero no traba.');
+        $this->assertFalse($this->fila($respuesta, $roto)['es_la_activa']);
+        $this->assertSame('error', $this->fila($respuesta, $roto)['estado']);
+        $this->assertTrue($this->fila($respuesta, $sano)['es_la_activa']);
+        $this->assertSame('escrita', $this->fila($respuesta, $sano)['accion']);
+    }
+
     /**
      * Un frente de VPS sin `vps_path` no se puede resolver: queda `error` (con el motivo) y no frena al
-     * otro. El resolver de rutas tira, y esa excepción no puede tumbar la respuesta entera.
+     * otro. El resolver de rutas tira, y esa excepción no puede tumbar la respuesta entera. Es el frente
+     * INACTIVO, así que tampoco traba `listo`.
      *
      * @return void
      */
@@ -1007,14 +1552,14 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertSame('error', $fila['estado']);
         $this->assertStringContainsString('vps_path', (string) $fila['error']);
 
-        $this->assertFalse($respuesta->json('listo'));
+        $this->assertTrue($respuesta->json('listo'), 'El frente roto es el inactivo: se informa, pero no traba listo.');
         $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion']);
     }
 
     /**
      * 🔴 Un frente de shared con el path VACÍO se resuelve a la raíz de la cuenta compartida, donde viven
      * las carpetas de todos los clientes: ahí no se opera, aunque exista un `.env`. Queda `error` y no
-     * frena al otro frente.
+     * frena al otro frente; siendo el inactivo, tampoco traba `listo`.
      *
      * @return void
      */
@@ -1034,7 +1579,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $respuesta->assertStatus(200);
-        $this->assertFalse($respuesta->json('listo'));
+        $this->assertTrue($respuesta->json('listo'), 'El frente roto es el inactivo: se informa, pero no traba listo.');
 
         $fila = $this->fila($respuesta, $dos);
         $this->assertSame('error', $fila['estado']);
@@ -1374,7 +1919,8 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     /**
      * 🔴 Un frente de shared con un path que no se puede identificar queda `estado: error` con el motivo y
      * NO se toca: ni se respalda ni se escribe su `.env` (aunque exista uno). El otro frente se escribe
-     * igual.
+     * igual. Siendo el INACTIVO, no traba `listo` (si fuera el activo sí: ver
+     * `test_un_frente_que_no_se_puede_tocar_traba_listo_solo_si_es_el_activo`).
      *
      * @dataProvider paths_de_shared_que_no_se_pueden_identificar
      *
@@ -1399,7 +1945,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $respuesta->assertStatus(200);
-        $this->assertFalse($respuesta->json('listo'));
+        $this->assertTrue($respuesta->json('listo'), 'El frente roto es el inactivo: se informa, pero no traba listo.');
 
         $fila = $this->fila($respuesta, $dos);
         $this->assertSame('error', $fila['estado']);
@@ -1480,6 +2026,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
 
     /**
      * 🔴 Un frente de VPS con un `vps_path` que no es un nombre simple queda `estado: error` y no se toca.
+     * Siendo el INACTIVO, no traba `listo`.
      *
      * @dataProvider vps_paths_que_no_son_un_nombre_simple
      *
@@ -1503,7 +2050,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $respuesta->assertStatus(200);
-        $this->assertFalse($respuesta->json('listo'));
+        $this->assertTrue($respuesta->json('listo'), 'El frente roto es el inactivo: se informa, pero no traba listo.');
 
         $fila = $this->fila($respuesta, $malo);
         $this->assertSame('error', $fila['estado']);
@@ -1519,7 +2066,9 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
      * 🔴 Un `.env` con un `USER_ID` que NO es el de este cliente (`clients.user_id`) es el sistema de OTRO
      * dueño —una carpeta mal cargada en el admin—: ese frente queda `estado: error` con el motivo
      * `dueno_distinto` y no se respalda ni se escribe, ni en dry_run ni aplicando. El otro frente (cuyo
-     * `.env` sí es de este cliente) se escribe igual.
+     * `.env` sí es de este cliente) se escribe igual. El ajeno es el INACTIVO: aplicando no traba `listo`
+     * (en dry_run sigue en false porque el activo todavía no tiene la clave); si fuera el activo sí (ver
+     * `test_un_frente_que_no_se_puede_tocar_traba_listo_solo_si_es_el_activo`).
      *
      * @return void
      */
@@ -1557,7 +2106,7 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         );
 
         $aplicado->assertStatus(200);
-        $this->assertFalse($aplicado->json('listo'));
+        $this->assertTrue($aplicado->json('listo'), 'El ajeno es el frente inactivo: se informa, pero no traba listo.');
 
         $fila = $this->fila($aplicado, $dos);
         $this->assertSame('error', $fila['estado']);
@@ -1871,5 +2420,34 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         sort($aceptados);
 
         $this->assertSame($aceptados, $declarados);
+    }
+
+    /**
+     * El catálogo describe la forma de cada frente de la respuesta con las MISMAS claves, y en el mismo orden,
+     * que la respuesta de verdad: un campo que está en una y no en la otra (como `es_la_activa`) es uno que
+     * Claude no encuentra, o que el catálogo promete y el endpoint no trae.
+     *
+     * @return void
+     */
+    public function test_el_catalogo_describe_el_frente_con_las_mismas_claves_que_la_respuesta(): void
+    {
+        $endpoint = config('claude_catalog.endpoints.POST api/claude/clients/{id}/catalogo/clave');
+
+        $this->assertIsArray($endpoint, 'El catálogo no tiene la entrada de C1.');
+        $this->assertSame(1, preg_match('/frentes: \[\{([^}]*)\}\]/', (string) $endpoint['para_que'], $coincidencia), 'El catálogo no describe la forma de `frentes`.');
+
+        $documentadas = [];
+
+        foreach (explode(', ', $coincidencia[1]) as $campo) {
+            $documentadas[] = explode(':', $campo)[0];
+        }
+
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertSame($documentadas, array_keys($respuesta->json('frentes.0')));
+        $this->assertStringContainsString('es_la_activa', (string) $endpoint['para_que']);
     }
 }

@@ -44,10 +44,16 @@ use Illuminate\Support\Str;
  * al sistema de OTRO dueño: escribirle ahí la clave de este cliente sería pisar la de aquél. Un `.env` sin
  * `USER_ID` (los de base propia no lo necesitan) o con la variable vacía se sigue como siempre.
  *
- * 🔴 `listo` (ver `calcular_listo()`) es true cuando hay AL MENOS UN frente con la clave igual o recién
- * escrita y NINGUNO en `falta`, `distinta` o `error`; un frente `sin_env` no cuenta ni a favor ni en
- * contra. Así una carpeta que nunca se instaló (la segunda de un cliente de shared) no deja al cliente
- * sin `listo` para siempre cuando el frente que sirve tráfico ya tiene la clave.
+ * 🔴 `es_la_activa` y `listo` (ver `calcular_listo()`). Cada frente de la respuesta dice si es EL frente al
+ * que le habla el admin: el que resuelve `ClientEmpresaApiUrlResolver::resolve_client_api()`, o sea el MISMO
+ * que usa el puente de catálogo y todas las sincronizaciones salientes (no una copia del criterio). Con el
+ * frente activo determinado, `listo` es true cuando ESE frente tiene la clave (`igual`, o `escrita` en esta
+ * llamada) y NINGÚN frente quedó en `falta` ni en `distinta` sin escribir; un frente INACTIVO en `error` o
+ * `sin_env` se informa con su `error` pero NO traba: el puente no le habla, y si trabara dejaría al cliente
+ * sin `listo` para siempre (`--aplicar` no arregla un `dueno_distinto` ni un path roto de una carpeta
+ * vieja). El activo en `error` o `sin_env` deja `listo` en false. Si no se puede determinar cuál es el
+ * activo (ningún frente tiene una URL válida), vale la regla de siempre: al menos un frente `igual` o
+ * `escrita` y ninguno en `falta`, `distinta` o `error`, con `sin_env` neutral.
  *
  * 🔴 NUNCA lleva el valor de ninguna clave ni en la respuesta, ni en un mensaje de error, ni en un
  * log. Los textos que salen de excepciones de SSH pasan por `texto_seguro()`; el log lleva ids,
@@ -162,11 +168,22 @@ class ClientInboundKeySyncService
     protected $env_ssh_service;
 
     /**
-     * @param EnvSshService $env_ssh_service Inyectable: en los tests es un fake en memoria.
+     * Resuelve a qué frente (`ClientApi`) le habla el admin: el mismo criterio que usa el puente.
+     *
+     * @var ClientEmpresaApiUrlResolver
      */
-    public function __construct(EnvSshService $env_ssh_service)
+    protected $api_url_resolver;
+
+    /**
+     * @param EnvSshService                    $env_ssh_service  Inyectable: en los tests es un fake en memoria.
+     * @param ClientEmpresaApiUrlResolver|null $api_url_resolver Inyectable para las pruebas.
+     */
+    public function __construct(EnvSshService $env_ssh_service, ?ClientEmpresaApiUrlResolver $api_url_resolver = null)
     {
-        $this->env_ssh_service = $env_ssh_service;
+        $this->env_ssh_service  = $env_ssh_service;
+        $this->api_url_resolver = $api_url_resolver === null
+            ? new ClientEmpresaApiUrlResolver()
+            : $api_url_resolver;
     }
 
     /**
@@ -199,10 +216,13 @@ class ClientInboundKeySyncService
         $resultado_de_frentes = [];
         $timestamp            = Carbon::now()->format('YmdHis');
         $user_id_del_cliente  = trim((string) $client->user_id);
+        $id_del_frente_activo = $this->id_del_frente_activo($client);
 
         try {
             foreach ($frentes as $frente) {
-                $resultado_de_frentes[] = $this->procesar_frente($frente, $clave, $dry_run, $timestamp, $user_id_del_cliente, $pisar_distintas);
+                $es_la_activa = $id_del_frente_activo !== null && (int) $frente->id === $id_del_frente_activo;
+
+                $resultado_de_frentes[] = $this->procesar_frente($frente, $clave, $dry_run, $timestamp, $user_id_del_cliente, $pisar_distintas, $es_la_activa);
             }
         } finally {
             /* La sesión SSH se cierra pase lo que pase: si algo revienta a mitad, no queda colgada. */
@@ -235,15 +255,17 @@ class ClientInboundKeySyncService
      * @param string    $timestamp Marca que nombra el respaldo del `.env`.
      * @param string    $user_id_del_cliente `clients.user_id` como texto y sin espacios ('' si no tiene).
      * @param bool      $pisar_distintas     true: un frente `distinta` también se escribe (o se escribiría, en dry_run).
+     * @param bool      $es_la_activa        true: es el frente al que le habla el admin (ver `id_del_frente_activo()`).
      *
-     * @return array<string, mixed> `{client_api_id, hosting_type, path, estado, accion, error}`.
+     * @return array<string, mixed> `{client_api_id, hosting_type, path, es_la_activa, estado, accion, error}`.
      */
-    protected function procesar_frente(ClientApi $frente, $clave, $dry_run, $timestamp, $user_id_del_cliente = '', $pisar_distintas = false)
+    protected function procesar_frente(ClientApi $frente, $clave, $dry_run, $timestamp, $user_id_del_cliente = '', $pisar_distintas = false, $es_la_activa = false)
     {
         $fila = [
             'client_api_id' => (int) $frente->id,
             'hosting_type'  => (string) ($frente->hosting_type ? $frente->hosting_type : 'shared_hosting'),
             'path'          => null,
+            'es_la_activa'  => (bool) $es_la_activa,
             'estado'        => self::ESTADO_ERROR,
             'accion'        => self::ACCION_NINGUNA,
             'error'         => null,
@@ -349,26 +371,90 @@ class ClientInboundKeySyncService
     /**
      * ¿Quedó lista la clave para que el motor use el catálogo del cliente?
      *
-     * 🔴 La regla es la del contrato con el motor (6/10/2026):
+     * 🔴 La regla es la del contrato con el motor, y depende de si se pudo determinar el frente ACTIVO (el
+     * que marca `es_la_activa`: aquél al que le habla el puente):
      *
-     *   - `listo` es true cuando hay AL MENOS UN frente con la clave igual (`estado: igual`) o recién
-     *     escrita (`accion: escrita`), y NINGÚN frente en `falta`, `distinta` o `error`.
-     *   - Un frente `sin_env` no cuenta ni a favor ni en contra: es una carpeta que nunca se instaló
-     *     (la segunda de un cliente de shared), no un fallo. Si contara en contra, el cliente
-     *     quedaría sin `listo` para siempre aunque el frente que sirve tráfico tenga la clave, y el
-     *     motor se quedaría en el ciclo "corré clave --aplicar".
-     *   - Con todos los frentes `sin_env` (o ninguno) no hay nada que esté listo: false.
-     *   - En `dry_run` un frente en `falta` o `distinta` deja `listo` en false: no se escribió nada.
+     *   Con frente activo determinado (`calcular_listo_con_activa()`):
+     *   - `listo` es true cuando el frente ACTIVO tiene la clave (`estado: igual`, o `accion: escrita` en
+     *     esta llamada) y NINGÚN frente está en `falta` ni en `distinta` sin escribir (un frente a medias
+     *     es una rotación que se rompe: el día que la activen, no tiene la clave).
+     *   - Un frente INACTIVO en `error` o `sin_env` no traba: se informa como siempre, con su `error`,
+     *     pero el puente no le habla. Si trabara, un `dueno_distinto`, un path roto o un SSH caído en una
+     *     carpeta vieja dejarían al cliente sin `listo` para siempre (`--aplicar` no lo arregla) y
+     *     `/categorizar` quedaría trabado.
+     *   - El ACTIVO en `error` o `sin_env` deja `listo` en false: el puente le habla a un frente sin clave.
+     *
+     *   Sin frente activo determinado (`calcular_listo_sin_activa()`): la regla de siempre, porque no hay
+     *   a quién mirar: al menos un frente `igual` o `escrita` y ninguno en `falta`, `distinta` o `error`,
+     *   con `sin_env` neutral y todos `sin_env` (o ninguno) en false.
+     *
+     *   En `dry_run` el cálculo es el mismo, sobre lo que se ENCONTRÓ: un frente en `falta` o `distinta`
+     *   (activo o no) deja `listo` en false porque no se escribió nada; el `dry_run` dice lo que haría
+     *   aplicar en `accion`, y aplicando esos mismos quedan `escrita`.
      *
      * Ojo con la lectura de `estado`: es lo que se ENCONTRÓ antes de actuar. Un frente que estaba en
-     * `falta` o `distinta` y se escribió bien trae `accion: escrita` y cuenta a favor; uno que quedó
-     * en `error` (no se pudo leer o escribir) cuenta en contra, escriba lo que escriba el resto.
+     * `falta` o `distinta` y se escribió bien trae `accion: escrita` y cuenta como con la clave.
      *
-     * @param array<int, array<string, mixed>> $frentes Resultado por frente (`estado` y `accion`).
+     * @param array<int, array<string, mixed>> $frentes Resultado por frente (`es_la_activa`, `estado` y `accion`).
      *
      * @return bool
      */
     protected function calcular_listo(array $frentes)
+    {
+        foreach ($frentes as $fila) {
+            if (! empty($fila['es_la_activa'])) {
+                return $this->calcular_listo_con_activa($frentes);
+            }
+        }
+
+        return $this->calcular_listo_sin_activa($frentes);
+    }
+
+    /**
+     * La regla de `listo` cuando se sabe cuál es el frente activo (ver `calcular_listo()`).
+     *
+     * @param array<int, array<string, mixed>> $frentes Resultado por frente.
+     *
+     * @return bool
+     */
+    protected function calcular_listo_con_activa(array $frentes)
+    {
+        foreach ($frentes as $fila) {
+            $con_la_clave = $fila['estado'] === self::ESTADO_IGUAL || $fila['accion'] === self::ACCION_ESCRITA;
+
+            if (! empty($fila['es_la_activa'])) {
+                /* El que atiende tiene que tener la clave: en error, sin .env, falta o distinta sin escribir, no hay listo. */
+                if (! $con_la_clave) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            /* Un frente inactivo en error o sin .env se informa pero no traba: el puente no le habla. */
+            if ($fila['estado'] === self::ESTADO_ERROR || $fila['estado'] === self::ESTADO_SIN_ENV) {
+                continue;
+            }
+
+            /* Pero uno inactivo en falta o distinta sin escribir sí: quedaría a medias, sin la clave. */
+            if (! $con_la_clave) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * La regla de `listo` de siempre, para cuando NO se pudo determinar el frente activo: al menos un
+     * frente con la clave y ninguno en `falta`, `distinta` o `error`; `sin_env` no cuenta ni a favor ni en
+     * contra.
+     *
+     * @param array<int, array<string, mixed>> $frentes Resultado por frente.
+     *
+     * @return bool
+     */
+    protected function calcular_listo_sin_activa(array $frentes)
     {
         $con_la_clave = 0;
 
@@ -388,6 +474,34 @@ class ClientInboundKeySyncService
         }
 
         return $con_la_clave > 0;
+    }
+
+    /**
+     * El id del frente al que le habla el admin, o null si no se puede determinar.
+     *
+     * 🔴 Sale de `ClientEmpresaApiUrlResolver::resolve_client_api()`, que recorre los MISMOS candidatos, en el
+     * mismo orden y con el mismo filtro de "URL válida" que `resolve_base_url()`: la API activa del cliente si
+     * tiene una URL válida; si no, la primera ClientApi con una URL válida. Es exactamente a la que le pega
+     * el puente de catálogo (`ClientCatalogoPuenteService` usa `admin_sync_url()`, que usa `resolve_base_url()`).
+     * No se mira `clients.active_client_api_id` a mano, que es lo que muestra la ficha de `claude/clients/{id}`
+     * y no coincide cuando el cliente no tiene API activa cargada o la que tiene no trae una URL válida.
+     *
+     * Devuelve null si el resolver no elige ninguna ClientApi (ninguna tiene URL válida: gana el valor legacy
+     * `clients.api_url`, o no hay ninguno), o si elige una que no es de este cliente (un dato mal cargado).
+     *
+     * @param Client $client Cliente.
+     *
+     * @return int|null
+     */
+    protected function id_del_frente_activo(Client $client)
+    {
+        $activa = $this->api_url_resolver->resolve_client_api($client);
+
+        if ($activa === null || (int) $activa->client_id !== (int) $client->id) {
+            return null;
+        }
+
+        return (int) $activa->id;
     }
 
     /**
@@ -559,6 +673,7 @@ class ClientInboundKeySyncService
         foreach ($frentes as $fila) {
             $resumen[] = [
                 'client_api_id' => $fila['client_api_id'],
+                'es_la_activa'  => $fila['es_la_activa'],
                 'estado'        => $fila['estado'],
                 'accion'        => $fila['accion'],
             ];

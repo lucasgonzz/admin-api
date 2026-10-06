@@ -112,9 +112,13 @@ class ClaudeClientCatalogoController extends Controller
      * frente es `estado: error` y los demás siguen.
      *
      * Respuesta 200: `{client_id, dry_run, api_key_en_el_admin, frentes[], listo}`. NUNCA lleva el
-     * valor de ninguna clave. `listo` es true con AL MENOS UN frente `igual` o `escrita` y NINGUNO en
-     * `falta`, `distinta` o `error`; un frente `sin_env` no cuenta (ver
-     * `ClientInboundKeySyncService::calcular_listo()`). Errores: 404 `cliente_inexistente`, 409
+     * valor de ninguna clave. Cada frente trae `es_la_activa`: es EL frente al que le habla el admin (el
+     * mismo al que le pega el puente, que resuelve `ClientEmpresaApiUrlResolver`), y `listo` mira a ese
+     * frente: es true cuando ESE frente tiene la clave y ningún frente quedó en `falta` ni en `distinta` sin
+     * escribir; un frente INACTIVO en `error` o `sin_env` se informa pero no traba. Sin un activo
+     * determinable vale la regla de siempre: al menos un frente `igual` o `escrita` y ninguno en `falta`,
+     * `distinta` o `error` (ver `ClientInboundKeySyncService::calcular_listo()`). Errores: 404
+     * `cliente_inexistente`, 409
      * `sin_frentes`, 422 `validacion` y 500 `clave_no_guardada` (falló la base al guardar la clave
      * recién generada: texto fijo, sin nada de lo que dijo la base; no se escribió nada en ningún servidor).
      *

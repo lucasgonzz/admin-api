@@ -49,39 +49,7 @@ class ClientEmpresaApiUrlResolver
      */
     public function resolve_base_url(Client $client, ?ClientVersionUpgrade $upgrade = null): string
     {
-        $client->loadMissing('active_client_api', 'client_apis');
-
-        if ($upgrade !== null) {
-            $upgrade->loadMissing('target_client_api');
-        }
-
-        // Lista de candidatos: cada uno es un array [url, hosting_type]
-        $candidates = [];
-
-        // Prioridad 1: API destino del upgrade
-        if ($upgrade !== null && $upgrade->target_client_api instanceof ClientApi) {
-            $hosting_type = $upgrade->target_client_api->hosting_type ?? 'shared_hosting';
-            $candidates[] = [$upgrade->target_client_api->url, $hosting_type];
-        }
-
-        // Prioridad 2: API activa del cliente
-        if ($client->active_client_api instanceof ClientApi) {
-            $hosting_type = $client->active_client_api->hosting_type ?? 'shared_hosting';
-            $candidates[] = [$client->active_client_api->url, $hosting_type];
-        }
-
-        // Prioridad 3: Cada ClientApi del cliente
-        foreach ($client->client_apis as $client_api) {
-            $hosting_type = $client_api->hosting_type ?? 'shared_hosting';
-            $candidates[] = [$client_api->url, $hosting_type];
-        }
-
-        // Prioridad 4: clients.api_url (legacy, sin ClientApi detras)
-        // Se trata como VPS porque es un valor histórico cargado a mano y no sabemos
-        // con qué convención se guardó; mejor no agregar /public a un legacy.
-        $candidates[] = [$client->api_url, 'vps'];
-
-        foreach ($candidates as [$candidate_url, $hosting_type]) {
+        foreach ($this->base_url_candidates($client, $upgrade) as [$candidate_url, $hosting_type]) {
             $normalized = $this->normalize_api_base_url($candidate_url, $hosting_type);
             if ($normalized !== '') {
                 return $normalized;
@@ -89,6 +57,84 @@ class ClientEmpresaApiUrlResolver
         }
 
         return '';
+    }
+
+    /**
+     * La ClientApi (frente) a la que le habla el admin: LA MISMA que elige `resolve_base_url()`, o null
+     * si la URL ganadora no sale de ninguna ClientApi (la ganó `clients.api_url`, el valor legacy) o no
+     * hay ninguna URL válida.
+     *
+     * 🔴 Existe para que quien necesite saber CUÁL de los frentes de un cliente es el que atiende —hoy,
+     * `ClientInboundKeySyncService`, que decide `listo` y marca `es_la_activa` según este frente— use el
+     * MISMO criterio que el puente de catálogo y todas las sincronizaciones salientes, y no una copia que
+     * se desincronice. Recorre los mismos candidatos, en el mismo orden y con el mismo filtro de "URL
+     * válida" que `resolve_base_url()`, porque los dos comparten `base_url_candidates()`.
+     *
+     * Ojo: NO es lo mismo que mirar `clients.active_client_api_id`, que es lo que muestra la ficha de
+     * `claude/clients/{id}`. Cuando el cliente no tiene API activa cargada, o la que tiene no trae una
+     * URL válida, el resolver cae a la primera ClientApi con una URL válida, y es esa a la que se le habla.
+     *
+     * @param  Client  $client
+     * @param  ClientVersionUpgrade|null  $upgrade
+     * @return ClientApi|null
+     */
+    public function resolve_client_api(Client $client, ?ClientVersionUpgrade $upgrade = null): ?ClientApi
+    {
+        foreach ($this->base_url_candidates($client, $upgrade) as [$candidate_url, $hosting_type, $candidate_api]) {
+            if ($this->normalize_api_base_url($candidate_url, $hosting_type) !== '') {
+                return $candidate_api;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Los candidatos a "la API del cliente", en orden de prioridad. Es la ÚNICA definición de ese orden:
+     * la usan `resolve_base_url()` y `resolve_client_api()`.
+     *
+     * Cada candidato es `[url, hosting_type, ClientApi|null]`; el tercero es null para el valor legacy
+     * `clients.api_url`, que no tiene ClientApi detrás.
+     *
+     * @param  Client  $client
+     * @param  ClientVersionUpgrade|null  $upgrade
+     * @return array<int, array{0: string|null, 1: string, 2: ClientApi|null}>
+     */
+    protected function base_url_candidates(Client $client, ?ClientVersionUpgrade $upgrade = null): array
+    {
+        $client->loadMissing('active_client_api', 'client_apis');
+
+        if ($upgrade !== null) {
+            $upgrade->loadMissing('target_client_api');
+        }
+
+        // Lista de candidatos: cada uno es un array [url, hosting_type, ClientApi|null]
+        $candidates = [];
+
+        // Prioridad 1: API destino del upgrade
+        if ($upgrade !== null && $upgrade->target_client_api instanceof ClientApi) {
+            $hosting_type = $upgrade->target_client_api->hosting_type ?? 'shared_hosting';
+            $candidates[] = [$upgrade->target_client_api->url, $hosting_type, $upgrade->target_client_api];
+        }
+
+        // Prioridad 2: API activa del cliente
+        if ($client->active_client_api instanceof ClientApi) {
+            $hosting_type = $client->active_client_api->hosting_type ?? 'shared_hosting';
+            $candidates[] = [$client->active_client_api->url, $hosting_type, $client->active_client_api];
+        }
+
+        // Prioridad 3: Cada ClientApi del cliente
+        foreach ($client->client_apis as $client_api) {
+            $hosting_type = $client_api->hosting_type ?? 'shared_hosting';
+            $candidates[] = [$client_api->url, $hosting_type, $client_api];
+        }
+
+        // Prioridad 4: clients.api_url (legacy, sin ClientApi detras)
+        // Se trata como VPS porque es un valor histórico cargado a mano y no sabemos
+        // con qué convención se guardó; mejor no agregar /public a un legacy.
+        $candidates[] = [$client->api_url, 'vps', null];
+
+        return $candidates;
     }
 
     /**
