@@ -5,7 +5,9 @@ namespace Tests\Feature\CatalogoDelClientePorClaude;
 use App\Http\Controllers\Api\ClaudeClientCatalogoController;
 use App\Models\Client;
 use App\Models\ClientApi;
+use App\Services\ClientInboundKeySyncService;
 use App\Services\EnvSshService;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Str;
 use Tests\Fakes\EnvSshServiceFake;
 
@@ -1071,6 +1073,80 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
         $this->assertSame([], $this->ssh->escrituras);
         $this->assertSame($generada, (string) $cliente->fresh()->api_key, 'La clave guardada no cambia en la segunda llamada.');
         $this->assertSinLaClave($otra, $generada);
+    }
+
+    /**
+     * 🔴 Si el UPDATE que guarda la clave GENERADA falla, la `QueryException` de Laravel arma su mensaje
+     * con el SQL y sus BINDINGS —o sea, con la clave nueva en claro—, y ese texto no puede llegar a la
+     * respuesta de error ni al log (el handler imprime también la cadena de `previous`). El servicio la
+     * atrapa y el endpoint contesta un 500 con código estable `clave_no_guardada` y un texto fijo.
+     *
+     * El doble hace fallar el guardado con una `QueryException` REAL cuyos bindings llevan la clave que
+     * se intentaba guardar; el test lee esa clave del doble y la busca en la respuesta y en el log.
+     *
+     * @return void
+     */
+    public function test_si_falla_el_guardado_de_la_clave_generada_no_sale_ni_en_la_respuesta_ni_en_el_log(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes('Doblep Distribuciones', '');
+
+        $doble = new class($this->ssh) extends ClientInboundKeySyncService {
+            /** @var string|null La clave que intentó guardar (para buscarla en la respuesta y el log). */
+            public $clave_intentada;
+
+            protected function guardar_si_sigue_vacia(Client $client, $nueva)
+            {
+                $this->clave_intentada = $nueva;
+
+                throw new QueryException(
+                    'update `clients` set `api_key` = ?, `updated_at` = ? where `id` = ? and (`api_key` is null or TRIM(api_key) = \'\')',
+                    [$nueva, '2026-10-06 22:00:00', $client->id],
+                    new \PDOException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock')
+                );
+            }
+        };
+
+        $this->app->instance(ClientInboundKeySyncService::class, $doble);
+
+        $registro = $this->capturar_el_log();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(500);
+        $this->assertSame('clave_no_guardada', $respuesta->json('error'));
+        $this->assertNotSame('', trim((string) $respuesta->json('mensaje')));
+
+        $clave = (string) $doble->clave_intentada;
+        $this->assertSame(40, strlen($clave), 'El doble intentó guardar una clave de verdad.');
+
+        /* 🔴 La clave no está en la respuesta ni en el log. */
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertLogSinLaClave($registro, $clave);
+
+        /* Y tampoco el texto de la base: es un 500 con texto fijo. */
+        foreach (['SQLSTATE', 'Deadlock', 'update `clients`', 'bindings'] as $texto_de_la_base) {
+            $this->assertStringNotContainsString($texto_de_la_base, $this->cuerpo($respuesta));
+            $this->assertStringNotContainsString($texto_de_la_base, implode("\n", $registro->lineas));
+        }
+
+        /* Queda constancia del fallo en el log, con la clase del error y sin su mensaje. */
+        $propias = array_values(array_filter($registro->registros, function ($r) {
+            return strpos($r['mensaje'], 'ClientInboundKeySyncService: no se pudo guardar la clave generada') === 0;
+        }));
+
+        $this->assertCount(1, $propias);
+        $this->assertSame('error', $propias[0]['nivel']);
+        $this->assertSame((int) $cliente->id, $propias[0]['contexto']['client_id']);
+        $this->assertSame(QueryException::class, $propias[0]['contexto']['excepcion']);
+
+        /* No se escribió nada en ningún servidor y el cliente sigue sin clave. */
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+        $this->assertSame('', trim((string) $cliente->fresh()->api_key));
     }
 
     /**

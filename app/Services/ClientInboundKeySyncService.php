@@ -106,6 +106,23 @@ class ClientInboundKeySyncService
     const SEGUNDOS_MAXIMOS = 180;
 
     /**
+     * Código de la excepción que lanza `sincronizar()` cuando la clave GENERADA no se pudo guardar en el
+     * admin (falló la base). El controlador la reconoce por este código y contesta un 500 con código
+     * estable (`clave_no_guardada`), sin el texto de la base.
+     *
+     * @var int
+     */
+    const CODIGO_CLAVE_NO_GUARDADA = 5201;
+
+    /**
+     * Texto FIJO de esa excepción: no lleva nada de lo que dijo la base, que puede traer la clave nueva.
+     *
+     * @var string
+     */
+    const MENSAJE_CLAVE_NO_GUARDADA = 'No se pudo guardar la clave nueva del cliente en el admin (falló la base de datos). '
+        . 'No se escribió nada en ningún servidor: reintentá, y si se repite mirá el log del admin.';
+
+    /**
      * Servicio que abre el SSH y opera el `.env` de cada frente.
      *
      * @var EnvSshService
@@ -345,30 +362,65 @@ class ClientInboundKeySyncService
      * que la primera ya la escribió en un servidor: la que pierde la carrera usa la clave que
      * quedó guardada.
      *
+     * 🔴 Si la base falla, NO se deja salir la excepción de Laravel: una `QueryException` arma su
+     * mensaje con el SQL y los BINDINGS, y los del UPDATE son la clave nueva en claro. Ese texto saldría
+     * en la respuesta de error y en el log del handler. Se atrapa todo, se deja constancia de la clase
+     * del error y de su SQLSTATE (que no trae valores) y se lanza una `RuntimeException` propia, con
+     * texto fijo, un código que el controlador reconoce y SIN encadenar la original como `previous`
+     * (el handler imprime también esa cadena).
+     *
      * @param Client $client Cliente sin clave.
      *
      * @return string La clave que quedó guardada.
+     *
+     * @throws \RuntimeException Con `CODIGO_CLAVE_NO_GUARDADA` si la base falló.
      */
     protected function generar_y_guardar(Client $client)
     {
         $nueva = Str::random(40);
 
-        $filas = Client::query()
-            ->where('id', $client->id)
-            ->where(function ($sub) {
-                $sub->whereNull('api_key')->orWhereRaw("TRIM(api_key) = ''");
-            })
-            ->update(['api_key' => $nueva]);
+        try {
+            $filas = $this->guardar_si_sigue_vacia($client, $nueva);
 
-        $guardada = $filas > 0
-            ? $nueva
-            : trim((string) Client::query()->where('id', $client->id)->value('api_key'));
+            $guardada = $filas > 0
+                ? $nueva
+                : trim((string) Client::query()->where('id', $client->id)->value('api_key'));
+        } catch (\Throwable $e) {
+            Log::error('ClientInboundKeySyncService: no se pudo guardar la clave generada del cliente.', [
+                'client_id' => (int) $client->id,
+                'excepcion' => get_class($e),
+                'sqlstate'  => (string) $e->getCode(),
+            ]);
+
+            throw new \RuntimeException(self::MENSAJE_CLAVE_NO_GUARDADA, self::CODIGO_CLAVE_NO_GUARDADA);
+        }
 
         /* El modelo en memoria refleja lo guardado, sin quedar marcado como modificado. */
         $client->setAttribute('api_key', $guardada);
         $client->syncOriginalAttribute('api_key');
 
         return $guardada;
+    }
+
+    /**
+     * El UPDATE condicional que guarda la clave nueva solo si el cliente sigue sin ninguna.
+     *
+     * Es un método aparte para poder hacer fallar el guardado en un test sin tocar la base, y para que
+     * `generar_y_guardar()` tenga UN solo lugar donde atrapar lo que diga la base.
+     *
+     * @param Client $client Cliente sin clave.
+     * @param string $nueva  La clave generada.
+     *
+     * @return int Filas actualizadas: 1 si la guardó, 0 si otro pedido ya había guardado una.
+     */
+    protected function guardar_si_sigue_vacia(Client $client, $nueva)
+    {
+        return Client::query()
+            ->where('id', $client->id)
+            ->where(function ($sub) {
+                $sub->whereNull('api_key')->orWhereRaw("TRIM(api_key) = ''");
+            })
+            ->update(['api_key' => $nueva]);
     }
 
     /**

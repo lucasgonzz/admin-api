@@ -108,7 +108,8 @@ class ClaudeClientCatalogoController extends Controller
      * valor de ninguna clave. `listo` es true con AL MENOS UN frente `igual` o `escrita` y NINGUNO en
      * `falta`, `distinta` o `error`; un frente `sin_env` no cuenta (ver
      * `ClientInboundKeySyncService::calcular_listo()`). Errores: 404 `cliente_inexistente`, 409
-     * `sin_frentes`, 422 `validacion`.
+     * `sin_frentes`, 422 `validacion` y 500 `clave_no_guardada` (falló la base al guardar la clave
+     * recién generada: texto fijo, sin nada de lo que dijo la base; no se escribió nada en ningún servidor).
      *
      * @param Request                      $request      Request entrante (`dry_run`, `confirm_client_name`).
      * @param int|string                   $id           Id numérico o uuid del cliente.
@@ -156,7 +157,20 @@ class ClaudeClientCatalogoController extends Controller
             );
         }
 
-        return response()->json($sincronizador->sincronizar($client, $pedido['dry_run']), 200);
+        try {
+            $resultado = $sincronizador->sincronizar($client, $pedido['dry_run']);
+        } catch (\RuntimeException $e) {
+            /* Solo el fallo de guardar la clave generada tiene respuesta propia; cualquier otra
+               excepción es un error de verdad y sigue su camino. */
+            if ($e->getCode() !== ClientInboundKeySyncService::CODIGO_CLAVE_NO_GUARDADA) {
+                throw $e;
+            }
+
+            /* El mensaje es el texto FIJO del servicio: nada de lo que dijo la base, que trae la clave. */
+            return $this->responder_error('clave_no_guardada', 500, $e->getMessage());
+        }
+
+        return response()->json($resultado, 200);
     }
 
     /* ==============================================================================================
