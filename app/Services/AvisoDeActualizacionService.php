@@ -26,11 +26,15 @@ use Illuminate\Support\Facades\Mail;
  *      que salga nada. Es lo que deduplica (único por actualización + cliente) y lo que deja
  *      rastro de un aviso que quedó debiendo.
  *   2. **La casilla.** `ClientContactEmailResolver`, que mira `clients.email` y si no hay le
- *      pregunta al `empresa-api` del cliente. Sin casilla no sale nada y queda `sin_mail`.
+ *      pregunta al `empresa-api` del cliente. Sin casilla no sale nada y queda `sin_mail`. Solo
+ *      LEE: la casilla que trae el cliente NO se guarda en la ficha todavía (ver el paso 4).
  *   3. **Las novedades.** Si esas versiones no traen ninguna para este cliente, el mail NO se
  *      manda: queda `sin_novedades`. Un mail que dice "actualizamos tu sistema" y abajo no tiene
  *      nada es peor que no mandarlo.
- *   4. **El mail.**
+ *   4. **El mail.** Y recién cuando el servidor de correo lo ACEPTÓ, la casilla que pudo haber
+ *      traído el cliente se guarda en su ficha (`recordar()`). Si el mail no salió —un rechazo, una
+ *      excepción, el mailer sin credencial— la ficha queda como estaba: una casilla que nunca
+ *      demostró funcionar no puede quedar grabada como la del dueño.
  *   5. **El WhatsApp, y solo si el mail salió.** 🔴 El mensaje dice "te mandamos un mail":
  *      mandarlo sin haber mandado el mail es mentirle al dueño.
  *
@@ -327,6 +331,16 @@ class AvisoDeActualizacionService
             $aviso->mail_enviado_at = now();
             $aviso->error           = null;
             $aviso->save();
+
+            /* 4.ter. La casilla se guarda en la ficha RECIÉN ACÁ, con el mail ya aceptado por el servidor. Antes
+               la guardaba `resolve()` en el paso 2, antes de mandar nada, y una casilla que el servidor rechaza
+               quedaba grabada en `clients.email` como si fuera la del dueño (y todo envío siguiente la leía de ahí
+               sin volver a preguntar). Si el mail no salió —excepción, credencial faltante, rechazo— no se llega
+               hasta acá y la ficha queda como estaba; el reintento le vuelve a preguntar al cliente.
+               `recordar()` no tira (atrapa todo y lo anota en el log) y va DESPUÉS de dejar el aviso `enviado`:
+               una falla al guardar la casilla no puede dar vuelta un aviso que ya salió. Tampoco pisa una casilla
+               válida que alguien haya cargado a mano en la ficha mientras el mail salía. */
+            $this->resolver_de_casilla->recordar($client, $casilla);
         }
 
         /* 5. El WhatsApp, y solo con el mail ya mandado. */
