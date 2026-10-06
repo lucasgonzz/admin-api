@@ -11,6 +11,7 @@ use Illuminate\Mail\Mailable;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
+use Tests\Fakes\FallaSiElServidorSmtpNoArranca;
 use Tests\Fakes\ServidorSmtpFake;
 
 /**
@@ -40,6 +41,9 @@ use Tests\Fakes\ServidorSmtpFake;
  */
 class CasillaDelClienteTrasElRechazoTest extends BaseDelAviso
 {
+    // Si el servidor SMTP de prueba no arranca y el entorno podía lanzarlo, el test FALLA (no se saltea en silencio).
+    use FallaSiElServidorSmtpNoArranca;
+
     /** La casilla que trae el sistema del cliente, y la que el servidor "rechaza" o "acepta". */
     const CASILLA_TRAIDA = 'traido.privado@ejemplo.test';
 
@@ -65,8 +69,8 @@ class CasillaDelClienteTrasElRechazoTest extends BaseDelAviso
     }
 
     /**
-     * Levanta un servidor SMTP de verdad y apunta el mailer `admin` a él. Si en este entorno no se puede
-     * lanzar un proceso, el test se saltea.
+     * Levanta un servidor SMTP de verdad y apunta el mailer `admin` a él. Si este entorno no puede lanzar
+     * procesos, el test se saltea; si puede y el servidor no arranca, el test FALLA (ver el trait).
      *
      * @param string $modo ServidorSmtpFake::MODO_RECHAZA | MODO_ACEPTA.
      *
@@ -77,7 +81,7 @@ class CasillaDelClienteTrasElRechazoTest extends BaseDelAviso
         $servidor = ServidorSmtpFake::levantar($modo);
 
         if ($servidor === null) {
-            $this->markTestSkipped('No se pudo lanzar el servidor SMTP de prueba en este entorno.');
+            $this->el_servidor_smtp_no_arranco();
         }
 
         $this->servidores_smtp[] = $servidor;

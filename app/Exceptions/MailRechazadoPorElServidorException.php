@@ -29,8 +29,8 @@ class MailRechazadoPorElServidorException extends \RuntimeException
      * Lo que se le muestra a quien opera el panel, y lo que queda en la columna `*_mail_last_error`
      * del lead. Dice qué pasó y qué hacer, sin jerga de SMTP.
      */
-    const MOTIVO = 'el servidor de correo rechazó la casilla del destinatario (no existe o no acepta mensajes). '
-        . 'Corregí el email en la ficha y volvé a enviar.';
+    const MOTIVO = 'el servidor de correo rechazó la casilla del destinatario (no existe, está llena o no acepta mensajes por ahora). '
+        . 'Revisá el email en la ficha y volvé a enviar.';
 
     /**
      * Las casillas que el servidor rechazó. Se guardan aparte del mensaje (ver el docblock de la clase).

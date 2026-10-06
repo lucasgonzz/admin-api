@@ -28,6 +28,14 @@ use Illuminate\Support\Facades\Log;
  * leía de ahí sin volver a preguntar. Guardar solo una casilla que ya demostró funcionar es lo que
  * evita eso. El costo, asumido: si el servidor rechaza la casilla que trajo el cliente, el
  * reintento le vuelve a preguntar al `empresa-api` (una llamada HTTP más) en vez de leerla de la ficha.
+ * Lo mismo para un aviso que quedó `sin_novedades` o sin credencial en el mailer: el mail no salió, así que
+ * la casilla traída tampoco se guarda (antes sí, porque se guardaba antes de saber nada).
+ *
+ * 🔴 **Una excepción deliberada, y no es un olvido:** `aviso-actualizacion:reintentar --email=<casilla>
+ * --aplicar` (`ReintentarAvisoDeActualizacionCommand`) SÍ escribe la casilla en la ficha ANTES de reintentar.
+ * Ahí no es una casilla que trajo un sistema ajeno sino una que el operador dicta a mano por consola, y la
+ * misma salida le muestra `Mail: no salió` con el motivo si el servidor la rechaza. Es una orden explícita de
+ * quien está mirando, no un efecto colateral de resolver una casilla.
  *
  * 🔴 **El paso 2 degrada sin romper, y eso no es defensividad genérica: es el estado normal
  * durante semanas.** Ese endpoint es nuevo del lado de `empresa-api` y los ~45 clientes corren

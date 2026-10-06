@@ -4,7 +4,9 @@ namespace Tests\Unit;
 
 use App\Exceptions\MailRechazadoPorElServidorException;
 use App\Mail\Helpers\RechazosDeCorreoHelper;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Tests\Fakes\FallaSiElServidorSmtpNoArranca;
 use Tests\Fakes\ServidorSmtpFake;
 use Tests\TestCase;
 
@@ -26,6 +28,9 @@ use Tests\TestCase;
  */
 class RechazosDeCorreoHelperTest extends TestCase
 {
+    // Si el servidor SMTP de prueba no arranca y el entorno podía lanzarlo, el test FALLA (no se saltea en silencio).
+    use FallaSiElServidorSmtpNoArranca;
+
     /**
      * Los servidores SMTP de mentira que levantó el test, para bajarlos al terminar.
      *
@@ -48,8 +53,8 @@ class RechazosDeCorreoHelperTest extends TestCase
     }
 
     /**
-     * Levanta un servidor SMTP de verdad y apunta el mailer dado a él. Si en este entorno no se puede
-     * lanzar un proceso, el test se saltea.
+     * Levanta un servidor SMTP de verdad y apunta el mailer dado a él. Si este entorno no puede lanzar
+     * procesos, el test se saltea; si puede y el servidor no arranca, el test FALLA (ver el trait).
      *
      * Hay que llamarlo ANTES de que el test use el mailer por primera vez: el administrador de mails
      * guarda cada mailer ya armado.
@@ -64,7 +69,7 @@ class RechazosDeCorreoHelperTest extends TestCase
         $servidor = ServidorSmtpFake::levantar($modo);
 
         if ($servidor === null) {
-            $this->markTestSkipped('No se pudo lanzar el servidor SMTP de prueba en este entorno.');
+            $this->el_servidor_smtp_no_arranco();
         }
 
         $this->servidores_smtp[] = $servidor;
@@ -224,7 +229,16 @@ class RechazosDeCorreoHelperTest extends TestCase
 
     /**
      * El helper lee el ÚLTIMO envío: el mailer reinicia la lista en cada `send()`. Un envío que sale bien
-     * después de uno rechazado no arrastra el rechazo viejo.
+     * después de uno rechazado, POR EL MISMO MAILER, no arrastra el rechazo viejo.
+     *
+     * 🔴 Tiene que ser el mismo objeto mailer. Una versión anterior de este test cambiaba de servidor con
+     * `Mail::purge('smtp')`, que descarta el mailer cacheado: el segundo envío corría sobre un mailer NUEVO, con la
+     * lista vacía de fábrica, y el `assertSame([], …)` pasaba igual aunque nadie reiniciara nada (el chequeo
+     * independiente lo midió). Acá, en cambio, se le cambia el puerto al transporte del MISMO mailer para que el
+     * segundo envío vaya al servidor que acepta, y se comprueba que la instancia sea la misma. Lo que se prueba es
+     * `Illuminate\Mail\Mailer::sendSwiftMessage()` (`$this->failedRecipients = []`): SwiftMailer no reinicia por su
+     * cuenta la variable que recibe por referencia, así que sin ese reinicio un envío bueno heredaría el rechazo de
+     * uno anterior y se daría por fallido.
      *
      * @return void
      */
@@ -232,22 +246,65 @@ class RechazosDeCorreoHelperTest extends TestCase
     {
         $this->levantar_un_smtp_por_defecto(ServidorSmtpFake::MODO_RECHAZA);
 
+        $mailer = Mail::mailer('smtp');
+
         $this->mandar_un_mail_de_prueba('uno@ejemplo.test');
         $this->assertSame(['uno@ejemplo.test'], RechazosDeCorreoHelper::del_ultimo_envio());
 
-        // El mismo mailer, ahora con el servidor aceptando: se baja el que rechazaba y se levanta otro.
-        $this->servidores_smtp[0]->bajar();
+        // El MISMO mailer, ahora contra un servidor que acepta: se lanza otro y se le cambia el puerto al transporte.
         $acepta = ServidorSmtpFake::levantar(ServidorSmtpFake::MODO_ACEPTA);
 
         if ($acepta === null) {
-            $this->markTestSkipped('No se pudo lanzar el segundo servidor SMTP de prueba en este entorno.');
+            $this->el_servidor_smtp_no_arranco();
         }
 
         $this->servidores_smtp[] = $acepta;
-        $acepta->apuntar_el_mailer('smtp');
-        Mail::purge('smtp');
+        $mailer->getSwiftMailer()->getTransport()->setPort($acepta->puerto);
 
         $this->mandar_un_mail_de_prueba('dos@ejemplo.test');
+
+        $this->assertSame($mailer, Mail::mailer('smtp'), 'Tiene que ser la MISMA instancia: lo que se prueba es el reinicio de la lista, no un mailer nuevo.');
+        $this->assertSame([], RechazosDeCorreoHelper::del_ultimo_envio(), 'El envío que salió bien no hereda el rechazo del anterior.');
+    }
+
+    /**
+     * Lo mismo, con dos rechazos seguidos por el mismo mailer: la lista es la del ÚLTIMO envío y no la suma de los
+     * dos. Si el mailer acumulara, acá habría dos casillas.
+     *
+     * @return void
+     */
+    public function test_la_lista_es_la_del_ultimo_envio_y_no_acumula_los_anteriores(): void
+    {
+        $this->levantar_un_smtp_por_defecto(ServidorSmtpFake::MODO_RECHAZA);
+
+        $this->mandar_un_mail_de_prueba('uno@ejemplo.test');
+        $this->mandar_un_mail_de_prueba('dos@ejemplo.test');
+
+        $this->assertSame(['dos@ejemplo.test'], RechazosDeCorreoHelper::del_ultimo_envio());
+    }
+
+    /**
+     * Si `failures()` no se puede leer, el helper no inventa un rechazo (devuelve vacío) pero TAMPOCO se calla: deja
+     * un aviso en el log. Sin él, un upgrade de Laravel o un typo que rompa la lectura devolvería a los nueve
+     * envíos a leads y a los dos servicios a darse por enviados en silencio, que es justo el defecto que el helper
+     * existe para evitar.
+     *
+     * @return void
+     */
+    public function test_si_no_se_puede_leer_failures_no_inventa_un_rechazo_pero_lo_deja_en_el_log(): void
+    {
+        Mail::shouldReceive('mailer')->with(null)->andThrow(new \RuntimeException('el mailer no responde failures()'));
+
+        Log::shouldReceive('warning')->once()->with(
+            \Mockery::on(function ($mensaje) {
+                return is_string($mensaje) && strpos($mensaje, 'no se pudo leer failures()') !== false;
+            }),
+            \Mockery::on(function ($contexto) {
+                return is_array($contexto)
+                    && $contexto['mailer'] === '(por defecto)'
+                    && $contexto['error'] === 'el mailer no responde failures()';
+            })
+        );
 
         $this->assertSame([], RechazosDeCorreoHelper::del_ultimo_envio());
     }
@@ -306,7 +363,9 @@ class RechazosDeCorreoHelperTest extends TestCase
     public function test_el_motivo_dice_que_paso_y_que_hacer(): void
     {
         $this->assertStringContainsString('el servidor de correo rechazó la casilla', MailRechazadoPorElServidorException::MOTIVO);
-        $this->assertStringContainsString('Corregí el email en la ficha', MailRechazadoPorElServidorException::MOTIVO);
+        // No afirma que la casilla "no existe": un 451 de greylisting o un 452 de buzón lleno también entran a `failures()`.
+        $this->assertStringContainsString('no existe, está llena o no acepta mensajes por ahora', MailRechazadoPorElServidorException::MOTIVO);
+        $this->assertStringContainsString('Revisá el email en la ficha y volvé a enviar', MailRechazadoPorElServidorException::MOTIVO);
     }
 
     /**

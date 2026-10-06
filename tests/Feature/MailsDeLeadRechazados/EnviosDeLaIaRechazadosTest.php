@@ -103,6 +103,22 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
     }
 
     /**
+     * Los disparadores donde el paquete de acciones trae `guardar_email`: el email llega después y el mail sale por
+     * ese motivo. Son los únicos donde el resumen de "acciones ejecutadas" de la burbuja dice
+     * "Enviar mail de acceso a la demo a <casilla>" (`LeadMessage::build_actions_summary()` agrega esa línea solo con
+     * `guardar_email`), así que son los únicos donde se puede probar que se corrige.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public static function disparadores_con_email_nuevo(): array
+    {
+        return [
+            'punto 7: Mail 1 cuando llega el email nuevo'   => ['mail_1_por_email_nuevo'],
+            'punto 9e: carta cuando llega el email nuevo'   => ['carta_por_email_nuevo'],
+        ];
+    }
+
+    /**
      * Lead de la dinámica nueva SIN demo asignada todavía: el que recibe la carta al asignarse la demo directa.
      *
      * 🔴 La dinámica se fija DESPUÉS del primer `save()`: el hook `creating` del modelo estampa la dinámica
@@ -205,6 +221,24 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
                     'evento_falla'  => 'Carta de acceso no enviada: falló el envío',
                 ];
 
+            case 'mail_1_por_email_nuevo':
+                // Dinámica vieja, ya agendada y SIN email: el lead lo pasa después y llega como `guardar_email`. Es el único
+                // camino del Mail 1 donde el paquete trae `guardar_email`, y por eso el único donde el resumen de acciones
+                // de la burbuja dice "Enviar mail de acceso a la demo a <casilla>" (ver los tests del resumen).
+                $lead = $this->con_un_mensaje_entrante($this->crear_lead_de_la_dinamica_vieja(['email' => null]));
+
+                return [
+                    'lead'          => $lead,
+                    'pendientes'    => ['guardar_email' => self::CASILLA],
+                    'final_actions' => $this->final_actions(['guardar_email' => self::CASILLA, 'enviar_mail_demo' => true]),
+                    'reintento'     => $this->final_actions(['enviar_mail_demo' => true]),
+                    'mailable'      => LeadDemoMail::class,
+                    'enviado_antes' => null,
+                    'evento_ok'     => 'Mail de demo enviado',
+                    'evento_fallo'  => 'Mail de demo no enviado: el servidor de correo rechazó la casilla',
+                    'evento_falla'  => 'Mail de demo no enviado: falló el envío',
+                ];
+
             default:
                 // Dinámica nueva con la carta ya enviada hace horas: el lead pide que se la reenvíen.
                 $lead = $this->con_un_mensaje_entrante($this->crear_lead_de_la_dinamica_nueva([
@@ -226,7 +260,9 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
     }
 
     /**
-     * Los eventos que quedaron anotados en `admin_notifications` del mensaje (es lo que dibuja la burbuja del panel).
+     * Los eventos que quedaron anotados en `admin_notifications` del mensaje. Son un dato del mensaje (API y base):
+     * la burbuja del panel NO dibuja los que tienen `admins` vacío (`admin_notifications_parsed` los filtra), ni los
+     * de "enviado" de siempre ni los de "no enviado" de esta misión.
      *
      * @param LeadMessage $mensaje
      *
@@ -509,6 +545,124 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
         $this->assertSame(
             [['evento' => 'Mail de demo no enviado: el servidor de correo rechazó la casilla', 'admins' => []]],
             $eventos
+        );
+    }
+
+    /**
+     * Las líneas del resumen de "acciones ejecutadas" que quedaron guardadas en el mensaje.
+     *
+     * @param LeadMessage $mensaje
+     *
+     * @return array<int, string>
+     */
+    private function resumen_de(LeadMessage $mensaje): array
+    {
+        return array_map('strval', (array) $mensaje->fresh()->applied_actions_summary);
+    }
+
+    /**
+     * (f) 🔴 El resumen de "acciones ejecutadas" de la burbuja NO puede decir que se manda un mail que el servidor
+     * rechazó. `LeadMessage::build_actions_summary()` lo arma con el paquete de acciones ANTES de mandar nada y
+     * `apply_parsed_response()` lo guarda con el mensaje: si el paquete trae `guardar_email` (el camino normal de la
+     * dinámica nueva) dice "Enviar mail de acceso a la demo a <casilla>" y la burbuja lo muestra con su tilde. Sin
+     * la corrección, con un 550 la tarjeta de la ficha decía "Fallido" y la conversación decía que se mandó (y
+     * repetía la casilla entera): el mismo "enviado" falso en otra pantalla. Lo encontró el chequeo independiente;
+     * el relevamiento de "qué hace el resto del flujo con un enviado" había mirado las marcas de la ficha y no esto.
+     *
+     * La línea se REEMPLAZA (no se borra), así que se ve que se intentó y que no salió, y la nueva no lleva la casilla.
+     *
+     * Solo corre con los disparadores donde esa línea EXISTE: los que traen `guardar_email` en el paquete. En los otros
+     * el resumen no la tiene y el test no podría ponerse rojo nunca (PHPUnit lo marcaría "risky" por no afirmar nada).
+     *
+     * @dataProvider disparadores_con_email_nuevo
+     *
+     * @param string $clave
+     *
+     * @return void
+     */
+    public function test_el_resumen_de_acciones_no_dice_que_se_mando_un_mail_que_el_servidor_rechazo(string $clave): void
+    {
+        $caso = $this->armar($clave);
+
+        $this->el_servidor_rechaza();
+
+        $resumen = $this->resumen_de($this->aprobar($caso['lead'], $caso['pendientes'], $caso['final_actions']));
+
+        // Lo que no puede quedar: la línea que dice que se manda el mail, ni la casilla entera repetida en la conversación.
+        $lineas_que_mienten = array_values(array_filter($resumen, function ($linea) {
+            return strpos($linea, LeadAiService::PREFIJO_RESUMEN_MAIL_DE_ACCESO) !== false || strpos($linea, self::CASILLA) !== false;
+        }));
+        $this->assertSame([], $lineas_que_mienten, 'El mail no salió: el resumen no puede decir que se manda ni repetir la casilla.');
+
+        // La línea se reemplazó (no se borró): se ve que se intentó y que el servidor rechazó la casilla.
+        $this->assertContains('No se pudo enviar el mail de acceso a la demo (el servidor de correo rechazó la casilla)', $resumen);
+    }
+
+    /**
+     * (f, control) Con un servidor que ACEPTA, el resumen queda como siempre: dice que se manda el mail de acceso a
+     * esa casilla. Sin esto, un arreglo que reemplazara la línea siempre pasaría el test de arriba.
+     *
+     * @dataProvider disparadores_con_email_nuevo
+     *
+     * @param string $clave
+     *
+     * @return void
+     */
+    public function test_con_un_smtp_que_acepta_el_resumen_conserva_la_linea_del_mail_de_acceso(string $clave): void
+    {
+        $caso = $this->armar($clave);
+
+        $this->el_servidor_acepta();
+
+        $resumen = $this->resumen_de($this->aprobar($caso['lead'], $caso['pendientes'], $caso['final_actions']));
+
+        $this->assertContains(LeadAiService::PREFIJO_RESUMEN_MAIL_DE_ACCESO . self::CASILLA, $resumen);
+        $this->assertNotContains('No se pudo enviar el mail de acceso a la demo (el servidor de correo rechazó la casilla)', $resumen);
+    }
+
+    /**
+     * (f) Una falla que NO es un rechazo (la conexión se cae) también corrige el resumen: el mail tampoco salió.
+     * La línea nueva no dice "el servidor rechazó la casilla" porque no fue eso.
+     *
+     * @dataProvider disparadores_con_email_nuevo
+     *
+     * @param string $clave
+     *
+     * @return void
+     */
+    public function test_una_falla_que_no_es_un_rechazo_tambien_corrige_el_resumen(string $clave): void
+    {
+        $caso = $this->armar($clave);
+
+        Mail::shouldReceive('to')->andThrow(new \RuntimeException('Connection could not be established with host smtp.ejemplo.test'));
+
+        $resumen = $this->resumen_de($this->aprobar($caso['lead'], $caso['pendientes'], $caso['final_actions']));
+
+        $this->assertContains('No se pudo enviar el mail de acceso a la demo', $resumen);
+        $this->assertNotContains('No se pudo enviar el mail de acceso a la demo (el servidor de correo rechazó la casilla)', $resumen, 'No fue un rechazo del servidor.');
+
+        $lineas_que_mienten = array_values(array_filter($resumen, function ($linea) {
+            return strpos($linea, LeadAiService::PREFIJO_RESUMEN_MAIL_DE_ACCESO) !== false;
+        }));
+        $this->assertSame([], $lineas_que_mienten);
+    }
+
+    /**
+     * (f) El acople por texto entre dos archivos, fijado: la corrección busca la línea por su comienzo
+     * (`LeadAiService::PREFIJO_RESUMEN_MAIL_DE_ACCESO`) y la arma `LeadMessage::build_actions_summary()`. Si alguien
+     * cambia el texto en el modelo y no en el servicio, este test se pone rojo; sin él, la corrección dejaría de
+     * encontrar la línea y la burbuja volvería a decir en silencio que se mandó un mail rechazado.
+     *
+     * @return void
+     */
+    public function test_la_linea_del_resumen_que_se_corrige_es_la_que_arma_el_modelo(): void
+    {
+        $resumen = LeadMessage::build_actions_summary(['guardar_email' => self::CASILLA], null);
+
+        $this->assertContains(
+            LeadAiService::PREFIJO_RESUMEN_MAIL_DE_ACCESO . self::CASILLA,
+            $resumen,
+            'LeadMessage dejó de armar la línea con el comienzo que busca LeadAiService.'
         );
     }
 }

@@ -11,6 +11,7 @@ use App\Services\LeadAiService;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
+use Tests\Fakes\FallaSiElServidorSmtpNoArranca;
 use Tests\Fakes\ServidorSmtpFake;
 use Tests\TestCase;
 
@@ -38,6 +39,9 @@ use Tests\TestCase;
 abstract class BaseDeMailsDeLead extends TestCase
 {
     use DatabaseTransactions;
+
+    // Si el servidor SMTP de prueba no arranca y el entorno podía lanzarlo, el test FALLA (no se saltea en silencio).
+    use FallaSiElServidorSmtpNoArranca;
 
     /**
      * La casilla del lead de prueba: la que el servidor "rechaza". Los tests verifican que NO aparezca
@@ -81,8 +85,9 @@ abstract class BaseDeMailsDeLead extends TestCase
     }
 
     /**
-     * Levanta un servidor SMTP de verdad y deja el mailer POR DEFECTO apuntando a él. Si en este
-     * entorno no se puede lanzar un proceso, el test se saltea.
+     * Levanta un servidor SMTP de verdad y deja el mailer POR DEFECTO apuntando a él. Si este entorno
+     * no puede lanzar procesos, el test se saltea; si puede y el servidor no arranca, el test FALLA
+     * (ver `FallaSiElServidorSmtpNoArranca`).
      *
      * Hay que llamarlo ANTES de que el test use el mailer por primera vez.
      *
@@ -95,7 +100,7 @@ abstract class BaseDeMailsDeLead extends TestCase
         $servidor = ServidorSmtpFake::levantar($modo);
 
         if ($servidor === null) {
-            $this->markTestSkipped('No se pudo lanzar el servidor SMTP de prueba en este entorno.');
+            $this->el_servidor_smtp_no_arranco();
         }
 
         $this->servidores_smtp[] = $servidor;

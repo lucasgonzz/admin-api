@@ -3,6 +3,7 @@
 namespace App\Mail\Helpers;
 
 use App\Exceptions\MailRechazadoPorElServidorException;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 
 /**
@@ -36,6 +37,18 @@ use Illuminate\Support\Facades\Mail;
  * Se lee de `Mail::mailer($nombre)->failures()`, que es la MISMA instancia del mailer que mandó el
  * mail (el administrador de mails guarda cada mailer ya armado), y que arranca vacía en cada envío.
  * Bajo `Mail::fake()` el falso también responde `failures()` y devuelve vacío.
+ *
+ * 🔴 **Límites que hay que saber (medidos con el SwiftMailer 6.3 de `vendor/` contra un SMTP de mentira).**
+ *
+ *   - `failures()` lista CUALQUIER destinatario rechazado, no solo el principal. Hoy ningún mailable de
+ *     leads agrega `cc` ni `bcc`, así que "hubo rechazos" significa "el lead no recibió el mail". El día que
+ *     uno agregue una copia interna, un rechazo de ESA copia marcaría como fallido un mail que SÍ llegó al
+ *     lead (y un reintento se lo mandaría dos veces): ahí hay que mirar si la casilla rechazada es la del lead.
+ *   - Entran a `failures()` los rechazos temporales (un 451 de greylisting, un 452 de buzón lleno) igual que
+ *     un 550: con 4xx la casilla puede estar bien. Por eso el motivo que ve el operador dice "no existe, está
+ *     llena o no acepta mensajes por ahora" y no "la casilla está mal".
+ *   - Solo ve el rechazo SÍNCRONO en el RCPT TO. Un servidor que acepta el mail y después lo devuelve (rebote
+ *     asincrónico al buzón remitente) no se ve desde acá.
  */
 class RechazosDeCorreoHelper
 {
@@ -64,6 +77,15 @@ class RechazosDeCorreoHelper
         try {
             $rechazadas = Mail::mailer($mailer)->failures();
         } catch (\Throwable $excepcion) {
+            // 🔴 No se inventa un fallo, pero tampoco se calla: si `failures()` deja de responder (un upgrade de
+            // Laravel, un typo), los envíos a leads y a clientes volverían EN SILENCIO a darse por enviados aunque el
+            // servidor los rechace, que es justo el defecto que este helper existe para evitar. Un renglón en el log
+            // hace que ese día se note. Bajo `Mail::fake()` no se pasa por acá: el falso sí responde `failures()`.
+            Log::warning('RechazosDeCorreoHelper: no se pudo leer failures() del mailer; se asume que el servidor no rechazó nada.', [
+                'mailer' => $mailer === null ? '(por defecto)' : $mailer,
+                'error'  => $excepcion->getMessage(),
+            ]);
+
             return [];
         }
 

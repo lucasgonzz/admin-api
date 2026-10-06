@@ -29,6 +29,12 @@ use RecursiveIteratorIterator;
  * acá). Alcanza para el modo de falla real, que es agregar un envío nuevo y olvidarse del chequeo. Y
  * justamente porque una heurística ciega pasa en verde para siempre, hay un test que exige que el detector
  * VEA los envíos que ya existen: ver `test_el_detector_ve_los_envios_que_ya_existen_en_app()`.
+ *
+ * Puntos ciegos medidos por el chequeo independiente (el detector cuenta CERO envíos en estas formas, y hoy no
+ * hay ninguna en `app/`): partir el envío en dos sentencias (`$p = Mail::to($a); $p->send($b);` o
+ * `$m = Mail::mailer('admin'); $m->to($a)->send($b);`), un alias de la fachada, `$this->mailer->send(...)` o
+ * `app('mailer')->send(...)` (fuera de la fachada) y `Notification::route('mail', ...)`. Quien escriba un envío
+ * así tiene que mirar los rechazos igual, aunque este test no se lo exija.
  */
 class TodoEnvioDeMailMiraLosRechazosTest extends TestCase
 {
