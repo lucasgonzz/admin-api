@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\UserSetupBloqueadoException;
 use App\Http\Controllers\CommonLaravel\Helpers\ModelPropertiesHelper;
 use App\Mail\Helpers\LeadPresentationMailHelper;
 use App\Mail\Helpers\LeadFollowupMailHelper;
@@ -387,13 +388,21 @@ class LeadController extends Controller
     /**
      * Dispara el user-setup en el empresa-api de producción del Lead promovido.
      *
+     * 🔴 Si el candado frena (el sistema del cliente ya opera o ya se configuró: el user setup hace `migrate:fresh` del otro lado) no
+     * se llamó a nadie ni se tocó nada: se vuelve al lead con el motivo (`UserSetupBloqueadoException`).
+     *
      * @param RunUserSetupService $service
      */
     public function run_user_setup($id, RunUserSetupService $service)
     {
         $lead = Lead::findOrFail($id);
 
-        $lead = $service->run($lead);
+        try {
+            $lead = $service->run($lead);
+        } catch (UserSetupBloqueadoException $bloqueo) {
+            return redirect()->route('leads.show', $lead->id)
+                             ->with('error', 'No se creó el sistema: ' . $bloqueo->getMessage());
+        }
 
         if ($lead->user_setup_status === 'exitoso') {
             return redirect()->route('leads.show', $lead->id)
@@ -2494,6 +2503,11 @@ class LeadController extends Controller
     /**
      * Ejecuta user-setup del sistema real desde admin-spa.
      *
+     * 🔴 Es el endpoint que usa la skill `/instalar-cliente`. Si el candado frena (el sistema del cliente ya opera o ya se configuró: el
+     * user setup hace `migrate:fresh` del otro lado) responde 422 con `bloqueado: true` y los `chequeos` que fallaron, y NO se llamó a
+     * nadie ni se tocó nada: quien lo recibe no reintenta, mira el sistema del cliente. La skill ya trata un no-200 con `message`; las
+     * claves nuevas son aditivas.
+     *
      * @param int|string $id
      * @param RunUserSetupService $service
      *
@@ -2504,7 +2518,16 @@ class LeadController extends Controller
         // Lead promovido objetivo para el setup de producción.
         $lead = Lead::findOrFail($id);
         // Ejecución encapsulada en servicio de provisioning.
-        $lead = $service->run($lead);
+        try {
+            $lead = $service->run($lead);
+        } catch (UserSetupBloqueadoException $bloqueo) {
+            return response()->json([
+                'message'   => 'No se creó el sistema: ' . $bloqueo->getMessage(),
+                'model'     => $this->fullModel('lead', $lead->id),
+                'bloqueado' => true,
+                'chequeos'  => $bloqueo->chequeos(),
+            ], 422);
+        }
 
         if ($lead->user_setup_status === 'exitoso') {
             return response()->json(['model' => $this->fullModel('lead', $lead->id)], 200);

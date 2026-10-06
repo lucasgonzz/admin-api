@@ -55,6 +55,16 @@ class UserSetupCandadoService
      */
     const MINUTOS_PARA_DAR_POR_COLGADO = 45;
 
+    /**
+     * Los estados de `leads.user_setup_status` que dicen "el setup del sistema de este cliente ya salió o está saliendo" por el
+     * camino de LEADS: `ejecutandose` (la llamada está en vuelo, o se cortó sin terminar), `exitoso` y `sin_confirmar` (la llamada
+     * salió y no se sabe cómo terminó). Los demás (`pendiente`, `fallido`, o ninguno) NO frenan: el setup no se aplicó, y reintentarlo
+     * es el flujo de `/instalar-cliente`.
+     *
+     * @var array<int, string>
+     */
+    const ESTADOS_DEL_LEAD_QUE_YA_CONFIGURARON = ['ejecutandose', 'exitoso', RunDemoSetupService::ESTADO_SIN_CONFIRMAR];
+
     /* ==============================================================================================
      | El plan estricto (claude/implementations/{id}/user-setup, el job y el modo automático)
      |============================================================================================= */
@@ -295,7 +305,7 @@ class UserSetupCandadoService
            /instalar-cliente para crear al dueño). Ese camino no escribe el candado de la implementación, así que sin
            esto el candado de abajo no se entera. `sin_confirmar` es "la llamada salió y no se sabe cómo terminó". */
         $estado_del_lead = $this->estado_del_user_setup_del_lead($client);
-        $lead_aplicado   = in_array($estado_del_lead, ['ejecutandose', 'exitoso', RunDemoSetupService::ESTADO_SIN_CONFIRMAR], true);
+        $lead_aplicado   = in_array($estado_del_lead, self::ESTADOS_DEL_LEAD_QUE_YA_CONFIGURARON, true);
 
         $chequeos[] = $this->chequeo(
             'lead_sin_user_setup',
@@ -317,6 +327,109 @@ class UserSetupCandadoService
                 ? 'El user setup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '. 🔴 Re-aplicarlo VACÍA la base del cliente '
                     . '(migrate:fresh): este camino no tiene forzar. Si de verdad hace falta, se hace desde el panel, con una persona mirando.'
                 : 'Todavía no se aplicó.'
+        );
+
+        return $chequeos;
+    }
+
+    /**
+     * Las tres PROTECCIONES de la puerta de LEADS (`RunUserSetupService::run()`): `sin_sistema_vivo`, `lead_sin_user_setup` e
+     * `implementacion_sin_user_setup`, en este orden.
+     *
+     * 🔴 Son las de siempre ("este sistema ya opera o ya se configuró"), con las diferencias de esta puerta, que a propósito NO mira
+     * lo que no le corresponde:
+     *  - NO mira si la instalación es "posterior" a algo: en el flujo viejo el sistema se instalaba y DESPUÉS se promovía el lead.
+     *  - NO exige instalación completada ni etapa: no cambia lo que este camino hacía (es una PRECONDICIÓN de "está listo", no una
+     *    protección).
+     *  - SÍ mira las implementaciones del cliente (`implementacion_sin_user_setup`): este camino llama al MISMO endpoint remoto que el
+     *    de implementaciones y no escribe su candado, así que sin esto no se entera de que ya aplicó el setup por allá.
+     *  - `lead_sin_user_setup` mira el estado del propio lead Y el del último lead promovido a ese cliente.
+     *
+     * Con `$client` en null (el lead todavía no tiene cliente promovido: se va a crear al aplicar el setup) los dos chequeos que miran al
+     * cliente "no aplican", pero el del propio lead sí: un `exitoso` sin cliente tampoco se pisa.
+     *
+     * Lee, no escribe. Los nombres de `sin_sistema_vivo` y `lead_sin_user_setup` son los mismos que en `claude/*`; los textos están
+     * pensados para quien aprieta el botón del lead, que no tiene "forzar".
+     *
+     * @param Lead        $lead   El lead al que se le va a crear el sistema.
+     * @param Client|null $client El cliente promovido de ese lead, o null si todavía no existe.
+     *
+     * @return array<int, array<string, mixed>> Los tres chequeos, cada uno con `chequeo`, `ok` y `detalle`.
+     */
+    public function protecciones_de_lead(Lead $lead, ?Client $client): array
+    {
+        // Los chequeos, en orden.
+        $chequeos = [];
+
+        /* 1. Que el cliente no tenga ya un sistema vivo (un cliente al que el admin ya le desplegó versiones). */
+        $vivo = $client === null ? ['vivo' => false, 'motivos' => []] : $this->sistema_vivo($client);
+
+        $chequeos[] = $this->chequeo(
+            'sin_sistema_vivo',
+            ! $vivo['vivo'],
+            $vivo['vivo']
+                ? 'El cliente ya tiene un sistema vivo: ' . implode(' ', $vivo['motivos']) . ' 🔴 migrate:fresh le borraría lo que tiene. Este botón no vuelve a crear un '
+                    . 'sistema que ya opera: si de verdad hace falta, se hace mirando el sistema del cliente, desde la raíz (no desde acá).'
+                : ($client === null
+                    ? 'El lead todavía no tiene un cliente promovido: no hay un sistema que pudiera estar vivo.'
+                    : 'Sin señales de un sistema ya instalado (el cliente no tiene actualizaciones registradas).')
+        );
+
+        /* 2. Que el user setup no se haya aplicado ya por este mismo camino: el estado del propio lead y el del último lead promovido
+           a ese cliente (pueden ser distintos si el cliente salió de más de un lead). Es la señal que escribe `RunUserSetupService`. */
+        $estado_propio = trim((string) $lead->user_setup_status);
+        $estado_del_cliente = $client === null ? null : $this->estado_del_user_setup_del_lead($client);
+
+        // Cuál de los dos dice que ya se configuró (el propio, primero) y de quién es.
+        $estado_que_frena = null;
+        $de_quien         = '';
+
+        if (in_array($estado_propio, self::ESTADOS_DEL_LEAD_QUE_YA_CONFIGURARON, true)) {
+            $estado_que_frena = $estado_propio;
+            $de_quien         = 'El user setup de este lead';
+        } elseif (in_array($estado_del_cliente, self::ESTADOS_DEL_LEAD_QUE_YA_CONFIGURARON, true)) {
+            $estado_que_frena = $estado_del_cliente;
+            $de_quien         = 'El user setup del lead del que salió este cliente';
+        }
+
+        $chequeos[] = $this->chequeo(
+            'lead_sin_user_setup',
+            $estado_que_frena === null,
+            $estado_que_frena !== null
+                ? $de_quien . ' está en estado "' . $estado_que_frena . '": el sistema del cliente ya se configuró (o se está configurando, o la llamada salió y no se sabe '
+                    . 'cómo terminó) por este camino. 🔴 Volver a aplicarlo VACÍA la base del cliente (migrate:fresh). Verificá el sistema del cliente (`motor <cliente> '
+                    . 'metricas`: ¿existe el dueño?): este botón no re-aplica un setup que ya salió.'
+                : 'El user setup no se aplicó por el camino de leads.'
+        );
+
+        /* 3. Que ninguna implementación del cliente haya aplicado el user setup (candado lleno) ni tenga uno en curso. */
+        $razones = [];
+
+        if ($client !== null) {
+            foreach (Implementation::where('client_id', $client->id)->orderBy('id')->get() as $implementacion) {
+                if ($implementacion->user_setup_executed_at !== null) {
+                    $razones[] = 'La implementación ' . (int) $implementacion->id . ' del cliente ya aplicó el user setup el '
+                        . $implementacion->user_setup_executed_at->format('d/m/Y H:i') . '.';
+
+                    continue;
+                }
+
+                $registro = $this->registro_del_user_setup($implementacion);
+
+                if ((isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso' && ! $this->esta_colgado($registro)) {
+                    $razones[] = 'La implementación ' . (int) $implementacion->id . ' del cliente tiene un user setup en curso (arrancó '
+                        . (isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : 'sin fecha') . ').';
+                }
+            }
+        }
+
+        $chequeos[] = $this->chequeo(
+            'implementacion_sin_user_setup',
+            count($razones) === 0,
+            count($razones) > 0
+                ? implode(' ', $razones) . ' 🔴 migrate:fresh le borraría lo que se cargó después. Este botón no lo vuelve a aplicar: si de verdad hace falta, se hace desde el panel '
+                    . 'de implementaciones, con una persona mirando.'
+                : 'Ninguna implementación del cliente aplicó el user setup ni tiene uno en curso.'
         );
 
         return $chequeos;
