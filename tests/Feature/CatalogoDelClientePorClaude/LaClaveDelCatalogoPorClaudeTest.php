@@ -696,6 +696,52 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * 🔴 Si el RESPALDO falla, ese frente NO se escribe: queda `estado: error` + `accion: fallo` con el
+     * motivo (sin la clave, aunque el mensaje la traiga), no se le toca ni un byte al `.env` y el otro
+     * frente se escribe igual. Escribir sin respaldo es dejar un `.env` modificado sin a dónde volver.
+     *
+     * @return void
+     */
+    public function test_si_el_respaldo_falla_ese_frente_no_se_escribe_y_los_demas_siguen(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave);
+
+        $this->ssh->fallan_al_respaldar[$uno->id] = 'No se pudo crear el backup del .env en /home/x/.env.bak-1 (disco lleno) ADMIN_API_INBOUND_KEY=' . $clave;
+
+        $antes    = $this->ssh->envs[$uno->id];
+        $registro = $this->capturar_el_log();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $roto = $this->fila($respuesta, $uno);
+        $this->assertSame('error', $roto['estado']);
+        $this->assertSame('fallo', $roto['accion']);
+        $this->assertStringContainsString('backup', (string) $roto['error']);
+        $this->assertStringContainsString('[clave oculta]', (string) $roto['error']);
+
+        $this->assertArrayNotHasKey($uno->id, $this->ssh->backups, 'Un respaldo que falla no deja nada.');
+        $this->assertArrayNotHasKey($uno->id, $this->ssh->escrituras, 'Sin respaldo no se escribe.');
+        $this->assertSame($antes, $this->ssh->envs[$uno->id], 'El .env del frente sin respaldo no cambió ni un byte.');
+
+        $sano = $this->fila($respuesta, $dos);
+        $this->assertSame('escrita', $sano['accion'], 'El otro frente se respaldó y se escribió igual.');
+        $this->assertArrayHasKey($dos->id, $this->ssh->backups);
+        $this->assertSame($clave, $this->valor_en_el_env($dos, self::VARIABLE));
+
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertLogSinLaClave($registro, $clave);
+    }
+
+    /**
      * Un frente sin `.env` NO se crea (escribir ahí dejaría un archivo en el servidor equivocado) y no
      * cuenta ni a favor ni en contra de `listo`: con el otro frente escrito, el cliente queda listo.
      *

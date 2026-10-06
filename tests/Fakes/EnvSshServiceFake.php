@@ -44,6 +44,17 @@ class EnvSshServiceFake extends EnvSshService
     public $fallan_al_escribir = [];
 
     /**
+     * Ids de API que fallan al RESPALDAR el .env, con el mensaje de error a devolver.
+     *
+     * Simula el `cp` del respaldo que no puede escribir (disco lleno, cuota agotada del hosting). El
+     * servicio real lanza ahí y NO llega a escribir: un respaldo que no existe es peor que no tenerlo,
+     * porque hace creer que hay a dónde volver. Un respaldo que falla no deja nada en `$backups`.
+     *
+     * @var array<int, string>
+     */
+    public $fallan_al_respaldar = [];
+
+    /**
      * Escrituras efectivamente realizadas: client_api_id => [KEY => valor].
      *
      * @var array<int, array<string, string>>
@@ -155,9 +166,15 @@ class EnvSshServiceFake extends EnvSshService
      * @param  ClientApi  $client_api
      * @param  string     $timestamp
      * @return string
+     * @throws \RuntimeException Si esa API está marcada como fallada al respaldar (no queda ningún backup).
      */
     public function backup_env_for(ClientApi $client_api, string $timestamp): string
     {
+        if (isset($this->fallan_al_respaldar[$client_api->id])) {
+            /* Espeja al servicio real: si el backup no queda escrito lanza, y no registra nada. */
+            throw new \RuntimeException($this->fallan_al_respaldar[$client_api->id]);
+        }
+
         $path = '/fake/' . $client_api->id . '/.env.bak-' . $timestamp;
 
         $this->backups[$client_api->id] = $path;
