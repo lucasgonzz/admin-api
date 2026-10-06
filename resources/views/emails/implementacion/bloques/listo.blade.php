@@ -9,12 +9,13 @@
   `hito.blade.php`: $font y $url_sistema.
 --}}
 @php
-    // Lo que sigue después de que el sistema queda listo. Constantes de este mismo archivo.
-    $lo_que_sigue = [
+    // Lo que sigue después de que el sistema queda listo. Constantes de este mismo archivo, salvo la línea de ARCA: va solo si
+    // aplica ($con_arca; `datos.arca: false` la saca). A un cliente que no factura electrónicamente no se le dice que se la conectamos.
+    $lo_que_sigue = array_values(array_filter([
         'Una videollamada con vos y tu equipo para resolver dudas y dejarlos operando.',
-        'Conectamos la facturación electrónica con ARCA.',
+        $con_arca ? 'Conectamos la facturación electrónica con ARCA.' : null,
         'Soporte por WhatsApp, siempre con una persona del otro lado.',
-    ];
+    ]));
 @endphp
 @if(count($resumen) > 0)
 <tr>

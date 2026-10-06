@@ -48,6 +48,6 @@
 @endif
 <tr>
   <td class="cc-lado" style="padding:28px 48px 0 48px;">
-    <p style="margin:0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;">Mientras tanto seguimos con las fotos de tus productos y con el orden de tu catálogo.</p>
+    <p style="margin:0;font-family:{!! $font !!};font-size:15px;line-height:24px;color:#566078;">Mientras tanto seguimos con las fotos de tus productos.</p>
   </td>
 </tr>

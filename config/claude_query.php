@@ -2379,6 +2379,11 @@ return [
          | matchea la reja `token` de columnas_prohibidas: declararlo rompe el
          | build, que es exactamente lo que tiene que pasar.
          |
+         | (La excepción buscada y acotada: `GET claude/implementations/{id}` —no
+         | esta consulta genérica— devuelve `form_link`, el link completo con el
+         | token, porque es lo que Claude le manda al cliente por WhatsApp Web
+         | para que complete el formulario: ClaudeImplementationOpsController.)
+         |
          | `migration_contact_phone` es PII —el teléfono del responsable de la
          | migración— y va opt-in, mismo criterio que `clients.phone`.
          |
@@ -2530,7 +2535,7 @@ return [
                     'columnas'    => ['id', 'client_id', 'current_stage', 'status', 'automation_mode'],
                 ],
             ],
-            'nota' => '🔴 `data` no se sirve por PII (form_responses del stage 1: email y doc_number del titular). El resumen legible del formulario lo arma ImplementationFormMapper::build_summary() y se ve en el panel; no hay endpoint claude/* que lo devuelva.',
+            'nota' => '🔴 `data` no se sirve por PII (form_responses del stage 1: email y doc_number del titular). El resumen legible del formulario lo arma ImplementationFormMapper::build_summary() y se ve en el panel y en `GET claude/implementations/{id}?include=formulario` (sin email, documento ni teléfonos salvo con include=contacto).',
         ],
 
         /* ---------------------------------------------------------------

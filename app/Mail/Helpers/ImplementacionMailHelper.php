@@ -224,8 +224,7 @@ class ImplementacionMailHelper
                     'preheader' => self::numero($con_foto) . ' de tus ' . self::numero($total) . ' '
                         . self::plural($total, 'artículo', 'artículos') . ' ya ' . ($con_foto === 1 ? 'tiene' : 'tienen') . ' foto.',
                     'titular'   => 'Tus productos ya tienen foto.',
-                    'intro'     => 'Con el Catálogo Inteligente buscamos la foto de cada artículo en los catálogos de tus proveedores '
-                        . 'y por su código de barras, y la verificamos antes de asignarla.',
+                    'intro'     => 'Con el Catálogo Inteligente buscamos la foto de cada artículo y la verificamos antes de asignarla.',
                 ];
 
             case 'categorias':
@@ -597,6 +596,8 @@ class ImplementacionMailHelper
         return [
             'resumen'      => $resumen,
             'recursos_url' => $recursos_url,
+            // La línea de ARCA de "lo que sigue" va salvo que se haya pasado `arca: false` (el cliente no factura electrónicamente).
+            'con_arca'     => ! (isset($datos['arca']) && $datos['arca'] === false),
         ];
     }
 }

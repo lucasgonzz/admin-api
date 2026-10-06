@@ -54,7 +54,7 @@ Entrar a mi sistema: {{ $url_sistema }}
 Cuando entres, cambiá la contraseña desde la configuración.
 @endif
 
-Mientras tanto seguimos con las fotos de tus productos y con el orden de tu catálogo.
+Mientras tanto seguimos con las fotos de tus productos.
 @elseif($hito === 'imagenes')
 {{ $con_foto_texto }} de {{ $total_texto }} {{ $fotos_leyenda }}.
 El {{ $porcentaje }} % de tu catálogo ya tiene foto.
@@ -68,7 +68,7 @@ Fuentes: {{ $fuentes }}
 @if($mostrar_boton && $url_fotos !== '')
 
 Revisar las fotos: {{ $url_fotos }}
-Las que apruebes quedan en tu sistema y en tu tienda online.
+Las que apruebes quedan en tu sistema, y en tu tienda online si tenés una.
 @endif
 @elseif($hito === 'categorias')
 @foreach($opciones as $opcion)
@@ -95,7 +95,9 @@ Ver los tutoriales: {{ $recursos_url }}
 
 Lo que sigue:
 - Una videollamada con vos y tu equipo para resolver dudas y dejarlos operando.
+@if($con_arca)
 - Conectamos la facturación electrónica con ARCA.
+@endif
 - Soporte por WhatsApp, siempre con una persona del otro lado.
 
 Gracias por elegirnos para acompañar a tu negocio.

@@ -113,7 +113,7 @@ class ImplementacionMailService
         'acceso'     => ['articulos'],
         'imagenes'   => ['con_foto', 'total', 'a_revisar', 'fuentes'],
         'categorias' => ['opciones', 'como_elegir'],
-        'listo'      => ['resumen', 'recursos_url'],
+        'listo'      => ['resumen', 'recursos_url', 'arca'],
     ];
 
     /**
@@ -352,7 +352,7 @@ class ImplementacionMailService
                 'error'             => $excepcion->getMessage(),
             ]);
 
-            return self::registrar_fallo($fila, $impl, $hito, $para, $armado['asunto'], $excepcion->getMessage());
+            return self::registrar_fallo($fila, $impl, $hito, $para, $armado['asunto'], self::sin_la_casilla_entera($excepcion->getMessage(), $para));
         }
 
         /*
@@ -386,11 +386,111 @@ class ImplementacionMailService
             );
         }
 
-        $resultado = self::registrar_envio($fila, $impl, $hito, $para, $armado['asunto']);
+        /* 🔴 El mail YA SALIÓ. Si anotarlo falla, NO se deja pasar la excepción (un 500): quien llama reintentaría y el dueño
+           recibiría el mail dos veces. El índice único `(implementation_id, hito)` no evita el doble mail: solo impide dos filas. */
+        try {
+            $resultado = self::registrar_envio($fila, $impl, $hito, $para, $armado['asunto']);
+        } catch (\Throwable $excepcion) {
+            $resultado = self::envio_que_salio_sin_registrarse($impl, $hito, $para, $armado['asunto'], $excepcion);
+        }
 
         self::guardar_la_casilla_en_el_cliente($armado['client'], $para, $email);
 
         return $resultado;
+    }
+
+    /**
+     * El mail SALIÓ —el servidor lo aceptó— pero no se pudo anotar en `implementation_mails`.
+     *
+     * 🔴 Devuelve `estado: enviado` y NO un error ni una excepción: lo que se pidió ya pasó, y un error invita a reintentar y a
+     * mandarlo dos veces. Los dos casos que llegan acá:
+     *   - Otra llamada ya escribió la fila de este hito mientras ésta mandaba (el lock de 120 s venció con el SMTP colgado, o se
+     *     vació el caché): el índice único rechaza el INSERT. Se la relee y se la deja `enviado` con esta fecha.
+     *   - La base falló justo entre el SMTP y el INSERT: no hay dónde anotarlo. Queda un log CRÍTICO diciendo que el mail salió, y la
+     *     respuesta lleva un `aviso` para que nadie lo reenvíe.
+     *
+     * @param Implementation $impl
+     * @param string         $hito
+     * @param string         $para
+     * @param string         $asunto
+     * @param \Throwable     $excepcion Lo que falló al anotar.
+     *
+     * @return array<string, mixed>
+     */
+    private static function envio_que_salio_sin_registrarse(Implementation $impl, string $hito, string $para, string $asunto, \Throwable $excepcion): array
+    {
+        Log::channel('daily')->critical('ImplementacionMail: el mail SALIÓ pero no se pudo anotar en implementation_mails.', [
+            'implementation_id' => $impl->id,
+            'hito'              => $hito,
+            'email'             => ImplementacionMailHelper::enmascarar($para),
+            'error'             => $excepcion->getMessage(),
+        ]);
+
+        $enviado_at = now();
+        $reenvios   = 0;
+        $anotado    = false;
+
+        try {
+            $fila = ImplementationMail::where('implementation_id', $impl->id)->where('hito', $hito)->first();
+
+            if ($fila instanceof ImplementationMail) {
+                $fila->email      = $para;
+                $fila->asunto     = $asunto;
+                $fila->estado     = ImplementationMail::ESTADO_ENVIADO;
+                $fila->enviado_at = $enviado_at;
+                $fila->error      = null;
+                $fila->save();
+
+                $reenvios = (int) $fila->reenvios;
+                $anotado  = true;
+            }
+        } catch (\Throwable $segunda) {
+            // La base sigue sin responder: quedan el log crítico y el aviso de la respuesta.
+        }
+
+        $resultado = [
+            'estado'           => ImplementationMail::ESTADO_ENVIADO,
+            'para_enmascarado' => ImplementacionMailHelper::enmascarar($para),
+            'enviado_at'       => $enviado_at->toIso8601String(),
+            'reenvios'         => $reenvios,
+            'error'            => null,
+        ];
+
+        if (! $anotado) {
+            $resultado['aviso'] = 'El mail SALIÓ, pero no se pudo anotar en implementation_mails (' . self::recortar_texto($excepcion->getMessage(), 160)
+                . '). NO lo reenvíes: el dueño ya lo tiene. Mirá el log de la aplicación (crítico) y, si hace falta, dejalo registrado a mano.';
+        }
+
+        return $resultado;
+    }
+
+    /**
+     * Cambia la casilla entera por su versión enmascarada dentro de un texto (el motivo de un error del SMTP suele repetir la
+     * dirección). La entera ya está en la columna `email` de la fila: no tiene por qué estar también en el motivo ni en las respuestas.
+     *
+     * @param string $texto El texto del error.
+     * @param string $para  La casilla.
+     *
+     * @return string
+     */
+    private static function sin_la_casilla_entera(string $texto, string $para): string
+    {
+        return $para === '' ? $texto : str_ireplace($para, ImplementacionMailHelper::enmascarar($para), $texto);
+    }
+
+    /**
+     * Recorta un texto a un largo máximo, en caracteres (con puntos suspensivos si se cortó).
+     *
+     * @param string $texto
+     * @param int    $maximo
+     *
+     * @return string
+     */
+    private static function recortar_texto(string $texto, int $maximo): string
+    {
+        $texto = trim((string) preg_replace('/\s+/u', ' ', $texto));
+
+        return mb_strlen($texto, 'UTF-8') > $maximo ? mb_substr($texto, 0, $maximo, 'UTF-8') . '…' : $texto;
     }
 
     /**
@@ -535,6 +635,10 @@ class ImplementacionMailService
                     $errores['con_foto'] = 'No puede ser mayor que el total (' . $total . '): saldría "más del 100 %".';
                 }
 
+                if ($a_revisar !== null && $total !== null && $total >= 1 && $a_revisar > $total) {
+                    $errores['a_revisar'] = 'No puede ser mayor que el total (' . $total . '): saldría "más fotos por revisar que artículos".';
+                }
+
                 if ($con_foto !== null) {
                     $limpio['con_foto'] = $con_foto;
                 }
@@ -571,6 +675,20 @@ class ImplementacionMailService
 
                 if ($resumen !== null) {
                     $limpio['resumen'] = $resumen;
+                }
+
+                if ($resumen !== null && isset($resumen['con_foto'], $resumen['articulos']) && $resumen['con_foto'] > $resumen['articulos']) {
+                    $errores['resumen.con_foto'] = 'No puede ser mayor que los artículos (' . $resumen['articulos'] . '): saldría "más fotos que artículos".';
+                }
+
+                /* `arca: false` saca del mail la línea de la facturación electrónica: a un cliente que no factura así no se le
+                   dice que se la conectamos. Sin el dato (o en true) la línea va. */
+                if (array_key_exists('arca', $datos) && $datos['arca'] !== null) {
+                    if (is_bool($datos['arca'])) {
+                        $limpio['arca'] = $datos['arca'];
+                    } else {
+                        $errores['arca'] = 'Tiene que ser verdadero o falso (false saca la línea de ARCA del mail).';
+                    }
                 }
 
                 $recursos_url = self::leer_texto($datos, 'recursos_url', 'recursos_url', 500, false, false, $errores);
@@ -658,6 +776,17 @@ class ImplementacionMailService
                 'categorias' => $categorias,
                 'ejemplos'   => $ejemplos,
             ];
+        }
+
+        if ($valido) {
+            $nombres = array_map(function ($opcion) {
+                return mb_strtolower($opcion['nombre'], 'UTF-8');
+            }, $salida);
+
+            if (count(array_unique($nombres)) !== count($nombres)) {
+                $errores['opciones'] = 'Las tres opciones tienen que tener nombres distintos: son tres formas distintas de ordenar el catálogo.';
+                $valido = false;
+            }
         }
 
         return $valido ? $salida : null;
@@ -840,7 +969,7 @@ class ImplementacionMailService
             return null;
         }
 
-        $texto = trim($origen[$campo]);
+        $texto = trim(self::sin_caracteres_de_control($origen[$campo]));
 
         if (! $multilinea) {
             $texto = (string) preg_replace('/\s+/u', ' ', $texto);
@@ -898,7 +1027,32 @@ class ImplementacionMailService
      */
     private static function es_una_url_web(string $url): bool
     {
-        return preg_match('#^https?://#i', $url) === 1 && filter_var($url, FILTER_VALIDATE_URL) !== false;
+        if (preg_match('#^https?://#i', $url) !== 1 || filter_var($url, FILTER_VALIDATE_URL) === false) {
+            return false;
+        }
+
+        // Nada de comillas, ángulos ni espacios (es un `href`), y nada de usuario:clave@ en un link que ve el dueño.
+        if (preg_match('#[\s"\'<>`]#u', $url) === 1) {
+            return false;
+        }
+
+        $partes = parse_url($url);
+
+        return is_array($partes) && ! empty($partes['host']) && ! isset($partes['user']) && ! isset($partes['pass']);
+    }
+
+    /**
+     * Saca de un texto los caracteres que no tienen lugar en un mail: los de control (menos el salto de línea y el retorno de
+     * carro, que los textos multilínea conservan), el DEL, los de ancho cero y los que cambian la dirección del texto (los
+     * RTL/LTR override de U+202A a U+202E y los aislantes de U+2066 a U+2069, que dan vuelta lo que se lee).
+     *
+     * @param string $texto
+     *
+     * @return string
+     */
+    private static function sin_caracteres_de_control(string $texto): string
+    {
+        return (string) preg_replace('/[\x{0000}-\x{0008}\x{000B}\x{000C}\x{000E}-\x{001F}\x{007F}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{2064}\x{2066}-\x{206F}\x{FEFF}]/u', '', $texto);
     }
 
     /**
@@ -995,7 +1149,10 @@ class ImplementacionMailService
 
         foreach ($candidatos as $candidato) {
             if (is_string($candidato) && trim($candidato) !== '') {
-                return trim($candidato);
+                /* El del formulario es texto libre del cliente, sin tope ni saneo: una sola línea y hasta 80 caracteres. */
+                $limpio = trim((string) preg_replace('/\s+/u', ' ', self::sin_caracteres_de_control($candidato)));
+
+                return mb_substr($limpio, 0, 80, 'UTF-8');
             }
         }
 

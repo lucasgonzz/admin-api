@@ -83,9 +83,10 @@ class EjecutarUserSetupDeImplementacionJob implements ShouldQueue
      * errores que no prueban que no corrió, para que el que lo lea (una sesión de Claude, o Lucas) sepa los
      * dos caminos sin tener que ir a buscar el endpoint.
      */
-    const ANTES_DE_REINTENTAR = 'ANTES de reintentar, mirá si el dueño existe en el sistema del cliente: si existe, el setup corrió '
-        . '—conciliá con `conciliar: true` (marca el user setup como aplicado SIN volver a correrlo)—; si no existe, reintentá con '
-        . '`reintentar: true` (un reintento le vuelve a vaciar la base: migrate:fresh).';
+    const ANTES_DE_REINTENTAR = 'ANTES de reintentar, mirá si el dueño existe en el sistema del cliente (con sus listas de precios y sus depósitos: '
+        . '`motor <cliente> metricas`): si existe completo, el setup corrió —conciliá con `conciliar: true` (marca el user setup como aplicado SIN '
+        . 'volver a correrlo)—; si no existe, reintentá con `reintentar: true` (un reintento le vuelve a vaciar la base: migrate:fresh); si existe '
+        . 'pero sin sus listas o sus depósitos, el setup se cortó a medias: no concilies ni reintentes por tu cuenta, hablá con Lucas.';
 
     /**
      * Tiempo máximo de ejecución del job, en segundos. 🔴 Por debajo de `retry_after` (2400).

@@ -2,12 +2,14 @@
 
 namespace App\Jobs;
 
+use App\Models\Client;
 use App\Models\ClientInstallation;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Corre la instalación del sistema de un cliente que pidió `POST claude/implementations/{id}/install`:
@@ -94,6 +96,42 @@ class EjecutarInstalacionDeImplementacionJob implements ShouldQueue
     public function handle()
     {
         (new RunClientInstallationGroupJob($this->installation_uuids))->handle();
+
+        $this->alinear_la_version_del_cliente();
+    }
+
+    /**
+     * Con la instalación REAL terminada, `clients.current_version_id` pasa a la versión que se instaló.
+     *
+     * 🔴 `install` instala la ÚLTIMA versión publicada, no la que quedó fijada en el cliente al promoverlo (el panel, en cambio,
+     * instala justamente `current_version_id`: ahí quedaban consistentes). Sin esto, un lead promovido con la 4.3.5 e instalado
+     * semanas después con la 4.3.7 deja el cliente en la 4.3.5, y su primera actualización parte de la 4.3.5 (`from_version_id`)
+     * y genera los seeders y comandos de versiones que la instalación ya trae.
+     *
+     * Solo si la fila `completa` terminó `completada` y trae versión; si no, no toca nada. Por query builder (sin eventos del
+     * modelo) y sin dejar escapar ninguna excepción: un fallo acá no puede ensuciar el resultado de una instalación que anduvo.
+     *
+     * @return void
+     */
+    public function alinear_la_version_del_cliente()
+    {
+        try {
+            $real = ClientInstallation::query()
+                ->whereIn('uuid', $this->installation_uuids)
+                ->where('kind', ClientInstallation::KIND_COMPLETA)
+                ->first();
+
+            if ($real === null || $real->status !== 'completada' || $real->version_id === null || $real->client_id === null) {
+                return;
+            }
+
+            Client::query()->whereKey((int) $real->client_id)->update(['current_version_id' => (int) $real->version_id]);
+        } catch (\Throwable $e) {
+            Log::channel('daily')->error('EjecutarInstalacionDeImplementacionJob: no se pudo alinear la versión del cliente.', [
+                'uuids' => $this->installation_uuids,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

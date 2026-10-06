@@ -38,6 +38,13 @@ class CreateImplementationMailsTable extends Migration
      */
     public function up()
     {
+        // 🔴 Idempotente: la migración se renumeró (de 2026_10_05_100000 a 2026_10_05_120000, porque otra misión subió una con ese
+        // prefijo a master) y las bases de los slots donde ya corrió tienen la tabla con el nombre viejo. Mismo criterio que otras
+        // migraciones recientes del admin (`hasTable`/`hasColumn`): un slot al que se le mergea la rama después de haberla probado.
+        if (Schema::hasTable('implementation_mails')) {
+            return;
+        }
+
         Schema::create('implementation_mails', function (Blueprint $table) {
             $table->id();
 

@@ -523,6 +523,11 @@ class ImplementationController extends Controller
     public function destroy(Implementation $implementation): JsonResponse
     {
         DB::transaction(function () use ($implementation) {
+            // Los mails de hito de ESTA implementación (misión implementar-cliente): la tabla no tiene foreign key y sus filas
+            // quedarían huérfanas, con un único (implementation_id, hito) que una implementación nueva podría heredar si MySQL
+            // reutiliza el id (el AUTO_INCREMENT de una versión vieja) y leer como "ya enviado" un mail que nunca salió.
+            \App\Models\ImplementationMail::where('implementation_id', $implementation->id)->delete();
+
             $implementation->delete();
         });
 

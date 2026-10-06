@@ -750,7 +750,7 @@ class ClaudeImplementationOpsController extends Controller
             $respuesta['nota']                = 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos: el registro sigue en en_curso sin resultado. '
                 . ($llamo
                     ? '🔴 El job SÍ llegó a llamar al sistema del cliente (llamada_iniciada_at) y se cortó sin dejar el resultado (un deploy del admin, una caída, '
-                        . 'el worker muerto): el setup PUDO HABER CORRIDO del otro lado. Mirá si el dueño existe en el sistema del cliente y mandá EXACTAMENTE UNO de '
+                        . 'el worker muerto): el setup PUDO HABER CORRIDO del otro lado. Mirá si el dueño existe en el sistema del cliente (con sus listas de precios y sus depósitos) y mandá EXACTAMENTE UNO de '
                         . '`conciliar: true` (existe: no llama a nadie) o `reintentar: true` (no existe o quedó a medias: vuelve a correr migrate:fresh). La llamada '
                         . 'normal, sin ninguno de los dos, es 422.'
                     : 'El job NUNCA llegó a llamar al cliente (no hay llamada_iniciada_at: la cola estaba parada o atrasada), así que no salió nada. POST '
@@ -1614,6 +1614,11 @@ class ClaudeImplementationOpsController extends Controller
         $propios = [$subdominio, $subdominio . '2'];
         $con_api = ['api-' . $subdominio, 'api-' . $subdominio . '2'];
 
+        /* 🔴 Los cuatro hosts candidatos se comparan contra el host SPA y el host API de cada ClientApi, sin importar el rol:
+           pedir `api-x` cuando existe el cliente `x` (su API es `api-x`) choca aunque `api-x` no sea un SPA suyo, y pedir `x` cuando
+           existe `api-x` también. Los dos terminarían como subdominios repetidos en Hostinger. */
+        $todos = array_merge($propios, $con_api);
+
         $candidatas = ClientApi::query()
             ->where(function ($consulta) use ($subdominio) {
                 $consulta->where('url', 'like', '%' . $subdominio . '%')
@@ -1629,7 +1634,7 @@ class ClaudeImplementationOpsController extends Controller
             $partes    = explode('/', trim((string) $api->path, '/'));
             $path_raiz = $partes[0];
 
-            if (in_array($host_spa, $propios, true) || in_array($host_api, $con_api, true) || in_array($path_raiz, $propios, true)) {
+            if (in_array($host_spa, $todos, true) || in_array($host_api, $todos, true) || in_array($path_raiz, $propios, true)) {
                 return (int) $api->client_id;
             }
         }
@@ -2736,8 +2741,13 @@ class ClaudeImplementationOpsController extends Controller
                     ? ' Y la instalación real ya está completada (id ' . (int) $completada->id . '): el sistema ya está instalado, y marcar_colgadas no abre la puerta a reinstalarlo.'
                     : '');
         } elseif ($completada !== null) {
-            $estado_previo = 'completada';
-            $detalle       = 'El sistema ya está instalado (instalación ' . (int) $completada->id . ' completada): reinstalar le pisaría el .env a un negocio que ya anda.';
+            $estado_previo     = 'completada';
+            $esqueleto_fallido = $previas->where('kind', ClientInstallation::KIND_ESQUELETO)->where('status', 'fallida')->first();
+            $detalle           = 'El sistema ya está instalado (instalación ' . (int) $completada->id . ' completada): reinstalar le pisaría el .env a un negocio que ya anda.'
+                . ($esqueleto_fallido !== null
+                    ? ' El esqueleto del subdominio hermano (instalación ' . (int) $esqueleto_fallido->id . ') quedó fallido: el cliente opera sin él y por acá no se '
+                        . 'puede reintentar solo ese; si hace falta, se hace desde el panel (Instalaciones).'
+                    : '');
         } elseif ($pendientes->count() > 0) {
             $estado_previo = 'pendientes';
             $detalle       = 'Hay ' . $pendientes->count() . ' instalación(es) pendiente(s) sin arrancar (id ' . $pendientes->pluck('id')->implode(', ')
@@ -3849,7 +3859,7 @@ class ClaudeImplementationOpsController extends Controller
                 ? 'terminó en error' . ($puede ? ' y PUDO HABER CORRIDO del otro lado' : '') . ' (' . (string) $this->recortar($estado['error']) . ')'
                 : 'quedó COLGADO después de llamar al sistema del cliente (sin resultado hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos) y PUDO HABER CORRIDO del otro lado')
                 . '. Repetir la llamada tal cual no alcanza: reintentar le vuelve a vaciar la base al cliente '
-                . '(migrate:fresh) y conciliar da por aplicado lo que ya corrió. Mirá si el dueño existe en el sistema del cliente y mandá EXACTAMENTE UNO de '
+                . '(migrate:fresh) y conciliar da por aplicado lo que ya corrió. Mirá si el dueño existe en el sistema del cliente (con sus listas de precios y sus depósitos) y mandá EXACTAMENTE UNO de '
                 . 'estos dos parámetros, con dry_run=false y confirm_client_name: `conciliar: true` (el dueño ya existe: no llama al cliente) o '
                 . '`reintentar: true` (no existe o quedó a medias: vuelve a despachar). No se aplicó nada.',
             [
@@ -3883,8 +3893,9 @@ class ClaudeImplementationOpsController extends Controller
             'opciones' => [
                 [
                     'parametro' => 'conciliar',
-                    'cuando'    => 'El dueño YA existe en el sistema del cliente: el intento anterior llegó a correr (un 502, un timeout o un worker muerto '
-                        . 'no prueban lo contrario).',
+                    'cuando'    => 'El dueño YA existe en el sistema del cliente, con sus listas de precios y sus depósitos (`motor <cliente> metricas`): el intento '
+                        . 'anterior llegó a correr (un 502, un timeout o un worker muerto no prueban lo contrario). Si existe pero sin sus listas o sus '
+                        . 'depósitos, se cortó a medias: no se concilia ni se reintenta por cuenta propia.',
                     'que_hace'  => 'NO llama al sistema del cliente: llena user_setup_executed_at, deja el estado en ok con la nota "'
                         . self::NOTA_DE_CONCILIACION . '" y registra la acción user_setup (canal claude).',
                 ],
@@ -4153,16 +4164,22 @@ class ClaudeImplementationOpsController extends Controller
             $previo = $this->mail_previo($implementation, $hito);
             $ya_salio = $previo !== null && $previo['estado'] === ImplementationMail::ESTADO_ENVIADO;
 
+            /* 🔴 Sin credencial en el mailer `admin` el mail NO puede salir: el real daría `estado: error`. El dry-run no tiene
+               que decir `listo` para algo que va a fallar. */
+            $falta_del_mailer = ImplementacionMailService::que_le_falta_al_mailer();
+
             return response()->json([
                 'dry_run'          => true,
                 'hito'             => $hito,
-                'listo'            => count($previa['faltan']) === 0 && (! $ya_salio || $reenviar),
+                'listo'            => count($previa['faltan']) === 0 && (! $ya_salio || $reenviar) && $falta_del_mailer === null,
                 'asunto'           => $previa['asunto'],
                 'para_enmascarado' => $previa['para_enmascarado'],
                 'html'             => $previa['html'],
                 'faltan'           => $previa['faltan'],
+                'mailer'           => ['listo' => $falta_del_mailer === null, 'falta' => $falta_del_mailer],
                 'ya_enviado'       => $previo,
                 'nota'             => 'Simulacro: no se mandó ni se escribió nada. '
+                    . ($falta_del_mailer !== null ? 'El mailer admin no tiene con qué mandar: ' . $falta_del_mailer . ' ' : '')
                     . ($ya_salio && ! $reenviar ? 'Este hito YA salió: el real pide reenviar=true. ' : '')
                     . 'Repetí con dry_run=false y confirm_client_name para mandarlo.',
             ], 200);
@@ -4180,7 +4197,7 @@ class ClaudeImplementationOpsController extends Controller
             return $this->respuesta_del_error_del_mail($e);
         }
 
-        return response()->json([
+        $respuesta = [
             'dry_run'          => false,
             'hito'             => $hito,
             'enviado'          => $resultado['estado'] === 'enviado',
@@ -4189,7 +4206,14 @@ class ClaudeImplementationOpsController extends Controller
             'enviado_at'       => $resultado['enviado_at'],
             'reenvios'         => (int) $resultado['reenvios'],
             'error'            => $resultado['error'],
-        ], 200);
+        ];
+
+        /* El mail SALIÓ pero no se pudo anotar en implementation_mails: se avisa para que nadie lo reenvíe. */
+        if (isset($resultado['aviso'])) {
+            $respuesta['aviso'] = $resultado['aviso'];
+        }
+
+        return response()->json($respuesta, 200);
     }
 
     /**

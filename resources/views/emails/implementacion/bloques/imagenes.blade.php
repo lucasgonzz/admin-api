@@ -43,7 +43,7 @@
 <tr>
   <td class="cc-lado" style="padding:28px 48px 0 48px;">
     @include('emails.implementacion.partials.boton', ['texto' => 'Revisar las fotos', 'url' => $url_fotos])
-    <p style="margin:14px 0 0 0;font-family:{!! $font !!};font-size:14px;line-height:22px;color:#566078;">Las que apruebes quedan en tu sistema y en tu tienda online.</p>
+    <p style="margin:14px 0 0 0;font-family:{!! $font !!};font-size:14px;line-height:22px;color:#566078;">Las que apruebes quedan en tu sistema, y en tu tienda online si tenés una.</p>
   </td>
 </tr>
 @endif
