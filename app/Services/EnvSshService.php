@@ -383,6 +383,11 @@ class EnvSshService
      * Para cada variable: si la key existe, reemplaza la línea con sed; si no, la agrega al final.
      * Al terminar RELEE el archivo y verifica que cada variable haya quedado con el valor pedido.
      *
+     * 🔴 Antes de agregar una línea al final se asegura que el archivo TERMINE EN UN SALTO DE LÍNEA
+     * (`build_append_command()`). Si el último renglón no lo tenía, el `printf` la pegaba a esa línea
+     * (`LAST=valKEY=nuevo`): corrompía una variable que nadie había pedido tocar y, encima, la relectura
+     * de abajo informaba que el .env "quedó como estaba", que era falso.
+     *
      * 🔴 La verificación final no es un lujo. `sed -i` necesita crear un temporal y renombrar en el
      * directorio: falla por permisos, por cuota de Hostinger agotada o por disco lleno. Sin releer,
      * una escritura fallida se reportaba como aplicada, y el llamador borraba el valor que quería
@@ -391,7 +396,7 @@ class EnvSshService
      * @param  string  $api_path  Directorio raíz de la API en el servidor.
      * @param  array<string, string>  $vars_to_update  KEY => nuevo valor, sin comillas.
      * @return void
-     * @throws \RuntimeException Si no hay conexión, el .env no existe, o la escritura no quedó.
+     * @throws \RuntimeException Si no hay conexión, el .env no existe, o la escritura no quedó verificada.
      */
     public function write_env_vars(string $api_path, array $vars_to_update): void
     {
@@ -430,13 +435,43 @@ class EnvSshService
                 $this->exec_remoto($sed_cmd, "actualizar {$key} en {$env_file}");
             } else {
                 /* La key no existe: la agrega al final del archivo (que sí existe, ya se verificó). */
-                $append_cmd = 'printf ' . $this->escape_remote_arg('%s\n') . ' ' . $this->escape_remote_arg($key . '=' . $formatted_value) . ' >> ' . $this->escape_remote_arg($env_file);
+                $append_cmd = $this->build_append_command($env_file, $key . '=' . $formatted_value);
 
                 $this->exec_remoto($append_cmd, "agregar {$key} en {$env_file}");
             }
         }
 
         $this->assert_escritura_aplicada($env_file, $vars_to_update);
+    }
+
+    /**
+     * Arma el comando que agrega UNA línea al final del .env, asegurando antes que el archivo termine
+     * en un salto de línea.
+     *
+     * 🔴 La guarda es `[ -z "$(tail -c1 F)" ] || printf '\n' >> F`: `$(...)` se come los saltos de
+     * línea finales, así que si el último byte del archivo ES un salto de línea la sustitución queda
+     * vacía y no se hace nada; si NO lo es (el archivo termina en `LAST=val`) devuelve ese byte y se
+     * agrega el salto. Un archivo vacío no lleva salto de más. Va unida con `&&` a la escritura: si la
+     * guarda falla (permisos, disco lleno) la línea NO se agrega, y el llamador recibe el error del
+     * `exec_remoto()` en vez de un archivo con dos variables pegadas.
+     *
+     * Se usa el MISMO quoting POSIX que el resto de los comandos de este servicio
+     * (`escape_remote_arg()`), y el comando es igual para hosting compartido y para VPS: corre en el
+     * shell del servidor, que en los dos casos es POSIX.
+     *
+     * @param  string  $env_file  Path del .env en el servidor.
+     * @param  string  $line      La línea KEY=valor, con el valor ya formateado para phpdotenv.
+     * @return string
+     */
+    protected function build_append_command(string $env_file, string $line): string
+    {
+        $archivo = $this->escape_remote_arg($env_file);
+
+        $asegurar_salto = '{ [ -z "$(tail -c1 ' . $archivo . ')" ] || printf ' . $this->escape_remote_arg('\n') . ' >> ' . $archivo . '; }';
+
+        $agregar = 'printf ' . $this->escape_remote_arg('%s\n') . ' ' . $this->escape_remote_arg($line) . ' >> ' . $archivo;
+
+        return $asegurar_salto . ' && ' . $agregar;
     }
 
     /**
@@ -589,6 +624,10 @@ class EnvSshService
     /**
      * Relee el .env y verifica que cada variable haya quedado con el valor que se pidió escribir.
      *
+     * 🔴 El mensaje NO dice que el archivo "quedó como estaba": cuando la relectura no coincide, el
+     * archivo pudo haber cambiado igual (un valor pegado a la línea anterior, una escritura a medias),
+     * y afirmar lo contrario manda a quien lee a reintentar sobre un .env que ya no es el original.
+     *
      * @param  string  $env_file
      * @param  array<string, string>  $vars_to_update
      * @return void
@@ -614,7 +653,9 @@ class EnvSshService
 
         throw new \RuntimeException(
             'La escritura no quedó aplicada en ' . $env_file . ' para: ' . implode(', ', $no_aplicadas)
-            . '. Revisá permisos y espacio en el servidor del cliente. El .env quedó como estaba.'
+            . '. Al releer el archivo el valor no es el pedido, y el .env PUDO HABER CAMBIADO (por ejemplo, un valor pegado '
+            . 'a otra línea): revisalo antes de reintentar y, si hay un respaldo .env.bak-*, restauralo desde ahí. '
+            . 'Revisá también permisos y espacio en el servidor del cliente.'
         );
     }
 
