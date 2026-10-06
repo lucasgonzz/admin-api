@@ -584,10 +584,33 @@ class UserSetupCandadoService
      */
     public function nombre_para_confirmar(Client $client): string
     {
-        // El nombre visible del negocio.
-        $nombre = trim($client->resolve_display_name());
+        // El nombre visible del negocio, recortado como lo recorta la pantalla (ver recortar_como_la_pantalla()).
+        $nombre = $this->recortar_como_la_pantalla($client->resolve_display_name());
 
         return $nombre !== '' ? $nombre : 'Cliente #' . (int) $client->id;
+    }
+
+    /**
+     * Recorta un texto igual que el `trim()` de JavaScript con el que la pantalla compara el nombre: saca de las puntas los espacios, los saltos de
+     * línea y TAMBIÉN el espacio duro (U+00A0, el que trae un nombre copiado de una web o de Excel), los demás separadores Unicode y la marca de orden
+     * de bytes (U+FEFF).
+     *
+     * 🔴 POR QUÉ NO ALCANZA CON EL `trim()` DE PHP (que solo saca los espacios ASCII). El modal del panel habilita el botón cuando el nombre escrito,
+     * recortado con el `trim()` de JS, coincide con el esperado. Con un espacio duro al final la pantalla lo habilitaba y la API lo rechazaba con "no
+     * coincide": un mensaje que miente sobre la causa (quien lo escribió, lo escribió bien). Las dos puntas tienen que aceptar lo mismo, ni más ni
+     * menos. Fallaba hacia no ejecutar, pero confundía.
+     *
+     * @param string $texto El texto crudo.
+     *
+     * @return string
+     */
+    private function recortar_como_la_pantalla(string $texto): string
+    {
+        // \p{Z}: separadores Unicode (incluye U+00A0); \s: espacios y saltos ASCII; U+FEFF: la marca de orden de bytes que el `trim()` de JS también saca.
+        $recortado = preg_replace('/^[\p{Z}\s\x{FEFF}]+|[\p{Z}\s\x{FEFF}]+$/u', '', $texto);
+
+        // Un texto que no es UTF-8 válido hace fallar el patrón (devuelve null): se cae al recorte común, que no lo deja pasar de largo.
+        return $recortado === null ? trim($texto) : $recortado;
     }
 
     /**
@@ -607,14 +630,14 @@ class UserSetupCandadoService
             return false;
         }
 
-        // Lo que escribió, recortado.
-        $escrito = trim($recibido);
+        // Lo que escribió, recortado como lo recorta la pantalla (también el espacio duro).
+        $escrito = $this->recortar_como_la_pantalla($recibido);
 
         if ($escrito === '') {
             return false;
         }
 
-        return mb_strtolower($escrito) === mb_strtolower(trim($this->nombre_para_confirmar($client)));
+        return mb_strtolower($escrito) === mb_strtolower($this->nombre_para_confirmar($client));
     }
 
     /**

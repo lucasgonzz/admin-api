@@ -104,8 +104,16 @@ class UserSetupCandadoServiceTest extends BaseDeLasPuertasDelUserSetup
             $this->assertTrue($this->candado()->confirma_el_nombre($cliente, $bien), '«' . $bien . '» tendría que confirmar.');
         }
 
-        // Lo vacío, un nombre incompleto o con un espacio de más ADENTRO, otro nombre y lo que no es un texto.
-        foreach (['', '   ', 'Panchito', 'Panchito  S.A.', 'Otro', null, 0, 1, true, false, ['Panchito S.A.']] as $mal) {
+        // 🔴 Lo mismo que recorta el `trim()` de JavaScript con el que el modal habilita el botón: el espacio duro (U+00A0) de un nombre copiado de una
+        // web o de Excel, otros separadores Unicode, la marca de orden de bytes (U+FEFF) y los saltos de línea. Con el `trim()` de PHP la pantalla
+        // habilitaba el botón y la API rechazaba el mismo texto con "no coincide".
+        foreach (["Panchito S.A.\u{00A0}", "\u{00A0}Panchito S.A.", "\u{FEFF}Panchito S.A.", "Panchito S.A.\u{2003}", "\t Panchito S.A.\r\n"] as $bien) {
+            $this->assertTrue($this->candado()->confirma_el_nombre($cliente, $bien), 'Con espacios raros en las puntas tendría que confirmar: ' . json_encode($bien));
+        }
+
+        // Lo vacío, un nombre incompleto o con un espacio de más ADENTRO, otro nombre y lo que no es un texto. Un espacio duro ADENTRO tampoco
+        // coincide (el `trim()` de JS solo recorta las puntas).
+        foreach (['', '   ', "\u{00A0}", 'Panchito', 'Panchito  S.A.', "Panchito\u{00A0}S.A.", 'Otro', null, 0, 1, true, false, ['Panchito S.A.']] as $mal) {
             $this->assertFalse($this->candado()->confirma_el_nombre($cliente, $mal), 'No tendría que confirmar: ' . json_encode($mal));
         }
     }
