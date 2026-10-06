@@ -282,7 +282,9 @@ class ClaveDeSerperEnElUserSetupDeLaImplementacionTest extends TestCase
             'La respuesta del botón del panel trae la clave de Serper en claro.'
         );
 
-        $enviado = $this->cuerpo_del_post(self::URL_API_DEL_CLIENTE . '/api/admin-sync/user-setup');
+        // La API de este cliente es de shared hosting (ver crear_cliente): vive bajo /public, igual que en todos
+        // los demás llamados del admin a un cliente (ClientEmpresaApiUrlResolver).
+        $enviado = $this->cuerpo_del_post(self::URL_API_DEL_CLIENTE . '/public/api/admin-sync/user-setup');
 
         $this->assertSame(self::CLAVE_CLIENTES, $enviado['serper_api_key'], 'Al cliente no le llegó la clave entera.');
     }
