@@ -259,8 +259,10 @@ class ClaudeClientCatalogoController extends Controller
             $errores['metodo'] = 'Es obligatorio. Tiene que ser GET o POST.';
         } elseif (! is_string($metodo_raw)) {
             $errores['metodo'] = 'Tiene que ser un texto: GET o POST.';
+        } elseif (! mb_check_encoding($metodo_raw, 'UTF-8')) {
+            $errores['metodo'] = 'Tiene bytes que no son UTF-8 válido: tiene que ser el texto GET o POST.';
         } elseif (! in_array(strtoupper(trim($metodo_raw)), ['GET', 'POST'], true)) {
-            $errores['metodo'] = 'Tiene que ser GET o POST: el puente no reenvía ningún otro método (llegó "' . mb_substr($metodo_raw, 0, 20) . '").';
+            $errores['metodo'] = 'Tiene que ser GET o POST: el puente no reenvía ningún otro método (llegó "' . $this->eco($metodo_raw, 20) . '").';
         } else {
             $metodo = strtoupper(trim($metodo_raw));
         }
@@ -273,6 +275,8 @@ class ClaudeClientCatalogoController extends Controller
             $errores['ruta'] = 'Es obligatoria: la ruta relativa a /api/admin-sync/catalogo, con `/` inicial (por ejemplo /resumen).';
         } elseif (! is_string($ruta_raw)) {
             $errores['ruta'] = 'Tiene que ser un texto: la ruta relativa a /api/admin-sync/catalogo.';
+        } elseif (! mb_check_encoding($ruta_raw, 'UTF-8')) {
+            $errores['ruta'] = 'Tiene bytes que no son UTF-8 válido: una ruta del puente es un texto (lo que no sea ASCII va codificado como %XX).';
         } elseif (mb_strlen($ruta_raw) > self::MAX_RUTA) {
             $errores['ruta'] = 'Es demasiado larga (máximo ' . self::MAX_RUTA . ' caracteres).';
         } elseif (preg_match('/[\x00-\x1f\x7f#]/', $ruta_raw) === 1) {
@@ -283,7 +287,7 @@ class ClaudeClientCatalogoController extends Controller
             list($path, $query) = ClientCatalogoPuenteService::separar_la_ruta($ruta_raw);
 
             if (! ClientCatalogoPuenteService::ruta_permitida($metodo, $path)) {
-                $errores['ruta'] = $metodo . ' ' . mb_substr($path, 0, 120) . ' no está en la lista blanca del puente: solo reenvía las rutas del catálogo.';
+                $errores['ruta'] = $metodo . ' ' . $this->eco($path, 120) . ' no está en la lista blanca del puente: solo reenvía las rutas del catálogo.';
                 $extra['rutas_permitidas'] = ClientCatalogoPuenteService::rutas_permitidas();
             } elseif (ClientCatalogoPuenteService::query_trae_method_override($query)) {
                 /* 🔴 `_method` en la query: el cliente (Laravel) lo toma como el método REAL de un POST y
@@ -302,6 +306,8 @@ class ClaudeClientCatalogoController extends Controller
         if ($cuerpo_raw !== null) {
             if (! is_array($cuerpo_raw)) {
                 $errores['cuerpo'] = 'Tiene que ser un objeto o una lista JSON.';
+            } elseif (! mb_check_encoding($cuerpo_raw, 'UTF-8')) {
+                $errores['cuerpo'] = 'Tiene texto con bytes que no son UTF-8 válido: el cuerpo tiene que ser JSON.';
             } elseif ($metodo === 'GET' && count($cuerpo_raw) > 0) {
                 $errores['cuerpo'] = 'Un GET no lleva cuerpo: los filtros van en la query de la ruta (/articulos?desde_id=100).';
             } elseif (ClientCatalogoPuenteService::cuerpo_trae_method_override($cuerpo_raw)) {
@@ -394,9 +400,18 @@ class ClaudeClientCatalogoController extends Controller
      */
     protected function cargar_cliente($route_id)
     {
-        $id = is_numeric($route_id)
-            ? DB::table('clients')->where('id', (int) $route_id)->value('id')
-            : DB::table('clients')->where('uuid', (string) $route_id)->value('id');
+        $route_id = (string) $route_id;
+
+        if (is_numeric($route_id)) {
+            $id = DB::table('clients')->where('id', (int) $route_id)->value('id');
+        } elseif (preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $route_id) === 1) {
+            $id = DB::table('clients')->where('uuid', $route_id)->value('id');
+        } else {
+            /* Ni un número ni un uuid: no puede ser un cliente, y no se le pregunta a la base con cualquier
+               texto de la URL. (Con bytes que no son UTF-8 el ruteador ni siquiera llega acá: sus patrones
+               son UTF-8 y contesta su 404 de siempre.) */
+            return null;
+        }
 
         if ($id === null) {
             return null;
@@ -422,10 +437,29 @@ class ClaudeClientCatalogoController extends Controller
                 continue;
             }
 
-            $errores[(string) $clave] = 'No es un parámetro de este endpoint. Los que acepta: ' . implode(', ', $aceptados) . '.';
+            $errores[$this->eco($clave, 60)] = 'No es un parámetro de este endpoint. Los que acepta: ' . implode(', ', $aceptados) . '.';
         }
 
         return $errores;
+    }
+
+    /**
+     * Un texto que vino de AFUERA (un parámetro, el id de la URL, la ruta), listo para repetirlo en una
+     * respuesta: en UTF-8 válido y recortado.
+     *
+     * 🔴 `json_encode` falla con un solo byte que no sea UTF-8, y entonces Laravel no contesta el 422 que
+     * se estaba armando sino un 500. Lo que llega por la query o por la URL puede traer cualquier byte
+     * (`%FF`), así que todo lo que se repite en un mensaje o se usa de clave de `detalle` pasa por acá:
+     * los bytes inválidos salen como `?`.
+     *
+     * @param mixed $texto  Lo que vino de afuera.
+     * @param int   $limite Caracteres máximos que se repiten.
+     *
+     * @return string
+     */
+    protected function eco($texto, $limite)
+    {
+        return mb_substr(mb_convert_encoding((string) $texto, 'UTF-8', 'UTF-8'), 0, $limite);
     }
 
     /**
@@ -487,7 +521,7 @@ class ClaudeClientCatalogoController extends Controller
         return $this->responder_error(
             'cliente_inexistente',
             404,
-            'No existe el cliente ' . $route_id . ' en el admin. No se hizo nada.'
+            'No existe el cliente ' . $this->eco($route_id, 60) . ' en el admin. No se hizo nada.'
         );
     }
 

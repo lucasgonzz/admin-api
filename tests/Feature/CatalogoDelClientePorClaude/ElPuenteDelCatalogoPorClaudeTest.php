@@ -710,6 +710,125 @@ class ElPuenteDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /* ------------------------------------------------------------------------------------------
+     | 4 ter. Bytes que no son UTF-8: 422 (o 404), nunca 500
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Pedidos con un byte que no es UTF-8 en el `metodo` o en la `ruta`. Un JSON con UTF-8 inválido no
+     * se decodifica, así que estos bytes llegan por la query de la URL (`%FF` crudo): es por donde un
+     * pedido a mano puede traerlos.
+     *
+     * Antes, el mensaje de error repetía el texto tal cual, `json_encode` fallaba con un solo byte
+     * inválido y Laravel contestaba un 500 en lugar del 422 que se estaba armando.
+     *
+     * @return array<string, array<int, string>>
+     */
+    public function pedidos_con_utf8_invalido(): array
+    {
+        return [
+            'metodo con un byte suelto'                   => ['?metodo=%FF&ruta=/resumen', 'metodo'],
+            'metodo con una secuencia cortada'            => ['?metodo=GE%C3&ruta=/resumen', 'metodo'],
+            'ruta con un byte suelto despues de la barra' => ['?metodo=GET&ruta=/x%FF', 'ruta'],
+            'ruta con un byte suelto en la query'         => ['?metodo=GET&ruta=/articulos%3Fq%3D%FF', 'ruta'],
+            'ruta que es solo un byte'                    => ['?metodo=GET&ruta=%FF', 'ruta'],
+            'metodo y ruta, los dos'                      => ['?metodo=%FE&ruta=%FF', 'metodo'],
+        ];
+    }
+
+    /**
+     * 🔴 Bytes que no son UTF-8 en el `metodo` o en la `ruta` son 422 `validacion` (no 500), y no se le
+     * pega al cliente.
+     *
+     * @dataProvider pedidos_con_utf8_invalido
+     *
+     * @param string $query Query de la URL del endpoint, con los bytes crudos.
+     * @param string $campo Campo del 422 donde se espera el motivo.
+     *
+     * @return void
+     */
+    public function test_bytes_que_no_son_utf8_en_metodo_o_ruta_son_422_y_no_500(string $query, string $campo): void
+    {
+        Http::fake();
+
+        $respuesta = $this->postJson($this->url() . $query, [], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertArrayHasKey($campo, $respuesta->json('detalle'));
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * El NOMBRE de un parámetro de más también se repite en el error (es la clave de `detalle`): con
+     * bytes que no son UTF-8 sale saneado, como 422, y no como un 500.
+     *
+     * @return void
+     */
+    public function test_un_nombre_de_parametro_con_bytes_invalidos_es_422_y_no_500(): void
+    {
+        Http::fake();
+
+        $respuesta = $this->postJson($this->url() . '?metodo=GET&ruta=/resumen&%FF%FE=1', [], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertCount(1, $respuesta->json('detalle'));
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * Un `cuerpo` con bytes que no son UTF-8 (solo puede llegar por un formulario: en JSON no se
+     * decodifica) es 422 y no se manda. Si pasara, `json_encode` fallaría y al cliente le llegaría un
+     * `{}` en lugar de lo que el motor mandó, sin ningún aviso.
+     *
+     * @return void
+     */
+    public function test_un_cuerpo_con_bytes_invalidos_es_422_y_no_se_manda(): void
+    {
+        Http::fake();
+
+        $respuesta = $this->post($this->url(), [
+            'metodo' => 'POST',
+            'ruta'   => '/categorias/propuestas',
+            'cuerpo' => ['nombre' => "Fijaciones \xFF"],
+        ], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertArrayHasKey('cuerpo', $respuesta->json('detalle'));
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * El `{id}` de la URL que no es un número ni un uuid no puede ser un cliente: 404
+     * `cliente_inexistente` (sin consultar la base) y sin llamar a nadie. Con bytes que no son UTF-8
+     * (`%FF`) el ruteador de Laravel ni siquiera matchea la ruta (sus patrones son UTF-8) y contesta su
+     * 404 de siempre, sin `error`: lo que importa es que no sea un 500.
+     *
+     * @return void
+     */
+    public function test_un_id_que_no_es_numero_ni_uuid_es_404_y_no_500(): void
+    {
+        Http::fake();
+
+        foreach (['abc', 'no-es-un-uuid', '%C3%B1and%C3%BA', '123e4567-e89b-12d3-a456-42661417400g'] as $id) {
+            $respuesta = $this->postJson('/api/claude/clients/' . $id . '/catalogo/puente', ['metodo' => 'GET', 'ruta' => '/resumen'], $this->headers());
+
+            $respuesta->assertStatus(404);
+            $this->assertSame('cliente_inexistente', $respuesta->json('error'), $id);
+        }
+
+        $con_bytes_invalidos = $this->postJson('/api/claude/clients/%FF%FE/catalogo/puente', ['metodo' => 'GET', 'ruta' => '/resumen'], $this->headers());
+
+        $con_bytes_invalidos->assertStatus(404);
+
+        Http::assertNothingSent();
+    }
+
+    /* ------------------------------------------------------------------------------------------
      | 5. Lo que contesta el cliente viaja adentro
      |----------------------------------------------------------------------------------------- */
 

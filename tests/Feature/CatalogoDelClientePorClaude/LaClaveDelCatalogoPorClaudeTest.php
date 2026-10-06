@@ -237,6 +237,28 @@ class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
+     * 🔴 Bytes que no son UTF-8 en la URL (`%FF` en el `{id}`) o en el nombre de un parámetro de más son
+     * un 404 y un 422 `validacion`, no un 500: el controlador repite el nombre del parámetro en el
+     * mensaje, y `json_encode` falla con un solo byte inválido. Lo comparten C1 y C2.
+     *
+     * @return void
+     */
+    public function test_bytes_que_no_son_utf8_en_la_url_o_en_un_parametro_de_mas_no_dan_500(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $this->postJson('/api/claude/clients/%FF%FE/catalogo/clave', [], $this->headers())->assertStatus(404);
+
+        $de_mas = $this->postJson($this->url($cliente) . '?%FF%FE=1', [], $this->headers());
+
+        $de_mas->assertStatus(422);
+        $this->assertSame('validacion', $de_mas->json('error'));
+        $this->assertCount(1, $de_mas->json('detalle'));
+
+        $this->assertSame([], $this->ssh->escrituras);
+    }
+
+    /**
      * El cliente se resuelve también por uuid, como en el resto del bloque.
      *
      * @return void
