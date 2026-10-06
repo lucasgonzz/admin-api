@@ -689,6 +689,26 @@ return [
                 ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El cliente cuyos horarios se reenvían. ⚠️ Es el ÚNICO parámetro: este endpoint no lee cuerpo, así que mandar un body no cambia nada.'],
             ],
         ],
+        'POST api/claude/clients/{id}/catalogo/clave' => [
+            'para_que'     => 'Deja la clave de la API del cliente (clients.api_key, la que el admin ya tiene) escrita como ADMIN_API_INBOUND_KEY en el .env de CADA frente (client_apis) de ese cliente, por SSH. Es lo que le da al motor de /categorizar acceso a las rutas admin-sync/catalogo/* del cliente SIN que la clave pase por la máquina de Lucas: el admin la ESCRIBE en el servidor del cliente. Respuesta 200: {client_id, dry_run, api_key_en_el_admin: presente|falta|generada, frentes: [{client_api_id, hosting_type, path, estado: igual|falta|distinta|sin_env|error, accion: ninguna|escribir|escrita|fallo, error}], listo}. `estado` es lo que se ENCONTRÓ y `accion` lo que se hizo (o se haría en dry_run); `listo` es true cuando todos los frentes quedaron (o ya estaban) con la clave igual. Errores: 404 cliente_inexistente, 409 sin_frentes, 422 validacion (con `detalle` por campo); en todos, `error` es el código y `mensaje` el texto. La respuesta NUNCA lleva el valor de ninguna clave.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'dry_run por defecto true: lee el .env de cada frente y dice qué escribiría (estado y accion por frente); no respalda, no escribe y no genera ninguna clave. Con la clave del admin vacía lo dice (api_key_en_el_admin=falta).',
+                'confirm_client_name obligatorio con dry_run=false: tiene que coincidir con clients.name (recorte y minúsculas) y el error no revela el nombre correcto. Es el mismo freno que PUT claude/clients/{id}/schedule.',
+                'Lista cerrada de parámetros: cualquier otra clave es 422 validacion. Y dry_run solo acepta true, false, 1 o 0: un valor que no se entiende es 422 y NO un "aplicar".',
+                '🔴 Antes de escribir en un frente se respalda su .env (.env.bak-<AAAAMMDDHHMMSS>) y después se RELEE el archivo: si la variable no quedó escrita, ese frente es estado=error y no se da por hecho. Nunca crea un .env: un frente sin .env es estado=sin_env y no se toca (escribir ahí dejaría un archivo en el servidor equivocado).',
+                'Un frente que falla (SSH caído, sin permisos, ruta imposible de resolver) NO frena a los otros: queda estado=error con el motivo, los demás siguen y listo=false.',
+                '🔴 Ni la respuesta, ni los mensajes de error, ni el log llevan el valor de ninguna clave (ni la del admin ni la que ya estaba en el .env): solo estados. Todo texto que viene del servidor pasa por un tapador de claves antes de salir.',
+                'Con la clave del admin vacía y dry_run=false, la genera (Str::random(40), igual que el alta del cliente) y la guarda con un UPDATE condicional —dos llamadas simultáneas no pueden generar dos claves distintas— ANTES de escribir en el primer servidor; la respuesta dice api_key_en_el_admin=generada.',
+                'Idempotente: un frente cuyo .env ya tiene la clave igual (hash_equals) no se respalda ni se toca. Se escribe en TODOS los frentes del cliente, no solo en el activo: en shared son dos carpetas y una rotación puede activar cualquiera.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{id} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL; acepta id numérico o uuid', 'que_es' => 'El cliente cuya clave se escribe en el .env de sus frentes.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'booleano estricto (true, false, 1, 0) — 🔴 DEFAULT true', 'que_es' => 'En true (el default) solo mira y dice qué escribiría. Con false respalda y escribe de verdad; exige confirm_client_name.'],
+                ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'string de hasta 190; tiene que coincidir con clients.name (trim + minúsculas)', 'que_es' => 'Obligatorio cuando dry_run es false. Es la redundancia contra escribirle la clave al cliente equivocado: el id numérico no tiene ninguna.'],
+            ],
+        ],
         'GET api/claude/versions' => [
             'para_que'     => 'Catálogo de versiones con la cantidad de ítems por versión ya contada. Sin paginación: son pocas filas.',
             'escribe'      => false,

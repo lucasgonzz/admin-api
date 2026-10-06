@@ -327,6 +327,14 @@ Route::middleware('claude.task.key')
         /* Reintento del push de horarios al empresa-api del cliente. Idempotente y sin frenos:
            reenvía lo que el admin ya tiene y encola, nunca hace el HTTP adentro del request. */
         Route::post('clients/{id}/schedule/sync', 'Api\ClaudeClientOpsController@sync_schedule_json');
+        /* 🔴 El acceso del motor de `/categorizar` al catálogo de UN cliente SIN que su clave pase por
+           la máquina de Lucas (misión `implementacion-dos-sistemas`, 6/10/2026). Los dos viven en
+           ClaudeClientCatalogoController y no llevan nunca el valor de `clients.api_key` en una
+           respuesta, un error ni un log.
+           `catalogo/clave` ESCRIBE `ADMIN_API_INBOUND_KEY` = `clients.api_key` en el `.env` de cada
+           frente del cliente por SSH (dry_run por defecto + confirm_client_name; respaldo del .env y
+           relectura antes de darlo por escrito). */
+        Route::post('clients/{id}/catalogo/clave', 'Api\ClaudeClientCatalogoController@clave_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
         Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');

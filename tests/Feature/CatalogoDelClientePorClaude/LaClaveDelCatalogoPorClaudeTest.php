@@ -1,0 +1,852 @@
+<?php
+
+namespace Tests\Feature\CatalogoDelClientePorClaude;
+
+use App\Http\Controllers\Api\ClaudeClientCatalogoController;
+use App\Models\Client;
+use App\Models\ClientApi;
+use App\Services\EnvSshService;
+use Illuminate\Support\Str;
+use Tests\Fakes\EnvSshServiceFake;
+
+/**
+ * `POST claude/clients/{id}/catalogo/clave` (C1, misión `implementacion-dos-sistemas`, 6/10/2026): el
+ * admin escribe `ADMIN_API_INBOUND_KEY` = `clients.api_key` en el `.env` de cada frente del cliente,
+ * para que el motor de `/categorizar` no tenga que traer la clave a la máquina de Lucas.
+ *
+ * Lo que estos tests protegen, en orden de importancia:
+ *
+ *  1. 🔴 **La clave del cliente NO aparece en ninguna respuesta, error ni log.** Cada test que devuelve
+ *     algo lo afirma contra el VALOR de la clave (`assertSinLaClave`), incluido el caso en que la
+ *     excepción de SSH trae la clave adentro de su mensaje.
+ *  2. 🔴 **Los frenos**: `dry_run` por defecto (no respalda ni escribe), `confirm_client_name`
+ *     obligatorio al aplicar sin revelar el nombre correcto, y `dry_run` estricto (un valor que no
+ *     se entiende NO es "aplicar").
+ *  3. **Se escribe en TODOS los frentes, con respaldo**, y un frente que falla no frena al otro.
+ *  4. **La forma del contrato con el motor** (`client_id`, `dry_run`, `api_key_en_el_admin`,
+ *     `frentes[]`, `listo`) y sus códigos de error (`cliente_inexistente`, `sin_frentes`,
+ *     `validacion`).
+ *
+ * Todo el SSH es un fake en memoria (`EnvSshServiceFake`): ningún test abre una conexión.
+ */
+class LaClaveDelCatalogoPorClaudeTest extends BaseDelCatalogoPorClaude
+{
+    /** La variable del `.env` del cliente. */
+    const VARIABLE = 'ADMIN_API_INBOUND_KEY';
+
+    /**
+     * Reemplazo en memoria del servicio SSH, bindeado en el contenedor para toda la prueba.
+     *
+     * @var EnvSshServiceFake
+     */
+    private $ssh;
+
+    /**
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->ssh = new EnvSshServiceFake();
+
+        $this->app->instance(EnvSshService::class, $this->ssh);
+    }
+
+    /**
+     * La URL de C1 para un cliente.
+     *
+     * @param Client|int|string $cliente Cliente, id o uuid.
+     *
+     * @return string
+     */
+    private function url($cliente): string
+    {
+        $id = $cliente instanceof Client ? $cliente->id : $cliente;
+
+        return '/api/claude/clients/' . $id . '/catalogo/clave';
+    }
+
+    /**
+     * Un cliente con sus DOS frentes de shared hosting (como los deja `PromoteLeadToClientService`),
+     * cada uno con su `.env` en memoria.
+     *
+     * @param string                $nombre Nombre del cliente.
+     * @param string|null           $clave  Clave del cliente (null = una de 40 caracteres).
+     * @param array<int, string>    $envs   Contenido del `.env` de cada frente (índice 0 y 1).
+     *
+     * @return array{0: Client, 1: ClientApi, 2: ClientApi}
+     */
+    private function cliente_con_dos_frentes(string $nombre = 'Doblep Distribuciones', ?string $clave = null, array $envs = []): array
+    {
+        $cliente = $this->crear_cliente($nombre, $clave);
+        $uno     = $this->crear_frente($cliente, 'doblep', 'shared_hosting', null, true);
+        $dos     = $this->crear_frente($cliente, 'doblep2');
+
+        $this->ssh->envs[$uno->id] = isset($envs[0]) ? $envs[0] : "APP_ENV=production\nDB_DATABASE=doblep\n";
+        $this->ssh->envs[$dos->id] = isset($envs[1]) ? $envs[1] : "APP_ENV=production\nDB_DATABASE=doblep\n";
+
+        return [$cliente, $uno, $dos];
+    }
+
+    /**
+     * El valor de una variable en el `.env` en memoria de un frente (parseado como lo parsea el admin).
+     *
+     * @param ClientApi $frente Frente.
+     * @param string    $clave  Nombre de la variable.
+     *
+     * @return string|null
+     */
+    private function valor_en_el_env(ClientApi $frente, string $clave)
+    {
+        $env = $this->ssh->parse_env_content($this->ssh->envs[$frente->id]);
+
+        return isset($env[$clave]) ? $env[$clave] : null;
+    }
+
+    /**
+     * La fila de un frente en la respuesta.
+     *
+     * @param \Illuminate\Testing\TestResponse $respuesta Respuesta de C1.
+     * @param ClientApi                        $frente    Frente.
+     *
+     * @return array<string, mixed>
+     */
+    private function fila($respuesta, ClientApi $frente): array
+    {
+        foreach ((array) $respuesta->json('frentes') as $fila) {
+            if ((int) $fila['client_api_id'] === (int) $frente->id) {
+                return $fila;
+            }
+        }
+
+        $this->fail('La respuesta no trae el frente ' . $frente->id . '.');
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 1. La puerta y los errores del admin
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * El bloque es fail-closed: sin el header de ingesta no contesta.
+     *
+     * @return void
+     */
+    public function test_sin_la_clave_de_ingesta_devuelve_401(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $this->postJson($this->url($cliente), [])->assertStatus(401);
+
+        $this->assertSame([], $this->ssh->escrituras);
+    }
+
+    /**
+     * 🔴 Un cliente que no existe es 404 con el CÓDIGO `cliente_inexistente` en `error`. Es lo que
+     * distingue, del lado del motor, "este admin conoce la ruta" de "este admin es viejo": el 404 de
+     * una ruta que no existe en Laravel NO trae `error`.
+     *
+     * @return void
+     */
+    public function test_cliente_inexistente_es_404_con_el_codigo_y_la_ruta_inexistente_no_lo_trae(): void
+    {
+        $inexistente = $this->postJson($this->url(987654321), [], $this->headers());
+
+        $inexistente->assertStatus(404);
+        $this->assertSame('cliente_inexistente', $inexistente->json('error'));
+        $this->assertNotSame('', (string) $inexistente->json('mensaje'));
+
+        $por_uuid = $this->postJson($this->url((string) Str::uuid()), [], $this->headers());
+        $por_uuid->assertStatus(404);
+        $this->assertSame('cliente_inexistente', $por_uuid->json('error'));
+
+        $sin_ruta = $this->postJson('/api/claude/clients/1/catalogo/ruta-que-no-existe', [], $this->headers());
+        $sin_ruta->assertStatus(404);
+        $this->assertNull($sin_ruta->json('error'), 'El 404 de una ruta inexistente NO lleva `error`: es lo que el motor lee como "admin viejo".');
+    }
+
+    /**
+     * Un cliente sin ninguna API cargada es 409 `sin_frentes`, y no genera ninguna clave.
+     *
+     * @return void
+     */
+    public function test_cliente_sin_frentes_es_409_y_no_genera_clave(): void
+    {
+        $cliente = $this->crear_cliente('Doblep Distribuciones', '');
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(409);
+        $this->assertSame('sin_frentes', $respuesta->json('error'));
+        $this->assertSame('', trim((string) $cliente->fresh()->api_key), 'Sin frentes donde escribirla, no se genera ninguna clave.');
+    }
+
+    /**
+     * El cliente se resuelve también por uuid, como en el resto del bloque.
+     *
+     * @return void
+     */
+    public function test_el_cliente_se_resuelve_por_uuid(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $respuesta = $this->postJson($this->url($cliente->uuid), [], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertSame((int) $cliente->id, $respuesta->json('client_id'));
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 2. dry_run: el default no escribe
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Sin `dry_run` el default es TRUE: lee, dice qué escribiría y no respalda ni escribe una línea.
+     * Y la respuesta tiene EXACTAMENTE la forma del contrato.
+     *
+     * @return void
+     */
+    public function test_el_dry_run_es_el_default_y_no_respalda_ni_escribe(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave, [
+            "APP_ENV=production\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\n",
+        ]);
+
+        $antes_uno = $this->ssh->envs[$uno->id];
+        $antes_dos = $this->ssh->envs[$dos->id];
+
+        $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $respuesta->assertStatus(200);
+
+        /* La forma del contrato. */
+        $this->assertSame(['client_id', 'dry_run', 'api_key_en_el_admin', 'frentes', 'listo'], array_keys($respuesta->json()));
+        $this->assertSame((int) $cliente->id, $respuesta->json('client_id'));
+        $this->assertTrue($respuesta->json('dry_run'));
+        $this->assertSame('presente', $respuesta->json('api_key_en_el_admin'));
+        $this->assertFalse($respuesta->json('listo'));
+        $this->assertCount(2, $respuesta->json('frentes'));
+
+        $fila_uno = $this->fila($respuesta, $uno);
+        $this->assertSame(['client_api_id', 'hosting_type', 'path', 'estado', 'accion', 'error'], array_keys($fila_uno));
+        $this->assertSame('shared_hosting', $fila_uno['hosting_type']);
+        $this->assertSame('domains/comerciocity.com/public_html/doblep/api', $fila_uno['path']);
+        $this->assertSame('falta', $fila_uno['estado']);
+        $this->assertSame('escribir', $fila_uno['accion']);
+        $this->assertNull($fila_uno['error']);
+
+        $fila_dos = $this->fila($respuesta, $dos);
+        $this->assertSame('distinta', $fila_dos['estado']);
+        $this->assertSame('escribir', $fila_dos['accion']);
+
+        /* Lo que importa: ni respaldo, ni escritura, ni un byte cambiado. */
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+        $this->assertSame($antes_uno, $this->ssh->envs[$uno->id]);
+        $this->assertSame($antes_dos, $this->ssh->envs[$dos->id]);
+
+        /* 🔴 Ni la clave del admin ni el valor viejo del .env salen en la respuesta. */
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertStringNotContainsString('otro-valor-viejo-1234567890', $this->cuerpo($respuesta));
+    }
+
+    /**
+     * Todas las formas de decir "true" son dry_run y no escriben.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function formas_de_dry_run_verdadero(): array
+    {
+        return [
+            'true booleano' => [true],
+            'texto true'    => ['true'],
+            'uno'           => [1],
+            'texto uno'     => ['1'],
+            'vacío (null)'  => [''],
+            'null'          => [null],
+        ];
+    }
+
+    /**
+     * @dataProvider formas_de_dry_run_verdadero
+     *
+     * @param mixed $valor Valor de `dry_run`.
+     *
+     * @return void
+     */
+    public function test_las_formas_de_dry_run_verdadero_no_escriben($valor): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => $valor], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertTrue($respuesta->json('dry_run'));
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+    }
+
+    /**
+     * 🔴 Un `dry_run` que no se entiende es 422 y NO "aplicar". Con `$request->boolean()` un "maybe"
+     * valdría false, que es el lado peligroso del interruptor.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function valores_de_dry_run_que_no_se_entienden(): array
+    {
+        return [
+            'maybe'     => ['maybe'],
+            'si'        => ['si'],
+            'dos'       => [2],
+            'una lista' => [[true]],
+            'negativo'  => [-1],
+        ];
+    }
+
+    /**
+     * @dataProvider valores_de_dry_run_que_no_se_entienden
+     *
+     * @param mixed $valor Valor de `dry_run`.
+     *
+     * @return void
+     */
+    public function test_un_dry_run_que_no_se_entiende_es_422_y_no_aplica($valor): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => $valor, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertArrayHasKey('dry_run', $respuesta->json('detalle'));
+        $this->assertSame([], $this->ssh->escrituras, 'Un dry_run ilegible no puede terminar escribiendo.');
+        $this->assertSame([], $this->ssh->backups);
+    }
+
+    /**
+     * La lista de parámetros es cerrada: una clave de más es 422 `validacion` y no se hace nada.
+     *
+     * @return void
+     */
+    public function test_un_parametro_de_mas_es_422_y_no_hace_nada(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes();
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false, 'force' => true, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertSame(['force'], array_keys($respuesta->json('detalle')));
+        $this->assertSame([], $this->ssh->escrituras);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 3. El freno del nombre
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Aplicar sin `confirm_client_name` es 422 y no escribe.
+     *
+     * @return void
+     */
+    public function test_aplicar_sin_confirm_client_name_es_422_y_no_escribe(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave);
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false], $this->headers());
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertArrayHasKey('confirm_client_name', $respuesta->json('detalle'));
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+        $this->assertSinLaClave($respuesta, $clave);
+    }
+
+    /**
+     * 🔴 Aplicar con el nombre equivocado es 422, no escribe NADA y la respuesta no revela el nombre
+     * correcto: es un freno, no un formulario a completar.
+     *
+     * @return void
+     */
+    public function test_aplicar_con_el_nombre_equivocado_es_422_no_escribe_y_no_revela_el_nombre(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave);
+
+        $antes_uno = $this->ssh->envs[$uno->id];
+        $antes_dos = $this->ssh->envs[$dos->id];
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Otro Cliente S.A.'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(422);
+        $this->assertSame('validacion', $respuesta->json('error'));
+        $this->assertArrayHasKey('confirm_client_name', $respuesta->json('detalle'));
+
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame([], $this->ssh->backups);
+        $this->assertSame($antes_uno, $this->ssh->envs[$uno->id]);
+        $this->assertSame($antes_dos, $this->ssh->envs[$dos->id]);
+
+        $texto = mb_strtolower($this->cuerpo($respuesta));
+        $this->assertStringNotContainsString('doblep', $texto, 'El error no puede revelar el nombre correcto del cliente.');
+        $this->assertSinLaClave($respuesta, $clave);
+    }
+
+    /**
+     * El nombre se compara con recorte y sin distinguir mayúsculas, como en `PUT .../schedule`.
+     *
+     * @return void
+     */
+    public function test_el_nombre_se_compara_con_recorte_y_sin_mayusculas(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes('Doblep Distribuciones');
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => '  DOBLEP distribuciones '],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertTrue($respuesta->json('listo'));
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 4. Aplicar
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Aplicar escribe la clave en los DOS frentes, con respaldo de cada `.env`, deja el resto del
+     * archivo como estaba, contesta `listo: true` y NO lleva la clave en la respuesta.
+     *
+     * @return void
+     */
+    public function test_aplicar_escribe_en_los_dos_frentes_con_respaldo(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave, [
+            "APP_ENV=production\nDB_DATABASE=doblep\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=otro-valor-viejo-1234567890\nDB_DATABASE=doblep\n",
+        ]);
+
+        $registro = $this->capturar_el_log();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('dry_run'));
+        $this->assertSame('presente', $respuesta->json('api_key_en_el_admin'));
+        $this->assertTrue($respuesta->json('listo'));
+
+        foreach ([$uno, $dos] as $frente) {
+            $fila = $this->fila($respuesta, $frente);
+
+            $this->assertSame('escrita', $fila['accion']);
+            $this->assertNull($fila['error']);
+
+            $this->assertSame([self::VARIABLE => $clave], $this->ssh->escrituras[$frente->id], 'Se escribe SOLO la variable, con la clave del cliente.');
+            $this->assertArrayHasKey($frente->id, $this->ssh->backups, 'Se respalda el .env del frente antes de escribir.');
+            $this->assertSame($clave, $this->valor_en_el_env($frente, self::VARIABLE));
+            $this->assertSame('production', $this->valor_en_el_env($frente, 'APP_ENV'), 'El resto del .env queda como estaba.');
+            $this->assertSame('doblep', $this->valor_en_el_env($frente, 'DB_DATABASE'));
+        }
+
+        $this->assertSame('falta', $this->fila($respuesta, $uno)['estado'], '`estado` es lo que se ENCONTRÓ antes de actuar.');
+        $this->assertSame('distinta', $this->fila($respuesta, $dos)['estado']);
+
+        /* 🔴 Ni en la respuesta ni en el log. */
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertStringNotContainsString('otro-valor-viejo-1234567890', $this->cuerpo($respuesta));
+        $this->assertLogSinLaClave($registro, $clave);
+        $this->assertStringNotContainsString('otro-valor-viejo-1234567890', implode("\n", $registro->lineas));
+    }
+
+    /**
+     * Aplicar deja una línea en el log con ids, estados y acciones; nunca valores.
+     *
+     * @return void
+     */
+    public function test_aplicar_deja_constancia_en_el_log_sin_valores(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave);
+
+        $registro = $this->capturar_el_log();
+
+        $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers())
+            ->assertStatus(200);
+
+        $propias = array_values(array_filter($registro->registros, function ($r) {
+            return strpos($r['mensaje'], 'ClientInboundKeySyncService') === 0;
+        }));
+
+        $this->assertCount(1, $propias);
+        $this->assertSame((int) $cliente->id, $propias[0]['contexto']['client_id']);
+        $this->assertTrue($propias[0]['contexto']['listo']);
+        $this->assertSame((int) $uno->id, $propias[0]['contexto']['frentes'][0]['client_api_id']);
+        $this->assertSame('escrita', $propias[0]['contexto']['frentes'][0]['accion']);
+
+        $this->assertLogSinLaClave($registro, $clave);
+    }
+
+    /**
+     * Es idempotente: un frente que ya tiene la clave igual no se respalda ni se toca, y el pedido
+     * contesta `listo: true` tanto en dry_run como aplicando. La clave entre comillas en el `.env`
+     * cuenta como igual (el admin la parsea como la parsea phpdotenv).
+     *
+     * @return void
+     */
+    public function test_un_frente_que_ya_tiene_la_clave_no_se_toca(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave, [
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=" . $clave . "\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY='" . $clave . "'\n",
+        ]);
+
+        $dry = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $dry->assertStatus(200);
+        $this->assertTrue($dry->json('listo'));
+        $this->assertSame('igual', $this->fila($dry, $uno)['estado']);
+        $this->assertSame('igual', $this->fila($dry, $dos)['estado']);
+        $this->assertSame('ninguna', $this->fila($dry, $uno)['accion']);
+
+        $aplicado = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $aplicado->assertStatus(200);
+        $this->assertTrue($aplicado->json('listo'));
+        $this->assertSame('ninguna', $this->fila($aplicado, $uno)['accion']);
+        $this->assertSame('ninguna', $this->fila($aplicado, $dos)['accion']);
+
+        $this->assertSame([], $this->ssh->escrituras, 'Un frente igual no se escribe.');
+        $this->assertSame([], $this->ssh->backups, 'Un frente igual no se respalda.');
+
+        $this->assertSinLaClave($dry, $clave);
+        $this->assertSinLaClave($aplicado, $clave);
+    }
+
+    /**
+     * Una variable vacía en el `.env` es `falta`, no `distinta`.
+     *
+     * @return void
+     */
+    public function test_una_variable_vacia_en_el_env_es_falta(): void
+    {
+        [$cliente, $uno] = $this->cliente_con_dos_frentes('Doblep Distribuciones', null, [
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=\n",
+        ]);
+
+        $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $this->assertSame('falta', $this->fila($respuesta, $uno)['estado']);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 5. Un frente que falla no frena al otro
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un frente con el SSH caído queda `estado: error` (el mensaje de la excepción tapado aunque
+     * traiga la clave adentro), `listo: false`, y el OTRO frente se escribe igual.
+     *
+     * @return void
+     */
+    public function test_un_frente_con_ssh_caido_no_frena_al_otro_y_no_filtra_la_clave(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave);
+
+        $this->ssh->fallan_al_leer[$uno->id] = 'Connection closed prematurely (exec cat ... ADMIN_API_INBOUND_KEY=' . $clave . ')';
+
+        $registro = $this->capturar_el_log();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $caido = $this->fila($respuesta, $uno);
+        $this->assertSame('error', $caido['estado']);
+        $this->assertSame('ninguna', $caido['accion'], 'Si ni siquiera se pudo leer, no se intentó escribir.');
+        $this->assertStringContainsString('[clave oculta]', (string) $caido['error']);
+        $this->assertArrayNotHasKey($uno->id, $this->ssh->escrituras);
+
+        $sano = $this->fila($respuesta, $dos);
+        $this->assertSame('escrita', $sano['accion']);
+        $this->assertSame($clave, $this->valor_en_el_env($dos, self::VARIABLE), 'El frente sano se escribió igual.');
+
+        $this->assertSinLaClave($respuesta, $clave);
+        $this->assertLogSinLaClave($registro, $clave);
+    }
+
+    /**
+     * Un frente que falla AL ESCRIBIR queda `estado: error` + `accion: fallo`, sin filtrar la clave, y
+     * el otro frente queda escrito.
+     *
+     * @return void
+     */
+    public function test_un_frente_que_falla_al_escribir_queda_en_fallo_y_el_otro_se_escribe(): void
+    {
+        $clave = Str::random(40);
+
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', $clave);
+
+        $this->ssh->fallan_al_escribir[$dos->id] = 'La escritura no quedó aplicada para ADMIN_API_INBOUND_KEY=' . $clave . '. Revisá permisos.';
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $roto = $this->fila($respuesta, $dos);
+        $this->assertSame('error', $roto['estado']);
+        $this->assertSame('fallo', $roto['accion']);
+        $this->assertStringContainsString('[clave oculta]', (string) $roto['error']);
+
+        $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion']);
+        $this->assertSame($clave, $this->valor_en_el_env($uno, self::VARIABLE));
+        $this->assertNull($this->valor_en_el_env($dos, self::VARIABLE), 'El frente que falló quedó como estaba.');
+
+        $this->assertSinLaClave($respuesta, $clave);
+    }
+
+    /**
+     * Un frente sin `.env` NO se crea (escribir ahí dejaría un archivo en el servidor equivocado) y no
+     * cuenta como listo, aunque el otro sí se escriba.
+     *
+     * @return void
+     */
+    public function test_un_frente_sin_env_no_se_crea_y_no_cuenta_como_listo(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes();
+
+        unset($this->ssh->envs[$dos->id]);
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertFalse($respuesta->json('listo'));
+
+        $sin_env = $this->fila($respuesta, $dos);
+        $this->assertSame('sin_env', $sin_env['estado']);
+        $this->assertSame('ninguna', $sin_env['accion']);
+        $this->assertNotNull($sin_env['error'], 'Un frente sin .env dice por qué no se tocó.');
+
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->envs, 'No se crea ningún .env.');
+        $this->assertArrayNotHasKey($dos->id, $this->ssh->escrituras);
+        $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion']);
+    }
+
+    /**
+     * Un frente de VPS sin `vps_path` no se puede resolver: queda `error` (con el motivo) y no frena al
+     * otro. El resolver de rutas tira, y esa excepción no puede tumbar la respuesta entera.
+     *
+     * @return void
+     */
+    public function test_un_frente_de_vps_sin_vps_path_queda_en_error_y_no_frena_al_otro(): void
+    {
+        [$cliente, $uno] = $this->cliente_con_dos_frentes();
+
+        $vps = $this->crear_frente($cliente, 'doblep-vps', 'vps', null);
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+
+        $fila = $this->fila($respuesta, $vps);
+        $this->assertSame('vps', $fila['hosting_type']);
+        $this->assertNull($fila['path']);
+        $this->assertSame('error', $fila['estado']);
+        $this->assertStringContainsString('vps_path', (string) $fila['error']);
+
+        $this->assertFalse($respuesta->json('listo'));
+        $this->assertSame('escrita', $this->fila($respuesta, $uno)['accion']);
+    }
+
+    /**
+     * Un frente de VPS con su `vps_path` se resuelve a la carpeta del VPS y se escribe.
+     *
+     * @return void
+     */
+    public function test_un_frente_de_vps_se_resuelve_a_su_carpeta(): void
+    {
+        $cliente = $this->crear_cliente();
+        $vps     = $this->crear_frente($cliente, 'doblep', 'vps', 'doblep', true);
+
+        $this->ssh->envs[$vps->id] = "APP_ENV=production\n";
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertTrue($respuesta->json('listo'));
+        $this->assertSame('/home/api-doblep/empresa-api', $this->fila($respuesta, $vps)['path']);
+        $this->assertSame('vps', $this->fila($respuesta, $vps)['hosting_type']);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 6. La clave del admin vacía
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Con la clave del admin vacía, `dry_run` dice `falta`, NO genera ni guarda nada, y ningún
+     * frente puede estar `igual` (una clave vacía no es igual a nada).
+     *
+     * @return void
+     */
+    public function test_con_la_clave_vacia_el_dry_run_dice_falta_y_no_guarda_nada(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', '', [
+            "APP_ENV=production\n",
+            "APP_ENV=production\nADMIN_API_INBOUND_KEY=lo-que-hubiera-1234567890\n",
+        ]);
+
+        $respuesta = $this->postJson($this->url($cliente), [], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('falta', $respuesta->json('api_key_en_el_admin'));
+        $this->assertFalse($respuesta->json('listo'));
+        $this->assertSame('falta', $this->fila($respuesta, $uno)['estado']);
+        $this->assertSame('distinta', $this->fila($respuesta, $dos)['estado'], 'Contra una clave vacía, lo que haya en el .env es distinto.');
+
+        $this->assertSame('', trim((string) $cliente->fresh()->api_key), 'El dry_run no genera ninguna clave.');
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertStringNotContainsString('lo-que-hubiera-1234567890', $this->cuerpo($respuesta));
+    }
+
+    /**
+     * 🔴 Con la clave del admin vacía y `dry_run=false`, la GENERA (40 caracteres), la guarda en el
+     * cliente, la escribe en los dos frentes y dice `generada` — sin devolverla. La segunda llamada ya
+     * la ve `presente`, con los frentes `igual` y sin escribir nada.
+     *
+     * @return void
+     */
+    public function test_con_la_clave_vacia_aplicando_la_genera_la_guarda_y_la_escribe(): void
+    {
+        [$cliente, $uno, $dos] = $this->cliente_con_dos_frentes('Doblep Distribuciones', '');
+
+        $registro = $this->capturar_el_log();
+
+        $respuesta = $this->postJson(
+            $this->url($cliente),
+            ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'],
+            $this->headers()
+        );
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('generada', $respuesta->json('api_key_en_el_admin'));
+        $this->assertTrue($respuesta->json('listo'));
+
+        $generada = (string) $cliente->fresh()->api_key;
+        $this->assertSame(40, strlen($generada), 'La clave generada tiene 40 caracteres, como la del alta del cliente.');
+
+        $this->assertSame($generada, $this->valor_en_el_env($uno, self::VARIABLE));
+        $this->assertSame($generada, $this->valor_en_el_env($dos, self::VARIABLE));
+
+        /* 🔴 La clave generada no sale ni en la respuesta ni en el log. */
+        $this->assertSinLaClave($respuesta, $generada);
+        $this->assertLogSinLaClave($registro, $generada);
+
+        /* Segunda llamada: ya está, y no se vuelve a escribir. */
+        $this->ssh->escrituras = [];
+        $this->ssh->backups    = [];
+
+        $otra = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $otra->assertStatus(200);
+        $this->assertSame('presente', $otra->json('api_key_en_el_admin'));
+        $this->assertTrue($otra->json('listo'));
+        $this->assertSame('igual', $this->fila($otra, $uno)['estado']);
+        $this->assertSame([], $this->ssh->escrituras);
+        $this->assertSame($generada, (string) $cliente->fresh()->api_key, 'La clave guardada no cambia en la segunda llamada.');
+        $this->assertSinLaClave($otra, $generada);
+    }
+
+    /**
+     * Una clave que son solo espacios cuenta como vacía y también se genera.
+     *
+     * @return void
+     */
+    public function test_una_clave_de_solo_espacios_cuenta_como_vacia(): void
+    {
+        [$cliente] = $this->cliente_con_dos_frentes('Doblep Distribuciones', '   ');
+
+        $respuesta = $this->postJson($this->url($cliente), ['dry_run' => false, 'confirm_client_name' => 'Doblep Distribuciones'], $this->headers());
+
+        $respuesta->assertStatus(200);
+        $this->assertSame('generada', $respuesta->json('api_key_en_el_admin'));
+        $this->assertSame(40, strlen((string) $cliente->fresh()->api_key));
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 7. El catálogo dice lo mismo que el controlador
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Los parámetros que `config/claude_catalog.php` declara para C1 son EXACTAMENTE la lista cerrada
+     * del controlador: un parámetro que está en una y no en la otra es uno que Claude no encuentra o
+     * que el catálogo promete y el controlador rechaza.
+     *
+     * @return void
+     */
+    public function test_el_catalogo_declara_los_mismos_parametros_que_acepta_el_controlador(): void
+    {
+        $endpoint = config('claude_catalog.endpoints.POST api/claude/clients/{id}/catalogo/clave');
+
+        $this->assertIsArray($endpoint, 'El catálogo no tiene la entrada de C1.');
+        $this->assertTrue($endpoint['escribe']);
+
+        $declarados = [];
+        foreach ($endpoint['parametros'] as $parametro) {
+            if (strpos($parametro['nombre'], '(en la ruta)') === false) {
+                $declarados[] = $parametro['nombre'];
+            }
+        }
+
+        $aceptados = ClaudeClientCatalogoController::PARAMETROS_DE_LA_CLAVE;
+
+        sort($declarados);
+        sort($aceptados);
+
+        $this->assertSame($aceptados, $declarados);
+    }
+}
