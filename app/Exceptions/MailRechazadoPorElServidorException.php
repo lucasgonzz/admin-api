@@ -40,6 +40,8 @@ class MailRechazadoPorElServidorException extends \RuntimeException
     private $rechazadas = [];
 
     /**
+     * Arma la excepción con el motivo fijo (sin la casilla) y guarda aparte las casillas que el servidor rechazó.
+     *
      * @param array<int, string> $rechazadas Las casillas rechazadas, tal como las devuelve
      *                                       `RechazosDeCorreoHelper::del_ultimo_envio()`.
      */

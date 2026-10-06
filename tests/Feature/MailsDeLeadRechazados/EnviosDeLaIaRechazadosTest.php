@@ -12,7 +12,6 @@ use App\Services\DemoDirectaService;
 use App\Services\LeadAiService;
 use App\Services\LeadDemoSettings;
 use Carbon\Carbon;
-use Illuminate\Http\Client\Factory;
 use Illuminate\Mail\Mailable;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
@@ -482,6 +481,14 @@ class EnviosDeLaIaRechazadosTest extends BaseDeMailsDeLead
     {
         // Un lead cuya ficha NO se puede escribir: el `update()` tira.
         $lead = new class extends Lead {
+            /**
+             * Simula la base caída: el `update()` de la ficha tira, que es justo lo que el método bajo prueba tiene que aguantar.
+             *
+             * @param array<string, mixed> $attributes
+             * @param array<string, mixed> $options
+             *
+             * @return bool Nunca llega a devolver: siempre tira.
+             */
             public function update(array $attributes = [], array $options = [])
             {
                 throw new \RuntimeException('la base se cayó');

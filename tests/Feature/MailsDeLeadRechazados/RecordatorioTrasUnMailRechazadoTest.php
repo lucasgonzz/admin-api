@@ -74,6 +74,16 @@ class RecordatorioTrasUnMailRechazadoTest extends BaseDeMailsDeLead
             /** @var array<int, array<string, mixed>> */
             public $textos = [];
 
+            /**
+             * Guarda lo que el comando intentó mandar por WhatsApp en vez de mandarlo de verdad.
+             *
+             * @param string      $to                        Teléfono del lead.
+             * @param string      $body                      Texto del mensaje.
+             * @param string|null $context                   No se usa.
+             * @param bool        $skip_failure_notification No se usa.
+             *
+             * @return string|null Un id de mensaje inventado.
+             */
             public function send_text(string $to, string $body, ?string $context = null, bool $skip_failure_notification = false): ?string
             {
                 $this->textos[] = ['to' => $to, 'body' => $body];
@@ -81,6 +91,17 @@ class RecordatorioTrasUnMailRechazadoTest extends BaseDeMailsDeLead
                 return 'wamid.texto.' . count($this->textos);
             }
 
+            /**
+             * Las plantillas no se miran en este test: devuelve un id inventado sin mandar nada.
+             *
+             * @param string               $to
+             * @param string               $template_name
+             * @param array<string, mixed> $variables
+             * @param string               $language_code
+             * @param string|null          $context
+             *
+             * @return string|null Un id de mensaje inventado.
+             */
             public function send_template(string $to, string $template_name, array $variables = [], string $language_code = 'es_AR', ?string $context = null): ?string
             {
                 return 'wamid.plantilla';
