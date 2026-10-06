@@ -41,6 +41,14 @@ use Illuminate\Support\Facades\Log;
  * (alguien conciliado), NO pisa el estado. Un job viejo que arranca tarde se descarta solo; por eso volver
  * a intentar es seguro.
  *
+ * 🔴 TAMBIÉN REVALIDA LA ETAPA Y DEJA UNA MARCA. Al tomar el turno (siempre bajo lock) vuelve a exigir que la
+ * implementación siga en la etapa 2 en curso —si alguien la avanzó mientras el job esperaba en la cola no llama a
+ * nadie y deja el registro en `error` con `puede_haber_corrido = false`— y escribe `llamada_iniciada_at` ANTES de
+ * llamar. Esa marca es lo que separa un `en_curso` colgado en el que el job nunca arrancó (no salió nada: se puede
+ * volver a intentar con la misma llamada) de uno colgado después de llamar (pudo haber corrido: pide `conciliar` o
+ * `reintentar`, igual que un error). Ver `estado_del_user_setup()` y `llamo_antes_de_colgarse()` en
+ * `ClaudeImplementationOpsController`.
+ *
  * Qué deja, en `stage 2 data.user_setup` (el endpoint escribe `en_curso` antes de despachar):
  *   - éxito: `estado: ok`, `terminado_at`, y además `user_setup_executed_at` (el candado) y la acción
  *     `user_setup` en `data.actions[]` de la etapa 2 (con `canal: claude`), que es la huella que lee el
@@ -220,8 +228,54 @@ class EjecutarUserSetupDeImplementacionJob implements ShouldQueue
                 return false;
             }
 
+            /* 🔴 La ETAPA, otra vez y bajo lock. El endpoint la exigió al despachar, pero entre el despacho y el arranque
+               del job (una cola atrasada, un worker parado) alguien pudo avanzar la implementación: con la etapa 3 o
+               después ya se cargan datos del negocio, y migrate:fresh se los borraría. No se llama a nadie, y el registro
+               queda en `error` (puede_haber_corrido = false) en vez de `en_curso` para siempre. */
+            if ((int) $implementation->current_stage !== 2 || (string) $implementation->status !== 'in_progress') {
+                $this->dejar_dicho('la implementación ya no está en la etapa 2 en curso (etapa ' . (int) $implementation->current_stage . ', estado "'
+                    . (string) $implementation->status . '"): se descarta el job sin llamar al cliente.');
+
+                $registro['estado']              = 'error';
+                $registro['terminado_at']        = now()->toISOString();
+                $registro['puede_haber_corrido'] = false;
+                $registro['error']               = 'Descartado: cuando el job llegó a la cola la implementación ya no estaba en la etapa 2 en curso (estaba en la etapa '
+                    . (int) $implementation->current_stage . ', estado "' . (string) $implementation->status . '"). NO se llamó al sistema del cliente: el user '
+                    . 'setup no corrió. Solo se aplica en la etapa 2, antes de que se cargue nada del negocio; si de verdad hace falta, se hace desde el '
+                    . 'panel, con una persona mirando.';
+
+                $this->guardar_el_registro($etapa, $registro);
+
+                return false;
+            }
+
+            /* 🔴 La MARCA de que la llamada sale: se escribe acá, bajo lock, ANTES de llamar. Es lo que distingue un
+               `en_curso` colgado en el que el job NUNCA arrancó (la cola estaba parada: no salió nada, se puede volver a
+               intentar con la misma llamada) de uno colgado DESPUÉS de llamar (un deploy que mató el worker, una caída: el
+               setup pudo haber corrido del otro lado y hay que decidir `conciliar` o `reintentar`). Sin la marca no hay
+               forma de saber en cuál de los dos casos se está. */
+            $registro['llamada_iniciada_at'] = now()->toISOString();
+
+            $this->guardar_el_registro($etapa, $registro);
+
             return true;
         });
+    }
+
+    /**
+     * Guarda el registro del user setup en `data.user_setup` de la etapa 2 (que ya viene bloqueada).
+     *
+     * @param ImplementationStage  $etapa    La etapa 2.
+     * @param array<string, mixed> $registro El registro completo, con lo que se le agregó.
+     *
+     * @return void
+     */
+    private function guardar_el_registro(ImplementationStage $etapa, array $registro)
+    {
+        $datos               = is_array($etapa->data) ? $etapa->data : [];
+        $datos['user_setup'] = $registro;
+        $etapa->data         = $datos;
+        $etapa->save();
     }
 
     /**
@@ -348,8 +402,11 @@ class EjecutarUserSetupDeImplementacionJob implements ShouldQueue
 
             if ($status === 409) {
                 return [
-                    'texto' => $mensaje . ' — Ya hay un setup corriendo (o que ya corrió) del otro lado: NO se reintenta. Esperá a que termine y '
-                        . 'mirá si el dueño existe en el sistema del cliente: si existe, conciliá con `conciliar: true`.',
+                    'texto' => $mensaje . ' — El sistema del cliente contestó 409, que son DOS cosas: hay otro setup corriendo (o ya corrió), o —en las '
+                        . 'versiones de empresa-api con la guarda `base_con_datos`— el sistema YA TIENE DATOS de negocio y se negó a vaciarlo. NO se '
+                        . 'reintenta. Esperá a que termine y mirá si el dueño existe en el sistema del cliente: si existe, ya estaba configurado '
+                        . '—conciliá con `conciliar: true`—; si hay datos pero NO hay dueño, no toques nada y hablá con Lucas: es un sistema con '
+                        . 'datos que no es el de esta implementación.',
                     'puede_haber_corrido' => true,
                 ];
             }

@@ -371,7 +371,7 @@ class RecorridoCompletoDeUnaImplementacionPorClaudeTest extends BaseDeImplementa
         $this->assertNotSame('', $token, 'El registro en_curso tiene que traer el token con el que se despachó el job.');
         (new EjecutarUserSetupDeImplementacionJob($id, $token))->handle();
 
-        $destino = 'https://api-rosa.' . self::DOMINIO . '/api/admin-sync/user-setup';
+        $destino = 'https://api-rosa.' . self::DOMINIO . '/public/api/admin-sync/user-setup';
         $this->assertSame([$consulta, $destino], $this->llamadas->urls);
         $this->assertSame('Almacén Rosa S.A.', $this->llamadas->cuerpo[$destino]['company_name']);
         $this->assertSame((int) $cliente->user_id, (int) $this->llamadas->cuerpo[$destino]['user_id']);

@@ -237,4 +237,32 @@ class SalidaAInternetDeLosTestsTest extends TestCase
             $this->assertFalse(ImplementationUserSetupService::destino_permitido_en_este_entorno($url), 'Tendría que negar «' . $url . '»');
         }
     }
+
+    /**
+     * 🔴 La otra mitad del freno del user setup: FUERA de `testing` puede llamar a cualquier host, como siempre. Si alguien
+     * rompe la condición de entorno de `destino_permitido_en_este_entorno()`, el user setup de producción dejaría de salir
+     * (se negaría a llamar a todos los clientes) y ningún otro test lo avisaría.
+     *
+     * @return void
+     */
+    public function test_fuera_de_testing_el_user_setup_puede_llamar_a_cualquier_host(): void
+    {
+        $original = $this->app['env'];
+
+        try {
+            foreach (['production', 'local', 'staging'] as $entorno) {
+                $this->app['env'] = $entorno;
+
+                $this->assertTrue(
+                    ImplementationUserSetupService::destino_permitido_en_este_entorno('https://api-panchito.comerciocity.com/public/api/admin-sync/user-setup'),
+                    'En "' . $entorno . '" el user setup tiene que poder llamar a un cliente real.'
+                );
+                $this->assertTrue(ImplementationUserSetupService::destino_permitido_en_este_entorno('https://76.13.171.147/api/admin-sync/user-setup'), $entorno);
+            }
+        } finally {
+            $this->app['env'] = $original;
+        }
+
+        $this->assertSame('testing', app()->environment());
+    }
 }

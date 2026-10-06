@@ -54,16 +54,26 @@ class ImplementationUserSetupService
         }
 
         // URL de la API del cliente (empresa-api desplegada): destino del setup remoto.
+        //
+        // 🔴 NORMALIZADA como en todos los demás llamados del admin al sistema de un cliente
+        // (`ClientEmpresaApiUrlResolver`): en hosting compartido el docroot de la API es la raíz del proyecto y
+        // la aplicación vive bajo `/public`, así que hace falta ese sufijo. Los clientes nuevos (los que crea
+        // `PromoteLeadToClientService`, 19 de los 68 de shared al 5/10/2026) guardan `client_apis.url` SIN `/public`
+        // y con la URL cruda este POST daba 404 —medido contra quino y doblep: `/api/version-activa` 404 y
+        // `/public/api/version-activa` 200—; los viejos la guardan CON `/public`, y la normalización es idempotente.
+        // En VPS no agrega nada. Siempre sobre la API ACTIVA: nunca cae a la otra, que es el otro frente.
         $client->loadMissing('active_client_api');
         $client_api  = $client->active_client_api;
-        $client_api_url = $client_api !== null ? trim((string) ($client_api->url ?? '')) : '';
+        $client_api_url = $client_api !== null
+            ? (new ClientEmpresaApiUrlResolver())->normalize_api_base_url($client_api->url, $client_api->hosting_type)
+            : '';
 
         if ($client_api_url === '') {
             Log::channel('daily')->warning('ImplementationUserSetupService: cliente sin client_api_url; no se ejecuta UserSetup.', [
                 'implementation_id' => $implementation->id,
                 'client_id'         => $client->id,
             ]);
-            return ['ok' => false, 'message' => 'El cliente todavía no tiene una client_api activa configurada.'];
+            return ['ok' => false, 'message' => 'El cliente todavía no tiene una client_api activa configurada (con una URL http o https válida).'];
         }
 
         // Construir el payload completo a partir de los datos del cliente y setup_data.
@@ -281,6 +291,13 @@ class ImplementationUserSetupService
          *
          * Contrato aditivo: campo nuevo y opcional, un empresa-api anterior lo ignora. */
         unset($payload['serper_api_key']);
+
+        /* 🔴 Los flags que le piden a empresa-api VACIAR una base que ya tiene datos (la guarda `base_con_datos`:
+           `forzar_borrado_total` más `confirmar_base_de_datos` con el nombre de la base) NUNCA viajan desde acá. `setup_data`
+           se desparrama entero más arriba, y es un JSON del cliente que un edit del admin puede completar con cualquier
+           clave: una que coincida con esos nombres le saltearía la guarda al user setup. Forzar un borrado total se decide
+           a mano, desde la raíz, mirando el sistema del cliente: no es un dato del formulario. */
+        unset($payload['forzar_borrado_total'], $payload['confirmar_base_de_datos']);
 
         $serper_api_key = ImplementationSettings::get_serper_api_key_default();
         if ($serper_api_key !== '') {

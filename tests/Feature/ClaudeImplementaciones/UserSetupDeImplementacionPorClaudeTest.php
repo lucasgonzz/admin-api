@@ -216,13 +216,13 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $respuesta->assertStatus(200);
         $respuesta->assertJsonPath('dry_run', true);
         $respuesta->assertJsonPath('listo', true);
-        $this->assertCount(6, $respuesta->json('chequeos'));
+        $this->assertCount(9, $respuesta->json('chequeos'));
 
         foreach ($respuesta->json('chequeos') as $chequeo) {
             $this->assertTrue($chequeo['ok'], 'El chequeo ' . $chequeo['chequeo'] . ' salió en false: ' . $chequeo['detalle']);
         }
 
-        $respuesta->assertJsonPath('destino.endpoint', self::URL_API . '/api/admin-sync/user-setup');
+        $respuesta->assertJsonPath('destino.endpoint', self::URL_API . '/public/api/admin-sync/user-setup');
         $respuesta->assertJsonPath('destino.timeout_segundos', 1200);
         $this->assertStringContainsString('migrate:fresh', $respuesta->json('aviso_destructivo'));
         $this->assertStringContainsString('no tiene forzar', $respuesta->json('aviso_destructivo'));
@@ -399,7 +399,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
 
         $respuesta->assertStatus(422);
         $this->assertStringContainsString('instalacion_completada', $this->cuerpo($respuesta));
-        $this->assertCount(6, $respuesta->json('chequeos'));
+        $this->assertCount(9, $respuesta->json('chequeos'));
         $this->assertSame([], $this->registro($e['implementacion']));
         Queue::assertNothingPushed();
     }
@@ -637,7 +637,7 @@ class UserSetupDeImplementacionPorClaudeTest extends BaseDeImplementaciones
         $this->job_de($e)->handle();
 
         $this->assertSame([1200], $llamadas->techos);
-        $this->assertSame([self::URL_API . '/api/admin-sync/user-setup'], $llamadas->urls);
+        $this->assertSame([self::URL_API . '/public/api/admin-sync/user-setup'], $llamadas->urls);
         $this->assertSame((int) $e['cliente']->user_id, $llamadas->cuerpo['user_id']);
         $this->assertSame('20304050607', $llamadas->cuerpo['doc_number']);
 

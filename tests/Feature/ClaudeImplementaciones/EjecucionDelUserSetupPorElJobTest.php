@@ -158,7 +158,7 @@ class EjecucionDelUserSetupPorElJobTest extends BaseDeImplementaciones
 
         $this->job($e)->handle();
 
-        $this->assertSame([self::URL_API . '/api/admin-sync/user-setup'], $llamadas->urls);
+        $this->assertSame([self::URL_API . '/public/api/admin-sync/user-setup'], $llamadas->urls, 'En hosting compartido el endpoint lleva /public.');
         $this->assertSame([1200], $llamadas->techos);
         $this->assertSame('ok', $this->registro($e)['estado']);
     }

@@ -742,15 +742,61 @@ class ClaudeImplementationOpsController extends Controller
         }
 
         if ($colgado) {
-            $respuesta['colgado'] = true;
-            $respuesta['nota']    = 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos: el registro sigue en en_curso sin '
-                . 'resultado. POST claude/implementations/{id}/user-setup deja volver a intentar, y es seguro: cada intento lleva su token y '
-                . 'el job viejo, si llega a arrancar, se descarta solo sin llamar al cliente. Si sospechás que el setup sí llegó a correr del '
-                . 'otro lado (el cliente tiene un setup lento), mirá si el dueño existe en el sistema del cliente antes de reintentar: un '
-                . 'reintento le vuelve a vaciar la base. Si el cliente seguía corriendo uno, contesta 409 y vuelve como error, sin reintento.';
+            $llamo = $this->llamo_antes_de_colgarse($registro);
+
+            $respuesta['colgado']             = true;
+            $respuesta['llamada_iniciada_at'] = $llamo ? (string) $registro['llamada_iniciada_at'] : null;
+            $respuesta['puede_haber_corrido'] = $llamo;
+            $respuesta['nota']                = 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos: el registro sigue en en_curso sin resultado. '
+                . ($llamo
+                    ? '🔴 El job SÍ llegó a llamar al sistema del cliente (llamada_iniciada_at) y se cortó sin dejar el resultado (un deploy del admin, una caída, '
+                        . 'el worker muerto): el setup PUDO HABER CORRIDO del otro lado. Mirá si el dueño existe en el sistema del cliente y mandá EXACTAMENTE UNO de '
+                        . '`conciliar: true` (existe: no llama a nadie) o `reintentar: true` (no existe o quedó a medias: vuelve a correr migrate:fresh). La llamada '
+                        . 'normal, sin ninguno de los dos, es 422.'
+                    : 'El job NUNCA llegó a llamar al cliente (no hay llamada_iniciada_at: la cola estaba parada o atrasada), así que no salió nada. POST '
+                        . 'claude/implementations/{id}/user-setup con la llamada normal vuelve a intentar, y es seguro: cada intento lleva su token y el job viejo, '
+                        . 'si llega a arrancar, se descarta solo sin llamar al cliente.');
         }
 
         return $respuesta;
+    }
+
+    /**
+     * ¿Un user setup que quedó `en_curso` llegó a llamar al sistema del cliente antes de colgarse?
+     *
+     * 🔴 Lo dice `llamada_iniciada_at`, que el job escribe bajo lock ANTES de llamar (ver `tomar_el_turno()`). Sin la
+     * marca el job nunca arrancó (cola parada o atrasada) y no salió nada; con ella, la llamada pudo estar en vuelo o
+     * haber terminado cuando se cortó la ejecución, y el setup PUDO HABER CORRIDO del otro lado.
+     *
+     * @param array<string, mixed> $registro El registro de la etapa 2.
+     *
+     * @return bool
+     */
+    protected function llamo_antes_de_colgarse(array $registro)
+    {
+        return isset($registro['llamada_iniciada_at']) && trim((string) $registro['llamada_iniciada_at']) !== '';
+    }
+
+    /**
+     * ¿Hay que DECIDIR (`conciliar` o `reintentar`) antes de volver a aplicar el user setup?
+     *
+     * Sí cuando el último intento terminó en `error` y cuando quedó colgado DESPUÉS de llamar al cliente: los dos
+     * pudieron haber corrido del otro lado, y repetir la llamada tal cual es otro `migrate:fresh`. No cuando no hubo
+     * intento, ni cuando el job nunca llegó a llamar (colgado sin la marca).
+     *
+     * @param array<string, mixed> $estado El bloque `user_setup` de `estado_del_user_setup()`.
+     *
+     * @return bool
+     */
+    protected function pide_decision_el_intento_anterior(array $estado)
+    {
+        if ($estado['estado'] === 'error') {
+            return true;
+        }
+
+        return $estado['estado'] === 'en_curso'
+            && isset($estado['colgado']) && $estado['colgado'] === true
+            && isset($estado['puede_haber_corrido']) && $estado['puede_haber_corrido'] === true;
     }
 
     /**
@@ -1877,11 +1923,12 @@ class ClaudeImplementationOpsController extends Controller
     /**
      * ¿Se puede avanzar con esta etapa pedida? Si no, el 409 que corresponde.
      *
-     * Dos casos, los dos 409 y no 422: no es que el pedido esté mal armado, es que el estado de la
+     * Tres casos, todos 409 y no 422: no es que el pedido esté mal armado, es que el estado de la
      * implementación ya no es el que el que llama miró.
      *   - Ya está completada: no hay etapa a la que avanzar.
      *   - `etapa_actual` no es la real: se devuelve la real para que la skill relea y decida, en vez de
      *     avanzar dos veces por un reintento.
+     *   - Se pide cerrar la etapa 2 con un user setup EN CURSO (no colgado): se espera a que termine.
      *
      * @param Implementation $implementation La implementación (bloqueada, si se llama adentro del lock).
      * @param int            $etapa_pedida   La etapa que dice el que llama.
@@ -1908,6 +1955,24 @@ class ClaudeImplementationOpsController extends Controller
                 'current_stage'     => (int) $implementation->current_stage,
                 'etapa_pedida'      => (int) $etapa_pedida,
             ], 409);
+        }
+
+        /* 🔴 De la etapa 2 no se avanza con un user setup EN CURSO. El job se despacha en la etapa 2 y recién después
+           llama al cliente; si se avanza a la 3 mientras corre (o espera en la cola), el negocio pasa a una etapa donde ya se
+           le cargan datos mientras su sistema se está vaciando y re-sembrando (migrate:fresh). Uno colgado (más de 45
+           minutos sin señal) no cuenta: ahí hay que resolverlo (conciliar o reintentar), no esperarlo. */
+        if ((int) $etapa_pedida === 2 && $implementation->user_setup_executed_at === null) {
+            $registro = $this->registro_del_user_setup($implementation);
+
+            if ((isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso' && ! $this->esta_colgado($registro)) {
+                return response()->json([
+                    'error'             => 'Hay un user setup en curso (arrancó ' . (isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : 'sin fecha')
+                        . '): esperá a que termine antes de avanzar de la etapa 2. No se hizo nada.',
+                    'implementation_id' => (int) $implementation->id,
+                    'user_setup'        => $this->estado_del_user_setup($implementation),
+                    'ayuda'             => 'GET claude/implementations/' . (int) $implementation->id . ' dice cómo va (user_setup.estado: en_curso → ok | error).',
+                ], 409);
+            }
         }
 
         return null;
@@ -2772,6 +2837,30 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
+     * El estado del user setup que dejó el camino de LEADS (`RunUserSetupService`) en el lead del que salió el
+     * cliente: `pendiente`, `ejecutandose`, `exitoso`, `fallido` o `sin_confirmar`. Null si el cliente no salió de un
+     * lead (se creó directo) o el lead no tiene estado.
+     *
+     * Lo mira el chequeo `lead_sin_user_setup` del user setup: ese camino llama al MISMO endpoint remoto
+     * (`admin-sync/user-setup`, que hace `migrate:fresh`) y no escribe el candado de la implementación, así que sin
+     * este dato el candado no se entera de que el sistema ya se configuró.
+     *
+     * @param Client $client El cliente.
+     *
+     * @return string|null
+     */
+    protected function estado_del_user_setup_del_lead(Client $client)
+    {
+        $lead = Lead::where('promoted_client_id', $client->id)->orderByDesc('id')->first();
+
+        if ($lead === null || $lead->user_setup_status === null || trim((string) $lead->user_setup_status) === '') {
+            return null;
+        }
+
+        return (string) $lead->user_setup_status;
+    }
+
+    /**
      * La señal HTTP de que ya hay un sistema andando: `GET <api del cliente>/api/version-activa`.
      *
      * 🔴 ES INFORMATIVA Y SOLO DEL DRY-RUN. No decide nada: una API que no responde es lo normal en un cliente
@@ -3206,10 +3295,18 @@ class ClaudeImplementationOpsController extends Controller
      *      instalado, y después el negocio puede estar operando —`migrate:fresh` le borraría lo que cargó—.
      *   3. La última instalación `completa` de la API activa está `completada` (la API responde).
      *   4. La API activa tiene URL.
+     *   4b. 🔴 La instalación completada es POSTERIOR al arranque de la implementación (`instalacion_de_esta_implementacion`):
+     *      una anterior es un sistema que ya existía y puede estar operando.
+     *   4c. 🔴 El cliente no tiene un sistema vivo (`sin_sistema_vivo`: actualizaciones registradas en
+     *      `client_version_upgrades`), el mismo chequeo que el alta y `install`.
+     *   4d. 🔴 El user setup no se aplicó ya por el camino de LEADS (`lead_sin_user_setup`: `leads.user_setup_status`
+     *      del lead promovido en ejecutandose, exitoso o sin_confirmar). Ese camino llama al mismo endpoint remoto.
      *   5. `user_setup_executed_at` está vacío: si no, 422 sin vuelta, con la fecha.
      *   6. No hay otro user setup `en_curso` (409). Uno que dice `en_curso` hace más de 45 minutos se da
-     *      por colgado y deja reintentar: es seguro porque el job viejo, si arranca, se descarta solo (cada
-     *      intento lleva su token), y el cliente igual frena un setup doble con su propio 409.
+     *      por colgado. Si el job NUNCA llegó a llamar al cliente (sin `llamada_iniciada_at`: la cola estaba parada o
+     *      atrasada) se puede volver a intentar con la misma llamada; si SÍ llegó a llamar (con la marca) pudo haber
+     *      corrido del otro lado y pide `reintentar` o `conciliar`, igual que un error. El job viejo, si arranca, se
+     *      descarta solo (cada intento lleva su token), y el cliente igual frena un setup doble con su propio 409.
      *
      * 🔴 TRAS UN ERROR NO SE REPITE LA LLAMADA SIN DECIR QUÉ SE HACE. Un error del job casi nunca prueba que el
      * setup no corrió (un 502, un timeout, un worker muerto: el origen sigue), y repetir la llamada era
@@ -3475,7 +3572,7 @@ class ClaudeImplementationOpsController extends Controller
     }
 
     /**
-     * Los seis chequeos del user setup.
+     * Los nueve chequeos del user setup.
      *
      * Lee, no escribe. Los tres primeros son los del `user_setup_gate()` del panel, con dos precisiones: el
      * segundo exige la etapa 2 EXACTA (el panel acepta cualquiera desde la 2, y re-aplicar en la 3 o después le
@@ -3540,12 +3637,64 @@ class ClaudeImplementationOpsController extends Controller
                     : 'La última instalación completa de la API activa (' . (int) $instalacion->id . ') está en "' . $instalacion->status . '", no en completada.')
         );
 
-        $url = $activa === null ? '' : trim((string) $activa->url);
+        /* 🔴 La misma URL que va a usar `trigger_user_setup()`: normalizada (con `/public` en hosting compartido, sin él en
+           VPS). Con la URL cruda de un cliente nuevo de shared el POST daba 404; el dry-run tiene que mostrar el destino REAL. */
+        $url = $activa === null ? '' : (new ClientEmpresaApiUrlResolver())->normalize_api_base_url($activa->url, $activa->hosting_type);
 
         $chequeos[] = $this->chequeo(
             'client_api_activa',
             $url !== '',
             $url !== '' ? 'La API activa del cliente es ' . $url . '.' : 'El cliente no tiene una API activa con URL (clients.active_client_api_id).'
+        );
+
+        /* 4b. 🔴 La instalación es de ESTA implementación. Una instalación completada ANTERIOR al arranque de la
+           implementación es un sistema que ya existía (instalado por afuera de este camino, por /instalar-cliente, a mano o
+           por otra implementación): puede estar operando, y migrate:fresh le borraría todo. Sin instalación completada
+           todavía no aplica (el chequeo de arriba ya está en false). */
+        $posterior = ! $instalada
+            || $implementation->started_at === null
+            || $instalacion->created_at === null
+            || $instalacion->created_at->gte($implementation->started_at);
+
+        $chequeos[] = $this->chequeo(
+            'instalacion_de_esta_implementacion',
+            $posterior,
+            ! $instalada
+                ? 'No aplica todavía: no hay una instalación completada.'
+                : ($posterior
+                    ? 'La instalación ' . (int) $instalacion->id . ' es posterior al arranque de la implementación: la hizo este camino.'
+                    : 'La instalación completada (' . (int) $instalacion->id . ', del ' . $instalacion->created_at->format('d/m/Y H:i') . ') es ANTERIOR al arranque de la '
+                        . 'implementación (' . $implementation->started_at->format('d/m/Y H:i') . '): es un sistema que ya existía y puede estar operando. 🔴 migrate:fresh '
+                        . 'le borraría todo. Si de verdad hace falta, se hace desde el panel, con una persona mirando.')
+        );
+
+        /* 4c. 🔴 Que no tenga ya un sistema vivo (el mismo chequeo que el alta y `install`: un cliente al que el admin ya le
+           desplegó versiones). El user setup es la acción que VACÍA la base, y es la que más lo necesita. */
+        $vivo = $this->sistema_vivo($client);
+
+        $chequeos[] = $this->chequeo(
+            'sin_sistema_vivo',
+            ! $vivo['vivo'],
+            $vivo['vivo']
+                ? 'El cliente ya tiene un sistema vivo: ' . implode(' ', $vivo['motivos']) . ' 🔴 migrate:fresh le borraría lo que tiene. Si de verdad hace '
+                    . 'falta, se hace desde el panel, con una persona mirando.'
+                : 'Sin señales de un sistema ya instalado (el cliente no tiene actualizaciones registradas).'
+        );
+
+        /* 4d. 🔴 Que el user setup no se haya aplicado ya por el camino de LEADS (`RunUserSetupService`: el que usa
+           /instalar-cliente para crear al dueño). Ese camino no escribe el candado de la implementación, así que sin
+           esto el candado de abajo no se entera. `sin_confirmar` es "la llamada salió y no se sabe cómo terminó". */
+        $estado_del_lead = $this->estado_del_user_setup_del_lead($client);
+        $lead_aplicado   = in_array($estado_del_lead, ['ejecutandose', 'exitoso', \App\Services\RunDemoSetupService::ESTADO_SIN_CONFIRMAR], true);
+
+        $chequeos[] = $this->chequeo(
+            'lead_sin_user_setup',
+            ! $lead_aplicado,
+            $lead_aplicado
+                ? 'El lead del que salió este cliente tiene el user setup en estado "' . $estado_del_lead . '": el sistema ya se configuró (o se está configurando) '
+                    . 'por el camino de leads. 🔴 Aplicarlo de nuevo VACÍA la base del cliente (migrate:fresh). Verificá el sistema del cliente (`motor <cliente> '
+                    . 'metricas`: ¿existe el dueño?) y seguí con la verificación; si de verdad hace falta re-aplicar, se hace desde el panel, con una persona mirando.'
+                : 'El user setup no se aplicó por el camino de leads.'
         );
 
         /* 5. El candado: ya aplicado = nunca más por acá. */
@@ -3570,7 +3719,10 @@ class ClaudeImplementationOpsController extends Controller
             $en_curso
                 ? 'Ya hay un user setup en curso (arrancó ' . (isset($registro['iniciado_at']) ? (string) $registro['iniciado_at'] : 'sin fecha') . '): esperá a que termine.'
                 : (! $aplicado && (isset($registro['estado']) ? $registro['estado'] : '') === 'en_curso'
-                    ? 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos (el registro sigue en en_curso sin resultado): se da por colgado y se puede volver a intentar; el job viejo, si arranca, se descarta solo.'
+                    ? 'No hubo señal en ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos (el registro sigue en en_curso sin resultado): se da por colgado. '
+                        . ($this->llamo_antes_de_colgarse($registro)
+                            ? 'El job SÍ llegó a llamar al cliente (llamada_iniciada_at): pudo haber corrido, así que hay que elegir `conciliar` o `reintentar`.'
+                            : 'El job nunca llegó a llamar al cliente: se puede volver a intentar con la llamada normal; el job viejo, si arranca, se descarta solo.')
                     : 'No hay ninguno en curso.')
         );
 
@@ -3667,14 +3819,17 @@ class ClaudeImplementationOpsController extends Controller
         $estado   = $this->estado_del_user_setup($implementation);
         $en_error = $estado['estado'] === 'error';
 
-        if (! $en_error) {
+        /* Pide decisión un `error` y un `en_curso` colgado DESPUÉS de llamar al cliente (con `llamada_iniciada_at`):
+           los dos pudieron haber corrido del otro lado. Un colgado en el que el job nunca arrancó, no. */
+        if (! $this->pide_decision_el_intento_anterior($estado)) {
             if (! $reintentar && ! $conciliar) {
                 return null;
             }
 
             return $this->error_422(
-                '`' . ($conciliar ? 'conciliar' : 'reintentar') . '` solo se acepta cuando el último intento del user setup terminó en error, y este no '
-                    . '(estado: ' . $estado['estado'] . '). Sin ese parámetro la llamada normal aplica. No se aplicó nada.',
+                '`' . ($conciliar ? 'conciliar' : 'reintentar') . '` solo se acepta cuando el último intento del user setup terminó en error o quedó colgado '
+                    . 'DESPUÉS de llamar al sistema del cliente, y este no (estado: ' . $estado['estado'] . '). Sin ese parámetro la llamada normal aplica. '
+                    . 'No se aplicó nada.',
                 [
                     'implementation_id' => (int) $implementation->id,
                     'user_setup'        => $estado,
@@ -3690,8 +3845,10 @@ class ClaudeImplementationOpsController extends Controller
         $puede    = $estado['puede_haber_corrido'] !== false;
 
         return $this->error_422(
-            'El último intento del user setup terminó en error' . ($puede ? ' y PUDO HABER CORRIDO del otro lado' : '') . ' ('
-                . (string) $this->recortar($estado['error']) . '). Repetir la llamada tal cual no alcanza: reintentar le vuelve a vaciar la base al cliente '
+            'El último intento del user setup ' . ($en_error
+                ? 'terminó en error' . ($puede ? ' y PUDO HABER CORRIDO del otro lado' : '') . ' (' . (string) $this->recortar($estado['error']) . ')'
+                : 'quedó COLGADO después de llamar al sistema del cliente (sin resultado hace más de ' . self::MINUTOS_PARA_DAR_POR_COLGADO . ' minutos) y PUDO HABER CORRIDO del otro lado')
+                . '. Repetir la llamada tal cual no alcanza: reintentar le vuelve a vaciar la base al cliente '
                 . '(migrate:fresh) y conciliar da por aplicado lo que ya corrió. Mirá si el dueño existe en el sistema del cliente y mandá EXACTAMENTE UNO de '
                 . 'estos dos parámetros, con dry_run=false y confirm_client_name: `conciliar: true` (el dueño ya existe: no llama al cliente) o '
                 . '`reintentar: true` (no existe o quedó a medias: vuelve a despachar). No se aplicó nada.',
@@ -3762,7 +3919,7 @@ class ClaudeImplementationOpsController extends Controller
             return 'esperar';
         }
 
-        if ($estado['estado'] === 'error') {
+        if ($this->pide_decision_el_intento_anterior($estado)) {
             $opciones = $this->opciones_tras_un_error($estado);
 
             return $opciones['sugerida'];
@@ -3809,7 +3966,7 @@ class ClaudeImplementationOpsController extends Controller
         /* Lo que pasó con el intento anterior y qué corresponde hacer ahora. */
         $estado      = $this->estado_del_user_setup($implementation);
         $corresponde = $this->que_corresponde_hacer($plan, $estado);
-        $en_error    = $estado['estado'] === 'error' && ! $plan['aplicado'];
+        $en_error    = $this->pide_decision_el_intento_anterior($estado) && ! $plan['aplicado'];
 
         $respuesta = [
             'dry_run'                 => true,
@@ -3843,7 +4000,8 @@ class ClaudeImplementationOpsController extends Controller
 
         $respuesta['nota'] = 'Simulacro: no se encoló ni se escribió nada. Repetí con dry_run=false y confirm_client_name para aplicar la configuración.'
             . ($en_error
-                ? ' 🔴 Como el último intento terminó en error' . ($estado['puede_haber_corrido'] === false ? '' : ' y pudo haber corrido del otro lado')
+                ? ' 🔴 Como el último intento ' . ($estado['estado'] === 'error' ? 'terminó en error' : 'quedó colgado después de llamar al cliente')
+                    . ($estado['puede_haber_corrido'] === false ? '' : ' y pudo haber corrido del otro lado')
                     . ', mirá si el dueño existe en el sistema del cliente y mandá además `' . $corresponde . ': true` (o el otro: ver `opciones`): sin uno de los dos, el real es 422.'
                 : '');
 
@@ -3852,7 +4010,7 @@ class ClaudeImplementationOpsController extends Controller
 
     /**
      * Enmascara en el payload del user setup los tres datos personales del dueño: `email`, `doc_number` y
-     * `phone`.
+     * `phone`, y tapa enteros la dirección del negocio y sus redes (`address_company`, `facebook`, `instagram`).
      *
      * El mail conserva la primera letra y el dominio (`p***@ejemplo.test`, el mismo formato que la casilla de
      * los mails de hito); el documento y el teléfono, solo los últimos cuatro dígitos (`***4567`). Un dato
@@ -3873,6 +4031,14 @@ class ClaudeImplementationOpsController extends Controller
             $payload[$campo] = $campo === 'email'
                 ? ImplementacionMailHelper::enmascarar((string) $payload[$campo])
                 : $this->enmascarar_un_numero((string) $payload[$campo]);
+        }
+
+        /* La dirección del negocio y sus redes también salen solo con `include=contacto` en `GET ?include=formulario`: acá
+           igual (se tapan enteras: no hay una parte que sirva para decidir si se aplica). */
+        foreach (['address_company', 'facebook', 'instagram'] as $campo) {
+            if (isset($payload[$campo]) && ! is_array($payload[$campo]) && trim((string) $payload[$campo]) !== '') {
+                $payload[$campo] = '***';
+            }
         }
 
         return $payload;

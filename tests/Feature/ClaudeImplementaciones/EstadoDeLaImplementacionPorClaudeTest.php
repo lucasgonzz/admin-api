@@ -462,7 +462,8 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
 
     /**
      * 4. Un `en_curso` de hace más de 45 minutos se reporta con `colgado: true` y la nota que explica
-     * qué hacer.
+     * qué hacer. SIN `llamada_iniciada_at` el job nunca llegó a llamar al cliente: no salió nada
+     * (`puede_haber_corrido: false`) y se puede volver a intentar con la llamada normal.
      *
      * @return void
      */
@@ -475,7 +476,36 @@ class EstadoDeLaImplementacionPorClaudeTest extends BaseDeImplementaciones
 
         $respuesta->assertJsonPath('user_setup.estado', 'en_curso');
         $respuesta->assertJsonPath('user_setup.colgado', true);
-        $this->assertStringContainsString('409', (string) $respuesta->json('user_setup.nota'));
+        $respuesta->assertJsonPath('user_setup.puede_haber_corrido', false);
+        $respuesta->assertJsonPath('user_setup.llamada_iniciada_at', null);
+        $this->assertStringContainsString('NUNCA llegó a llamar al cliente', (string) $respuesta->json('user_setup.nota'));
+    }
+
+    /**
+     * 4b. 🔴 Un `en_curso` colgado CON `llamada_iniciada_at` es otra cosa: la llamada salió y se cortó sin
+     * dejar el resultado, así que el setup PUDO HABER CORRIDO del otro lado. La nota manda a mirar si el
+     * dueño existe y a elegir `conciliar` o `reintentar`.
+     *
+     * @return void
+     */
+    public function test_un_user_setup_colgado_despues_de_llamar_pudo_haber_corrido(): void
+    {
+        $e = $this->escenario();
+        $this->escribir_data_de_la_etapa($e['implementacion'], 2, ['user_setup' => [
+            'estado'              => 'en_curso',
+            'iniciado_at'         => now()->subMinutes(60)->toISOString(),
+            'llamada_iniciada_at' => now()->subMinutes(59)->toISOString(),
+        ]]);
+
+        $respuesta = $this->getJson('/api/claude/implementations/' . $e['implementacion']->id, $this->headers());
+
+        $respuesta->assertJsonPath('user_setup.estado', 'en_curso');
+        $respuesta->assertJsonPath('user_setup.colgado', true);
+        $respuesta->assertJsonPath('user_setup.puede_haber_corrido', true);
+        $this->assertNotNull($respuesta->json('user_setup.llamada_iniciada_at'));
+        $this->assertStringContainsString('PUDO HABER CORRIDO', (string) $respuesta->json('user_setup.nota'));
+        $this->assertStringContainsString('conciliar', (string) $respuesta->json('user_setup.nota'));
+        $this->assertStringContainsString('reintentar', (string) $respuesta->json('user_setup.nota'));
     }
 
     /**
