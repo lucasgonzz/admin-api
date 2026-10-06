@@ -1,5 +1,5 @@
 {{--
-  Hito "categorias": las tres formas de ordenar el catálogo, para que el cliente elija una.
+  Hito "categorias": las dos o tres formas de ordenar el catálogo, para que el cliente elija una.
 
   Cada opción es una tarjeta con su número y cuántas categorías tiene, su nombre, en qué se basa y,
   si hay, hasta cuatro ejemplos como fichas. No lleva botón: la elección se hace en el sistema

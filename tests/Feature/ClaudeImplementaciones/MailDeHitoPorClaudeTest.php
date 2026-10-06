@@ -240,10 +240,10 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
         $fotos->assertStatus(422);
         $this->assertArrayHasKey('con_foto', $fotos->json('errores'));
 
-        /* categorías: son EXACTAMENTE tres. */
-        $dos = $this->datos_validos()['categorias'];
-        array_pop($dos['opciones']);
-        $categorias = $this->mail($e['implementacion'], $this->real('categorias', ['datos' => $dos]));
+        /* categorías: dos o tres (desde el 6/10/2026, D4 de `implementacion-dos-sistemas`; antes eran EXACTAMENTE tres). Una sola no sirve. */
+        $una = $this->datos_validos()['categorias'];
+        $una['opciones'] = array_slice($una['opciones'], 0, 1);
+        $categorias = $this->mail($e['implementacion'], $this->real('categorias', ['datos' => $una]));
         $categorias->assertStatus(422);
         $this->assertArrayHasKey('opciones', $categorias->json('errores'));
 

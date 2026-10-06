@@ -3,7 +3,9 @@
 namespace Tests\Feature\ImplementacionMail;
 
 use App\Exceptions\ImplementacionMailException;
+use App\Mail\ImplementacionMail;
 use App\Services\ImplementacionMailService;
+use Illuminate\Support\Facades\Mail;
 
 /**
  * La validación de los datos de cada hito: tipos, máximos, obligatorios y la lista cerrada de claves.
@@ -192,30 +194,34 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
     }
 
     /**
-     * Categorías: `opciones` es obligatorio y son EXACTAMENTE tres. Con dos, con cuatro, vacío o
-     * sin ser una lista, es un error.
+     * Categorías: `opciones` es obligatorio y son DOS o TRES (misión `implementacion-dos-sistemas`,
+     * 6/10/2026: `/categorizar` arma DOS sistemas por defecto y tres solo si se pide; antes eran
+     * EXACTAMENTE tres). Con una, con cuatro, vacío o sin ser una lista, es un error. Tres sigue
+     * entrando igual que antes (compatible hacia atrás).
      *
      * @return void
      */
-    public function test_categorias_pide_exactamente_tres_opciones()
+    public function test_categorias_pide_dos_o_tres_opciones()
     {
         $opciones = $this->opciones_de_ejemplo();
 
-        $this->assertSame(['opciones' => 'Es obligatorio: las tres opciones de categorías.'], $this->errores('categorias', []));
+        $this->assertSame(['opciones' => 'Es obligatorio: las opciones de categorías (dos o tres).'], $this->errores('categorias', []));
 
-        $dos = $this->errores('categorias', ['opciones' => array_slice($opciones, 0, 2)]);
-        $this->assertSame(['opciones'], array_keys($dos));
-        $this->assertStringContainsString('exactamente tres', $dos['opciones']);
-        $this->assertStringContainsString('llegaron 2', $dos['opciones']);
+        $una = $this->errores('categorias', ['opciones' => array_slice($opciones, 0, 1)]);
+        $this->assertSame(['opciones'], array_keys($una));
+        $this->assertStringContainsString('dos o tres', $una['opciones']);
+        $this->assertStringContainsString('llegaron 1', $una['opciones']);
 
         $cuatro = $this->errores('categorias', ['opciones' => array_merge($opciones, [$opciones[0]])]);
         $this->assertSame(['opciones'], array_keys($cuatro));
+        $this->assertStringContainsString('dos o tres', $cuatro['opciones']);
         $this->assertStringContainsString('llegaron 4', $cuatro['opciones']);
 
         $this->assertSame(['opciones'], array_keys($this->errores('categorias', ['opciones' => []])));
         $this->assertSame(['opciones'], array_keys($this->errores('categorias', ['opciones' => 'tres'])));
 
-        $this->assertSame([], $this->errores('categorias', ['opciones' => $opciones]));
+        $this->assertSame([], $this->errores('categorias', ['opciones' => array_slice($opciones, 0, 2)]), 'Dos opciones es válido.');
+        $this->assertSame([], $this->errores('categorias', ['opciones' => $opciones]), 'Tres sigue siendo válido.');
     }
 
     /**
@@ -376,14 +382,15 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
         $client = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
         $impl   = $this->crear_implementacion($client, $this->estados(3, 4));
 
-        $dos_opciones = ['opciones' => array_slice($this->opciones_de_ejemplo(), 0, 2)];
+        /* Una sola opción: desde el 6/10/2026 dos o tres sirven (D4 de `implementacion-dos-sistemas`), y una no. */
+        $una_opcion = ['opciones' => array_slice($this->opciones_de_ejemplo(), 0, 1)];
 
         foreach (['previa', 'enviar'] as $metodo) {
             try {
                 if ($metodo === 'previa') {
-                    ImplementacionMailService::previa($impl, 'categorias', $dos_opciones, null);
+                    ImplementacionMailService::previa($impl, 'categorias', $una_opcion, null);
                 } else {
-                    ImplementacionMailService::enviar($impl, 'categorias', $dos_opciones, null, false);
+                    ImplementacionMailService::enviar($impl, 'categorias', $una_opcion, null, false);
                 }
 
                 $this->fail($metodo . ' tendría que haber tirado la excepción.');
@@ -392,8 +399,141 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
                 $this->assertSame(422, $excepcion->getCode(), $metodo);
                 $this->assertSame(['opciones'], array_keys($excepcion->errores), $metodo);
                 $this->assertSame(['opciones'], $excepcion->faltan, $metodo);
-                $this->assertStringContainsString('exactamente tres', $excepcion->getMessage(), $metodo);
+                $this->assertStringContainsString('dos o tres', $excepcion->getMessage(), $metodo);
             }
         }
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Dos o tres opciones de categorías (misión `implementacion-dos-sistemas`, 6/10/2026, D4)
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Con DOS opciones la previa entra y el mail dice "dos" en el asunto, el preheader y la
+     * introducción: un mail con dos tarjetas que dice "tres formas" es un mail que miente. Lleva las
+     * dos tarjetas y ninguna tercera.
+     *
+     * @return void
+     */
+    public function test_con_dos_opciones_la_previa_entra_y_el_mail_dice_dos()
+    {
+        $client = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $impl   = $this->crear_implementacion($client, $this->estados(3, 4));
+
+        $previa = ImplementacionMailService::previa($impl, 'categorias', ['opciones' => array_slice($this->opciones_de_ejemplo(), 0, 2)], null);
+
+        $this->assertSame('Dos formas de ordenar tu catálogo', $previa['asunto']);
+        $this->assertSame([], $previa['faltan']);
+
+        $html = $previa['html'];
+
+        $this->assertStringContainsString('<title>Dos formas de ordenar tu catálogo</title>', $html);
+        $this->assertStringContainsString('Armamos dos propuestas de categorías para tus productos. Elegí la que más te sirva.', $html);
+        $this->assertStringContainsString('armamos dos formas distintas de organizarlos', $html);
+
+        $this->assertStringContainsString('Opción 1 &middot; 14 categorías', $html);
+        $this->assertStringContainsString('Opción 2 &middot; 9 categorías', $html);
+        $this->assertStringNotContainsString('Opción 3', $html);
+
+        $this->assertStringNotContainsString('Tres formas', $html, 'Con dos opciones el mail no puede decir "tres".');
+        $this->assertStringNotContainsString('tres propuestas', $html);
+        $this->assertStringNotContainsString('tres formas', $html);
+
+        /* El cierre de siempre vale para dos: "cada una" no cuenta cuántas son. */
+        $this->assertStringContainsString('elegís desde tu sistema, en Alertas → Catálogo → Categorías', $html);
+    }
+
+    /**
+     * 🔴 Compatible hacia atrás: con TRES opciones el mail dice exactamente lo de siempre.
+     *
+     * @return void
+     */
+    public function test_con_tres_opciones_la_previa_sigue_diciendo_lo_de_siempre()
+    {
+        $client = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $impl   = $this->crear_implementacion($client, $this->estados(3, 4));
+
+        $previa = ImplementacionMailService::previa($impl, 'categorias', ['opciones' => $this->opciones_de_ejemplo()], null);
+
+        $this->assertSame('Tres formas de ordenar tu catálogo', $previa['asunto']);
+
+        $html = $previa['html'];
+
+        $this->assertStringContainsString('Armamos tres propuestas de categorías para tus productos. Elegí la que más te sirva.', $html);
+        $this->assertStringContainsString(
+            'Analizamos todos tus productos y armamos tres formas distintas de organizarlos. Cada una parte de un criterio diferente: '
+            . 'quedate con la que se parezca más a cómo te buscan tus clientes y cómo trabaja tu equipo.',
+            $html
+        );
+        $this->assertStringContainsString('Opción 3 &middot; 22 categorías', $html);
+        $this->assertStringNotContainsString('Dos formas', $html);
+        $this->assertStringNotContainsString('dos propuestas', $html);
+    }
+
+    /**
+     * El envío REAL con dos opciones sale con el asunto de dos, con las dos tarjetas en la vista y
+     * queda registrado así.
+     *
+     * @return void
+     */
+    public function test_el_envio_real_con_dos_opciones_sale_con_el_asunto_de_dos()
+    {
+        Mail::fake();
+
+        $client = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
+        $impl   = $this->crear_implementacion($client, $this->estados(3, 4));
+
+        $resultado = ImplementacionMailService::enviar(
+            $impl,
+            'categorias',
+            ['opciones' => array_slice($this->opciones_de_ejemplo(), 0, 2)],
+            null,
+            false
+        );
+
+        $this->assertSame('enviado', $resultado['estado']);
+
+        Mail::assertSent(ImplementacionMail::class, 1);
+        Mail::assertSent(ImplementacionMail::class, function ($mailable) {
+            return $mailable->hito === 'categorias'
+                && $mailable->asunto === 'Dos formas de ordenar tu catálogo'
+                && count($mailable->vista['opciones']) === 2;
+        });
+    }
+
+    /**
+     * Dos opciones con el mismo nombre son una opción repetida, no dos formas de ordenar el catálogo.
+     *
+     * @return void
+     */
+    public function test_dos_opciones_con_el_mismo_nombre_son_un_error()
+    {
+        $opciones              = array_slice($this->opciones_de_ejemplo(), 0, 2);
+        $opciones[1]['nombre'] = '  POR TIPO de producto ';
+
+        $errores = $this->errores('categorias', ['opciones' => $opciones]);
+
+        $this->assertSame(['opciones'], array_keys($errores));
+        $this->assertStringContainsString('nombres distintos', $errores['opciones']);
+    }
+
+    /**
+     * El catálogo de `claude/*` ya no promete "EXACTAMENTE 3": describe dos o tres, en el freno de los
+     * datos y en la descripción del hito y de los datos del mail.
+     *
+     * @return void
+     */
+    public function test_el_catalogo_describe_dos_o_tres_opciones_y_no_exactamente_tres()
+    {
+        $endpoint = config('claude_catalog.endpoints.POST api/claude/implementations/{id}/mail');
+
+        $this->assertIsArray($endpoint);
+
+        $texto = json_encode($endpoint, JSON_UNESCAPED_UNICODE);
+
+        $this->assertStringNotContainsString('EXACTAMENTE 3', $texto);
+        $this->assertStringNotContainsString('las tres opciones', $texto);
+        $this->assertStringContainsString('2 o 3', $texto);
+        $this->assertStringContainsString('dos o tres', $texto);
     }
 }

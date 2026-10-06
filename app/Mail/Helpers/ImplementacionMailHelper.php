@@ -50,7 +50,7 @@ class ImplementacionMailHelper
      *
      * Solo se muestran si la etapa 4 está en curso de verdad. En `listo` no hay subpasos porque la
      * etapa 4 ya está completa. `categorias` es igual a `imagenes`: las categorías siguen en curso
-     * mientras el cliente no elige una de las tres opciones.
+     * mientras el cliente no elige una de las opciones (dos o tres).
      *
      * @var array<string, array<int, array<int, string>>>
      */
@@ -174,8 +174,9 @@ class ImplementacionMailHelper
      * Los asuntos son los de la tabla del plan (§2.8). Los titulares, el preheader y la
      * introducción salen del prototipo aprobado, que es el texto final.
      *
-     * El único texto con datos adentro es el preheader de `acceso` e `imagenes`, que lleva los
-     * números.
+     * Los textos con datos adentro son el preheader de `acceso` e `imagenes`, que lleva los números,
+     * y el asunto, el preheader y la introducción de `categorias`, que dicen "dos" o "tres" según
+     * cuántas opciones viajan en el mail.
      *
      * @param string               $hito  Hito del mail.
      * @param array<string, mixed> $datos Datos del hito, validados.
@@ -228,11 +229,20 @@ class ImplementacionMailHelper
                 ];
 
             case 'categorias':
+                /*
+                 * Cuántas propuestas se armaron: DOS (el default de /categorizar desde el 6/10/2026) o
+                 * tres. El texto dice la cantidad que de verdad viaja en el mail: un mail con dos tarjetas
+                 * que dice "tres formas" es un mail que miente. Sin el dato —no pasa, el servicio ya lo
+                 * validó— queda el texto de siempre, el de tres: compatible hacia atrás.
+                 */
+                $cantidad = isset($datos['opciones']) && is_array($datos['opciones']) ? count($datos['opciones']) : 3;
+                $palabra  = $cantidad === 2 ? 'dos' : 'tres';
+
                 return [
-                    'asunto'    => 'Tres formas de ordenar tu catálogo',
-                    'preheader' => 'Armamos tres propuestas de categorías para tus productos. Elegí la que más te sirva.',
+                    'asunto'    => ucfirst($palabra) . ' formas de ordenar tu catálogo',
+                    'preheader' => 'Armamos ' . $palabra . ' propuestas de categorías para tus productos. Elegí la que más te sirva.',
                     'titular'   => 'Elegí cómo ordenar tu catálogo.',
-                    'intro'     => 'Analizamos todos tus productos y armamos tres formas distintas de organizarlos. Cada una parte de un '
+                    'intro'     => 'Analizamos todos tus productos y armamos ' . $palabra . ' formas distintas de organizarlos. Cada una parte de un '
                         . 'criterio diferente: quedate con la que se parezca más a cómo te buscan tus clientes y cómo trabaja tu equipo.',
                 ];
 
@@ -531,9 +541,9 @@ class ImplementacionMailHelper
     }
 
     /**
-     * El bloque del mail de las categorías: las tres opciones y el cierre.
+     * El bloque del mail de las categorías: las opciones (dos o tres) y el cierre.
      *
-     * @param array<string, mixed> $datos opciones (exactamente tres) y, si vino, como_elegir.
+     * @param array<string, mixed> $datos opciones (dos o tres) y, si vino, como_elegir.
      *
      * @return array<string, mixed>
      */
