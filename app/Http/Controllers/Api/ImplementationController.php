@@ -691,28 +691,47 @@ class ImplementationController extends Controller
      * Devuelve además el modelo fresco de la implementación para que el panel se refresque
      * sin necesidad de otra llamada.
      *
-     * @param Request        $request        Petición con `content` (texto editado, opcional) y `stage` (opcional).
+     * @param Request        $request        Petición con `content` (texto editado, opcional) y `stage` (opcional). Solo para `user_setup`:
+     *                                       `force` (re-aplicar), `confirm_client_name` (el nombre que escribió la persona) y
+     *                                       `confirm_live_system` (reconoció que el sistema está en uso).
      * @param Implementation $implementation Implementación destino (route model binding).
      * @param string         $action         Clave de la acción (ver ImplementationActionService::ACTIONS).
      *
-     * @return JsonResponse
+     * @return JsonResponse 200 con `result` y `model`; 422 con `message` y, solo en los dos casos de la confirmación fuerte de
+     *                      `user_setup`, `codigo` (`confirmacion_requerida` | `falta_confirmar_sistema_en_uso`).
      */
     public function action_execute(Request $request, Implementation $implementation, string $action): JsonResponse
     {
         // Texto editado por el admin (opcional), etapa seleccionada (opcional, solo 'progreso')
-        // y override de lock (opcional, solo 'user_setup': re-aplicar aunque ya se haya aplicado).
+        // y override del candado (opcional, solo 'user_setup': re-aplicar aunque ya se haya aplicado o el sistema ya opere).
         $content = $request->input('content');
         $stage   = $request->has('stage') ? (int) $request->input('stage') : null;
-        $force   = (bool) $request->input('force', false);
+
+        // 🔴 Los booleanos se leen ESTRICTOS (misión `puertas-del-user-setup`, 6/10/2026): `(bool) "false"` es `true`, y una puerta que
+        // borra bases no acepta que un texto "false" fuerce. `filter_var(..., FILTER_VALIDATE_BOOLEAN)` entiende "false", "0", "off" y ""
+        // como false. Vale también para `force`, que antes se leía con `(bool)`.
+        $force               = filter_var($request->input('force', false), FILTER_VALIDATE_BOOLEAN);
+        $confirm_live_system = filter_var($request->input('confirm_live_system', false), FILTER_VALIDATE_BOOLEAN);
+
+        // El nombre del cliente que escribió la persona: solo vale un texto (un array o un número no confirman nada).
+        $confirm_client_name = $request->input('confirm_client_name');
+        $confirm_client_name = is_string($confirm_client_name) ? $confirm_client_name : null;
 
         try {
-            $result = (new ImplementationActionService())->execute($implementation, $action, $content, $stage, $force);
+            $result = (new ImplementationActionService())->execute($implementation, $action, $content, $stage, $force, $confirm_client_name, $confirm_live_system);
         } catch (\InvalidArgumentException $exception) {
             return response()->json(['message' => $exception->getMessage()], 422);
         }
 
         if (! $result['ok']) {
-            return response()->json(['message' => $result['message']], 422);
+            // `codigo` solo viaja en los dos casos nuevos de la confirmación fuerte: el resto del 422 queda igual.
+            $cuerpo = ['message' => $result['message']];
+
+            if (isset($result['codigo'])) {
+                $cuerpo['codigo'] = $result['codigo'];
+            }
+
+            return response()->json($cuerpo, 422);
         }
 
         return response()->json([

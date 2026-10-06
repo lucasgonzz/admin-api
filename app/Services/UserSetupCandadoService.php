@@ -435,6 +435,188 @@ class UserSetupCandadoService
         return $chequeos;
     }
 
+    /* ==============================================================================================
+     | El botón `user_setup` del panel: lo que se puede forzar y lo que no
+     |============================================================================================= */
+
+    /**
+     * Evalúa el botón `user_setup` del panel de una implementación: qué NO se puede saltear ni forzando (los DUROS), qué se puede
+     * forzar con una confirmación fuerte (las FORZABLES) y qué señales hay de que el sistema está en uso.
+     *
+     * 🔴 Los DUROS son "todavía no se puede aplicar" (el gate de siempre del panel, con los mismos textos): el formulario enviado (la
+     * lógica LAXA del panel: `form_submitted_at` o etapa 1 `completed`), la etapa 2 como mínimo, la ÚLTIMA instalación del cliente
+     * `completada`, y que no haya otro user setup en curso (un `claude/*` corriendo: dos `migrate:fresh` a la vez no tienen
+     * confirmación que los habilite). Con alguno fallando, `force` no sirve.
+     *
+     * Las FORZABLES son las protecciones que fallan (`protecciones_de_implementacion()`, las mismas de todas las puertas) más la etapa
+     * 2 exacta cuando la implementación ya pasó de ella: se saltean con `force` + el nombre del cliente. Con la etapa menor a 2 falla el
+     * duro, no esta.
+     *
+     * Las SEÑALES DE USO son los `detalle` de `sin_sistema_vivo`, `lead_sin_user_setup` e `instalacion_de_esta_implementacion` cuando
+     * fallan: con alguna, además del nombre hay que RECONOCER que el sistema está en uso. Solo el candado lleno y/o la etapa mayor
+     * (el "re-aplicar" clásico) piden solo el nombre.
+     *
+     * En las forzables, el texto de `sin_aplicar_antes` es el del panel ("El user setup ya se aplicó el …"): el de `claude/*` dice
+     * "este camino no tiene forzar", que en este modal de "forzar" sería absurdo.
+     *
+     * Lee, no escribe.
+     *
+     * @param Implementation $implementation La implementación (con sus etapas, o se cargan).
+     *
+     * @return array{puede: bool, duros: array<int, array<string, mixed>>, forzables: array<int, array<string, mixed>>, senales_de_uso: array<int, string>, chequeos: array<int, array<string, mixed>>}
+     *         `puede` (true = no falla NADA: se aplica sin forzar), `duros` y `forzables` (los chequeos que fallaron, cada uno con
+     *         `chequeo`, `ok` y `detalle`), `senales_de_uso` (los `detalle`) y `chequeos` (todos los evaluados, en orden).
+     */
+    public function evaluar_para_el_panel(Implementation $implementation): array
+    {
+        $implementation->loadMissing(['client', 'stages']);
+
+        // El cliente de la implementación (null si ya no existe).
+        $client = $implementation->client ?? Client::find($implementation->client_id);
+
+        // Todos los chequeos evaluados, en orden: primero los duros, después las protecciones.
+        $chequeos = [];
+
+        /* DURO 0. Sin cliente no hay a quién configurarle nada (y las protecciones necesitan el cliente). */
+        if ($client === null) {
+            $chequeos[] = $this->chequeo('cliente_de_la_implementacion', false, 'No se encontró el cliente de la implementación.');
+
+            return $this->resultado_del_panel($chequeos, []);
+        }
+
+        /* DURO 1. El formulario de la Etapa 1 (la lógica laxa del panel: enviado, o la etapa 1 completada). */
+        $formulario = $implementation->form_submitted_at !== null;
+
+        if (! $formulario) {
+            $etapa_1    = ImplementationStage::where('implementation_id', $implementation->id)->where('stage_number', 1)->first();
+            $formulario = $etapa_1 !== null && $etapa_1->status === 'completed';
+        }
+
+        $chequeos[] = $this->chequeo(
+            'formulario_enviado',
+            $formulario,
+            $formulario ? 'El formulario de la Etapa 1 ya se completó.' : 'Todavía no se completó el formulario (Etapa 1).'
+        );
+
+        /* DURO 2. La implementación llegó a la Etapa 2 (desde la 2 en adelante: el user setup corre DENTRO de la etapa 2). */
+        $llego = (int) $implementation->current_stage >= 2;
+
+        $chequeos[] = $this->chequeo(
+            'llego_a_la_etapa_2',
+            $llego,
+            $llego ? 'La implementación ya llegó a la Etapa 2.' : 'La implementación todavía no avanzó a la Etapa 2.'
+        );
+
+        /* DURO 3. La ÚLTIMA instalación del cliente terminó (la API responde). Es la regla laxa del panel: no mira el `kind` ni la API. */
+        $ultima   = ClientInstallation::where('client_id', $implementation->client_id)->orderByDesc('id')->first();
+        $instalada = $ultima !== null && $ultima->status === 'completada';
+
+        $chequeos[] = $this->chequeo(
+            'instalacion_completada',
+            $instalada,
+            $instalada
+                ? 'La instalación ' . (int) $ultima->id . ' del sistema está completada.'
+                : "El sistema todavía no terminó de instalarse (la instalación no está en 'completada')."
+        );
+
+        /* DURO 4. Que no haya otro user setup EN CURSO (uno colgado, de más de 45 minutos, no cuenta). */
+        $chequeos[] = $this->chequeo_sin_setup_en_curso($implementation, $implementation->user_setup_executed_at !== null)['chequeo'];
+
+        /* FORZABLES. Las protecciones de todas las puertas, comparando contra la instalación completada del cliente. */
+        $protecciones = $this->protecciones_de_implementacion($implementation, $client, $this->instalacion_completada_del_cliente($client));
+
+        foreach ($protecciones as $indice => $proteccion) {
+            if ($proteccion['chequeo'] === 'sin_aplicar_antes' && ! $proteccion['ok']) {
+                $protecciones[$indice]['detalle'] = 'El user setup ya se aplicó el ' . $implementation->user_setup_executed_at->format('d/m/Y H:i') . '.';
+            }
+        }
+
+        // La etapa 2 EXACTA es una protección más, pero solo cuando ya la pasó: con la etapa menor falla el duro de arriba.
+        if ((int) $implementation->current_stage >= 2) {
+            $protecciones[] = $this->chequeo_de_la_etapa_2($implementation);
+        }
+
+        return $this->resultado_del_panel($chequeos, $protecciones);
+    }
+
+    /**
+     * Arma el resultado de `evaluar_para_el_panel()` a partir de los chequeos duros evaluados y las protecciones evaluadas.
+     *
+     * @param array<int, array<string, mixed>> $duros        Los chequeos duros evaluados (con su `ok`).
+     * @param array<int, array<string, mixed>> $protecciones  Las protecciones evaluadas (con su `ok`).
+     *
+     * @return array{puede: bool, duros: array<int, array<string, mixed>>, forzables: array<int, array<string, mixed>>, senales_de_uso: array<int, string>, chequeos: array<int, array<string, mixed>>}
+     */
+    private function resultado_del_panel(array $duros, array $protecciones): array
+    {
+        // Lo que fallo de cada lista.
+        $duros_que_fallan     = $this->bloqueos($duros);
+        $forzables_que_fallan = $this->bloqueos($protecciones);
+
+        // Las señales de que el sistema está en uso: el `detalle` de estas tres protecciones cuando fallan.
+        $senales = [];
+
+        foreach ($forzables_que_fallan as $forzable) {
+            if (in_array($forzable['chequeo'], ['sin_sistema_vivo', 'lead_sin_user_setup', 'instalacion_de_esta_implementacion'], true)) {
+                $senales[] = $forzable['detalle'];
+            }
+        }
+
+        return [
+            'puede'          => count($duros_que_fallan) === 0 && count($forzables_que_fallan) === 0,
+            'duros'          => $duros_que_fallan,
+            'forzables'      => $forzables_que_fallan,
+            'senales_de_uso' => $senales,
+            'chequeos'       => array_merge($duros, $protecciones),
+        ];
+    }
+
+    /**
+     * El nombre que hay que escribir para confirmar un re-aplicado: el del negocio (`resolve_display_name()`: la razón social y, si
+     * no hay, el nombre del contacto).
+     *
+     * Es el MISMO que el panel muestra y la API manda en `force_confirm_name`. Un cliente sin ninguno de los dos (no debería existir)
+     * no podría confirmar nunca y el botón quedaría trabado para siempre: cae a `Cliente #<id>`.
+     *
+     * @param Client $client El cliente.
+     *
+     * @return string
+     */
+    public function nombre_para_confirmar(Client $client): string
+    {
+        // El nombre visible del negocio.
+        $nombre = trim($client->resolve_display_name());
+
+        return $nombre !== '' ? $nombre : 'Cliente #' . (int) $client->id;
+    }
+
+    /**
+     * ¿Lo que se escribió confirma el nombre del cliente? Se compara recortado y sin distinguir mayúsculas, en las dos puntas.
+     *
+     * Lo vacío NUNCA confirma, ni siquiera contra un nombre vacío; y lo que no es un texto (un array, un número, un booleano) tampoco:
+     * en una acción que borra bases no se adivina qué quiso decir quien mandó otra cosa.
+     *
+     * @param Client $client   El cliente.
+     * @param mixed  $recibido Lo que escribió la persona (`confirm_client_name`).
+     *
+     * @return bool
+     */
+    public function confirma_el_nombre(Client $client, $recibido): bool
+    {
+        if (! is_string($recibido)) {
+            return false;
+        }
+
+        // Lo que escribió, recortado.
+        $escrito = trim($recibido);
+
+        if ($escrito === '') {
+            return false;
+        }
+
+        return mb_strtolower($escrito) === mb_strtolower(trim($this->nombre_para_confirmar($client)));
+    }
+
     /**
      * La instalación completa y COMPLETADA más reciente del cliente, o null si no tiene ninguna.
      *
