@@ -24,11 +24,30 @@ class ImplementationUserSetupService
     const PREFIJO_BLOQUEADO = 'Bloqueado: ';
 
     /**
+     * Con lo que empieza el mensaje de `trigger_user_setup()` cuando el candado (`UserSetupCandadoService`) lo FRENÓ: el sistema
+     * del cliente ya opera o ya se configuró y nadie confirmó a mano que se lo quiere re-aplicar. El job del user setup lo
+     * reconoce para decir que el setup no corrió (igual que `PREFIJO_BLOQUEADO`): sin eso un frenado se leería como "pudo haber
+     * corrido" y mandaría a conciliar o reintentar algo que ni salió.
+     */
+    const PREFIJO_FRENADO_POR_EL_CANDADO = 'Frenado por el candado: ';
+
+    /**
      * Ejecuta el setup remoto del sistema del cliente vía empresa-api.
      *
      * Construye el payload a partir de client.setup_data y datos del cliente, lo envía
      * a `POST {client_api_url}/api/admin-sync/user-setup` y registra el resultado.
      * Cualquier error se loguea sin interrumpir el flujo de implementación.
+     *
+     * 🔴 ESTE ES EL PUNTO DE LLAMADA, Y SE CIERRA SOLO (misión `puertas-del-user-setup`, 6/10/2026). Del otro lado el setup
+     * arranca con `migrate:fresh`, así que antes de armar el pedido se evalúan las protecciones del candado
+     * (`UserSetupCandadoService::protecciones_de_implementacion()`: instalación anterior a la implementación, sistema vivo,
+     * user setup ya aplicado por el camino de leads, candado de la implementación lleno). Si alguna falla y NO hay
+     * `$confirmado_por_una_persona`, no se llama a nadie y el mensaje empieza con `PREFIJO_FRENADO_POR_EL_CANDADO`.
+     *
+     * 🔴 Es defensa en profundidad y NO se saca porque "la puerta ya chequeó": el job de `claude/*`, el modo automático y el
+     * botón del panel hacen sus propios chequeos, pero el DEFAULT de este método es protegido (un llamador nuevo que no sepa
+     * del candado queda frenado por defecto). La etapa NO se mira acá a propósito: es de cada puerta, y hay tests y llamadores
+     * que le piden el servicio a una implementación que no está en la etapa 2.
      *
      * @param Implementation $implementation   Implementación que avanzó a la Etapa 3.
      * @param int|null       $timeout_segundos Techo de la llamada HTTP, en segundos (misión
@@ -36,12 +55,16 @@ class ImplementationUserSetupService
      *                                         es como lo llama el panel— se usa
      *                                         `services.client_api.timeout`, exactamente como siempre.
      *                                         Ver resolver_timeout() para el porqué del parámetro.
+     * @param bool           $confirmado_por_una_persona true = una persona vio por qué el candado frena y confirmó, a mano y
+     *                                         con el nombre del cliente, que quiere re-aplicar el setup igual (el botón
+     *                                         del panel con `force`, DESPUÉS de validar esa confirmación). Es el ÚNICO
+     *                                         llamador que pasa `true`: el job y el modo automático pasan `false`.
      *
      * @return array{ok: bool, message: string} Resultado de la ejecución: ok según
      *     $response->successful(), message con el motivo del fallo o la confirmación de éxito.
      *     Los llamadores existentes que ignoran el retorno siguen funcionando sin cambios.
      */
-    public function trigger_user_setup(Implementation $implementation, ?int $timeout_segundos = null): array
+    public function trigger_user_setup(Implementation $implementation, ?int $timeout_segundos = null, bool $confirmado_por_una_persona = false): array
     {
         // Cliente dueño de la implementación.
         $client = $implementation->client ?? Client::find($implementation->client_id);
@@ -51,6 +74,13 @@ class ImplementationUserSetupService
                 'implementation_id' => $implementation->id,
             ]);
             return ['ok' => false, 'message' => 'No se encontró el cliente de la implementación.'];
+        }
+
+        // El candado: ¿este sistema ya opera o ya se configuró? Si sí (y nadie lo confirmó a mano), no se llama a nadie.
+        $frenado = $this->frenar_si_el_candado_lo_pide($implementation, $client, $confirmado_por_una_persona);
+
+        if ($frenado !== null) {
+            return $frenado;
         }
 
         // URL de la API del cliente (empresa-api desplegada): destino del setup remoto.
@@ -143,6 +173,71 @@ class ImplementationUserSetupService
 
             return ['ok' => false, 'message' => 'Error de conexión con la client_api: ' . $exception->getMessage()];
         }
+    }
+
+    /**
+     * Evalúa el candado antes de llamar al sistema del cliente: devuelve el resultado de "no se llamó" si lo frena, o null si
+     * se puede seguir.
+     *
+     * Con `$confirmado_por_una_persona` el candado NO frena, pero lo que se salteó queda en el log: es el único rastro de que
+     * alguien re-aplicó el setup sobre un sistema que ya operaba.
+     *
+     * @param Implementation $implementation              La implementación.
+     * @param Client         $client                      Su cliente.
+     * @param bool           $confirmado_por_una_persona  Ver `trigger_user_setup()`.
+     *
+     * @return array{ok: bool, message: string}|null El resultado a devolver si se frena; null si se sigue.
+     */
+    private function frenar_si_el_candado_lo_pide(Implementation $implementation, Client $client, bool $confirmado_por_una_persona): ?array
+    {
+        // El servicio que define "ya opera".
+        $candado = new UserSetupCandadoService();
+
+        // Las protecciones, comparando contra la instalación completada del cliente (si la hay).
+        $protecciones = $candado->protecciones_de_implementacion(
+            $implementation,
+            $client,
+            $candado->instalacion_completada_del_cliente($client)
+        );
+
+        // Las que fallaron.
+        $bloqueos = $candado->bloqueos($protecciones);
+
+        if (count($bloqueos) === 0) {
+            return null;
+        }
+
+        // Los nombres de lo que falló, para el log y el mensaje.
+        $frase = $candado->frase_de_bloqueos($bloqueos);
+
+        if ($confirmado_por_una_persona) {
+            Log::channel('daily')->warning('ImplementationUserSetupService: una persona confirmó re-aplicar el user setup y se SALTEA el candado.', [
+                'implementation_id' => $implementation->id,
+                'client_id'         => $client->id,
+                'protecciones'      => $frase,
+            ]);
+
+            return null;
+        }
+
+        Log::channel('daily')->warning('ImplementationUserSetupService: FRENADO por el candado, no se llama al sistema del cliente.', [
+            'implementation_id' => $implementation->id,
+            'client_id'         => $client->id,
+            'protecciones'      => $frase,
+        ]);
+
+        // Lo que se vio de cada protección que falló, para quien lee el motivo (el job lo guarda en el registro del user setup).
+        $detalles = [];
+
+        foreach ($bloqueos as $bloqueo) {
+            $detalles[] = $bloqueo['detalle'];
+        }
+
+        return [
+            'ok'      => false,
+            'message' => self::PREFIJO_FRENADO_POR_EL_CANDADO . 'no se llamó al sistema del cliente porque ya opera o ya se configuró (' . $frase . '): aplicarle el '
+                . 'user setup le vaciaría la base (migrate:fresh). ' . implode(' ', $detalles),
+        ];
     }
 
     /**

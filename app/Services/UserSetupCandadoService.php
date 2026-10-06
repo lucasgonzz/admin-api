@@ -323,6 +323,27 @@ class UserSetupCandadoService
     }
 
     /**
+     * La instalación completa y COMPLETADA más reciente del cliente, o null si no tiene ninguna.
+     *
+     * Es la que usan el punto de llamada (`ImplementationUserSetupService::trigger_user_setup()`) y el panel para pasarle a
+     * `protecciones_de_implementacion()` la instalación contra la que se compara el arranque de la implementación: no
+     * conocen el plan estricto, que busca la última de la API activa. 🔴 Solo cuentan las de `kind` completa: el esqueleto
+     * del subdominio hermano no es "el sistema" y no dice nada de si ya operaba.
+     *
+     * @param Client $client El cliente.
+     *
+     * @return ClientInstallation|null
+     */
+    public function instalacion_completada_del_cliente(Client $client): ?ClientInstallation
+    {
+        return ClientInstallation::where('client_id', $client->id)
+            ->where('kind', ClientInstallation::KIND_COMPLETA)
+            ->where('status', 'completada')
+            ->orderByDesc('id')
+            ->first();
+    }
+
+    /**
      * Los chequeos que fallaron (los que tienen `ok === false`), en el mismo orden.
      *
      * @param array<int, array<string, mixed>> $chequeos Una lista de chequeos (`chequeo`, `ok`, `detalle`).
