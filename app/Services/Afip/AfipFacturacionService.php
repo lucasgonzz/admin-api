@@ -63,8 +63,16 @@ class AfipFacturacionService
         }
 
         // 3. Datos fiscales del receptor: sin CUIT no se puede armar el comprobante (DocTipo 80).
-        if (empty($client->afip_cuit)) {
+        // El CUIT viaja a AFIP solo con dígitos: el placeholder del modal invita a escribirlo con
+        // guiones (`20-12345678-9`) y así AFIP lo rechaza (hallazgo del 31/8/2026).
+        $cuit_receptor = self::cuit_solo_digitos($client->afip_cuit);
+
+        if ($cuit_receptor === '') {
             return $this->respuesta_error('Cargá el CUIT fiscal del cliente antes de facturar.');
+        }
+
+        if (strlen($cuit_receptor) !== 11) {
+            return $this->respuesta_error('El CUIT fiscal del cliente tiene '.strlen($cuit_receptor).' dígitos y un CUIT tiene 11. Revisalo antes de facturar.');
         }
 
         // 4. Monto a facturar: el total de mensualidad ya calculado en admin (prompts 328/329).
@@ -112,7 +120,7 @@ class AfipFacturacionService
                         // Concepto 1 = productos (igual que empresa-api).
                         'Concepto' => 1,
                         'DocTipo' => self::DOC_TIPO_CUIT,
-                        'DocNro' => $client->afip_cuit,
+                        'DocNro' => $cuit_receptor,
                         'CbteDesde' => $numero,
                         'CbteHasta' => $numero,
                         'CbteFch' => date('Ymd'),
@@ -144,9 +152,9 @@ class AfipFacturacionService
             'cbte_numero' => $numero,
             'punto_venta' => $config->punto_venta,
             'cuit_negocio' => $config->cuit,
-            'cuit_cliente' => $client->afip_cuit,
+            'cuit_cliente' => $cuit_receptor,
             'doc_tipo' => self::DOC_TIPO_CUIT,
-            'doc_nro' => $client->afip_cuit,
+            'doc_nro' => $cuit_receptor,
             'importe_total' => $total,
             'imp_neto' => $total,
             'imp_iva' => 0,
@@ -177,12 +185,24 @@ class AfipFacturacionService
             $datos_invoice['cae_expired_at'] = $det_resp->CAEFchVto;
         } else {
             $datos_invoice['resultado'] = 'R';
-            $datos_invoice['error_message'] = $this->extraer_error_legible($det_resp);
+            $datos_invoice['error_message'] = $this->extraer_error_legible($det_resp).$this->aviso_de_homologacion($config);
         }
 
         $invoice = MensualidadInvoice::create($datos_invoice);
 
         return $this->respuesta($invoice, false);
+    }
+
+    /**
+     * Deja un CUIT solo con sus dígitos: saca guiones, puntos y espacios, que es como lo escribe la
+     * gente y como lo rechaza AFIP en `DocNro`.
+     *
+     * @param  string|null $valor CUIT tal como está guardado en el cliente.
+     * @return string Solo dígitos (cadena vacía si no había ninguno).
+     */
+    public static function cuit_solo_digitos($valor)
+    {
+        return preg_replace('/\D/', '', (string) $valor);
     }
 
     /**
@@ -255,6 +275,27 @@ class AfipFacturacionService
     }
 
     /**
+     * Texto que se suma a un rechazo de AFIP cuando la emisión fue contra HOMOLOGACIÓN.
+     *
+     * En homologación ARCA solo conoce unos pocos CUIT de prueba, así que a casi cualquier
+     * cliente real lo rechaza con `[10015] ... no se encuentra registrado en los padrones de
+     * AFIP`. Ese mensaje no dice que el problema es el ambiente y se lo toma por un dato mal
+     * cargado del cliente (7/10/2026: Arfren, Ananda, San Cayetano y 3dTisk). En producción
+     * devuelve cadena vacía: el rechazo se muestra tal cual lo manda AFIP.
+     *
+     * @param  ComerciocityAfipConfig $config
+     * @return string
+     */
+    protected function aviso_de_homologacion(ComerciocityAfipConfig $config)
+    {
+        if ($config->afip_produccion) {
+            return '';
+        }
+
+        return ' — OJO: esta emisión fue contra HOMOLOGACIÓN (el ambiente de pruebas de ARCA, sin validez fiscal), donde solo existen unos pocos CUIT de prueba. Si el CUIT del cliente es real, activá Producción en Configuración fiscal.';
+    }
+
+    /**
      * Arma la respuesta estándar del servicio a partir de un MensualidadInvoice ya persistido.
      *
      * `importe_total` viaja acá (hallazgo del chequeo independiente, 18/9/2026) para que el
@@ -278,6 +319,8 @@ class AfipFacturacionService
             'error_message' => $invoice->error_message,
             'invoice_id' => $invoice->id,
             'importe_total' => $invoice->importe_total !== null ? (float) $invoice->importe_total : null,
+            // Ambiente de la emisión (campo nuevo, opcional para quien consume): false = homologación.
+            'afip_produccion' => (bool) $invoice->afip_produccion,
         ];
     }
 

@@ -134,7 +134,10 @@ class AfipWsaaService
            `check_wsaa()` lo da por bueno —solo mira `expirationTime`, nunca de
            dónde vino—: ARCA rechaza con un error de autenticación críptico y
            reintentar no arregla nada hasta que el TA venza (~12hs). Si hace falta
-           ese caso, el ambiente tiene que entrar acá. */
+           ese caso, el ambiente tiene que entrar acá.
+           (7/10/2026: `check_wsaa()` ya descarta un TA vigente emitido por el otro
+           ambiente, mirando `header/source`, así que cambiar el interruptor de
+           `afip_produccion` no deja un TA ajeno en uso. La ruta sigue sin distinguir.) */
         $this->work_dir = storage_path('app/afip/wsaa/'.$this->ws_name.'/');
 
         // Crea el directorio de trabajo si todavía no existe (recursivo).
@@ -188,6 +191,12 @@ class AfipWsaaService
             } else if (strtotime($ta->header->expirationTime) < time()) {
                 Log::info('AfipWsaaService: el TA estaba vencido, se regenera');
                 $this->wsaa();
+            } else if (! self::ta_es_del_ambiente(isset($ta->header->source) ? (string) $ta->header->source : '', $this->testing_es_produccion)) {
+                // TA vigente pero emitido por el otro ambiente (pasa al cambiar el interruptor de
+                // producción/homologación): ARCA lo rechazaría con un error de autenticación
+                // críptico hasta que venza (~12 hs), así que se pide uno nuevo ya.
+                Log::info('AfipWsaaService: el TA vigente es de otro ambiente, se regenera');
+                $this->wsaa();
             } else {
                 Log::info('AfipWsaaService: el TA vigente esta OK');
             }
@@ -195,6 +204,36 @@ class AfipWsaaService
             Log::info('AfipWsaaService: el TA no estaba creado, se genera');
             $this->wsaa();
         }
+    }
+
+    /**
+     * ¿Un TA con este `header/source` corresponde al ambiente pedido?
+     *
+     * ARCA firma el TA con su propio certificado y lo declara en `<source>`:
+     * `CN=wsaa, O=AFIP...` en producción y `CN=wsaahomo, O=AFIP...` en homologación.
+     * El directorio del TA no distingue ambiente (ver `define()`), así que esta es
+     * la única forma de saber de dónde vino el archivo que quedó en disco sin mover
+     * rutas (mover la ruta regeneraría los TA vivos de producción y ARCA contestaría
+     * `coe.alreadyAuthenticated`). Si el `source` viene vacío o no se reconoce, se da
+     * por bueno: es el comportamiento de siempre y no se regenera a ciegas.
+     *
+     * @param  string $source          Contenido de `header/source` del TA.
+     * @param  bool   $es_produccion   Ambiente que se necesita (true = producción).
+     * @return bool
+     */
+    public static function ta_es_del_ambiente($source, $es_produccion)
+    {
+        $source = strtolower((string) $source);
+
+        if (strpos($source, 'cn=wsaahomo') !== false) {
+            return ! $es_produccion;
+        }
+
+        if (strpos($source, 'cn=wsaa') !== false) {
+            return (bool) $es_produccion;
+        }
+
+        return true;
     }
 
     /**
