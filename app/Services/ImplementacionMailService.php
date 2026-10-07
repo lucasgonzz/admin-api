@@ -31,7 +31,8 @@ use Illuminate\Support\Facades\Mail;
  *   instalado  — el sistema ya está instalado; pide los archivos.
  *   acceso     — la primera tanda de artículos ya está cargada; lleva el link para entrar.
  *   imagenes   — cuántos artículos ya tienen foto y cuántas esperan el visto bueno del cliente.
- *   categorias — las opciones de categorías (dos o tres) para que elija una.
+ *   categorias — las opciones de categorías (una, dos o tres): con varias elige una, y con una sola
+ *                (la lista que pasó el dueño) la confirma.
  *   listo      — el sistema está listo para operar.
  *
  * OJO: todo mail lleva además la línea de progreso con el estado real de las ocho etapas al momento
@@ -40,7 +41,7 @@ use Illuminate\Support\Facades\Mail;
  *
  * Qué se manda y qué sale solo de la implementación:
  *
- *   - De los datos del hito (lo pasa quien llama): cantidades, las opciones de categorías (dos o tres),
+ *   - De los datos del hito (lo pasa quien llama): cantidades, las opciones de categorías (una, dos o tres),
  *     la nota personal. Se validan en `validar_datos()`.
  *   - De la implementación (no se pasa): el nombre y el negocio del cliente, el link del formulario,
  *     la dirección de su sistema y el estado de las etapas.
@@ -117,10 +118,15 @@ class ImplementacionMailService
     ];
 
     /**
-     * Cuántas opciones de categorías acepta el mail "categorias": como mínimo dos (si no, no hay nada
-     * que elegir) y como máximo tres (las que armó `/categorizar` cuando eran tres; más es ruido).
+     * Cuántas opciones de categorías acepta el mail "categorias": como mínimo una y como máximo tres
+     * (las que armó `/categorizar` cuando eran tres; más es ruido).
+     *
+     * El mínimo era dos (con una sola no hay nada que ELEGIR). Bajó a una el 7/10/2026 (misión
+     * `categorias-del-dueno`): cuando el dueño trae su propia lista de categorías se le ofrece SOLO
+     * su sistema, y el mail ya no le pide que elija entre formas sino que revise y confirme la suya.
+     * Con dos o tres el mail sale idéntico a como salía.
      */
-    const MIN_OPCIONES_DE_CATEGORIAS = 2;
+    const MIN_OPCIONES_DE_CATEGORIAS = 1;
     const MAX_OPCIONES_DE_CATEGORIAS = 3;
 
     /**
@@ -739,12 +745,14 @@ class ImplementacionMailService
     /**
      * Lee y valida las opciones de categorías del mail "categorias".
      *
-     * Dos o tres (`MIN_OPCIONES_DE_CATEGORIAS` y `MAX_OPCIONES_DE_CATEGORIAS`): desde el 6/10/2026
-     * `/categorizar` arma DOS sistemas por defecto y tres solo si Lucas lo pide. Tres sigue entrando
-     * igual que antes (compatible hacia atrás); una sola o cuatro no, porque el mail es para ELEGIR
-     * entre formas distintas de ordenar el catálogo. Cada una con nombre (hasta 60 caracteres), base
-     * (hasta 280, en qué se basa), categorias (entero de 1 en adelante) y, si hay, hasta cuatro
-     * ejemplos de hasta 40 caracteres. El texto del mail dice "dos" o "tres" según cuántas lleguen.
+     * Una, dos o tres (`MIN_OPCIONES_DE_CATEGORIAS` y `MAX_OPCIONES_DE_CATEGORIAS`): desde el 6/10/2026
+     * `/categorizar` arma DOS sistemas por defecto y tres solo si Lucas lo pide, y desde el 7/10/2026
+     * (misión `categorias-del-dueno`) UNA sola cuando el dueño trae su propia lista de categorías.
+     * Dos y tres entran igual que antes (compatible hacia atrás); cero o cuatro o más no, porque sin
+     * ninguna no hay nada que mostrar y más de tres es ruido. Cada una con nombre (hasta 60 caracteres),
+     * base (hasta 280, en qué se basa), categorias (entero de 1 en adelante) y, si hay, hasta cuatro
+     * ejemplos de hasta 40 caracteres. El texto del mail cambia según cuántas lleguen: "dos" o "tres"
+     * formas para elegir, o el texto de la lista única si llega una sola.
      *
      * @param array<string, mixed>  $datos
      * @param array<string, string> $errores
@@ -754,19 +762,19 @@ class ImplementacionMailService
     private static function leer_las_opciones(array $datos, array &$errores): ?array
     {
         if (! array_key_exists('opciones', $datos) || $datos['opciones'] === null) {
-            $errores['opciones'] = 'Es obligatorio: las opciones de categorías (dos o tres).';
+            $errores['opciones'] = 'Es obligatorio: las opciones de categorías (una, dos o tres).';
 
             return null;
         }
 
         if (! is_array($datos['opciones'])) {
-            $errores['opciones'] = 'Tiene que ser una lista con las dos o tres opciones.';
+            $errores['opciones'] = 'Tiene que ser una lista con una, dos o tres opciones.';
 
             return null;
         }
 
         if (count($datos['opciones']) < self::MIN_OPCIONES_DE_CATEGORIAS || count($datos['opciones']) > self::MAX_OPCIONES_DE_CATEGORIAS) {
-            $errores['opciones'] = 'Tienen que ser dos o tres opciones (llegaron ' . count($datos['opciones']) . ').';
+            $errores['opciones'] = 'Tienen que ser una, dos o tres opciones (llegaron ' . count($datos['opciones']) . ').';
 
             return null;
         }

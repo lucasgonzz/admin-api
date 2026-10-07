@@ -240,12 +240,31 @@ class MailDeHitoPorClaudeTest extends BaseDeImplementaciones
         $fotos->assertStatus(422);
         $this->assertArrayHasKey('con_foto', $fotos->json('errores'));
 
-        /* categorías: dos o tres (desde el 6/10/2026, D4 de `implementacion-dos-sistemas`; antes eran EXACTAMENTE tres). Una sola no sirve. */
-        $una = $this->datos_validos()['categorias'];
-        $una['opciones'] = array_slice($una['opciones'], 0, 1);
-        $categorias = $this->mail($e['implementacion'], $this->real('categorias', ['datos' => $una]));
+        /*
+         * categorías: una, dos o tres (desde el 7/10/2026, misión `categorias-del-dueno`; antes dos o tres, y
+         * antes EXACTAMENTE tres). Cero y cuatro no sirven: el borde inválido se sigue probando. Una SÍ sirve.
+         */
+        $cero = $this->datos_validos()['categorias'];
+        $cero['opciones'] = [];
+        $categorias = $this->mail($e['implementacion'], $this->real('categorias', ['datos' => $cero]));
         $categorias->assertStatus(422);
         $this->assertArrayHasKey('opciones', $categorias->json('errores'));
+
+        $cuatro = $this->datos_validos()['categorias'];
+        $cuatro['opciones'] = array_merge($cuatro['opciones'], [$cuatro['opciones'][0]]);
+        $categorias = $this->mail($e['implementacion'], $this->real('categorias', ['datos' => $cuatro]));
+        $categorias->assertStatus(422);
+        $this->assertArrayHasKey('opciones', $categorias->json('errores'));
+
+        /*
+         * Una sola opción (la lista del dueño) es válida: da 200 con el asunto de la lista única. Va en dry-run
+         * (el default) a propósito: acá nada tiene que mandarse ni escribirse, y este test lo verifica al final.
+         */
+        $una = $this->datos_validos()['categorias'];
+        $una['opciones'] = array_slice($una['opciones'], 0, 1);
+        $categorias = $this->mail($e['implementacion'], ['hito' => 'categorias', 'datos' => $una]);
+        $categorias->assertStatus(200);
+        $categorias->assertJsonPath('asunto', 'Tu catálogo, ordenado en categorías');
 
         /* una nota de más de 600 caracteres. */
         $nota = $this->mail($e['implementacion'], $this->real('bienvenida', ['datos' => ['nota' => str_repeat('x', 601)]]));

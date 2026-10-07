@@ -194,23 +194,22 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
     }
 
     /**
-     * Categorías: `opciones` es obligatorio y son DOS o TRES (misión `implementacion-dos-sistemas`,
-     * 6/10/2026: `/categorizar` arma DOS sistemas por defecto y tres solo si se pide; antes eran
-     * EXACTAMENTE tres). Con una, con cuatro, vacío o sin ser una lista, es un error. Tres sigue
-     * entrando igual que antes (compatible hacia atrás).
+     * Categorías: `opciones` es obligatorio y son UNA, DOS o TRES. La historia: eran EXACTAMENTE tres;
+     * el 6/10/2026 (misión `implementacion-dos-sistemas`) pasaron a dos o tres, porque `/categorizar`
+     * arma DOS sistemas por defecto; y el 7/10/2026 (misión `categorias-del-dueno`) se aceptó también
+     * UNA, la lista de categorías que trae el dueño. Con cuatro, vacío o sin ser una lista, es un
+     * error. Dos y tres siguen entrando igual que antes (compatible hacia atrás).
      *
      * @return void
      */
-    public function test_categorias_pide_dos_o_tres_opciones()
+    public function test_categorias_pide_una_dos_o_tres_opciones()
     {
         $opciones = $this->opciones_de_ejemplo();
 
-        $this->assertSame(['opciones' => 'Es obligatorio: las opciones de categorías (dos o tres).'], $this->errores('categorias', []));
+        $this->assertSame(['opciones' => 'Es obligatorio: las opciones de categorías (una, dos o tres).'], $this->errores('categorias', []));
 
-        $una = $this->errores('categorias', ['opciones' => array_slice($opciones, 0, 1)]);
-        $this->assertSame(['opciones'], array_keys($una));
-        $this->assertStringContainsString('dos o tres', $una['opciones']);
-        $this->assertStringContainsString('llegaron 1', $una['opciones']);
+        /* Antes de la misión `categorias-del-dueno` una sola opción era un error ("dos o tres"); ahora es válida. */
+        $this->assertSame([], $this->errores('categorias', ['opciones' => array_slice($opciones, 0, 1)]), 'Una opción es válido.');
 
         $cuatro = $this->errores('categorias', ['opciones' => array_merge($opciones, [$opciones[0]])]);
         $this->assertSame(['opciones'], array_keys($cuatro));
@@ -382,15 +381,20 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
         $client = $this->crear_cliente(['email' => 'dueno@ejemplo.test']);
         $impl   = $this->crear_implementacion($client, $this->estados(3, 4));
 
-        /* Una sola opción: desde el 6/10/2026 dos o tres sirven (D4 de `implementacion-dos-sistemas`), y una no. */
-        $una_opcion = ['opciones' => array_slice($this->opciones_de_ejemplo(), 0, 1)];
+        /*
+         * Datos que no sirven: CUATRO opciones. Antes acá se usaba UNA sola, pero desde el 7/10/2026
+         * (misión `categorias-del-dueno`) una opción es válida; lo que sigue siendo un error es pasarse
+         * de tres.
+         */
+        $opciones_de_ejemplo = $this->opciones_de_ejemplo();
+        $datos_que_no_sirven = ['opciones' => array_merge($opciones_de_ejemplo, [$opciones_de_ejemplo[0]])];
 
         foreach (['previa', 'enviar'] as $metodo) {
             try {
                 if ($metodo === 'previa') {
-                    ImplementacionMailService::previa($impl, 'categorias', $una_opcion, null);
+                    ImplementacionMailService::previa($impl, 'categorias', $datos_que_no_sirven, null);
                 } else {
-                    ImplementacionMailService::enviar($impl, 'categorias', $una_opcion, null, false);
+                    ImplementacionMailService::enviar($impl, 'categorias', $datos_que_no_sirven, null, false);
                 }
 
                 $this->fail($metodo . ' tendría que haber tirado la excepción.');
@@ -535,5 +539,9 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
         $this->assertStringNotContainsString('las tres opciones', $texto);
         $this->assertStringContainsString('2 o 3', $texto);
         $this->assertStringContainsString('dos o tres', $texto);
+        // Desde categorias-del-dueno (7/10/2026) una sola opción es válida: el catálogo tiene que
+        // documentarla y no puede seguir diciendo que una opción es un 422.
+        $this->assertStringContainsString('una opción', $texto);
+        $this->assertStringNotContainsString('una o cuatro', $texto);
     }
 }

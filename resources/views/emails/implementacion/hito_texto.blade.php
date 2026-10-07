@@ -72,14 +72,14 @@ Las que apruebes quedan en tu sistema, y en tu tienda online si tenés una.
 @endif
 @elseif($hito === 'categorias')
 @foreach($opciones as $opcion)
-Opción {{ $opcion['indice'] }} - {{ $opcion['categorias_texto'] }} {{ $opcion['categorias_leyenda'] }}: {{ $opcion['nombre'] }}
+@if(! $una_sola_opcion)Opción {{ $opcion['indice'] }} - @endif{{ $opcion['categorias_texto'] }} {{ $opcion['categorias_leyenda'] }}: {{ $opcion['nombre'] }}
 {{ $opcion['base'] }}
 @if(count($opcion['ejemplos']) > 0)
 Por ejemplo: {{ implode(', ', $opcion['ejemplos']) }}
 @endif
 
 @endforeach
-{{ $como_elegir !== '' ? $como_elegir : 'Las ves completas y elegís desde tu sistema, en Alertas → Catálogo → Categorías: ahí ves los productos de cada una y cómo quedaría el menú de tu tienda. La elección la hace el dueño de la cuenta.' }}
+{{ $como_elegir !== '' ? $como_elegir : ($una_sola_opcion ? 'La ves completa en tu sistema, en Alertas → Catálogo → Categorías: tocá "Elegir este" para confirmarla.' : 'Las ves completas y elegís desde tu sistema, en Alertas → Catálogo → Categorías: ahí ves los productos de cada una y cómo quedaría el menú de tu tienda. La elección la hace el dueño de la cuenta.') }}
 @elseif($hito === 'listo')
 @if(count($resumen) > 0)
 Lo que quedó cargado:

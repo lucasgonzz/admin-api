@@ -50,7 +50,8 @@ class ImplementacionMailHelper
      *
      * Solo se muestran si la etapa 4 está en curso de verdad. En `listo` no hay subpasos porque la
      * etapa 4 ya está completa. `categorias` es igual a `imagenes`: las categorías siguen en curso
-     * mientras el cliente no elige una de las opciones (dos o tres).
+     * mientras el cliente no elige una de las opciones (una, dos o tres; con una sola, mientras no la
+     * confirma).
      *
      * @var array<string, array<int, array<int, string>>>
      */
@@ -176,7 +177,7 @@ class ImplementacionMailHelper
      *
      * Los textos con datos adentro son el preheader de `acceso` e `imagenes`, que lleva los números,
      * y el asunto, el preheader y la introducción de `categorias`, que dicen "dos" o "tres" según
-     * cuántas opciones viajan en el mail.
+     * cuántas opciones viajan en el mail (y, con una sola, son otros textos: ver abajo).
      *
      * @param string               $hito  Hito del mail.
      * @param array<string, mixed> $datos Datos del hito, validados.
@@ -236,6 +237,25 @@ class ImplementacionMailHelper
                  * validó— queda el texto de siempre, el de tres: compatible hacia atrás.
                  */
                 $cantidad = isset($datos['opciones']) && is_array($datos['opciones']) ? count($datos['opciones']) : 3;
+
+                /*
+                 * UNA sola opción (misión `categorias-del-dueno`, 7/10/2026): es la lista de categorías que
+                 * trajo el dueño, y ahí no hay nada que ELEGIR entre formas distintas: hay que revisar y
+                 * confirmar. Por eso el mail no puede decir "formas" ni "propuestas" ni pedir que elija.
+                 * Los textos son genéricos a propósito: valen tanto para la lista del dueño como para un
+                 * único sistema armado por nosotros; "son tus categorías" lo dice la `base` de la opción,
+                 * que la escribe quien llama.
+                 */
+                if ($cantidad === 1) {
+                    return [
+                        'asunto'    => 'Tu catálogo, ordenado en categorías',
+                        'preheader' => 'Ubicamos tus productos en sus categorías. Revisalo y confirmalo desde tu sistema.',
+                        'titular'   => 'Tu catálogo ya tiene sus categorías.',
+                        'intro'     => 'Ubicamos tus productos en sus categorías y subcategorías. Revisá cómo quedó '
+                            . 'y confirmalo desde tu sistema: hasta que lo confirmes, no cambia nada.',
+                    ];
+                }
+
                 $palabra  = $cantidad === 2 ? 'dos' : 'tres';
 
                 return [
@@ -541,9 +561,13 @@ class ImplementacionMailHelper
     }
 
     /**
-     * El bloque del mail de las categorías: las opciones (dos o tres) y el cierre.
+     * El bloque del mail de las categorías: las opciones (una, dos o tres) y el cierre.
      *
-     * @param array<string, mixed> $datos opciones (dos o tres) y, si vino, como_elegir.
+     * `una_sola_opcion` le avisa a las vistas que no hay entre qué elegir: sin el "Opción 1" de la
+     * tarjeta y con el cierre en singular ("tocá Elegir este para confirmarla"). Con dos o tres sale
+     * todo como siempre.
+     *
+     * @param array<string, mixed> $datos opciones (una, dos o tres) y, si vino, como_elegir.
      *
      * @return array<string, mixed>
      */
@@ -565,9 +589,11 @@ class ImplementacionMailHelper
         }
 
         return [
-            'opciones'    => $opciones,
+            'opciones'        => $opciones,
+            // Con una sola opción no se numera: "Opción 1" de una sola opción confunde.
+            'una_sola_opcion' => count($opciones) === 1,
             // Si el dato no vino, el cierre es el de siempre y lo pone la vista.
-            'como_elegir' => isset($datos['como_elegir']) ? (string) $datos['como_elegir'] : '',
+            'como_elegir'     => isset($datos['como_elegir']) ? (string) $datos['como_elegir'] : '',
         ];
     }
 
