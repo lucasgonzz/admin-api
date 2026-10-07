@@ -117,6 +117,46 @@ class FacturaMensualidadAmbienteTest extends BaseDeCobranzas
         return $metodo->invoke(new AfipFacturacionService(), $config);
     }
 
+    public function test_una_factura_de_homologacion_no_da_el_periodo_por_facturado_en_produccion()
+    {
+        $client = $this->crear_cliente(['afip_cuit' => '30718863623', 'total_mensualidad' => 27000]);
+        $this->factura_autorizada($client, '2026-10', false);
+        $servicio = new AfipFacturacionService();
+
+        $this->config_fiscal(true);
+        $this->assertFalse($servicio->ya_facturado($client, '2026-10'), 'El CAE de homologación no vale en producción.');
+
+        $this->config_fiscal(false);
+        $this->assertTrue($servicio->ya_facturado($client, '2026-10'), 'En homologación sigue valiendo la de homologación.');
+    }
+
+    public function test_una_factura_de_produccion_da_el_periodo_por_facturado_en_produccion()
+    {
+        $client = $this->crear_cliente(['afip_cuit' => '30718863623', 'total_mensualidad' => 27000]);
+        $this->factura_autorizada($client, '2026-10', true);
+
+        $this->config_fiscal(true);
+
+        $this->assertTrue((new AfipFacturacionService())->ya_facturado($client, '2026-10'));
+    }
+
+    /**
+     * Inserta una Factura C autorizada (con CAE) para el cliente y período, en el ambiente dado.
+     *
+     * @param  \App\Models\Client $client
+     * @param  string $periodo
+     * @param  bool   $produccion
+     * @return MensualidadInvoice
+     */
+    protected function factura_autorizada($client, $periodo, $produccion)
+    {
+        return MensualidadInvoice::create([
+            'client_id' => $client->id, 'periodo' => $periodo, 'cbte_tipo' => 11, 'cbte_letra' => 'C',
+            'cbte_numero' => 1, 'punto_venta' => 1, 'importe_total' => 27000, 'resultado' => 'A',
+            'cae' => '70000000000001', 'afip_produccion' => $produccion,
+        ]);
+    }
+
     public function test_el_ta_se_reconoce_por_su_source_segun_el_ambiente()
     {
         $homo = 'CN=wsaahomo, O=AFIP, C=AR, SERIALNUMBER=CUIT 33693450239';

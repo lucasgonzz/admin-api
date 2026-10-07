@@ -231,6 +231,11 @@ class AfipFacturacionService
      * `ya_facturado()` compartan exactamente la misma consulta de idempotencia, en vez de tener
      * dos definiciones de "ya está facturado" que se puedan desincronizar.
      *
+     * Solo cuenta la autorizada en el MISMO ambiente que está activo (7/10/2026): una factura con
+     * CAE de HOMOLOGACIÓN no tiene validez fiscal, así que al pasar a producción no puede dar el
+     * período por facturado ni impedir que se emita la real. En homologación sigue valiendo la
+     * de homologación, igual que siempre.
+     *
      * @param  Client $client
      * @param  string $periodo
      * @return MensualidadInvoice|null
@@ -239,6 +244,7 @@ class AfipFacturacionService
     {
         return MensualidadInvoice::where('client_id', $client->id)
             ->where('periodo', $periodo)
+            ->where('afip_produccion', (bool) ComerciocityAfipConfig::current()->afip_produccion)
             ->where('resultado', 'A')
             ->whereNotNull('cae')
             ->latest('id')
