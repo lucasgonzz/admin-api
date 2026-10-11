@@ -44,6 +44,16 @@ class EnvSshServiceFake extends EnvSshService
     public $fallan_al_escribir = [];
 
     /**
+     * Ids de API cuyas PRIMERAS escrituras fallan y después andan: `client_api_id => cuántas escrituras fallan`.
+     *
+     * Simula una falla pasajera (un corte de la sesión SSH): la escritura de ida falla y la vuelta atrás, que viene
+     * después, funciona. `$fallan_al_escribir` falla siempre, y no deja probar que la restauración sí se pudo hacer.
+     *
+     * @var array<int, int>
+     */
+    public $escrituras_que_fallan_y_despues_andan = [];
+
+    /**
      * Ids de API que fallan al RESPALDAR el .env, con el mensaje de error a devolver.
      *
      * Simula el `cp` del respaldo que no puede escribir (disco lleno, cuota agotada del hosting). El
@@ -53,6 +63,28 @@ class EnvSshServiceFake extends EnvSshService
      * @var array<int, string>
      */
     public $fallan_al_respaldar = [];
+
+    /**
+     * Ids de API que fallan al LIMPIAR el config cacheado, con el mensaje de error a devolver.
+     *
+     * @var array<int, string>
+     */
+    public $fallan_al_limpiar_el_cache = [];
+
+    /**
+     * Cuántas veces se limpió el config cacheado de cada API: client_api_id => cantidad.
+     *
+     * @var array<int, int>
+     */
+    public $caches_limpiados = [];
+
+    /**
+     * Registro ordenado de todo lo que se hizo con el `.env` de cada API (`backup`, `escribir`, `limpiar`), como
+     * `"<id> <operacion>"`. Sirve para afirmar el ORDEN (respaldo antes de escribir, limpiar después) y que `ver` no hace nada.
+     *
+     * @var array<int, string>
+     */
+    public $operaciones = [];
 
     /**
      * Escrituras efectivamente realizadas: client_api_id => [KEY => valor].
@@ -178,6 +210,7 @@ class EnvSshServiceFake extends EnvSshService
         $path = '/fake/' . $client_api->id . '/.env.bak-' . $timestamp;
 
         $this->backups[$client_api->id] = $path;
+        $this->operaciones[]            = $client_api->id . ' backup';
 
         return $path;
     }
@@ -200,9 +233,17 @@ class EnvSshServiceFake extends EnvSshService
             throw new \RuntimeException($this->fallan_al_escribir[$client_api->id]);
         }
 
+        if (isset($this->escrituras_que_fallan_y_despues_andan[$client_api->id]) && $this->escrituras_que_fallan_y_despues_andan[$client_api->id] > 0) {
+            $this->escrituras_que_fallan_y_despues_andan[$client_api->id]--;
+
+            throw new \RuntimeException('La escritura no quedó aplicada (falla pasajera de prueba).');
+        }
+
         if (! isset($this->escrituras[$client_api->id])) {
             $this->escrituras[$client_api->id] = [];
         }
+
+        $this->operaciones[] = $client_api->id . ' escribir';
 
         foreach ($vars_to_update as $key => $value) {
             $this->escrituras[$client_api->id][$key] = $value;
@@ -213,6 +254,23 @@ class EnvSshServiceFake extends EnvSshService
                 (string) $value
             );
         }
+    }
+
+    /**
+     * Registra el borrado del config cacheado sin tocar nada.
+     *
+     * @param  ClientApi  $client_api
+     * @return void
+     * @throws \RuntimeException Si esa API está marcada como fallada al limpiar el cache.
+     */
+    public function limpiar_cache_de_config_for(ClientApi $client_api): void
+    {
+        if (isset($this->fallan_al_limpiar_el_cache[$client_api->id])) {
+            throw new \RuntimeException($this->fallan_al_limpiar_el_cache[$client_api->id]);
+        }
+
+        $this->caches_limpiados[$client_api->id] = (isset($this->caches_limpiados[$client_api->id]) ? $this->caches_limpiados[$client_api->id] : 0) + 1;
+        $this->operaciones[]                     = $client_api->id . ' limpiar';
     }
 
     /**

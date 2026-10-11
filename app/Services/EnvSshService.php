@@ -378,6 +378,39 @@ class EnvSshService
     }
 
     /**
+     * Borra el config cacheado de la API de esa ClientApi (`bootstrap/cache/config.php`), para que Laravel vuelva a leer el `.env`.
+     *
+     * 🔴 POR QUÉ. Con el config cacheado, un cambio en el `.env` NO se lee: la variable que se acaba de escribir no tiene
+     * efecto hasta que el cache se rehace. Es exactamente lo que hace `php artisan config:clear` (borrar ese archivo), pero sin
+     * depender de que artisan bootee: el `php` del PATH de un servidor puede no ser el de la app, y un config.php inválido puede
+     * romper a artisan mismo. Es el mismo criterio que ya usa `DeploymentService` ("lo sacamos de circulación sin depender de que
+     * artisan bootee"). `rm -f` no falla si el archivo no estaba (no había nada cacheado); lo que sí se verifica es que después
+     * NO exista.
+     *
+     * @param  ClientApi  $client_api
+     * @return void
+     * @throws \RuntimeException Si el comando falla o el archivo sigue existiendo.
+     */
+    public function limpiar_cache_de_config_for(ClientApi $client_api): void
+    {
+        $this->connect_for($client_api);
+        $this->assert_connected();
+
+        $cache = $this->path_resolver->resolve($client_api) . '/bootstrap/cache/config.php';
+
+        $this->exec_remoto('rm -f ' . $this->escape_remote_arg($cache), "borrar el config cacheado en {$cache}");
+
+        /* Marcadores propios, como en env_exists_for(): un string vacío (sesión rota) no es "no existe". */
+        $raw = trim((string) $this->ssh->exec(
+            'if [ -e ' . $this->escape_remote_arg($cache) . ' ]; then echo CACHE_SI; else echo CACHE_NO; fi'
+        ));
+
+        if ($raw !== 'CACHE_NO') {
+            throw new \RuntimeException("No se pudo confirmar que el config cacheado se haya borrado en: {$cache} (el servidor respondió '{$raw}').");
+        }
+    }
+
+    /**
      * Escribe o actualiza variables en el .env que está en un path dado, sobre la conexión abierta.
      *
      * Para cada variable: si la key existe, reemplaza la línea con sed; si no, la agrega al final.
