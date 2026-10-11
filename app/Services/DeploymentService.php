@@ -1675,11 +1675,22 @@ class DeploymentService
          * la instancia de masquito `config()` devuelve `bool(false)`. O sea que el endpoint acepta
          * el PUT sin ninguna clave, y el admin se estaba auto-bloqueando solo.
          *
-         * Lo que costaba: 20 de los 44 clientes activos tienen `clients.api_key` vacío. A todos
+         * Lo que costaba: el 3/9/2026, 20 de los 44 clientes activos tenían `clients.api_key` vacío. A todos
          * ellos el deployment les terminaba en `completed` mientras `users.default_version` y
          * `users.api_url` seguían apuntando a la carpeta VIEJA — o sea, el negocio siguiendo con el
          * código anterior sobre la base ya migrada. Sin error, sin fallo, solo un warning en un log
          * que nadie mira. Le pasó a masquito ese mismo día (upgrade 76) y se descubrió de casualidad.
+         *
+         * ⚠️ Ese "20 de 44" es una MEDICIÓN DEL 3/9 y quedó vieja; no describe el estado de hoy. La reconciliación
+         * del 17/9/2026 (`reconciliar-api-key`) dejó 43 de 43 clientes resolubles con `clients.api_key` igual a
+         * `ADMIN_API_INBOUND_KEY` del `.env` del frente ACTIVO, sin un solo conflicto. Y la del 11/10/2026 (misión
+         * `cerrar-admin-sync`, `reconciliar-api-key ver`) midió 53 clientes activos: 44 coinciden en el frente
+         * activo, 0 faltan en el admin, 6 faltan en el cliente (todos de shared, nacidos el 18/9, después de la
+         * reconciliación) y 3 no tienen ninguna `ClientApi` (no hay empresa-api al que escribirle). Por eso el
+         * header ya viaja casi siempre; la rama sin clave que está más abajo queda para esos casos y para los
+         * clientes que se den de alta de acá en adelante hasta que la instalación les siembre la clave. Si querés
+         * el estado real de un cliente, no te fíes de este comentario: `POST claude/clients/{id}/admin-sync/exigir-clave`
+         * con `ver` (o `catalogo/clave` con `dry_run`) lo lee de sus dos frentes sin escribir nada.
          *
          * Desde acá: el header viaja solo si hay clave, el PUT se intenta SIEMPRE, y la degradación
          * a manual queda para lo que de verdad falló (401/403, otro HTTP de error, o transporte),
