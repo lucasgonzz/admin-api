@@ -340,6 +340,18 @@ Route::middleware('claude.task.key')
            deja al motor usar el catálogo de un cliente sin tener nunca su clave. */
         Route::post('clients/{id}/catalogo/clave', 'Api\ClaudeClientCatalogoController@clave_json');
         Route::post('clients/{id}/catalogo/puente', 'Api\ClaudeClientCatalogoController@puente_json');
+        /* 🔴 Cerrar `admin-sync` en el empresa-api de UN cliente (misión `cerrar-admin-sync`, 10/10/2026). Los dos viven en
+           ClaudeClientAdminSyncController y no llevan nunca el valor de `clients.api_key` en una respuesta, un error ni un log.
+           `admin-sync/puente` es el hermano de `catalogo/puente` para las rutas que le pegaban DERECHO al cliente sin su clave:
+           reenvía UN pedido de una lista blanca de siete entradas (método + ruta, regex anclada: las seis de `mostrador/*` que usa
+           `/mostrador` y `PUT update-default-version`, que usan a mano `/implementar` e `/instalar-cliente`) CON la clave del
+           cliente, sin seguir redirecciones, y contesta siempre 200 `puente: true` con el HTTP del cliente adentro.
+           `admin-sync/exigir-clave` MIRA (`ver`, el default), PRENDE o APAGA `ADMIN_SYNC_REQUIRE_API_KEY` y
+           `ADMIN_SYNC_SETUP_REQUIRE_API_KEY` en el `.env` de cada frente del cliente por SSH: prender exige confirm_client_name,
+           que TODOS los frentes ya tengan la clave `igual`, respalda el `.env`, borra el config cacheado, PRUEBA contra el frente
+           activo (con la clave tiene que entrar, sin ella tiene que dar 401) y se DESHACE sola si la prueba con clave falla. */
+        Route::post('clients/{id}/admin-sync/puente', 'Api\ClaudeClientAdminSyncController@puente_de_admin_sync_json');
+        Route::post('clients/{id}/admin-sync/exigir-clave', 'Api\ClaudeClientAdminSyncController@exigir_clave_json');
         Route::get('versions', 'Api\ClaudeClientOpsController@versions_json');
         Route::post('versions', 'Api\ClaudeClientOpsController@versions_store_json');
         Route::post('versions/{id}/status', 'Api\ClaudeClientOpsController@versions_status_json');
