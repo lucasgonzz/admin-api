@@ -359,14 +359,16 @@ class DemoIngresoTokenService
      * (RunDemoSetupService, timeout x20 por las migraciones/seeders), esto es solo un update de
      * una fila, no hay motivo para esperar minutos.
      *
-     * Sobre el header X-Admin-Api-Key: se manda solo si hay una clave disponible para esta
-     * instancia. La demo no tiene una fila de `clients` con api_key cargada (a diferencia de
-     * PublishVersionService, que si la tiene via $client->api_key), asi que hoy el POST sale
-     * siempre sin header. Eso es intencional: no se inventa una clave nueva ni se agrega config,
-     * y la proteccion real es que la ruta ya vive dentro del grupo con middleware admin.api.key
-     * en empresa-api, hoy desactivado por services.admin_api.require_api_key = false (decision
-     * de Lucas, 27/7/2026). Falta de clave no es un error: nunca se debe frenar el
-     * reemitir/revocar por esto.
+     * Sobre el header X-Admin-Api-Key: se manda solo si la demo tiene una clave cargada. La demo
+     * no tiene una fila de `clients` (a diferencia de PublishVersionService, que usa
+     * $client->api_key), pero la tabla `demos` tiene su propia `api_key` (nullable, desde el
+     * 31/8/2026: es la que ya usa EcommerceInstallationService::owner_api_key() para el branding de
+     * una demo). Con `demos.api_key` cargada, el POST lleva el header con ese valor; sin ella sale
+     * exactamente como siempre, sin header: no se inventa una clave ni se agrega config, y la
+     * ruta `demo-token` vive dentro del grupo con middleware admin.api.key de empresa-api, que
+     * solo valida cuando esa instancia lo tiene prendido (misión `cerrar-admin-sync`,
+     * 10/10/2026; antes de eso el POST salía siempre sin header, decision de Lucas del
+     * 27/7/2026). Falta de clave no es un error: nunca se debe frenar el reemitir/revocar por esto.
      *
      * @param \App\Models\Demo $demo    Demo asignada al lead (dueña de la ERP API a avisar)
      * @param array<string, mixed> $payload Body a enviar (accion + datos segun el caso)
@@ -389,9 +391,15 @@ class DemoIngresoTokenService
             throw new \RuntimeException('La demo asignada no tiene ERP API URL configurada.');
         }
 
-        $response = Http::withHeaders([
-                'Accept' => 'application/json',
-            ])
+        $headers = ['Accept' => 'application/json'];
+
+        $clave_de_la_demo = trim((string) $demo->api_key);
+
+        if ($clave_de_la_demo !== '') {
+            $headers['X-Admin-Api-Key'] = $clave_de_la_demo;
+        }
+
+        $response = Http::withHeaders($headers)
             ->timeout((int) config('services.client_api.timeout', 15))
             ->retry((int) config('services.client_api.retries', 2), 500)
             ->post($erp_api_url . '/api/admin-sync/demo-token', $payload);

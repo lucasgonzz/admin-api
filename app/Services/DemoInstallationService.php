@@ -1168,8 +1168,18 @@ class DemoInstallationService
             . '. Es destructivo y puede tardar varios minutos.'
         );
 
+        /* La clave de la demo (`demos.api_key`) viaja en `X-Admin-Api-Key` SOLO si existe. La ruta no la exige
+         * (queda abierta a propósito: la protege la guarda de instancia), así que no cambia ningún comportamiento;
+         * es por consistencia con `demo-token` (misión `cerrar-admin-sync`, 10/10/2026). */
+        $headers          = ['Accept' => 'application/json'];
+        $clave_de_la_demo = trim((string) $this->demo->api_key);
+
+        if ($clave_de_la_demo !== '') {
+            $headers['X-Admin-Api-Key'] = $clave_de_la_demo;
+        }
+
         try {
-            $response = Http::withHeaders(['Accept' => 'application/json'])
+            $response = Http::withHeaders($headers)
                 ->timeout((int) config('services.client_api.demo_setup_timeout', 900))
                 ->post($url, $payload);
         } catch (ConnectionException $e) {

@@ -189,9 +189,20 @@ class RunDemoSetupService
         $payload = $this->build_payload($lead);
 
         try {
-            $response = Http::withHeaders([
-                    'Accept'          => 'application/json',
-                ])
+            $headers = ['Accept' => 'application/json'];
+
+            /* La clave de la demo (`demos.api_key`) viaja en `X-Admin-Api-Key` SOLO si existe. La ruta
+             * `demo-setup` no la exige (queda abierta a propósito, decisión de Lucas del 27/7/2026: la
+             * protege la guarda de instancia), así que el header no cambia ningún comportamiento; se
+             * manda por consistencia con `demo-token` y con el branding (misión `cerrar-admin-sync`,
+             * 10/10/2026). Sin clave, el pedido sale como siempre. */
+            $clave_de_la_demo = trim((string) $demo->api_key);
+
+            if ($clave_de_la_demo !== '') {
+                $headers['X-Admin-Api-Key'] = $clave_de_la_demo;
+            }
+
+            $response = Http::withHeaders($headers)
                 /* Techo propio y alto (900 s por default), no el genérico ×20 de los otros
                  * servicios. Una corrida sola del setup tardó 565,7 s medidos el 25/8/2026: con los
                  * 300 s de antes, el camino normal terminaba SIEMPRE en timeout mientras la
