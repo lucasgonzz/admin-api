@@ -133,7 +133,19 @@ class ImplementationUserSetupService
         try {
             $timeout = $this->resolver_timeout($timeout_segundos);
 
+            /* 🔴 La clave del cliente (`clients.api_key`) viaja en `X-Admin-Api-Key` SOLO si existe. El
+             * `admin.setup.key` del empresa-api la exige cuando la instancia tiene prendido
+             * `ADMIN_SYNC_SETUP_REQUIRE_API_KEY` (misión `cerrar-admin-sync`, 10/10/2026); hasta que se prenda
+             * el header de más no hace nada, y sin clave el pedido sale exactamente como siempre. */
+            $headers_de_clave   = [];
+            $clave_del_cliente = trim((string) $client->api_key);
+
+            if ($clave_del_cliente !== '') {
+                $headers_de_clave['X-Admin-Api-Key'] = $clave_del_cliente;
+            }
+
             $response = Http::timeout($timeout)
+                ->withHeaders($headers_de_clave)
                 ->acceptJson()
                 ->asJson()
                 ->post($endpoint, $payload);

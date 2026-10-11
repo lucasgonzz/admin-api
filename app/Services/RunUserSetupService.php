@@ -79,9 +79,19 @@ class RunUserSetupService
         }
 
         try {
-            $response = Http::withHeaders([
-                    'Accept' => 'application/json',
-                ])
+            $headers = ['Accept' => 'application/json'];
+
+            /* 🔴 La clave del cliente (`clients.api_key`) viaja en `X-Admin-Api-Key` SOLO si existe. El
+             * `admin.setup.key` del empresa-api la exige cuando la instancia tiene prendido
+             * `ADMIN_SYNC_SETUP_REQUIRE_API_KEY` (misión `cerrar-admin-sync`, 10/10/2026); hasta que se prenda
+             * el header de más no hace nada, y sin clave el pedido sale exactamente como siempre. */
+            $clave_del_cliente = trim((string) $client->api_key);
+
+            if ($clave_del_cliente !== '') {
+                $headers['X-Admin-Api-Key'] = $clave_del_cliente;
+            }
+
+            $response = Http::withHeaders($headers)
                 ->timeout((int) config('services.client_api.timeout', 15) * 20)
                 /* 🔴 SIN `->retry()`, por el mismo argumento que ya está escrito largo en
                  * `RunDemoSetupService::run()`, y no se repone. `UserSetupHelper::run()` del otro
