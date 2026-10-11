@@ -369,7 +369,11 @@ trait InstallationProvisioningSteps
      *   - `ADMIN_API_INBOUND_KEY` = `clients.api_key` (si el cliente no tiene, se GENERA con `Str::random(40)` y se GUARDA antes de
      *     escribir, con el mismo UPDATE condicional de `ClientInboundKeySyncService`: un corte a mitad no deja un `.env` con una
      *     clave que el admin no conoce);
-     *   - `ADMIN_SYNC_REQUIRE_API_KEY=true` y `ADMIN_SYNC_SETUP_REQUIRE_API_KEY=true`.
+     *   - `ADMIN_SYNC_REQUIRE_API_KEY=true` y `ADMIN_SYNC_SETUP_REQUIRE_API_KEY=true`;
+     *   - `ADMIN_API_OUTBOUND_KEY` = `clients.inbound_api_key` (11/10/2026): con la exigencia prendida, `AdminReportHelper` y
+     *     `SupportSyncHelper` de `empresa-api` NO mandan nada al admin (mensajes de soporte, acuses de lectura de novedades) si esa
+     *     variable está vacía. El admin hoy no valida esa clave de entrada, así que escribirla es inocua. Si el cliente no tiene
+     *     `inbound_api_key` se genera y se guarda igual que `api_key`.
      *
      * Funciona porque TODO lo que el admin le pega a ese cliente después manda el header cuando hay clave, incluido el user setup
      * de la propia implementación (`ImplementationUserSetupService` / `RunUserSetupService`, misma misión). Esta etapa en sí no le
@@ -393,44 +397,52 @@ trait InstallationProvisioningSteps
         $clave = trim((string) $client->api_key);
 
         if ($clave === '') {
-            $clave = $this->generar_y_guardar_la_clave_del_cliente($client);
+            $clave = $this->generar_y_guardar_la_clave_del_cliente($client, 'api_key');
+        }
+
+        $clave_de_salida = trim((string) $client->inbound_api_key);
+
+        if ($clave_de_salida === '') {
+            $clave_de_salida = $this->generar_y_guardar_la_clave_del_cliente($client, 'inbound_api_key');
         }
 
         $vars_to_write['ADMIN_API_INBOUND_KEY']             = $clave;
+        $vars_to_write['ADMIN_API_OUTBOUND_KEY']            = $clave_de_salida;
         $vars_to_write['ADMIN_SYNC_REQUIRE_API_KEY']        = 'true';
         $vars_to_write['ADMIN_SYNC_SETUP_REQUIRE_API_KEY']  = 'true';
 
-        $this->log('write_env', 'El .env nace cerrado a admin-sync: lleva la clave del cliente y las dos banderas de exigencia en true.');
+        $this->log('write_env', 'El .env nace cerrado a admin-sync: lleva la clave del cliente, la de salida y las dos banderas de exigencia en true.');
 
         return $vars_to_write;
     }
 
     /**
-     * Genera la clave del cliente (40 caracteres, igual que el alta) y la guarda SOLO si sigue vacía.
+     * Genera una clave del cliente (40 caracteres, igual que el alta) y la guarda SOLO si sigue vacía.
      *
      * El UPDATE condicional evita que dos instalaciones simultáneas (el par real + esqueleto) generen dos claves distintas: la que
      * pierde la carrera usa la que quedó guardada. Si la base falla NO se deja salir la excepción de Laravel (arma su mensaje con el
      * SQL y los bindings, y el del UPDATE es la clave nueva en claro): se lanza una `RuntimeException` de texto fijo.
      *
-     * @param  \App\Models\Client  $client  Cliente sin clave.
+     * @param  \App\Models\Client  $client   Cliente sin clave.
+     * @param  string              $columna  `api_key` o `inbound_api_key`.
      * @return string  La clave que quedó guardada.
      * @throws \RuntimeException Si la base no la guardó.
      */
-    private function generar_y_guardar_la_clave_del_cliente($client): string
+    private function generar_y_guardar_la_clave_del_cliente($client, string $columna): string
     {
         $nueva = \Illuminate\Support\Str::random(40);
 
         try {
             $filas = \App\Models\Client::query()
                 ->where('id', $client->id)
-                ->where(function ($sub) {
-                    $sub->whereNull('api_key')->orWhereRaw("TRIM(api_key) = ''");
+                ->where(function ($sub) use ($columna) {
+                    $sub->whereNull($columna)->orWhereRaw('TRIM(' . $columna . ") = ''");
                 })
-                ->update(['api_key' => $nueva]);
+                ->update([$columna => $nueva]);
 
             $guardada = $filas > 0
                 ? $nueva
-                : trim((string) \App\Models\Client::query()->where('id', $client->id)->value('api_key'));
+                : trim((string) \App\Models\Client::query()->where('id', $client->id)->value($columna));
         } catch (\Throwable $e) {
             throw new \RuntimeException(
                 'No se pudo guardar la clave nueva del cliente en el admin (falló la base de datos), así que no se escribió el .env. '
@@ -442,8 +454,8 @@ trait InstallationProvisioningSteps
             throw new \RuntimeException('La clave nueva del cliente no quedó guardada en el admin: no se escribe el .env sin ella.');
         }
 
-        $client->setAttribute('api_key', $guardada);
-        $client->syncOriginalAttribute('api_key');
+        $client->setAttribute($columna, $guardada);
+        $client->syncOriginalAttribute($columna);
 
         return $guardada;
     }
