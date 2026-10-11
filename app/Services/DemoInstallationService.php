@@ -861,6 +861,15 @@ class DemoInstallationService
             $vars_to_write['USER_ID'] = (string) (int) $user_id;
         }
 
+        // f) La clave de la demo (`demos.api_key`), SOLO si existe (misión `cerrar-admin-sync`, 10/10/2026). Es la que el admin
+        //    manda en `X-Admin-Api-Key` a esa instancia (`demo-token`, el branding). 🔴 Las dos banderas de exigencia NO se
+        //    escriben: las demos quedan abiertas a propósito (las protege la guarda de instancia y su token), y una demo sin
+        //    clave no escribe nada de esto.
+        $clave_de_la_demo = trim((string) $this->demo->api_key);
+        if ($clave_de_la_demo !== '') {
+            $vars_to_write['ADMIN_API_INBOUND_KEY'] = $clave_de_la_demo;
+        }
+
         return $vars_to_write;
     }
 

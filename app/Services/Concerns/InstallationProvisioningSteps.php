@@ -358,6 +358,97 @@ trait InstallationProvisioningSteps
     }
 
     /**
+     * Hace que el .env de un cliente nuevo NAZCA CERRADO a `admin-sync`: le escribe la clave que el admin le manda en
+     * `X-Admin-Api-Key` y las dos banderas que hacen que el `empresa-api` la exija (misión `cerrar-admin-sync`, 10/10/2026).
+     *
+     * 🔴 POR QUÉ. Hasta acá un cliente instalado nacía ABIERTO y sin clave: `step_write_env()` no sembraba `ADMIN_API_INBOUND_KEY`
+     * (solo `catalogo/clave` la escribía) y `AdminApiKey` no valida mientras la bandera esté apagada. La flota se cierra cliente por
+     * cliente (`POST claude/clients/{id}/admin-sync/exigir-clave`); si la instalación no cambia, el próximo cliente que se instale
+     * vuelve a nacer abierto y hay que cerrarlo a mano. Con esto el `.env` trae las tres variables desde el minuto cero:
+     *
+     *   - `ADMIN_API_INBOUND_KEY` = `clients.api_key` (si el cliente no tiene, se GENERA con `Str::random(40)` y se GUARDA antes de
+     *     escribir, con el mismo UPDATE condicional de `ClientInboundKeySyncService`: un corte a mitad no deja un `.env` con una
+     *     clave que el admin no conoce);
+     *   - `ADMIN_SYNC_REQUIRE_API_KEY=true` y `ADMIN_SYNC_SETUP_REQUIRE_API_KEY=true`.
+     *
+     * Funciona porque TODO lo que el admin le pega a ese cliente después manda el header cuando hay clave, incluido el user setup
+     * de la propia implementación (`ImplementationUserSetupService` / `RunUserSetupService`, misma misión). Esta etapa en sí no le
+     * pega a ninguna ruta `admin-sync`.
+     *
+     * Se aplica a la instalación real y al esqueleto del subdominio secundario: los dos frentes tienen que tener la clave para que
+     * una rotación no deje al cliente sin canal.
+     *
+     * @param  array<string, string>  $vars_to_write
+     * @return array<string, string>
+     * @throws \RuntimeException Si hay que generar la clave y la base no la guarda (texto fijo: nada de lo que dijo la base).
+     */
+    private function aplicar_cierre_de_admin_sync(array $vars_to_write): array
+    {
+        $client = $this->installation->client;
+
+        if ($client === null) {
+            return $vars_to_write;
+        }
+
+        $clave = trim((string) $client->api_key);
+
+        if ($clave === '') {
+            $clave = $this->generar_y_guardar_la_clave_del_cliente($client);
+        }
+
+        $vars_to_write['ADMIN_API_INBOUND_KEY']             = $clave;
+        $vars_to_write['ADMIN_SYNC_REQUIRE_API_KEY']        = 'true';
+        $vars_to_write['ADMIN_SYNC_SETUP_REQUIRE_API_KEY']  = 'true';
+
+        $this->log('write_env', 'El .env nace cerrado a admin-sync: lleva la clave del cliente y las dos banderas de exigencia en true.');
+
+        return $vars_to_write;
+    }
+
+    /**
+     * Genera la clave del cliente (40 caracteres, igual que el alta) y la guarda SOLO si sigue vacía.
+     *
+     * El UPDATE condicional evita que dos instalaciones simultáneas (el par real + esqueleto) generen dos claves distintas: la que
+     * pierde la carrera usa la que quedó guardada. Si la base falla NO se deja salir la excepción de Laravel (arma su mensaje con el
+     * SQL y los bindings, y el del UPDATE es la clave nueva en claro): se lanza una `RuntimeException` de texto fijo.
+     *
+     * @param  \App\Models\Client  $client  Cliente sin clave.
+     * @return string  La clave que quedó guardada.
+     * @throws \RuntimeException Si la base no la guardó.
+     */
+    private function generar_y_guardar_la_clave_del_cliente($client): string
+    {
+        $nueva = \Illuminate\Support\Str::random(40);
+
+        try {
+            $filas = \App\Models\Client::query()
+                ->where('id', $client->id)
+                ->where(function ($sub) {
+                    $sub->whereNull('api_key')->orWhereRaw("TRIM(api_key) = ''");
+                })
+                ->update(['api_key' => $nueva]);
+
+            $guardada = $filas > 0
+                ? $nueva
+                : trim((string) \App\Models\Client::query()->where('id', $client->id)->value('api_key'));
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(
+                'No se pudo guardar la clave nueva del cliente en el admin (falló la base de datos), así que no se escribió el .env. '
+                . 'Reintentá la instalación; si se repite, mirá el log del admin.'
+            );
+        }
+
+        if ($guardada === '') {
+            throw new \RuntimeException('La clave nueva del cliente no quedó guardada en el admin: no se escribe el .env sin ella.');
+        }
+
+        $client->setAttribute('api_key', $guardada);
+        $client->syncOriginalAttribute('api_key');
+
+        return $guardada;
+    }
+
+    /**
      * Las variables que un .env de VPS lleva y uno de hosting compartido NO: la bandera VPS y los
      * prefijos de Redis (§3.3).
      *

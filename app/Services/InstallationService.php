@@ -778,6 +778,10 @@ class InstallationService
             $vars_to_write['USER_ID'] = (string) $installation_client->user_id;
         }
 
+        // e-bis) El .env nace cerrado a admin-sync: la clave del cliente y las dos banderas de exigencia
+        //        (misión `cerrar-admin-sync`; el detalle y el porqué, en el trait InstallationProvisioningSteps).
+        $vars_to_write = $this->aplicar_cierre_de_admin_sync($vars_to_write);
+
         // f) Las variables propias de un .env de VPS: la bandera VPS=true —sin la cual empresa-api
         //    le agrega '/public' a la URL de todos los archivos y el scheduler vuelve a programar la
         //    cola— y los prefijos de Redis, porque el VPS tiene un solo Redis para todos (§3.3).
