@@ -96,7 +96,9 @@ class ExigirLaClaveDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
     }
 
     /**
-     * El contenido del `.env` de un frente, con la clave de inbound y el dueño del cliente.
+     * El contenido del `.env` de un frente, con la clave de inbound, el dueño del cliente y la clave de salida
+     * (`ADMIN_API_OUTBOUND_KEY`) YA cargada: los casos de esa variable —que `prender` la escribe si falta, que no la pisa, que la
+     * reversión la deja— están en `LaClaveDeSalidaAlPrenderAdminSyncTest`, con `.env` que no la traen.
      *
      * @param Client      $cliente  Cliente.
      * @param string|null $inbound  Valor de `ADMIN_API_INBOUND_KEY` (null = la clave del cliente; '' = sin la variable).
@@ -108,7 +110,7 @@ class ExigirLaClaveDeAdminSyncPorClaudeTest extends BaseDelCatalogoPorClaude
     {
         $linea_de_clave = $inbound === '' ? '' : 'ADMIN_API_INBOUND_KEY=' . ($inbound === null ? $cliente->api_key : $inbound) . "\n";
 
-        return "APP_ENV=production\nUSER_ID=" . $cliente->user_id . "\n" . $linea_de_clave . $extra;
+        return "APP_ENV=production\nUSER_ID=" . $cliente->user_id . "\nADMIN_API_OUTBOUND_KEY=salida-ya-cargada-en-el-env\n" . $linea_de_clave . $extra;
     }
 
     /**

@@ -41,6 +41,20 @@ use Illuminate\Support\Facades\Log;
  *   4. Ningún `.env` tiene un `USER_ID` que no sea el de este cliente (`dueno_distinto`, la misma regla que
  *      `ClientInboundKeySyncService`): es la carpeta de otro dueño.
  *
+ * 🔴 LA CLAVE DE SALIDA (`ADMIN_API_OUTBOUND_KEY`, agregada el 11/10/2026). Con la exigencia prendida, `AdminReportHelper` y
+ * `SupportSyncHelper` de `empresa-api` (los mensajes de soporte y los acuses de lectura de novedades, cliente → admin) hacen
+ * `(bool) config('services.admin_api.require_api_key')` y, si es true y `services.admin_api.inbound_key` (= esa variable) está
+ * vacía, devuelven false SIN mandar nada al admin. O sea que prender la exigencia corta esas salidas si el `.env` no la tiene. El
+ * admin hoy no valida esa clave de entrada (`ADMIN_INBOUND_REQUIRE_API_KEY` apagado), así que escribirla es inocua, y su valor
+ * correcto es `clients.inbound_api_key` (lo que busca el middleware `AdminInboundKey`). Por eso `prender` la asegura en CADA frente,
+ * en la misma tanda respaldo → escritura → borrado del cache que las banderas:
+ *   - si `clients.inbound_api_key` está vacía, se GENERA (`Str::random(40)`) y se GUARDA con un UPDATE condicional ANTES de escribir
+ *     en el primer servidor (y solo después de que pasaron las precondiciones: un `prender` abortado no genera nada);
+ *   - si el `.env` del frente ya la tiene con CUALQUIER valor no vacío, NO se toca (puede haber una integración con otra clave): se
+ *     informa como `salida: cargada` y no se pisa.
+ * 🔴 La vuelta atrás NO la restaura, y `apagar` tampoco la toca: es inocua y dejarla evita volver a cortar la salida. Cuando una
+ * reversión se hace después de haberla escrito, el `motivo` lo dice.
+ *
  * 🔴 LA PRUEBA (solo contra el frente ACTIVO, el único al que le habla el admin), después de escribir:
  *   (i)  `GET admin-sync/mensualidad-info` CON la clave: un 401 (la clave no entra), un 5xx, un 3xx o una falla de red →
  *        REVIERTE todo lo escrito (restaura los valores previos de las dos variables en cada frente y borra el config
@@ -82,6 +96,18 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
 
     /** Las acciones que escriben (piden confirmar el nombre del cliente). */
     const ACCIONES_QUE_ESCRIBEN = [self::ACCION_PRENDER, self::ACCION_APAGAR];
+
+    /** La variable del `.env` de empresa-api con la clave que ESE sistema le manda al admin (cliente → admin). */
+    const VARIABLE_SALIDA = 'ADMIN_API_OUTBOUND_KEY';
+
+    /** Salida: el `.env` tiene la variable con algún valor. */
+    const SALIDA_CARGADA = 'cargada';
+
+    /** Salida: el `.env` no tiene la variable, o la tiene vacía. */
+    const SALIDA_FALTA = 'falta';
+
+    /** Código de la excepción cuando la clave de salida generada no se pudo guardar en el admin. */
+    const CODIGO_SALIDA_NO_GUARDADA = 5202;
 
     /** Exigencia: la variable no está en el `.env` (o está vacía). */
     const EXIGENCIA_SIN_DEFINIR = 'sin_definir';
@@ -164,6 +190,13 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
     const RUTA_DE_PRUEBA_DE_RESPALDO = 'api/admin-sync/employees';
 
     /**
+     * Ids de los frentes en los que ESTA llamada escribió `ADMIN_API_OUTBOUND_KEY` (para decir en el `motivo` que una reversión no la saca).
+     *
+     * @var array<int, int>
+     */
+    protected $salida_escrita = [];
+
+    /**
      * Lo que leyó de cada frente y no sale en la respuesta: `client_api_id => ['frente' => ClientApi, 'previo' => [...]]`.
      *
      * @var array<int, array<string, mixed>>
@@ -191,7 +224,8 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
         $user_id       = trim((string) $client->user_id);
         $filas         = [];
 
-        $this->lecturas = [];
+        $this->lecturas       = [];
+        $this->salida_escrita = [];
 
         try {
             /* 1. Leer todos los frentes. Un frente que falla queda como `error` y NO frena la lectura de los demás. */
@@ -242,6 +276,7 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
             'path'            => null,
             'es_la_activa'    => (bool) $es_la_activa,
             'clave'           => self::ESTADO_ERROR,
+            'salida'          => self::ESTADO_ERROR,
             'exigencia'       => null,
             'exigencia_setup' => null,
             'accion'          => self::FRENTE_NINGUNA,
@@ -269,8 +304,9 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
             }
 
             if (! $this->env_ssh_service->env_exists_for($frente)) {
-                $fila['clave'] = self::ESTADO_SIN_ENV;
-                $fila['error'] = 'Esta carpeta del cliente no tiene .env en el servidor: no se escribe nada.';
+                $fila['clave']  = self::ESTADO_SIN_ENV;
+                $fila['salida'] = self::ESTADO_SIN_ENV;
+                $fila['error']  = 'Esta carpeta del cliente no tiene .env en el servidor: no se escribe nada.';
 
                 return $fila;
             }
@@ -296,8 +332,11 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
         $actual = isset($env[self::VARIABLE]) ? (string) $env[self::VARIABLE] : '';
 
         $fila['clave']           = $this->comparar($actual, $clave);
+        $fila['salida']          = isset($env[self::VARIABLE_SALIDA]) && trim((string) $env[self::VARIABLE_SALIDA]) !== ''
+            ? self::SALIDA_CARGADA
+            : self::SALIDA_FALTA;
         $fila['exigencia']       = $this->leer_la_exigencia($env, self::VARIABLE_EXIGENCIA);
-        $fila['exigencia_setup'] = $this->leer_la_exigencia($env, self::VARIABLE_EXIGENCIA_SETUP);
+        $fila['exigencia_setup'] = $this->leer_la_exigencia_de_setup($env, self::VARIABLE_EXIGENCIA_SETUP);
 
         /* Los valores PREVIOS crudos (o null si la variable no estaba), para poder restaurar exactamente lo que había. */
         $this->lecturas[(int) $frente->id] = [
@@ -312,7 +351,12 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
     }
 
     /**
-     * El valor de una variable booleana del `.env` como lo lee Laravel: `sin_definir`, `true`, `false` o `invalido`.
+     * El valor de `ADMIN_SYNC_REQUIRE_API_KEY`: `sin_definir`, `true`, `false` o `invalido`.
+     *
+     * 🔴 ESTRICTO: solo es `true` o `false` si el texto es exactamente eso (sin importar mayúsculas, con o sin paréntesis: `(true)`,
+     * que es lo que `env()` también convierte). Vacío o ausente es `sin_definir`. CUALQUIER otro texto (`off`, `no`, `1`, `0`,
+     * `banana`) es `invalido`: en versiones viejas de `empresa-api` `env()` lo deja crudo y `"off"` es un string truthy, así que
+     * decir `false` sería mentir sobre lo que la bandera hace en ese cliente.
      *
      * @param array<string, string> $env      El `.env` parseado.
      * @param string                $variable Nombre de la variable.
@@ -320,6 +364,37 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
      * @return string
      */
     protected function leer_la_exigencia(array $env, $variable)
+    {
+        if (! isset($env[$variable]) || trim((string) $env[$variable]) === '') {
+            return self::EXIGENCIA_SIN_DEFINIR;
+        }
+
+        $valor = strtolower(trim((string) $env[$variable]));
+
+        if ($valor === 'true' || $valor === '(true)') {
+            return self::EXIGENCIA_TRUE;
+        }
+
+        if ($valor === 'false' || $valor === '(false)') {
+            return self::EXIGENCIA_FALSE;
+        }
+
+        return self::EXIGENCIA_INVALIDA;
+    }
+
+    /**
+     * El valor de `ADMIN_SYNC_SETUP_REQUIRE_API_KEY`: `sin_definir`, `true`, `false` o `invalido`.
+     *
+     * Esa bandera se lee en `empresa-api` con `filter_var(..., FILTER_VALIDATE_BOOLEAN)`, que acepta `1`, `true`, `on` y `yes` como
+     * verdaderos: se informan igual. Lo que `filter_var` leería como falso sin ser un falso reconocible (`banana`) se informa como
+     * `invalido` para que se vea, aunque en runtime sea falso.
+     *
+     * @param array<string, string> $env      El `.env` parseado.
+     * @param string                $variable Nombre de la variable.
+     *
+     * @return string
+     */
+    protected function leer_la_exigencia_de_setup(array $env, $variable)
     {
         if (! isset($env[$variable]) || trim((string) $env[$variable]) === '') {
             return self::EXIGENCIA_SIN_DEFINIR;
@@ -385,26 +460,64 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
             return $this->resultado(self::ACCION_PRENDER, self::ESTADO_ABORTADO, false, $motivo, $filas, null);
         }
 
+        /* 1-bis. La clave de salida: si algún frente no la tiene y el cliente no tiene `inbound_api_key`, se genera y se GUARDA ahora, ANTES
+           de escribir en el primer servidor. Las precondiciones ya pasaron: un `prender` abortado no deja nada generado. */
+        $clave_de_salida = '';
+        $hay_que_escribir_salida = false;
+
+        foreach ($filas as $fila) {
+            if ($fila['salida'] === self::SALIDA_FALTA) {
+                $hay_que_escribir_salida = true;
+            }
+        }
+
+        if ($hay_que_escribir_salida) {
+            try {
+                $clave_de_salida = trim((string) $client->inbound_api_key);
+
+                if ($clave_de_salida === '') {
+                    $clave_de_salida = $this->generar_y_guardar_la_clave_de_salida($client);
+                }
+            } catch (\Throwable $e) {
+                return $this->resultado(
+                    self::ACCION_PRENDER,
+                    self::ESTADO_ABORTADO,
+                    false,
+                    'clave_de_salida: ' . $this->texto_seguro($e->getMessage(), $clave) . ' No se escribió nada en ningún servidor.',
+                    $filas,
+                    null
+                );
+            }
+        }
+
         /* 2. Escribir, frente por frente. Cualquier falla → se restaura lo ya escrito y se corta. */
         $escritos = [];
 
         foreach ($filas as $indice => $fila) {
-            /* Un frente que ya exige las dos no se vuelve a escribir (ni se respalda de nuevo): no hay nada que deshacer ahí. */
-            if ($fila['exigencia'] === self::EXIGENCIA_TRUE && $fila['exigencia_setup'] === self::EXIGENCIA_TRUE) {
+            /* Un frente que ya exige las dos y ya tiene la clave de salida no se vuelve a escribir (ni se respalda de nuevo): no hay
+               nada que deshacer ahí. */
+            if ($fila['exigencia'] === self::EXIGENCIA_TRUE && $fila['exigencia_setup'] === self::EXIGENCIA_TRUE
+                && $fila['salida'] === self::SALIDA_CARGADA) {
                 $filas[$indice]['accion'] = self::FRENTE_YA_ESTABA;
 
                 continue;
             }
 
             $tocado = false;
+            $extra  = $fila['salida'] === self::SALIDA_FALTA ? [self::VARIABLE_SALIDA => $clave_de_salida] : [];
 
             try {
-                $this->escribir_las_dos($fila['client_api_id'], 'true', $timestamp, $tocado);
+                $this->escribir_las_dos($fila['client_api_id'], 'true', $timestamp, $tocado, $extra);
 
                 $filas[$indice]['accion']          = self::FRENTE_ESCRITO;
                 $filas[$indice]['exigencia']       = self::EXIGENCIA_TRUE;
                 $filas[$indice]['exigencia_setup'] = self::EXIGENCIA_TRUE;
+                $filas[$indice]['salida']          = self::SALIDA_CARGADA;
                 $escritos[]                        = $indice;
+
+                if (count($extra) > 0) {
+                    $this->salida_escrita[] = (int) $fila['client_api_id'];
+                }
             } catch (\Throwable $e) {
                 $filas[$indice]['accion'] = self::FRENTE_FALLO;
                 $filas[$indice]['error']  = $this->texto_seguro($e->getMessage(), $clave);
@@ -487,12 +600,13 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
      * @param string $timestamp     Marca del respaldo.
      * @param bool   $tocado        Por referencia: pasa a true apenas el respaldo quedó hecho, o sea cuando el `.env` YA puede cambiar.
      *                              Si el respaldo falla queda en false: no se tocó nada.
+     * @param array<string, string> $extra Variables de más que van en LA MISMA escritura (la clave de salida, en `prender`).
      *
      * @return void
      *
      * @throws \Throwable Si el servidor falla: el llamador decide si restaurar.
      */
-    protected function escribir_las_dos($client_api_id, $valor, $timestamp, &$tocado)
+    protected function escribir_las_dos($client_api_id, $valor, $timestamp, &$tocado, array $extra = [])
     {
         $frente = $this->lecturas[$client_api_id]['frente'];
 
@@ -500,11 +614,76 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
 
         $tocado = true;
 
-        $this->env_ssh_service->write_env_vars_for($frente, [
+        $this->env_ssh_service->write_env_vars_for($frente, array_merge([
             self::VARIABLE_EXIGENCIA       => $valor,
             self::VARIABLE_EXIGENCIA_SETUP => $valor,
-        ]);
+        ], $extra));
         $this->env_ssh_service->limpiar_cache_de_config_for($frente);
+    }
+
+    /**
+     * Genera `clients.inbound_api_key` (40 caracteres, igual que `api_key`) y la guarda SOLO si sigue vacía.
+     *
+     * Mismo patrón que `ClientInboundKeySyncService::generar_y_guardar()`: el UPDATE condicional evita que dos llamadas simultáneas
+     * generen dos claves distintas (la que pierde usa la guardada), y si la base falla NO se deja salir la excepción de Laravel (arma
+     * su mensaje con el SQL y los bindings, y el del UPDATE es la clave nueva en claro): se lanza una `RuntimeException` de texto fijo.
+     *
+     * @param Client $client Cliente sin `inbound_api_key`.
+     *
+     * @return string La clave que quedó guardada.
+     *
+     * @throws \RuntimeException Con `CODIGO_SALIDA_NO_GUARDADA` si la base falló.
+     */
+    protected function generar_y_guardar_la_clave_de_salida(Client $client)
+    {
+        $nueva = \Illuminate\Support\Str::random(40);
+
+        try {
+            $filas = $this->guardar_la_clave_de_salida_si_sigue_vacia($client, $nueva);
+
+            $guardada = $filas > 0
+                ? $nueva
+                : trim((string) Client::query()->where('id', $client->id)->value('inbound_api_key'));
+        } catch (\Throwable $e) {
+            Log::error('ClientAdminSyncClaveService: no se pudo guardar la clave de salida generada del cliente.', [
+                'client_id' => (int) $client->id,
+                'excepcion' => get_class($e),
+                'sqlstate'  => (string) $e->getCode(),
+            ]);
+
+            throw new \RuntimeException(
+                'No se pudo guardar la clave de salida nueva del cliente en el admin (falló la base de datos).',
+                self::CODIGO_SALIDA_NO_GUARDADA
+            );
+        }
+
+        if ($guardada === '') {
+            throw new \RuntimeException('La clave de salida nueva del cliente no quedó guardada en el admin.', self::CODIGO_SALIDA_NO_GUARDADA);
+        }
+
+        $client->setAttribute('inbound_api_key', $guardada);
+        $client->syncOriginalAttribute('inbound_api_key');
+
+        return $guardada;
+    }
+
+    /**
+     * El UPDATE condicional que guarda la clave de salida nueva solo si el cliente sigue sin ninguna. Aparte para poder hacerlo fallar
+     * en un test.
+     *
+     * @param Client $client Cliente.
+     * @param string $nueva  La clave generada.
+     *
+     * @return int Filas actualizadas.
+     */
+    protected function guardar_la_clave_de_salida_si_sigue_vacia(Client $client, $nueva)
+    {
+        return Client::query()
+            ->where('id', $client->id)
+            ->where(function ($sub) {
+                $sub->whereNull('inbound_api_key')->orWhereRaw("TRIM(inbound_api_key) = ''");
+            })
+            ->update(['inbound_api_key' => $nueva]);
     }
 
     /* ==============================================================================================
@@ -711,7 +890,7 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
 
                 $filas[$indice]['accion']          = self::FRENTE_REVERTIDO;
                 $filas[$indice]['exigencia']       = $this->leer_la_exigencia($valores, self::VARIABLE_EXIGENCIA);
-                $filas[$indice]['exigencia_setup'] = $this->leer_la_exigencia($valores, self::VARIABLE_EXIGENCIA_SETUP);
+                $filas[$indice]['exigencia_setup'] = $this->leer_la_exigencia_de_setup($valores, self::VARIABLE_EXIGENCIA_SETUP);
             } catch (\Throwable $e) {
                 $con_fallas                  = true;
                 $filas[$indice]['accion']    = self::FRENTE_REVERSION_FALLO;
@@ -723,6 +902,13 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
         }
 
         $estado = $con_fallas ? self::ESTADO_REVERTIDO_CON_FALLAS : self::ESTADO_REVERTIDO;
+
+        /* 🔴 La reversión restaura SOLO las dos banderas: `ADMIN_API_OUTBOUND_KEY` se deja donde se escribió (es inocua, y sacarla
+           volvería a cortar la salida cliente → admin el día que se prenda la exigencia). */
+        if (count($this->salida_escrita) > 0) {
+            $motivo .= ' La clave de salida (ADMIN_API_OUTBOUND_KEY) escrita en el frente ' . implode(', ', $this->salida_escrita)
+                . ' NO se revierte: es inocua y dejarla evita volver a cortar la salida.';
+        }
 
         if ($con_fallas) {
             $motivo .= ' ATENCIÓN: la restauración de al menos un frente falló; revisalo a mano.';
@@ -776,6 +962,7 @@ class ClientAdminSyncClaveService extends ClientInboundKeySyncService
                 'client_api_id' => $fila['client_api_id'],
                 'es_la_activa'  => $fila['es_la_activa'],
                 'clave'         => $fila['clave'],
+                'salida'        => $fila['salida'],
                 'accion'        => $fila['accion'],
             ];
         }
