@@ -592,6 +592,13 @@ Route::middleware('claude.task.key')
            lista blanca, datos validados por hito, dry_run por defecto y confirm_client_name— y la respuesta. */
         Route::post('implementations/{id}/mail', 'Api\ClaudeImplementationOpsController@mail_json')
             ->whereNumber('id');
+
+        /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026). La carga del catálogo la
+           manda `publicar_centro.py` después de subir los videos a R2: upsert por `codigo` y, con desactivar_faltantes,
+           los que no vinieron quedan inactivos (nunca se borran: tienen avance). Borra la caché del catálogo público.
+           Solo filas del admin: no toca el sistema de ningún cliente. `resumen` son los totales, sin entrar al panel. */
+        Route::post('recursos/catalogo', [\App\Http\Controllers\Api\RecursosClaudeController::class, 'catalogo_json']);
+        Route::get('recursos/resumen', [\App\Http\Controllers\Api\RecursosClaudeController::class, 'resumen_json']);
     });
 
 /*
