@@ -47,6 +47,12 @@ class PaginaDelLeadDeLaWebTest extends TestCase
         . "    pagina como mensaje aparte (separado con ---), presentandola como algo para que vaya viendo lo que hacemos.\n"
         . "    Sin ofrecer la demo todavia, salvo que el lead la pida.\n";
 
+    /** El encabezado de siempre de la página, sin el link (que va pegado atrás). */
+    const ENCABEZADO_DE_SIEMPRE = '  Su pagina (copiar textual; se puede pasar en cualquier momento): ';
+
+    /** El encabezado de la página para un lead de la web, sin el link. */
+    const ENCABEZADO_DE_LA_WEB = '  Su pagina (copiar textual; es el acceso a su demo: va en el mensaje del si a la demo o si el la pide, no como presentacion): ';
+
     /**
      * @return void
      */
@@ -100,6 +106,11 @@ class PaginaDelLeadDeLaWebTest extends TestCase
         $this->assertStringContainsString('NO le pases el link de su pagina como', $contexto);
         $this->assertStringContainsString('va recien cuando acepta la demo', $contexto);
         $this->assertStringContainsString('el acceso a su demo', $contexto);
+        $this->assertStringContainsString('esto pisa lo que digan los recursos', $contexto);
+
+        /* El encabezado de la página tampoco dice "en cualquier momento": es el acceso a su demo. */
+        $this->assertStringContainsString(self::ENCABEZADO_DE_LA_WEB . $lead->demo_experiencia_url . "\n", $contexto);
+        $this->assertStringNotContainsString('se puede pasar en cualquier momento', $contexto);
 
         /* La página sigue en el bloque, y la aceptación sigue mandando los dos links. */
         $this->assertStringContainsString((string) $lead->demo_experiencia_url, $contexto);
@@ -123,8 +134,50 @@ class PaginaDelLeadDeLaWebTest extends TestCase
         $contexto = $this->contexto_de_demo_directa($lead);
 
         $this->assertStringContainsString(self::REGLA_DE_SIEMPRE, $contexto);
+        $this->assertStringContainsString(self::ENCABEZADO_DE_SIEMPRE . $lead->demo_experiencia_url . "\n", $contexto);
         $this->assertStringNotContainsString('VINO DE LA WEB', $contexto);
+        $this->assertStringNotContainsString('es el acceso a su demo', $contexto);
         $this->assertSame(self::REGLA_DE_SIEMPRE, LeadOrigenService::regla_de_la_pagina_al_primer_contacto($lead));
+        $this->assertSame(
+            self::ENCABEZADO_DE_SIEMPRE . 'https://x.test/p' . "\n",
+            LeadOrigenService::encabezado_de_la_pagina($lead, 'https://x.test/p')
+        );
+    }
+
+    /**
+     * (2-bis) El camino real: el lead nace sin origen, su PRIMER mensaje es la frase del botón de la
+     * web y el origen lo escribe el observer con un UPDATE (no viene en el alta). El bloque que arma
+     * el agente con el lead leído de la base, como lo lee el job de la sugerencia, ya es el de la web.
+     *
+     * @return void
+     */
+    public function test_el_primer_mensaje_con_la_frase_de_la_web_cambia_el_bloque(): void
+    {
+        /* Las frases del «sí» por defecto (que incluyen la de la web): la base de testing puede traer
+           una lista guardada de una verificación anterior. */
+        AdminSetting::whereIn('key', [
+            LeadDemoSettings::KEY_CTA_WHATSAPP_TEXTO,
+            LeadDemoSettings::KEY_CTA_WHATSAPP_TEXTOS,
+        ])->delete();
+
+        $lead = $this->crear_lead_con_origen(null);
+        $this->assertNull($lead->origen);
+
+        $this->crear_mensaje_del_lead($lead, LeadOrigenService::FRASE_LANDING);
+
+        /* El modelo en memoria no se entera del UPDATE del observer: el job lee el lead de la base. */
+        $this->assertNull($lead->origen);
+        $de_la_base = Lead::query()->findOrFail($lead->id);
+        $this->assertSame(LeadOrigenService::ORIGEN_LANDING, $de_la_base->origen);
+
+        $contexto = $this->contexto_de_demo_directa($de_la_base);
+
+        $this->assertStringNotContainsString(self::REGLA_DE_SIEMPRE, $contexto);
+        $this->assertStringNotContainsString('En tu PRIMERA respuesta al lead', $contexto);
+        $this->assertStringContainsString('VINO DE LA WEB', $contexto);
+        $this->assertStringContainsString(self::ENCABEZADO_DE_LA_WEB . $de_la_base->demo_experiencia_url . "\n", $contexto);
+        /* Y como es el último mensaje del lead y es la frase exacta, el bloque lo marca como un sí. */
+        $this->assertStringContainsString('es un SI a la demo', $contexto);
     }
 
     /**

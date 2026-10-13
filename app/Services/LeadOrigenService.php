@@ -248,8 +248,9 @@ class LeadOrigenService
      * Para cualquier origen que no sea `landing` (NULL incluido: el lead anterior a la medición, o
      * uno cuyo primer mensaje todavía no se procesó) devuelve el texto de siempre, byte a byte.
      *
-     * El renglón dice explícito que pisa lo que diga el recurso de calificación: el `.md` de la
-     * dinámica nueva manda pasar la página en el primer mensaje a todos, y lo edita otra misión.
+     * El renglón dice explícito que pisa lo que digan los recursos: los `.md` de la dinámica nueva
+     * (calificación, agenda de la demo) mandan pasar la página en el primer mensaje a todos, y los
+     * edita otra misión.
      *
      * @param Lead $lead
      *
@@ -265,9 +266,32 @@ class LeadOrigenService
 
         return "  - Este lead VINO DE LA WEB de ComercioCity: ya vio lo que hacemos. NO le pases el link de su pagina como\n"
             . "    presentacion ni \"para que vayas viendo lo que hacemos\": ni en la primera respuesta ni despues, salvo que\n"
-            . "    el lo pida (esto pisa lo que diga el recurso de calificacion). Segui con lo que pidio, que normalmente es\n"
+            . "    el lo pida (esto pisa lo que digan los recursos). Segui con lo que pidio, que normalmente es\n"
             . "    la demo. El link de su pagina va recien cuando acepta la demo, presentado como el acceso a su demo\n"
             . "    (\"aca tenes el acceso a tu demo\": ahi estan el formulario, el video y el boton para entrar).\n";
+    }
+
+    /**
+     * El renglón «Su pagina» del bloque DEMO DIRECTA, con el link (corrección del chequeo de la
+     * segunda tanda, 13/10/2026).
+     *
+     * Para un lead de la web, el «se puede pasar en cualquier momento» de siempre contradice la
+     * regla de {@see regla_de_la_pagina_al_primer_contacto()}: para él la página es el acceso a su
+     * demo, y va en el mensaje del sí o si él la pide, nunca como presentación. Para cualquier otro
+     * origen (NULL incluido) devuelve el renglón de siempre, byte a byte.
+     *
+     * @param Lead   $lead
+     * @param string $url_pagina El link de su página, ya resuelto.
+     *
+     * @return string El renglón con su salto de línea.
+     */
+    public static function encabezado_de_la_pagina(Lead $lead, string $url_pagina): string
+    {
+        if ((string) $lead->origen !== self::ORIGEN_LANDING) {
+            return "  Su pagina (copiar textual; se puede pasar en cualquier momento): {$url_pagina}\n";
+        }
+
+        return "  Su pagina (copiar textual; es el acceso a su demo: va en el mensaje del si a la demo o si el la pide, no como presentacion): {$url_pagina}\n";
     }
 
     /**
