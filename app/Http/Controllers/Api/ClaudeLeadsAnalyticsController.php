@@ -11,6 +11,7 @@ use App\Models\LeadPipelineStatus;
 use App\Services\ClaudeLeadMetricsService;
 use App\Services\ClaudeLeadQueryService;
 use App\Services\LeadAiService;
+use App\Services\LeadOrigenService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -455,6 +456,17 @@ class ClaudeLeadsAnalyticsController extends Controller
             }
         }
 
+        /* Origen del lead: mismo criterio que el estado, un valor inválido devuelve la lista de
+           válidos en vez de un resultado vacío que parece un dato. */
+        $origen = ClaudeLeadQueryService::normalize_list($request->input('origen'));
+        foreach ($origen as $valor) {
+            if (! in_array($valor, LeadOrigenService::ORIGENES, true)) {
+                return $this->error_422('El origen "' . $valor . '" no existe.', [
+                    'origenes_validos' => LeadOrigenService::ORIGENES,
+                ]);
+            }
+        }
+
         $order_by  = $this->texto_con_default($request, 'order_by', 'id');
         $direction = $this->texto_con_default($request, 'order', 'asc');
         $limit     = ClaudeLeadQueryService::resolve_limit($request->input('limit'));
@@ -473,6 +485,7 @@ class ClaudeLeadsAnalyticsController extends Controller
 
         $filtros = [
             'status'               => $status,
+            'origen'               => $origen,
             'lead_ids'             => ClaudeLeadQueryService::normalize_int_list($request->input('lead_ids')),
             'created_from'         => ClaudeLeadQueryService::normalize_date_boundary($request->input('created_from'), false),
             'created_to'           => ClaudeLeadQueryService::normalize_date_boundary($request->input('created_to'), true),

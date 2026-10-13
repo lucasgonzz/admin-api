@@ -3,6 +3,7 @@
 namespace App\ModelProperties;
 
 use App\Models\LeadPipelineStatus;
+use App\Services\LeadOrigenService;
 
 /**
  * Propiedades declarativas del recurso Lead para admin-spa.
@@ -144,6 +145,30 @@ class LeadProperties
                 'exclude_on_update' => true,
                 'use_to_filter_in_search' => true,
                 'width' => 170,
+            ],
+            [
+                /*
+                 * De dónde vino el lead (misión origen-del-lead-y-conversiones-meta, 13/10/2026):
+                 * lo calcula el sistema sobre el primer mensaje, nadie lo edita a mano. Va con el
+                 * tipo `pipeline_status` a propósito: el SPA ya lo pinta como etiqueta con color y
+                 * lo filtra como select, así que entra sin tocar admin-spa. Un lead sin origen
+                 * calculado (anterior al deploy) se ve vacío.
+                 */
+                'key' => 'origen',
+                'text' => 'Origen',
+                'type' => 'pipeline_status',
+                'value' => null,
+                'show' => true,
+                'only_show' => true,
+                'exclude_on_update' => true,
+                'use_to_filter_in_search' => true,
+                'width' => 140,
+                'options' => [
+                    ['value' => LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP, 'text' => 'Anuncio de WhatsApp', 'color' => '#d1f2e0'],
+                    ['value' => LeadOrigenService::ORIGEN_LANDING, 'text' => 'Web', 'color' => '#d6e8fb'],
+                    ['value' => LeadOrigenService::ORIGEN_INSTAGRAM, 'text' => 'Instagram', 'color' => '#f8dcec'],
+                    ['value' => LeadOrigenService::ORIGEN_DESCONOCIDO, 'text' => 'Sin dato', 'color' => '#e9ecef'],
+                ],
             ],
             [
                 'key' => 'email',

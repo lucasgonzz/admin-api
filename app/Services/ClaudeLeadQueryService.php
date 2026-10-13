@@ -77,6 +77,10 @@ class ClaudeLeadQueryService
         'contact_name',
         'company_name',
         'status',
+        /* De dónde vino el lead (anuncio_whatsapp | landing | instagram | desconocido, o NULL si
+           todavía no se calculó). No es PII: es un canal, no un dato de la persona. El ctwa_clid
+           NO viaja acá. */
+        'origen',
         'created_at',
         'first_message_at',
         'last_message_at',
@@ -384,6 +388,19 @@ class ClaudeLeadQueryService
         $lead_ids = isset($filtros['lead_ids']) ? $filtros['lead_ids'] : [];
         if (! empty($lead_ids)) {
             $query->whereIn('leads.id', $lead_ids);
+        }
+
+        /* Origen del lead. `desconocido` incluye los NULL: un lead anterior al cálculo del origen
+           (mientras no corra `leads:calcular-origen`) tampoco tiene dato, y dejarlo afuera haría
+           que la suma de los cuatro orígenes no diera el total. */
+        $origen = isset($filtros['origen']) ? $filtros['origen'] : [];
+        if (! empty($origen)) {
+            $query->where(function ($sub) use ($origen) {
+                $sub->whereIn('leads.origen', $origen);
+                if (in_array('desconocido', $origen, true)) {
+                    $sub->orWhereNull('leads.origen');
+                }
+            });
         }
 
         /* Rangos temporales sobre timestamps: los bordes ya vienen expandidos al día
@@ -740,6 +757,7 @@ class ClaudeLeadQueryService
         return [
             'status'               => 'array o lista separada por comas de slugs del pipeline. Ver pipeline_statuses.',
             'lead_ids'             => 'array o lista separada por comas de ids de lead.',
+            'origen'               => 'array o lista separada por comas: anuncio_whatsapp | landing | instagram | desconocido. Se calcula sobre el primer mensaje del lead. desconocido incluye los leads sin origen calculado (NULL). Un valor inválido es 422 con origenes_validos.',
             'created_from'         => 'fecha o fecha-hora. Una fecha sola arranca a las 00:00:00 de ese día.',
             'created_to'           => 'fecha o fecha-hora. Una fecha sola incluye hasta las 23:59:59 de ese día.',
             'first_message_from'   => 'ídem sobre leads.first_message_at.',

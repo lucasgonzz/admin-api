@@ -843,9 +843,17 @@ return [
                 'pendiente_revision_at', 'no_recibe_mensajes_at',
                 'no_recibe_mensajes_motivo',
 
+                /* De dónde vino el lead, calculado sobre su primer mensaje (misión
+                   origen-del-lead-y-conversiones-meta, 13/10/2026). NULL = todavía no se calculó. */
+                'origen', 'origen_calculado_at',
+
                 'created_at', 'updated_at',
             ],
             'columnas_opt_in' => [
+                /* El click id del anuncio Click-to-WhatsApp, copiado del referral. Opt-in con el mismo
+                   nombre de grupo que en whatsapp_ad_referral: sirve para depurar la atribución y
+                   las conversiones a Meta, y para nada más. */
+                'atribucion'       => ['ctwa_clid'],
                 /* 🔴 `uuid` NO ES UN IDENTIFICADOR INTERNO ACÁ: ES UNA CREDENCIAL AL PORTADOR, y por
                    eso es la única entrada de todo este archivo donde el uuid no va en la proyección
                    base. `routes/web.php` lo dice con todas las letras arriba de la ruta
@@ -945,6 +953,10 @@ return [
                 'ids'                            => ['columna' => 'id',                             'tipo' => 'lista_de_enteros'],
                 'creado_desde'                   => ['columna' => 'created_at',                     'tipo' => 'fecha_desde'],
                 'creado_hasta'                   => ['columna' => 'created_at',                     'tipo' => 'fecha_hasta'],
+                /* Verificado en LeadOrigenService::ORIGENES. ⚠️ Acá `desconocido` NO trae los NULL
+                   (leads sin origen calculado): este endpoint compara la columna tal cual. Para
+                   contarlos juntos está GET claude/leads?origen=desconocido. */
+                'origen'                         => ['columna' => 'origen',                         'tipo' => 'en', 'valores' => ['anuncio_whatsapp', 'landing', 'instagram', 'desconocido']],
             ],
             'relaciones'      => [
                 'demo' => [
@@ -1402,6 +1414,46 @@ return [
             ],
             'relaciones'      => [],
             'nota' => '🔴 NO tiene lead_id, y es a propósito: el referral llega ANTES de que el lead exista y el vínculo es por teléfono normalizado. Para cruzarlo con un lead hay que pedir include=contacto y matchear el teléfono a mano. Y ojo: sólo el webhook CRUDO de Meta trae este bloque; el payload procesado de Kapso no lo incluye, así que una fila que falta puede ser eso y no que el lead no vino de un aviso.',
+        ],
+
+        /* ---------------------------------------------------------------
+         | lead_evento_meta — las conversiones de los leads de anuncio que se le
+         | mandan a Meta (CAPI for Business Messaging): LeadSubmitted,
+         | QualifiedLead y Purchase, una fila por (lead, evento).
+         |
+         | Entra entera, y se revisó columna por columna: ninguna es un dato de
+         | una persona. `ctwa_clid` NO está en esta tabla (vive en leads, opt-in
+         | `atribucion`). `ultimo_error` es el motivo que se escribe sin el token
+         | (MetaConversionesService::sin_token) y `respuesta` es lo que contestó
+         | Meta recortado a events_received, messages, fbtrace_id y el código
+         | del error: Meta no devuelve datos personales.
+         --------------------------------------------------------------- */
+        'lead_evento_meta' => [
+            'tabla'           => 'lead_eventos_meta',
+            'descripcion'     => 'Conversiones de los leads de anuncio Click-to-WhatsApp que se le mandan a Meta por la CAPI: qué evento, en qué estado quedó el envío, cuántos intentos y el motivo del último fallo.',
+            'columnas'        => [
+                'id', 'lead_id', 'evento', 'estado', 'event_id', 'event_time',
+                'intentos', 'enviado_at', 'ultimo_error', 'respuesta',
+                'created_at', 'updated_at',
+            ],
+            'clave_de_cursor' => 'id',
+            'orden_default'   => 'desc',
+            'limite_default'  => 200,
+            'limite_max'      => 500,
+            'busqueda'        => ['ultimo_error'],
+            'filtros'         => [
+                'lead_id'      => ['columna' => 'lead_id',    'tipo' => 'entero'],
+                /* Verificado en LeadEventoMeta::EVENTOS y ::ESTADOS. */
+                'evento'       => ['columna' => 'evento',     'tipo' => 'en', 'valores' => ['LeadSubmitted', 'QualifiedLead', 'Purchase']],
+                'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['pendiente', 'enviando', 'enviado', 'error', 'sin_configurar']],
+                'evento_desde' => ['columna' => 'event_time', 'tipo' => 'fecha_desde'],
+                'evento_hasta' => ['columna' => 'event_time', 'tipo' => 'fecha_hasta'],
+                'ids'          => ['columna' => 'id',         'tipo' => 'lista_de_enteros'],
+                'creado_desde' => ['columna' => 'created_at', 'tipo' => 'fecha_desde'],
+                'creado_hasta' => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
+            ],
+            'relaciones'      => [],
+            'nota' => '🔴 sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID en el .env: no salió ninguna llamada. error con intentos < 3 lo reintenta leads:meta-capi-conciliar (cada diez minutos), siempre que el evento tenga menos de siete días (Meta no acepta más viejos). Para ver de dónde vino el lead: model=lead con include=atribucion.',
         ],
 
         /* ---------------------------------------------------------------
