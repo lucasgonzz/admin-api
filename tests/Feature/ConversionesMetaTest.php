@@ -337,6 +337,20 @@ class ConversionesMetaTest extends TestCase
     }
 
     /**
+     * `mail2_enviado` (en desuso, post-demo) cuenta para los dos eventos, igual que en las métricas.
+     *
+     * @return void
+     */
+    public function test_mail2_enviado_cuenta_para_los_dos_eventos(): void
+    {
+        $lead         = $this->crear_lead('nuevo');
+        $lead->status = 'mail2_enviado';
+        $lead->save();
+
+        $this->assertSame(['LeadSubmitted', 'QualifiedLead'], $this->eventos_de($lead));
+    }
+
+    /**
      * La promoción a cliente manda Purchase con la moneda y el valor del contrato.
      *
      * @return void

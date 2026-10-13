@@ -18,6 +18,10 @@ use Illuminate\Support\Facades\Schema;
  * contado por Meta. `event_id` también es único y viaja a Meta, que deduplica por él del otro lado.
  *
  * El nombre del índice único va explícito por el límite de 64 caracteres de MySQL.
+ *
+ * Sin foreign keys, como el resto de las tablas nuevas del admin (criterio escrito en la migración
+ * de `implementation_mails`): `lead_id` apunta a `leads.id` por convención. Una fila de un lead
+ * borrado queda huérfana y no rompe nada: el envío la marca `error` porque el lead ya no existe.
  */
 class CreateLeadEventosMetaTable extends Migration
 {
@@ -28,11 +32,16 @@ class CreateLeadEventosMetaTable extends Migration
      */
     public function up()
     {
+        if (Schema::hasTable('lead_eventos_meta')) {
+            return;
+        }
+
         Schema::create('lead_eventos_meta', function (Blueprint $table) {
             $table->id();
 
-            // De qué lead es el evento. Cascade: si el lead se borra, sus envíos no le sirven a nadie.
-            $table->unsignedBigInteger('lead_id')->index();
+            // De qué lead es el evento. Sin foreign key y sin índice propio: el único
+            // (lead_id, evento) de abajo ya lo cubre, porque lead_id es su primera columna.
+            $table->unsignedBigInteger('lead_id');
 
             // LeadSubmitted | QualifiedLead | Purchase (nombres de evento de Meta, tal cual viajan).
             $table->string('evento', 40);
@@ -86,8 +95,6 @@ class CreateLeadEventosMetaTable extends Migration
 
             // 🔴 La deduplicación. Nombre explícito por el límite de 64 caracteres de MySQL.
             $table->unique(['lead_id', 'evento'], 'lem_lead_evento_unique');
-
-            $table->foreign('lead_id')->references('id')->on('leads')->onDelete('cascade');
         });
     }
 

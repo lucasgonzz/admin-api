@@ -87,12 +87,16 @@ class MetaConversionesService
         'demo_pendiente_de_terminar',
         'demo_realizada',
         'closer_activo',
+        'mail2_enviado',
         'cerrado_ganado',
     ];
 
     /**
      * Estados desde los que el lead cuenta como `QualifiedLead`: la demo agendada y todo lo que viene
      * después. Meta no tiene un evento de «demo agendada» (informe del 5/10/2026, §10.7).
+     *
+     * `mail2_enviado` está en desuso pero es post-demo: entra a los dos conjuntos, igual que en
+     * `ClaudeLeadMetricsService`.
      */
     const ESTADOS_QUALIFIED_LEAD = [
         'demo_agendada',
@@ -101,6 +105,7 @@ class MetaConversionesService
         'demo_pendiente_de_terminar',
         'demo_realizada',
         'closer_activo',
+        'mail2_enviado',
         'cerrado_ganado',
     ];
 
@@ -267,11 +272,22 @@ class MetaConversionesService
                     'ultimo_error' => $motivo,
                 ]);
             } catch (QueryException $exception) {
-                /* El único (lead_id, evento): otro proceso lo registró entre la lectura y el alta.
-                   Es exactamente lo que el único está para frenar; no hay nada que hacer. */
-                Log::channel('daily')->info('Conversiones Meta: el evento ya estaba registrado.', [
+                if (self::es_error_de_duplicado($exception)) {
+                    /* El único (lead_id, evento): otro proceso lo registró entre la lectura y el
+                       alta. Es exactamente lo que el único está para frenar; no hay nada que hacer. */
+                    Log::channel('daily')->info('Conversiones Meta: el evento ya estaba registrado.', [
+                        'lead_id' => (int) $lead->id,
+                        'evento'  => $evento,
+                    ]);
+                    continue;
+                }
+
+                /* Cualquier otra cosa (un valor que no entra con `strict`, la base caída) es un
+                   error de verdad y no un duplicado: se loguea como tal y se sigue con el resto. */
+                Log::channel('daily')->error('Conversiones Meta: la base rechazó el registro del evento.', [
                     'lead_id' => (int) $lead->id,
                     'evento'  => $evento,
+                    'error'   => $this->sin_token($exception->getMessage()),
                 ]);
             }
         }
@@ -528,6 +544,24 @@ class MetaConversionesService
         $this->despachar($fila);
 
         return true;
+    }
+
+    /**
+     * ¿La excepción es una violación de unicidad? Mismo criterio que
+     * `MetaRawWebhookController::es_error_de_duplicado()` (que es privado): SQLSTATE 23000 cubre toda
+     * la familia de violaciones de integridad (un NOT NULL roto también es 23000), así que hace falta
+     * además el código del driver: 1062 es el «Duplicate entry» de MySQL y 19 el de SQLite.
+     *
+     * @param QueryException $exception
+     *
+     * @return bool
+     */
+    private static function es_error_de_duplicado(QueryException $exception): bool
+    {
+        $error_info    = $exception->errorInfo;
+        $codigo_driver = is_array($error_info) && isset($error_info[1]) ? (int) $error_info[1] : 0;
+
+        return (string) $exception->getCode() === '23000' && in_array($codigo_driver, [1062, 19], true);
     }
 
     /**

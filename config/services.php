@@ -473,13 +473,15 @@ return [
         // Conjunto de datos (dataset) de la WABA. Si no lo tenés: php artisan meta:capi-dataset.
         'dataset_id'      => env('META_CAPI_DATASET_ID', ''),
         // Cuenta de WhatsApp Business de ComercioCity. Viaja en user_data de cada evento.
-        'waba_id'         => env('META_CAPI_WABA_ID', '1290129236552587'),
-        'graph_version'   => env('META_CAPI_GRAPH_VERSION', 'v24.0'),
+        // `?:` y no solo el segundo argumento de env(): una clave descomentada y vacía en el .env
+        // llega como '' (no como null) y tiene que caer al default igual.
+        'waba_id'         => env('META_CAPI_WABA_ID') ?: '1290129236552587',
+        'graph_version'   => env('META_CAPI_GRAPH_VERSION') ?: 'v24.0',
         // Opcional: con un código de Events Manager (Probar eventos), los eventos se ven ahí sin
         // ensuciar la optimización de las campañas. Vacío en producción.
         'test_event_code' => env('META_CAPI_TEST_EVENT_CODE', ''),
         // Timeout (segundos) de cada llamada a Meta.
-        'timeout'         => (int) env('META_CAPI_TIMEOUT', 15),
+        'timeout'         => (int) (env('META_CAPI_TIMEOUT') ?: 15),
     ],
 
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).

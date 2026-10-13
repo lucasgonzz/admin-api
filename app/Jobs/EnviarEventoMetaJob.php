@@ -38,7 +38,7 @@ class EnviarEventoMetaJob implements ShouldQueue
 
     /**
      * Un solo intento: los reintentos los hace el conciliador (`leads:meta-capi-conciliar`), que
-     * respeta el tope de intentos de la fila y la vigencia de siete días de Meta.
+     * respeta el tope de intentos de la fila y la ventana de reenvío (seis días: Meta acepta siete).
      *
      * @var int
      */

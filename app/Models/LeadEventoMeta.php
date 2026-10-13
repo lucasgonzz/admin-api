@@ -68,8 +68,12 @@ class LeadEventoMeta extends Model
      */
     const MINUTOS_ANTES_DE_REENCOLAR = 15;
 
-    /** Meta no acepta eventos con `event_time` de más de siete días: más viejo, no se reintenta. */
-    const DIAS_DE_VIGENCIA = 7;
+    /**
+     * Ventana de reenvío del conciliador. Meta no acepta eventos con `event_time` de más de siete
+     * días; se usan seis para que un evento que sale tarde por la cola no caiga afuera de lo que
+     * Meta acepta. Más viejo, no se reenvía.
+     */
+    const DIAS_DE_VIGENCIA = 6;
 
     /**
      * @var string
