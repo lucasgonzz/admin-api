@@ -111,4 +111,31 @@ class EnviarEventoMetaJob implements ShouldQueue
             }
         }
     }
+
+    /**
+     * El job falló SIN pasar por `handle()`: el worker murió después de reservarlo y Laravel lo
+     * manda a `failed_jobs` con MaxAttemptsExceeded (o se cortó por el timeout). Sin esto la fila
+     * quedaría `pendiente` o `enviando` para siempre. Si todavía está en uno de esos dos, pasa a
+     * `error` con el motivo sin el token, y el conciliador la reintenta como cualquier error.
+     *
+     * @param \Throwable $exception
+     *
+     * @return void
+     */
+    public function failed(\Throwable $exception)
+    {
+        try {
+            $service = app(MetaConversionesService::class);
+            $motivo  = $service->sin_token($exception->getMessage());
+
+            Log::channel('daily')->error('EnviarEventoMetaJob: el job falló sin terminar.', [
+                'lead_evento_meta_id' => $this->lead_evento_meta_id,
+                'error'               => $motivo,
+            ]);
+
+            $service->anotar_caida($this->lead_evento_meta_id, 'El job falló sin terminar: ' . $motivo);
+        } catch (\Throwable $ignorado) {
+            // Último recurso: si ni esto se puede escribir, el conciliador ve la fila huérfana.
+        }
+    }
 }

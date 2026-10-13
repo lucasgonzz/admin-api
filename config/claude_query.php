@@ -1453,7 +1453,7 @@ return [
                 'creado_hasta' => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
             ],
             'relaciones'      => [],
-            'nota' => '🔴 sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID en el .env: no salió ninguna llamada. omitido = etapa alcanzada antes de que existiera la medición (la registró el backfill del origen): no se manda nunca. error con intentos < 3 lo reintenta leads:meta-capi-conciliar (cada diez minutos), siempre que el evento tenga menos de siete días (Meta no acepta más viejos). Para ver de dónde vino el lead: model=lead con include=atribucion.',
+            'nota' => '🔴 sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID en el .env: no salió ninguna llamada. omitido = etapa alcanzada antes de que existiera la medición (la registró el backfill del origen): no se manda nunca. leads:meta-capi-conciliar (cada diez minutos) reencola un error con intentos < 3 y un pendiente huérfano cuando llevan más de quince minutos quietos, siempre dentro de la vigencia del evento (Meta no acepta eventos de más de siete días). Para ver de dónde vino el lead: model=lead con include=atribucion.',
         ],
 
         /* ---------------------------------------------------------------

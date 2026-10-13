@@ -11,9 +11,9 @@ use Illuminate\Support\Facades\Log;
  * 13/10/2026). Corre cada diez minutos desde el scheduler, con `withoutOverlapping()`.
  *
  * Registra los eventos que ningún observer vio (la demo directa cambia el estado con un UPDATE
- * directo), libera los envíos colgados, reintenta los errores (hasta tres intentos) y, cuando la
- * configuración aparece, encola lo que quedó `sin_configurar` en los últimos siete días. El detalle
- * está en `MetaConversionesService::conciliar()`.
+ * directo), libera los envíos colgados, reencola los `pendiente` huérfanos y los errores (hasta tres
+ * intentos, y solo cuando llevan más de quince minutos quietos) y, cuando la configuración aparece,
+ * encola lo que quedó `sin_configurar`. El detalle está en `MetaConversionesService::conciliar()`.
  *
  * Encola, no manda: el envío lo hace el worker de la cola `database`.
  */
@@ -50,6 +50,7 @@ class ConciliarConversionesMetaCommand extends Command
         $this->table(['Qué', 'Cuántos'], [
             ['Eventos registrados', $resumen['registrados']],
             ['Envíos colgados liberados', $resumen['colgados_liberados']],
+            ['Pendientes huérfanos reencolados', $resumen['pendientes_reencolados']],
             ['Errores reencolados', $resumen['reintentos']],
             ['Sin configurar reencolados', $resumen['sin_configurar_reenviados']],
         ]);

@@ -532,17 +532,21 @@ class ConversionesMetaTest extends TestCase
 
         $con_error = $this->crear_lead('calificado');
         $fila_con_error = LeadEventoMeta::query()->where('lead_id', $con_error->id)->firstOrFail();
-        LeadEventoMeta::query()->whereKey($fila_con_error->id)->update([
+        /* El último intento fue hace 20 minutos: pasó la espera antes de reencolar. Por DB::table
+           para que el `updated_at` sea el que se escribe y no el de ahora. */
+        DB::table('lead_eventos_meta')->where('id', $fila_con_error->id)->update([
             'estado'       => LeadEventoMeta::ESTADO_ERROR,
             'intentos'     => 1,
             'ultimo_error' => 'Meta rechazó el evento (HTTP 500): sin mensaje',
+            'updated_at'   => Carbon::now()->subMinutes(20),
         ]);
 
         $agotado = $this->crear_lead('calificado');
         $fila_agotada = LeadEventoMeta::query()->where('lead_id', $agotado->id)->firstOrFail();
-        LeadEventoMeta::query()->whereKey($fila_agotada->id)->update([
-            'estado'   => LeadEventoMeta::ESTADO_ERROR,
-            'intentos' => LeadEventoMeta::MAX_INTENTOS,
+        DB::table('lead_eventos_meta')->where('id', $fila_agotada->id)->update([
+            'estado'     => LeadEventoMeta::ESTADO_ERROR,
+            'intentos'   => LeadEventoMeta::MAX_INTENTOS,
+            'updated_at' => Carbon::now()->subMinutes(20),
         ]);
 
         $antes = count(Queue::pushed(EnviarEventoMetaJob::class));
@@ -575,8 +579,8 @@ class ConversionesMetaTest extends TestCase
     }
 
     /**
-     * Un envío colgado (enviando hace más de diez minutos) se libera y se reencola; uno que agotó
-     * los intentos no se reclama más.
+     * Un envío colgado (enviando hace más de diez minutos) se libera a `error`; y como error recién
+     * tocado, se reencola recién cuando pasa la espera de quince minutos, no en la misma corrida.
      *
      * @return void
      */
@@ -584,21 +588,123 @@ class ConversionesMetaTest extends TestCase
     {
         $lead = $this->crear_lead('calificado');
         $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
-        LeadEventoMeta::query()->whereKey($fila->id)->update(['estado' => LeadEventoMeta::ESTADO_ENVIANDO, 'intentos' => 1]);
-        \Illuminate\Support\Facades\DB::table('lead_eventos_meta')->where('id', $fila->id)
-            ->update(['updated_at' => Carbon::now()->subMinutes(LeadEventoMeta::MINUTOS_PARA_DAR_POR_COLGADO + 5)]);
+        DB::table('lead_eventos_meta')->where('id', $fila->id)->update([
+            'estado'     => LeadEventoMeta::ESTADO_ENVIANDO,
+            'intentos'   => 1,
+            'updated_at' => Carbon::now()->subMinutes(LeadEventoMeta::MINUTOS_PARA_DAR_POR_COLGADO + 5),
+        ]);
 
         $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
 
         $fila->refresh();
         $this->assertSame(LeadEventoMeta::ESTADO_ERROR, $fila->estado);
         $this->assertStringContainsString('colgado', (string) $fila->ultimo_error);
+        $this->assertCount(1, $this->encolados_de($fila), 'Recién liberado no se reencola: solo está el encolado del registro.');
 
-        /* Dos veces encolado: al registrarse (el observer) y ahora, el reintento del conciliador. */
-        $encolados = Queue::pushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila) {
+        DB::table('lead_eventos_meta')->where('id', $fila->id)
+            ->update(['updated_at' => Carbon::now()->subMinutes(LeadEventoMeta::MINUTOS_ANTES_DE_REENCOLAR + 1)]);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        $this->assertCount(2, $this->encolados_de($fila), 'Pasada la espera, el error se reencola.');
+        $this->assertSame(LeadEventoMeta::ESTADO_PENDIENTE, $fila->fresh()->estado);
+    }
+
+    /**
+     * (a) Un `pendiente` huérfano (el worker murió después de reservar el job) se reencola cuando
+     * lleva más de quince minutos quieto; uno más nuevo, no. Y una vez reencolado, la corrida
+     * siguiente no lo vuelve a encolar: queda con el `updated_at` de ahora.
+     *
+     * @return void
+     */
+    public function test_el_conciliador_reencola_un_pendiente_huerfano(): void
+    {
+        $huerfano = LeadEventoMeta::query()->where('lead_id', $this->crear_lead('calificado')->id)->firstOrFail();
+        $reciente = LeadEventoMeta::query()->where('lead_id', $this->crear_lead('calificado')->id)->firstOrFail();
+
+        DB::table('lead_eventos_meta')->where('id', $huerfano->id)
+            ->update(['updated_at' => Carbon::now()->subMinutes(LeadEventoMeta::MINUTOS_ANTES_DE_REENCOLAR + 5)]);
+        DB::table('lead_eventos_meta')->where('id', $reciente->id)
+            ->update(['updated_at' => Carbon::now()->subMinutes(5)]);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        $this->assertCount(2, $this->encolados_de($huerfano), 'El pendiente huérfano se vuelve a encolar.');
+        $this->assertCount(1, $this->encolados_de($reciente), 'Un pendiente de hace cinco minutos todavía espera al worker.');
+        $this->assertSame(LeadEventoMeta::ESTADO_PENDIENTE, $huerfano->fresh()->estado);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+        $this->assertCount(2, $this->encolados_de($huerfano), 'Recién reencolado, la corrida siguiente no lo duplica.');
+    }
+
+    /**
+     * (c) Un `error` se reencola solo si su último intento tiene más de quince minutos: con la cola
+     * atrasada o Meta caído, reencolar en cada corrida quemaría los tres intentos en ráfaga.
+     *
+     * @return void
+     */
+    public function test_el_conciliador_reencola_un_error_solo_pasados_quince_minutos(): void
+    {
+        $viejo  = LeadEventoMeta::query()->where('lead_id', $this->crear_lead('calificado')->id)->firstOrFail();
+        $fresco = LeadEventoMeta::query()->where('lead_id', $this->crear_lead('calificado')->id)->firstOrFail();
+
+        DB::table('lead_eventos_meta')->where('id', $viejo->id)->update([
+            'estado'     => LeadEventoMeta::ESTADO_ERROR,
+            'intentos'   => 1,
+            'updated_at' => Carbon::now()->subMinutes(LeadEventoMeta::MINUTOS_ANTES_DE_REENCOLAR + 5),
+        ]);
+        DB::table('lead_eventos_meta')->where('id', $fresco->id)->update([
+            'estado'     => LeadEventoMeta::ESTADO_ERROR,
+            'intentos'   => 1,
+            'updated_at' => Carbon::now()->subMinutes(5),
+        ]);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        $this->assertCount(2, $this->encolados_de($viejo), 'El error de hace veinte minutos se reencola.');
+        $this->assertCount(1, $this->encolados_de($fresco), 'El error de hace cinco minutos espera.');
+        $this->assertSame(LeadEventoMeta::ESTADO_ERROR, $fresco->fresh()->estado);
+    }
+
+    /**
+     * (b) Si el job falla sin pasar por `handle()` (MaxAttemptsExceeded, timeout), `failed()` deja la
+     * fila en `error` con el motivo sin el token; una fila ya enviada no se toca.
+     *
+     * @return void
+     */
+    public function test_el_job_que_falla_sin_terminar_deja_la_fila_en_error(): void
+    {
+        $registro = $this->capturar_el_log();
+
+        $pendiente = LeadEventoMeta::query()->where('lead_id', $this->crear_lead('calificado')->id)->firstOrFail();
+        $enviada   = LeadEventoMeta::query()->where('lead_id', $this->crear_lead('calificado')->id)->firstOrFail();
+        DB::table('lead_eventos_meta')->where('id', $enviada->id)->update(['estado' => LeadEventoMeta::ESTADO_ENVIADO]);
+
+        $falla = new \RuntimeException('App\Jobs\EnviarEventoMetaJob has been attempted too many times or run too long. ' . self::TOKEN);
+        (new EnviarEventoMetaJob((int) $pendiente->id))->failed($falla);
+        (new EnviarEventoMetaJob((int) $enviada->id))->failed($falla);
+
+        $pendiente->refresh();
+        $this->assertSame(LeadEventoMeta::ESTADO_ERROR, $pendiente->estado);
+        $this->assertStringContainsString('attempted too many times', (string) $pendiente->ultimo_error);
+        $this->assertStringNotContainsString(self::TOKEN, (string) $pendiente->ultimo_error);
+        $this->assertSame(LeadEventoMeta::ESTADO_ENVIADO, $enviada->fresh()->estado);
+
+        $this->assertLogSinElToken($registro);
+    }
+
+    /**
+     * Jobs encolados para una fila.
+     *
+     * @param LeadEventoMeta $fila
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    private function encolados_de(LeadEventoMeta $fila)
+    {
+        return Queue::pushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila) {
             return $this->id_del_job($job) === (int) $fila->id;
         });
-        $this->assertCount(2, $encolados);
     }
 
     /**

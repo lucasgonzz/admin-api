@@ -61,6 +61,13 @@ class LeadEventoMeta extends Model
     /** Un `enviando` más viejo que esto es un proceso que murió sin soltar la fila. */
     const MINUTOS_PARA_DAR_POR_COLGADO = 10;
 
+    /**
+     * El conciliador vuelve a encolar un `pendiente` o un `error` solo si su `updated_at` tiene más
+     * que esto: un `pendiente` más viejo es un job que se perdió, y con un `error` más nuevo,
+     * reencolar en cada corrida quemaría los tres intentos en ráfaga si Meta está caído.
+     */
+    const MINUTOS_ANTES_DE_REENCOLAR = 15;
+
     /** Meta no acepta eventos con `event_time` de más de siete días: más viejo, no se reintenta. */
     const DIAS_DE_VIGENCIA = 7;
 

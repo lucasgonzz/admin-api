@@ -387,13 +387,23 @@ class MetaConversionesService
      * La red de seguridad que corre cada diez minutos (`leads:meta-capi-conciliar`).
      *
      *   1. Registra lo que ningún observer vio: la demo directa escribe `status='demo_agendada'` con
-     *      un UPDATE directo que esquiva `Lead::saved`. Mira los leads con `ctwa_clid` tocados en los
-     *      últimos siete días (un UPDATE de Eloquent mueve `updated_at` igual).
+     *      un UPDATE directo que esquiva `Lead::saved`. Mira los leads con `ctwa_clid` tocados dentro
+     *      de la vigencia (un UPDATE de Eloquent mueve `updated_at` igual).
      *   2. Libera los `enviando` colgados (el proceso murió sin soltar la fila): pasan a `error`.
-     *   3. Reintenta los `error` con menos de tres intentos y de los últimos siete días.
-     *   4. Si la configuración apareció, manda los `sin_configurar` de los últimos siete días.
+     *   3. Vuelve a encolar los `pendiente` huérfanos: los que llevan más de quince minutos sin que
+     *      nadie los tome. Pasa si el worker muere después de reservar el job (Laravel lo manda a
+     *      `failed_jobs` sin pasar por `handle()`) o si el `dispatch` tiró después del alta.
+     *   4. Reintenta los `error` con menos de tres intentos, pero solo si el último intento tiene más
+     *      de quince minutos: con la cola atrasada o Meta caído, reencolar en cada corrida quemaría
+     *      los tres intentos en ráfaga.
+     *   5. Si la configuración apareció, manda los `sin_configurar`.
      *
-     * Encola, no manda: el envío lo hace el worker, con el mismo reclamo que el primer intento.
+     * Todo dentro de la vigencia (`event_time`). Un `omitido` no se toca nunca.
+     *
+     * Encola, no manda: el envío lo hace el worker, con el mismo reclamo atómico que el primer
+     * intento, así que un evento encolado dos veces sale una sola. Al reencolar, la fila vuelve a
+     * `pendiente` con el `updated_at` de ahora: eso es lo que evita que la corrida siguiente la
+     * vuelva a encolar mientras espera al worker.
      *
      * @return array<string, int>
      */
@@ -402,12 +412,14 @@ class MetaConversionesService
         $resumen = [
             'registrados'               => 0,
             'colgados_liberados'        => 0,
+            'pendientes_reencolados'    => 0,
             'reintentos'                => 0,
             'sin_configurar_reenviados' => 0,
         ];
 
-        $ahora = AppTime::now();
-        $desde = $ahora->copy()->subDays(LeadEventoMeta::DIAS_DE_VIGENCIA);
+        $ahora           = AppTime::now();
+        $desde           = $ahora->copy()->subDays(LeadEventoMeta::DIAS_DE_VIGENCIA);
+        $quieto_antes_de = $ahora->copy()->subMinutes(LeadEventoMeta::MINUTOS_ANTES_DE_REENCOLAR);
 
         Lead::query()
             ->whereNotNull('ctwa_clid')
@@ -443,15 +455,25 @@ class MetaConversionesService
             return $resumen;
         }
 
+        $huerfanos = LeadEventoMeta::query()
+            ->where('estado', LeadEventoMeta::ESTADO_PENDIENTE)
+            ->where('updated_at', '<=', $quieto_antes_de)
+            ->where('event_time', '>=', $desde)
+            ->orderBy('id')
+            ->get();
+        foreach ($huerfanos as $fila) {
+            $resumen['pendientes_reencolados'] += $this->reencolar($fila) ? 1 : 0;
+        }
+
         $errores = LeadEventoMeta::query()
             ->where('estado', LeadEventoMeta::ESTADO_ERROR)
             ->where('intentos', '<', LeadEventoMeta::MAX_INTENTOS)
+            ->where('updated_at', '<=', $quieto_antes_de)
             ->where('event_time', '>=', $desde)
             ->orderBy('id')
             ->get();
         foreach ($errores as $fila) {
-            $this->despachar($fila);
-            $resumen['reintentos']++;
+            $resumen['reintentos'] += $this->reencolar($fila) ? 1 : 0;
         }
 
         $sin_configurar = LeadEventoMeta::query()
@@ -460,11 +482,34 @@ class MetaConversionesService
             ->orderBy('id')
             ->get();
         foreach ($sin_configurar as $fila) {
-            $this->despachar($fila);
-            $resumen['sin_configurar_reenviados']++;
+            $resumen['sin_configurar_reenviados'] += $this->reencolar($fila) ? 1 : 0;
         }
 
         return $resumen;
+    }
+
+    /**
+     * Devuelve una fila a `pendiente` (con el `updated_at` de ahora) y la encola. Condicional sobre
+     * el estado que tenía: si un worker la reclamó en el medio, no se toca ni se encola.
+     *
+     * @param LeadEventoMeta $fila
+     *
+     * @return bool true si quedó encolada.
+     */
+    private function reencolar(LeadEventoMeta $fila): bool
+    {
+        $tomadas = LeadEventoMeta::query()
+            ->whereKey((int) $fila->id)
+            ->where('estado', (string) $fila->estado)
+            ->update(['estado' => LeadEventoMeta::ESTADO_PENDIENTE]);
+
+        if ($tomadas === 0) {
+            return false;
+        }
+
+        $this->despachar($fila);
+
+        return true;
     }
 
     /**
