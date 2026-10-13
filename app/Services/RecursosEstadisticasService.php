@@ -172,8 +172,17 @@ class RecursosEstadisticasService
     }
 
     /**
-     * Por cliente con usuarios en el centro: usuarios, avance promedio, videos terminados y última
-     * actividad. Los de actividad más reciente primero.
+     * TODOS los clientes activos con lo suyo en el centro: usuarios, avance promedio, videos
+     * terminados y última actividad. Un cliente que nunca entró sale igual, en cero.
+     *
+     * 🔴 Todos y no solo los que ya entraron: desde esta lista se saca el link del dueño, y el caso que
+     * más importa es justamente el del cliente que todavía no entró (hasta que su sistema tenga el
+     * botón del centro, el link es la única puerta).
+     *
+     * Quedan afuera los dados de baja (`is_active` en false), con el mismo criterio que los procesos que
+     * recorren la flota (`RecolectarTokensCommand`, `SincronizarAiPlanesCommand`).
+     *
+     * Orden: primero los que tienen actividad, la más reciente arriba; después el resto por nombre.
      *
      * @return array<int, array<string, mixed>>
      */
@@ -181,45 +190,64 @@ class RecursosEstadisticasService
     {
         $por_usuario = $this->avance_por_usuario();
 
-        $usuarios = RecursosUsuario::with('client:id,name,company_name,slug')->get();
+        $usuarios_por_cliente = [];
+        foreach (RecursosUsuario::get(['id', 'client_id', 'ultimo_ingreso_at']) as $usuario) {
+            $usuarios_por_cliente[(int) $usuario->client_id][] = $usuario;
+        }
 
-        $clientes = [];
+        $lista = [];
 
-        foreach ($usuarios as $usuario) {
-            $id = (int) $usuario->client_id;
+        foreach (Client::where('is_active', true)->get(['id', 'name', 'company_name', 'slug']) as $client) {
+            $fila = [
+                'client_id'         => (int) $client->id,
+                'nombre'            => $client->resolve_display_name(),
+                'slug'              => $client->slug,
+                'usuarios'          => 0,
+                'avance'            => 0.0,
+                'videos_terminados' => 0,
+                'ultima_actividad'  => null,
+            ];
 
-            if (! isset($clientes[$id])) {
-                $clientes[$id] = [
-                    'client_id'         => $id,
-                    'nombre'            => $usuario->client instanceof Client ? $usuario->client->resolve_display_name() : '',
-                    'slug'              => $usuario->client instanceof Client ? $usuario->client->slug : null,
-                    'usuarios'          => 0,
-                    'avance'            => 0.0,
-                    'videos_terminados' => 0,
-                    'ultima_actividad'  => null,
-                ];
+            $usuarios = isset($usuarios_por_cliente[(int) $client->id]) ? $usuarios_por_cliente[(int) $client->id] : [];
+            $suma     = 0.0;
+
+            foreach ($usuarios as $usuario) {
+                $suyo = isset($por_usuario[$usuario->id]) ? $por_usuario[$usuario->id] : ['avance' => 0.0, 'terminados' => 0, 'ultima' => null];
+
+                $fila['usuarios']++;
+                $suma                      += $suyo['avance'];
+                $fila['videos_terminados'] += $suyo['terminados'];
+                $fila['ultima_actividad']   = self::mas_reciente(
+                    $fila['ultima_actividad'],
+                    self::mas_reciente($suyo['ultima'], $usuario->ultimo_ingreso_at !== null ? $usuario->ultimo_ingreso_at->toDateTimeString() : null)
+                );
             }
 
-            $suyo = isset($por_usuario[$usuario->id]) ? $por_usuario[$usuario->id] : ['avance' => 0.0, 'terminados' => 0, 'ultima' => null];
+            $fila['avance']           = $fila['usuarios'] > 0 ? round($suma / $fila['usuarios'], 1) : 0.0;
+            $fila['ultima_actividad'] = self::iso($fila['ultima_actividad']);
 
-            $clientes[$id]['usuarios']++;
-            $clientes[$id]['avance']            += $suyo['avance'];
-            $clientes[$id]['videos_terminados'] += $suyo['terminados'];
-            $clientes[$id]['ultima_actividad']   = self::mas_reciente(
-                $clientes[$id]['ultima_actividad'],
-                self::mas_reciente($suyo['ultima'], $usuario->ultimo_ingreso_at !== null ? $usuario->ultimo_ingreso_at->toDateTimeString() : null)
-            );
+            $lista[] = $fila;
         }
-
-        foreach ($clientes as $id => $cliente) {
-            $clientes[$id]['avance']           = $cliente['usuarios'] > 0 ? round($cliente['avance'] / $cliente['usuarios'], 1) : 0.0;
-            $clientes[$id]['ultima_actividad'] = self::iso($cliente['ultima_actividad']);
-        }
-
-        $lista = array_values($clientes);
 
         usort($lista, function ($a, $b) {
-            return strcmp((string) $b['ultima_actividad'], (string) $a['ultima_actividad']);
+            $a_activo = $a['ultima_actividad'] !== null;
+            $b_activo = $b['ultima_actividad'] !== null;
+
+            if ($a_activo !== $b_activo) {
+                return $a_activo ? -1 : 1;
+            }
+
+            if ($a_activo) {
+                $por_fecha = strcmp((string) $b['ultima_actividad'], (string) $a['ultima_actividad']);
+
+                if ($por_fecha !== 0) {
+                    return $por_fecha;
+                }
+            }
+
+            $por_nombre = strcmp(mb_strtolower((string) $a['nombre'], 'UTF-8'), mb_strtolower((string) $b['nombre'], 'UTF-8'));
+
+            return $por_nombre !== 0 ? $por_nombre : $a['client_id'] <=> $b['client_id'];
         });
 
         return $lista;

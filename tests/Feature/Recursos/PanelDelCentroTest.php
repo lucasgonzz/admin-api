@@ -314,8 +314,9 @@ class PanelDelCentroTest extends BaseDelCentroDeRecursos
         // Empleado: T2.1 al 20 % → 0,2 de 4 = 5 %.
         RecursosProgreso::create(['recursos_usuario_id' => $empleado->id, 'recursos_video_id' => $v3->id, 'vistos' => '', 'porcentaje' => 20]);
 
+        // La lista trae a TODOS los clientes activos (ver el test de abajo): se mira la fila de éste, que
+        // por tener actividad va primera.
         $clientes = $this->getJson('/api/admin/recursos/clientes')->assertStatus(200)->json('clientes');
-        $this->assertCount(1, $clientes);
         $this->assertSame((int) $client->id, $clientes[0]['client_id']);
         $this->assertSame('Kiosco Uno', $clientes[0]['nombre']);
         $this->assertSame(2, $clientes[0]['usuarios']);
@@ -341,6 +342,48 @@ class PanelDelCentroTest extends BaseDelCentroDeRecursos
         );
         $this->assertEquals(5, $detalle['usuarios'][1]['avance']);
         $this->assertEquals(10, $detalle['usuarios'][1]['carpetas'][1]['avance']);
+    }
+
+    /**
+     * 🔴 La lista trae a TODOS los clientes activos, también los que nunca entraron (en cero): desde ahí
+     * se saca el link del dueño, y el que más lo necesita es el que todavía no entró. Primero los que
+     * tienen actividad (la más reciente arriba), después el resto por nombre. Los dados de baja no.
+     */
+    public function test_la_lista_de_clientes_trae_tambien_a_los_que_nunca_entraron(): void
+    {
+        $this->admin_logueado();
+        $video = $this->crear_video('T1.1');
+
+        $viejo   = $this->crear_cliente('api-viejo.test', ['company_name' => 'Almacén Viejo']);
+        $reciente = $this->crear_cliente('api-reciente.test', ['company_name' => 'Zapatería Reciente']);
+        $nunca_b = $this->crear_cliente('api-b.test', ['company_name' => 'Bazar Nunca']);
+        $nunca_a = $this->crear_cliente('api-a.test', ['company_name' => 'almacén Nunca']);
+        $baja    = $this->crear_cliente('api-baja.test', ['company_name' => 'Dado De Baja', 'is_active' => false]);
+
+        list($u_viejo)    = $this->usuario_con_sesion($viejo, ['ultimo_ingreso_at' => now()->subDays(10)]);
+        list($u_reciente) = $this->usuario_con_sesion($reciente, ['ultimo_ingreso_at' => now()->subHour()]);
+        RecursosProgreso::create(['recursos_usuario_id' => $u_reciente->id, 'recursos_video_id' => $video->id, 'vistos' => '', 'porcentaje' => 50]);
+        $this->usuario_con_sesion($baja, ['ultimo_ingreso_at' => now()]);
+
+        $clientes = $this->getJson('/api/admin/recursos/clientes')->assertStatus(200)->json('clientes');
+        $mios     = array_values(array_filter($clientes, function ($fila) use ($viejo, $reciente, $nunca_a, $nunca_b, $baja) {
+            return in_array($fila['client_id'], [(int) $viejo->id, (int) $reciente->id, (int) $nunca_a->id, (int) $nunca_b->id, (int) $baja->id], true);
+        }));
+
+        $this->assertSame(
+            [(int) $reciente->id, (int) $viejo->id, (int) $nunca_a->id, (int) $nunca_b->id],
+            array_column($mios, 'client_id')
+        );
+
+        $this->assertEquals(50, $mios[0]['avance']);
+        $this->assertSame(1, $mios[1]['usuarios']);
+        $this->assertSame(
+            ['client_id' => (int) $nunca_a->id, 'nombre' => 'almacén Nunca', 'slug' => $nunca_a->slug, 'usuarios' => 0, 'avance' => 0, 'videos_terminados' => 0, 'ultima_actividad' => null],
+            $mios[2]
+        );
+
+        // Y del que nunca entró se saca el link del dueño.
+        $this->postJson('/api/admin/recursos/clientes/' . $nunca_a->id . '/link-dueno')->assertStatus(200);
     }
 
     public function test_un_cliente_que_no_entro_contesta_en_cero_y_uno_que_no_existe_404(): void
