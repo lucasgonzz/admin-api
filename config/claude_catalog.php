@@ -348,8 +348,60 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'GET api/claude/templates/meta' => [
+            'para_que'     => 'La BIBLIOTECA de plantillas con su estado en Meta y, sobre todo, con `uso`: el texto corto que dice CUÁNDO usar cada una. Es por donde se elige plantilla cuando hay que escribirle a un lead fuera de la ventana de 24 hs. Lee la tabla local, que templates:sync-meta refresca cada hora; para el estado de UNA al instante está el refresh.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => 'status', 'obligatorio' => false, 'validacion' => 'nullable|string|max:20', 'que_es' => 'Filtra por meta_status: PENDING, APPROVED, REJECTED, PAUSED, DISABLED.'],
+                ['nombre' => 'category', 'obligatorio' => false, 'validacion' => 'nullable|string|max:20', 'que_es' => 'Filtra por meta_category: UTILITY o MARKETING. Define el costo (marketing se cobra siempre).'],
+                ['nombre' => 'activa', 'obligatorio' => false, 'validacion' => 'nullable|boolean', 'que_es' => 'Filtra por el interruptor local.'],
+                ['nombre' => 'estado', 'obligatorio' => false, 'validacion' => 'nullable|string|max:40', 'que_es' => 'Filtra por el `estado` de la fila (los manual_* son las de envío a mano).'],
+            ],
+        ],
+        'POST api/claude/templates/meta' => [
+            'para_que'     => 'CREA una plantilla en Meta (vía el proxy de Kapso) y la registra. Es lo que permite tener una plantilla nueva sin que nadie entre a Meta Business Suite con el navegador. 🔴 No confundir con POST claude/followup-templates, que sólo REGISTRA una que ya está aprobada.',
+            'escribe'      => true,
+            'peligrosidad' => 'alta',
+            'frenos'       => [
+                'dry_run por defecto: sin dry_run=false explícito no se llama a Meta ni se escribe ninguna fila. Devuelve el payload exacto que se mandaría.',
+                '🔴 Un template_name que ya tiene fila es 422 y NO se reenvía a Meta: no hay upsert. Crear dos veces la misma consume cupo del tope de 100 creaciones por hora por WABA. Para traer el estado de una que ya existe, el refresh.',
+                '🔴 La fila nace con activa=false y meta_status=PENDING, incluso si Meta contestara APPROVED. La enciende templates:sync-meta o el refresh, nunca este endpoint.',
+                'Las reglas de formato de Meta se validan ANTES de salir a la red: nombre ^[a-z0-9_]+$, cuerpo de hasta 1024 caracteres, numeración {{1}}..{{n}} sin saltos, y los tres defectos de rechazo automático (variable al principio, variable al final, dos variables seguidas).',
+                'Un ejemplo por variable, obligatorio: Meta no puede revisar una plantilla sin muestras.',
+                '🔴 El `estado` se fuerza a manual_*: uno que coincida con un slug real del pipeline haría que LeadFollowupService (cada 2 horas) le empiece a mandar la plantilla sola a todos los leads de ese estado.',
+                'Sólo el componente BODY con parámetros posicionales: es lo único que WhatsappSendService::send_template() sabe enviar. Una plantilla con header o botones con variables quedaría aprobada e imposible de mandar.',
+                'Con 401/403 de Meta la respuesta trae motivo=sin_permiso_en_meta y un plan_b: cargarla a mano con el procedimiento de contexto/cuentas_meta.md. No hay reintento que sirva.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'name', 'obligatorio' => true, 'validacion' => 'required|string|max:120, y ^[a-z0-9_]+$', 'que_es' => 'Nombre con el que queda en Meta. Convención: prefijo cc_ y versionado con _v2. Un nombre publicado no se reusa.'],
+                ['nombre' => 'category', 'obligatorio' => true, 'validacion' => 'required, UTILITY o MARKETING', 'que_es' => 'UTILITY cuando el mensaje retoma algo que el lead pidió (es gratis dentro de la ventana y aprueba más rápido); MARKETING para nutrición (se cobra siempre y choca con el tope por destinatario 131049).'],
+                ['nombre' => 'body', 'obligatorio' => true, 'validacion' => 'required|string, hasta 1024 caracteres', 'que_es' => 'El texto con sus {{n}} posicionales. Para que sea REUTILIZABLE, las variables van en el MEDIO: {{1}} el nombre, {{2}} el asunto concreto.'],
+                ['nombre' => 'ejemplos[]', 'obligatorio' => true, 'validacion' => 'uno por variable, en orden; cada ítem required|string|max:120', 'que_es' => 'La muestra de cada hueco. Meta la exige para revisar, y queda guardada: es lo que después rotula cada variable en GET claude/templates/meta.'],
+                ['nombre' => 'uso', 'obligatorio' => true, 'validacion' => 'required|string|max:255', 'que_es' => 'Texto corto de CUÁNDO usarla. Es lo que le deja elegir plantilla a /leads sin leer el cuerpo de las treinta y ocho.'],
+                ['nombre' => 'language', 'obligatorio' => false, 'validacion' => 'nullable|string|max:10 (default es_AR)', 'que_es' => 'Idioma con el que se aprueba. Queda guardado y es el que usa el envío: no se puede mandar con otro.'],
+                ['nombre' => 'estado', 'obligatorio' => false, 'validacion' => 'nullable|string|max:40, tiene que empezar con manual_', 'que_es' => 'Si no viene, se deriva del nombre (cc_x -> manual_x). Ver el freno.'],
+                ['nombre' => 'dia_numero', 'obligatorio' => false, 'validacion' => 'nullable|integer|min:1 (default 1)', 'que_es' => 'Orden dentro del estado. Para una plantilla manual no significa nada, pero la columna es NOT NULL.'],
+                ['nombre' => 'dry_run', 'obligatorio' => false, 'validacion' => 'nullable|boolean — 🔴 DEFAULT true', 'que_es' => 'Sin dry_run=false explícito no se crea nada en Meta.'],
+            ],
+        ],
+        'POST api/claude/templates/meta/{name}/refresh' => [
+            'para_que'     => 'Consulta en Meta el estado de UNA plantilla y lo baja a la fila, activándola si pasó a APPROVED. Es lo que permite crear una plantilla y volver a mirarla un rato después en la misma corrida, sin esperar la hora del scheduler. Meta no manda webhooks de estado de plantilla: hay que consultar.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                'Sólo actualiza una fila que ya existe: un nombre no registrado es 404 y no crea nada.',
+                '🔴 Si Meta NO devuelve la plantilla, NO se cambia meta_status ni activa: sólo se sella meta_synced_at y se deja el motivo escrito. Una consulta vacía no es un rechazo (puede ser el filtro name del proxy, una página cortada o un error que contestó 200), y apagar una plantilla que funciona dejaría a /leads sin poder escribirle a nadie fuera de la ventana, en silencio.',
+                'APPROVED activa la fila; REJECTED y DISABLED la desactivan y guardan el motivo; PAUSED se registra y no toca activa (la pausa de Meta es temporal y se levanta sola).',
+                'No crea ni borra nada en Meta.',
+            ],
+            'parametros'   => [
+                ['nombre' => '{name} (en la ruta)', 'obligatorio' => true, 'validacion' => 'segmento de la URL, restringido a [a-z0-9_]+', 'que_es' => 'Nombre exacto de la plantilla. Un nombre con otros caracteres es 404 de Laravel y no llega al controlador.'],
+            ],
+        ],
         'POST api/claude/followup-templates' => [
-            'para_que'     => 'Alta de un lote de plantillas de LEAD (followup_templates), para que aparezcan en GET claude/templates y en el selector del panel. No tienen nada que ver con client-templates, que es el alta de plantillas de SOPORTE (client_templates).',
+            'para_que'     => 'Alta de un lote de plantillas de LEAD (followup_templates), para que aparezcan en GET claude/templates y en el selector del panel. No tienen nada que ver con client-templates, que es el alta de plantillas de SOPORTE (client_templates). 🔴 REGISTRA una plantilla que YA está aprobada en Meta; la que la CREA en Meta es POST claude/templates/meta.',
             'escribe'      => true,
             'peligrosidad' => 'baja',
             'frenos'       => [
@@ -454,6 +506,8 @@ return [
             'peligrosidad' => 'alta',
             'frenos'       => [
                 'El lead se nombra por id: no hay forma de mandarle a "los que cumplan un filtro".',
+                '🔴 La plantilla tiene que estar REGISTRADA, activa y APROBADA en Meta (meta_status=APPROVED): si no, 422 y no se envía nada. Hasta el 13/10/2026 no se validaba nada, y una plantilla que Meta no conocía fallaba en Kapso y este endpoint contestaba 200 con enviado=false, que desde afuera se lee como un éxito parcial. El 422 nombra el paso para salir (refresh, el listado o el alta).',
+                'El language_code sale de la FILA de la plantilla, no del request: Meta la aprobó para un idioma y es el único con el que la entrega. Si el llamador manda otro, se ignora y la respuesta dice con cuál salió.',
                 'Cooldown de 24 horas por lead. Para saltearlo hay que repetir la llamada con ignorar_cooldown, que queda escrito en el pedido.',
                 /* Estaba en el código y no acá. */
                 'El lead tiene que tener teléfono cargado: sin él es 422 y no se crea absolutamente nada.',
@@ -477,6 +531,8 @@ return [
             'peligrosidad' => 'alta',
             'frenos'       => [
                 'Sólo lead_ids explícitos: el lote NO acepta filtros, así que un filtro mal escrito no se puede convertir en un envío masivo.',
+                '🔴 La plantilla tiene que estar REGISTRADA, activa y APROBADA en Meta, y se valida UNA vez para todo el lote antes de resolver destinatarios. Acá pesa más que en el endpoint individual: sin esto, una plantilla rechazada producía cincuenta LeadMessage rojos en cincuenta conversaciones y cincuenta avisos a los admins.',
+                'El language_code sale de la FILA de la plantilla, no del request.',
                 'dry_run por defecto: si no se pide lo contrario, simula y no manda nada.',
                 'confirm_count tiene que coincidir exactamente con la cantidad simulada.',
                 'confirm_token con hash_equals: un lote que cambió entre la simulación y la confirmación no pasa.',

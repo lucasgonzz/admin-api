@@ -1028,13 +1028,24 @@ return [
             'columnas'        => [
                 'id', 'estado', 'dia_numero', 'template_name', 'body_template',
                 'language_code', 'activa', 'solo_si_ingreso_confirmado',
+                /* El estado de Meta y el `uso`, desde la misión `plantillas-meta-y-leads-humano`
+                   (13/10/2026). `components` queda AFUERA a propósito: es el JSON de componentes
+                   tal cual se le mandó a Meta y acá viajaría como un string crudo que nadie lee
+                   —este endpoint usa DB::table, sin modelo, así que ni el cast ni el accessor
+                   `variables` aplican—. Para leerlo con sus ejemplos ya interpretados está
+                   `GET claude/templates/meta`. */
+                'meta_status', 'meta_category', 'meta_template_id', 'meta_rechazo',
+                'meta_synced_at', 'uso',
                 'created_at', 'updated_at',
             ],
             'clave_de_cursor' => 'id',
             'orden_default'   => 'asc',
             'limite_default'  => 200,
             'limite_max'      => 500,
-            'busqueda'        => ['template_name', 'body_template', 'estado'],
+            /* `uso` entra en la búsqueda porque es el campo por el que se ELIGE una plantilla
+               ("retomar un día acordado", "nutrición con un reel"): buscar por el cuerpo obliga a
+               saber cómo está redactada. */
+            'busqueda'        => ['template_name', 'body_template', 'estado', 'uso'],
             'filtros'         => [
                 /* 🔴 ACÁ NO VA UNA ENUMERACIÓN CERRADA, Y ES LA ASIMETRÍA DELIBERADA CON
                    followup_rule. `followup_templates.estado` mezcla slugs del pipeline con
@@ -1051,6 +1062,13 @@ return [
                 'activa'                     => ['columna' => 'activa',                     'tipo' => 'booleano'],
                 'solo_si_ingreso_confirmado' => ['columna' => 'solo_si_ingreso_confirmado', 'tipo' => 'booleano'],
                 'language_code'              => ['columna' => 'language_code',              'tipo' => 'texto_exacto'],
+                /* Mismo criterio que `estado`: enumeración ABIERTA. Los valores que manda Meta hoy
+                   son PENDING, APPROVED, REJECTED, PAUSED y DISABLED, pero los escribe
+                   `MetaTemplateService::aplicar_estado_de_meta()` tal cual vienen: declararlos acá
+                   en un `en` haría 422 el día que Meta agregue uno, y eso se descubriría recién
+                   cuando alguien intente filtrar por él. */
+                'meta_status'                => ['columna' => 'meta_status',                'tipo' => 'texto_exacto'],
+                'meta_category'              => ['columna' => 'meta_category',              'tipo' => 'texto_exacto'],
                 'ids'                        => ['columna' => 'id',                         'tipo' => 'lista_de_enteros'],
             ],
             'relaciones'      => [],
