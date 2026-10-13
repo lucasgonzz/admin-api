@@ -311,6 +311,81 @@ class OrigenDelLeadTest extends TestCase
         $this->assertNull($lead->ctwa_clid);
     }
 
+    /**
+     * El referral llega DESPUÉS con un wamid DISTINTO al del mensaje: engancha por teléfono y ±30 s.
+     * Es el camino real si el `message.id` de Kapso no fuera el wamid de Meta.
+     *
+     * @return void
+     */
+    public function test_referral_despues_con_otro_wamid_engancha_por_telefono(): void
+    {
+        $telefono = $this->telefono_al_azar();
+        $momento  = time() - 120;
+
+        $this->postear_kapso($telefono, 'Hola, quiero saber más', 'wamid.ORIGEN-MSG-6', $momento)->assertStatus(200);
+
+        $lead = $this->lead_del_telefono($telefono);
+        $this->assertNotNull($lead);
+        $this->assertSame(LeadOrigenService::ORIGEN_DESCONOCIDO, $lead->origen, 'Antes del referral no hay señal.');
+
+        $this->postear_referral($telefono, 'wamid.ORIGEN-REF-6', $momento + 20)->assertStatus(200);
+
+        $lead->refresh();
+        $this->assertSame(LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP, $lead->origen);
+        $this->assertSame(self::CLID, $lead->ctwa_clid);
+    }
+
+    /**
+     * El borde exacto de la tolerancia, en los dos órdenes de llegada y siempre con wamids distintos
+     * (o sea, solo por teléfono y tiempo): a 30 s engancha, a 31 s no.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function bordes_de_la_tolerancia(): array
+    {
+        return [
+            'referral antes, a 30 s'   => ['antes', 30, LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP],
+            'referral antes, a 31 s'   => ['antes', 31, LeadOrigenService::ORIGEN_DESCONOCIDO],
+            'referral después, a 30 s' => ['despues', 30, LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP],
+            'referral después, a 31 s' => ['despues', 31, LeadOrigenService::ORIGEN_DESCONOCIDO],
+        ];
+    }
+
+    /**
+     * @dataProvider bordes_de_la_tolerancia
+     *
+     * @param string $orden    `antes`: el referral llega primero; `despues`: llega después del mensaje.
+     * @param int    $segundos Distancia entre el `received_at` del referral y el `sent_at` del mensaje.
+     * @param string $esperado
+     *
+     * @return void
+     */
+    public function test_el_borde_de_los_30_segundos_en_los_dos_ordenes(string $orden, int $segundos, string $esperado): void
+    {
+        $telefono = $this->telefono_al_azar();
+        $momento  = time() - 300;
+        $sufijo   = Str::random(8);
+
+        if ($orden === 'antes') {
+            /* El mensaje sale $segundos DESPUÉS del clic. */
+            $this->postear_referral($telefono, 'wamid.BORDE-REF-' . $sufijo, $momento)->assertStatus(200);
+            $this->postear_kapso($telefono, 'Hola, quiero saber más', 'wamid.BORDE-MSG-' . $sufijo, $momento + $segundos)->assertStatus(200);
+        } else {
+            /* El referral dice $segundos más que el mensaje, y llega después. */
+            $this->postear_kapso($telefono, 'Hola, quiero saber más', 'wamid.BORDE-MSG-' . $sufijo, $momento)->assertStatus(200);
+            $this->postear_referral($telefono, 'wamid.BORDE-REF-' . $sufijo, $momento + $segundos)->assertStatus(200);
+        }
+
+        $lead = $this->lead_del_telefono($telefono);
+        $this->assertNotNull($lead);
+        $this->assertSame($esperado, $lead->origen);
+        if ($esperado === LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP) {
+            $this->assertSame(self::CLID, $lead->ctwa_clid);
+        } else {
+            $this->assertNull($lead->ctwa_clid);
+        }
+    }
+
     /* ------------------------------------------------------------------------------------------
      | 2. Las frases
      |----------------------------------------------------------------------------------------- */
@@ -593,5 +668,46 @@ class OrigenDelLeadTest extends TestCase
         foreach ($propiedad['options'] as $opcion) {
             $this->assertMatchesRegularExpression('/^#[0-9a-f]{6}$/i', $opcion['color']);
         }
+    }
+
+    /**
+     * El filtro del panel: lo que manda el SPA al filtrar la columna Origen (convierte el tipo
+     * `pipeline_status` a `select`) por `POST admin/search/lead/null/1` trae solo los de ese origen.
+     *
+     * @return void
+     */
+    public function test_el_filtro_del_panel_por_origen_trae_solo_ese_origen(): void
+    {
+        $landing_1   = $this->crear_lead_con_origen('landing');
+        $landing_2   = $this->crear_lead_con_origen('landing');
+        $instagram   = $this->crear_lead_con_origen('instagram');
+        $sin_calculo = $this->crear_lead_con_origen(null);
+
+        $admin = Admin::create([
+            'name'     => 'Operador de prueba',
+            'email'    => 'origen-filtro-' . uniqid() . '@test.local',
+            'password' => bcrypt('secret'),
+        ]);
+
+        $respuesta = $this->actingAs($admin, 'sanctum')
+            ->postJson('/api/admin/search/lead/null/1?page=1', [
+                'filters'  => [
+                    ['key' => 'origen', 'type' => 'select', 'igual_que' => 'landing'],
+                ],
+                'per_page' => 200,
+            ]);
+        $respuesta->assertStatus(200);
+
+        $filas = $respuesta->json('data');
+        $this->assertNotEmpty($filas);
+        foreach ($filas as $fila) {
+            $this->assertSame('landing', $fila['origen'], 'El filtro trajo un lead de otro origen.');
+        }
+
+        $ids = array_map('intval', array_column($filas, 'id'));
+        $this->assertContains((int) $landing_1->id, $ids);
+        $this->assertContains((int) $landing_2->id, $ids);
+        $this->assertNotContains((int) $instagram->id, $ids);
+        $this->assertNotContains((int) $sin_calculo->id, $ids);
     }
 }
