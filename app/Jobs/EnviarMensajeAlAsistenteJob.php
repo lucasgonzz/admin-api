@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Client;
 use App\Models\ClientAssistantMessage;
+use App\Models\WhatsappConfig;
 use App\Services\AsistenteFotoSalienteService;
 use App\Services\AsistenteImagenesService;
 use App\Services\AsistenteWhatsappService;
@@ -554,7 +555,16 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
          * y con eso puede pedir la foto de nuevo en vez de contestar como si nunca hubiera existido.
          */
         if ($this->imagenes !== []) {
-            $preparadas = $imagenes->preparar($this->imagenes, (int) $fila->id);
+            /* 🔴 La foto se baja con las credenciales del número que la RECIBIÓ, no con las del
+             * principal. La URL de media de Kapso viene firmada para la cuenta de ese número y el
+             * repliegue por `whatsapp_media_id` le pega a `…/{phone_number_id}/media`: con el
+             * `phone_number_id` del otro número, Meta contesta que no existe. Null —el asistente
+             * todavía sin fila— deja el comportamiento de hoy, que es bajar con el principal. */
+            $preparadas = $imagenes->preparar(
+                $this->imagenes,
+                (int) $fila->id,
+                WhatsappConfig::porProposito(WhatsappConfig::PROPOSITO_ASISTENTE)
+            );
 
             /* 🔴 Dos motivos distintos para que una foto no viaje, y cada uno lleva su nota. Las que
              * quedaron afuera por el TOPE llegaron bien: decirle al asistente que "no se pudieron
@@ -885,7 +895,12 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $fila->ai_conversation_id = (int) $datos['ai_conversation_id'];
         }
 
-        $whatsapp_message_id = $sender->send_text(
+        /* 🔴 Todo lo que sale de este job sale por el número del ASISTENTE y no por el
+         * institucional (misión whatsapp-dos-numeros, 13/10/2026): es la respuesta a algo que el
+         * dueño escribió a ese número, y contestarle desde el otro abriría una conversación nueva
+         * en un chat distinto del que él está mirando. Si el número del asistente todavía no está
+         * cargado, `paraProposito()` cae al principal y el canal se comporta como antes. */
+        $whatsapp_message_id = $sender->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)->send_text(
             (string) $fila->telefono,
             $contenido,
             'Asistente por WhatsApp - cliente #' . $client->id
@@ -905,7 +920,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $whatsapp_message_id !== null
                 ? ClientAssistantMessage::ESTADO_RESPONDIDO
                 : ClientAssistantMessage::ESTADO_ERROR,
-            $whatsapp_message_id === null ? (string) $sender->last_send_error : null
+            $whatsapp_message_id === null ? (string) $sender->last_send_error : null,
+            $sender->phone_number_id_de_destino()
         );
 
         /* Las fotos van DESPUÉS de que el texto quedó guardado y registrado, y solo si el texto
@@ -1151,6 +1167,11 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
     ): array {
         $telefono = (string) $fila->telefono;
         $contexto = 'Asistente por WhatsApp - foto - cliente #' . $client->id;
+
+        /* Las fotos de la respuesta salen por el mismo número que el texto que las precede: van
+         * debajo de él en el chat del dueño, y por el otro número aparecerían en otra
+         * conversación. Vale para los dos caminos de abajo (link y bytes). */
+        $sender->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE);
 
         if ($fotos->va_por_link($url)) {
             $resultado = $this->con_reintento_transitorio($sender, $vence, function () use ($sender, $telefono, $url, $caption, $contexto) {
@@ -1423,7 +1444,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
         $fila->error  = 'El empresa-api de este cliente no tiene la ruta ' . self::RUTA_MENSAJES . ' (404).';
         $fila->save();
 
-        $whatsapp_message_id = $sender->send_text(
+        // Por el número del asistente, igual que la respuesta: ver el comentario de `consultar()`.
+        $whatsapp_message_id = $sender->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)->send_text(
             (string) $fila->telefono,
             AsistenteWhatsappService::TEXTO_SIN_ENDPOINT,
             'Asistente por WhatsApp sin endpoint - cliente #' . $client->id
@@ -1433,7 +1455,9 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             $fila,
             AsistenteWhatsappService::TEXTO_SIN_ENDPOINT,
             $whatsapp_message_id,
-            ClientAssistantMessage::ESTADO_DEGRADADO
+            ClientAssistantMessage::ESTADO_DEGRADADO,
+            null,
+            $sender->phone_number_id_de_destino()
         );
 
         $asistente->avisar_cliente_sin_endpoint($client);
@@ -1480,7 +1504,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             );
         }
 
-        $whatsapp_message_id = $sender->send_text(
+        // Por el número del asistente, igual que la respuesta: ver el comentario de `consultar()`.
+        $whatsapp_message_id = $sender->paraProposito(WhatsappConfig::PROPOSITO_ASISTENTE)->send_text(
             (string) $fila->telefono,
             AsistenteWhatsappService::TEXTO_DE_DISCULPA,
             'Asistente por WhatsApp con error - cliente #' . ($client !== null ? $client->id : '?')
@@ -1491,7 +1516,8 @@ class EnviarMensajeAlAsistenteJob implements ShouldQueue
             AsistenteWhatsappService::TEXTO_DE_DISCULPA,
             $whatsapp_message_id,
             ClientAssistantMessage::ESTADO_ERROR,
-            $fila->error
+            $fila->error,
+            $sender->phone_number_id_de_destino()
         );
 
         $nombre = $client !== null ? (string) $client->name : 'cliente desconocido';

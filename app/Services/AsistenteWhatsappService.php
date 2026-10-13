@@ -160,6 +160,7 @@ class AsistenteWhatsappService
         $fila                               = new ClientAssistantMessage();
         $fila->client_id                    = (int) $client->id;
         $fila->telefono                     = (string) $parsed['from'];
+        $fila->phone_number_id              = $this->phone_number_id_del_payload($parsed);
         $fila->direccion                    = ClientAssistantMessage::DIRECCION_ENTRANTE;
         $fila->whatsapp_message_id          = (string) $parsed['message_id'];
         $fila->reply_to_whatsapp_message_id = $reply_to !== '' ? $reply_to : null;
@@ -672,6 +673,28 @@ class AsistenteWhatsappService
     }
 
     /**
+     * Por qué número de WhatsApp entró este mensaje, tal como lo resolvió el webhook.
+     *
+     * 🔴 **Puede no venir, y eso no es un error.** El campo lo agrega el webhook a partir del
+     * payload de Kapso (misión whatsapp-dos-numeros, 13/10/2026) y hay dos caminos por los que
+     * llega vacío: un payload de Kapso que no lo trae —ahí el webhook cae al número principal, que
+     * es la compatibilidad hacia atrás— y cualquier llamador que arme el `$parsed` a mano. En los
+     * dos casos la fila queda con la columna en null, que es exactamente lo que significa: *no se
+     * sabe por qué número entró*. Inventarle el número principal sería escribir un dato falso en la
+     * única tabla que después se usa para diagnosticar.
+     *
+     * @param array<string, mixed> $parsed Resultado de `WhatsappWebhookController::parse_inbound_message()`.
+     *
+     * @return string|null
+     */
+    private function phone_number_id_del_payload(array $parsed): ?string
+    {
+        $phone_number_id = isset($parsed['phone_number_id']) ? trim((string) $parsed['phone_number_id']) : '';
+
+        return $phone_number_id !== '' ? $phone_number_id : null;
+    }
+
+    /**
      * Deja la fila del mensaje que el asistente le devolvió al dueño.
      *
      * 🔴 Esta fila es la que hace funcionar la cita del PRÓXIMO turno: guarda el `wamid` con el
@@ -688,6 +711,11 @@ class AsistenteWhatsappService
      * @param string|null            $whatsapp_message_id wamid devuelto por Meta, o null si falló.
      * @param string                 $estado              Estado con el que nace la fila saliente.
      * @param string|null            $error               Detalle del fallo, si lo hubo.
+     * @param string|null            $phone_number_id     Número por el que salió. Opcional y con
+     *        default null para no tocar a ningún llamador viejo; sin él la fila cae al número por el
+     *        que ENTRÓ el mensaje del dueño, que es lo que pasa siempre en el canal del asistente
+     *        (se responde por donde escribió). Se pasa explícito cuando el llamador sabe por qué
+     *        número salió de verdad, que es lo único que sirve el día que los dos no coincidan.
      *
      * @return ClientAssistantMessage
      */
@@ -696,7 +724,8 @@ class AsistenteWhatsappService
         string $texto,
         ?string $whatsapp_message_id,
         string $estado,
-        ?string $error = null
+        ?string $error = null,
+        ?string $phone_number_id = null
     ): ClientAssistantMessage {
         $fila = $this->registrar_saliente_de(
             (int) $entrante->client_id,
@@ -705,7 +734,8 @@ class AsistenteWhatsappService
             $whatsapp_message_id,
             $entrante->ai_conversation_id,
             $estado,
-            $error
+            $error,
+            $phone_number_id !== null ? $phone_number_id : $entrante->phone_number_id
         );
 
         $fila->ai_message_id = $entrante->ai_message_id;
@@ -734,6 +764,8 @@ class AsistenteWhatsappService
      * @param int|null    $ai_conversation_id  Conversación del `empresa-api` a la que lleva la cita.
      * @param string      $estado              Estado con el que nace la fila.
      * @param string|null $error               Detalle del fallo, si lo hubo.
+     * @param string|null $phone_number_id     Número de WhatsApp por el que salió, o null si no se
+     *        sabe. Opcional y último a propósito: la firma vieja sigue andando igual.
      *
      * @return ClientAssistantMessage
      */
@@ -744,11 +776,13 @@ class AsistenteWhatsappService
         ?string $whatsapp_message_id,
         ?int $ai_conversation_id,
         string $estado,
-        ?string $error = null
+        ?string $error = null,
+        ?string $phone_number_id = null
     ): ClientAssistantMessage {
         $fila                      = new ClientAssistantMessage();
         $fila->client_id           = $client_id;
         $fila->telefono            = $telefono;
+        $fila->phone_number_id     = $phone_number_id;
         $fila->direccion           = ClientAssistantMessage::DIRECCION_SALIENTE;
         $fila->whatsapp_message_id = $whatsapp_message_id;
         $fila->ai_conversation_id  = $ai_conversation_id;

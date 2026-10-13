@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Helpers\WhatsappNormalizer;
+use App\Models\ClientAssistantMessage;
+use App\Models\WhatsappConfig;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -13,6 +15,13 @@ use Illuminate\Support\Facades\DB;
  * La ventana es por par de números, no por canal: leads, soporte e implementación comparten
  * el mismo WhatsappConfig::getActive(), así que un entrante por cualquiera de los tres la
  * abre para los tres. Por eso se miran las tres tablas.
+ *
+ * 🔴 **Y por eso mismo, desde el 13/10/2026 el propósito importa** (misión
+ * whatsapp-dos-numeros). El asistente de los dueños vive en OTRO número de WhatsApp, así que es
+ * otro par de números y otra ventana: lo que el dueño le escribió al número institucional no
+ * habilita texto libre por el número del asistente, ni al revés. Con `proposito = 'asistente'` la
+ * ventana se calcula sobre `client_assistant_messages`, que es el hilo de ese número. Con null o
+ * con `'principal'` se miran las tres tablas de siempre, idéntico a antes de la misión.
  *
  * Ante la duda (sin ningún registro entrante) se devuelve CERRADA: mandar una plantilla
  * pudiendo mandar texto libre es una molestia; mandar texto libre con la ventana cerrada es
@@ -38,11 +47,16 @@ class WhatsappSessionWindowService
     /**
      * Estado de la ventana para un teléfono.
      *
-     * @param string $phone Teléfono en cualquier formato.
+     * @param string      $phone     Teléfono en cualquier formato.
+     * @param string|null $proposito Número por el que se va a mandar: uno de los
+     *        WhatsappConfig::PROPOSITO_*. 🔴 **Opcional y con default null a propósito**: hay
+     *        varios consumidores (la bandeja de soporte, los mensajes programados, el endpoint de
+     *        contactos, los seguimientos de leads) y ninguno se tocó. Null se comporta exactamente
+     *        como antes del 13/10/2026.
      *
      * @return array{open: bool, last_inbound_at: string|null, expires_at: string|null, origin: string|null}
      */
-    public function window_state(string $phone): array
+    public function window_state(string $phone, ?string $proposito = null): array
     {
         $closed = [
             'open'            => false,
@@ -77,8 +91,16 @@ class WhatsappSessionWindowService
          * las cachea por request y el consumidor que más pega (el endpoint de contactos) pregunta
          * muchas veces por teléfonos distintos sobre las mismas filas.
          */
+        /* El canal del asistente tiene UN solo buscador y no tres, porque es otro número: los
+         * entrantes de soporte, leads e implementación llegaron al institucional y no abren nada
+         * acá. Y al revés —un dueño que le escribe a su asistente— no habilita texto libre por el
+         * número de leads, así que el camino de siempre tampoco mira esta tabla. */
+        $buscadores = $proposito === WhatsappConfig::PROPOSITO_ASISTENTE
+            ? ['find_asistente_inbound']
+            : ['find_support_inbound', 'find_lead_inbound', 'find_implementation_inbound'];
+
         $candidatos = [];
-        foreach (['find_support_inbound', 'find_lead_inbound', 'find_implementation_inbound'] as $buscador) {
+        foreach ($buscadores as $buscador) {
             $encontrado = $this->{$buscador}($phone, $cutoff);
             if ($encontrado !== null) {
                 $candidatos[] = $encontrado;
@@ -109,13 +131,14 @@ class WhatsappSessionWindowService
     /**
      * Atajo booleano de window_state().
      *
-     * @param string $phone Teléfono en cualquier formato.
+     * @param string      $phone     Teléfono en cualquier formato.
+     * @param string|null $proposito Ver {@see window_state()}. Null = comportamiento de siempre.
      *
      * @return bool
      */
-    public function is_open(string $phone): bool
+    public function is_open(string $phone, ?string $proposito = null): bool
     {
-        $state = $this->window_state($phone);
+        $state = $this->window_state($phone, $proposito);
 
         return (bool) $state['open'];
     }
@@ -194,6 +217,39 @@ class WhatsappSessionWindowService
         });
 
         return $this->first_matching_row($rows, $phone, 'implementacion');
+    }
+
+    /**
+     * Último entrante del canal del asistente de ese número dentro de la ventana.
+     *
+     * Cuenta cualquier fila entrante del hilo, sin mirar el `estado`: una foto que todavía está
+     * `esperando` su instrucción es un mensaje que el dueño ya mandó, y para Meta la ventana la
+     * abre el mensaje, no lo que nosotros hayamos hecho después con él.
+     *
+     * No se filtra por `phone_number_id` aunque la columna exista: las filas anteriores al
+     * 13/10/2026 la tienen en null y un filtro por ella dejaría la ventana cerrada para todo dueño
+     * que escribió antes de la migración. El propósito ya está resuelto por la elección de este
+     * buscador; acá lo que hace falta es el teléfono y la fecha.
+     *
+     * @param string                    $phone  Teléfono buscado.
+     * @param \Illuminate\Support\Carbon $cutoff Momento a partir del cual cuenta.
+     *
+     * @return array{at: \Illuminate\Support\Carbon, origin: string}|null
+     */
+    private function find_asistente_inbound(string $phone, $cutoff)
+    {
+        $rows = $this->rows_for('asistente', function () use ($cutoff) {
+            return DB::table('client_assistant_messages')
+                ->where('direccion', ClientAssistantMessage::DIRECCION_ENTRANTE)
+                ->where('created_at', '>=', $cutoff)
+                ->whereNotNull('telefono')
+                ->where('telefono', '!=', '')
+                ->select('telefono as phone', 'created_at as at')
+                ->orderByDesc('created_at')
+                ->get();
+        });
+
+        return $this->first_matching_row($rows, $phone, 'asistente');
     }
 
     /**
