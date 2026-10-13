@@ -87,6 +87,12 @@ class LeadOrigenService
     const SEGUNDOS_DE_TOLERANCIA_DEL_REFERRAL = 30;
 
     /**
+     * Saludos que {@see es_frase_exacta()} tolera delante de la frase, ya normalizados. Los más
+     * largos primero: «buenas tardes» tiene que ganarle a «buenas».
+     */
+    const SALUDOS = ['buenos dias', 'buenas tardes', 'buenas noches', 'buen dia', 'buenas', 'hola'];
+
+    /**
      * Normaliza un texto para comparar frases: sin tildes, minúsculas, sin signos y con los espacios
      * colapsados. «¡Hola Martín!, quiero...» y «hola martin quiero» quedan iguales.
      *
@@ -176,8 +182,18 @@ class LeadOrigenService
     }
 
     /**
-     * Renglón extra del bloque DEMO DIRECTA cuando el ÚLTIMO mensaje del lead es una de las frases
+     * Renglón extra del bloque DEMO DIRECTA cuando el último mensaje del hilo ES una de las frases
      * del «sí»: lo dice explícito, para no depender de que el modelo empareje el ejemplo.
+     *
+     * 🔴 Acá la comparación es «es», no «contiene» (el origen sí usa «contiene»): «Hola Martín,
+     * quiero hacer la demo de ComercioCity, pero hoy no puedo, ¿mañana?» contiene la frase y NO es
+     * un sí para ahora; decirle al modelo que lo es chocaría con la regla de «si dice que ahora no
+     * puede, no agendes». Ver {@see es_frase_exacta()}.
+     *
+     * Y tiene que ser el último mensaje que cuenta: el último del lead, sin un mensaje nuestro que
+     * haya salido después (mismo criterio que `ClaudeLeadQueryService::saliente_salido_sql()`: las
+     * sugerencias `sugerido`/`rechazado` y los eventos de estado no salieron, así que no cuentan).
+     * Si ya le contestamos, la frase ya se atendió.
      *
      * @param Lead $lead
      *
@@ -195,13 +211,53 @@ class LeadOrigenService
             return '';
         }
 
+        $ya_le_contestamos = LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('id', '>', (int) $ultimo->id)
+            ->whereRaw(ClaudeLeadQueryService::saliente_salido_sql('lead_messages'))
+            ->exists();
+        if ($ya_le_contestamos) {
+            return '';
+        }
+
         foreach (self::frases_de_cta() as $frase) {
-            if (self::contiene_frase((string) $ultimo->content, $frase)) {
+            if (self::es_frase_exacta((string) $ultimo->content, $frase)) {
                 return "  - OJO: el ULTIMO mensaje del lead es una de esas frases (\"" . $frase . "\"): es un SI a la demo.\n";
             }
         }
 
         return '';
+    }
+
+    /**
+     * ¿El texto ES la frase? Normalizado (sin tildes, sin signos, minúsculas) y tolerando como mucho
+     * UN saludo adelante («Buenas!», «Hola», «Buen día»...). Nada atrás: «la frase, pero hoy no
+     * puedo» no es la frase.
+     *
+     * @param string $texto
+     * @param string $frase
+     *
+     * @return bool
+     */
+    public static function es_frase_exacta(string $texto, string $frase): bool
+    {
+        $frase_normalizada = self::normalizar($frase);
+        if ($frase_normalizada === '') {
+            return false;
+        }
+
+        $texto_normalizado = self::normalizar($texto);
+        if ($texto_normalizado === $frase_normalizada) {
+            return true;
+        }
+
+        foreach (self::SALUDOS as $saludo) {
+            if (strpos($texto_normalizado, $saludo . ' ') === 0) {
+                return trim(substr($texto_normalizado, strlen($saludo))) === $frase_normalizada;
+            }
+        }
+
+        return false;
     }
 
     /**

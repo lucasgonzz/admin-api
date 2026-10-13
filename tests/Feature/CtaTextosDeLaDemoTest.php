@@ -229,12 +229,111 @@ class CtaTextosDeLaDemoTest extends TestCase
     }
 
     /**
-     * El bloque DEMO DIRECTA nombra todas las frases; la línea explícita aparece SOLO cuando el
-     * último mensaje del lead es una de ellas (aunque venga con un saludo delante y sin tildes).
+     * El bloque DEMO DIRECTA nombra todas las frases; sin la frase como último mensaje no va la línea
+     * explícita.
      *
      * @return void
      */
-    public function test_el_bloque_de_demo_directa_nombra_las_frases_y_avisa_el_si(): void
+    public function test_el_bloque_de_demo_directa_nombra_todas_las_frases(): void
+    {
+        $lead = $this->crear_lead_para_el_prompt();
+        $this->mensaje_del_lead($lead, 'Hola, tengo una ferretería y quiero ordenar el stock');
+
+        $contexto = $this->contexto_de_demo_directa($lead->fresh());
+
+        foreach (LeadDemoSettings::get_cta_whatsapp_textos() as $frase) {
+            $this->assertStringContainsString('"' . $frase . '"', $contexto, 'El bloque tiene que nombrar la frase: ' . $frase);
+        }
+        $this->assertStringNotContainsString('es un SI a la demo', $contexto, 'Sin la frase como último mensaje no va la línea explícita.');
+    }
+
+    /**
+     * La frase sola como último mensaje: va la línea explícita.
+     *
+     * @return void
+     */
+    public function test_la_frase_sola_como_ultimo_mensaje_lleva_la_linea_del_si(): void
+    {
+        $lead = $this->crear_lead_para_el_prompt();
+        $this->mensaje_del_lead($lead, 'Hola, tengo una ferretería');
+        $this->mensaje_del_lead($lead, 'Hola Martín, vengo de Instagram y quiero hacer la demo de ComercioCity');
+
+        $contexto = $this->contexto_de_demo_directa($lead->fresh());
+
+        $this->assertStringContainsString('el ULTIMO mensaje del lead es una de esas frases', $contexto);
+        $this->assertStringContainsString('es un SI a la demo', $contexto);
+    }
+
+    /**
+     * Con un saludo delante y sin tildes sigue siendo la frase.
+     *
+     * @return void
+     */
+    public function test_la_frase_con_un_saludo_delante_lleva_la_linea_del_si(): void
+    {
+        $lead = $this->crear_lead_para_el_prompt();
+        $this->mensaje_del_lead($lead, 'Buenas! Hola Martin, vi la web de Comerciocity y quiero hacer la demo');
+
+        $this->assertStringContainsString('es un SI a la demo', $this->contexto_de_demo_directa($lead->fresh()));
+    }
+
+    /**
+     * 🔴 La frase con algo detrás («pero hoy no puedo») CONTIENE la frase y NO es un sí para ahora:
+     * sin la línea, para que el modelo aplique la regla de «si dice que ahora no puede».
+     *
+     * @return void
+     */
+    public function test_la_frase_con_un_pero_detras_no_lleva_la_linea_del_si(): void
+    {
+        $lead = $this->crear_lead_para_el_prompt();
+        $this->mensaje_del_lead($lead, 'Hola Martín, quiero hacer la demo de ComercioCity, pero hoy no puedo, ¿mañana?');
+
+        $this->assertStringNotContainsString('es un SI a la demo', $this->contexto_de_demo_directa($lead->fresh()));
+    }
+
+    /**
+     * Si después de la frase ya salió un mensaje nuestro, la frase ya se atendió: sin la línea. Una
+     * sugerencia que nunca salió no cuenta como respuesta.
+     *
+     * @return void
+     */
+    public function test_la_frase_ya_respondida_no_lleva_la_linea_del_si(): void
+    {
+        $lead = $this->crear_lead_para_el_prompt();
+        $this->mensaje_del_lead($lead, 'Hola Martín, vi la web de ComercioCity y quiero hacer la demo');
+
+        /* Una sugerencia pendiente no salió: la línea sigue. */
+        $this->mensaje_nuestro($lead, 'sugerido', null);
+        $this->assertStringContainsString('es un SI a la demo', $this->contexto_de_demo_directa($lead->fresh()));
+
+        /* Un mensaje nuestro que salió de verdad: la frase ya se atendió. */
+        $this->mensaje_nuestro($lead, 'enviado', 'wamid.CTA-RESPUESTA-' . Str::random(10));
+        $this->assertStringNotContainsString('es un SI a la demo', $this->contexto_de_demo_directa($lead->fresh()));
+    }
+
+    /**
+     * «Es» y no «contiene», visto directo sobre la comparación.
+     *
+     * @return void
+     */
+    public function test_es_frase_exacta_tolera_solo_un_saludo_delante(): void
+    {
+        $frase = LeadOrigenService::FRASE_LANDING;
+
+        $this->assertTrue(LeadOrigenService::es_frase_exacta('Hola Martín, vi la web de ComercioCity y quiero hacer la demo!!', $frase));
+        $this->assertTrue(LeadOrigenService::es_frase_exacta('Buenas tardes. Hola Martin vi la web de comerciocity y quiero hacer la demo', $frase));
+        $this->assertTrue(LeadOrigenService::es_frase_exacta('buen día, hola martín, vi la web de comerciocity y quiero hacer la demo', $frase));
+        $this->assertFalse(LeadOrigenService::es_frase_exacta('Hola Martín, vi la web de ComercioCity y quiero hacer la demo el lunes', $frase));
+        $this->assertFalse(LeadOrigenService::es_frase_exacta('Che, hola Martín, vi la web de ComercioCity y quiero hacer la demo', $frase));
+        $this->assertFalse(LeadOrigenService::es_frase_exacta('Buenas! Buenas! Hola Martín, vi la web de ComercioCity y quiero hacer la demo', $frase));
+    }
+
+    /**
+     * Lead de la dinámica nueva con link de página (teléfono + URL del admin-spa configurada).
+     *
+     * @return Lead
+     */
+    private function crear_lead_para_el_prompt(): Lead
     {
         config(['services.admin_spa.url' => 'https://admin.test']);
 
@@ -245,20 +344,31 @@ class CtaTextosDeLaDemoTest extends TestCase
         $lead->status       = 'contactado';
         $lead->save();
 
-        $this->mensaje_del_lead($lead, 'Hola, tengo una ferretería y quiero ordenar el stock');
+        return $lead;
+    }
 
-        $contexto = $this->contexto_de_demo_directa($lead->fresh());
+    /**
+     * Mensaje nuestro en el hilo (sistema), en el estado pedido.
+     *
+     * @param Lead        $lead
+     * @param string      $status
+     * @param string|null $wamid
+     *
+     * @return LeadMessage
+     */
+    private function mensaje_nuestro(Lead $lead, string $status, ?string $wamid): LeadMessage
+    {
+        $mensaje                        = new LeadMessage();
+        $mensaje->lead_id               = $lead->id;
+        $mensaje->sender                = 'sistema';
+        $mensaje->status                = $status;
+        $mensaje->is_followup           = false;
+        $mensaje->requiere_verificacion = false;
+        $mensaje->content               = 'Dale, te la dejo lista en diez minutos.';
+        $mensaje->whatsapp_message_id   = $wamid;
+        $mensaje->save();
 
-        foreach (LeadDemoSettings::get_cta_whatsapp_textos() as $frase) {
-            $this->assertStringContainsString('"' . $frase . '"', $contexto, 'El bloque tiene que nombrar la frase: ' . $frase);
-        }
-        $this->assertStringNotContainsString('es un SI a la demo', $contexto, 'Sin la frase como último mensaje no va la línea explícita.');
-
-        $this->mensaje_del_lead($lead, 'Buenas! Hola Martin, vi la web de Comerciocity y quiero hacer la demo');
-
-        $contexto = $this->contexto_de_demo_directa($lead->fresh());
-        $this->assertStringContainsString('el ULTIMO mensaje del lead es una de esas frases', $contexto);
-        $this->assertStringContainsString('es un SI a la demo', $contexto);
+        return $mensaje;
     }
 
     /**
