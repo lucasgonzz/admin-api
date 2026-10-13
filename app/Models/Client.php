@@ -39,6 +39,10 @@ class Client extends Model
         'tiene_ecommerce'          => 'boolean',
         'tiene_mercado_libre'      => 'boolean',
         'tiene_tienda_nube'        => 'boolean',
+        /* Factura de mensualidad a Consumidor Final, sin CUIT (misión mensualidad-consumidor-final,
+         * 13/10/2026). Booleana y no leída cruda porque `AfipFacturacionService::resolver_receptor()`
+         * decide con un `if` sobre esta columna, y un "0" string es verdadero en PHP. */
+        'facturar_consumidor_final' => 'boolean',
         'precio_plan'              => 'decimal:2',
         'precio_por_cuenta'        => 'decimal:2',
         'precio_ecommerce'         => 'decimal:2',
