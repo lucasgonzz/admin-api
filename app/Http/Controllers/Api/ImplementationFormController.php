@@ -99,14 +99,12 @@ class ImplementationFormController extends Controller
         $form_data = $this->read_form_responses($stage);
 
         // Precargar el email del lead (el que se uso para agendar la demo) si el cliente todavia no cargo uno.
-        $has_email = is_array($form_data) && isset($form_data['email']) && trim((string) $form_data['email']) !== '';
+        $has_email = isset($form_data['email']) && trim((string) $form_data['email']) !== '';
         if (! $has_email && $implementation->client !== null) {
             $lead = \App\Models\Lead::where('promoted_client_id', $implementation->client->id)->first();
             if ($lead !== null) {
                 $lead_email = trim((string) ($lead->email ?? ''));
                 if ($lead_email !== '') {
-                    // $form_data puede ser un stdClass vacio (se serializa como {}); normalizar a array para inyectar.
-                    $form_data = is_array($form_data) ? $form_data : array();
                     $form_data['email'] = $lead_email;
                 }
             }
@@ -119,7 +117,8 @@ class ImplementationFormController extends Controller
         return response()->json([
             'submitted'                => false,
             'client_name'              => $client_name,
-            'form_data'                => $form_data,
+            // Sin respuestas va como objeto vacío: un array vacío se serializa como [] y el SPA espera {}.
+            'form_data'                => empty($form_data) ? new \stdClass() : $form_data,
             'payment_method_options'   => $payment_method_options,
         ], 200);
     }
@@ -423,6 +422,11 @@ class ImplementationFormController extends Controller
      * Lee las respuestas del formulario web desde el stage 1.
      * Prioriza data.form_responses; si no existe, busca claves legadas en el raíz.
      *
+     * Devuelve SIEMPRE un array (vacío si no hay respuestas). Pasarlo a {} para el JSON es cosa de
+     * show(): devolver acá un stdClass rompía el tipo de retorno (TypeError → 500) en cuanto el stage 1
+     * tenía data sin form_responses, por ejemplo las `actions` que registra Claude antes de que el
+     * cliente abra el formulario (medido en producción el 13/10/2026).
+     *
      * @param ImplementationStage|null $stage
      *
      * @return array<string, mixed>
@@ -436,13 +440,10 @@ class ImplementationFormController extends Controller
         $stage_data = $stage->data;
 
         if (isset($stage_data[self::FORM_RESPONSES_KEY]) && is_array($stage_data[self::FORM_RESPONSES_KEY])) {
-            // Forzar objeto vacío en lugar de array vacío para que JSON lo serialice como {} no como []
-            $responses = $stage_data[self::FORM_RESPONSES_KEY];
-            return empty($responses) ? new \stdClass() : $responses;
+            return $stage_data[self::FORM_RESPONSES_KEY];
         }
 
-        $legacy = $this->extract_legacy_form_fields($stage_data);
-        return empty($legacy) ? new \stdClass() : $legacy;
+        return $this->extract_legacy_form_fields($stage_data);
     }
 
     /**
