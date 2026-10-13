@@ -483,9 +483,10 @@ return [
         // Timeout (segundos) de cada llamada a Meta.
         'timeout'         => (int) (env('META_CAPI_TIMEOUT') ?: 15),
         // Conversiones de los leads que vinieron de la WEB (segunda tanda, 13/10/2026): van al
-        // conjunto de datos del píxel de la web, no al de la WABA. Vacías, caen a las de arriba
-        // (el fallback lo resuelve MetaConversionesService, no este archivo). El token, con la misma
-        // regla: no se loguea nunca ni viaja por query string.
+        // conjunto de datos del píxel de la web, no al de la WABA. 🔴 Sin fallback a las de arriba:
+        // si falta cualquiera de las dos, los eventos de la web quedan sin_configurar. Si es un solo
+        // dataset, se cargan repetidas. El token, con la misma regla: no se loguea nunca ni viaja
+        // por query string.
         'web_token'       => env('META_CAPI_WEB_TOKEN', ''),
         'web_dataset_id'  => env('META_CAPI_WEB_DATASET_ID', ''),
     ],

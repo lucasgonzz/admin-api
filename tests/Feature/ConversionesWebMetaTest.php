@@ -30,9 +30,10 @@ use Tests\TestCase;
  * Lo que se protege: que un lead `landing` registre `Lead`, `Schedule` y `Purchase` en el canal
  * `web` (acumulativos, una vez cada uno); que el POST salga al dataset de la web con el body exacto
  * (`action_source: chat`, `ph` en las dos variantes argentinas, sin `ctwa_clid` ni
- * `messaging_channel`); que la configuración de la web caiga a la de WhatsApp; que un lead de anuncio
- * siga yendo por WhatsApp; que el único sea por canal; que el backfill no mande nada; que el
- * conciliador levante a los leads de la web; y que ningún token quede en una fila o en el log.
+ * `messaging_channel`); que la web necesite su propia configuración, sin caer a la de WhatsApp;
+ * que un lead de anuncio siga yendo por WhatsApp; que el único sea por canal; que el backfill no
+ * mande nada; que el conciliador levante a los leads de la web; y que ningún token quede en una
+ * fila o en el log.
  */
 class ConversionesWebMetaTest extends TestCase
 {
@@ -343,40 +344,56 @@ class ConversionesWebMetaTest extends TestCase
      |----------------------------------------------------------------------------------------- */
 
     /**
-     * Sin las variables de la web, cae a las de WhatsApp: el dataset y el token de la WABA. Y cada
-     * una cae por su lado: con el token de la web y sin su dataset, sale con el token de la web al
-     * dataset de WhatsApp.
+     * 🔴 Sin fallback: con la configuración de WhatsApp completa y a la de la web le falta el token o
+     * el dataset, los eventos de la web quedan `sin_configurar`, el envío no sale a ningún lado (ni
+     * al dataset de la WABA) y el conciliador no los reencola, pero avisa qué falta del canal web.
+     * Un lead de anuncio, en cambio, sale normal.
      *
      * @return void
      */
-    public function test_la_config_de_la_web_cae_a_la_de_whatsapp(): void
+    public function test_sin_su_config_propia_la_web_no_cae_a_la_de_whatsapp(): void
     {
         Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+        $this->capturar_el_log();
 
-        config(['services.meta_capi.web_token' => '', 'services.meta_capi.web_dataset_id' => '  ']);
-        $primero = $this->crear_lead_de_la_web('calificado');
-        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $primero->id)->firstOrFail());
+        config(['services.meta_capi.web_token' => '', 'services.meta_capi.web_dataset_id' => self::WEB_DATASET]);
+        $sin_token = $this->crear_lead_de_la_web('calificado');
 
-        config(['services.meta_capi.web_token' => self::WEB_TOKEN, 'services.meta_capi.web_dataset_id' => '']);
-        $segundo = $this->crear_lead_de_la_web('calificado');
-        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $segundo->id)->firstOrFail());
+        config(['services.meta_capi.web_token' => self::WEB_TOKEN, 'services.meta_capi.web_dataset_id' => '  ']);
+        $sin_dataset = $this->crear_lead_de_la_web('calificado');
 
-        Http::assertSentCount(2);
-        Http::assertSent(function ($request) use ($primero) {
+        foreach ([$sin_token, $sin_dataset] as $lead) {
+            $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+            $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, $fila->estado);
+            $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, app(MetaConversionesService::class)->enviar($fila));
+        }
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+        Http::assertNothingSent();
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+        $this->assertStringContainsString('Canal web: falta META_CAPI_WEB_TOKEN o META_CAPI_WEB_DATASET_ID', Artisan::output());
+        $this->assertStringNotContainsString('Canal whatsapp', Artisan::output());
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        /* WhatsApp está configurado: un lead de anuncio sale a su dataset. */
+        $anuncio            = $this->crear_lead_de_la_web('nuevo');
+        $anuncio->origen    = LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP;
+        $anuncio->ctwa_clid = self::CLID;
+        $anuncio->status    = 'calificado';
+        $anuncio->save();
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $anuncio->id)->firstOrFail());
+
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) {
             return $request->url() === 'https://graph.facebook.com/v24.0/' . self::DATASET . '/events'
-                && $request->hasHeader('Authorization', 'Bearer ' . self::TOKEN)
-                && $request->data()['data'][0]['event_id'] === 'cc-lead-' . $primero->id . '-web-lead';
-        });
-        Http::assertSent(function ($request) use ($segundo) {
-            return $request->url() === 'https://graph.facebook.com/v24.0/' . self::DATASET . '/events'
-                && $request->hasHeader('Authorization', 'Bearer ' . self::WEB_TOKEN)
-                && $request->data()['data'][0]['event_id'] === 'cc-lead-' . $segundo->id . '-web-lead';
+                && $request->data()['data'][0]['action_source'] === 'business_messaging';
         });
     }
 
     /**
      * Sin ninguna configuración (ni la de la web ni la de WhatsApp): sin_configurar, un warning que
-     * nombra las variables de la web, nada encolado y ninguna llamada.
+     * nombra las variables de la web (y no las de WhatsApp, que no le sirven), nada encolado y
+     * ninguna llamada.
      *
      * @return void
      */
@@ -403,6 +420,9 @@ class ConversionesWebMetaTest extends TestCase
             return strpos($linea, 'warning') === 0 && strpos($linea, 'META_CAPI_WEB_TOKEN') !== false;
         });
         $this->assertNotEmpty($warnings, 'Sin configuración tiene que quedar un warning que nombre las variables de la web.');
+        foreach ($warnings as $linea) {
+            $this->assertStringNotContainsString('META_CAPI_TOKEN o', $linea, 'El warning de la web no puede mandar a cargar las de WhatsApp.');
+        }
     }
 
     /* ------------------------------------------------------------------------------------------

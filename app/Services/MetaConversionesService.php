@@ -63,7 +63,10 @@ use Illuminate\Support\Str;
  *
  * 🔴 **Sin configuración no sale nada.** `META_CAPI_TOKEN` o `META_CAPI_DATASET_ID` vacíos: el
  * evento queda `sin_configurar`, con un warning en el log y CERO llamadas HTTP. El canal `web` usa
- * `META_CAPI_WEB_TOKEN` y `META_CAPI_WEB_DATASET_ID`, y cada una que esté vacía cae a la de WhatsApp.
+ * SUS PROPIAS `META_CAPI_WEB_TOKEN` y `META_CAPI_WEB_DATASET_ID`, sin caer a las de WhatsApp: con un
+ * fallback, cargar solo las de WhatsApp mandaría los eventos de la web al dataset de la WABA sin que
+ * nadie lo decida, y un token sin permiso sobre el píxel quemaría los tres intentos de cada evento.
+ * Si es un solo dataset, se cargan las cuatro con los valores repetidos.
  */
 class MetaConversionesService
 {
@@ -841,8 +844,9 @@ class MetaConversionesService
     }
 
     /**
-     * Token del canal. El de la web cae al de WhatsApp si está vacío (`META_CAPI_WEB_TOKEN` →
-     * `META_CAPI_TOKEN`). Privado a propósito: el token no sale de esta clase.
+     * Token del canal: `META_CAPI_TOKEN` para WhatsApp, `META_CAPI_WEB_TOKEN` para la web. 🔴 Sin
+     * fallback entre canales (ver el docblock de la clase). Privado a propósito: el token no sale de
+     * esta clase.
      *
      * @param string $canal
      *
@@ -850,19 +854,14 @@ class MetaConversionesService
      */
     private static function token_del_canal(string $canal): string
     {
-        if ($canal === LeadEventoMeta::CANAL_WEB) {
-            $web = trim((string) config('services.meta_capi.web_token'));
-            if ($web !== '') {
-                return $web;
-            }
-        }
+        $clave = $canal === LeadEventoMeta::CANAL_WEB ? 'services.meta_capi.web_token' : 'services.meta_capi.token';
 
-        return trim((string) config('services.meta_capi.token'));
+        return trim((string) config($clave));
     }
 
     /**
-     * Dataset del canal. El de la web (el del píxel) cae al de WhatsApp si está vacío
-     * (`META_CAPI_WEB_DATASET_ID` → `META_CAPI_DATASET_ID`).
+     * Dataset del canal: `META_CAPI_DATASET_ID` (el de la WABA) para WhatsApp,
+     * `META_CAPI_WEB_DATASET_ID` (el del píxel) para la web. 🔴 Sin fallback entre canales.
      *
      * @param string $canal
      *
@@ -870,14 +869,9 @@ class MetaConversionesService
      */
     private static function dataset_del_canal(string $canal): string
     {
-        if ($canal === LeadEventoMeta::CANAL_WEB) {
-            $web = trim((string) config('services.meta_capi.web_dataset_id'));
-            if ($web !== '') {
-                return $web;
-            }
-        }
+        $clave = $canal === LeadEventoMeta::CANAL_WEB ? 'services.meta_capi.web_dataset_id' : 'services.meta_capi.dataset_id';
 
-        return trim((string) config('services.meta_capi.dataset_id'));
+        return trim((string) config($clave));
     }
 
     /**
@@ -890,7 +884,7 @@ class MetaConversionesService
     public static function config_que_falta(string $canal): string
     {
         if ($canal === LeadEventoMeta::CANAL_WEB) {
-            return 'META_CAPI_WEB_TOKEN (o META_CAPI_TOKEN) o META_CAPI_WEB_DATASET_ID (o META_CAPI_DATASET_ID)';
+            return 'META_CAPI_WEB_TOKEN o META_CAPI_WEB_DATASET_ID';
         }
 
         return 'META_CAPI_TOKEN o META_CAPI_DATASET_ID';
