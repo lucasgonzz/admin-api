@@ -149,8 +149,11 @@ class RecursosLinkService
 
         $nombre = trim((string) $client->name);
 
+        /* 🔴 Sin nombre de contacto en la ficha va "Dueño", NUNCA el nombre del negocio: el nombre del
+           usuario del centro se publica como "nombre de pila" en sus preguntas, y el negocio quedaría a la
+           vista de todos los clientes. Cuando entre con un pase, el sistema le pone su nombre real. */
         if ($nombre === '') {
-            $nombre = $client->resolve_display_name() !== '' ? $client->resolve_display_name() : 'Dueño';
+            $nombre = 'Dueño';
         }
 
         return RecursosUsuario::create([

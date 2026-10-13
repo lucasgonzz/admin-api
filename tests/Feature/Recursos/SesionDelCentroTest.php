@@ -113,23 +113,26 @@ class SesionDelCentroTest extends BaseDelCentroDeRecursos
     }
 
     /**
-     * 🔴 La `api` del navegador solo elige el cliente. La llamada va a la URL que el admin tiene para ese
-     * cliente (su API activa), con su clave: aunque el navegador mande la de otro frente del mismo
-     * cliente, o una con path inventado, el admin le pega a la suya.
+     * 🔴 La `api` del navegador solo ELIGE el frente. La llamada va a la URL de ese frente tal como está
+     * en la base del admin (normalizada con su hosting_type), con la clave del cliente: el path que
+     * inventa el navegador no viaja.
+     *
+     * Y va al frente que matcheó, no al activo: el pase vive en la instancia que lo emitió, y si el
+     * frente activo corre una versión vieja, preguntarle a él daría un `pase_invalido` engañoso.
      */
-    public function test_el_canje_va_a_la_url_de_la_base_del_admin_y_no_a_la_del_navegador(): void
+    public function test_el_canje_va_al_frente_que_matcheo_con_la_url_de_la_base_del_admin(): void
     {
         $client = $this->crear_cliente('api-tornillo.test');
 
-        // El segundo frente del mismo cliente (las dos carpetas del shared hosting).
+        // El segundo frente del mismo cliente (las dos carpetas del shared hosting), NO activo.
         $otro               = new ClientApi();
         $otro->client_id    = $client->id;
         $otro->url          = 'https://api-tornillo2.test';
         $otro->path         = 'tornillo2/api';
-        $otro->hosting_type = 'vps';
+        $otro->hosting_type = 'shared_hosting';
         $otro->save();
 
-        Http::fake(['https://api-tornillo.test/api/admin-sync/recursos/canjear-pase' => $this->canje_ok(123)]);
+        Http::fake(['https://api-tornillo2.test/public/api/admin-sync/recursos/canjear-pase' => $this->canje_ok(123)]);
 
         $this->postJson('/api/recursos/sesion/pase', [
             'pase' => $this->pase(),
@@ -137,9 +140,83 @@ class SesionDelCentroTest extends BaseDelCentroDeRecursos
         ])->assertStatus(200);
 
         Http::assertSentCount(1);
-        Http::assertNotSent(function (PedidoHttp $pedido) {
-            return strpos($pedido->url(), 'tornillo2') !== false || strpos($pedido->url(), 'raro') !== false;
+        Http::assertSent(function (PedidoHttp $pedido) use ($client) {
+            return $pedido->url() === 'https://api-tornillo2.test/public/api/admin-sync/recursos/canjear-pase'
+                && $pedido->header('X-Admin-Api-Key') === [$client->api_key];
         });
+        Http::assertNotSent(function (PedidoHttp $pedido) {
+            return strpos($pedido->url(), 'raro') !== false || strpos($pedido->url(), 'https://api-tornillo.test') === 0;
+        });
+    }
+
+    /**
+     * Dos clientes con el MISMO frente (uno cargado apuntando a la API del otro): es la misma
+     * instancia. Se canjea una vez (probando la clave de cada uno: un 401 no gasta el pase) y gana el
+     * cliente cuyo `user_id` es el dueño del usuario que volvió. Si ninguno o más de uno, no se adivina.
+     */
+    public function test_un_frente_de_dos_clientes_se_resuelve_por_el_dueno_del_usuario(): void
+    {
+        $a = $this->crear_cliente('api-compartida.test', ['user_id' => 100]);
+        $b = $this->crear_cliente('api-compartida.test', ['user_id' => 200]);
+
+        // La instancia solo reconoce la clave de B.
+        Http::fake(['https://api-compartida.test/*' => function ($pedido) use ($b) {
+            if ($pedido->header('X-Admin-Api-Key') !== [$b->api_key]) {
+                return Http::response(['message' => 'Unauthorized'], 401);
+            }
+
+            return Http::response(['user' => ['id' => 205, 'name' => 'Juan Pérez', 'email' => null, 'owner_id' => 200]], 200);
+        }]);
+
+        $this->postJson('/api/recursos/sesion/pase', ['pase' => $this->pase(), 'api' => 'https://api-compartida.test'])
+            ->assertStatus(200)
+            ->assertJsonPath('usuario.nombre', 'Juan Pérez');
+
+        $this->assertSame(1, RecursosUsuario::where('client_id', $b->id)->where('empresa_user_id', 205)->count());
+        $this->assertSame(0, RecursosUsuario::where('client_id', $a->id)->count());
+
+        // Un usuario cuyo dueño no es ninguno de los dos: no se elige.
+        Http::swap(new \Tests\Fakes\HttpFactorySinSalida());
+        Http::fake(['https://api-compartida.test/*' => Http::response(['user' => ['id' => 305, 'name' => 'X', 'owner_id' => 300]], 200)]);
+
+        $this->postJson('/api/recursos/sesion/pase', ['pase' => $this->pase(), 'api' => 'https://api-compartida.test'])
+            ->assertStatus(422)
+            ->assertExactJson(['error' => 'cliente_no_encontrado']);
+
+        $this->assertSame(0, RecursosUsuario::where('client_id', $a->id)->count());
+        $this->assertSame(1, RecursosUsuario::where('client_id', $b->id)->count());
+    }
+
+    /**
+     * 🔴 Base compartida: el usuario que devuelve el canje tiene que ser de ESTE dueño. Si no, es
+     * `pase_invalido` y no se crea ni se completa ningún usuario del centro.
+     */
+    public function test_en_una_base_compartida_el_usuario_tiene_que_ser_del_dueno(): void
+    {
+        $grupo = \App\Models\SharedDatabaseGroup::create(['name' => 'u767360347_empresa de prueba']);
+        $client = $this->crear_cliente('api-compartida.test', ['user_id' => 300, 'shared_database_group_id' => $grupo->id]);
+
+        // El dueño ya tenía el link (fila sin id): un usuario ajeno no se la puede completar.
+        (new RecursosLinkService())->link_del_dueno($client);
+        \App\Models\RecursosUsuario::where('client_id', $client->id)->update(['empresa_user_id' => null]);
+
+        Http::fake(['https://api-compartida.test/*' => Http::sequence()
+            ->push(['user' => ['id' => 401, 'name' => 'De otro comercio', 'owner_id' => null]], 200)
+            ->push(['user' => ['id' => 450, 'name' => 'Empleado de otro', 'owner_id' => 400]], 200)
+            ->push(['user' => ['id' => 301, 'name' => 'Empleado propio', 'owner_id' => 300]], 200)]);
+
+        foreach ([1, 2] as $vez) {
+            $this->postJson('/api/recursos/sesion/pase', ['pase' => $this->pase(), 'api' => 'https://api-compartida.test'])
+                ->assertStatus(422)
+                ->assertExactJson(['error' => 'pase_invalido']);
+        }
+
+        $this->assertSame(1, RecursosUsuario::where('client_id', $client->id)->count());
+        $this->assertNull(RecursosUsuario::where('client_id', $client->id)->value('empresa_user_id'));
+
+        $this->postJson('/api/recursos/sesion/pase', ['pase' => $this->pase(), 'api' => 'https://api-compartida.test'])
+            ->assertStatus(200)
+            ->assertJsonPath('usuario.nombre', 'Empleado propio');
     }
 
     public function test_un_404_del_cliente_es_pase_invalido_y_no_crea_nada(): void
@@ -271,21 +348,29 @@ class SesionDelCentroTest extends BaseDelCentroDeRecursos
      */
     public function test_el_dueno_creado_por_el_link_sin_id_se_completa_con_el_pase(): void
     {
-        $client = $this->crear_cliente('api-tornillo.test');
+        // Ficha sin nombre de contacto: el link crea al dueño como "Dueño", nunca con el negocio.
+        $client = $this->crear_cliente('api-tornillo.test', ['name' => '']);
 
         (new RecursosLinkService())->link_del_dueno($client);
 
         $dueno = RecursosUsuario::where('client_id', $client->id)->first();
         $this->assertNull($dueno->empresa_user_id);
         $this->assertTrue($dueno->es_dueno);
+        $this->assertSame('Dueño', $dueno->nombre);
+        $this->assertStringNotContainsString('Tornillo', $dueno->nombre);
 
         Http::fake(['https://api-tornillo.test/*' => $this->canje_ok(77, 'Marcela Gómez', null)]);
 
         $this->postJson('/api/recursos/sesion/pase', ['pase' => $this->pase(), 'api' => 'https://api-tornillo.test'])
-            ->assertStatus(200);
+            ->assertStatus(200)
+            ->assertJsonPath('usuario.nombre', 'Marcela Gómez');
 
+        // La misma fila, con el id, el nombre y el mail que devolvió el sistema.
         $this->assertSame(1, RecursosUsuario::where('client_id', $client->id)->count());
-        $this->assertSame(77, (int) $dueno->fresh()->empresa_user_id);
+        $dueno->refresh();
+        $this->assertSame(77, (int) $dueno->empresa_user_id);
+        $this->assertSame('Marcela Gómez', $dueno->nombre);
+        $this->assertSame('marcela@ferreteria.test', $dueno->email);
     }
 
     public function test_el_mismo_usuario_entra_siempre_a_la_misma_fila(): void
@@ -384,6 +469,25 @@ class SesionDelCentroTest extends BaseDelCentroDeRecursos
         $this->getJson('/api/admin/client', $this->con_sesion($token))->assertStatus(401);
     }
 
+    /**
+     * Y al revés: un token de Sanctum de un admin no es una sesión del centro.
+     */
+    public function test_un_token_de_admin_no_entra_al_centro(): void
+    {
+        $admin           = new \App\Models\Admin();
+        $admin->name     = 'Admin con token';
+        $admin->email    = 'token-' . Str::random(8) . '@test.local';
+        $admin->password = bcrypt('secret');
+        $admin->save();
+
+        $token = $admin->createToken('prueba')->plainTextToken;
+
+        $this->getJson('/api/admin/me', $this->con_sesion($token))->assertStatus(200);
+        $this->app['auth']->forgetGuards();
+
+        $this->getJson('/api/recursos/yo', $this->con_sesion($token))->assertStatus(401)->assertExactJson(['error' => 'sin_sesion']);
+    }
+
     public function test_salir_invalida_solo_ese_token(): void
     {
         $client = $this->crear_cliente('api-tornillo.test');
@@ -420,6 +524,26 @@ class SesionDelCentroTest extends BaseDelCentroDeRecursos
             });
             $this->assertCount(1, $propios, $ruta->uri() . ' no tiene su limitador propio.');
         }
+    }
+
+    /**
+     * 🔴 Un token inventado no tiene cubeta propia: si la tuviera, mandar un token distinto en cada
+     * pedido sería cupo infinito. Cae en la cubeta de la IP; una sesión vigente sigue con la suya.
+     */
+    public function test_los_tokens_invalidos_comparten_la_cubeta_de_la_ip(): void
+    {
+        $client = $this->crear_cliente('api-tornillo.test');
+        list(, $valido) = $this->usuario_con_sesion($client);
+
+        foreach (range(1, 60) as $intento) {
+            $this->getJson('/api/recursos/yo', $this->con_sesion('inventado-' . $intento))->assertStatus(401);
+        }
+
+        $this->getJson('/api/recursos/yo', $this->con_sesion('inventado-61'))->assertStatus(429);
+        $this->getJson('/api/recursos/yo')->assertStatus(429);
+
+        // La sesión de verdad tiene su propia cubeta.
+        $this->getJson('/api/recursos/yo', $this->con_sesion($valido))->assertStatus(200);
     }
 
     public function test_entrar_tiene_un_tope_de_diez_por_minuto_por_ip(): void

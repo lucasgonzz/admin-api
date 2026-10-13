@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\RecursosSesion as RecursosSesionModelo;
 use Closure;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 
@@ -20,9 +21,9 @@ use Illuminate\Routing\Middleware\ThrottleRequests;
  *  - Los limitadores con nombre (`RateLimiter::for`) viven en `RouteServiceProvider`, que esta
  *    misión no toca, y definirlos en `routes/api.php` no sobrevive a un `route:cache`.
  *
- * Por token se cuenta sobre el sha256 del token (el token en claro no va a la caché). Un pedido sin
- * token en una ruta "por token" cae en la cubeta de su IP; igual la sesión obligatoria lo corta con
- * 401 después.
+ * Por token se cuenta sobre el sha256 del token (el token en claro no va a la caché), y solo si es de
+ * una sesión vigente. Un pedido sin token, o con uno que no es de ninguna sesión vigente, en una ruta
+ * "por token" cae en la cubeta de su IP; igual la sesión obligatoria lo corta con 401 después.
  */
 class RecursosThrottle extends ThrottleRequests
 {
@@ -62,11 +63,28 @@ class RecursosThrottle extends ThrottleRequests
         if ($this->por === 'token') {
             $token = RecursosSesion::token_del_pedido($request);
 
-            if ($token !== '') {
+            /* 🔴 Solo un token que es de una sesión VIGENTE tiene cubeta propia. Si cualquier texto en el
+               header armara su propia cubeta, inventar un token distinto en cada pedido sería tener cupo
+               infinito; esos caen en la cubeta de su IP, como un pedido sin token. */
+            if ($token !== '' && self::sesion_vigente($token)) {
                 return sha1('token|' . hash('sha256', $token));
             }
         }
 
         return sha1('ip|' . $request->ip());
+    }
+
+    /**
+     * Si el token es de una sesión del centro que no venció.
+     *
+     * @param string $token
+     *
+     * @return bool
+     */
+    protected static function sesion_vigente(string $token): bool
+    {
+        return RecursosSesionModelo::where('token_hash', hash('sha256', $token))
+            ->where('expires_at', '>', now())
+            ->exists();
     }
 }
