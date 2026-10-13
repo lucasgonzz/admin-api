@@ -319,6 +319,7 @@ class AudienciasMetaTest extends TestCase
         }));
         $this->assertCount(1, $de_ana, 'La misma persona tiene que quedar en una sola fila.');
         $this->assertSame(hash('sha256', 'ana.perez@ejemplo.com'), $de_ana[0]['email_sha256']);
+        $this->assertSame(hash('sha256', '543411234567'), $de_ana[0]['phone_sha256_sin_9'], 'La variante sin el 9.');
 
         $this->assertSame(1, $this->filas_con_telefono($filas, $tel_calificado));
         $this->assertSame(0, $this->filas_con_telefono($filas, $tel_callado), 'Un seguimiento nuestro reciente no cuenta como conversación.');
@@ -353,6 +354,60 @@ class AudienciasMetaTest extends TestCase
         $this->assertSame(1, $this->filas_con_telefono($filas, $tel_pendiente));
         $this->assertSame(0, $this->filas_con_telefono($filas, $tel_entro));
         $this->assertSame(0, $this->filas_con_telefono($filas, $tel_realizada));
+    }
+
+    /**
+     * agendaron: los que agendaron ALGUNA VEZ, estén donde estén hoy (estado de demo agendada en
+     * adelante, mail2_enviado incluido, o con demo_date, o con el ingreso confirmado), sin ventana de
+     * días. Quedan afuera los que nunca agendaron.
+     *
+     * @return void
+     */
+    public function test_agendaron_alguna_vez(): void
+    {
+        $this->crear_lead('demo_realizada', $tel_realizada = $this->telefono_al_azar());
+        $this->crear_lead('closer_activo', $tel_closer = $this->telefono_al_azar());
+        $this->crear_lead('mail2_enviado', $tel_mail2 = $this->telefono_al_azar());
+        $this->crear_lead('cerrado_ganado', $tel_ganado = $this->telefono_al_azar());
+        $this->crear_lead('demo_agendada', $tel_agendado = $this->telefono_al_azar());
+        $this->crear_lead('cerrado_perdido', $tel_perdido_con_demo = $this->telefono_al_azar(), null, [
+            'demo_date' => Carbon::now()->subMonths(3)->format('Y-m-d'),
+        ]);
+        $this->crear_lead('calificado', $tel_ingreso = $this->telefono_al_azar(), null, ['demo_ingreso_confirmado' => true]);
+
+        $this->crear_lead('contactado', $tel_contactado = $this->telefono_al_azar());
+        $this->crear_lead('cerrado_perdido', $tel_perdido = $this->telefono_al_azar());
+        $this->crear_lead('en_pausa', $tel_pausa = $this->telefono_al_azar());
+
+        $filas = $this->filas(AudienciasMetaService::ETAPA_AGENDARON);
+
+        foreach ([$tel_realizada, $tel_closer, $tel_mail2, $tel_ganado, $tel_agendado, $tel_perdido_con_demo, $tel_ingreso] as $adentro) {
+            $this->assertSame(1, $this->filas_con_telefono($filas, $adentro), 'Tenía que entrar: ' . $adentro);
+        }
+        foreach ([$tel_contactado, $tel_perdido, $tel_pausa] as $afuera) {
+            $this->assertSame(0, $this->filas_con_telefono($filas, $afuera), 'No agendó nunca: ' . $afuera);
+        }
+    }
+
+    /**
+     * dias=0 en conversaron_sin_agendar: sin límite de tiempo («escribieron alguna vez y no
+     * agendaron»). Igual hace falta un mensaje del propio lead.
+     *
+     * @return void
+     */
+    public function test_conversaron_sin_agendar_con_dias_cero_no_tiene_limite(): void
+    {
+        $viejo = $this->crear_lead('contactado', $tel_viejo = $this->telefono_al_azar());
+        $this->mensaje($viejo, 'lead', 200);
+
+        $sin_mensajes_del_lead = $this->crear_lead('nuevo', $tel_mudo = $this->telefono_al_azar());
+        $this->mensaje($sin_mensajes_del_lead, 'sistema', 200);
+
+        $this->assertSame(0, $this->filas_con_telefono($this->filas(AudienciasMetaService::ETAPA_CONVERSARON_SIN_AGENDAR, 14), $tel_viejo));
+
+        $sin_limite = $this->filas(AudienciasMetaService::ETAPA_CONVERSARON_SIN_AGENDAR, 0);
+        $this->assertSame(1, $this->filas_con_telefono($sin_limite, $tel_viejo), 'Con dias=0 entra el que escribió hace 200 días.');
+        $this->assertSame(0, $this->filas_con_telefono($sin_limite, $tel_mudo), 'Sin ningún mensaje del lead no conversó nunca.');
     }
 
     /**
@@ -406,32 +461,62 @@ class AudienciasMetaTest extends TestCase
      */
     public function test_el_endpoint_respeta_el_contrato(): void
     {
-        $lead = $this->crear_lead('demo_agendada', $telefono = $this->telefono_al_azar(), 'agendado@ejemplo.com');
+        $this->crear_lead('demo_agendada', $telefono = $this->telefono_al_azar(), 'agendado@ejemplo.com');
+        $this->crear_lead('demo_agendada', '+34 612 345 678');
 
         $json = $this->getJson('/api/claude/audiencias?etapa=agendaron_sin_entrar', $this->headers());
         $json->assertStatus(200)
             ->assertJsonPath('etapa', 'agendaron_sin_entrar')
             ->assertJsonPath('dias', 14)
-            ->assertJsonStructure(['etapa', 'dias', 'cantidad', 'filas' => ['*' => ['phone_sha256', 'email_sha256']], 'descripcion']);
+            ->assertJsonStructure([
+                'etapa', 'dias', 'cantidad', 'descripcion', 'descartados_por_telefono',
+                'filas' => ['*' => ['phone_sha256', 'email_sha256', 'phone_sha256_sin_9']],
+            ]);
         $this->assertSame(count($json->json('filas')), $json->json('cantidad'));
         $this->assertIsString($json->json('descripcion'));
+        $this->assertIsInt($json->json('descartados_por_telefono'));
 
+        /* El celular argentino trae las dos variantes; el extranjero, solo la suya. */
+        $hash_con_9  = AudienciasMetaService::hash_telefono($telefono);
+        $hash_sin_9  = hash('sha256', '54' . substr($telefono, 3));
+        $del_agendado = array_values(array_filter($json->json('filas'), function ($fila) use ($hash_con_9) {
+            return $fila['phone_sha256'] === $hash_con_9;
+        }));
+        $this->assertCount(1, $del_agendado);
+        $this->assertSame($hash_sin_9, $del_agendado[0]['phone_sha256_sin_9']);
+
+        $hash_extranjero = hash('sha256', '34612345678');
+        $del_extranjero  = array_values(array_filter($json->json('filas'), function ($fila) use ($hash_extranjero) {
+            return $fila['phone_sha256'] === $hash_extranjero;
+        }));
+        $this->assertCount(1, $del_extranjero);
+        $this->assertNull($del_extranjero[0]['phone_sha256_sin_9']);
+
+        /* CSV: el celular argentino en dos filas (una por variante, el mail repetido); el extranjero
+           en una. */
         $csv = $this->get('/api/claude/audiencias?etapa=agendaron_sin_entrar&formato=csv', $this->headers());
         $csv->assertStatus(200);
         $this->assertStringContainsString('text/csv', (string) $csv->headers->get('Content-Type'));
         $lineas = explode("\n", trim($csv->getContent()));
         $this->assertSame('phone,email', $lineas[0]);
-        $this->assertContains(
-            AudienciasMetaService::hash_telefono($telefono) . ',' . hash('sha256', 'agendado@ejemplo.com'),
-            $lineas
-        );
+        $hash_email = hash('sha256', 'agendado@ejemplo.com');
+        $this->assertContains($hash_con_9 . ',' . $hash_email, $lineas);
+        $this->assertContains($hash_sin_9 . ',' . $hash_email, $lineas);
+        $this->assertCount(1, array_filter($lineas, function ($linea) use ($hash_extranjero) {
+            return strpos($linea, $hash_extranjero) === 0;
+        }));
         $this->assertStringNotContainsString($telefono, $csv->getContent());
 
         $this->getJson('/api/claude/audiencias?etapa=todos', $this->headers())
             ->assertStatus(422)
             ->assertJsonPath('etapas_validas', AudienciasMetaService::ETAPAS);
+        $this->assertSame(['conversaron_sin_agendar', 'agendaron_sin_entrar', 'agendaron', 'clientes'], AudienciasMetaService::ETAPAS);
         $this->getJson('/api/claude/audiencias', $this->headers())->assertStatus(422);
-        $this->getJson('/api/claude/audiencias?etapa=clientes&dias=0', $this->headers())->assertStatus(422);
+        $this->getJson('/api/claude/audiencias?etapa=clientes&dias=-1', $this->headers())->assertStatus(422);
+        $this->getJson('/api/claude/audiencias?etapa=clientes&dias=366', $this->headers())->assertStatus(422);
+        $this->getJson('/api/claude/audiencias?etapa=clientes&dias=0', $this->headers())
+            ->assertStatus(200)
+            ->assertJsonPath('dias', 0);
         $this->getJson('/api/claude/audiencias?etapa=clientes&formato=xml', $this->headers())->assertStatus(422);
 
         /* Sin la clave de ingesta no contesta. */
@@ -458,6 +543,7 @@ class AudienciasMetaTest extends TestCase
             $lineas    = explode("\n", trim($contenido));
             $this->assertSame('phone,email', $lineas[0]);
             $this->assertContains(AudienciasMetaService::hash_telefono($telefono) . ',', $lineas);
+            $this->assertContains(AudienciasMetaService::hash_telefono_sin_9($telefono) . ',', $lineas, 'El celular argentino va también sin el 9.');
             $this->assertStringNotContainsString($telefono, $contenido);
 
             $otra = dirname($salida) . '/no-se-escribe.csv';

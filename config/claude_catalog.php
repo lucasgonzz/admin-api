@@ -343,14 +343,14 @@ return [
             'frenos'       => [],
         ],
         'GET api/claude/audiencias' => [
-            'para_que'     => 'Públicos personalizados para Meta armados con el pipeline: conversaron_sin_agendar (por el último mensaje DEL LEAD en los últimos N días), agendaron_sin_entrar y clientes (leads promovidos o cerrado_ganado más la tabla clients). Una fila por persona, deduplicada, con teléfono y mail en SHA-256 normalizados como pide Meta. Nunca devuelve un dato en claro. Con formato=csv devuelve el archivo listo para subir (phone,email).',
+            'para_que'     => 'Públicos personalizados para Meta armados con el pipeline: conversaron_sin_agendar (por el último mensaje DEL LEAD en los últimos N días, o sin límite con dias=0), agendaron_sin_entrar, agendaron (los que agendaron alguna vez, sin ventana) y clientes (leads promovidos o cerrado_ganado más la tabla clients). Una fila por persona, deduplicada, con teléfono y mail en SHA-256 normalizados como pide Meta; un celular argentino trae además phone_sha256_sin_9 (la variante 54 sin el 9). Los teléfonos que no encajan en ningún formato no se adivinan: se cuentan en descartados_por_telefono. Nunca devuelve un dato en claro. Con formato=csv devuelve el archivo listo para subir (phone,email; el celular argentino en dos filas, con y sin el 9).',
             'escribe'      => false,
             'peligrosidad' => 'lectura',
             'frenos'       => [],
             'parametros'   => [
-                ['nombre' => 'etapa', 'obligatorio' => true, 'validacion' => 'conversaron_sin_agendar | agendaron_sin_entrar | clientes', 'que_es' => 'Qué público. Una etapa inválida devuelve 422 con etapas_validas y la descripción de cada una.'],
-                ['nombre' => 'dias', 'obligatorio' => false, 'validacion' => 'entero 1..365, default 14', 'que_es' => 'Ventana de conversaron_sin_agendar. Las otras dos etapas la ignoran.'],
-                ['nombre' => 'formato', 'obligatorio' => false, 'validacion' => 'json | csv, default json', 'que_es' => 'JSON: {etapa, dias, cantidad, filas: [{phone_sha256, email_sha256}], descripcion}. CSV: phone,email.'],
+                ['nombre' => 'etapa', 'obligatorio' => true, 'validacion' => 'conversaron_sin_agendar | agendaron_sin_entrar | agendaron | clientes', 'que_es' => 'Qué público. Una etapa inválida devuelve 422 con etapas_validas y la descripción de cada una.'],
+                ['nombre' => 'dias', 'obligatorio' => false, 'validacion' => 'entero 0..365, default 14', 'que_es' => 'Ventana de conversaron_sin_agendar; 0 = sin límite de tiempo («escribieron alguna vez y no agendaron»). Las otras etapas la ignoran.'],
+                ['nombre' => 'formato', 'obligatorio' => false, 'validacion' => 'json | csv, default json', 'que_es' => 'JSON: {etapa, dias, cantidad, filas: [{phone_sha256, email_sha256, phone_sha256_sin_9}], descripcion, descartados_por_telefono}. CSV: phone,email, con el celular argentino en dos filas.'],
             ],
         ],
         'GET api/claude/templates' => [

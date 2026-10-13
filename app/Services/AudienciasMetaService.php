@@ -10,15 +10,19 @@ use Illuminate\Support\Facades\DB;
  * origen-del-lead-y-conversiones-meta, 13/10/2026). Los consumen `GET claude/audiencias` (para M6b,
  * que los sube a Meta) y `leads:exportar-audiencias` (un CSV a mano).
  *
- * Tres etapas, una fila por persona y deduplicadas:
+ * Cuatro etapas, una fila por persona y deduplicadas:
  *
  *   - `conversaron_sin_agendar`: llegaron a WhatsApp y no agendaron. Estado en {nuevo, contactado,
  *     calificado, solicita_disponibilidad}, sin demo, sin la marca de inalcanzable, sin promover, y
- *     con un mensaje DEL PROPIO LEAD en los últimos N días (14 por defecto). Se mide por el último
- *     mensaje del lead y no por `last_message_at`, que también lo mueven nuestros seguimientos: un
- *     lead que no contesta hace dos meses no conversó, aunque le hayamos escrito ayer.
+ *     con un mensaje DEL PROPIO LEAD en los últimos N días (14 por defecto; 0 = sin límite de tiempo,
+ *     o sea «escribieron alguna vez y no agendaron»). Se mide por el último mensaje del lead y no por
+ *     `last_message_at`, que también lo mueven nuestros seguimientos: un lead que no contesta hace
+ *     dos meses no conversó, aunque le hayamos escrito ayer.
  *   - `agendaron_sin_entrar`: estado en {demo_agendada, demo_pendiente_de_ingreso} y sin el ingreso
  *     confirmado.
+ *   - `agendaron`: los que agendaron ALGUNA VEZ, estén donde estén hoy: estado de demo agendada en
+ *     adelante, o con `demo_date`, o con el ingreso confirmado. Sin ventana de días. M6b la usa como
+ *     exclusión y como parte de la semilla.
  *   - `clientes`: leads promovidos o en `cerrado_ganado`, más la tabla `clients` (teléfono y mail
  *     del dueño), porque hay clientes anteriores al pipeline. Sirve de exclusión y de semilla del
  *     público similar.
@@ -27,24 +31,33 @@ use Illuminate\Support\Facades\DB;
  * como pide Meta: el teléfono con solo dígitos y código de país, sin `+` (`+549 341 123-4567` →
  * `5493411234567`, con una normalización propia y no la del webhook: ver normalizar_telefono());
  * el mail sin espacios y en minúsculas.
+ *
+ * Un celular argentino viaja en DOS variantes, con y sin el 9 (`549…` en `phone_sha256` y `54…` en
+ * `phone_sha256_sin_9`): Meta guarda los números de los dos modos y subir los dos sube el match. Es
+ * como M6b armó sus listas.
  */
 class AudienciasMetaService
 {
     const ETAPA_CONVERSARON_SIN_AGENDAR = 'conversaron_sin_agendar';
     const ETAPA_AGENDARON_SIN_ENTRAR = 'agendaron_sin_entrar';
+    const ETAPA_AGENDARON = 'agendaron';
     const ETAPA_CLIENTES = 'clientes';
 
-    /** Las tres etapas válidas. */
+    /** Las cuatro etapas válidas. */
     const ETAPAS = [
         self::ETAPA_CONVERSARON_SIN_AGENDAR,
         self::ETAPA_AGENDARON_SIN_ENTRAR,
+        self::ETAPA_AGENDARON,
         self::ETAPA_CLIENTES,
     ];
 
     /** Ventana por defecto de `conversaron_sin_agendar`, en días. */
     const DIAS_POR_DEFECTO = 14;
 
-    /** Tope de la ventana: más de un año ya no es una audiencia, es un archivo. */
+    /** `dias=0` en `conversaron_sin_agendar`: sin límite de tiempo. */
+    const DIAS_SIN_LIMITE = 0;
+
+    /** Tope de la ventana: más de un año ya no es una audiencia, es un archivo (para eso está el 0). */
     const DIAS_MAXIMO = 365;
 
     /** Estados de `conversaron_sin_agendar`. */
@@ -54,6 +67,21 @@ class AudienciasMetaService
     const ESTADOS_AGENDARON = ['demo_agendada', 'demo_pendiente_de_ingreso'];
 
     /**
+     * Estados de `agendaron` (agendó alguna vez): la demo agendada y todo lo que viene después,
+     * `mail2_enviado` incluido (en desuso, pero es post-demo).
+     */
+    const ESTADOS_AGENDARON_ALGUNA_VEZ = [
+        'demo_agendada',
+        'demo_en_curso',
+        'demo_pendiente_de_ingreso',
+        'demo_pendiente_de_terminar',
+        'demo_realizada',
+        'closer_activo',
+        'mail2_enviado',
+        'cerrado_ganado',
+    ];
+
+    /**
      * Qué es cada etapa, para el que consume el endpoint.
      *
      * @return array<string, string>
@@ -61,10 +89,13 @@ class AudienciasMetaService
     public static function descripciones(): array
     {
         return [
-            self::ETAPA_CONVERSARON_SIN_AGENDAR => 'Leads que escribieron por WhatsApp en los últimos N días (por su propio último mensaje) y no agendaron la demo: '
+            self::ETAPA_CONVERSARON_SIN_AGENDAR => 'Leads que escribieron por WhatsApp en los últimos N días (por su propio último mensaje; dias=0 = sin límite de tiempo) y no agendaron la demo: '
                 . 'estado ' . implode(', ', self::ESTADOS_CONVERSARON) . ', sin demo, sin la marca de inalcanzable y sin promover.',
             self::ETAPA_AGENDARON_SIN_ENTRAR => 'Leads con la demo agendada que no confirmaron el ingreso: estado '
                 . implode(', ', self::ESTADOS_AGENDARON) . ' y demo_ingreso_confirmado en 0.',
+            self::ETAPA_AGENDARON => 'Leads que agendaron la demo alguna vez, estén donde estén hoy: estado '
+                . implode(', ', self::ESTADOS_AGENDARON_ALGUNA_VEZ) . ', o con demo_date, o con demo_ingreso_confirmado en 1. '
+                . 'Sin ventana de días. Sirve para excluir y como parte de la semilla.',
             self::ETAPA_CLIENTES => 'Clientes: leads promovidos o en cerrado_ganado, más el teléfono y el mail del dueño de cada fila de clients. '
                 . 'Sirve para excluir y como semilla del público similar.',
         ];
@@ -74,9 +105,10 @@ class AudienciasMetaService
      * Las filas de una etapa, ya con hash y deduplicadas.
      *
      * @param string $etapa Una de ETAPAS.
-     * @param int    $dias  Ventana de `conversaron_sin_agendar` (las otras dos la ignoran).
+     * @param int    $dias  Ventana de `conversaron_sin_agendar` (0 = sin límite; las otras la ignoran).
      *
-     * @return array<int, array<string, string|null>> Cada fila: `phone_sha256` y `email_sha256` (null si falta).
+     * @return array<int, array<string, string|null>> Cada fila: `phone_sha256`, `email_sha256` y
+     *                                                `phone_sha256_sin_9` (null si falta o no aplica).
      */
     public function filas(string $etapa, int $dias = self::DIAS_POR_DEFECTO): array
     {
@@ -88,7 +120,7 @@ class AudienciasMetaService
      * dejaron afuera por no poder normalizarlos sin adivinar.
      *
      * @param string $etapa Una de ETAPAS.
-     * @param int    $dias  Ventana de `conversaron_sin_agendar` (las otras dos la ignoran).
+     * @param int    $dias  Ventana de `conversaron_sin_agendar` (0 = sin límite; las otras la ignoran).
      *
      * @return array<string, mixed> `filas` y `descartados_por_telefono` (contactos con un teléfono
      *                              cargado que no encaja en ningún formato; si tienen mail, entran
@@ -99,7 +131,9 @@ class AudienciasMetaService
         if ($etapa === self::ETAPA_CONVERSARON_SIN_AGENDAR) {
             $contactos = $this->contactos_conversaron($dias);
         } elseif ($etapa === self::ETAPA_AGENDARON_SIN_ENTRAR) {
-            $contactos = $this->contactos_agendaron();
+            $contactos = $this->contactos_agendaron_sin_entrar();
+        } elseif ($etapa === self::ETAPA_AGENDARON) {
+            $contactos = $this->contactos_agendaron_alguna_vez();
         } elseif ($etapa === self::ETAPA_CLIENTES) {
             $contactos = $this->contactos_clientes();
         } else {
@@ -110,7 +144,11 @@ class AudienciasMetaService
     }
 
     /**
-     * CSV con encabezado `phone,email` (los dos ya hasheados), una fila por persona.
+     * CSV con encabezado `phone,email` (los dos ya hasheados).
+     *
+     * Una persona con celular argentino sale en DOS filas, una por variante del teléfono (con y sin
+     * el 9) y el mail repetido: es como lo armó M6b y como lo acepta la lista de clientes de Meta.
+     * El resto, en una sola fila.
      *
      * @param array<int, array<string, string|null>> $filas
      *
@@ -120,10 +158,29 @@ class AudienciasMetaService
     {
         $lineas = ['phone,email'];
         foreach ($filas as $fila) {
-            $lineas[] = (string) $fila['phone_sha256'] . ',' . (string) $fila['email_sha256'];
+            $email    = (string) $fila['email_sha256'];
+            $lineas[] = (string) $fila['phone_sha256'] . ',' . $email;
+
+            if (isset($fila['phone_sha256_sin_9']) && $fila['phone_sha256_sin_9'] !== null) {
+                $lineas[] = (string) $fila['phone_sha256_sin_9'] . ',' . $email;
+            }
         }
 
         return implode("\n", $lineas) . "\n";
+    }
+
+    /**
+     * SHA-256 de la variante sin el 9 de un celular argentino (`54` + los 10 dígitos).
+     *
+     * @param string|null $telefono
+     *
+     * @return string|null Null si no es un celular argentino (o no encaja).
+     */
+    public static function hash_telefono_sin_9($telefono): ?string
+    {
+        $normalizado = self::normalizar_telefono($telefono);
+
+        return $normalizado !== null && $normalizado['sin_9'] !== null ? hash('sha256', $normalizado['sin_9']) : null;
     }
 
     /**
@@ -282,7 +339,11 @@ class AudienciasMetaService
      */
     private function contactos_conversaron(int $dias): array
     {
-        $desde = AppTime::now()->subDays(max(1, $dias))->format('Y-m-d H:i:s');
+        /* dias=0: sin límite de tiempo («escribieron alguna vez y no agendaron»). Igual tiene que
+           haber al menos un mensaje del propio lead. */
+        $desde = $dias > self::DIAS_SIN_LIMITE
+            ? AppTime::now()->subDays($dias)->format('Y-m-d H:i:s')
+            : null;
 
         return DB::table('leads')
             ->whereIn('leads.status', self::ESTADOS_CONVERSARON)
@@ -295,8 +356,10 @@ class AudienciasMetaService
                     ->from('lead_messages')
                     ->whereColumn('lead_messages.lead_id', 'leads.id')
                     ->where('lead_messages.sender', 'lead')
-                    ->where('lead_messages.is_status_event', 0)
-                    ->whereRaw('COALESCE(lead_messages.sent_at, lead_messages.created_at) >= ?', [$desde]);
+                    ->where('lead_messages.is_status_event', 0);
+                if ($desde !== null) {
+                    $query->whereRaw('COALESCE(lead_messages.sent_at, lead_messages.created_at) >= ?', [$desde]);
+                }
             })
             ->orderBy('leads.id')
             ->get(['leads.phone', 'leads.email'])
@@ -309,7 +372,26 @@ class AudienciasMetaService
     /**
      * @return array<int, array<string, string|null>>
      */
-    private function contactos_agendaron(): array
+    private function contactos_agendaron_alguna_vez(): array
+    {
+        return DB::table('leads')
+            ->where(function ($query) {
+                $query->whereIn('status', self::ESTADOS_AGENDARON_ALGUNA_VEZ)
+                    ->orWhereNotNull('demo_date')
+                    ->orWhere('demo_ingreso_confirmado', 1);
+            })
+            ->orderBy('id')
+            ->get(['phone', 'email'])
+            ->map(function ($fila) {
+                return ['phone' => $fila->phone, 'email' => $fila->email];
+            })
+            ->all();
+    }
+
+    /**
+     * @return array<int, array<string, string|null>>
+     */
+    private function contactos_agendaron_sin_entrar(): array
     {
         return DB::table('leads')
             ->whereIn('status', self::ESTADOS_AGENDARON)
@@ -371,9 +453,10 @@ class AudienciasMetaService
         $descartados  = 0;
 
         foreach ($contactos as $contacto) {
-            $crudo    = isset($contacto['phone']) ? trim((string) $contacto['phone']) : '';
-            $telefono = self::hash_telefono($crudo);
-            $email    = self::hash_email(isset($contacto['email']) ? $contacto['email'] : null);
+            $crudo     = isset($contacto['phone']) ? trim((string) $contacto['phone']) : '';
+            $telefono  = self::hash_telefono($crudo);
+            $sin_9     = self::hash_telefono_sin_9($crudo);
+            $email     = self::hash_email(isset($contacto['email']) ? $contacto['email'] : null);
 
             if ($crudo !== '' && $telefono === null) {
                 $descartados++;
@@ -391,11 +474,13 @@ class AudienciasMetaService
             }
 
             if ($indice === null) {
-                $indice   = count($filas);
-                $filas[]  = ['phone_sha256' => $telefono, 'email_sha256' => $email];
+                $indice  = count($filas);
+                /* `phone_sha256_sin_9` va al final: es un agregado compatible del contrato con M6b. */
+                $filas[] = ['phone_sha256' => $telefono, 'email_sha256' => $email, 'phone_sha256_sin_9' => $sin_9];
             } else {
                 if ($filas[$indice]['phone_sha256'] === null && $telefono !== null && ! isset($por_telefono[$telefono])) {
-                    $filas[$indice]['phone_sha256'] = $telefono;
+                    $filas[$indice]['phone_sha256']       = $telefono;
+                    $filas[$indice]['phone_sha256_sin_9'] = $sin_9;
                 }
                 if ($filas[$indice]['email_sha256'] === null && $email !== null && ! isset($por_email[$email])) {
                     $filas[$indice]['email_sha256'] = $email;

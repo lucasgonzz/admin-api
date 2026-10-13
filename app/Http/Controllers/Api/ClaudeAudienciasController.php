@@ -14,9 +14,16 @@ use Illuminate\Http\Request;
  * Contrato:
  *
  *     GET claude/audiencias?etapa=<slug>&dias=14&formato=json|csv   (header X-Claude-Task-Key)
- *     JSON → {etapa, dias, cantidad, filas: [{phone_sha256, email_sha256}], descripcion}
- *     CSV  → encabezado `phone,email`, los dos ya hasheados
- *     422  → con `etapas_validas` si la etapa no existe
+ *     etapa → conversaron_sin_agendar | agendaron_sin_entrar | agendaron | clientes
+ *     dias  → 0..365, default 14; 0 = sin límite de tiempo (solo conversaron_sin_agendar la usa)
+ *     JSON  → {etapa, dias, cantidad, filas: [{phone_sha256, email_sha256, phone_sha256_sin_9}],
+ *              descripcion, descartados_por_telefono}
+ *     CSV   → encabezado `phone,email`, los dos ya hasheados; un celular argentino sale en dos
+ *              filas (con y sin el 9, el mail repetido)
+ *     422   → con `etapas_validas` si la etapa no existe
+ *
+ * Todo lo que se sumó después del primer contrato (`phone_sha256_sin_9`, la etapa `agendaron`,
+ * `dias=0`, `descartados_por_telefono`) es agregado: nada se renombró ni se sacó.
  *
  * 🔴 Solo lectura, y nada viaja en claro: teléfono y mail salen como SHA-256 (ver
  * AudienciasMetaService).
@@ -44,11 +51,12 @@ class ClaudeAudienciasController extends Controller
         $dias_crudo = $request->query('dias');
         $dias       = AudienciasMetaService::DIAS_POR_DEFECTO;
         if ($dias_crudo !== null && $dias_crudo !== '') {
+            /* 0 vale: «sin límite de tiempo» (M6b lo usa para «escribieron alguna vez»). */
             if (! is_string($dias_crudo) || ! ctype_digit($dias_crudo)
-                || (int) $dias_crudo < 1 || (int) $dias_crudo > AudienciasMetaService::DIAS_MAXIMO
+                || (int) $dias_crudo > AudienciasMetaService::DIAS_MAXIMO
             ) {
                 return response()->json([
-                    'error' => '`dias` tiene que ser un entero entre 1 y ' . AudienciasMetaService::DIAS_MAXIMO . '.',
+                    'error' => '`dias` tiene que ser un entero entre 0 (sin límite) y ' . AudienciasMetaService::DIAS_MAXIMO . '.',
                 ], 422);
             }
             $dias = (int) $dias_crudo;

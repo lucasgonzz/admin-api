@@ -9,7 +9,8 @@ use Illuminate\Console\Command;
 /**
  * Exporta a CSV un público personalizado para Meta (misión origen-del-lead-y-conversiones-meta,
  * 13/10/2026): la misma lista que `GET claude/audiencias`, para subirla a mano en el Administrador de
- * anuncios. Encabezado `phone,email`, los dos ya hasheados con SHA-256.
+ * anuncios. Encabezado `phone,email`, los dos ya hasheados con SHA-256; un celular argentino sale en
+ * dos filas, con y sin el 9 (el mail repetido), que es como lo acepta la lista de clientes de Meta.
  *
  *     php artisan leads:exportar-audiencias --etapa=conversaron_sin_agendar
  *     php artisan leads:exportar-audiencias --etapa=clientes --salida=C:/tmp/clientes.csv
@@ -20,8 +21,8 @@ class ExportarAudienciasCommand extends Command
      * @var string
      */
     protected $signature = 'leads:exportar-audiencias
-        {--etapa= : conversaron_sin_agendar | agendaron_sin_entrar | clientes}
-        {--dias=14 : Ventana en días de conversaron_sin_agendar (por el último mensaje del lead)}
+        {--etapa= : conversaron_sin_agendar | agendaron_sin_entrar | agendaron | clientes}
+        {--dias=14 : Ventana en días de conversaron_sin_agendar (por el último mensaje del lead; 0 = sin límite)}
         {--salida= : Ruta del CSV. Por defecto, storage/app/audiencias/audiencia-<etapa>-<fecha>.csv}';
 
     /**
@@ -47,8 +48,8 @@ class ExportarAudienciasCommand extends Command
         if ($dias_crudo === '') {
             $dias_crudo = (string) AudienciasMetaService::DIAS_POR_DEFECTO;
         }
-        if (! ctype_digit($dias_crudo) || (int) $dias_crudo < 1 || (int) $dias_crudo > AudienciasMetaService::DIAS_MAXIMO) {
-            $this->error('--dias tiene que ser un entero entre 1 y ' . AudienciasMetaService::DIAS_MAXIMO . '.');
+        if (! ctype_digit($dias_crudo) || (int) $dias_crudo > AudienciasMetaService::DIAS_MAXIMO) {
+            $this->error('--dias tiene que ser un entero entre 0 (sin límite) y ' . AudienciasMetaService::DIAS_MAXIMO . '.');
 
             return 1;
         }
