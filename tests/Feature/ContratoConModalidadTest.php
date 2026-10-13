@@ -301,6 +301,66 @@ class ContratoConModalidadTest extends BaseDeCobranzas
     }
 
     /**
+     * 2c. El plazo mínimo se escribe en letras hasta 60 meses (el techo que valida el PUT), con el
+     * uno apocopado en todas las decenas. Los meses de IPC siguen como siempre: en letras hasta 24
+     * y la cifra sola después, para que ningún contrato ya emitido cambie de texto.
+     *
+     * @return void
+     */
+    public function test_el_plazo_minimo_sale_en_letras_hasta_60(): void
+    {
+        // El helper con el tope del plazo mínimo.
+        $casos = [
+            25 => 'veinticinco (25) meses',
+            29 => 'veintinueve (29) meses',
+            30 => 'treinta (30) meses',
+            31 => 'treinta y un (31) meses',
+            36 => 'treinta y seis (36) meses',
+            41 => 'cuarenta y un (41) meses',
+            48 => 'cuarenta y ocho (48) meses',
+            51 => 'cincuenta y un (51) meses',
+            59 => 'cincuenta y nueve (59) meses',
+            60 => 'sesenta (60) meses',
+            61 => '61 meses',
+        ];
+        foreach ($casos as $meses => $esperado) {
+            $this->assertSame($esperado, LeadContractPdfService::meses_en_letras($meses, LeadContractPdfService::PERMANENCIA_MESES_MAX_EN_LETRAS), 'Meses: ' . $meses);
+        }
+
+        // De 1 a 24 da lo mismo con cualquier tope: los valores de siempre no cambian.
+        for ($meses = 1; $meses <= 24; $meses++) {
+            $this->assertSame(
+                LeadContractPdfService::meses_en_letras($meses),
+                LeadContractPdfService::meses_en_letras($meses, LeadContractPdfService::PERMANENCIA_MESES_MAX_EN_LETRAS),
+                'Meses: ' . $meses
+            );
+        }
+        $this->assertSame('un (1) mes', LeadContractPdfService::meses_en_letras(1));
+        $this->assertSame('veintiún (21) meses', LeadContractPdfService::meses_en_letras(21));
+        $this->assertSame('veinticuatro (24) meses', LeadContractPdfService::meses_en_letras(24));
+
+        // Sin tope explícito, pasado 24 sigue saliendo la cifra (los meses de IPC de siempre).
+        $this->assertSame('36 meses', LeadContractPdfService::meses_en_letras(36));
+
+        // En el contrato: plazo de 36 en letras, IPC de 36 como siempre (la cifra sola).
+        $html = $this->normalizado($this->html($this->lead_con_contrato([
+            'contract_modalidad'           => 'suscripcion',
+            'contract_permanencia_meses'   => 36,
+            'contract_meses_actualizacion' => 36,
+        ])));
+        $this->assertStringContainsString('plazo mínimo de <strong>treinta y seis (36) meses</strong>', $html);
+        $this->assertStringContainsString('cada <strong>36 meses</strong>', $html);
+
+        $this->assertStringContainsString(
+            'plazo mínimo de <strong>sesenta (60) meses</strong>',
+            $this->normalizado($this->html($this->lead_con_contrato([
+                'contract_modalidad'         => 'suscripcion',
+                'contract_permanencia_meses' => 60,
+            ])))
+        );
+    }
+
+    /**
      * 3. La cláusula 5.2 (consumos de terceros) va solo con Agentes, en las dos modalidades. Los
      * sistemas salen en el orden del catálogo, sin repetidos, y una key desconocida se ignora.
      *
