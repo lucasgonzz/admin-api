@@ -170,6 +170,12 @@ class Kernel extends ConsoleKernel
         // Pasa a closer_activo los leads en demo_pendiente_de_terminar que superaron el timeout desde el fin de la demo.
         $schedule->command('leads:check-demo-pendiente-terminar-timeout')->everyMinute();
 
+        // Conversiones a Meta de los leads de anuncio (misión origen-del-lead-y-conversiones-meta,
+        // 13/10/2026): registra lo que el observer de Lead no vio (la demo directa cambia el estado
+        // con un UPDATE directo), libera envíos colgados y reintenta errores. Encola, no manda, así
+        // que la corrida es corta; `withoutOverlapping()` para que dos pasadas no reencolen lo mismo.
+        $schedule->command('leads:meta-capi-conciliar')->everyTenMinutes()->withoutOverlapping();
+
         // Destraba los deployments que quedaron en `running` sin reportar actividad. Es el
         // equivalente de `leads:vencer-demo-setups-colgados` para la máquina de estados del
         // deployment: sin esto, `running` es un estado del que no se sale — lo rechazan las dos

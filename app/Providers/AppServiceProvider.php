@@ -3,8 +3,10 @@
 namespace App\Providers;
 
 use App\Models\AdminSetting;
+use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Models\WhatsappAdReferral;
+use App\Observers\ConversionesMetaObserver;
 use App\Observers\OrigenDesdeElPrimerMensajeObserver;
 use App\Observers\OrigenDesdeElReferralObserver;
 use Illuminate\Support\Facades\Queue;
@@ -41,5 +43,12 @@ class AppServiceProvider extends ServiceProvider
          */
         LeadMessage::observe(OrigenDesdeElPrimerMensajeObserver::class);
         WhatsappAdReferral::observe(OrigenDesdeElReferralObserver::class);
+
+        /*
+         * Conversiones a Meta (misma misión): cuando un lead de anuncio alcanza una etapa, se
+         * registra el evento y se encola su envío. La red de seguridad para lo que este observer
+         * no ve es `leads:meta-capi-conciliar`.
+         */
+        Lead::observe(ConversionesMetaObserver::class);
     }
 }

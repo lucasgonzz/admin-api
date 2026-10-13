@@ -1016,6 +1016,17 @@ class Lead extends Model
     }
 
     /**
+     * Conversiones que se le mandaron (o se le van a mandar) a Meta por este lead, si vino de un
+     * anuncio Click-to-WhatsApp: una fila por evento. Ver MetaConversionesService.
+     *
+     * @return \Illuminate\Database\Eloquent\Relations\HasMany
+     */
+    public function eventos_meta()
+    {
+        return $this->hasMany(LeadEventoMeta::class, 'lead_id')->orderBy('id');
+    }
+
+    /**
      * Mensajes de la conversación WhatsApp (lead, setter, sugerencias de Claude).
      *
      * @return \Illuminate\Database\Eloquent\Relations\HasMany

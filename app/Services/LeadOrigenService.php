@@ -9,6 +9,7 @@ use App\Models\LeadMessage;
 use App\Models\WhatsappAdReferral;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -498,8 +499,11 @@ class LeadOrigenService
     }
 
     /**
-     * Lo que pasa después de guardarle a un lead su `ctwa_clid`. Por ahora nada: es el punto donde
-     * engancha la conversión a Meta.
+     * Lo que pasa después de guardarle a un lead su `ctwa_clid`: registrar las conversiones que ya
+     * alcanzó. El `ctwa_clid` se escribe con un UPDATE condicional (para que dos webhooks no se
+     * pisen) y ese UPDATE no dispara `Lead::saved`, así que el registro se pide acá. Casi siempre no
+     * hay nada que registrar (el lead recién nace, está en `nuevo`); si el referral llegó tarde y el
+     * lead ya avanzó, sale lo que corresponde. Si esto falla, lo levanta el conciliador.
      *
      * @param int $lead_id
      *
@@ -507,5 +511,16 @@ class LeadOrigenService
      */
     protected function despues_de_guardar_el_clid(int $lead_id): void
     {
+        try {
+            $lead = Lead::query()->find($lead_id);
+            if ($lead !== null) {
+                app(MetaConversionesService::class)->registrar_alcanzados($lead);
+            }
+        } catch (\Throwable $exception) {
+            Log::channel('daily')->error('Origen del lead: no se pudieron registrar las conversiones a Meta.', [
+                'lead_id' => $lead_id,
+                'error'   => $exception->getMessage(),
+            ]);
+        }
     }
 }
