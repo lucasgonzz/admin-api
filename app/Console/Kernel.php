@@ -173,8 +173,10 @@ class Kernel extends ConsoleKernel
         // Conversiones a Meta de los leads de anuncio (misión origen-del-lead-y-conversiones-meta,
         // 13/10/2026): registra lo que el observer de Lead no vio (la demo directa cambia el estado
         // con un UPDATE directo), libera envíos colgados y reintenta errores. Encola, no manda, así
-        // que la corrida es corta; `withoutOverlapping()` para que dos pasadas no reencolen lo mismo.
-        $schedule->command('leads:meta-capi-conciliar')->everyTenMinutes()->withoutOverlapping();
+        // que la corrida es corta; `withoutOverlapping(30)` para que dos pasadas no reencolen lo mismo,
+        // con techo explícito: el default de Laravel son 24 horas, y una corrida que muera sin soltar
+        // el candado dejaría las conversiones sin red de seguridad un día entero.
+        $schedule->command('leads:meta-capi-conciliar')->everyTenMinutes()->withoutOverlapping(30);
 
         // Destraba los deployments que quedaron en `running` sin reportar actividad. Es el
         // equivalente de `leads:vencer-demo-setups-colgados` para la máquina de estados del
