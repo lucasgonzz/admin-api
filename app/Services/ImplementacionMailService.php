@@ -189,7 +189,8 @@ class ImplementacionMailService
     {
         $datos_ok = self::datos_validos_o_excepcion($hito, $datos);
 
-        $armado = self::armar($impl, $hito, $datos_ok, $email);
+        // `false`: la vista previa no escribe nada, tampoco el link del centro de recursos (ver `recursos_url_del_listo()`).
+        $armado = self::armar($impl, $hito, $datos_ok, $email, false);
 
         return [
             'asunto'           => $armado['asunto'],
@@ -323,7 +324,7 @@ class ImplementacionMailService
             );
         }
 
-        $armado = self::armar($impl, $hito, $datos, $email);
+        $armado = self::armar($impl, $hito, $datos, $email, true);
 
         if ($armado['para'] === null) {
             $aclaracion = $email !== null && trim($email) !== ''
@@ -527,18 +528,20 @@ class ImplementacionMailService
 
     /**
      * Arma el mail de un hito: resuelve la casilla y el contexto de la implementación, arma la vista
-     * y el Mailable. No manda ni escribe nada.
+     * y el Mailable. No manda nada. Lo único que puede escribir, y solo con `$para_mandar`, es el link
+     * personal del dueño al centro de recursos del mail "listo" (ver `recursos_url_del_listo()`).
      *
      * @param Implementation       $impl
      * @param string               $hito
      * @param array<string, mixed> $datos           Datos ya validados.
      * @param string|null          $email_explicito
+     * @param bool                 $para_mandar     true desde `enviar()`; false desde `previa()`, que no escribe nada.
      *
      * @return array{client: Client, vista: array<string, mixed>, mailable: ImplementacionMail, asunto: string, para: string|null, faltan: array<int, string>}
      *
      * @throws ImplementacionMailException faltan_datos si la implementación no tiene cliente.
      */
-    private static function armar(Implementation $impl, string $hito, array $datos, ?string $email_explicito): array
+    private static function armar(Implementation $impl, string $hito, array $datos, ?string $email_explicito, bool $para_mandar = false): array
     {
         $client = Client::find($impl->client_id);
 
@@ -562,7 +565,7 @@ class ImplementacionMailService
             'logo_url'     => (string) config('commerciocity.logo_url', ''),
             'firma_nombre' => (string) config('commerciocity.implementacion_mail.firma_nombre', ''),
             'firma_rol'    => (string) config('commerciocity.implementacion_mail.firma_rol', ''),
-            'recursos_url' => (string) config('commerciocity.implementacion_mail.recursos_url', ''),
+            'recursos_url' => self::recursos_url_del_listo($client, $hito, $datos, $para_mandar),
             'form_link'    => trim((string) $impl->form_link),
             'url_sistema'  => $url_sistema,
             'progreso'     => ImplementacionMailHelper::progreso($impl, $hito),
@@ -583,6 +586,62 @@ class ImplementacionMailService
             'para'     => $para,
             'faltan'   => $faltan,
         ];
+    }
+
+    /**
+     * Adónde lleva el botón de los tutoriales del mail "listo" (misión centro-de-recursos-clientes,
+     * 13/10/2026).
+     *
+     *   - Si en el admin hay catálogo del centro de recursos (al menos un video activo): al LINK
+     *     PERSONAL del dueño (`recursos.comerciocity.com/?t=...`), que lo deja entrar con su cuenta y
+     *     guardar su avance sin pasar por su sistema. Se crea o se reusa el vigente
+     *     (`RecursosLinkService`), así que reenviar el mail no deja otro link dando vueltas.
+     *   - Si no hay catálogo: la carpeta de Drive de la config, como antes de la misión. Un centro sin
+     *     videos sería un botón a una página vacía.
+     *   - Un `recursos_url` explícito en los datos del hito pisa a los dos (lo resuelve la vista).
+     *
+     * 🔴 La vista previa (`$para_mandar` false) NO crea el link: por contrato `previa()` no escribe
+     * nada. Muestra el link vigente si ya hay uno y, si no, la dirección de la página; el que sale en
+     * el mail de verdad es el personal. Y si armar el link falla por lo que sea, va el de Drive: el
+     * mail "listo" no se cae por el centro de recursos.
+     *
+     * @param Client               $client
+     * @param string               $hito
+     * @param array<string, mixed> $datos       Datos del hito, ya validados.
+     * @param bool                 $para_mandar
+     *
+     * @return string
+     */
+    private static function recursos_url_del_listo(Client $client, string $hito, array $datos, bool $para_mandar): string
+    {
+        $drive = (string) config('commerciocity.implementacion_mail.recursos_url', '');
+
+        if ($hito !== 'listo' || (isset($datos['recursos_url']) && trim((string) $datos['recursos_url']) !== '')) {
+            return $drive;
+        }
+
+        try {
+            if (! RecursosLinkService::hay_catalogo()) {
+                return $drive;
+            }
+
+            $links = new RecursosLinkService();
+
+            if ($para_mandar) {
+                return $links->link_del_dueno($client)['url'];
+            }
+
+            $vigente = $links->link_vigente_del_dueno($client);
+
+            return $vigente !== null ? $vigente['url'] : rtrim((string) config('recursos.url'), '/') . '/';
+        } catch (\Throwable $excepcion) {
+            Log::channel('daily')->warning('ImplementacionMail: no se pudo armar el link del centro de recursos; el botón va a Drive.', [
+                'client_id' => $client->id,
+                'error'     => $excepcion->getMessage(),
+            ]);
+
+            return $drive;
+        }
     }
 
     /**

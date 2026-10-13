@@ -231,6 +231,10 @@ return [
 
         // Carpeta del centro de recursos (tutoriales). Es el botón secundario del mail "listo"; en un
         // mail puntual se puede pisar con el dato `recursos_url`.
+        // Desde la misión centro-de-recursos-clientes (13/10/2026) es el RESPALDO: si el admin tiene
+        // catálogo cargado (`recursos_videos` con algún video activo), el botón lleva el link personal
+        // del dueño a recursos.comerciocity.com (`config/recursos.php`); esta carpeta queda para cuando
+        // no hay catálogo o armar el link falla. Ver ImplementacionMailService::recursos_url_del_listo().
         'recursos_url' => 'https://drive.google.com/drive/folders/1pGWyUekgBok-ShmRWbXNrDhuxXMQvElp?usp=drive_link',
     ],
 ];
