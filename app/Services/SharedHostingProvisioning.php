@@ -86,6 +86,22 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
      * Crea la base de datos del cliente (una sola para las dos instancias) y persiste su
      * contraseña cifrada en el instante siguiente.
      *
+     * 🔴 ESTA ETAPA CORRE DOS VECES POR CLIENTE Y LA SEGUNDA TIENE QUE SER UN NO-OP. Un cliente de
+     * hosting compartido se instala como un par (la real y el esqueleto del subdominio secundario) y
+     * las dos filas comparten UNA base. La real la crea y guarda su contraseña; el esqueleto corre
+     * después sobre el mismo cliente y encuentra la base puesta. Medido el 13/10/2026 con Los Peña
+     * (cliente 73): la real terminó bien y el esqueleto murió a los 18 s en esta etapa, con
+     * `422 "[Hosting:9999] Database name must be unique"`.
+     *
+     * Por qué no frenó el chequeo previo: base_ya_existe() leía mal la lista (ver
+     * HostingerApiClient::list_databases()) y nunca dio true en producción. La primera instalación de
+     * un cliente no lo necesita; el esqueleto lo necesita siempre.
+     *
+     * Y por qué el POST va dentro de un try/catch en vez de confiar en el chequeo previo: entre la
+     * lectura y el POST hay una carrera posible (otra corrida del mismo cliente, o una base que
+     * Hostinger todavía no refleja en la lista), y el 422 que sale de ahí tiene que poder reusarse.
+     * Pero solo después de VERIFICAR contra el proveedor: ver manejar_error_de_base().
+     *
      * @return void
      * @throws \RuntimeException
      */
@@ -99,10 +115,25 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
             return;
         }
 
+        /*
+         * 🔴 Esta contraseña existe solo para ESTE intento de creación. Si el POST falla y la base
+         * resulta ser la de la instalación real, se descarta: persistir_secretos() NO se llama en
+         * ningún camino de reuso. Guardarla pisaría en las dos ClientApi la contraseña que
+         * efectivamente tiene la base, y el .env del cliente (que sale de esos secretos) quedaría con
+         * una clave que MySQL no conoce. La API de Hostinger no deja leer ni resetear la contraseña
+         * de una base existente, así que ese error no tendría vuelta atrás.
+         */
         $password = $this->generar_password();
 
         $this->log('provision_db', 'Creando la base ' . $nombre . '...');
-        $this->hostinger()->create_database($nombre, $nombre, $password, $this->dominio());
+
+        try {
+            $this->hostinger()->create_database($nombre, $nombre, $password, $this->dominio());
+        } catch (\Throwable $excepcion) {
+            $this->manejar_error_de_base($nombre, $excepcion);
+
+            return;
+        }
 
         /*
          * 🔴 Persistencia INMEDIATA, en su propia escritura, antes de loguear siquiera el éxito.
@@ -238,6 +269,10 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
      * client_apis.hosting_provisioned_at: alguien puede haber borrado la base a mano desde hPanel y
      * la columna no se entera.
      *
+     * Lee la lista COMPLETA, todas las páginas (list_databases() las recorre): con solo la primera,
+     * una base que cae en la página 2 o 3 parecería no existir, y es el mismo falso "no existe" que
+     * tumbó al esqueleto de Los Peña.
+     *
      * @param  string  $nombre
      * @return bool
      * @throws \RuntimeException
@@ -254,7 +289,63 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
     }
 
     /**
+     * Decide qué hacer con el error del POST que crea la base.
+     *
+     * Misma idea que manejar_error_de_subdominio() —la idempotencia importa y "ya existe" no se
+     * adivina nunca—, con una diferencia que es a propósito: acá NO se confía en el texto del error,
+     * se pregunta al proveedor.
+     *
+     *   - OTRO_ERROR (401, 403, 404, 5xx, transporte): se relanza SIN consultar nada. Token
+     *     inválido, permisos o una caída no tienen relación con que la base exista, y una segunda
+     *     lectura contra una API que acaba de fallar solo sumaría ruido a lo que el operador lee.
+     *   - YA_EXISTE o DESCONOCIDA: se verifica con base_ya_existe(), o sea con la lista PAGINADA de
+     *     la cuenta. El 422 de Hostinger dice "Database name must be unique" sin decir de quién es la
+     *     base: lo único que prueba que está es verla. Si la verificación misma falla, o la base NO
+     *     figura, se relanza el error ORIGINAL (no el de la verificación): es el que describe lo que
+     *     pasó con la creación y el que el operador tiene que ver.
+     *
+     * Si la base está, se reusa con reusar_base_existente(), que exige tener su contraseña guardada.
+     * Ese es el seguro contra la mitad peligrosa del caso: una base que existe pero NO es la de este
+     * cliente (un resto de otra prueba con el mismo nombre) falla con el mensaje del operador, en vez
+     * de seguir de largo con una contraseña que nadie conoce.
+     *
+     * 🔴 NADA de esto escribe secretos. Ver el comentario del password en provision_db().
+     *
+     * @param  string      $nombre
+     * @param  \Throwable  $excepcion  El error original del POST.
+     * @return void
+     * @throws \Throwable
+     */
+    private function manejar_error_de_base(string $nombre, \Throwable $excepcion): void
+    {
+        if ($this->hostinger()->clasificar_error($excepcion) === HostingerApiClient::CLASIFICACION_OTRO_ERROR) {
+            throw $excepcion;
+        }
+
+        try {
+            $figura = $this->base_ya_existe($nombre);
+        } catch (\Throwable $verificacion) {
+            throw $excepcion;
+        }
+
+        if (! $figura) {
+            throw $excepcion;
+        }
+
+        $this->log(
+            'provision_db',
+            'El POST que crea la base ' . $nombre . ' falló (' . $excepcion->getMessage() . '), pero la '
+                . 'base ya figura en la cuenta de Hostinger: se toma como ya existente y se sigue.',
+            'warning'
+        );
+
+        $this->reusar_base_existente($nombre);
+    }
+
+    /**
      * La base ya estaba: se reusa si tenemos su contraseña guardada, y si no, se falla.
+     *
+     * No escribe NINGÚN secreto: solo lee los que ya guardó la instalación que la creó.
      *
      * @param  string  $nombre
      * @return void
