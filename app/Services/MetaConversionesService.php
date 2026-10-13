@@ -6,11 +6,13 @@ use App\Helpers\AppTime;
 use App\Jobs\EnviarEventoMetaJob;
 use App\Models\Lead;
 use App\Models\LeadEventoMeta;
+use App\Models\LicenciaCuota;
 use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Conversiones de los leads de anuncio a Meta, por la Conversions API for Business Messaging
@@ -55,6 +57,22 @@ class MetaConversionesService
 
     /** Moneda del `Purchase` cuando el contrato no dice otra (las licencias se pactan en dólares). */
     const MONEDA_POR_DEFECTO = 'USD';
+
+    /**
+     * Cómo se escribe la moneda a mano en el contrato → la de `LicenciaCuota::MONEDAS`. Las claves
+     * van normalizadas: minúsculas, sin tildes, sin espacios ni puntos.
+     */
+    const ALIAS_DE_MONEDA = [
+        '$'       => 'ARS',
+        'ars'     => 'ARS',
+        'peso'    => 'ARS',
+        'pesos'   => 'ARS',
+        'u$s'     => 'USD',
+        'us$'     => 'USD',
+        'usd'     => 'USD',
+        'dolar'   => 'USD',
+        'dolares' => 'USD',
+    ];
 
     /**
      * Estados desde los que el lead cuenta como `LeadSubmitted`: calificado y todo lo que viene
@@ -674,17 +692,66 @@ class MetaConversionesService
     }
 
     /**
-     * Moneda del contrato en ISO 4217 (tres letras). Cualquier otra cosa, o nada, es USD.
+     * Moneda del `Purchase`, contra la lista blanca del repo (`LicenciaCuota::MONEDAS`: USD y ARS).
+     *
+     * Mismo criterio que `ClientContratoService::normalizar_moneda()` (que es privado, por eso se
+     * replica acá), más los alias que se tipean a mano en el contrato: `$`, `ars`, `peso`, `pesos` son
+     * ARS; `u$s`, `us$`, `usd`, `dolar`, `dólar`, `dolares`, `dólares` son USD. 🔴 Antes pasaba
+     * cualquier `[A-Z]{3}` tal cual (`DOL`, `PES` → 400 de Meta) y `$` o `pesos` caían a USD con el
+     * valor en pesos: un Purchase de USD 2.500.000.
+     *
+     * Vacío → USD, salvo que el propio precio diga la moneda (`$ 2.500.000`, `USD 2500`). Cualquier
+     * otra cosa → USD con un warning en el log, para que alguien corrija el contrato.
      *
      * @param Lead $lead
      *
-     * @return string
+     * @return string USD o ARS.
      */
     private function moneda_del_contrato(Lead $lead): string
     {
-        $moneda = strtoupper(trim((string) $lead->contract_currency));
+        $crudo = trim((string) $lead->contract_currency);
 
-        return preg_match('/^[A-Z]{3}$/', $moneda) ? $moneda : self::MONEDA_POR_DEFECTO;
+        if ($crudo === '') {
+            /* Lo que queda del precio sin números ni separadores: `$ 2.500.000` deja `$`. */
+            $del_precio = $this->moneda_reconocida((string) preg_replace('/[0-9.,\s]+/u', '', (string) $lead->contract_precio_licencia));
+
+            return $del_precio !== null ? $del_precio : self::MONEDA_POR_DEFECTO;
+        }
+
+        $moneda = $this->moneda_reconocida($crudo);
+        if ($moneda !== null) {
+            return $moneda;
+        }
+
+        Log::channel('daily')->warning('Conversiones Meta: la moneda del contrato no se reconoce; el Purchase sale en USD.', [
+            'lead_id' => (int) $lead->id,
+            'moneda'  => $crudo,
+        ]);
+
+        return self::MONEDA_POR_DEFECTO;
+    }
+
+    /**
+     * USD o ARS si el texto es una de las dos (o uno de sus alias), null si no.
+     *
+     * @param string $texto
+     *
+     * @return string|null
+     */
+    private function moneda_reconocida(string $texto): ?string
+    {
+        $clave = (string) preg_replace('/[\s.]+/u', '', mb_strtolower(Str::ascii(trim($texto)), 'UTF-8'));
+        if ($clave === '') {
+            return null;
+        }
+
+        if (isset(self::ALIAS_DE_MONEDA[$clave])) {
+            return self::ALIAS_DE_MONEDA[$clave];
+        }
+
+        $mayusculas = strtoupper($clave);
+
+        return in_array($mayusculas, LicenciaCuota::MONEDAS, true) ? $mayusculas : null;
     }
 
     /**

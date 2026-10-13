@@ -381,6 +381,115 @@ class ConversionesMetaTest extends TestCase
     }
 
     /**
+     * Moneda y precio del contrato → custom_data del Purchase.
+     *
+     * @return array<string, array<int, mixed>>
+     */
+    public function monedas_del_contrato(): array
+    {
+        return [
+            'USD'                          => ['USD', '2.500', 'USD', 2500],
+            'usd en minúsculas'            => ['usd', '2500', 'USD', 2500],
+            'u$s'                          => ['u$s', '1.800', 'USD', 1800],
+            'US$'                          => ['US$', '1800', 'USD', 1800],
+            'dólares'                      => ['dólares', '2500', 'USD', 2500],
+            'Dolar'                        => ['Dolar', '2500', 'USD', 2500],
+            'dolares'                      => ['dolares', '2500', 'USD', 2500],
+            'dólar'                        => ['dólar', '2500', 'USD', 2500],
+            'signo pesos'                  => ['$', '$ 2.500.000', 'ARS', 2500000],
+            'ARS'                          => ['ARS', '2.500.000', 'ARS', 2500000],
+            'ars'                          => ['ars', '2500000', 'ARS', 2500000],
+            'pesos'                        => ['pesos', '1.500.000', 'ARS', 1500000],
+            'Peso'                         => ['Peso', '1500000', 'ARS', 1500000],
+            'vacía y el precio con $'      => ['', '$ 2.500.000', 'ARS', 2500000],
+            'vacía y el precio con USD'    => ['', 'USD 2.500', 'USD', 2500],
+            'vacía y el precio pelado'     => ['', '2500', 'USD', 2500],
+            'nula y sin precio'            => [null, '', 'USD', 0],
+        ];
+    }
+
+    /**
+     * La moneda del Purchase sale de la lista blanca (USD, ARS) con sus alias; ninguna de estas
+     * entradas deja un warning.
+     *
+     * @dataProvider monedas_del_contrato
+     *
+     * @param string|null $moneda
+     * @param string      $precio
+     * @param string      $esperada
+     * @param int         $valor
+     *
+     * @return void
+     */
+    public function test_la_moneda_del_purchase_sale_de_la_lista_blanca($moneda, string $precio, string $esperada, int $valor): void
+    {
+        $registro = $this->capturar_el_log();
+
+        $dato = $this->payload_de_un_purchase($moneda, $precio);
+
+        $this->assertSame(['currency' => $esperada, 'value' => $valor], $dato['custom_data']);
+        $this->assertSame([], $this->warnings_de_moneda($registro), 'Una moneda reconocida no deja warning.');
+    }
+
+    /**
+     * Una moneda que no está en la lista blanca (`DOL`, `PES`, `euros`) sale como USD con un warning
+     * en el log, y nunca tal cual (Meta la rechaza con un 400).
+     *
+     * @return void
+     */
+    public function test_una_moneda_desconocida_sale_en_usd_con_un_warning(): void
+    {
+        foreach (['DOL', 'PES', 'euros'] as $moneda) {
+            $registro = $this->capturar_el_log();
+
+            $dato = $this->payload_de_un_purchase($moneda, '2.500');
+
+            $this->assertSame(['currency' => 'USD', 'value' => 2500], $dato['custom_data'], 'Moneda: ' . $moneda);
+            $this->assertCount(1, $this->warnings_de_moneda($registro), 'Moneda: ' . $moneda);
+        }
+    }
+
+    /**
+     * El dato del body de un Purchase armado para un lead (sin guardar) con esa moneda y ese precio.
+     *
+     * @param string|null $moneda
+     * @param string      $precio
+     *
+     * @return array<string, mixed>
+     */
+    private function payload_de_un_purchase($moneda, string $precio): array
+    {
+        $lead                           = new Lead();
+        $lead->id                       = 424242;
+        $lead->ctwa_clid                = self::CLID;
+        $lead->contract_currency        = $moneda;
+        $lead->contract_precio_licencia = $precio;
+
+        $evento = new LeadEventoMeta([
+            'lead_id'    => 424242,
+            'evento'     => LeadEventoMeta::EVENTO_PURCHASE,
+            'event_id'   => 'cc-lead-424242-purchase',
+            'event_time' => Carbon::now(),
+        ]);
+
+        return app(MetaConversionesService::class)->armar_payload($evento, $lead)['data'][0];
+    }
+
+    /**
+     * Líneas de warning sobre la moneda del contrato.
+     *
+     * @param AbstractLogger $registro
+     *
+     * @return array<int, string>
+     */
+    private function warnings_de_moneda(AbstractLogger $registro): array
+    {
+        return array_values(array_filter($registro->lineas, function ($linea) {
+            return strpos($linea, 'warning') === 0 && strpos($linea, 'moneda del contrato') !== false;
+        }));
+    }
+
+    /**
      * Sin ctwa_clid no hay a quién atribuir: no se registra nada.
      *
      * @return void
