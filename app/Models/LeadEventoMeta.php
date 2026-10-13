@@ -67,9 +67,13 @@ class LeadEventoMeta extends Model
     const ESTADO_SIN_CONFIGURAR = 'sin_configurar';
 
     /**
-     * Etapa que el lead alcanzó ANTES de que existiera la medición (la registra el backfill del
-     * origen al cargarle el `ctwa_clid` a un lead viejo, o al dejarlo como `landing`). No se manda
-     * nunca: el reclamo del envío no acepta este estado, y el conciliador no lo toca.
+     * Un evento que no se manda nunca: el reclamo del envío no acepta este estado, y el conciliador
+     * no lo toca. Dos motivos, escritos en `ultimo_error`:
+     *
+     *   - etapa que el lead alcanzó ANTES de que existiera la medición (la registra el backfill del
+     *     origen al cargarle el `ctwa_clid` a un lead viejo, o al dejarlo como `landing`);
+     *   - el lead cambió de canal antes de que el evento saliera (el canal es pegajoso: un lead no
+     *     se reporta en dos canales; ver `MetaConversionesService::canal_del_lead()`).
      */
     const ESTADO_OMITIDO = 'omitido';
 
@@ -85,6 +89,9 @@ class LeadEventoMeta extends Model
 
     /** El porqué que queda escrito en `ultimo_error` de una fila `omitido`. */
     const MOTIVO_OMITIDO = 'Alcanzado antes de que existiera la medición; no se manda.';
+
+    /** Comienzo del motivo de una fila `omitido` porque el lead cambió de canal (o se quedó sin). */
+    const MOTIVO_CANAL_CAMBIADO = 'El lead cambió de canal';
 
     /** Tope de intentos de envío (el primero más dos reintentos del conciliador). */
     const MAX_INTENTOS = 3;

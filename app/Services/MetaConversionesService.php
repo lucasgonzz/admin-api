@@ -22,8 +22,9 @@ use Illuminate\Support\Str;
  *     Messaging, al conjunto de datos de la WABA. Eventos `LeadSubmitted`, `QualifiedLead`, `Purchase`.
  *   - `web` (segunda tanda, 13/10/2026): los leads que vinieron de la web (`origen = landing` y sin
  *     `ctwa_clid`), al conjunto de datos del PÍXEL de la web. Eventos estándar `Lead`, `Schedule`,
- *     `Purchase`. Un lead de la web al que le llega el `ctwa_clid` de un anuncio pasa a `whatsapp`:
- *     el click id atribuye mejor que los datos de contacto.
+ *     `Purchase`. Un lead de la web al que le llega el `ctwa_clid` de un anuncio pasa a `whatsapp`
+ *     solo si todavía no se registró nada por la web: 🔴 el canal es pegajoso, un lead no se
+ *     reporta en dos canales (ver {@see canal_del_lead()}).
  *
  * Contrato con Meta, canal `whatsapp` (verificado en su documentación):
  *
@@ -155,20 +156,21 @@ class MetaConversionesService
     }
 
     /**
-     * Por qué canal salen las conversiones de este lead, o null si no tiene ninguno.
+     * El canal que le tocaría al lead por sus datos de HOY, sin mirar lo que ya se registró:
      *
      *   - con `ctwa_clid` → `whatsapp` (sea cual sea el origen: el click id es la atribución más
      *     fuerte que hay, y es lo que la primera tanda ya hacía);
      *   - sin `ctwa_clid` y con `origen = landing` → `web`;
      *   - cualquier otro → null: no hay con qué atribuirle nada.
      *
-     * No toca la base: lo usa el observer de cada `save()` como filtro barato.
+     * No toca la base: lo usa el observer de cada `save()` como filtro barato. El canal que manda es
+     * el de {@see canal_del_lead()}, que es pegajoso.
      *
      * @param Lead $lead
      *
      * @return string|null
      */
-    public static function canal_del_lead(Lead $lead): ?string
+    public static function canal_natural(Lead $lead): ?string
     {
         if (trim((string) $lead->ctwa_clid) !== '') {
             return LeadEventoMeta::CANAL_WHATSAPP;
@@ -179,6 +181,42 @@ class MetaConversionesService
         }
 
         return null;
+    }
+
+    /**
+     * Por qué canal salen las conversiones de este lead, o null si no tiene ninguno.
+     *
+     * 🔴 **El canal es pegajoso** (corrección del chequeo de la segunda tanda, 13/10/2026): un lead
+     * no se reporta en dos canales. El caso: entra con la frase de la web, queda `landing`, salen
+     * `Lead` y `Schedule` por la web, y horas después llega el referral de su anuncio y se le carga
+     * el `ctwa_clid`. Con el canal natural se registrarían `LeadSubmitted` y `QualifiedLead` por
+     * WhatsApp para etapas que ya se reportaron. Por eso, si el lead ya tiene filas registradas, su
+     * canal es el de esas filas (el de la primera, si por algo tuviera de los dos), aunque hoy le
+     * tocaría otro.
+     *
+     * Lo pegajoso no le inventa canal a un lead que se quedó sin ninguno (por ejemplo, un referral
+     * sin `ctwa_clid` que lo pasó de `landing` a `anuncio_whatsapp`): si el canal natural es null,
+     * devuelve null, y sus filas pendientes no salen ({@see enviar()} las deja `omitido`).
+     *
+     * Una consulta a la base, solo para los leads que tienen canal natural.
+     *
+     * @param Lead $lead
+     *
+     * @return string|null
+     */
+    public static function canal_del_lead(Lead $lead): ?string
+    {
+        $natural = self::canal_natural($lead);
+        if ($natural === null || ! $lead->id) {
+            return $natural;
+        }
+
+        $registrado = (string) LeadEventoMeta::query()
+            ->where('lead_id', (int) $lead->id)
+            ->orderBy('id')
+            ->value('canal');
+
+        return in_array($registrado, LeadEventoMeta::CANALES, true) ? $registrado : $natural;
     }
 
     /**
@@ -427,13 +465,34 @@ class MetaConversionesService
         }
 
         $lead = Lead::query()->find((int) $evento->lead_id);
-        if ($canal === LeadEventoMeta::CANAL_WHATSAPP && ($lead === null || trim((string) $lead->ctwa_clid) === '')) {
-            $this->marcar_error($evento, 'El lead ya no existe o no tiene ctwa_clid: Meta no tiene con qué atribuir el evento.', null);
+        if ($lead === null) {
+            $this->marcar_error(
+                $evento,
+                $canal === LeadEventoMeta::CANAL_WHATSAPP
+                    ? 'El lead ya no existe o no tiene ctwa_clid: Meta no tiene con qué atribuir el evento.'
+                    : 'El lead ya no existe: no hay a quién atribuirle el evento.',
+                null
+            );
 
             return LeadEventoMeta::ESTADO_ERROR;
         }
-        if ($lead === null) {
-            $this->marcar_error($evento, 'El lead ya no existe: no hay a quién atribuirle el evento.', null);
+
+        /* 🔴 Un lead no se reporta en dos canales: una fila de un canal que ya no es el del lead (o
+           de un lead que se quedó sin canal) no sale. Queda `omitido`, que no reclama nadie más. */
+        $canal_del_lead = self::canal_del_lead($lead);
+        if ($canal_del_lead !== $canal) {
+            $this->marcar_omitido(
+                $evento,
+                LeadEventoMeta::MOTIVO_CANAL_CAMBIADO . ' ('
+                    . ($canal_del_lead !== null ? 'ahora es ' . $canal_del_lead : 'ya no tiene canal')
+                    . '): este evento de ' . $canal . ' no sale, para no reportarlo en dos canales.'
+            );
+
+            return LeadEventoMeta::ESTADO_OMITIDO;
+        }
+
+        if ($canal === LeadEventoMeta::CANAL_WHATSAPP && trim((string) $lead->ctwa_clid) === '') {
+            $this->marcar_error($evento, 'El lead ya no existe o no tiene ctwa_clid: Meta no tiene con qué atribuir el evento.', null);
 
             return LeadEventoMeta::ESTADO_ERROR;
         }
@@ -946,6 +1005,33 @@ class MetaConversionesService
         $evento->refresh();
 
         return true;
+    }
+
+    /**
+     * Deja `omitido` una fila que este proceso reclamó y que no tiene que salir. Condicional sobre
+     * `enviando`: solo la toca el que la reclamó.
+     *
+     * @param LeadEventoMeta $evento
+     * @param string         $motivo
+     *
+     * @return void
+     */
+    private function marcar_omitido(LeadEventoMeta $evento, string $motivo): void
+    {
+        LeadEventoMeta::query()
+            ->whereKey((int) $evento->id)
+            ->where('estado', LeadEventoMeta::ESTADO_ENVIANDO)
+            ->update([
+                'estado'       => LeadEventoMeta::ESTADO_OMITIDO,
+                'ultimo_error' => $motivo,
+            ]);
+
+        Log::channel('daily')->info('Conversiones Meta: el evento no sale porque el lead cambió de canal.', [
+            'lead_evento_meta_id' => (int) $evento->id,
+            'lead_id'             => (int) $evento->lead_id,
+            'canal'               => self::canal_de_la_fila($evento),
+            'evento'              => $evento->evento,
+        ]);
     }
 
     /**

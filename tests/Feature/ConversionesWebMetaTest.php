@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LeadEventoMeta;
 use App\Models\LeadMessage;
+use App\Models\WhatsappAdReferral;
 use App\Services\LeadOrigenService;
 use App\Services\MetaConversionesService;
 use Carbon\Carbon;
@@ -516,6 +517,128 @@ class ConversionesWebMetaTest extends TestCase
         $this->assertSame('whatsapp', $sin_canal->fresh()->canal);
     }
 
+    /**
+     * 🔴 El canal es pegajoso. Un lead entra por la web y sale `Lead` por la web; horas después llega
+     * el referral de su anuncio (con ctwa_clid) por el observer real del referral. El lead queda en
+     * el canal web: no se registra ningún evento de WhatsApp para etapas ya reportadas, y lo que
+     * alcanza después (`Schedule`) también sale por la web. Y una fila de WhatsApp que hubiera
+     * quedado pendiente para ese lead no sale: queda `omitido` porque el lead es de otro canal.
+     *
+     * @return void
+     */
+    public function test_un_lead_de_la_web_al_que_le_llega_el_anuncio_sigue_en_el_canal_web(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $lead    = $this->crear_lead_de_la_web('nuevo');
+        $primero = $this->crear_primer_mensaje($lead, LeadOrigenService::FRASE_LANDING);
+
+        $lead->status = 'calificado';
+        $lead->save();
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail());
+        Http::assertSentCount(1);
+
+        /* El referral llega tarde, con el wamid del primer mensaje y su click id. */
+        WhatsappAdReferral::create([
+            'phone'       => $lead->phone,
+            'ctwa_clid'   => self::CLID,
+            'wamid'       => $primero->whatsapp_message_id,
+            'received_at' => $primero->sent_at,
+        ]);
+
+        $lead->refresh();
+        $this->assertSame(LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP, $lead->origen, 'El anuncio gana el origen.');
+        $this->assertSame(self::CLID, $lead->ctwa_clid);
+        $this->assertSame(LeadEventoMeta::CANAL_WHATSAPP, MetaConversionesService::canal_natural($lead));
+        $this->assertSame(LeadEventoMeta::CANAL_WEB, MetaConversionesService::canal_del_lead($lead), 'Ya se reportó por la web: el canal no cambia.');
+
+        $lead->status = 'demo_agendada';
+        $lead->save();
+
+        $this->assertSame([
+            ['web', 'Lead', 'cc-lead-' . $lead->id . '-web-lead', LeadEventoMeta::ESTADO_ENVIADO],
+            ['web', 'Schedule', 'cc-lead-' . $lead->id . '-web-schedule', LeadEventoMeta::ESTADO_PENDIENTE],
+        ], $this->filas_de($lead), 'Ningún evento de WhatsApp para un lead que ya se reportó por la web.');
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+        $this->assertSame(0, LeadEventoMeta::query()->where('lead_id', $lead->id)->where('canal', 'whatsapp')->count());
+
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $lead->id)->where('evento', 'Schedule')->firstOrFail());
+        Http::assertSentCount(2);
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), '/' . self::DATASET . '/') !== false;
+        });
+
+        /* Una fila de WhatsApp que hubiera quedado pendiente (por ejemplo, de antes de esta regla)
+           no sale: el lead es del canal web. */
+        $de_whatsapp = LeadEventoMeta::create([
+            'lead_id'    => $lead->id,
+            'canal'      => 'whatsapp',
+            'evento'     => 'LeadSubmitted',
+            'estado'     => LeadEventoMeta::ESTADO_PENDIENTE,
+            'event_id'   => 'cc-lead-' . $lead->id . '-leadsubmitted',
+            'event_time' => Carbon::now(),
+        ]);
+        $this->correr_job($de_whatsapp);
+
+        Http::assertSentCount(2);
+        $de_whatsapp->refresh();
+        $this->assertSame(LeadEventoMeta::ESTADO_OMITIDO, $de_whatsapp->estado);
+        $this->assertStringStartsWith(LeadEventoMeta::MOTIVO_CANAL_CAMBIADO, (string) $de_whatsapp->ultimo_error);
+        $this->assertStringContainsString('ahora es web', (string) $de_whatsapp->ultimo_error);
+    }
+
+    /**
+     * 🔴 Un lead de la web que se queda sin canal (el referral de su anuncio llega SIN ctwa_clid y lo
+     * pasa a `anuncio_whatsapp`): su evento web pendiente no sale, queda `omitido` con el motivo, el
+     * conciliador no lo reencola, y lo que alcance después no registra nada.
+     *
+     * @return void
+     */
+    public function test_un_lead_que_se_queda_sin_canal_no_manda_lo_pendiente(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $lead    = $this->crear_lead_de_la_web('nuevo');
+        $primero = $this->crear_primer_mensaje($lead, LeadOrigenService::FRASE_LANDING);
+
+        $lead->status = 'calificado';
+        $lead->save();
+        $pendiente = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+        $this->assertSame(LeadEventoMeta::ESTADO_PENDIENTE, $pendiente->estado);
+
+        WhatsappAdReferral::create([
+            'phone'       => $lead->phone,
+            'ctwa_clid'   => null,
+            'wamid'       => $primero->whatsapp_message_id,
+            'received_at' => $primero->sent_at,
+        ]);
+
+        $lead->refresh();
+        $this->assertSame(LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP, $lead->origen);
+        $this->assertNull($lead->ctwa_clid);
+        $this->assertNull(MetaConversionesService::canal_del_lead($lead));
+
+        $this->assertSame(LeadEventoMeta::ESTADO_OMITIDO, app(MetaConversionesService::class)->enviar($pendiente));
+        Http::assertNothingSent();
+
+        $pendiente->refresh();
+        $this->assertSame(LeadEventoMeta::ESTADO_OMITIDO, $pendiente->estado);
+        $this->assertStringStartsWith(LeadEventoMeta::MOTIVO_CANAL_CAMBIADO, (string) $pendiente->ultimo_error);
+        $this->assertStringContainsString('ya no tiene canal', (string) $pendiente->ultimo_error);
+
+        $lead->status = 'demo_agendada';
+        $lead->save();
+        $antes = count(Queue::pushed(EnviarEventoMetaJob::class));
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        $this->assertSame([
+            ['web', 'Lead', 'cc-lead-' . $lead->id . '-web-lead', LeadEventoMeta::ESTADO_OMITIDO],
+        ], $this->filas_de($lead));
+        $this->assertCount($antes, Queue::pushed(EnviarEventoMetaJob::class), 'El conciliador no reencola un omitido.');
+        Http::assertNothingSent();
+    }
+
     /* ------------------------------------------------------------------------------------------
      | 5. El backfill y el conciliador
      |----------------------------------------------------------------------------------------- */
@@ -747,6 +870,31 @@ class ConversionesWebMetaTest extends TestCase
         $lead->save();
 
         return $lead;
+    }
+
+    /**
+     * Primer mensaje entrante del lead, con wamid y momento (para que un referral lo encuentre). El
+     * lead ya tiene origen, así que el observer del primer mensaje no lo recalcula.
+     *
+     * @param Lead   $lead
+     * @param string $texto
+     *
+     * @return LeadMessage
+     */
+    private function crear_primer_mensaje(Lead $lead, string $texto): LeadMessage
+    {
+        $mensaje                        = new LeadMessage();
+        $mensaje->lead_id               = $lead->id;
+        $mensaje->sender                = 'lead';
+        $mensaje->status                = 'enviado';
+        $mensaje->is_followup           = false;
+        $mensaje->requiere_verificacion = false;
+        $mensaje->content               = $texto;
+        $mensaje->whatsapp_message_id   = 'wamid.WEB-' . Str::random(16);
+        $mensaje->sent_at               = Carbon::now()->subHours(3);
+        $mensaje->save();
+
+        return $mensaje;
     }
 
     /**

@@ -31,8 +31,9 @@ class ConversionesMetaObserver
     public function saved(Lead $lead)
     {
         try {
-            /* El filtro barato primero, sin tocar la base: casi ningún lead tiene canal. */
-            if (MetaConversionesService::canal_del_lead($lead) === null) {
+            /* El filtro barato primero, sin tocar la base: un lead sin ctwa_clid y que no vino de la
+               web no tiene canal. El canal definitivo (pegajoso) lo decide el servicio. */
+            if (MetaConversionesService::canal_natural($lead) === null) {
                 return;
             }
 
