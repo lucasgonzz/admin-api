@@ -7,14 +7,17 @@ use App\Services\MetaConversionesService;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Registra las conversiones a Meta cuando un lead de anuncio cambia de etapa (misión
- * origen-del-lead-y-conversiones-meta, 13/10/2026).
+ * Registra las conversiones a Meta cuando un lead con canal cambia de etapa (misión
+ * origen-del-lead-y-conversiones-meta, 13/10/2026): los de anuncio (con `ctwa_clid`, por WhatsApp)
+ * y, desde la segunda tanda, los que vinieron de la web (`origen = landing`, al dataset del píxel).
  *
- * Mira solo los cambios que pueden hacer alcanzar un evento: `status`, `promoted_client_id` y
- * `ctwa_clid`. El envío no sale de acá: se registra la fila y se encola `EnviarEventoMetaJob`.
+ * Mira solo los cambios que pueden hacer alcanzar un evento o cambiar el canal: `status`,
+ * `promoted_client_id`, `ctwa_clid` y `origen`. El envío no sale de acá: se registra la fila y se
+ * encola `EnviarEventoMetaJob`.
  *
  * ⚠️ No ve los cambios hechos con `Lead::query()->...->update()` (la demo directa escribe
- * `status='demo_agendada'` así). Esos los levanta el conciliador cada diez minutos.
+ * `status='demo_agendada'` así, y el origen se escribe así también). Esos los levanta el
+ * conciliador cada diez minutos.
  *
  * 🔴 No puede tirar abajo un `save()`: todo adentro de un try/catch que solo loguea.
  */
@@ -28,12 +31,12 @@ class ConversionesMetaObserver
     public function saved(Lead $lead)
     {
         try {
-            /* El filtro barato primero, sin tocar la base: casi ningún lead tiene ctwa_clid. */
-            if (trim((string) $lead->ctwa_clid) === '') {
+            /* El filtro barato primero, sin tocar la base: casi ningún lead tiene canal. */
+            if (MetaConversionesService::canal_del_lead($lead) === null) {
                 return;
             }
 
-            if (! $lead->wasRecentlyCreated && ! $lead->wasChanged(['status', 'promoted_client_id', 'ctwa_clid'])) {
+            if (! $lead->wasRecentlyCreated && ! $lead->wasChanged(['status', 'promoted_client_id', 'ctwa_clid', 'origen'])) {
                 return;
             }
 

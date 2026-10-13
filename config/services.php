@@ -482,6 +482,12 @@ return [
         'test_event_code' => env('META_CAPI_TEST_EVENT_CODE', ''),
         // Timeout (segundos) de cada llamada a Meta.
         'timeout'         => (int) (env('META_CAPI_TIMEOUT') ?: 15),
+        // Conversiones de los leads que vinieron de la WEB (segunda tanda, 13/10/2026): van al
+        // conjunto de datos del píxel de la web, no al de la WABA. Vacías, caen a las de arriba
+        // (el fallback lo resuelve MetaConversionesService, no este archivo). El token, con la misma
+        // regla: no se loguea nunca ni viaja por query string.
+        'web_token'       => env('META_CAPI_WEB_TOKEN', ''),
+        'web_dataset_id'  => env('META_CAPI_WEB_DATASET_ID', ''),
     ],
 
     // Ingesta de tareas creadas por Claude desde la conversación (grupo 180).

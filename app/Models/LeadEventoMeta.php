@@ -5,14 +5,32 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * Una conversión de un lead de anuncio que se le manda (o se le mandó) a Meta por la Conversions
- * API for Business Messaging (misión origen-del-lead-y-conversiones-meta, 13/10/2026).
+ * Una conversión de un lead que se le manda (o se le mandó) a Meta por la Conversions API (misión
+ * origen-del-lead-y-conversiones-meta, 13/10/2026), por uno de dos canales:
  *
- * Una fila por (lead, evento). El esquema y el porqué de cada columna están en la migración
- * `2026_10_13_120100_create_lead_eventos_meta_table`; la lógica, en `MetaConversionesService`.
+ *   - `whatsapp`: los leads de anuncio Click-to-WhatsApp, por la CAPI for Business Messaging, al
+ *     conjunto de datos de la WABA (`LeadSubmitted`, `QualifiedLead`, `Purchase`).
+ *   - `web`: los leads que vinieron de la web (segunda tanda, 13/10/2026), al conjunto de datos del
+ *     píxel (`Lead`, `Schedule`, `Purchase`, eventos estándar).
+ *
+ * Una fila por (lead, canal, evento). El esquema y el porqué de cada columna están en las
+ * migraciones `2026_10_13_120100_create_lead_eventos_meta_table` y
+ * `2026_10_13_130000_add_canal_to_lead_eventos_meta_table`; la lógica, en `MetaConversionesService`.
  */
 class LeadEventoMeta extends Model
 {
+    /** Canal de los leads de anuncio Click-to-WhatsApp (CAPI for Business Messaging). */
+    const CANAL_WHATSAPP = 'whatsapp';
+
+    /** Canal de los leads que vinieron de la web (conjunto de datos del píxel). */
+    const CANAL_WEB = 'web';
+
+    /** Los dos canales. */
+    const CANALES = [
+        self::CANAL_WHATSAPP,
+        self::CANAL_WEB,
+    ];
+
     /** El lead llegó a calificado o a cualquier etapa posterior. */
     const EVENTO_LEAD_SUBMITTED = 'LeadSubmitted';
 
@@ -22,10 +40,23 @@ class LeadEventoMeta extends Model
     /** El lead se promovió a cliente. */
     const EVENTO_PURCHASE = 'Purchase';
 
-    /** Los tres, en el orden en que se alcanzan y se mandan. */
+    /** Los tres del canal `whatsapp`, en el orden en que se alcanzan y se mandan. */
     const EVENTOS = [
         self::EVENTO_LEAD_SUBMITTED,
         self::EVENTO_QUALIFIED_LEAD,
+        self::EVENTO_PURCHASE,
+    ];
+
+    /** Canal `web`: el lead llegó a calificado o a cualquier etapa posterior (evento estándar `Lead`). */
+    const EVENTO_WEB_LEAD = 'Lead';
+
+    /** Canal `web`: el lead agendó la demo o llegó a cualquier etapa posterior (evento estándar `Schedule`). */
+    const EVENTO_WEB_SCHEDULE = 'Schedule';
+
+    /** Los tres del canal `web`, en el mismo orden. `Purchase` se llama igual en los dos canales. */
+    const EVENTOS_WEB = [
+        self::EVENTO_WEB_LEAD,
+        self::EVENTO_WEB_SCHEDULE,
         self::EVENTO_PURCHASE,
     ];
 
@@ -37,8 +68,8 @@ class LeadEventoMeta extends Model
 
     /**
      * Etapa que el lead alcanzó ANTES de que existiera la medición (la registra el backfill del
-     * origen al cargarle el `ctwa_clid` a un lead viejo). No se manda nunca: el reclamo del envío no
-     * acepta este estado, y el conciliador no lo toca.
+     * origen al cargarle el `ctwa_clid` a un lead viejo, o al dejarlo como `landing`). No se manda
+     * nunca: el reclamo del envío no acepta este estado, y el conciliador no lo toca.
      */
     const ESTADO_OMITIDO = 'omitido';
 

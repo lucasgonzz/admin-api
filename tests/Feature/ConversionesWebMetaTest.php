@@ -1,0 +1,851 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Jobs\EnviarEventoMetaJob;
+use App\Models\Client;
+use App\Models\Lead;
+use App\Models\LeadEventoMeta;
+use App\Models\LeadMessage;
+use App\Services\LeadOrigenService;
+use App\Services\MetaConversionesService;
+use Carbon\Carbon;
+use Illuminate\Database\QueryException;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
+use Psr\Log\AbstractLogger;
+use Tests\TestCase;
+
+/**
+ * Las conversiones de los leads que vinieron de la WEB al conjunto de datos del píxel, por la API de
+ * conversiones (segunda tanda de M6c, 13/10/2026: «quiero que extiendas la función para que se mande
+ * la info de los leads que fueron a la landing y agendaron una demo»).
+ *
+ * Lo que se protege: que un lead `landing` registre `Lead`, `Schedule` y `Purchase` en el canal
+ * `web` (acumulativos, una vez cada uno); que el POST salga al dataset de la web con el body exacto
+ * (`action_source: chat`, `ph` en las dos variantes argentinas, sin `ctwa_clid` ni
+ * `messaging_channel`); que la configuración de la web caiga a la de WhatsApp; que un lead de anuncio
+ * siga yendo por WhatsApp; que el único sea por canal; que el backfill no mande nada; que el
+ * conciliador levante a los leads de la web; y que ningún token quede en una fila o en el log.
+ */
+class ConversionesWebMetaTest extends TestCase
+{
+    use DatabaseTransactions;
+
+    /** Token de WhatsApp: si aparece en un log o en una fila, el test falla. */
+    private const TOKEN = 'EAAG-token-de-prueba-capi-SECRETO-1234567890';
+
+    /** Dataset de la WABA. */
+    private const DATASET = '998877665544332';
+
+    /** Token de la web: misma regla. */
+    private const WEB_TOKEN = 'EAAG-token-web-de-prueba-SECRETO-0987654321';
+
+    /** Dataset del píxel de la web. */
+    private const WEB_DATASET = '112233445566778';
+
+    /** WABA por defecto del config. */
+    private const WABA = '1290129236552587';
+
+    /** Click id de prueba. */
+    private const CLID = 'ARAkLkA-clid-de-prueba-conversiones-web';
+
+    /**
+     * Configuración completa de los dos canales y cola falseada.
+     *
+     * @return void
+     */
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Queue::fake();
+
+        config([
+            'services.meta_capi.token'           => self::TOKEN,
+            'services.meta_capi.dataset_id'      => self::DATASET,
+            'services.meta_capi.web_token'       => self::WEB_TOKEN,
+            'services.meta_capi.web_dataset_id'  => self::WEB_DATASET,
+            'services.meta_capi.waba_id'         => self::WABA,
+            'services.meta_capi.graph_version'   => 'v24.0',
+            'services.meta_capi.test_event_code' => '',
+            'services.meta_capi.timeout'         => 15,
+        ]);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 1. El registro
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Lead de la web que agenda la demo de una (la demo directa lo lleva de nuevo a demo_agendada):
+     * se registran `Lead` y `Schedule` en el canal web, en orden, con el event_id del canal, y se
+     * encolan por la conexión database.
+     *
+     * @return void
+     */
+    public function test_un_lead_de_la_web_que_agenda_registra_lead_y_schedule_por_el_canal_web(): void
+    {
+        $lead = $this->crear_lead_de_la_web('nuevo');
+        $this->assertSame([], $this->filas_de($lead), 'En nuevo no se alcanzó ningún evento.');
+
+        $lead->status = 'demo_agendada';
+        $lead->save();
+
+        $this->assertSame([
+            ['web', 'Lead', 'cc-lead-' . $lead->id . '-web-lead', LeadEventoMeta::ESTADO_PENDIENTE],
+            ['web', 'Schedule', 'cc-lead-' . $lead->id . '-web-schedule', LeadEventoMeta::ESTADO_PENDIENTE],
+        ], $this->filas_de($lead));
+
+        Queue::assertPushed(EnviarEventoMetaJob::class, 2);
+        Queue::assertPushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) {
+            return $job->connection === 'database';
+        });
+    }
+
+    /**
+     * Calificado registra solo `Lead`; la promoción suma `Schedule` y `Purchase` (acumulativos). Un
+     * segundo guardado no registra nada.
+     *
+     * @return void
+     */
+    public function test_los_eventos_web_son_acumulativos_y_no_se_repiten(): void
+    {
+        $lead         = $this->crear_lead_de_la_web('nuevo');
+        $lead->status = 'calificado';
+        $lead->save();
+        $this->assertSame(['Lead'], $this->eventos_de($lead));
+
+        $lead->notes = 'Una nota cualquiera';
+        $lead->save();
+        $lead->status = 'solicita_disponibilidad';
+        $lead->save();
+        $this->assertSame(['Lead'], $this->eventos_de($lead));
+
+        $lead->promoted_client_id = $this->crear_cliente()->id;
+        $lead->save();
+        $this->assertSame(['Lead', 'Schedule', 'Purchase'], $this->eventos_de($lead));
+
+        Queue::assertPushed(EnviarEventoMetaJob::class, 3);
+        $this->assertSame([], app(MetaConversionesService::class)->registrar_alcanzados($lead->fresh()));
+    }
+
+    /**
+     * Un lead sin canal (desconocido, de Instagram, o sin origen calculado) y sin ctwa_clid no
+     * registra nada, llegue a donde llegue.
+     *
+     * @return void
+     */
+    public function test_un_lead_sin_canal_no_registra_nada(): void
+    {
+        foreach ([LeadOrigenService::ORIGEN_DESCONOCIDO, LeadOrigenService::ORIGEN_INSTAGRAM, null] as $origen) {
+            $lead         = $this->crear_lead_de_la_web('nuevo');
+            $lead->origen = $origen;
+            $lead->save();
+
+            $lead->status = 'demo_agendada';
+            $lead->save();
+
+            $this->assertSame([], $this->filas_de($lead), 'Origen ' . var_export($origen, true) . ' no tiene canal.');
+        }
+
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 2. El POST
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * El job manda UN POST al dataset de la web con el token de la web en el header y el body exacto:
+     * `action_source: chat`, `ph` con las dos variantes argentinas, `em`, `country`, `external_id`,
+     * `fn` y `ln`, todo en SHA-256; sin `messaging_channel` ni `ctwa_clid`.
+     *
+     * @return void
+     */
+    public function test_el_job_manda_el_post_exacto_al_dataset_de_la_web(): void
+    {
+        Http::fake([
+            'graph.facebook.com/*' => Http::response(['events_received' => 1, 'messages' => [], 'fbtrace_id' => 'WebTrace1'], 200),
+        ]);
+        $registro = $this->capturar_el_log();
+
+        $numero              = (string) random_int(1000000, 9999999);
+        $lead                = $this->crear_lead_de_la_web('nuevo', '+549351' . $numero);
+        $lead->email         = '  Guille@Ferreteria.COM.ar ';
+        $lead->contact_name  = '  Guillermo   González ';
+        $lead->status        = 'calificado';
+        $lead->save();
+
+        $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+        $this->correr_job($fila);
+
+        $esperado = [
+            'data' => [[
+                'event_name'    => 'Lead',
+                'event_time'    => $fila->fresh()->event_time->getTimestamp(),
+                'event_id'      => 'cc-lead-' . $lead->id . '-web-lead',
+                'action_source' => 'chat',
+                'user_data'     => [
+                    'ph'          => [hash('sha256', '549351' . $numero), hash('sha256', '54351' . $numero)],
+                    'em'          => [hash('sha256', 'guille@ferreteria.com.ar')],
+                    'country'     => [hash('sha256', 'ar')],
+                    'external_id' => [hash('sha256', 'cc-lead-' . $lead->id)],
+                    'fn'          => [hash('sha256', 'guillermo')],
+                    'ln'          => [hash('sha256', 'gonzález')],
+                ],
+            ]],
+        ];
+
+        Http::assertSentCount(1);
+        Http::assertSent(function ($request) use ($esperado) {
+            return $request->method() === 'POST'
+                && $request->url() === 'https://graph.facebook.com/v24.0/' . self::WEB_DATASET . '/events'
+                && $request->hasHeader('Authorization', 'Bearer ' . self::WEB_TOKEN)
+                && strpos($request->url(), self::WEB_TOKEN) === false
+                && $request->data() === $esperado;
+        });
+
+        $fila->refresh();
+        $this->assertSame(LeadEventoMeta::ESTADO_ENVIADO, $fila->estado);
+        $this->assertSame(1, $fila->intentos);
+        $this->assertNotNull($fila->enviado_at);
+        /* Clave por clave: MySQL reordena las claves de una columna json. */
+        $this->assertSame(1, $fila->respuesta['events_received']);
+        $this->assertSame('WebTrace1', $fila->respuesta['fbtrace_id']);
+
+        /* Correrlo otra vez no manda nada: ya salió. */
+        $this->correr_job($fila);
+        Http::assertSentCount(1);
+
+        $this->assertLogSinLosTokens($registro);
+    }
+
+    /**
+     * Con `test_event_code` configurado viaja también en el body de la web (es compartido).
+     *
+     * @return void
+     */
+    public function test_el_codigo_de_prueba_viaja_tambien_por_la_web(): void
+    {
+        config(['services.meta_capi.test_event_code' => 'TEST98765']);
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $lead = $this->crear_lead_de_la_web('calificado');
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail());
+
+        Http::assertSent(function ($request) {
+            return ($request->data()['test_event_code'] ?? null) === 'TEST98765'
+                && $request->data()['data'][0]['action_source'] === 'chat';
+        });
+    }
+
+    /**
+     * El Purchase de la web lleva la moneda y el valor del contrato, igual que el de WhatsApp.
+     *
+     * @return void
+     */
+    public function test_el_purchase_web_lleva_moneda_y_valor_del_contrato(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $lead                           = $this->crear_lead_de_la_web('closer_activo');
+        $lead->contract_currency        = 'pesos';
+        $lead->contract_precio_licencia = '$ 2.500.000';
+        $lead->promoted_client_id       = $this->crear_cliente()->id;
+        $lead->save();
+
+        $purchase = LeadEventoMeta::query()->where('lead_id', $lead->id)->where('evento', 'Purchase')->firstOrFail();
+        $this->assertSame('web', $purchase->canal);
+        $this->assertSame('cc-lead-' . $lead->id . '-web-purchase', $purchase->event_id);
+
+        $this->correr_job($purchase);
+
+        Http::assertSent(function ($request) {
+            $dato = $request->data()['data'][0];
+
+            return $dato['event_name'] === 'Purchase'
+                && $dato['action_source'] === 'chat'
+                && $dato['custom_data'] === ['currency' => 'ARS', 'value' => 2500000];
+        });
+    }
+
+    /**
+     * Un teléfono de otro país viaja en una sola variante y sin `country`; un nombre de una sola
+     * palabra no manda `fn` ni `ln`; sin mail, no hay `em`.
+     *
+     * @return void
+     */
+    public function test_un_telefono_extranjero_va_sin_pais_y_un_nombre_suelto_sin_fn_ni_ln(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $lead               = $this->crear_lead_de_la_web('nuevo', '+59899123456');
+        $lead->contact_name = 'Guille 🔥';
+        $lead->status       = 'calificado';
+        $lead->save();
+
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail());
+
+        Http::assertSent(function ($request) use ($lead) {
+            return $request->data()['data'][0]['user_data'] === [
+                'ph'          => [hash('sha256', '59899123456')],
+                'external_id' => [hash('sha256', 'cc-lead-' . $lead->id)],
+            ];
+        });
+    }
+
+    /**
+     * Sin teléfono ni mail no hay con qué cruzar al lead: la fila queda en error y no sale ninguna
+     * llamada.
+     *
+     * @return void
+     */
+    public function test_sin_telefono_ni_mail_no_sale_la_llamada(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+        $this->capturar_el_log();
+
+        $lead = $this->crear_lead_de_la_web('calificado', null);
+        $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+
+        $this->correr_job($fila);
+
+        Http::assertNothingSent();
+        $fila->refresh();
+        $this->assertSame(LeadEventoMeta::ESTADO_ERROR, $fila->estado);
+        $this->assertStringContainsString('ni un mail', (string) $fila->ultimo_error);
+    }
+
+    /**
+     * La partición del nombre para `fn`/`ln`.
+     *
+     * @return void
+     */
+    public function test_nombre_y_apellido_se_parten_como_pide_meta(): void
+    {
+        $this->assertSame(['guillermo', 'gonzález'], MetaConversionesService::nombre_y_apellido('Guillermo González'));
+        $this->assertSame(['juan', 'pérez'], MetaConversionesService::nombre_y_apellido(' Juan  Carlos Pérez '));
+        $this->assertSame(['maríajosé', 'obrien'], MetaConversionesService::nombre_y_apellido("María-José O'Brien"));
+        $this->assertNull(MetaConversionesService::nombre_y_apellido('Guille 🔥'));
+        $this->assertNull(MetaConversionesService::nombre_y_apellido(''));
+        $this->assertNull(MetaConversionesService::nombre_y_apellido(null));
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 3. La configuración
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Sin las variables de la web, cae a las de WhatsApp: el dataset y el token de la WABA. Y cada
+     * una cae por su lado: con el token de la web y sin su dataset, sale con el token de la web al
+     * dataset de WhatsApp.
+     *
+     * @return void
+     */
+    public function test_la_config_de_la_web_cae_a_la_de_whatsapp(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        config(['services.meta_capi.web_token' => '', 'services.meta_capi.web_dataset_id' => '  ']);
+        $primero = $this->crear_lead_de_la_web('calificado');
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $primero->id)->firstOrFail());
+
+        config(['services.meta_capi.web_token' => self::WEB_TOKEN, 'services.meta_capi.web_dataset_id' => '']);
+        $segundo = $this->crear_lead_de_la_web('calificado');
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $segundo->id)->firstOrFail());
+
+        Http::assertSentCount(2);
+        Http::assertSent(function ($request) use ($primero) {
+            return $request->url() === 'https://graph.facebook.com/v24.0/' . self::DATASET . '/events'
+                && $request->hasHeader('Authorization', 'Bearer ' . self::TOKEN)
+                && $request->data()['data'][0]['event_id'] === 'cc-lead-' . $primero->id . '-web-lead';
+        });
+        Http::assertSent(function ($request) use ($segundo) {
+            return $request->url() === 'https://graph.facebook.com/v24.0/' . self::DATASET . '/events'
+                && $request->hasHeader('Authorization', 'Bearer ' . self::WEB_TOKEN)
+                && $request->data()['data'][0]['event_id'] === 'cc-lead-' . $segundo->id . '-web-lead';
+        });
+    }
+
+    /**
+     * Sin ninguna configuración (ni la de la web ni la de WhatsApp): sin_configurar, un warning que
+     * nombra las variables de la web, nada encolado y ninguna llamada.
+     *
+     * @return void
+     */
+    public function test_sin_ninguna_config_queda_sin_configurar_y_no_sale_nada(): void
+    {
+        config([
+            'services.meta_capi.token'          => '',
+            'services.meta_capi.web_token'      => '',
+            'services.meta_capi.web_dataset_id' => '',
+        ]);
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+        $registro = $this->capturar_el_log();
+
+        $lead = $this->crear_lead_de_la_web('calificado');
+        $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+
+        $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, $fila->estado);
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, app(MetaConversionesService::class)->enviar($fila));
+        Http::assertNothingSent();
+
+        $warnings = array_filter($registro->lineas, function ($linea) {
+            return strpos($linea, 'warning') === 0 && strpos($linea, 'META_CAPI_WEB_TOKEN') !== false;
+        });
+        $this->assertNotEmpty($warnings, 'Sin configuración tiene que quedar un warning que nombre las variables de la web.');
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 4. Los dos canales conviven
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Un lead de anuncio sigue yendo por WhatsApp aunque la web tenga otro dataset y otro token: al
+     * dataset de la WABA, con su token, `business_messaging` y el `ctwa_clid`. Y un lead de la web
+     * que trae `ctwa_clid` también va por WhatsApp: el click id gana.
+     *
+     * @return void
+     */
+    public function test_un_lead_de_anuncio_sigue_yendo_por_whatsapp(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $anuncio            = $this->crear_lead_de_la_web('nuevo');
+        $anuncio->origen    = LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP;
+        $anuncio->ctwa_clid = self::CLID;
+        $anuncio->status    = 'calificado';
+        $anuncio->save();
+
+        $web_con_clid            = $this->crear_lead_de_la_web('nuevo');
+        $web_con_clid->ctwa_clid = self::CLID;
+        $web_con_clid->status    = 'calificado';
+        $web_con_clid->save();
+
+        foreach ([$anuncio, $web_con_clid] as $lead) {
+            $this->assertSame([
+                ['whatsapp', 'LeadSubmitted', 'cc-lead-' . $lead->id . '-leadsubmitted', LeadEventoMeta::ESTADO_PENDIENTE],
+            ], $this->filas_de($lead));
+
+            $this->correr_job(LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail());
+        }
+
+        Http::assertSentCount(2);
+        Http::assertSent(function ($request) use ($anuncio) {
+            $dato = $request->data()['data'][0];
+
+            return $request->url() === 'https://graph.facebook.com/v24.0/' . self::DATASET . '/events'
+                && $request->hasHeader('Authorization', 'Bearer ' . self::TOKEN)
+                && $dato['event_id'] === 'cc-lead-' . $anuncio->id . '-leadsubmitted'
+                && $dato['action_source'] === 'business_messaging'
+                && $dato['messaging_channel'] === 'whatsapp'
+                && $dato['user_data'] === ['whatsapp_business_account_id' => self::WABA, 'ctwa_clid' => self::CLID];
+        });
+        Http::assertNotSent(function ($request) {
+            return strpos($request->url(), self::WEB_DATASET) !== false;
+        });
+    }
+
+    /**
+     * 🔴 El único es por canal: el mismo lead puede tener un `Purchase` de cada canal (si le llegó un
+     * anuncio después de la web), pero no dos del mismo canal.
+     *
+     * @return void
+     */
+    public function test_el_unico_es_por_lead_canal_y_evento(): void
+    {
+        $lead = $this->crear_lead_de_la_web('nuevo');
+        $base = [
+            'lead_id'    => $lead->id,
+            'evento'     => 'Purchase',
+            'estado'     => LeadEventoMeta::ESTADO_OMITIDO,
+            'event_time' => Carbon::now(),
+        ];
+
+        LeadEventoMeta::create($base + ['canal' => 'whatsapp', 'event_id' => 'cc-lead-' . $lead->id . '-purchase']);
+        LeadEventoMeta::create($base + ['canal' => 'web', 'event_id' => 'cc-lead-' . $lead->id . '-web-purchase']);
+        $this->assertSame(2, LeadEventoMeta::query()->where('lead_id', $lead->id)->count());
+
+        $duplicado = false;
+        try {
+            DB::transaction(function () use ($base, $lead) {
+                LeadEventoMeta::create($base + ['canal' => 'web', 'event_id' => 'cc-lead-' . $lead->id . '-otro-id']);
+            });
+        } catch (QueryException $exception) {
+            $duplicado = true;
+        }
+        $this->assertTrue($duplicado, 'Dos filas del mismo lead, canal y evento tienen que chocar contra el único.');
+
+        /* Una fila sin canal explícito es de WhatsApp (el default de la columna). */
+        $sin_canal = LeadEventoMeta::create([
+            'lead_id'    => $lead->id,
+            'evento'     => 'LeadSubmitted',
+            'estado'     => LeadEventoMeta::ESTADO_OMITIDO,
+            'event_id'   => 'cc-lead-' . $lead->id . '-leadsubmitted',
+            'event_time' => Carbon::now(),
+        ]);
+        $this->assertSame('whatsapp', $sin_canal->fresh()->canal);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 5. El backfill y el conciliador
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un lead viejo de la web (primer mensaje con la frase del botón, demo realizada y promovido,
+     * tocado ayer): el backfill lo deja `landing` y registra lo que ya alcanzó como `omitido` en el
+     * canal web, sin encolar; el conciliador después no encola ni manda nada.
+     *
+     * @return void
+     */
+    public function test_el_backfill_deja_omitido_lo_alcanzado_por_un_lead_viejo_de_la_web(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1], 200)]);
+
+        $lead                     = new Lead();
+        $lead->contact_name       = 'Lead viejo de la web';
+        $lead->phone              = '+549351' . random_int(1000000, 9999999);
+        $lead->status             = 'demo_realizada';
+        $lead->promoted_client_id = $this->crear_cliente()->id;
+        $lead->save();
+
+        /* El primer mensaje es de antes del deploy: se guarda sin pasar por el observer del origen. */
+        LeadMessage::withoutEvents(function () use ($lead) {
+            $primero                        = new LeadMessage();
+            $primero->lead_id               = $lead->id;
+            $primero->sender                = 'lead';
+            $primero->status                = 'enviado';
+            $primero->is_followup           = false;
+            $primero->requiere_verificacion = false;
+            $primero->content               = LeadOrigenService::FRASE_LANDING;
+            $primero->sent_at               = Carbon::now()->subDays(30);
+            $primero->save();
+        });
+
+        $hace_30_dias = Carbon::now()->subDays(30);
+        DB::table('leads')->where('id', $lead->id)->update([
+            'origen'              => null,
+            'origen_calculado_at' => null,
+            'created_at'          => $hace_30_dias,
+            'updated_at'          => Carbon::now()->subDay(),
+        ]);
+        $this->assertSame([], $this->filas_de($lead));
+
+        $this->assertSame(0, Artisan::call('leads:calcular-origen', [
+            '--desde'   => $hace_30_dias->format('Y-m-d'),
+            '--aplicar' => true,
+        ]));
+
+        $this->assertSame(LeadOrigenService::ORIGEN_LANDING, $lead->fresh()->origen);
+        $this->assertSame([
+            ['web', 'Lead', 'cc-lead-' . $lead->id . '-web-lead', LeadEventoMeta::ESTADO_OMITIDO],
+            ['web', 'Schedule', 'cc-lead-' . $lead->id . '-web-schedule', LeadEventoMeta::ESTADO_OMITIDO],
+            ['web', 'Purchase', 'cc-lead-' . $lead->id . '-web-purchase', LeadEventoMeta::ESTADO_OMITIDO],
+        ], $this->filas_de($lead));
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        $this->correr_job(LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail());
+        Http::assertNothingSent();
+    }
+
+    /**
+     * El conciliador registra y encola lo que el observer no vio de un lead de la web (el UPDATE
+     * directo de la demo directa), y no toca un lead de la web quieto hace más que la vigencia ni
+     * un lead sin canal.
+     *
+     * @return void
+     */
+    public function test_el_conciliador_levanta_a_los_leads_de_la_web(): void
+    {
+        $reciente = $this->crear_lead_de_la_web('nuevo');
+        Lead::query()->whereKey($reciente->id)->update(['status' => 'demo_agendada']);
+        $this->assertSame([], $this->filas_de($reciente), 'El UPDATE directo no pasa por el observer.');
+
+        $quieto = $this->crear_lead_de_la_web('nuevo');
+        DB::table('leads')->where('id', $quieto->id)->update([
+            'status'     => 'demo_agendada',
+            'updated_at' => Carbon::now()->subDays(LeadEventoMeta::DIAS_DE_VIGENCIA + 2),
+        ]);
+
+        $sin_canal = $this->crear_lead_de_la_web('nuevo');
+        DB::table('leads')->where('id', $sin_canal->id)->update(['status' => 'demo_agendada', 'origen' => 'desconocido']);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        $this->assertSame(['Lead', 'Schedule'], $this->eventos_de($reciente));
+        $this->assertSame([], $this->filas_de($quieto));
+        $this->assertSame([], $this->filas_de($sin_canal));
+
+        foreach (LeadEventoMeta::query()->where('lead_id', $reciente->id)->get() as $fila) {
+            $this->assertSame('web', $fila->canal);
+            Queue::assertPushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila) {
+                return $this->id_del_job($job) === (int) $fila->id;
+            });
+        }
+    }
+
+    /**
+     * El conciliador reencola los `sin_configurar` solo de los canales que ya tienen configuración:
+     * con la de la web cargada y la de WhatsApp todavía vacía, sale el de la web y el de WhatsApp
+     * espera.
+     *
+     * @return void
+     */
+    public function test_el_conciliador_reencola_sin_configurar_solo_del_canal_configurado(): void
+    {
+        config([
+            'services.meta_capi.token'          => '',
+            'services.meta_capi.dataset_id'     => '',
+            'services.meta_capi.web_token'      => '',
+            'services.meta_capi.web_dataset_id' => '',
+        ]);
+        $this->capturar_el_log();
+
+        $web               = $this->crear_lead_de_la_web('calificado');
+        $anuncio            = $this->crear_lead_de_la_web('nuevo');
+        $anuncio->origen    = LeadOrigenService::ORIGEN_ANUNCIO_WHATSAPP;
+        $anuncio->ctwa_clid = self::CLID;
+        $anuncio->status    = 'calificado';
+        $anuncio->save();
+
+        $fila_web     = LeadEventoMeta::query()->where('lead_id', $web->id)->firstOrFail();
+        $fila_anuncio = LeadEventoMeta::query()->where('lead_id', $anuncio->id)->firstOrFail();
+        $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, $fila_web->estado);
+        $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, $fila_anuncio->estado);
+
+        config(['services.meta_capi.web_token' => self::WEB_TOKEN, 'services.meta_capi.web_dataset_id' => self::WEB_DATASET]);
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+
+        Queue::assertPushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila_web) {
+            return $this->id_del_job($job) === (int) $fila_web->id;
+        });
+        Queue::assertNotPushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila_anuncio) {
+            return $this->id_del_job($job) === (int) $fila_anuncio->id;
+        });
+        $this->assertSame(LeadEventoMeta::ESTADO_SIN_CONFIGURAR, $fila_anuncio->fresh()->estado);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 6. Ningún token a la vista
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Una caída de red cuyo mensaje trae el token de la web no lo deja ni en la fila ni en el log.
+     *
+     * @return void
+     */
+    public function test_el_token_de_la_web_no_queda_en_la_fila_ni_en_el_log(): void
+    {
+        Http::fake(function ($request) {
+            throw new ConnectionException('cURL error 28: Operation timed out for ' . $request->url() . '?access_token=' . self::WEB_TOKEN);
+        });
+        $registro = $this->capturar_el_log();
+
+        $lead = $this->crear_lead_de_la_web('calificado');
+        $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+
+        $this->correr_job($fila);
+
+        $fila->refresh();
+        $this->assertSame(LeadEventoMeta::ESTADO_ERROR, $fila->estado);
+        $this->assertStringNotContainsString(self::WEB_TOKEN, (string) $fila->ultimo_error);
+        $this->assertStringContainsString('[token]', (string) $fila->ultimo_error);
+
+        $this->assertNotEmpty($registro->lineas);
+        $this->assertLogSinLosTokens($registro);
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 7. claude/query
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * `claude/query` expone el canal: como columna y como filtro.
+     *
+     * @return void
+     */
+    public function test_claude_query_expone_y_filtra_el_canal(): void
+    {
+        config(['services.claude_task_ingest.key' => 'clave-de-prueba-conversiones-web']);
+
+        $lead = $this->crear_lead_de_la_web('calificado');
+        $fila = LeadEventoMeta::query()->where('lead_id', $lead->id)->firstOrFail();
+
+        $headers = ['X-Claude-Task-Key' => 'clave-de-prueba-conversiones-web', 'Accept' => 'application/json'];
+
+        $web = $this->getJson('/api/claude/query?' . http_build_query([
+            'model'   => 'lead_evento_meta',
+            'lead_id' => $lead->id,
+            'canal'   => 'web',
+        ]), $headers);
+        $web->assertStatus(200);
+        $this->assertContains('canal', $web->json('columnas'));
+        $this->assertSame([(int) $fila->id], array_map('intval', array_column($web->json('data'), 'id')));
+        $this->assertSame('web', $web->json('data.0.canal'));
+        $this->assertSame('Lead', $web->json('data.0.evento'));
+
+        $whatsapp = $this->getJson('/api/claude/query?' . http_build_query([
+            'model'   => 'lead_evento_meta',
+            'lead_id' => $lead->id,
+            'canal'   => 'whatsapp',
+        ]), $headers);
+        $whatsapp->assertStatus(200);
+        $this->assertSame([], $whatsapp->json('data'));
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | Ayudas
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * Lead que vino de la web (origen `landing`, sin ctwa_clid), en el estado pedido.
+     *
+     * @param string      $status
+     * @param string|null $telefono Default: un celular de Córdoba al azar.
+     *
+     * @return Lead
+     */
+    private function crear_lead_de_la_web(string $status, ?string $telefono = 'al_azar'): Lead
+    {
+        $lead               = new Lead();
+        $lead->contact_name = 'Lead de la web ' . Str::random(5);
+        $lead->phone        = $telefono === 'al_azar' ? '+549351' . random_int(1000000, 9999999) : $telefono;
+        $lead->status       = $status;
+        $lead->origen       = LeadOrigenService::ORIGEN_LANDING;
+        $lead->save();
+
+        return $lead;
+    }
+
+    /**
+     * Filas del lead, en orden: [canal, evento, event_id, estado].
+     *
+     * @param Lead $lead
+     *
+     * @return array<int, array<int, string>>
+     */
+    private function filas_de(Lead $lead): array
+    {
+        return LeadEventoMeta::query()
+            ->where('lead_id', $lead->id)
+            ->orderBy('id')
+            ->get()
+            ->map(function (LeadEventoMeta $fila) {
+                return [(string) $fila->canal, (string) $fila->evento, (string) $fila->event_id, (string) $fila->estado];
+            })
+            ->all();
+    }
+
+    /**
+     * Eventos registrados del lead, en orden.
+     *
+     * @param Lead $lead
+     *
+     * @return array<int, string>
+     */
+    private function eventos_de(Lead $lead): array
+    {
+        return LeadEventoMeta::query()->where('lead_id', $lead->id)->orderBy('id')->pluck('evento')->all();
+    }
+
+    /**
+     * Id de la fila que lleva un job encolado (la propiedad es privada a propósito).
+     *
+     * @param EnviarEventoMetaJob $job
+     *
+     * @return int
+     */
+    private function id_del_job(EnviarEventoMetaJob $job): int
+    {
+        $propiedad = new \ReflectionProperty(EnviarEventoMetaJob::class, 'lead_evento_meta_id');
+        $propiedad->setAccessible(true);
+
+        return (int) $propiedad->getValue($job);
+    }
+
+    /**
+     * Corre el job como lo correría el worker.
+     *
+     * @param LeadEventoMeta $fila
+     *
+     * @return void
+     */
+    private function correr_job(LeadEventoMeta $fila): void
+    {
+        (new EnviarEventoMetaJob((int) $fila->id))->handle(app(MetaConversionesService::class));
+    }
+
+    /**
+     * Reemplaza el log por un registro propio que acepta `Log::channel('daily')`.
+     *
+     * @return AbstractLogger Con `$lineas`: "nivel mensaje {contexto}".
+     */
+    private function capturar_el_log(): AbstractLogger
+    {
+        $registro = new class extends AbstractLogger {
+            /** @var array<int, string> */
+            public $lineas = [];
+
+            public function channel($nombre = null)
+            {
+                return $this;
+            }
+
+            public function log($level, $message, array $context = [])
+            {
+                $this->lineas[] = $level . ' ' . $message . ' ' . json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+        };
+
+        Log::swap($registro);
+
+        return $registro;
+    }
+
+    /**
+     * Ninguna línea de log lleva ninguno de los dos tokens.
+     *
+     * @param AbstractLogger $registro
+     *
+     * @return void
+     */
+    private function assertLogSinLosTokens(AbstractLogger $registro): void
+    {
+        foreach ($registro->lineas as $linea) {
+            $this->assertStringNotContainsString(self::TOKEN, $linea, 'Una línea de log lleva el token de WhatsApp.');
+            $this->assertStringNotContainsString(self::WEB_TOKEN, $linea, 'Una línea de log lleva el token de la web.');
+        }
+    }
+
+    /**
+     * Cliente mínimo para promover un lead (leads.promoted_client_id tiene FK a clients).
+     *
+     * @return Client
+     */
+    private function crear_cliente(): Client
+    {
+        $cliente                  = new Client();
+        $cliente->name            = 'Cliente de prueba ' . Str::random(5);
+        $cliente->company_name    = 'Negocio de prueba';
+        $cliente->slug            = 'conversiones-web-' . Str::lower(Str::random(10));
+        $cliente->api_url         = 'https://ejemplo.test';
+        $cliente->api_key         = 'clave-sembrada-' . Str::random(10);
+        $cliente->inbound_api_key = 'clave-sembrada-inbound-' . Str::random(10);
+        $cliente->is_active       = true;
+        $cliente->save();
+
+        return $cliente;
+    }
+}

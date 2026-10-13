@@ -12,8 +12,8 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Manda a Meta UNA conversión de un lead de anuncio (misión origen-del-lead-y-conversiones-meta,
- * 13/10/2026).
+ * Manda a Meta UNA conversión de un lead, de anuncio (canal `whatsapp`) o de la web (canal `web`)
+ * (misión origen-del-lead-y-conversiones-meta, 13/10/2026). El canal lo resuelve el servicio.
  *
  * 🔴 **Por qué existe.** El registro del evento vive en el observer de `Lead::saved`, que corre
  * adentro del request que cambió el estado del lead (el webhook de Kapso, el envío de una sugerencia,

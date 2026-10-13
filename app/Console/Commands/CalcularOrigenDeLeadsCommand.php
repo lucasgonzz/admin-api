@@ -32,8 +32,12 @@ use Illuminate\Support\Facades\DB;
  * jamás: el reclamo del envío no acepta ese estado, y como la fila ya existe, nadie la vuelve a
  * registrar como `pendiente`. Sin eso, el conciliador tomaría a cualquier lead de anuncio tocado en
  * la última semana y reportaría clics de hace semanas con fecha de ayer. Lo que el lead alcance
- * DESPUÉS sí sale, como para cualquier lead. Un lead al que el backfill no le carga `ctwa_clid` no
- * registra nada.
+ * DESPUÉS sí sale, como para cualquier lead.
+ *
+ * Lo mismo con los leads viejos que quedan como `landing` (segunda tanda, 13/10/2026): ese origen
+ * también tiene canal de conversiones (el dataset del píxel de la web), así que sus etapas ya
+ * alcanzadas (`Lead`, `Schedule`, `Purchase`) quedan `omitido` en el canal `web`. Un lead al que el
+ * backfill no le carga `ctwa_clid` ni lo deja `landing` no registra nada.
  *
  * Un lead sin ningún mensaje entrante queda en NULL a propósito: todavía no hay de dónde leer su
  * origen, y si mañana escribe, el observer lo calcula con su primer mensaje.
@@ -106,14 +110,18 @@ class CalcularOrigenDeLeadsCommand extends Command
                     ->update($cambios);
                 $escritos += $escrito;
 
-                /* Lead viejo de anuncio: lo que ya alcanzó queda `omitido` y no sale a Meta (ver el
-                   docblock de la clase). */
-                if ($escrito > 0 && $resultado['ctwa_clid'] !== null) {
-                    $lead->ctwa_clid = $resultado['ctwa_clid'];
+                /* Lead viejo de anuncio o de la web: lo que ya alcanzó queda `omitido` y no sale a Meta
+                   (ver el docblock de la clase). El modelo en memoria no tiene lo que se acaba de
+                   escribir por el query builder: se le carga para que el servicio elija el canal. */
+                if ($escrito > 0 && ($resultado['ctwa_clid'] !== null || $resultado['origen'] === LeadOrigenService::ORIGEN_LANDING)) {
+                    $lead->origen = $resultado['origen'];
+                    if ($resultado['ctwa_clid'] !== null) {
+                        $lead->ctwa_clid = $resultado['ctwa_clid'];
+                    }
                     try {
                         $omitidos += count($conversiones->registrar_omitidos($lead));
                     } catch (\Throwable $exception) {
-                        $this->error('Lead ' . $lead->id . ': no se pudieron registrar los eventos omitidos (' . $exception->getMessage() . ').');
+                        $this->error('Lead ' . $lead->id . ': no se pudieron registrar los eventos omitidos (' . $conversiones->sin_token($exception->getMessage()) . ').');
                     }
                 }
             }

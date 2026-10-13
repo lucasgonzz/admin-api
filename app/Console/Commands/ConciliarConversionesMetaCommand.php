@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\LeadEventoMeta;
 use App\Services\MetaConversionesService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -15,6 +16,9 @@ use Illuminate\Support\Facades\Log;
  * intentos, y solo cuando llevan más de quince minutos quietos) y, cuando la configuración aparece,
  * encola lo que quedó `sin_configurar`. El detalle está en `MetaConversionesService::conciliar()`.
  *
+ * Desde la segunda tanda (13/10/2026) mira los dos canales: los leads de anuncio (WhatsApp) y los
+ * que vinieron de la web (dataset del píxel).
+ *
  * Encola, no manda: el envío lo hace el worker de la cola `database`.
  */
 class ConciliarConversionesMetaCommand extends Command
@@ -27,7 +31,7 @@ class ConciliarConversionesMetaCommand extends Command
     /**
      * @var string
      */
-    protected $description = 'Registra y reintenta las conversiones a Meta (CAPI) de los leads de anuncio que ningún observer vio o que fallaron';
+    protected $description = 'Registra y reintenta las conversiones a Meta (CAPI) de los leads de anuncio y de la web que ningún observer vio o que fallaron';
 
     /**
      * @param MetaConversionesService $service Inyectado por el contenedor.
@@ -55,8 +59,10 @@ class ConciliarConversionesMetaCommand extends Command
             ['Sin configurar reencolados', $resumen['sin_configurar_reenviados']],
         ]);
 
-        if (! MetaConversionesService::config_completa()) {
-            $this->warn('Falta META_CAPI_TOKEN o META_CAPI_DATASET_ID: no sale ningún evento hasta que estén en el .env.');
+        foreach (LeadEventoMeta::CANALES as $canal) {
+            if (! MetaConversionesService::config_completa($canal)) {
+                $this->warn('Canal ' . $canal . ': falta ' . MetaConversionesService::config_que_falta($canal) . '. No sale ningún evento de ese canal hasta que estén en el .env.');
+            }
         }
 
         return 0;

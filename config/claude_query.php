@@ -1417,9 +1417,11 @@ return [
         ],
 
         /* ---------------------------------------------------------------
-         | lead_evento_meta — las conversiones de los leads de anuncio que se le
-         | mandan a Meta (CAPI for Business Messaging): LeadSubmitted,
-         | QualifiedLead y Purchase, una fila por (lead, evento).
+         | lead_evento_meta — las conversiones de los leads que se le mandan a
+         | Meta por la CAPI, una fila por (lead, canal, evento). Canal whatsapp:
+         | los leads de anuncio (LeadSubmitted, QualifiedLead, Purchase). Canal
+         | web (desde el 13/10/2026): los que vinieron de la web, al dataset del
+         | píxel (Lead, Schedule, Purchase).
          |
          | Entra entera, y se revisó columna por columna: ninguna es un dato de
          | una persona. `ctwa_clid` NO está en esta tabla (vive en leads, opt-in
@@ -1430,9 +1432,9 @@ return [
          --------------------------------------------------------------- */
         'lead_evento_meta' => [
             'tabla'           => 'lead_eventos_meta',
-            'descripcion'     => 'Conversiones de los leads de anuncio Click-to-WhatsApp que se le mandan a Meta por la CAPI: qué evento, en qué estado quedó el envío, cuántos intentos y el motivo del último fallo.',
+            'descripcion'     => 'Conversiones de los leads que se le mandan a Meta por la CAPI, por canal (whatsapp: leads de anuncio Click-to-WhatsApp; web: leads que vinieron de la web, al dataset del píxel): qué evento, en qué estado quedó el envío, cuántos intentos y el motivo del último fallo.',
             'columnas'        => [
-                'id', 'lead_id', 'evento', 'estado', 'event_id', 'event_time',
+                'id', 'lead_id', 'canal', 'evento', 'estado', 'event_id', 'event_time',
                 'intentos', 'enviado_at', 'ultimo_error', 'respuesta',
                 'created_at', 'updated_at',
             ],
@@ -1443,8 +1445,9 @@ return [
             'busqueda'        => ['ultimo_error'],
             'filtros'         => [
                 'lead_id'      => ['columna' => 'lead_id',    'tipo' => 'entero'],
-                /* Verificado en LeadEventoMeta::EVENTOS y ::ESTADOS. */
-                'evento'       => ['columna' => 'evento',     'tipo' => 'en', 'valores' => ['LeadSubmitted', 'QualifiedLead', 'Purchase']],
+                /* Verificado en LeadEventoMeta::CANALES, ::EVENTOS, ::EVENTOS_WEB y ::ESTADOS. */
+                'canal'        => ['columna' => 'canal',      'tipo' => 'en', 'valores' => ['whatsapp', 'web']],
+                'evento'       => ['columna' => 'evento',     'tipo' => 'en', 'valores' => ['LeadSubmitted', 'QualifiedLead', 'Lead', 'Schedule', 'Purchase']],
                 'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['pendiente', 'enviando', 'enviado', 'error', 'sin_configurar', 'omitido']],
                 'evento_desde' => ['columna' => 'event_time', 'tipo' => 'fecha_desde'],
                 'evento_hasta' => ['columna' => 'event_time', 'tipo' => 'fecha_hasta'],
@@ -1453,7 +1456,7 @@ return [
                 'creado_hasta' => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
             ],
             'relaciones'      => [],
-            'nota' => '🔴 sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID en el .env: no salió ninguna llamada. omitido = etapa alcanzada antes de que existiera la medición (la registró el backfill del origen): no se manda nunca. leads:meta-capi-conciliar (cada diez minutos) reencola un error con intentos < 3 y un pendiente huérfano cuando llevan más de quince minutos quietos, siempre dentro de la vigencia del evento (Meta no acepta eventos de más de siete días). Para ver de dónde vino el lead: model=lead con include=atribucion.',
+            'nota' => '🔴 canal=whatsapp son los leads de anuncio (ctwa_clid); canal=web, los que vinieron de la web (origen=landing), al dataset del píxel (META_CAPI_WEB_DATASET_ID / META_CAPI_WEB_TOKEN, que vacías caen a las de WhatsApp). sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID (o las WEB) en el .env: no salió ninguna llamada. omitido = etapa alcanzada antes de que existiera la medición (la registró el backfill del origen): no se manda nunca. leads:meta-capi-conciliar (cada diez minutos) reencola un error con intentos < 3 y un pendiente huérfano cuando llevan más de quince minutos quietos, siempre dentro de la vigencia del evento (Meta no acepta eventos de más de siete días). Para ver de dónde vino el lead: model=lead con include=atribucion.',
         ],
 
         /* ---------------------------------------------------------------

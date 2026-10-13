@@ -406,7 +406,8 @@ class LeadOrigenService
             return null;
         }
 
-        if ($resultado['ctwa_clid'] !== null) {
+        /* Con el clid sale por WhatsApp; un lead de la web sale por el dataset del píxel. */
+        if ($resultado['ctwa_clid'] !== null || $resultado['origen'] === self::ORIGEN_LANDING) {
             $this->despues_de_guardar_el_clid((int) $lead->id);
         }
 
@@ -596,11 +597,12 @@ class LeadOrigenService
     }
 
     /**
-     * Lo que pasa después de guardarle a un lead su `ctwa_clid`: registrar las conversiones que ya
-     * alcanzó. El `ctwa_clid` se escribe con un UPDATE condicional (para que dos webhooks no se
-     * pisen) y ese UPDATE no dispara `Lead::saved`, así que el registro se pide acá. Casi siempre no
-     * hay nada que registrar (el lead recién nace, está en `nuevo`); si el referral llegó tarde y el
-     * lead ya avanzó, sale lo que corresponde. Si esto falla, lo levanta el conciliador.
+     * Lo que pasa después de guardarle a un lead su `ctwa_clid` (o el origen `landing`, que desde la
+     * segunda tanda también tiene canal de conversiones): registrar las conversiones que ya alcanzó.
+     * Los dos se escriben con un UPDATE condicional (para que dos webhooks no se pisen) y ese UPDATE
+     * no dispara `Lead::saved`, así que el registro se pide acá. Casi siempre no hay nada que
+     * registrar (el lead recién nace, está en `nuevo`); si el referral llegó tarde y el lead ya
+     * avanzó, sale lo que corresponde. Si esto falla, lo levanta el conciliador.
      *
      * @param int $lead_id
      *
@@ -616,7 +618,7 @@ class LeadOrigenService
         } catch (\Throwable $exception) {
             Log::channel('daily')->error('Origen del lead: no se pudieron registrar las conversiones a Meta.', [
                 'lead_id' => $lead_id,
-                'error'   => $exception->getMessage(),
+                'error'   => app(MetaConversionesService::class)->sin_token($exception->getMessage()),
             ]);
         }
     }
