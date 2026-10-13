@@ -80,6 +80,10 @@ class ClientMensualidadController extends Controller
             'afip_razon_social' => ['nullable', 'string', 'max:120'],
             'afip_condicion_iva' => ['nullable', 'string', 'max:60'],
             'afip_domicilio' => ['nullable', 'string', 'max:200'],
+            /* Facturar a Consumidor Final sin CUIT (misión mensualidad-consumidor-final, 13/10/2026).
+               Opcional a propósito: el SPA anterior no manda la clave y no tiene por qué apagar un
+               tilde que alguien prendió (ver `ClientMensualidadService::guardar()`). */
+            'facturar_consumidor_final' => ['nullable', 'boolean'],
         ]);
 
         $service->guardar($client, $validated);
