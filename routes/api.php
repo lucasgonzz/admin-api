@@ -197,6 +197,10 @@ Route::middleware('claude.task.key')
         Route::get('metrics', 'Api\ClaudeLeadsAnalyticsController@metrics_json');
         Route::get('templates', 'Api\ClaudeLeadsAnalyticsController@templates_json');
 
+        /* Públicos personalizados para Meta armados con el pipeline (misión
+           origen-del-lead-y-conversiones-meta): teléfono y mail en SHA-256, nunca en claro. */
+        Route::get('audiencias', 'Api\ClaudeAudienciasController@index');
+
         /* Alta en LOTE de plantillas de LEAD (followup_templates). Hermano de escritura de
            `templates` de arriba, en un controlador aparte porque no es análisis de lectura.
            No confundir con `client-templates`, que es el alta de plantillas de SOPORTE

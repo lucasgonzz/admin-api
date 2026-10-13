@@ -342,6 +342,17 @@ return [
             'peligrosidad' => 'lectura',
             'frenos'       => [],
         ],
+        'GET api/claude/audiencias' => [
+            'para_que'     => 'Públicos personalizados para Meta armados con el pipeline: conversaron_sin_agendar (por el último mensaje DEL LEAD en los últimos N días), agendaron_sin_entrar y clientes (leads promovidos o cerrado_ganado más la tabla clients). Una fila por persona, deduplicada, con teléfono y mail en SHA-256 normalizados como pide Meta. Nunca devuelve un dato en claro. Con formato=csv devuelve el archivo listo para subir (phone,email).',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+            'parametros'   => [
+                ['nombre' => 'etapa', 'obligatorio' => true, 'validacion' => 'conversaron_sin_agendar | agendaron_sin_entrar | clientes', 'que_es' => 'Qué público. Una etapa inválida devuelve 422 con etapas_validas y la descripción de cada una.'],
+                ['nombre' => 'dias', 'obligatorio' => false, 'validacion' => 'entero 1..365, default 14', 'que_es' => 'Ventana de conversaron_sin_agendar. Las otras dos etapas la ignoran.'],
+                ['nombre' => 'formato', 'obligatorio' => false, 'validacion' => 'json | csv, default json', 'que_es' => 'JSON: {etapa, dias, cantidad, filas: [{phone_sha256, email_sha256}], descripcion}. CSV: phone,email.'],
+            ],
+        ],
         'GET api/claude/templates' => [
             'para_que'     => 'Catálogo de plantillas Meta aprobadas, para saber qué se puede mandar y con qué variables.',
             'escribe'      => false,
