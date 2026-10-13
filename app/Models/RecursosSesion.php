@@ -26,6 +26,14 @@ class RecursosSesion extends Model
         'last_used_at'        => 'datetime',
     ];
 
+    /**
+     * El hash del token no sale serializado por ningún lado. Las rutas genéricas del panel ni siquiera
+     * resuelven este modelo (`GeneralHelper::MODELOS_NO_EXPUESTOS`); esto es la segunda reja.
+     *
+     * @var array<int, string>
+     */
+    protected $hidden = ['token_hash'];
+
     public function usuario()
     {
         return $this->belongsTo(RecursosUsuario::class, 'recursos_usuario_id');
