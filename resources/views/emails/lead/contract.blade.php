@@ -144,11 +144,29 @@
 </head>
 <body>
 
-    {{-- Encabezado --}}
+    {{-- Encabezado.
+         🔴 Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026): con `$modalidad`
+         en null este archivo tiene que imprimir EXACTAMENTE lo mismo que antes de esa misión,
+         carácter por carácter, porque es el contrato de todo lead y cliente que ya existía. Por eso
+         las directivas de la modalidad (if / elseif / else / endif) van en la columna 0 y solas en
+         su línea: Blade las convierte en código PHP y PHP se come el salto de línea que sigue a la
+         etiqueta de cierre, así que una directiva sin sangría no deja rastro en la salida. Con
+         sangría dejaría los espacios, y un comentario nuevo en una línea propia dejaría una línea en
+         blanco: por eso las notas de esa misión van dentro de los comentarios que ya existían.
+         Al construirla se renderizaron las dos versiones de la vista (la anterior y ésta) con los
+         mismos datos y modalidad null: el HTML dio idéntico byte a byte. ContratoConModalidadTest
+         cuida que sin modalidad no aparezca nada de la letra chica nueva. --}}
     <p class="header-title">COMERCIOCITY</p>
+@if($modalidad === 'suscripcion')
+    <p class="header-subtitle">Contrato de Suscripción, Implementación y Servicio</p>
+@else
     <p class="header-subtitle">Contrato de Licencia, Implementación y Servicio</p>
+@endif
     <hr class="header-line">
     <p class="fecha-emision">Fecha de emisión: {{ $fecha_emision }}</p>
+@if($modalidad !== null)
+    <p class="fecha-emision">Modalidad: <strong>{{ $modalidad === 'suscripcion' ? 'Suscripción' : 'Licencia' }}</strong></p>
+@endif
 
     {{-- Sección 1 — Partes --}}
     <h2 class="section-title">1. Partes del contrato</h2>
@@ -179,20 +197,46 @@
         </tbody>
     </table>
 
-    {{-- Sección 2 — Objeto --}}
+    {{-- Sección 2 — Objeto.
+         En Suscripción la licencia de uso no es de por vida: vale mientras la suscripción mensual
+         esté activa. Licencia y el contrato sin modalidad dicen el texto de siempre. Los sistemas
+         contratados se nombran en las dos modalidades y nunca sin modalidad: el contrato histórico
+         no los nombraba. --}}
     <h2 class="section-title">2. Objeto del contrato</h2>
+@if($modalidad === 'suscripcion')
+    <p>
+        El presente contrato tiene por objeto la concesión de una <strong>licencia de uso</strong> del software ComercioCity,
+        <strong>vigente mientras se mantenga activa la suscripción mensual</strong>, junto con el <strong>servicio de implementación</strong>
+        que permite poner en marcha la plataforma en las condiciones operativas del CLIENTE, y el <strong>servicio mensual continuo</strong>
+        de soporte, mantenimiento y actualizaciones descrito en las cláusulas siguientes.
+    </p>
+@else
     <p>
         El presente contrato tiene por objeto la concesión de una <strong>licencia de uso de por vida</strong> del software ComercioCity,
         junto con el <strong>servicio de implementación</strong> que permite poner en marcha la plataforma en las condiciones operativas
         del CLIENTE, y el <strong>servicio mensual continuo</strong> de soporte, mantenimiento y actualizaciones descrito en las cláusulas siguientes.
     </p>
+@endif
+@if($modalidad !== null && count($sistemas_contratados) > 0)
+    <p>Sistemas contratados: <strong>{{ $sistemas_contratados_texto }}</strong>.</p>
+@endif
 
-    {{-- Sección 3 — Pago único --}}
+    {{-- Sección 3 — Pago único.
+         En Suscripción no hay licencia que pagar: el pago inicial es la puesta en marcha (el monto
+         sigue saliendo de contract_precio_licencia, que es el campo que carga quien vende). --}}
+@if($modalidad === 'suscripcion')
+    <h2 class="section-title">3. Pago inicial — Puesta en marcha</h2>
+    <p>
+        El CLIENTE abonará al PRESTADOR un pago inicial por el servicio de implementación y puesta en marcha, por un importe total de
+        <strong>{{ $moneda }} {{ $precio_licencia ?? '—' }}</strong>, conforme al plan de cuotas que se detalla a continuación:
+    </p>
+@else
     <h2 class="section-title">3. Pago único — Licencia e implementación</h2>
     <p>
         El CLIENTE abonará al PRESTADOR un pago único por la licencia de uso y el servicio de implementación, por un importe total de
         <strong>{{ $moneda }} {{ $precio_licencia ?? '—' }}</strong>, conforme al plan de cuotas que se detalla a continuación:
     </p>
+@endif
     <table class="data-table">
         <thead>
             <tr>
@@ -303,11 +347,52 @@
     @endif
     {{-- Cada cuántos meses se actualiza por IPC: variable desde la misión modulo-cobranzas (18/9/2026).
          El texto ("seis (6) meses") lo arma LeadContractPdfService::meses_en_letras(); el `??` es la red
-         para un llamador que renderice la vista con datos armados por otro camino y sin esa clave. --}}
+         para un llamador que renderice la vista con datos armados por otro camino y sin esa clave.
+         Después del párrafo de IPC, solo con modalidad (misión precios-dos-modalidades, 13/10/2026):
+         5.1 es la letra chica de la modalidad (Licencia: la mensualidad es de por vida y solo se
+         ajusta por IPC; Suscripción: plazo mínimo y después la lista vigente) y 5.2 los consumos de
+         terceros (los mensajes de WhatsApp que cobra Meta), que solo van si se contrató Agentes. --}}
     <p>
         Los importes de la mensualidad podrán actualizarse cada <strong>{{ $meses_actualizacion_texto ?? 'seis (6) meses' }}</strong> conforme al índice IPC publicado por el INDEC,
         con un aviso previo de <strong>quince (15) días</strong> al CLIENTE.
     </p>
+@if($modalidad === 'licencia')
+    <div class="clausula-particular">
+        <p class="clausula-titulo">5.1 — Mensualidad de por vida</p>
+        <p>
+            En la modalidad Licencia, la mensualidad base pactada en este contrato es de por vida: solo podrá modificarse por la actualización
+            por IPC prevista en el párrafo anterior, y no por cambios en la lista de precios de ComercioCity. Incluye las versiones nuevas de los
+            sistemas contratados, el soporte y la infraestructura en la nube. No incluye: (a) sistemas o módulos que el CLIENTE no haya contratado
+            en este acuerdo, ni los que ComercioCity lance en el futuro; (b) los usuarios adicionales que se sumen después de la firma, que se
+            cobran al precio de lista vigente en ese momento; (c) los consumos de terceros que se detallan en este contrato. Si el servicio
+            mensual se da de baja —por rescisión del CLIENTE o por falta de pago— y luego se retoma, la mensualidad pasa a ser la de la lista
+            vigente al momento de retomarlo.
+        </p>
+    </div>
+@elseif($modalidad === 'suscripcion')
+    <div class="clausula-particular">
+        <p class="clausula-titulo">5.1 — Plazo mínimo</p>
+        <p>
+            En la modalidad Suscripción, el servicio mensual tiene un plazo mínimo de <strong>{{ $permanencia_meses_texto }}</strong>
+            contados desde el primer pago de la mensualidad. Si el CLIENTE rescinde antes de cumplirse ese plazo, deberá abonar las
+            mensualidades que resten hasta completarlo. Cumplido el plazo mínimo, la suscripción continúa mes a mes. Durante el plazo mínimo
+            la mensualidad solo se actualiza por IPC; después podrá ajustarse además a la lista de precios vigente de ComercioCity, con un
+            aviso previo de treinta (30) días.
+        </p>
+    </div>
+@endif
+@if($modalidad !== null && $tiene_agentes)
+    <div class="clausula-particular">
+        <p class="clausula-titulo">5.2 — Consumos de terceros</p>
+        <p>
+            Los mensajes de WhatsApp que los sistemas envíen a clientes, proveedores u otros terceros del CLIENTE (por ejemplo,
+            recordatorios de cobro) tienen un costo por mensaje que cobra Meta Platforms. Ese costo no está incluido en la mensualidad: el
+            PRESTADOR podrá trasladarlo al CLIENTE al valor que cobre Meta, con un aviso previo de quince (15) días. Las consultas que el
+            CLIENTE le haga a su sistema por WhatsApp y los informes que reciba no tienen costo adicional. El uso de herramientas de
+            inteligencia artificial propias del CLIENTE conectadas a su sistema corre por cuenta del CLIENTE.
+        </p>
+    </div>
+@endif
 
     {{-- Sección 6 — Soporte --}}
     <h2 class="section-title">6. Soporte personalizado de por vida</h2>
@@ -316,7 +401,10 @@
         sin costo adicional al abono mensual. El soporte tiene por objeto resolver consultas de uso, configuración y operación cotidiana de la plataforma.
     </p>
 
-    {{-- Sección 7 — Condiciones generales --}}
+    {{-- Sección 7 — Condiciones generales.
+         La rescisión cambia con la Suscripción (misión precios-dos-modalidades, 13/10/2026): rige
+         después del plazo mínimo de la cláusula 5.1 y con ella termina la licencia de uso. Licencia
+         y el contrato sin modalidad dicen el texto de siempre. --}}
     <h2 class="section-title">7. Condiciones generales</h2>
     <p>
         <strong>Licencia de uso:</strong> La licencia otorgada es personal, intransferible, sin derecho a sublicenciar ni comercializar el software
@@ -330,10 +418,18 @@
         <strong>Confidencialidad:</strong> Ambas partes se comprometen a mantener la confidencialidad de la información intercambiada y a no divulgarla
         a terceros sin consentimiento previo por escrito de la otra parte.
     </p>
+@if($modalidad === 'suscripcion')
+    <p>
+        <strong>Rescisión:</strong> Cumplido el plazo mínimo de la cláusula 5.1, cualquiera de las partes podrá rescindir el servicio mensual
+        con un preaviso de treinta (30) días. Con la rescisión finaliza la licencia de uso. El pago inicial no será reembolsable una vez
+        iniciada la implementación.
+    </p>
+@else
     <p>
         <strong>Rescisión:</strong> Cualquiera de las partes podrá rescindir el servicio mensual con un preaviso de treinta (30) días. La licencia de uso
         de por vida permanecerá vigente. El pago único no será reembolsable una vez iniciada la implementación.
     </p>
+@endif
     <p>
         <strong>Jurisdicción:</strong> Para cualquier controversia derivada del presente contrato, las partes se someten a los tribunales ordinarios de la
         Ciudad Autónoma de Buenos Aires.

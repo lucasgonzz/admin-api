@@ -13,11 +13,17 @@ use Illuminate\Support\Facades\Log;
  *
  * Usa dompdf (barryvdh/laravel-dompdf) y la vista {@see resources/views/emails/lead/contract.blade.php}.
  *
- * Desde la misión modulo-cobranzas (18/9/2026) acepta un `Lead` O un `Client`: las 17 columnas
+ * Desde la misión modulo-cobranzas (18/9/2026) acepta un `Lead` O un `Client`: las columnas
  * `contract_*` existen con el mismo nombre y el mismo cast en los dos modelos, así que el mismo
  * código genera el contrato de un prospecto y el de un cliente ya promovido. Por eso `generate()`
  * y sus ayudantes NO tipan el modelo (PHP 7.4 no tiene union types) y lo documentan como
  * `Lead|Client`. El nombre de la clase se conserva por los llamadores existentes.
+ *
+ * Desde la misión precios-dos-modalidades (13/10/2026) el contrato tiene MODALIDAD
+ * (`contract_modalidad`: 'licencia' | 'suscripcion'), sistemas contratados y plazo mínimo, y la
+ * vista agrega la letra chica de cada modalidad. 🔴 Con `contract_modalidad` en null el PDF sale
+ * EXACTAMENTE como salía antes de esa misión, carácter por carácter: es el contrato de todo lead y
+ * cliente que ya existía, y lo que ya se firmó no puede cambiar por regenerarlo.
  */
 class LeadContractPdfService
 {
@@ -27,6 +33,18 @@ class LeadContractPdfService
      * cargada tiene que seguir generando exactamente el mismo contrato.
      */
     const MESES_ACTUALIZACION_DEFAULT = 6;
+
+    /**
+     * Plazo mínimo de la Suscripción, en meses, cuando el contrato no trae el dato (o trae 0).
+     * Es el plazo con el que se diseñó la modalidad (misión precios-dos-modalidades, 13/10/2026).
+     */
+    const PERMANENCIA_MESES_DEFAULT = 12;
+
+    /** Modalidad Licencia: entrada alta y mensualidad de por vida que solo se ajusta por IPC. */
+    const MODALIDAD_LICENCIA = 'licencia';
+
+    /** Modalidad Suscripción: entrada baja, plazo mínimo y mensualidad que después sigue la lista. */
+    const MODALIDAD_SUSCRIPCION = 'suscripcion';
 
     /**
      * Construye datos del contrato, renderiza la vista y devuelve el PDF como string binario.
@@ -111,6 +129,20 @@ class LeadContractPdfService
             $lead->contract_precio_perfil_ecommerce
         );
 
+        // Modalidad del contrato: null = contrato histórico (la vista no cambia ni un carácter).
+        $modalidad = self::normalize_modalidad($lead->contract_modalidad);
+
+        // Sistemas contratados, como etiquetas y en el orden canónico del catálogo del cotizador.
+        $sistemas_raw = $lead->contract_sistemas;
+        $sistemas_contratados = self::normalize_sistemas($sistemas_raw);
+        $tiene_agentes = is_array($sistemas_raw) && in_array('agentes', $sistemas_raw, true);
+
+        // Plazo mínimo de la Suscripción (sección 5.1). 0 o nulo = default de 12 meses.
+        $permanencia_meses = (int) ($lead->contract_permanencia_meses ?? 0);
+        if ($permanencia_meses <= 0) {
+            $permanencia_meses = self::PERMANENCIA_MESES_DEFAULT;
+        }
+
         return array_merge(self::build_signature_data($lead, $incluir_firma), [
             'cc_nombre_fantasia'   => 'ComercioCity',
             'cc_razon_social'      => 'Lucas González',
@@ -145,7 +177,90 @@ class LeadContractPdfService
             // (número en letras, cifra y unidad) para que la vista solo lo imprima.
             'meses_actualizacion'         => $meses_actualizacion,
             'meses_actualizacion_texto'   => self::meses_en_letras($meses_actualizacion),
+
+            /* Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026). Las seis claves
+             * están SIEMPRE, aunque valgan null o vacío: la vista no usa `@isset` (ver
+             * build_signature_data()), y una clave que falta tira `Undefined variable` y el
+             * contrato entero deja de generarse. La vista decide con `modalidad`: en null no
+             * imprime nada de esto, ni siquiera los sistemas contratados.
+             *
+             * `tiene_agentes` decide la cláusula 5.2 (consumos de terceros: los mensajes de
+             * WhatsApp que cobra Meta), que solo tiene sentido si se contrató Agentes. */
+            'modalidad'                   => $modalidad,
+            'sistemas_contratados'        => $sistemas_contratados,
+            'sistemas_contratados_texto'  => self::unir_en_castellano($sistemas_contratados),
+            'tiene_agentes'               => $tiene_agentes,
+            'permanencia_meses'           => $permanencia_meses,
+            'permanencia_meses_texto'     => self::meses_en_letras($permanencia_meses),
         ]);
+    }
+
+    /**
+     * La modalidad del contrato, o null si no hay una válida.
+     *
+     * 🔴 Cualquier valor que no sea exactamente 'licencia' o 'suscripcion' (un texto editado a
+     * mano contra la base, un PUT del lead con basura: el PUT genérico no valida) se trata como
+     * null, o sea como el contrato histórico. Es la opción segura: el PDF de siempre es un contrato
+     * que ya se firmó muchas veces; una modalidad adivinada sería letra chica que nadie eligió.
+     *
+     * @param mixed $modalidad_raw Lo guardado en `contract_modalidad`.
+     *
+     * @return string|null 'licencia' | 'suscripcion' | null.
+     */
+    protected static function normalize_modalidad($modalidad_raw): ?string
+    {
+        if ($modalidad_raw === self::MODALIDAD_LICENCIA || $modalidad_raw === self::MODALIDAD_SUSCRIPCION) {
+            return $modalidad_raw;
+        }
+
+        return null;
+    }
+
+    /**
+     * Las etiquetas de los sistemas contratados, en el orden del catálogo (gestión → e-commerce →
+     * agentes) y sin repetidos.
+     *
+     * Recorre `CotizadorSettings::SISTEMAS` y no lo guardado: así el orden es siempre el mismo
+     * aunque la SPA mande las keys en el orden en que se tildaron, una key repetida sale una vez y
+     * una key desconocida (un sistema que ya no existe, basura) se ignora sin romper el contrato.
+     * La etiqueta sale del catálogo, que es la única fuente de los nombres comerciales.
+     *
+     * @param mixed $sistemas_raw JSON decodificado (array de keys) o cualquier otra cosa.
+     *
+     * @return array<int, string> Etiquetas; `[]` si no hay ninguna válida.
+     */
+    protected static function normalize_sistemas($sistemas_raw): array
+    {
+        if (!is_array($sistemas_raw)) {
+            return [];
+        }
+
+        $etiquetas = [];
+        foreach (CotizadorSettings::SISTEMAS as $key => $etiqueta) {
+            if (in_array($key, $sistemas_raw, true)) {
+                $etiquetas[] = $etiqueta;
+            }
+        }
+
+        return $etiquetas;
+    }
+
+    /**
+     * Une una lista como se escribe en castellano: "A", "A y B", "A, B y C".
+     *
+     * @param array<int, string> $partes
+     *
+     * @return string Vacío si la lista está vacía.
+     */
+    protected static function unir_en_castellano(array $partes): string
+    {
+        if (count($partes) <= 1) {
+            return implode('', $partes);
+        }
+
+        $ultima = array_pop($partes);
+
+        return implode(', ', $partes) . ' y ' . $ultima;
     }
 
     /**
