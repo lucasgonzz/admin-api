@@ -9416,9 +9416,7 @@ BLOQUE_DEL_MANUAL;
             . "  Carta de acceso por mail: " . ($lead->demo_mail_sent_at ? 'ya enviada (' . $lead->demo_mail_sent_at->copy()->setTimezone(DemoDirectaService::TZ)->format('H:i') . ')' : 'todavia no enviada') . "\n"
             . "  Demo: {$estado_demo}\n"
             . "Reglas de este turno:\n"
-            . "  - En tu PRIMERA respuesta al lead (la que reconoce lo que conto y le pide el nombre), pasale el link de su\n"
-            . "    pagina como mensaje aparte (separado con ---), presentandola como algo para que vaya viendo lo que hacemos.\n"
-            . "    Sin ofrecer la demo todavia, salvo que el lead la pida.\n"
+            . LeadOrigenService::regla_de_la_pagina_al_primer_contacto($lead)
             . "  - La demo se ofrece cuando el lead ya conto su rubro y su problema (calificado), o antes si el la pide. Si el\n"
             . "    bloque dice que ya abrio su pagina, podes nombrarlo (\"vi que le pegaste una mirada\").\n"
             . "  - Si el lead pide la demo (por ejemplo " . LeadOrigenService::frases_de_cta_para_el_prompt() . ", que es lo que\n"

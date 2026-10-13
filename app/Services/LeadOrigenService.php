@@ -234,6 +234,43 @@ class LeadOrigenService
     }
 
     /**
+     * La regla de la página en la primera respuesta, para el bloque DEMO DIRECTA (pedido de Lucas del
+     * 13/10/2026, segunda tanda: «enviar la página solo debería hacerse si el lead vino del anuncio
+     * que lo lleva a WhatsApp; si ya viene de la landing no hay que volver a enviársela»).
+     *
+     * La página del lead es su landing personal. A un lead de anuncio (o de Instagram, o sin origen
+     * conocido) Martín se la pasa en la primera respuesta para que vaya viendo lo que hacemos. A uno
+     * que vino de la WEB no: ya vio lo que hacemos, y mandársela como presentación es repetirle lo que
+     * acaba de leer. A él el link le llega recién cuando acepta la demo, presentado como el acceso a
+     * su demo (ahí están el formulario, el video y el botón para entrar), que es la regla de la
+     * aceptación del mismo bloque y no cambia.
+     *
+     * Para cualquier origen que no sea `landing` (NULL incluido: el lead anterior a la medición, o
+     * uno cuyo primer mensaje todavía no se procesó) devuelve el texto de siempre, byte a byte.
+     *
+     * El renglón dice explícito que pisa lo que diga el recurso de calificación: el `.md` de la
+     * dinámica nueva manda pasar la página en el primer mensaje a todos, y lo edita otra misión.
+     *
+     * @param Lead $lead
+     *
+     * @return string Los renglones, cada uno con su salto de línea.
+     */
+    public static function regla_de_la_pagina_al_primer_contacto(Lead $lead): string
+    {
+        if ((string) $lead->origen !== self::ORIGEN_LANDING) {
+            return "  - En tu PRIMERA respuesta al lead (la que reconoce lo que conto y le pide el nombre), pasale el link de su\n"
+                . "    pagina como mensaje aparte (separado con ---), presentandola como algo para que vaya viendo lo que hacemos.\n"
+                . "    Sin ofrecer la demo todavia, salvo que el lead la pida.\n";
+        }
+
+        return "  - Este lead VINO DE LA WEB de ComercioCity: ya vio lo que hacemos. NO le pases el link de su pagina como\n"
+            . "    presentacion ni \"para que vayas viendo lo que hacemos\": ni en la primera respuesta ni despues, salvo que\n"
+            . "    el lo pida (esto pisa lo que diga el recurso de calificacion). Segui con lo que pidio, que normalmente es\n"
+            . "    la demo. El link de su pagina va recien cuando acepta la demo, presentado como el acceso a su demo\n"
+            . "    (\"aca tenes el acceso a tu demo\": ahi estan el formulario, el video y el boton para entrar).\n";
+    }
+
+    /**
      * ¿El texto ES la frase? Normalizado (sin tildes, sin signos, minúsculas) y tolerando como mucho
      * UN saludo adelante («Buenas!», «Hola», «Buen día»...). Nada atrás: «la frase, pero hoy no
      * puedo» no es la frase.
