@@ -161,8 +161,83 @@ class ClaudeLeadsAnalyticsController extends Controller
                     ],
                     'nota' => 'Idempotente y aditivo, mismo criterio que POST claude/client-templates: nunca duplica por '
                         . 'template_name y nunca borra lo que no vino en el payload. No envía nada: el envío real es '
-                        . 'POST claude/leads/{id}/send-template.',
+                        . 'POST claude/leads/{id}/send-template. 🔴 REGISTRA una plantilla que YA está aprobada en Meta y '
+                        . 'NO le pregunta nada a Meta: la fila queda con meta_status nulo, así que el envío la rechaza con '
+                        . '422 hasta que se la sincronice (POST claude/templates/meta/{name}/refresh). La que CREA la '
+                        . 'plantilla en Meta es POST claude/templates/meta, descripto en `plantillas_meta`.',
                 ],
+            ],
+            /*
+             * Las plantillas EN META, por API (misión plantillas-meta-y-leads-humano, 13/10/2026).
+             * Se describen acá, al lado de `templates` y `envio`, porque son la otra mitad del mismo
+             * trabajo: `templates` dice qué hay, esto dice cómo tener una que no hay. Sin esta
+             * descripción, una sesión nueva de /leads no tiene cómo enterarse de que puede crear una
+             * plantilla y seguiría dejándole el trabajo a Lucas con el navegador.
+             */
+            'plantillas_meta' => [
+                'para_que' => 'Crear, listar y consultar plantillas EN META (vía el proxy de Kapso), sin pasar por el '
+                    . 'navegador. Es lo que permite que una corrida sin nadie adelante consiga una plantilla que no existe.',
+                'biblioteca' => [
+                    'ruta'    => 'GET claude/templates/meta',
+                    'filtros' => [
+                        'status'   => 'Opcional. meta_status: PENDING, APPROVED, REJECTED, PAUSED, DISABLED.',
+                        'category' => 'Opcional. meta_category: UTILITY o MARKETING.',
+                        'activa'   => 'Opcional. Booleano, el interruptor local.',
+                        'estado'   => 'Opcional. El `estado` de la fila (los manual_* son las de envío a mano).',
+                    ],
+                    'nota' => '🔴 ES DE ACÁ QUE SE ELIGE PLANTILLA, y no de claude/templates: devuelve `uso` (el texto '
+                        . 'corto de cuándo usar cada una), el estado real de Meta y `enviable` — que es activa Y APPROVED, '
+                        . 'o sea lo único que de verdad sale. Lee la tabla local, que templates:sync-meta refresca cada '
+                        . 'hora; la respuesta trae `sin_sincronizar` y `sincronizada_mas_vieja` para que se sepa de cuándo '
+                        . 'es el dato. Para el estado de UNA al instante, el refresh.',
+                ],
+                'crear' => [
+                    'ruta' => 'POST claude/templates/meta',
+                    'body' => [
+                        'name'       => 'OBLIGATORIO. ^[a-z0-9_]+$ (minúsculas, números y guión bajo). Convención: prefijo cc_. '
+                            . '🔴 Un nombre publicado en Meta no se reusa ni se corrige: un cambio de texto es otra '
+                            . 'plantilla con sufijo _v2.',
+                        'category'   => 'OBLIGATORIO. UTILITY o MARKETING, nada más. UTILITY cuando el mensaje retoma algo '
+                            . 'que el lead pidió (aprueba más rápido y es gratis dentro de la ventana); MARKETING para '
+                            . 'nutrición: se cobra siempre y choca con el tope por destinatario 131049, que Meta aplica en '
+                            . 'silencio justo a los leads que vienen recibiendo seguimientos hace semanas.',
+                        'body'       => 'OBLIGATORIO. El texto con sus {{n}} posicionales, hasta 1024 caracteres. Para que '
+                            . 'sea REUTILIZABLE las variables van en el MEDIO: {{1}} el nombre, {{2}} el asunto concreto.',
+                        'ejemplos'   => 'OBLIGATORIO, uno por variable y en orden. Meta exige una muestra por hueco para '
+                            . 'poder revisar; queda guardada y es lo que después rotula cada variable en el listado.',
+                        'uso'        => 'OBLIGATORIO. Texto corto de CUÁNDO usarla. Es lo que deja elegir plantilla sin leer '
+                            . 'el cuerpo de las treinta y ocho.',
+                        'language'   => 'Opcional, default es_AR. Es el idioma con el que Meta la aprueba, y el envío usa ESE.',
+                        'estado'     => 'Opcional. Si viene, tiene que empezar con `manual_`; si no, se deriva del nombre '
+                            . '(cc_x → manual_x). 🔴 Un estado que coincida con un slug real del pipeline haría que el cron '
+                            . 'de cada 2 horas le mande esta plantilla sola a todos los leads de ese estado.',
+                        'dia_numero' => 'Opcional, default 1.',
+                        'dry_run'    => '🔴 DEFAULT true. Sin dry_run=false explícito no se crea nada en Meta ni se escribe '
+                            . 'ninguna fila: devuelve el payload exacto que se mandaría, para leerlo antes de confirmar.',
+                    ],
+                    'nota' => 'Valida las reglas de Meta ANTES de salir a la red (nombre, largo, numeración {{1}}..{{n}} sin '
+                        . 'saltos, y los tres defectos de rechazo automático: variable al principio, variable al final, dos '
+                        . 'variables seguidas), así un formato mal armado es un 422 inmediato y no un rechazo de Meta un día '
+                        . 'después que consumió una de las 100 creaciones por hora. Un template_name ya registrado es 422 y '
+                        . 'NO se reenvía a Meta: no hay upsert. La fila nace con activa=false y meta_status=PENDING incluso '
+                        . 'si Meta contestara APPROVED — la enciende el sync o el refresh, nunca el alta. Solo componente '
+                        . 'BODY con texto posicional, que es lo único que sabe enviar WhatsappSendService.',
+                ],
+                'refresh' => [
+                    'ruta' => 'POST claude/templates/meta/{name}/refresh',
+                    'nota' => 'Consulta el estado en Meta y lo baja a la fila, activándola si pasó a APPROVED. Meta NO manda '
+                        . 'webhooks de estado de plantilla: hay que consultar. Revisa hasta 24 horas, así que lo razonable es '
+                        . 'mirar cada cinco minutos y soltar a los veinte: templates:sync-meta la activa sola más tarde. '
+                        . '🔴 Si Meta no devuelve la plantilla NO se cambia su estado ni se desactiva: una consulta vacía no '
+                        . 'es un rechazo, y apagar una que funciona deja al pipeline sin poder mandar nada fuera de la '
+                        . 'ventana, en silencio.',
+                ],
+                'plan_b' => '🔴 Un 422 con motivo=sin_permiso_en_meta (401/403 de Meta) es lo ÚNICO que habilita cargar la '
+                    . 'plantilla a mano con el navegador (contexto/cuentas_meta.md del repo de conocimiento), y la respuesta '
+                    . 'lo dice en el campo plan_b. No hay reintento que arregle una credencial sin permiso. Los otros motivos '
+                    . 'tienen otra salida: sin_waba_id y sin_configuracion se arreglan cargando el dato en el panel '
+                    . '(Cuenta → WhatsApp), limite_de_meta (429) es el tope de 100 creaciones por hora y se espera, '
+                    . 'sin_red y error_de_meta se reportan.',
             ],
             /*
              * Los dos endpoints de ESCRITURA se describen acá aunque vivan en el otro controlador.
@@ -174,18 +249,26 @@ class ClaudeLeadsAnalyticsController extends Controller
                 'un_lead' => [
                     'ruta'       => 'POST claude/leads/{id}/send-template',
                     'body'       => [
-                        'template_name'        => 'OBLIGATORIO. Nombre de la plantilla aprobada en Meta (ver claude/templates).',
+                        'template_name'        => 'OBLIGATORIO. 🔴 Tiene que estar REGISTRADA, activa y APROBADA en Meta '
+                            . '(meta_status=APPROVED): si no, 422 con el motivo (plantilla_no_registrada, '
+                            . 'plantilla_inactiva, plantilla_no_aprobada) y no se envía nada. GET claude/templates/meta '
+                            . 'dice cuáles cumplen (campo `enviable`).',
                         'content'              => 'OBLIGATORIO. El texto YA renderizado, que es lo que se guarda como cuerpo '
                             . 'del mensaje en la conversación. Lo que viaja a Meta son las `variables`, no esto: los dos '
                             . 'tienen que quedar consistentes.',
                         'variables'            => 'Array POSICIONAL: el primero es {{1}}, el segundo {{2}}, etc.',
-                        'language_code'        => 'Default ' . ClaudeLeadsOutboundController::IDIOMA_POR_DEFECTO . '.',
-                        'followup_template_id' => 'Opcional, solo para trazabilidad.',
+                        'language_code'        => '⚠️ SE IGNORA. El idioma sale de la fila de la plantilla, que es el que Meta '
+                            . 'aprobó y el único con el que la entrega. La respuesta dice con cuál salió.',
+                        'followup_template_id' => 'Opcional, solo para trazabilidad. Si no viene, se atribuye a la fila de la '
+                            . 'plantilla.',
                         'context'              => 'Opcional. Texto del aviso a admins si el envío falla.',
                     ],
                     'nota'       => 'Envía de una: NO tiene dry_run. Sí respeta el cooldown de '
                         . ClaudeLeadsOutboundController::COOLDOWN_HORAS . ' hs (se saltea con ignorar_cooldown=true). '
-                        . 'Para mandarle a varios leads usá el lote, que tiene simulación.',
+                        . 'Para mandarle a varios leads usá el lote, que tiene simulación. '
+                        . '🔴 Hasta el 13/10/2026 no validaba la plantilla: si Meta no conocía el nombre, el envío fallaba '
+                        . 'en Kapso y este endpoint contestaba 200 con enviado=false, que desde afuera se lee como un éxito '
+                        . 'a medias. Ahora es 422 y el cuerpo dice cuál es el próximo paso.',
                 ],
                 'lote' => [
                     'ruta' => 'POST claude/send-template-batch',
@@ -193,7 +276,10 @@ class ClaudeLeadsAnalyticsController extends Controller
                         'lead_ids'             => 'OBLIGATORIO. Ids explícitos, máximo ' . ClaudeLeadsOutboundController::MAX_BATCH
                             . '. 🔴 No hay ningún filtro de selección de este lado a propósito: hay que nombrar a cada '
                             . 'destinatario. Los ids se sacan de claude/messages con group_by=lead.',
-                        'template_name'        => 'OBLIGATORIO.',
+                        'template_name'        => 'OBLIGATORIO. 🔴 Mismo gate que el endpoint individual (registrada, activa '
+                            . 'y APPROVED), y se valida UNA vez para todo el lote ANTES de resolver destinatarios: sin eso, '
+                            . 'una plantilla rechazada dejaba cincuenta mensajes rojos en cincuenta conversaciones. El '
+                            . 'language_code también sale de la fila, no del body.',
                         'content_template'     => 'OBLIGATORIO. Texto con {{1}}, {{2}}... que se renderiza por lead.',
                         'variables_desde_lead' => 'Lista de campos del lead a usar como variables, en orden. Permitidos: '
                             . implode(', ', ClaudeLeadsOutboundController::CAMPOS_DE_LEAD_PERMITIDOS)
