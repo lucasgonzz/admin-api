@@ -7,11 +7,14 @@ use App\Jobs\EnviarEventoMetaJob;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LeadEventoMeta;
+use App\Models\LeadMessage;
+use App\Models\WhatsappAdReferral;
 use App\Services\MetaConversionesService;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -627,5 +630,114 @@ class ConversionesMetaTest extends TestCase
         Queue::assertNotPushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila_vieja) {
             return $this->id_del_job($job) === (int) $fila_vieja->id;
         });
+    }
+
+    /* ------------------------------------------------------------------------------------------
+     | 4. El backfill del origen no manda conversiones viejas
+     |----------------------------------------------------------------------------------------- */
+
+    /**
+     * 🔴 Un lead de anuncio anterior a la medición, en closer_activo y promovido, tocado ayer: el
+     * backfill le carga el ctwa_clid y registra lo que ya alcanzó como `omitido`, sin encolar; y una
+     * corrida del conciliador después no encola ni manda nada (antes, reportaba los tres eventos con
+     * fecha de ayer). Un `omitido` tampoco sale si alguien corre el job a mano.
+     *
+     * @return void
+     */
+    public function test_el_backfill_registra_omitido_lo_ya_alcanzado_y_el_conciliador_no_manda_nada(): void
+    {
+        Http::fake(['graph.facebook.com/*' => Http::response(['events_received' => 1, 'messages' => [], 'fbtrace_id' => 'x'], 200)]);
+
+        $cliente  = $this->crear_cliente();
+        $telefono = WhatsappNormalizer::normalize('+54911' . random_int(10000000, 99999999));
+
+        $lead                     = new Lead();
+        $lead->contact_name       = 'Lead viejo de anuncio';
+        $lead->phone              = $telefono;
+        $lead->status             = 'closer_activo';
+        $lead->promoted_client_id = $cliente->id;
+        $lead->save();
+
+        $primero                        = new LeadMessage();
+        $primero->lead_id               = $lead->id;
+        $primero->sender                = 'lead';
+        $primero->status                = 'enviado';
+        $primero->is_followup           = false;
+        $primero->requiere_verificacion = false;
+        $primero->content               = 'Hola, vi el anuncio';
+        $primero->whatsapp_message_id   = 'wamid.BACKFILL-' . Str::random(10);
+        $primero->sent_at               = Carbon::now()->subDays(40);
+        $primero->save();
+
+        /* El referral es de antes del deploy: se guarda sin pasar por el observer. */
+        WhatsappAdReferral::withoutEvents(function () use ($telefono, $primero) {
+            WhatsappAdReferral::create([
+                'phone'       => $telefono,
+                'ctwa_clid'   => self::CLID,
+                'wamid'       => $primero->whatsapp_message_id,
+                'received_at' => $primero->sent_at,
+            ]);
+        });
+
+        /* Lead anterior a la medición: sin origen, creado hace 40 días y tocado ayer. */
+        $hace_40_dias = Carbon::now()->subDays(40);
+        DB::table('leads')->where('id', $lead->id)->update([
+            'origen'              => null,
+            'ctwa_clid'           => null,
+            'origen_calculado_at' => null,
+            'created_at'          => $hace_40_dias,
+            'updated_at'          => Carbon::now()->subDay(),
+        ]);
+
+        $this->assertSame(0, Artisan::call('leads:calcular-origen', [
+            '--desde'   => $hace_40_dias->format('Y-m-d'),
+            '--aplicar' => true,
+        ]));
+
+        $lead->refresh();
+        $this->assertSame('anuncio_whatsapp', $lead->origen);
+        $this->assertSame(self::CLID, $lead->ctwa_clid);
+
+        $filas = LeadEventoMeta::query()->where('lead_id', $lead->id)->orderBy('id')->get();
+        $this->assertSame(['LeadSubmitted', 'QualifiedLead', 'Purchase'], $filas->pluck('evento')->all());
+        foreach ($filas as $fila) {
+            $this->assertSame(LeadEventoMeta::ESTADO_OMITIDO, $fila->estado);
+            $this->assertSame(LeadEventoMeta::MOTIVO_OMITIDO, $fila->ultimo_error);
+            $this->assertSame(0, $fila->intentos);
+            $this->assertNull($fila->enviado_at);
+        }
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        $this->assertSame(0, Artisan::call('leads:meta-capi-conciliar'));
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        /* Ni corriendo el job a mano. */
+        $this->correr_job($filas->first());
+
+        Http::assertNothingSent();
+        $this->assertSame(
+            [LeadEventoMeta::ESTADO_OMITIDO],
+            LeadEventoMeta::query()->where('lead_id', $lead->id)->pluck('estado')->unique()->values()->all()
+        );
+    }
+
+    /**
+     * Cliente mínimo para promover un lead (leads.promoted_client_id tiene FK a clients).
+     *
+     * @return Client
+     */
+    private function crear_cliente(): Client
+    {
+        $cliente                  = new Client();
+        $cliente->name            = 'Cliente de prueba ' . Str::random(5);
+        $cliente->company_name    = 'Negocio de prueba';
+        $cliente->slug            = 'conversiones-' . Str::lower(Str::random(10));
+        $cliente->api_url         = 'https://ejemplo.test';
+        $cliente->api_key         = 'clave-sembrada-' . Str::random(10);
+        $cliente->inbound_api_key = 'clave-sembrada-inbound-' . Str::random(10);
+        $cliente->is_active       = true;
+        $cliente->save();
+
+        return $cliente;
     }
 }

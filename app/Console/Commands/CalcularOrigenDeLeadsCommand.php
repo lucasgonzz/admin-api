@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Helpers\AppTime;
 use App\Models\Lead;
 use App\Services\LeadOrigenService;
+use App\Services\MetaConversionesService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -21,9 +22,18 @@ use Illuminate\Support\Facades\DB;
  *     php artisan leads:calcular-origen --desde=2026-09-01 --aplicar
  *
  * 🔴 Solo toca leads con `origen` en NULL, así que es seguro de correr dos veces. Escribe con el query
- * builder pelado, sin pasar por Eloquent: no mueve `updated_at` ni dispara observers. Un lead viejo
- * que resulta ser de anuncio queda con su `ctwa_clid`, pero no le manda a Meta conversiones de
- * etapas que alcanzó hace semanas: esas salen recién si el lead vuelve a moverse.
+ * builder pelado, sin pasar por Eloquent: no mueve `updated_at` ni dispara observers.
+ *
+ * 🔴 **Las etapas alcanzadas antes de la medición no se le mandan a Meta.** Cuando `--aplicar` le
+ * carga el `ctwa_clid` a un lead viejo que resulta ser de anuncio, en la misma pasada registra cada
+ * evento que ese lead YA alcanzó (`LeadSubmitted`, `QualifiedLead`, `Purchase`) como una fila de
+ * `lead_eventos_meta` en estado `omitido`, con el motivo escrito («alcanzado antes de que existiera
+ * la medición; no se manda»), y no encola nada. Ni el job ni el conciliador mandan un `omitido`
+ * jamás: el reclamo del envío no acepta ese estado, y como la fila ya existe, nadie la vuelve a
+ * registrar como `pendiente`. Sin eso, el conciliador tomaría a cualquier lead de anuncio tocado en
+ * la última semana y reportaría clics de hace semanas con fecha de ayer. Lo que el lead alcance
+ * DESPUÉS sí sale, como para cualquier lead. Un lead al que el backfill no le carga `ctwa_clid` no
+ * registra nada.
  *
  * Un lead sin ningún mensaje entrante queda en NULL a propósito: todavía no hay de dónde leer su
  * origen, y si mañana escribe, el observer lo calcula con su primer mensaje.
@@ -47,7 +57,7 @@ class CalcularOrigenDeLeadsCommand extends Command
      *
      * @return int
      */
-    public function handle(LeadOrigenService $service): int
+    public function handle(LeadOrigenService $service, MetaConversionesService $conversiones): int
     {
         $query = Lead::query()->whereNull('origen');
 
@@ -61,13 +71,14 @@ class CalcularOrigenDeLeadsCommand extends Command
             $query->where('created_at', '>=', Carbon::parse($desde . ' 00:00:00'));
         }
 
-        $aplicar  = (bool) $this->option('aplicar');
-        $conteo   = array_fill_keys(LeadOrigenService::ORIGENES, 0);
-        $sin_dato = 0;
-        $escritos = 0;
-        $ahora    = AppTime::now()->format('Y-m-d H:i:s');
+        $aplicar   = (bool) $this->option('aplicar');
+        $conteo    = array_fill_keys(LeadOrigenService::ORIGENES, 0);
+        $sin_dato  = 0;
+        $escritos  = 0;
+        $omitidos  = 0;
+        $ahora     = AppTime::now()->format('Y-m-d H:i:s');
 
-        $query->chunkById(200, function ($leads) use ($service, $aplicar, $ahora, &$conteo, &$sin_dato, &$escritos) {
+        $query->chunkById(200, function ($leads) use ($service, $conversiones, $aplicar, $ahora, &$conteo, &$sin_dato, &$escritos, &$omitidos) {
             foreach ($leads as $lead) {
                 $resultado = $service->calcular_para_lead($lead);
                 if ($resultado === null) {
@@ -89,10 +100,22 @@ class CalcularOrigenDeLeadsCommand extends Command
                     $cambios['ctwa_clid'] = $resultado['ctwa_clid'];
                 }
 
-                $escritos += DB::table('leads')
+                $escrito = DB::table('leads')
                     ->where('id', (int) $lead->id)
                     ->whereNull('origen')
                     ->update($cambios);
+                $escritos += $escrito;
+
+                /* Lead viejo de anuncio: lo que ya alcanzó queda `omitido` y no sale a Meta (ver el
+                   docblock de la clase). */
+                if ($escrito > 0 && $resultado['ctwa_clid'] !== null) {
+                    $lead->ctwa_clid = $resultado['ctwa_clid'];
+                    try {
+                        $omitidos += count($conversiones->registrar_omitidos($lead));
+                    } catch (\Throwable $exception) {
+                        $this->error('Lead ' . $lead->id . ': no se pudieron registrar los eventos omitidos (' . $exception->getMessage() . ').');
+                    }
+                }
             }
         });
 
@@ -106,6 +129,7 @@ class CalcularOrigenDeLeadsCommand extends Command
 
         if ($aplicar) {
             $this->info('Escritos: ' . $escritos . ' lead(s).');
+            $this->info('Conversiones registradas como omitidas (alcanzadas antes de la medición, no se mandan): ' . $omitidos . '.');
         } else {
             $this->warn('Simulación: no se escribió nada. Correlo con --aplicar para guardar el origen.');
         }

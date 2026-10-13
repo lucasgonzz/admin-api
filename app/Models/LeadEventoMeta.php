@@ -35,14 +35,25 @@ class LeadEventoMeta extends Model
     const ESTADO_ERROR = 'error';
     const ESTADO_SIN_CONFIGURAR = 'sin_configurar';
 
-    /** Los cinco estados válidos. */
+    /**
+     * Etapa que el lead alcanzó ANTES de que existiera la medición (la registra el backfill del
+     * origen al cargarle el `ctwa_clid` a un lead viejo). No se manda nunca: el reclamo del envío no
+     * acepta este estado, y el conciliador no lo toca.
+     */
+    const ESTADO_OMITIDO = 'omitido';
+
+    /** Los seis estados válidos. */
     const ESTADOS = [
         self::ESTADO_PENDIENTE,
         self::ESTADO_ENVIANDO,
         self::ESTADO_ENVIADO,
         self::ESTADO_ERROR,
         self::ESTADO_SIN_CONFIGURAR,
+        self::ESTADO_OMITIDO,
     ];
+
+    /** El porqué que queda escrito en `ultimo_error` de una fila `omitido`. */
+    const MOTIVO_OMITIDO = 'Alcanzado antes de que existiera la medición; no se manda.';
 
     /** Tope de intentos de envío (el primero más dos reintentos del conciliador). */
     const MAX_INTENTOS = 3;

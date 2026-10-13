@@ -1445,7 +1445,7 @@ return [
                 'lead_id'      => ['columna' => 'lead_id',    'tipo' => 'entero'],
                 /* Verificado en LeadEventoMeta::EVENTOS y ::ESTADOS. */
                 'evento'       => ['columna' => 'evento',     'tipo' => 'en', 'valores' => ['LeadSubmitted', 'QualifiedLead', 'Purchase']],
-                'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['pendiente', 'enviando', 'enviado', 'error', 'sin_configurar']],
+                'estado'       => ['columna' => 'estado',     'tipo' => 'en', 'valores' => ['pendiente', 'enviando', 'enviado', 'error', 'sin_configurar', 'omitido']],
                 'evento_desde' => ['columna' => 'event_time', 'tipo' => 'fecha_desde'],
                 'evento_hasta' => ['columna' => 'event_time', 'tipo' => 'fecha_hasta'],
                 'ids'          => ['columna' => 'id',         'tipo' => 'lista_de_enteros'],
@@ -1453,7 +1453,7 @@ return [
                 'creado_hasta' => ['columna' => 'created_at', 'tipo' => 'fecha_hasta'],
             ],
             'relaciones'      => [],
-            'nota' => '🔴 sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID en el .env: no salió ninguna llamada. error con intentos < 3 lo reintenta leads:meta-capi-conciliar (cada diez minutos), siempre que el evento tenga menos de siete días (Meta no acepta más viejos). Para ver de dónde vino el lead: model=lead con include=atribucion.',
+            'nota' => '🔴 sin_configurar = falta META_CAPI_TOKEN o META_CAPI_DATASET_ID en el .env: no salió ninguna llamada. omitido = etapa alcanzada antes de que existiera la medición (la registró el backfill del origen): no se manda nunca. error con intentos < 3 lo reintenta leads:meta-capi-conciliar (cada diez minutos), siempre que el evento tenga menos de siete días (Meta no acepta más viejos). Para ver de dónde vino el lead: model=lead con include=atribucion.',
         ],
 
         /* ---------------------------------------------------------------

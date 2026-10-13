@@ -48,7 +48,10 @@ class CreateLeadEventosMetaTable extends Migration
              *   error          — Meta lo rechazó o no se pudo conectar. El motivo, en `ultimo_error`.
              *   sin_configurar — falta META_CAPI_TOKEN o META_CAPI_DATASET_ID: no salió ninguna
              *                    llamada. Cuando la configuración aparece, el conciliador manda los
-             *                    de los últimos siete días.
+             *                    de los últimos días.
+             *   omitido        — etapa que el lead alcanzó ANTES de que existiera la medición (la
+             *                    registra `leads:calcular-origen --aplicar` al cargarle el ctwa_clid
+             *                    a un lead viejo). No se manda nunca.
              *
              * Indexado porque el conciliador filtra por acá.
              */

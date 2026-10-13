@@ -152,44 +152,13 @@ class MetaConversionesService
      */
     public function registrar_alcanzados(Lead $lead, ?Carbon $momento = null, bool $despachar = true): array
     {
-        if (trim((string) $lead->ctwa_clid) === '' || ! $lead->id) {
-            return [];
-        }
-
-        $alcanzados = $this->eventos_alcanzados($lead);
-        if (empty($alcanzados)) {
-            return [];
-        }
-
-        $existentes = LeadEventoMeta::query()->where('lead_id', (int) $lead->id)->pluck('evento')->all();
-        $faltantes  = array_values(array_diff($alcanzados, $existentes));
-        if (empty($faltantes)) {
-            return [];
-        }
-
         $config  = self::config_completa();
-        $momento = $momento !== null ? $momento : AppTime::now();
-        $creados = [];
-
-        foreach ($faltantes as $evento) {
-            try {
-                $creados[] = LeadEventoMeta::create([
-                    'lead_id'    => (int) $lead->id,
-                    'evento'     => $evento,
-                    'estado'     => $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR,
-                    'event_id'   => self::event_id_para((int) $lead->id, $evento),
-                    'event_time' => $momento,
-                    'intentos'   => 0,
-                ]);
-            } catch (QueryException $exception) {
-                /* El único (lead_id, evento): otro proceso lo registró entre la lectura y el alta.
-                   Es exactamente lo que el único está para frenar; no hay nada que hacer. */
-                Log::channel('daily')->info('Conversiones Meta: el evento ya estaba registrado.', [
-                    'lead_id' => (int) $lead->id,
-                    'evento'  => $evento,
-                ]);
-            }
-        }
+        $creados = $this->crear_filas_faltantes(
+            $lead,
+            $config ? LeadEventoMeta::ESTADO_PENDIENTE : LeadEventoMeta::ESTADO_SIN_CONFIGURAR,
+            $momento !== null ? $momento : AppTime::now(),
+            null
+        );
 
         if (empty($creados)) {
             return [];
@@ -212,6 +181,80 @@ class MetaConversionesService
         if ($despachar) {
             foreach ($creados as $fila) {
                 $this->despachar($fila);
+            }
+        }
+
+        return $creados;
+    }
+
+    /**
+     * Registra como `omitido` cada evento que el lead YA alcanzó y todavía no tiene, sin encolar nada.
+     *
+     * 🔴 Es lo que usa `leads:calcular-origen --aplicar` cuando le carga el `ctwa_clid` a un lead
+     * anterior a la medición. Las etapas que ese lead alcanzó antes de que existiera la medición NO
+     * se le mandan a Meta: sería reportar un clic de hace semanas con la fecha de hoy (Purchase
+     * incluido). Dejarlas registradas es lo que hace que ni el observer ni el conciliador las vuelvan
+     * a registrar como `pendiente` después; y un `omitido` no lo reclama nunca el envío. Las etapas
+     * que el lead alcance DESPUÉS sí salen, como las de cualquier lead.
+     *
+     * @param Lead $lead Con el `ctwa_clid` ya cargado.
+     *
+     * @return array<int, LeadEventoMeta> Las filas que se crearon en esta llamada.
+     */
+    public function registrar_omitidos(Lead $lead): array
+    {
+        return $this->crear_filas_faltantes(
+            $lead,
+            LeadEventoMeta::ESTADO_OMITIDO,
+            AppTime::now(),
+            LeadEventoMeta::MOTIVO_OMITIDO
+        );
+    }
+
+    /**
+     * Crea, en orden, las filas de los eventos que el lead alcanzó y no tiene registrados todavía.
+     * Solo para leads con `ctwa_clid`: sin el click id, Meta no tiene cómo atribuir nada.
+     *
+     * @param Lead        $lead
+     * @param string      $estado  Estado con el que nacen las filas.
+     * @param Carbon      $momento `event_time` de las filas.
+     * @param string|null $motivo  Texto para `ultimo_error` (el porqué de un `omitido`).
+     *
+     * @return array<int, LeadEventoMeta>
+     */
+    private function crear_filas_faltantes(Lead $lead, string $estado, Carbon $momento, ?string $motivo): array
+    {
+        if (trim((string) $lead->ctwa_clid) === '' || ! $lead->id) {
+            return [];
+        }
+
+        $alcanzados = $this->eventos_alcanzados($lead);
+        if (empty($alcanzados)) {
+            return [];
+        }
+
+        $existentes = LeadEventoMeta::query()->where('lead_id', (int) $lead->id)->pluck('evento')->all();
+        $faltantes  = array_values(array_diff($alcanzados, $existentes));
+        $creados    = [];
+
+        foreach ($faltantes as $evento) {
+            try {
+                $creados[] = LeadEventoMeta::create([
+                    'lead_id'      => (int) $lead->id,
+                    'evento'       => $evento,
+                    'estado'       => $estado,
+                    'event_id'     => self::event_id_para((int) $lead->id, $evento),
+                    'event_time'   => $momento,
+                    'intentos'     => 0,
+                    'ultimo_error' => $motivo,
+                ]);
+            } catch (QueryException $exception) {
+                /* El único (lead_id, evento): otro proceso lo registró entre la lectura y el alta.
+                   Es exactamente lo que el único está para frenar; no hay nada que hacer. */
+                Log::channel('daily')->info('Conversiones Meta: el evento ya estaba registrado.', [
+                    'lead_id' => (int) $lead->id,
+                    'evento'  => $evento,
+                ]);
             }
         }
 
