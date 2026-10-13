@@ -2,12 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Helpers\WhatsappNormalizer;
 use App\Jobs\EnviarEventoMetaJob;
 use App\Models\Client;
 use App\Models\Lead;
 use App\Models\LeadEventoMeta;
 use App\Models\LeadMessage;
 use App\Models\WhatsappAdReferral;
+use App\Models\WhatsappConfig;
 use App\Services\LeadOrigenService;
 use App\Services\MetaConversionesService;
 use Carbon\Carbon;
@@ -57,6 +59,9 @@ class ConversionesWebMetaTest extends TestCase
 
     /** Click id de prueba. */
     private const CLID = 'ARAkLkA-clid-de-prueba-conversiones-web';
+
+    /** Secreto con el que se firman los webhooks de Kapso. */
+    private const SECRETO_KAPSO = 'secreto-de-prueba-del-webhook-conversiones-web';
 
     /**
      * Configuración completa de los dos canales y cola falseada.
@@ -158,6 +163,45 @@ class ConversionesWebMetaTest extends TestCase
         }
 
         Queue::assertNotPushed(EnviarEventoMetaJob::class);
+    }
+
+    /**
+     * El camino real, sin `origen` en el alta: el webhook de Kapso (firmado) crea el lead con la
+     * frase del botón de la web como primer mensaje, y el origen lo escribe el observer con un
+     * UPDATE. El lead queda `landing` sin ningún evento (está en `nuevo`), y al pasar a
+     * `demo_agendada` se registran y encolan `Lead` y `Schedule` en el canal web.
+     *
+     * @return void
+     */
+    public function test_el_webhook_con_la_frase_de_la_web_deja_al_lead_en_el_canal_web(): void
+    {
+        Http::fake();
+        $this->configurar_whatsapp();
+
+        $telefono = '+54911' . random_int(10000000, 99999999);
+        $this->postear_kapso($telefono, LeadOrigenService::FRASE_LANDING, 'wamid.WEB-KAPSO-' . Str::random(10), time() - 60)
+            ->assertStatus(200);
+
+        $lead = Lead::query()->where('phone', WhatsappNormalizer::normalize($telefono))->orderByDesc('id')->first();
+        $this->assertNotNull($lead, 'El webhook de Kapso tenía que crear el lead.');
+        $this->assertSame(LeadOrigenService::ORIGEN_LANDING, $lead->origen);
+        $this->assertNull($lead->ctwa_clid);
+        $this->assertSame([], $this->filas_de($lead), 'En nuevo no se alcanzó ningún evento.');
+        Queue::assertNotPushed(EnviarEventoMetaJob::class);
+
+        $lead->status = 'demo_agendada';
+        $lead->save();
+
+        $this->assertSame([
+            ['web', 'Lead', 'cc-lead-' . $lead->id . '-web-lead', LeadEventoMeta::ESTADO_PENDIENTE],
+            ['web', 'Schedule', 'cc-lead-' . $lead->id . '-web-schedule', LeadEventoMeta::ESTADO_PENDIENTE],
+        ], $this->filas_de($lead));
+
+        foreach (LeadEventoMeta::query()->where('lead_id', $lead->id)->get() as $fila) {
+            Queue::assertPushed(EnviarEventoMetaJob::class, function (EnviarEventoMetaJob $job) use ($fila) {
+                return $job->connection === 'database' && $this->id_del_job($job) === (int) $fila->id;
+            });
+        }
     }
 
     /* ------------------------------------------------------------------------------------------
@@ -870,6 +914,56 @@ class ConversionesWebMetaTest extends TestCase
         $lead->save();
 
         return $lead;
+    }
+
+    /**
+     * Configuración de WhatsApp activa en modo prueba, con el secreto del webhook de Kapso (mismo
+     * armado que OrigenDelLeadTest).
+     *
+     * @return void
+     */
+    private function configurar_whatsapp(): void
+    {
+        WhatsappConfig::query()->update(['is_active' => false]);
+
+        $config                     = new WhatsappConfig();
+        $config->kapso_api_key      = 'clave-de-prueba';
+        $config->phone_number_id    = '1234567890';
+        $config->webhook_secret     = self::SECRETO_KAPSO;
+        $config->meta_webhook_token = 'token-de-prueba-del-webhook-meta-web-1234567890';
+        $config->is_active          = true;
+        $config->test_mode          = true;
+        $config->save();
+    }
+
+    /**
+     * Pega al webhook de Kapso con el body firmado igual que lo firma Kapso.
+     *
+     * @param string $telefono
+     * @param string $texto
+     * @param string $wamid
+     * @param int    $timestamp
+     *
+     * @return \Illuminate\Testing\TestResponse
+     */
+    private function postear_kapso(string $telefono, string $texto, string $wamid, int $timestamp)
+    {
+        $body = json_encode([
+            'event'        => 'whatsapp.message.received',
+            'conversation' => ['phone_number' => $telefono, 'contact_name' => 'Lead de la web'],
+            'message'      => [
+                'id'        => $wamid,
+                'from'      => $telefono,
+                'type'      => 'text',
+                'text'      => ['body' => $texto],
+                'timestamp' => (string) $timestamp,
+            ],
+        ]);
+
+        return $this->call('POST', '/api/webhook/whatsapp', [], [], [], [
+            'CONTENT_TYPE'           => 'application/json',
+            'HTTP_X_KAPSO_SIGNATURE' => hash_hmac('sha256', $body, self::SECRETO_KAPSO),
+        ], $body);
     }
 
     /**
