@@ -1464,8 +1464,8 @@ return [
                 'Solo escribe filas del admin (recursos_videos). No toca el sistema de ningún cliente.',
             ],
             'parametros'   => [
-                ['nombre' => 'videos', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:2000; cada uno: codigo (string ≤ 20, único en el payload), titulo (string ≤ 255), carpeta (int ≥ 1), carpeta_nombre (string ≤ 255; si falta, sale de `carpetas`), orden (int ≥ 0), duracion (segundos > 0), url (http/https ≤ 500), y opcionales seccion (≤ 255), para_que, cuando_no, transcripcion (texto), relacionados (lista de códigos), miniatura_url (http/https ≤ 500), version (≤ 16)', 'que_es' => 'Los videos del catálogo, en el formato que arma publicar_centro.py.'],
-                ['nombre' => 'carpetas', 'obligatorio' => false, 'validacion' => 'nullable|array; cada una {nro: int ≥ 1, nombre: string}', 'que_es' => 'Nombres de las carpetas, para los videos que no traen carpeta_nombre.'],
+                ['nombre' => 'videos', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:2000; cada uno: codigo (string ≤ 20, único en el payload), titulo (string ≤ 255), carpeta (int ≥ 0: la carpeta 0 es «Empezá por acá»), carpeta_nombre (string ≤ 255; si falta, sale de `carpetas`), orden (int ≥ 0), duracion (segundos > 0), url (http/https ≤ 500), y opcionales seccion (≤ 255), para_que, cuando_no, transcripcion (texto), relacionados (lista de códigos), miniatura_url (http/https ≤ 500), version (≤ 16)', 'que_es' => 'Los videos del catálogo, en el formato que arma publicar_centro.py.'],
+                ['nombre' => 'carpetas', 'obligatorio' => false, 'validacion' => 'nullable|array; cada una {nro: int ≥ 0, nombre: string}', 'que_es' => 'Nombres de las carpetas, para los videos que no traen carpeta_nombre.'],
                 ['nombre' => 'desactivar_faltantes', 'obligatorio' => false, 'validacion' => 'nullable|boolean — default false', 'que_es' => 'true = los videos activos que no vienen en este payload quedan inactivos.'],
             ],
         ],

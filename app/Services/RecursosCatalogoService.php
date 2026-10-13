@@ -126,9 +126,11 @@ class RecursosCatalogoService
             $errores['carpetas'] = 'Tiene que ser una lista de {nro, nombre}.';
         } elseif (is_array($carpetas)) {
             foreach (array_values($carpetas) as $i => $carpeta) {
-                if (! is_array($carpeta) || ! isset($carpeta['nro']) || ! self::entero($carpeta['nro']) || (int) $carpeta['nro'] < 1
+                /* 🔴 La carpeta 0 EXISTE ("Empezá por acá", T0.x): el número va desde 0, no desde 1. Ojo con
+                   cualquier `if ($nro)`, `?:` o `empty()` sobre el número de carpeta: tratan a la 0 como vacía. */
+                if (! is_array($carpeta) || ! isset($carpeta['nro']) || ! self::entero($carpeta['nro']) || (int) $carpeta['nro'] < 0
                     || ! isset($carpeta['nombre']) || ! is_string($carpeta['nombre']) || trim($carpeta['nombre']) === '') {
-                    $errores['carpetas.' . $i] = 'Cada carpeta es {nro: entero ≥ 1, nombre: texto}.';
+                    $errores['carpetas.' . $i] = 'Cada carpeta es {nro: entero ≥ 0, nombre: texto}.';
                     continue;
                 }
 
@@ -190,9 +192,11 @@ class RecursosCatalogoService
             }
 
             // Carpeta.
-            if (! isset($video['carpeta']) || ! self::entero($video['carpeta']) || (int) $video['carpeta'] < 1 || (int) $video['carpeta'] > 65535) {
-                $errores[$donde . '.carpeta'] = 'Entero entre 1 y 65535.';
-                $limpio['carpeta'] = 0;
+            // Desde 0: la carpeta 0 es "Empezá por acá" (ver arriba).
+            if (! isset($video['carpeta']) || ! self::entero($video['carpeta']) || (int) $video['carpeta'] < 0 || (int) $video['carpeta'] > 65535) {
+                $errores[$donde . '.carpeta'] = 'Entero entre 0 y 65535.';
+                // -1 y no 0: la 0 es una carpeta de verdad y no tiene que poder prestarle su nombre a un error.
+                $limpio['carpeta'] = -1;
             } else {
                 $limpio['carpeta'] = (int) $video['carpeta'];
             }

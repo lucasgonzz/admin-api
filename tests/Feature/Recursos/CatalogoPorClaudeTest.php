@@ -173,6 +173,55 @@ class CatalogoPorClaudeTest extends BaseDelCentroDeRecursos
         $this->assertSame(0, RecursosVideo::count());
     }
 
+    /**
+     * 🔴 La carpeta 0 existe ("Empezá por acá", T0.x) y el catálogo real arranca ahí: la carga la
+     * acepta (con el nombre sacado de `carpetas`), la página la ve primera y el detalle por carpetas
+     * del panel la cuenta. Un número negativo sigue siendo 422.
+     */
+    public function test_la_carpeta_cero_se_carga_se_ve_y_se_cuenta(): void
+    {
+        $this->postJson('/api/claude/recursos/catalogo', [
+            'carpetas' => [['nro' => 0, 'nombre' => 'Empezá por acá'], ['nro' => 1, 'nombre' => 'Tus artículos (Listado)']],
+            'videos'   => [
+                $this->video('T0.1', ['carpeta' => 0, 'carpeta_nombre' => null, 'orden' => 1, 'duracion' => 100]),
+                $this->video('T1.1', ['carpeta' => 1, 'orden' => 2]),
+            ],
+        ], $this->de_claude())
+            ->assertStatus(200)
+            ->assertJsonPath('creados', 2);
+
+        $this->assertSame('Empezá por acá', RecursosVideo::where('codigo', 'T0.1')->value('carpeta_nombre'));
+
+        $catalogo = $this->getJson('/api/recursos/catalogo')->assertStatus(200)->json();
+        $this->assertSame([['nro' => 0, 'nombre' => 'Empezá por acá'], ['nro' => 1, 'nombre' => 'Tus artículos (Listado)']], $catalogo['carpetas']);
+        $this->assertSame(0, $catalogo['videos'][0]['carpeta']);
+        $this->assertSame('T0.1', $catalogo['videos'][0]['codigo']);
+
+        // El avance en la carpeta 0 se ve en el detalle del cliente del panel.
+        $this->admin_logueado();
+        $client = $this->crear_cliente('api-cero.test');
+        list(, $token) = $this->usuario_con_sesion($client);
+
+        $this->postJson('/api/recursos/progreso', ['codigo' => 'T0.1', 'posicion' => 30, 'tramos' => [[0, 30]]], $this->con_sesion($token))
+            ->assertStatus(200);
+
+        $carpetas = $this->getJson('/api/admin/recursos/clientes/' . $client->id)->assertStatus(200)->json('usuarios.0.carpetas');
+        $this->assertSame(0, $carpetas[0]['nro']);
+        $this->assertSame('Empezá por acá', $carpetas[0]['nombre']);
+        $this->assertSame(1, $carpetas[0]['total']);
+        $this->assertEquals(30, $carpetas[0]['avance']);
+        $this->assertSame(1, $carpetas[1]['nro']);
+        $this->assertEquals(0, $carpetas[1]['avance']);
+
+        // Negativos, no.
+        $this->postJson('/api/claude/recursos/catalogo', ['videos' => [$this->video('T9.1', ['carpeta' => -1])]], $this->de_claude())
+            ->assertStatus(422)
+            ->assertJsonPath('errores', ['videos.0.carpeta' => 'Entero entre 0 y 65535.']);
+        $this->postJson('/api/claude/recursos/catalogo', ['carpetas' => [['nro' => -1, 'nombre' => 'x']], 'videos' => [$this->video('T9.1')]], $this->de_claude())
+            ->assertStatus(422)
+            ->assertJsonPath('errores', ['carpetas.0' => 'Cada carpeta es {nro: entero ≥ 0, nombre: texto}.']);
+    }
+
     public function test_el_resumen_cuenta_lo_del_centro(): void
     {
         $this->postJson('/api/claude/recursos/catalogo', ['videos' => [$this->video('T1.1')]], $this->de_claude())->assertStatus(200);
