@@ -136,6 +136,12 @@ class LeadDemoSettingsController extends Controller
                 },
             ],
             'cta_whatsapp_texto'              => 'sometimes|nullable|string|min:1|max:'.LeadDemoSettings::MAX_CHARS_CTA_TEXTO,
+            /* Lista de frases del «sí» a la demo (misión origen-del-lead-y-conversiones-meta,
+               13/10/2026). "sometimes" porque el admin-spa desplegado no la manda, y una lista vacía
+               es un no-op (ver persist_from_request). Cada frase llega recortada por TrimStrings, y
+               una que queda vacía es un 422: no hay frase en blanco que reconocer. */
+            'cta_whatsapp_textos'             => 'sometimes|nullable|array|max:'.LeadDemoSettings::MAX_CTA_WHATSAPP_TEXTOS,
+            'cta_whatsapp_textos.*'           => 'required|string|min:1|max:'.LeadDemoSettings::MAX_CHARS_CTA_TEXTO,
             'pagina_seguimiento_minutos'      => 'sometimes|integer|min:'.LeadDemoSettings::MIN_MINUTOS.'|max:'.LeadDemoSettings::MAX_MINUTOS,
         ]);
 

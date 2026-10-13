@@ -143,6 +143,67 @@ class LeadOrigenService
     }
 
     /**
+     * Las frases que el agente reconoce como un «sí» a la demo: el texto del botón de la página de
+     * experiencia más las frases de la web y de Instagram, editables desde la configuración de
+     * demos (`demo_cta_whatsapp_textos`).
+     *
+     * @return array<int, string>
+     */
+    public static function frases_de_cta(): array
+    {
+        return LeadDemoSettings::get_cta_whatsapp_textos();
+    }
+
+    /**
+     * Las frases del «sí» entre comillas y separadas por coma, para nombrarlas en el prompt.
+     *
+     * @return string Ej.: `"A", "B" o "C"`.
+     */
+    public static function frases_de_cta_para_el_prompt(): string
+    {
+        $entre_comillas = array_map(function ($frase) {
+            return '"' . $frase . '"';
+        }, self::frases_de_cta());
+
+        if (count($entre_comillas) <= 1) {
+            return implode('', $entre_comillas);
+        }
+
+        $ultima = array_pop($entre_comillas);
+
+        return implode(', ', $entre_comillas) . ' o ' . $ultima;
+    }
+
+    /**
+     * Renglón extra del bloque DEMO DIRECTA cuando el ÚLTIMO mensaje del lead es una de las frases
+     * del «sí»: lo dice explícito, para no depender de que el modelo empareje el ejemplo.
+     *
+     * @param Lead $lead
+     *
+     * @return string El renglón con su salto de línea, o '' si no corresponde.
+     */
+    public static function linea_del_si_explicito(Lead $lead): string
+    {
+        $ultimo = LeadMessage::query()
+            ->where('lead_id', (int) $lead->id)
+            ->where('sender', 'lead')
+            ->where('is_status_event', false)
+            ->orderByDesc('id')
+            ->first();
+        if ($ultimo === null) {
+            return '';
+        }
+
+        foreach (self::frases_de_cta() as $frase) {
+            if (self::contiene_frase((string) $ultimo->content, $frase)) {
+                return "  - OJO: el ULTIMO mensaje del lead es una de esas frases (\"" . $frase . "\"): es un SI a la demo.\n";
+            }
+        }
+
+        return '';
+    }
+
+    /**
      * Primer mensaje entrante del lead (del propio lead, sin eventos internos), por orden de alta.
      *
      * @param int $lead_id

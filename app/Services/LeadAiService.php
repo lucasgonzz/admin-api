@@ -9421,10 +9421,11 @@ BLOQUE_DEL_MANUAL;
             . "    Sin ofrecer la demo todavia, salvo que el lead la pida.\n"
             . "  - La demo se ofrece cuando el lead ya conto su rubro y su problema (calificado), o antes si el la pide. Si el\n"
             . "    bloque dice que ya abrio su pagina, podes nombrarlo (\"vi que le pegaste una mirada\").\n"
-            . "  - Si el lead pide la demo (por ejemplo \"" . LeadDemoSettings::get_cta_whatsapp_texto() . "\", que es lo que\n"
-            . "    manda el boton de su pagina, o cualquier frase equivalente), es un SI: en el mismo mensaje confirmale que la\n"
+            . "  - Si el lead pide la demo (por ejemplo " . LeadOrigenService::frases_de_cta_para_el_prompt() . ", que es lo que\n"
+            . "    mandan el boton de su pagina, el de la web y el de Instagram, o cualquier frase equivalente), es un SI: en el mismo mensaje confirmale que la\n"
             . "    haga desde una computadora, en un lugar tranquilo y con una hora disponible, y devolve agendar_demo:\n"
             . "    {\"ahora\": true} con los dos links y el pedido del mail, como en cualquier aceptacion.\n"
+            . LeadOrigenService::linea_del_si_explicito($lead)
             . "  - Para ofrecerla: \"si queres, te la puedo tener lista en diez minutos\". Sin hora, sin grilla, sin preguntar\n"
             . "    horarios. Si el lead pregunta cuando, la respuesta es ahora mismo (o cuando se siente en la computadora).\n"
             . "  - Cuando acepta hacerla ahora: devolve agendar_demo: {\"ahora\": true} y en el MISMO mensaje pasale los dos\n"

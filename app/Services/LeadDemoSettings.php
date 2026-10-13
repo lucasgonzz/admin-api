@@ -219,6 +219,19 @@ class LeadDemoSettings
     public const KEY_CTA_WHATSAPP_TEXTO = 'demo_cta_whatsapp_texto';
 
     /**
+     * Clave: lista (JSON) de las frases que el agente reconoce como un «sí» a la demo (misión
+     * origen-del-lead-y-conversiones-meta, 13/10/2026). Hoy son tres botones distintos que dejan
+     * un texto prearmado en el WhatsApp del lead: el de la página de experiencia
+     * (KEY_CTA_WHATSAPP_TEXTO), el de la web y el de Instagram.
+     *
+     * 🔴 KEY_CTA_WHATSAPP_TEXTO NO se reemplaza por esta: sigue siendo el texto del botón de la
+     * página, y el admin-spa desplegado lo edita y lo manda en el PUT. Por eso la lista que devuelve
+     * `get_cta_whatsapp_textos()` lo incluye SIEMPRE, aunque lo guardado no lo traiga: cambiar el
+     * texto del botón desde el panel viejo nunca puede dejar de ser un «sí».
+     */
+    public const KEY_CTA_WHATSAPP_TEXTOS = 'demo_cta_whatsapp_textos';
+
+    /**
      * Clave: minutos desde que el lead ABRIÓ su página sin turno hasta que `leads:check-pagina-
      * sin-demo` le manda el único seguimiento de página ("vi que le pegaste una mirada..."). Sólo
      * corre si no pidió la demo desde el CTA ni volvió a escribir después de abrirla.
@@ -397,6 +410,9 @@ class LeadDemoSettings
     /** Largo máximo del texto prearmado del CTA (caracteres, no bytes: lleva tilde). */
     public const MAX_CHARS_CTA_TEXTO = 200;
 
+    /** Máximo de frases en la lista del «sí» que se acepta por el PUT. */
+    public const MAX_CTA_WHATSAPP_TEXTOS = 10;
+
     /** Valores válidos para la frecuencia de slots (minutos). */
     public const VALID_FRECUENCIA_SLOTS = [5, 10, 15, 30, 60];
 
@@ -474,6 +490,7 @@ class LeadDemoSettings
             'experiencia_tema'                    => self::get_experiencia_tema(),
             'whatsapp_numero_leads'               => self::get_whatsapp_numero_leads(),
             'cta_whatsapp_texto'                  => self::get_cta_whatsapp_texto(),
+            'cta_whatsapp_textos'                 => self::get_cta_whatsapp_textos(),
             'pagina_seguimiento_minutos'          => self::get_pagina_seguimiento_minutos(),
         ];
     }
@@ -677,6 +694,16 @@ class LeadDemoSettings
             $texto = trim((string) $data['cta_whatsapp_texto']);
             if ($texto !== '') {
                 AdminSetting::set(self::KEY_CTA_WHATSAPP_TEXTO, mb_substr($texto, 0, self::MAX_CHARS_CTA_TEXTO));
+            }
+        }
+        /* Lista de frases del «sí» (misión origen-del-lead-y-conversiones-meta): mismo "isset" que
+           el resto, así el admin-spa desplegado, que no manda esta clave, no la borra. Una lista
+           vacía tampoco borra: es un no-op, igual que el texto vacío de arriba. Se guarda recortada
+           y sin repetidas (comparando normalizado); el texto del botón se suma al leerla. */
+        if (isset($data['cta_whatsapp_textos']) && is_array($data['cta_whatsapp_textos'])) {
+            $textos = self::limpiar_lista_de_textos($data['cta_whatsapp_textos']);
+            if (! empty($textos)) {
+                AdminSetting::set(self::KEY_CTA_WHATSAPP_TEXTOS, json_encode($textos, JSON_UNESCAPED_UNICODE));
             }
         }
         if (isset($data['pagina_seguimiento_minutos'])) {
@@ -1298,6 +1325,70 @@ class LeadDemoSettings
         }
 
         return mb_substr($texto, 0, self::MAX_CHARS_CTA_TEXTO);
+    }
+
+    /**
+     * Las frases que el agente reconoce como un «sí» a la demo (misión
+     * origen-del-lead-y-conversiones-meta, 13/10/2026).
+     *
+     * Sin nada guardado, el default son los tres botones: el texto del botón de la página de
+     * experiencia, la frase de la web (la nueva de M6a y la vieja, que es la misma que el texto del
+     * botón por defecto) y la de Instagram. Las frases de origen salen de `LeadOrigenService`, que
+     * es quien las usa para leer de dónde vino cada lead.
+     *
+     * 🔴 El texto del botón de la página va SIEMPRE, primero, aunque lo guardado no lo traiga: lo
+     * edita el panel viejo por su propia clave y cambiarlo no puede dejar de ser un «sí».
+     *
+     * @return array<int, string> Sin repetidas (comparando normalizado), en el orden guardado.
+     */
+    public static function get_cta_whatsapp_textos(): array
+    {
+        $guardadas = [];
+        $crudo     = AdminSetting::get(self::KEY_CTA_WHATSAPP_TEXTOS);
+        if (is_string($crudo) && trim($crudo) !== '') {
+            $decodificado = json_decode($crudo, true);
+            if (is_array($decodificado)) {
+                $guardadas = self::limpiar_lista_de_textos($decodificado);
+            }
+        }
+
+        if (empty($guardadas)) {
+            $guardadas = [
+                LeadOrigenService::FRASE_LANDING,
+                LeadOrigenService::FRASE_LANDING_VIEJA,
+                LeadOrigenService::FRASE_INSTAGRAM,
+            ];
+        }
+
+        return self::limpiar_lista_de_textos(array_merge([self::get_cta_whatsapp_texto()], $guardadas));
+    }
+
+    /**
+     * Recorta, descarta vacíos y no-strings, corta a MAX_CHARS_CTA_TEXTO y saca repetidas
+     * comparando normalizado («Hola Martín» y «hola martin» son la misma frase): queda la primera.
+     *
+     * @param array<int, mixed> $textos
+     *
+     * @return array<int, string>
+     */
+    private static function limpiar_lista_de_textos(array $textos): array
+    {
+        $limpias = [];
+        $vistas  = [];
+        foreach ($textos as $texto) {
+            if (! is_string($texto)) {
+                continue;
+            }
+            $texto = mb_substr(trim($texto), 0, self::MAX_CHARS_CTA_TEXTO);
+            $clave = LeadOrigenService::normalizar($texto);
+            if ($clave === '' || isset($vistas[$clave])) {
+                continue;
+            }
+            $vistas[$clave] = true;
+            $limpias[]      = $texto;
+        }
+
+        return $limpias;
     }
 
     /**
