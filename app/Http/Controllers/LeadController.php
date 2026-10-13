@@ -490,6 +490,13 @@ class LeadController extends Controller
             }
         }
 
+        // Deep link del panel de inicio (/leads?filtro=sin-responder): el MISMO scope que cuenta la
+        // tarjeta, para que el numero y las filas no puedan separarse. Opcional de verdad: sin el
+        // parametro el listado se comporta exactamente como antes.
+        if ($request->boolean('sin_responder')) {
+            $query->requiereRevision(true);
+        }
+
         // Filtro por sistema destino.
         if ($request->filled('target_client_id')) {
             $query->where('target_client_id', (int) $request->input('target_client_id'));
