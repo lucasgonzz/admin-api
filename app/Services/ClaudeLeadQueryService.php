@@ -121,6 +121,12 @@ class ClaudeLeadQueryService
         'contract_precio_perfil_ecommerce',
         'contract_fecha_primer_pago_mensual',
         'contract_clausulas_particulares',
+        // Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026): 'licencia' |
+        // 'suscripcion' | null (contrato histórico), keys de los sistemas contratados (JSON, se
+        // decodifica en ClaudeLeadsAnalyticsController::proyectar_lead) y plazo mínimo en meses.
+        'contract_modalidad',
+        'contract_sistemas',
+        'contract_permanencia_meses',
     ];
 
     /**

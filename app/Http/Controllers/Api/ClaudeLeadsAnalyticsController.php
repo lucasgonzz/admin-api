@@ -1076,6 +1076,8 @@ class ClaudeLeadsAnalyticsController extends Controller
             'contract_usuarios_incluidos',
             'contract_usuarios_extra',
             'contract_perfiles_ecommerce',
+            // Plazo mínimo de la Suscripción (misión precios-dos-modalidades, 13/10/2026).
+            'contract_permanencia_meses',
         ];
         foreach ($enteros as $campo) {
             if (array_key_exists($campo, $lead) && $lead[$campo] !== null) {
@@ -1085,8 +1087,9 @@ class ClaudeLeadsAnalyticsController extends Controller
 
         /* El query builder devuelve las columnas JSON como string crudo (a diferencia de
            Eloquent, que las castea). Se decodifican acá para que la respuesta sea JSON de
-           verdad y no un string con JSON adentro. */
-        foreach (['contract_financiacion', 'contract_clausulas_particulares'] as $campo) {
+           verdad y no un string con JSON adentro. `contract_sistemas` (keys de los sistemas
+           contratados) es JSON desde la misión precios-dos-modalidades, 13/10/2026. */
+        foreach (['contract_financiacion', 'contract_clausulas_particulares', 'contract_sistemas'] as $campo) {
             if (array_key_exists($campo, $lead) && is_string($lead[$campo]) && $lead[$campo] !== '') {
                 $decoded = json_decode($lead[$campo], true);
                 if (json_last_error() === JSON_ERROR_NONE) {
