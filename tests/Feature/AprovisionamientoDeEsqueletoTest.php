@@ -6,14 +6,17 @@ use App\Models\Client;
 use App\Models\ClientApi;
 use App\Models\ClientInstallation;
 use App\Models\ClientSshCredential;
+use App\Models\DeploymentLog;
 use App\Services\HostingProvisioningService;
 use App\Services\HostingerApiClient;
 use App\Services\InstallationService;
 use App\Services\RemoteCommandRunner;
 use App\Services\SharedHostingProvisioning;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\Fakes\HostingerApiClientFake;
+use Tests\Fakes\HttpFactorySinSalida;
 use Tests\Fakes\RemoteCommandRunnerFake;
 use Tests\TestCase;
 
@@ -54,6 +57,14 @@ class AprovisionamientoDeEsqueletoTest extends TestCase
     const FECHA_DE_LA_REAL = '2026-10-12 10:00:00';
 
     /**
+     * Host de mentira al que apunta el transporte REAL en los tests de la sección 9. Nada sale ahí:
+     * Http::fake() atiende cada pedido, y el que no atienda lo frena HttpFactorySinSalida.
+     *
+     * @var string
+     */
+    const BASE_URL_DE_PRUEBA = 'https://hostinger.invalido.test';
+
+    /**
      * Reemplazo en memoria del cliente HTTP de Hostinger, bindeado para toda la prueba.
      *
      * @var HostingerApiClientFake
@@ -81,6 +92,18 @@ class AprovisionamientoDeEsqueletoTest extends TestCase
      * @var RemoteCommandRunnerFake|null
      */
     private $runner = null;
+
+    /**
+     * Guion de lo que contesta el Hostinger "de mentira" de la sección 9 (el que atiende Http::fake()
+     * por debajo del transporte REAL). Se lee en CADA pedido, así que un test lo cambia entre dos
+     * fases (la real y el esqueleto) sin volver a armar el fake.
+     *
+     * Claves: `slug`, `lecturas_de_bases` (JSON crudo por cada GET /databases, la última se repite),
+     * `post_subdominio` y `post_base` (cada uno [status, cuerpo crudo]).
+     *
+     * @var array<string, mixed>
+     */
+    private $escenario_http = [];
 
     protected function setUp(): void
     {
@@ -756,6 +779,323 @@ class AprovisionamientoDeEsqueletoTest extends TestCase
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // 9 — EL TRANSPORTE REAL, CON Http::fake
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // 🔴 Por qué esta sección existe. Todo lo de arriba corre sobre HostingerApiClientFake, que
+    // sobreescribe request() y devuelve arrays YA decodificados: el json_decode del envoltorio
+    // {data, meta} y la URL `?page=N` que arma el transporte real quedaban sin probar, y son
+    // justamente las dos cosas que estaban mal en producción. Acá se usa el HostingerApiClient de
+    // verdad y se falsea una capa más abajo: el HTTP. Cada respuesta es el JSON CRUDO que mandaría
+    // Hostinger, y los pedidos se verifican con lo que Http::fake() registró.
+
+    /**
+     * list_databases() contra el transporte real: decodifica el JSON crudo y pide las tres URLs.
+     *
+     * 74 filas con las claves REALES de una fila de la API (medidas el 13/10/2026), en tres
+     * páginas. La primera URL termina en `/databases` SIN query string y las otras en `?page=2` y
+     * `?page=3`: exactamente tres GET, sin una cuarta página de más.
+     */
+    public function test_con_el_transporte_real_list_databases_decodifica_el_json_y_pide_las_tres_urls(): void
+    {
+        $this->usar_el_transporte_real();
+        $this->escenario_http['lecturas_de_bases'] = $this->tres_paginas_crudas_de_bases();
+
+        $filas = (new HostingerApiClient())->list_databases();
+
+        $this->assertCount(74, $filas);
+        $this->assertSame($this->nombres_de_relleno(1, 74), array_column($filas, 'name'));
+        $this->assertSame(
+            ['name', 'user', 'domain', 'permissions', 'created_at', 'updated_at', 'disk_usage_mb', 'max_size_mb', 'host', 'port'],
+            array_keys($filas[0]),
+            'La fila llega entera, no solo el nombre.'
+        );
+
+        $url = self::BASE_URL_DE_PRUEBA . '/api/hosting/v1/accounts/u767360347/databases';
+
+        Http::assertSentCount(3);
+        $this->assertSame(
+            [['GET', $url], ['GET', $url . '?page=2'], ['GET', $url . '?page=3']],
+            array_map(function ($pedido) {
+                return [$pedido['metodo'], $pedido['url']];
+            }, $this->pedidos_http())
+        );
+        $this->assertStringNotContainsString('?', $this->pedidos_http()[0]['url']);
+    }
+
+    /**
+     * El par completo contra el transporte real, con la base en la página 3 de 3.
+     *
+     * La real crea los 4 subdominios y la base (lectura vacía, POST 200). Después, el esqueleto: los
+     * cuatro POST de subdominio dan 422 "already hosted", la base figura en la ÚLTIMA página, y el
+     * POST de la base —si se intentara— daría el 422 "must be unique". El esqueleto tiene que
+     * terminar sin ningún POST a /databases, con los 4 subdominios como ya existentes y con los
+     * secretos de las dos filas idénticos a los que dejó la real.
+     */
+    public function test_el_esqueleto_contra_el_transporte_real_reusa_la_base_de_la_pagina_tres(): void
+    {
+        $datos  = $this->preparar_par_de_instalaciones();
+        $slug   = $datos['slug'];
+        $nombre = 'u767360347_' . $slug;
+
+        $this->usar_el_transporte_real($slug);
+
+        /* La real. */
+        $this->escenario_http['post_base'] = [200, '{"name":"' . $nombre . '"}'];
+
+        $real = $datos['proveedor'];
+        $real->provision_check();
+        $real->provision_sites();
+        $real->provision_dns();
+        $real->provision_db();
+
+        $this->assertCount(4, $this->pedidos_http_a('POST', '/subdomains'));
+        $this->assertCount(1, $this->pedidos_http_a('POST', '/databases'));
+
+        $secretos_de_la_real = $this->secretos_de($datos['api1']);
+        $this->assertSame($nombre, $secretos_de_la_real['db_name']);
+        $this->assertSame($secretos_de_la_real, $this->secretos_de($datos['api2']));
+
+        /* El esqueleto, con el registro de pedidos EN BLANCO: lo que se afirma abajo es solo de él. */
+        $this->empezar_a_registrar_pedidos_http();
+        $this->escenario_http['post_subdominio']   = [422, '{"message":"[Hosting:9999] Subdomain is already hosted"}'];
+        $this->escenario_http['post_base']         = [422, '{"message": "[Hosting:9999] Database name must be unique"}'];
+        $this->escenario_http['lecturas_de_bases'] = $this->tres_paginas_crudas_de_bases($nombre, 3);
+
+        $esqueleto = $datos['proveedor_esqueleto'];
+        $esqueleto->provision_check();
+        $esqueleto->provision_sites();
+        $esqueleto->provision_dns();
+        $esqueleto->provision_db();
+
+        Http::assertNotSent(function ($request) {
+            return $request->method() === 'POST' && strpos($request->url(), '/databases') !== false;
+        });
+        $this->assertCount(4, $this->pedidos_http_a('POST', '/subdomains'), 'Los 4 se intentaron.');
+        $this->assertCount(3, $this->pedidos_http_a('GET', '/databases'), 'Leyó las tres páginas, hasta la última.');
+
+        $ya_existian = $esqueleto->result()->ya_existian();
+        $this->assertCount(5, $ya_existian);
+        $this->assertSame('base', $ya_existian[4]['tipo']);
+        $this->assertSame($nombre, $ya_existian[4]['nombre']);
+        $this->assertSame([], $esqueleto->result()->creados());
+        $this->assertCount(0, $this->lineas_que_contienen('que no sé clasificar', $this->lineas_del_esqueleto));
+
+        $this->assertSame($secretos_de_la_real, $this->secretos_de($datos['api1']));
+        $this->assertSame($secretos_de_la_real, $this->secretos_de($datos['api2']));
+    }
+
+    /**
+     * El 422 literal de producción por el transporte real: lectura 1 sin la base, el POST da 422
+     * "Database name must be unique", la lectura 2 sí la trae → se reusa, con UN solo POST y sin
+     * tocar los secretos.
+     *
+     * Es el caso 3 de arriba, pero con el 422 pasando por el status y el cuerpo de una respuesta
+     * HTTP de verdad: de ahí sale el código que lee clasificar_error().
+     */
+    public function test_el_422_literal_por_el_transporte_real_se_reusa_al_releer_la_lista(): void
+    {
+        $datos  = $this->preparar_par_de_instalaciones();
+        $slug   = $datos['slug'];
+        $nombre = 'u767360347_' . $slug;
+
+        $secretos = $this->dejar_secretos_de_la_real($datos);
+
+        $this->usar_el_transporte_real($slug);
+        $this->escenario_http['lecturas_de_bases'] = [
+            $this->pagina_cruda_de_bases([], 1, 0),
+            $this->pagina_cruda_de_bases([$nombre], 1, 1),
+        ];
+        $this->escenario_http['post_base'] = [422, '{"message": "[Hosting:9999] Database name must be unique"}'];
+
+        $datos['proveedor_esqueleto']->provision_db();
+
+        $posts = $this->pedidos_http_a('POST', '/databases');
+        $this->assertCount(1, $posts, 'Exactamente un intento de creación.');
+        $this->assertCount(2, $this->pedidos_http_a('GET', '/databases'));
+
+        $this->assertSame(
+            [['tipo' => 'base', 'nombre' => $nombre]],
+            $datos['proveedor_esqueleto']->result()->ya_existian()
+        );
+        $this->assertSame([], $datos['proveedor_esqueleto']->result()->creados());
+        $this->assertCount(1, $this->lineas_que_contienen('ya figura en la cuenta', $this->lineas_del_esqueleto));
+
+        $this->afirmar_secretos_sin_tocar($datos, $secretos, $posts[0]['body']['password']);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 10 — EL NOMBRE DE LA BASE SE COMPARA ENTERO
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Nombre exacto, no prefijo: la base del cliente `<slug>2` no es la del cliente `<slug>`.
+     *
+     * La cuenta de Hostinger tiene las bases de ~70 clientes y los slugs se parecen (`lacava` y
+     * `lacava2` son dos clientes). Si la comparación fuera por prefijo —o por "contiene"—, crear la
+     * base de `<slug>` encontraría la de `<slug>2`, se daría por existente, y el cliente quedaría sin
+     * base propia y usando (o fallando por) la de otro. La lista trae SOLO bases vecinas por nombre:
+     * `<slug>2` (la base la contiene) y un prefijo del slug (el slug la contiene). La de `<slug>` hay
+     * que CREARLA, con su POST y sus secretos.
+     */
+    public function test_la_base_se_busca_por_nombre_exacto_y_no_por_prefijo(): void
+    {
+        $datos  = $this->preparar_par_de_instalaciones();
+        $slug   = $datos['slug'];
+        $nombre = 'u767360347_' . $slug;
+
+        $this->hostinger->responder(
+            '/databases',
+            $this->respuesta_de_bases([$nombre . '2', 'u767360347_' . substr($slug, 0, 6)]),
+            'GET'
+        );
+        $this->hostinger->responder('/databases', ['name' => $nombre], 'POST');
+
+        $datos['proveedor']->provision_db();
+
+        $posts = $this->posts_a('/databases');
+        $this->assertCount(1, $posts, 'La base de este cliente no existía: hay que crearla.');
+        $this->assertSame($nombre, $posts[0]['body']['name']);
+
+        $this->assertSame([['tipo' => 'base', 'nombre' => $nombre]], $datos['proveedor']->result()->creados());
+        $this->assertSame([], $datos['proveedor']->result()->ya_existian());
+
+        foreach ([$datos['api1'], $datos['api2']] as $api) {
+            $secretos = $this->secretos_de($api);
+            $this->assertSame($nombre, $secretos['db_name']);
+            $this->assertSame($posts[0]['body']['password'], $secretos['db_password']);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 11 — CLASIFICACIÓN AFINADA
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * La frase de la base es `database name must be unique`, no `name must be unique`.
+     *
+     * Otros mensajes de validación que dicen "name must be unique" no son "ya existe": el nombre de
+     * un subdominio o el de un usuario de sitio de clpctl no son la base. La lista de patrones la
+     * leen también VpsDatabaseProvisioner y VpsSiteProvisioner sobre errores de `clpctl`: darlos por
+     * "ya existía" haría que esas etapas siguieran de largo con un recurso que no existe. El mensaje
+     * medido en producción, en cambio, sí lo es.
+     */
+    public function test_solo_el_mensaje_de_la_base_se_clasifica_como_ya_existe(): void
+    {
+        $cliente = new HostingerApiClient();
+
+        $no_son_ya_existe = [
+            'Hostinger: nombre de subdominio' => new \RuntimeException(
+                'La API de Hostinger respondió 422: {"message": "[Hosting:9999] Subdomain name must be unique"}',
+                422
+            ),
+            'clpctl: usuario del sitio, con 422' => new \RuntimeException(
+                'El comando remoto falló (exit 1): clpctl site:add:php --siteUser=lacava → Validation error: the site user name must be unique.',
+                422
+            ),
+            'clpctl: usuario del sitio, con exit 1' => new \RuntimeException(
+                'El comando remoto falló (exit 1): clpctl site:add:php --siteUser=lacava → Validation error: the site user name must be unique.',
+                1
+            ),
+        ];
+
+        foreach ($no_son_ya_existe as $descripcion => $excepcion) {
+            $this->assertSame(
+                HostingerApiClient::CLASIFICACION_DESCONOCIDA,
+                $cliente->clasificar_error($excepcion),
+                $descripcion
+            );
+            $this->assertFalse($cliente->es_error_de_ya_existe($excepcion), $descripcion);
+        }
+
+        $de_la_base = new \RuntimeException(
+            'La API de Hostinger respondió 422: {"message": "[Hosting:9999] Database name must be unique"}',
+            422
+        );
+        $this->assertSame(HostingerApiClient::CLASIFICACION_YA_EXISTE, $cliente->clasificar_error($de_la_base));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 12 — LAS ETAPAS REALES DEL PIPELINE DEL ESQUELETO
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * El esqueleto recorre SUS etapas de aprovisionamiento, las del InstallationService, y llega al
+     * write_env con las credenciales de la real.
+     *
+     * Es lo más cerca que se llega de "el esqueleto termina completada" sin fakear el SSH/SFTP de
+     * InstallationService::run(), que ninguna suite del repo falsea. Se arma el servicio de la fila
+     * esqueleto y se invoca por reflexión cada step_provision_* de su lista de etapas, en ese
+     * orden, con la real ya provisionada y los 422 "already hosted" que dio Hostinger. Después, el
+     * merge del .env que hace write_env. Lo que queda sin probar es lo que corre por SSH
+     * (prepare_dirs, upload_public, finalize_skeleton) y que no depende de este arreglo.
+     */
+    public function test_las_etapas_de_aprovisionamiento_del_esqueleto_terminan_y_dejan_el_env_de_la_real(): void
+    {
+        $datos = $this->correr_la_real();
+        $this->registrar_las_respuestas_del_esqueleto($datos);
+
+        $nombre              = 'u767360347_' . $datos['slug'];
+        $password_de_la_real = $this->posts_a('/databases')[0]['body']['password'];
+        $servicio            = new InstallationService($datos['esqueleto']->fresh());
+
+        /* Las etapas del esqueleto: aprovisiona, pero no crea cron ni pide certificado. */
+        $etapas = $this->etapas_de($servicio);
+
+        $this->assertSame(
+            ['provision_check', 'provision_sites', 'provision_dns', 'provision_db',
+             'prepare_dirs', 'upload_public', 'write_env', 'finalize_skeleton'],
+            $etapas
+        );
+        $this->assertNotContains('provision_cron', $etapas);
+        $this->assertNotContains('provision_ssl', $etapas);
+
+        /* Cada etapa de aprovisionamiento, en el orden de la lista, y ninguna puede lanzar. */
+        $corridas = [];
+
+        foreach ($etapas as $etapa) {
+            if (strpos($etapa, 'provision_') !== 0) {
+                continue;
+            }
+
+            $excepcion = $this->excepcion_de(function () use ($servicio, $etapa) {
+                $this->invocar($servicio, 'step_' . $etapa, []);
+            });
+
+            $this->assertNull(
+                $excepcion,
+                'La etapa ' . $etapa . ' del esqueleto lanzó: ' . ($excepcion === null ? '' : $excepcion->getMessage())
+            );
+            $corridas[] = $etapa;
+        }
+
+        $this->assertSame(['provision_check', 'provision_sites', 'provision_dns', 'provision_db'], $corridas);
+
+        /* Ni un POST más a /databases que el de la real; los subdominios, todos como ya existentes. */
+        $this->assertCount(1, $this->posts_a('/databases'));
+
+        $resultado = $this->invocar($servicio, 'provisioner', [])->result();
+        $this->assertSame([], $resultado->creados());
+        $this->assertCount(5, $resultado->ya_existian());
+
+        /* La línea que la etapa deja en el panel de la instalación del esqueleto. */
+        $lineas_del_panel = DeploymentLog::where('client_installation_id', $datos['esqueleto']->id)
+            ->where('step', 'provision_db')
+            ->pluck('line')
+            ->all();
+        $this->assertContains($resultado->resumen(), $lineas_del_panel);
+        $this->assertStringContainsString('0 recurso(s) creado(s)', $resultado->resumen());
+
+        /* Y el .env que escribiría write_env: las credenciales de la real, a la letra. */
+        $env = $this->invocar($servicio, 'merge_env_del_aprovisionamiento', [[]]);
+
+        $this->assertSame(
+            ['DB_DATABASE' => $nombre, 'DB_USERNAME' => $nombre, 'DB_PASSWORD' => $password_de_la_real],
+            $env
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -799,17 +1139,33 @@ class AprovisionamientoDeEsqueletoTest extends TestCase
      */
     private function correr_el_esqueleto(array $datos): void
     {
-        $nombre = 'u767360347_' . $datos['slug'];
-
-        $this->hostinger->fallar_con('/subdomains', 422, '{"message": "[Hosting:9999] Subdomain is already hosted"}', 'POST');
-        $this->hostinger->fallar_con('/databases', 422, '{"message": "[Hosting:9999] Database name must be unique"}', 'POST');
-        $this->hostinger->responder_secuencia('/databases', $this->tres_paginas_de_bases($nombre), 'GET');
+        $this->registrar_las_respuestas_del_esqueleto($datos);
 
         $esqueleto = $datos['proveedor_esqueleto'];
         $esqueleto->provision_check();
         $esqueleto->provision_sites();
         $esqueleto->provision_dns();
         $esqueleto->provision_db();
+    }
+
+    /**
+     * Registra en el fake lo que Hostinger contestó en producción al esqueleto: 422 "already hosted"
+     * en cada subdominio, 422 "must be unique" si se intentara crear la base otra vez, y la base ya
+     * presente en la página 2 de 3 de la lista.
+     *
+     * Aparte de correr_el_esqueleto() para el test que maneja las etapas por el InstallationService
+     * en vez de llamar al proveedor directo.
+     *
+     * @param  array<string, mixed>  $datos
+     * @return void
+     */
+    private function registrar_las_respuestas_del_esqueleto(array $datos): void
+    {
+        $nombre = 'u767360347_' . $datos['slug'];
+
+        $this->hostinger->fallar_con('/subdomains', 422, '{"message": "[Hosting:9999] Subdomain is already hosted"}', 'POST');
+        $this->hostinger->fallar_con('/databases', 422, '{"message": "[Hosting:9999] Database name must be unique"}', 'POST');
+        $this->hostinger->responder_secuencia('/databases', $this->tres_paginas_de_bases($nombre), 'GET');
     }
 
     /**
@@ -918,8 +1274,20 @@ class AprovisionamientoDeEsqueletoTest extends TestCase
      */
     private function afirmar_secretos_intactos(array $datos, array $secretos): void
     {
-        $password_del_intento = $this->posts_a('/databases')[0]['body']['password'];
+        $this->afirmar_secretos_sin_tocar($datos, $secretos, $this->posts_a('/databases')[0]['body']['password']);
+    }
 
+    /**
+     * Lo mismo que afirmar_secretos_intactos(), con la contraseña del intento de creación dada: la
+     * de los tests del transporte real sale del pedido que registró Http::fake(), no del fake propio.
+     *
+     * @param  array<string, mixed>   $datos
+     * @param  array<string, string>  $secretos
+     * @param  string                 $password_del_intento  La que se generó y se mandó en el POST.
+     * @return void
+     */
+    private function afirmar_secretos_sin_tocar(array $datos, array $secretos, string $password_del_intento): void
+    {
         foreach ([$datos['api1'], $datos['api2']] as $api) {
             $this->assertSame($secretos, $this->secretos_de($api));
             $this->assertNotSame($password_del_intento, $this->secretos_de($api)['db_password']);
@@ -1171,6 +1539,230 @@ class AprovisionamientoDeEsqueletoTest extends TestCase
         $excepcion = $this->excepcion_de($accion);
 
         return $excepcion === null ? '' : $excepcion->getMessage();
+    }
+
+    /**
+     * Pone a HostingerApiClient a hablar por el transporte REAL, con un Hostinger de mentira debajo.
+     *
+     * El cliente bindeado es el de verdad (no el fake que sobreescribe request()), y debajo de él
+     * Http::fake() contesta con el JSON crudo que dicta $this->escenario_http. Por defecto: la lista
+     * de bases vacía (una sola página), los POST de subdominio y de base en 200, la zona con los 4 A
+     * records y la lista de cronjobs vacía.
+     *
+     * @param  string  $slug  Slug del cliente: define qué 4 nombres trae la zona DNS.
+     * @return void
+     */
+    private function usar_el_transporte_real(string $slug = ''): void
+    {
+        config([
+            'services.hostinger.base_url'   => self::BASE_URL_DE_PRUEBA,
+            'services.hostinger.verify_ssl' => true,
+            'services.hostinger.ca_bundle'  => null,
+            'services.hostinger.timeout'    => 5,
+        ]);
+
+        $this->app->instance(HostingerApiClient::class, new HostingerApiClient());
+
+        $this->escenario_http = [
+            'slug'              => $slug,
+            'lecturas_de_bases' => [$this->pagina_cruda_de_bases([], 1, 0)],
+            'post_subdominio'   => [200, '{}'],
+            'post_base'         => [200, '{}'],
+        ];
+
+        $this->empezar_a_registrar_pedidos_http();
+    }
+
+    /**
+     * Cambia el cliente HTTP por una fábrica LIMPIA (sin pedidos registrados) y le enchufa el guion.
+     *
+     * 🔴 HttpFactorySinSalida y no `new Factory()`: Http::fake() ACUMULA stubs y gana el primero que
+     * contesta, así que volver a falsear sobre la misma fábrica no reemplaza nada ni borra lo
+     * registrado; y una fábrica pelada dejaría al test sin el freno a internet que instala TestCase.
+     *
+     * @return void
+     */
+    private function empezar_a_registrar_pedidos_http(): void
+    {
+        Http::swap(new HttpFactorySinSalida());
+
+        Http::fake(function ($request) {
+            return $this->responder_como_hostinger($request->method(), $request->url());
+        });
+    }
+
+    /**
+     * Qué contesta el Hostinger de mentira a un pedido, según $this->escenario_http.
+     *
+     * Devuelve null para una ruta que el guion no conoce: HttpFactorySinSalida lo frena y el test
+     * falla diciendo cuál fue, en vez de recibir una respuesta inventada.
+     *
+     * @param  string  $metodo
+     * @param  string  $url
+     * @return mixed  Una respuesta de Http::response(), o null.
+     */
+    private function responder_como_hostinger(string $metodo, string $url)
+    {
+        if (strpos($url, '/cron-jobs') !== false) {
+            return Http::response('[]', 200);
+        }
+
+        if (strpos($url, '/api/dns/v1/zones/') !== false) {
+            $slug = $this->escenario_http['slug'];
+
+            return Http::response(json_encode([
+                ['name' => 'api-' . $slug, 'type' => 'A'],
+                ['name' => $slug, 'type' => 'A'],
+                ['name' => 'api-' . $slug . '2', 'type' => 'A'],
+                ['name' => $slug . '2', 'type' => 'A'],
+            ]), 200);
+        }
+
+        if (strpos($url, '/subdomains') !== false && $metodo === 'POST') {
+            return Http::response($this->escenario_http['post_subdominio'][1], $this->escenario_http['post_subdominio'][0]);
+        }
+
+        if (strpos($url, '/databases') !== false && $metodo === 'POST') {
+            return Http::response($this->escenario_http['post_base'][1], $this->escenario_http['post_base'][0]);
+        }
+
+        if (strpos($url, '/databases') !== false && $metodo === 'GET') {
+            /* Se consume una lectura por pedido; la última queda pegada para las que sobren. */
+            if (count($this->escenario_http['lecturas_de_bases']) > 1) {
+                $cuerpo = array_shift($this->escenario_http['lecturas_de_bases']);
+            } else {
+                $cuerpo = $this->escenario_http['lecturas_de_bases'][0];
+            }
+
+            return Http::response($cuerpo, 200);
+        }
+
+        return null;
+    }
+
+    /**
+     * Una fila de GET /databases con las claves REALES que devuelve la API (medidas el 13/10/2026).
+     *
+     * @param  string  $nombre
+     * @return array<string, mixed>
+     */
+    private function fila_real_de_base(string $nombre): array
+    {
+        return [
+            'name'          => $nombre,
+            'user'          => $nombre,
+            'domain'        => 'comerciocity.com',
+            'permissions'   => 'ALL',
+            'created_at'    => '2026-10-01T12:00:00.000000Z',
+            'updated_at'    => '2026-10-01T12:00:00.000000Z',
+            'disk_usage_mb' => 1,
+            'max_size_mb'   => 1024,
+            'host'          => 'localhost',
+            'port'          => 3306,
+        ];
+    }
+
+    /**
+     * Una página de GET /databases como la manda Hostinger: el JSON CRUDO, con `data` y `meta`.
+     *
+     * @param  array<int, string>  $nombres  Bases de ESTA página.
+     * @param  int                 $pagina
+     * @param  int                 $total    `meta.total`.
+     * @return string
+     */
+    private function pagina_cruda_de_bases(array $nombres, int $pagina, int $total): string
+    {
+        $filas = [];
+
+        foreach ($nombres as $nombre) {
+            $filas[] = $this->fila_real_de_base($nombre);
+        }
+
+        return json_encode([
+            'data' => $filas,
+            'meta' => ['current_page' => $pagina, 'per_page' => 25, 'total' => $total],
+        ]);
+    }
+
+    /**
+     * Las tres páginas de la cuenta real (25 + 25 + 24 = 74) en JSON crudo; si se pasa un nombre, va
+     * como la última fila de la página pedida.
+     *
+     * @param  string|null  $nombre
+     * @param  int          $en_la_pagina  1, 2 o 3.
+     * @return array<int, string>
+     */
+    private function tres_paginas_crudas_de_bases(?string $nombre = null, int $en_la_pagina = 2): array
+    {
+        $paginas = [
+            $this->nombres_de_relleno(1, 25),
+            $this->nombres_de_relleno(26, 25),
+            $this->nombres_de_relleno(51, 24),
+        ];
+
+        if ($nombre !== null) {
+            $paginas[$en_la_pagina - 1][count($paginas[$en_la_pagina - 1]) - 1] = $nombre;
+        }
+
+        return [
+            $this->pagina_cruda_de_bases($paginas[0], 1, 74),
+            $this->pagina_cruda_de_bases($paginas[1], 2, 74),
+            $this->pagina_cruda_de_bases($paginas[2], 3, 74),
+        ];
+    }
+
+    /**
+     * Los pedidos que Http::fake() registró desde el último empezar_a_registrar_pedidos_http().
+     *
+     * @return array<int, array<string, mixed>>  Cada uno: ['metodo', 'url', 'body'].
+     */
+    private function pedidos_http(): array
+    {
+        $pedidos = [];
+
+        foreach (Http::recorded() as $par) {
+            $pedidos[] = [
+                'metodo' => $par[0]->method(),
+                'url'    => $par[0]->url(),
+                'body'   => $par[0]->data(),
+            ];
+        }
+
+        return $pedidos;
+    }
+
+    /**
+     * Pedidos HTTP registrados de un verbo contra una ruta (cuenta también los `?page=N`).
+     *
+     * @param  string  $metodo
+     * @param  string  $ruta_parcial
+     * @return array<int, array<string, mixed>>
+     */
+    private function pedidos_http_a(string $metodo, string $ruta_parcial): array
+    {
+        $encontrados = [];
+
+        foreach ($this->pedidos_http() as $pedido) {
+            if ($pedido['metodo'] === $metodo && strpos($pedido['url'], $ruta_parcial) !== false) {
+                $encontrados[] = $pedido;
+            }
+        }
+
+        return $encontrados;
+    }
+
+    /**
+     * Lista de etapas que va a correr un InstallationService, leída por reflexión.
+     *
+     * @param  InstallationService  $servicio
+     * @return array<int, string>
+     */
+    private function etapas_de(InstallationService $servicio): array
+    {
+        $propiedad = new \ReflectionProperty($servicio, 'steps');
+        $propiedad->setAccessible(true);
+
+        return $propiedad->getValue($servicio);
     }
 
     /**
