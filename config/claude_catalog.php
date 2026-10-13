@@ -1450,6 +1450,31 @@ return [
                 ['nombre' => 'confirm_client_name', 'obligatorio' => false, 'validacion' => 'required_if:dry_run,false|nullable|string|max:190', 'que_es' => 'El nombre exacto del cliente (clients.name). Obligatorio con dry_run=false.'],
             ],
         ],
+        /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026). Va al final de
+           `endpoints`, después de 'POST api/claude/implementations/{id}/mail'. */
+        'POST api/claude/recursos/catalogo' => [
+            'para_que'     => 'Carga el catálogo del centro de recursos (recursos.comerciocity.com): los videos aprobados que publicar_centro.py ya subió a R2, con sus textos (para qué, cuándo no, transcripción) y relacionados. Upsert por `codigo`: crea los nuevos, actualiza los que cambiaron y no toca los que vinieron iguales. Con desactivar_faltantes=true los activos que NO vinieron quedan activo=false. Borra la caché del catálogo público y del índice del buscador. Devuelve {creados, actualizados, sin_cambios, desactivados}.',
+            'escribe'      => true,
+            'peligrosidad' => 'baja',
+            'frenos'       => [
+                '🔴 Ningún video se borra nunca: el que deja de venir queda inactivo (tiene avance, votos, preguntas y encuestas de usuarios colgando). Si vuelve a venir, se reactiva.',
+                'Se valida TODO el payload antes de escribir (422 con `errores` por campo, motivo datos_invalidos): un video roto no deja el catálogo cargado a medias. `videos` tiene que traer al menos uno (una lista vacía con desactivar_faltantes apagaría el centro entero).',
+                'Lista blanca de parámetros: cualquier clave que no sea carpetas, videos o desactivar_faltantes es 422. Dentro de cada video las claves desconocidas (como `_fuente`) se ignoran.',
+                'desactivar_faltantes es false por defecto: sin pedirlo explícito no se desactiva nada.',
+                'Solo escribe filas del admin (recursos_videos). No toca el sistema de ningún cliente.',
+            ],
+            'parametros'   => [
+                ['nombre' => 'videos', 'obligatorio' => true, 'validacion' => 'required|array|min:1|max:2000; cada uno: codigo (string ≤ 20, único en el payload), titulo (string ≤ 255), carpeta (int ≥ 1), carpeta_nombre (string ≤ 255; si falta, sale de `carpetas`), orden (int ≥ 0), duracion (segundos > 0), url (http/https ≤ 500), y opcionales seccion (≤ 255), para_que, cuando_no, transcripcion (texto), relacionados (lista de códigos), miniatura_url (http/https ≤ 500), version (≤ 16)', 'que_es' => 'Los videos del catálogo, en el formato que arma publicar_centro.py.'],
+                ['nombre' => 'carpetas', 'obligatorio' => false, 'validacion' => 'nullable|array; cada una {nro: int ≥ 1, nombre: string}', 'que_es' => 'Nombres de las carpetas, para los videos que no traen carpeta_nombre.'],
+                ['nombre' => 'desactivar_faltantes', 'obligatorio' => false, 'validacion' => 'nullable|boolean — default false', 'que_es' => 'true = los videos activos que no vienen en este payload quedan inactivos.'],
+            ],
+        ],
+        'GET api/claude/recursos/resumen' => [
+            'para_que'     => 'Totales del centro de recursos sin entrar al panel: videos activos e inactivos, usuarios (total, dueños, clientes, activos en 7 días), videos empezados y terminados, votos positivos y negativos, encuestas, y preguntas pendientes, respondidas y ocultas.',
+            'escribe'      => false,
+            'peligrosidad' => 'lectura',
+            'frenos'       => [],
+        ],
     ],
 
     /*
