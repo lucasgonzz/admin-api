@@ -193,6 +193,84 @@ class AudienciasMetaTest extends TestCase
         $this->assertNull(AudienciasMetaService::hash_email('sin arroba'));
     }
 
+    /**
+     * Teléfono cargado a mano → el número que se hashea (null = no encaja y no se adivina).
+     *
+     * @return array<string, array<int, string|null>>
+     */
+    public function telefonos_cargados_a_mano(): array
+    {
+        return [
+            'ya normalizado por el webhook'      => ['+5493411234567', '5493411234567'],
+            'con formato'                        => ['+549 341 123-4567', '5493411234567'],
+            '10 dígitos'                         => ['3411234567', '5493411234567'],
+            'con 0 y 15 (característica de 3)'   => ['0341 15 512-3456', '5493415123456'],
+            'con 0 y 15 (característica de 2)'   => ['011 15 1234-5678', '5491112345678'],
+            'con 0 y 15 (característica de 4)'   => ['02954 15 123456', '5492954123456'],
+            'fijo con 0'                         => ['0341 4512345', '5493414512345'],
+            '54 + 10'                            => ['54 341 512 3456', '5493415123456'],
+            '+54 9 + 10'                         => ['+54 9 341 512-3456', '5493415123456'],
+            '+54 + 15'                           => ['+54 341 15 512-3456', '5493415123456'],
+            '0054 9 + 10'                        => ['0054 9 341 512 3456', '5493415123456'],
+            '549 + 10 sin +'                     => ['5493415123456', '5493415123456'],
+            'España con +'                       => ['+34 612 345 678', '34612345678'],
+            'España con 00'                      => ['0034 612 345 678', '34612345678'],
+            'Estados Unidos'                     => ['+1 (305) 555-0100', '13055550100'],
+            'corto'                              => ['12345', null],
+            'característica sola'                => ['0341 123', null],
+            '+549 incompleto'                    => ['+549341', null],
+            '11 dígitos que no son nada'         => ['34112345678', null],
+        ];
+    }
+
+    /**
+     * La normalización propia de las audiencias (no la del webhook, que convierte «0341 15 512-3456»
+     * en un número de España y le fuerza el 549 a cualquier extranjero).
+     *
+     * @dataProvider telefonos_cargados_a_mano
+     *
+     * @param string      $crudo
+     * @param string|null $esperado
+     *
+     * @return void
+     */
+    public function test_la_normalizacion_de_telefonos_cargados_a_mano(string $crudo, ?string $esperado): void
+    {
+        $this->assertSame(
+            $esperado !== null ? hash('sha256', $esperado) : null,
+            AudienciasMetaService::hash_telefono($crudo),
+            'Teléfono: ' . $crudo
+        );
+    }
+
+    /**
+     * Un teléfono que no encaja se deja afuera y se cuenta en `descartados_por_telefono`; si el
+     * contacto tiene mail, entra igual por el mail.
+     *
+     * @return void
+     */
+    public function test_los_telefonos_que_no_encajan_se_cuentan_como_descartados(): void
+    {
+        $antes = $this->getJson('/api/claude/audiencias?etapa=clientes', $this->headers());
+        $antes->assertStatus(200);
+        $descartados_antes = $antes->json('descartados_por_telefono');
+        $this->assertIsInt($descartados_antes);
+
+        $email = 'telefono.raro.' . Str::lower(Str::random(6)) . '@ejemplo.com';
+        $this->crear_cliente('12345', $email);
+
+        $despues = $this->getJson('/api/claude/audiencias?etapa=clientes', $this->headers());
+        $despues->assertStatus(200);
+        $this->assertSame($descartados_antes + 1, $despues->json('descartados_por_telefono'));
+
+        $hash_email = hash('sha256', $email);
+        $del_raro   = array_values(array_filter($despues->json('filas'), function ($fila) use ($hash_email) {
+            return $fila['email_sha256'] === $hash_email;
+        }));
+        $this->assertCount(1, $del_raro, 'Con el teléfono descartado, entra por el mail.');
+        $this->assertNull($del_raro[0]['phone_sha256']);
+    }
+
     /* ------------------------------------------------------------------------------------------
      | 2. Las tres etapas
      |----------------------------------------------------------------------------------------- */

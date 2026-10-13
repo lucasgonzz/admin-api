@@ -63,25 +63,31 @@ class ClaudeAudienciasController extends Controller
             ], 422);
         }
 
-        $filas = $service->filas($etapa, $dias);
+        $audiencia = $service->audiencia($etapa, $dias);
+        $filas     = $audiencia['filas'];
 
         if ($formato === 'csv') {
             $archivo = 'audiencia-' . $etapa . '-' . AppTime::now()->format('Ymd-His') . '.csv';
 
             return response($service->a_csv($filas), 200, [
-                'Content-Type'        => 'text/csv; charset=UTF-8',
-                'Content-Disposition' => 'attachment; filename="' . $archivo . '"',
+                'Content-Type'                => 'text/csv; charset=UTF-8',
+                'Content-Disposition'         => 'attachment; filename="' . $archivo . '"',
+                /* El CSV no tiene dónde decirlo: va en un header, igual que en el JSON. */
+                'X-Descartados-Por-Telefono'  => (string) $audiencia['descartados_por_telefono'],
             ]);
         }
 
         $descripciones = AudienciasMetaService::descripciones();
 
         return response()->json([
-            'etapa'       => $etapa,
-            'dias'        => $dias,
-            'cantidad'    => count($filas),
-            'filas'       => $filas,
-            'descripcion' => $descripciones[$etapa],
+            'etapa'                    => $etapa,
+            'dias'                     => $dias,
+            'cantidad'                 => count($filas),
+            'filas'                    => $filas,
+            'descripcion'              => $descripciones[$etapa],
+            /* Contactos con un teléfono cargado que no encaja en ningún formato: no se adivina, se
+               deja afuera (si tienen mail, entran por el mail). */
+            'descartados_por_telefono' => $audiencia['descartados_por_telefono'],
         ], 200);
     }
 }

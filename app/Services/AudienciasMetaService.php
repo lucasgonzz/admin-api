@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Helpers\AppTime;
-use App\Helpers\WhatsappNormalizer;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -26,7 +25,8 @@ use Illuminate\Support\Facades\DB;
  *
  * 🔴 **Nunca sale un dato personal en claro.** Teléfono y mail viajan como SHA-256, normalizados
  * como pide Meta: el teléfono con solo dígitos y código de país, sin `+` (`+549 341 123-4567` →
- * `5493411234567`); el mail sin espacios y en minúsculas.
+ * `5493411234567`, con una normalización propia y no la del webhook: ver normalizar_telefono());
+ * el mail sin espacios y en minúsculas.
  */
 class AudienciasMetaService
 {
@@ -80,6 +80,22 @@ class AudienciasMetaService
      */
     public function filas(string $etapa, int $dias = self::DIAS_POR_DEFECTO): array
     {
+        return $this->audiencia($etapa, $dias)['filas'];
+    }
+
+    /**
+     * La audiencia entera de una etapa: las filas (con hash y deduplicadas) y cuántos teléfonos se
+     * dejaron afuera por no poder normalizarlos sin adivinar.
+     *
+     * @param string $etapa Una de ETAPAS.
+     * @param int    $dias  Ventana de `conversaron_sin_agendar` (las otras dos la ignoran).
+     *
+     * @return array<string, mixed> `filas` y `descartados_por_telefono` (contactos con un teléfono
+     *                              cargado que no encaja en ningún formato; si tienen mail, entran
+     *                              igual por el mail).
+     */
+    public function audiencia(string $etapa, int $dias = self::DIAS_POR_DEFECTO): array
+    {
         if ($etapa === self::ETAPA_CONVERSARON_SIN_AGENDAR) {
             $contactos = $this->contactos_conversaron($dias);
         } elseif ($etapa === self::ETAPA_AGENDARON_SIN_ENTRAR) {
@@ -115,17 +131,131 @@ class AudienciasMetaService
      *
      * @param string|null $telefono
      *
-     * @return string|null Null si no queda un número usable.
+     * @return string|null Null si no queda un número usable (vacío o que no encaja: ver
+     *                     {@see normalizar_telefono()}).
      */
     public static function hash_telefono($telefono): ?string
     {
-        $normalizado = WhatsappNormalizer::normalize((string) $telefono);
-        $digitos     = (string) preg_replace('/\D+/', '', $normalizado);
-        if (strlen($digitos) < 8) {
+        $normalizado = self::normalizar_telefono($telefono);
+
+        return $normalizado !== null ? hash('sha256', $normalizado['con_9']) : null;
+    }
+
+    /**
+     * El teléfono como lo pide Meta (solo dígitos, con código de país, sin `+`), con una regla propia
+     * para las audiencias y NO la del webhook.
+     *
+     * 🔴 Por qué no `WhatsappNormalizer::normalize()`: está pensado para lo que manda WhatsApp (que
+     * ya viene en E.164) y con un teléfono cargado a mano en `clients` se equivoca en silencio:
+     * «0341 15 512-3456» le da `+341155123456` (código de país 34, España) y a cualquier extranjero
+     * le fuerza el `549`. Un hash de un número equivocado no le hace match a nadie en Meta.
+     *
+     * La regla, en orden:
+     *   (a) Si el crudo empieza con `+` o `00` y el código de país no es 54: internacional tal cual
+     *       (solo dígitos, sin el `00`), entre 8 y 15 dígitos.
+     *   (b) Argentino (sin prefijo internacional, o con `+54`/`0054`): se saca el 0 inicial y
+     *       - 10 dígitos → `549` + los 10;
+     *       - 12 dígitos con un «15» después de una característica de 2, 3 o 4 dígitos que, quitado,
+     *         deja 10 → `549` + esos 10 (si más de una característica deja números distintos, es
+     *         ambiguo y no se adivina);
+     *       - `54` + 10 → `549` + los 10; `549` + 10 → tal cual; `54` + 12 con el 15 → igual que
+     *         el caso del 15.
+     *   (c) Lo que no encaja en nada de eso no se adivina: devuelve null y el que llama lo cuenta en
+     *       `descartados_por_telefono`.
+     *
+     * `leads.phone` ya viene normalizado `+549…` desde el webhook y esta regla lo deja igual.
+     *
+     * @param string|null $telefono
+     *
+     * @return array<string, string|null>|null `con_9` (el número para Meta) y `sin_9` (`54` + los 10
+     *                                         de un celular argentino; null para un internacional).
+     *                                         Null si está vacío o no encaja.
+     */
+    public static function normalizar_telefono($telefono): ?array
+    {
+        $crudo = trim((string) $telefono);
+        if ($crudo === '') {
             return null;
         }
 
-        return hash('sha256', $digitos);
+        $digitos = (string) preg_replace('/\D+/', '', $crudo);
+
+        if (strpos($crudo, '+') === 0 || strpos($crudo, '00') === 0) {
+            if (strpos($crudo, '00') === 0) {
+                $digitos = (string) substr($digitos, 2);
+            }
+
+            if (strpos($digitos, '54') !== 0) {
+                $largo = strlen($digitos);
+
+                return ($largo >= 8 && $largo <= 15) ? ['con_9' => $digitos, 'sin_9' => null] : null;
+            }
+        } elseif (strpos($digitos, '0') === 0) {
+            $digitos = (string) substr($digitos, 1);
+        }
+
+        $diez = self::diez_digitos_argentinos($digitos);
+        if ($diez === null) {
+            return null;
+        }
+
+        return ['con_9' => '549' . $diez, 'sin_9' => '54' . $diez];
+    }
+
+    /**
+     * Los 10 dígitos (característica + número) de un celular argentino, o null si no encaja.
+     *
+     * @param string $digitos Ya sin el 0 inicial.
+     *
+     * @return string|null
+     */
+    private static function diez_digitos_argentinos(string $digitos): ?string
+    {
+        $largo = strlen($digitos);
+
+        if ($largo === 13 && strpos($digitos, '549') === 0) {
+            return substr($digitos, 3);
+        }
+        if ($largo === 12 && strpos($digitos, '54') === 0) {
+            return substr($digitos, 2);
+        }
+        if ($largo === 14 && strpos($digitos, '54') === 0) {
+            return self::sacar_el_15(substr($digitos, 2));
+        }
+        if ($largo === 10) {
+            return $digitos;
+        }
+        if ($largo === 12) {
+            return self::sacar_el_15($digitos);
+        }
+
+        return null;
+    }
+
+    /**
+     * Saca el «15» de un número local de 12 dígitos (característica de 2, 3 o 4 + 15 + número). Si
+     * más de una característica posible deja números distintos, es ambiguo: null.
+     *
+     * @param string $doce
+     *
+     * @return string|null Los 10 dígitos.
+     */
+    private static function sacar_el_15(string $doce): ?string
+    {
+        if (strlen($doce) !== 12) {
+            return null;
+        }
+
+        $candidatos = [];
+        foreach ([2, 3, 4] as $largo_caracteristica) {
+            if (substr($doce, $largo_caracteristica, 2) === '15') {
+                $candidatos[] = substr($doce, 0, $largo_caracteristica) . substr($doce, $largo_caracteristica + 2);
+            }
+        }
+
+        $candidatos = array_values(array_unique($candidatos));
+
+        return count($candidatos) === 1 ? $candidatos[0] : null;
     }
 
     /**
@@ -226,19 +356,28 @@ class AudienciasMetaService
      * persona, y la fila se completa con lo que falte (un lead sin mail y su cliente con mail quedan
      * en una sola fila con los dos). Un contacto sin teléfono ni mail usable no entra.
      *
+     * Un teléfono cargado que no encaja en ningún formato se deja afuera (no se adivina) y se cuenta
+     * en `descartados_por_telefono`; si el contacto tiene mail, entra igual por el mail.
+     *
      * @param array<int, array<string, string|null>> $contactos
      *
-     * @return array<int, array<string, string|null>>
+     * @return array<string, mixed> `filas` y `descartados_por_telefono`.
      */
     private function deduplicar(array $contactos): array
     {
         $filas        = [];
         $por_telefono = [];
         $por_email    = [];
+        $descartados  = 0;
 
         foreach ($contactos as $contacto) {
-            $telefono = self::hash_telefono(isset($contacto['phone']) ? $contacto['phone'] : null);
+            $crudo    = isset($contacto['phone']) ? trim((string) $contacto['phone']) : '';
+            $telefono = self::hash_telefono($crudo);
             $email    = self::hash_email(isset($contacto['email']) ? $contacto['email'] : null);
+
+            if ($crudo !== '' && $telefono === null) {
+                $descartados++;
+            }
 
             if ($telefono === null && $email === null) {
                 continue;
@@ -271,6 +410,6 @@ class AudienciasMetaService
             }
         }
 
-        return $filas;
+        return ['filas' => $filas, 'descartados_por_telefono' => $descartados];
     }
 }

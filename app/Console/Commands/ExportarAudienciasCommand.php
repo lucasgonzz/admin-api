@@ -65,7 +65,8 @@ class ExportarAudienciasCommand extends Command
             return 1;
         }
 
-        $filas = $service->filas($etapa, (int) $dias_crudo);
+        $audiencia = $service->audiencia($etapa, (int) $dias_crudo);
+        $filas     = $audiencia['filas'];
 
         if (@file_put_contents($salida, $service->a_csv($filas)) === false) {
             $this->error('No se pudo escribir ' . $salida . '.');
@@ -74,6 +75,11 @@ class ExportarAudienciasCommand extends Command
         }
 
         $this->info(count($filas) . ' persona(s) en ' . $etapa . ' → ' . $salida);
+
+        if ($audiencia['descartados_por_telefono'] > 0) {
+            $this->warn($audiencia['descartados_por_telefono'] . ' teléfono(s) que no encajan en ningún formato quedaron afuera '
+                . '(no se adivinan; si el contacto tenía mail, entró por el mail).');
+        }
 
         return 0;
     }
