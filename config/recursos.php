@@ -50,6 +50,8 @@ return [
     'progreso' => [
         'max_tramos'          => 50,
         'max_segundos_tramo'  => 30,
+        // Margen sobre ese tope por el redondeo de los floats (32.2 - 2.2 = 30.000000000000004).
+        'tolerancia'          => 0.05,
         // Holgura al final del video: el reproductor puede reportar `currentTime` unas décimas más
         // allá de la duración que se midió con ffprobe. Lo que se pase de esto es un tramo inválido.
         'holgura_final'       => 1,

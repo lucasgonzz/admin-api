@@ -42,6 +42,7 @@ class RecursosProgresoService
 
         $max_tramos = (int) config('recursos.progreso.max_tramos', 50);
         $max_largo  = (float) config('recursos.progreso.max_segundos_tramo', 30);
+        $tolerancia = (float) config('recursos.progreso.tolerancia', 0.05);
         $holgura    = (float) config('recursos.progreso.holgura_final', 1);
         $duracion   = (float) $video->duracion;
 
@@ -75,7 +76,10 @@ class RecursosProgresoService
                 return 'El tramo #' . $i . ' pasa del final del video (' . $duracion . ' s).';
             }
 
-            if ($hasta - $desde > $max_largo) {
+            /* 🔴 Con tolerancia: la página manda los segundos con decimales y la resta de dos floats no da
+               exacto (32.2 - 2.2 = 30.000000000000004). Sin ella, un tramo de 30 s justos —el tope que la
+               misma página respeta— tiraba el lote entero con 422. */
+            if ($hasta - $desde > $max_largo + $tolerancia) {
                 return 'El tramo #' . $i . ' es de más de ' . $max_largo . ' s.';
             }
         }

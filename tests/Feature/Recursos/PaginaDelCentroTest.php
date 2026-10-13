@@ -283,6 +283,28 @@ class PaginaDelCentroTest extends BaseDelCentroDeRecursos
             ->assertExactJson(['porcentaje' => 100.0, 'terminado' => true]);
     }
 
+    /**
+     * 🔴 Un tramo de 30 s justos con decimales (32.2 - 2.2 = 30.000000000000004 en float) es válido:
+     * sin la tolerancia, el redondeo tiraba el lote entero con 422. Pasar el tope de verdad sigue
+     * siendo inválido.
+     */
+    public function test_un_tramo_al_tope_por_redondeo_pasa(): void
+    {
+        $this->crear_video('T1.1', ['duracion' => 60.0]);
+        $client = $this->crear_cliente('api-a.test');
+        list(, $token) = $this->usuario_con_sesion($client);
+
+        $this->assertGreaterThan(30, 32.2 - 2.2);
+
+        $this->postJson('/api/recursos/progreso', ['codigo' => 'T1.1', 'posicion' => 32.2, 'tramos' => [[2.2, 32.2], [32.2, 40.1]]], $this->con_sesion($token))
+            ->assertStatus(200)
+            ->assertJsonPath('terminado', false);
+
+        $this->postJson('/api/recursos/progreso', ['codigo' => 'T1.1', 'posicion' => 31, 'tramos' => [[0, 30.06]]], $this->con_sesion($token))
+            ->assertStatus(422)
+            ->assertJsonPath('error', 'tramos_invalidos');
+    }
+
     public function test_los_tramos_invalidos_son_422_y_no_marcan_nada(): void
     {
         $this->crear_video('T1.1', ['duracion' => 60.0]);
