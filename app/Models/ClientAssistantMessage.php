@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Model;
  *
  * @property int         $client_id                    Cliente dueño del hilo.
  * @property string      $telefono                     E.164 normalizado del dueño.
+ * @property string|null $phone_number_id              Número de WhatsApp por el que entró o salió.
  * @property string      $direccion                    'in' o 'out'.
  * @property string|null $whatsapp_message_id          wamid de Meta de ESTE mensaje.
  * @property string|null $reply_to_whatsapp_message_id wamid citado (solo entrantes).
