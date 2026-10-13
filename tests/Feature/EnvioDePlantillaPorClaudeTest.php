@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\FollowupTemplate;
 use App\Models\Lead;
 use App\Models\LeadMessage;
 use App\Services\WhatsappSendService;
@@ -42,6 +43,43 @@ class EnvioDePlantillaPorClaudeTest extends TestCase
         parent::setUp();
 
         config(['services.claude_task_ingest.key' => self::CLAVE]);
+
+        $this->registrar_la_plantilla_del_test();
+    }
+
+    /**
+     * Registra la plantilla que usan todos los tests de este archivo.
+     *
+     * 🔴 AGREGADO EL 13/10/2026 (misión `plantillas-meta-y-leads-humano`), Y ES UN FIXTURE, NO UNA
+     * ASERCIÓN AJUSTADA. Desde esa misión los dos endpoints de envío exigen que la plantilla esté
+     * REGISTRADA, activa y APROBADA en Meta (ver
+     * `ClaudeLeadsOutboundController::plantilla_para_enviar()`). Estos tests mandaban
+     * `cc_recuperacion_demora_propia` sin crear la fila, apoyados en que el endpoint no validaba
+     * nada: diez de ellos pasaron a 422 de golpe.
+     *
+     * No es que midan mal: miden los FRENOS del lote (simulación por defecto, conteo exacto,
+     * cooldown, tope) y eso no cambió ni un renglón. Lo que les faltaba era el estado de partida
+     * REAL de producción, donde esta plantilla sí existe: la siembra `FollowupTemplatesSeeder`
+     * (`estado = manual_recuperacion`, activa por default) y la migración de esa misión le pone
+     * `meta_status = APPROVED` a toda fila activa, justamente para que el gate nuevo no rompa lo que
+     * ya andaba. Sin esta fila, el test corría contra un escenario que en producción no existe: una
+     * `followup_templates` vacía.
+     *
+     * @return void
+     */
+    private function registrar_la_plantilla_del_test(): void
+    {
+        FollowupTemplate::create([
+            'template_name' => 'cc_recuperacion_demora_propia',
+            'estado'        => 'manual_recuperacion',
+            'dia_numero'    => 1,
+            'body_template' => 'Hola {{1}}! Perdoná la demora... se nos pasó tu mensaje y recién lo estoy viendo. '
+                . '¿Seguís interesado? Si querés lo retomamos justo por donde habíamos quedado.',
+            'language_code' => 'es_AR',
+            'activa'        => true,
+            'meta_status'   => 'APPROVED',
+            'meta_category' => 'UTILITY',
+        ]);
     }
 
     /**
