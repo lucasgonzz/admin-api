@@ -394,12 +394,24 @@
     </div>
 @endif
 
-    {{-- Sección 6 — Soporte --}}
+    {{-- Sección 6 — Soporte.
+         En Suscripción el soporte no es "de por vida": dura mientras la suscripción esté activa
+         (misión precios-dos-modalidades, 13/10/2026). Licencia y el contrato sin modalidad dicen
+         el texto de siempre. --}}
+@if($modalidad === 'suscripcion')
+    <h2 class="section-title">6. Soporte personalizado</h2>
+    <p>
+        El servicio mensual incluye, mientras la suscripción esté activa, soporte personalizado vía WhatsApp de lunes a sábados, atendido por
+        personas reales del equipo de ComercioCity, sin costo adicional al abono mensual. El soporte tiene por objeto resolver consultas de uso,
+        configuración y operación cotidiana de la plataforma.
+    </p>
+@else
     <h2 class="section-title">6. Soporte personalizado de por vida</h2>
     <p>
         El servicio mensual incluye soporte personalizado vía WhatsApp de lunes a sábados, atendido por personas reales del equipo de ComercioCity,
         sin costo adicional al abono mensual. El soporte tiene por objeto resolver consultas de uso, configuración y operación cotidiana de la plataforma.
     </p>
+@endif
 
     {{-- Sección 7 — Condiciones generales.
          La rescisión cambia con la Suscripción (misión precios-dos-modalidades, 13/10/2026): rige

@@ -74,6 +74,15 @@ class ContratoConModalidadTest extends BaseDeCobranzas
         . 'puesta en marcha, por un importe total de <strong>USD 1200</strong>, conforme al plan de cuotas que se detalla a '
         . 'continuación:';
 
+    /** Primera oración del soporte (sección 6) en Suscripción: dura mientras la suscripción esté activa. */
+    const TEXTO_SUSCRIPCION_SOPORTE = 'El servicio mensual incluye, mientras la suscripción esté activa, soporte personalizado vía '
+        . 'WhatsApp de lunes a sábados, atendido por personas reales del equipo de ComercioCity, sin costo adicional al abono '
+        . 'mensual.';
+
+    /** Primera oración del soporte (sección 6) de siempre: Licencia y contrato sin modalidad. */
+    const TEXTO_SOPORTE_DE_SIEMPRE = 'El servicio mensual incluye soporte personalizado vía WhatsApp de lunes a sábados, atendido '
+        . 'por personas reales del equipo de ComercioCity, sin costo adicional al abono mensual.';
+
     /** Texto literal de la rescisión (sección 7) en Suscripción (plan de la misión). */
     const TEXTO_SUSCRIPCION_RESCISION = '<strong>Rescisión:</strong> Cumplido el plazo mínimo de la cláusula 5.1, cualquiera de '
         . 'las partes podrá rescindir el servicio mensual con un preaviso de treinta (30) días. Con la rescisión finaliza la '
@@ -179,6 +188,10 @@ class ContratoConModalidadTest extends BaseDeCobranzas
             $this->assertStringContainsString('licencia de uso de por vida', $html, $mensaje);
             // La rescisión de siempre: la licencia sigue vigente después de rescindir.
             $this->assertStringContainsString('La licencia de uso de por vida permanecerá vigente', $this->normalizado($html), $mensaje);
+            // El soporte de siempre: "de por vida".
+            $this->assertStringContainsString('6. Soporte personalizado de por vida</h2>', $html, $mensaje);
+            $this->assertStringContainsString(self::TEXTO_SOPORTE_DE_SIEMPRE, $this->normalizado($html), $mensaje);
+            $this->assertStringNotContainsString('mientras la suscripción esté activa', $html, $mensaje);
         }
 
         // Las claves nuevas están siempre en los datos de la vista, aunque el modelo no traiga nada.
@@ -222,6 +235,9 @@ class ContratoConModalidadTest extends BaseDeCobranzas
         $this->assertStringContainsString('licencia de uso de por vida', $html);
         $this->assertStringContainsString('3. Pago único — Licencia e implementación', $html);
         $this->assertStringContainsString('La licencia de uso de por vida permanecerá vigente', $plano);
+        $this->assertStringContainsString('6. Soporte personalizado de por vida</h2>', $html, 'En Licencia el soporte sigue siendo de por vida.');
+        $this->assertStringContainsString(self::TEXTO_SOPORTE_DE_SIEMPRE, $plano);
+        $this->assertStringNotContainsString('mientras la suscripción esté activa', $plano);
 
         // Los sistemas, en la sección 2.
         $this->assertStringContainsString('Sistemas contratados: <strong>ComercioCity Gestión y ComercioCity E-Commerce</strong>.', $html);
@@ -256,6 +272,12 @@ class ContratoConModalidadTest extends BaseDeCobranzas
         $this->assertStringContainsString('Con la rescisión finaliza la licencia de uso', $plano);
         $this->assertStringNotContainsString('Mensualidad de por vida', $html);
         $this->assertStringNotContainsString('de uso de por vida', $plano, 'En Suscripción la licencia no es de por vida en ningún lado.');
+
+        // El soporte dura mientras la suscripción esté activa: ni el título ni el texto dicen "de por vida".
+        $this->assertStringContainsString('6. Soporte personalizado</h2>', $html);
+        $this->assertStringNotContainsString('6. Soporte personalizado de por vida', $html);
+        $this->assertStringContainsString(self::TEXTO_SUSCRIPCION_SOPORTE, $plano);
+        $this->assertStringNotContainsString('de por vida', $plano, 'Nada de "de por vida" en un contrato de Suscripción.');
 
         // Los párrafos enteros, literales.
         $this->assertStringContainsString(self::TEXTO_SUSCRIPCION_OBJETO, $plano);
