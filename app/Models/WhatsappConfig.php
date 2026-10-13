@@ -25,6 +25,10 @@ class WhatsappConfig extends Model
     protected $fillable = [
         'kapso_api_key',
         'phone_number_id',
+        /* WABA (business account id) de Meta. 🔴 NO es lo mismo que `phone_number_id`: los mensajes
+           se mandan por número y las PLANTILLAS se piden por WABA
+           (`MetaTemplateService::endpoint()`). Pasar uno donde va el otro da 404 de Meta. */
+        'waba_id',
         'webhook_secret',
         'meta_webhook_token',
         'is_active',
