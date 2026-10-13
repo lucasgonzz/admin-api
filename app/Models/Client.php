@@ -81,6 +81,11 @@ class Client extends Model
         'contract_fecha_primer_pago_unico'   => 'date',
         'contract_fecha_primer_pago_mensual' => 'date',
         'contract_meses_actualizacion'       => 'integer',
+        /* Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026): los mismos casts
+         * que en `Lead`, por el mismo motivo que el resto del bloque. `contract_modalidad` es texto
+         * y no lleva cast. */
+        'contract_sistemas'                  => 'array',
+        'contract_permanencia_meses'         => 'integer',
         'contract_copiado_desde_lead_at'     => 'datetime',
         // Primer mes que se cobra la mensualidad (siempre el día 1). Nulo = todavía no arrancó.
         'mensualidad_inicio'                 => 'date',

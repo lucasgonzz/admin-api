@@ -375,6 +375,13 @@ class Lead extends Model
         // 18/9/2026). Int porque va al PDF en letras y se copia al cliente para hacer cuentas.
         'contract_meses_actualizacion'       => 'integer',
 
+        // Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026). `contract_modalidad`
+        // no lleva cast: es texto ('licencia' | 'suscripcion' | null). Los sistemas contratados son
+        // un JSON de keys de CotizadorSettings::SISTEMAS, y el plazo mínimo de la Suscripción va a
+        // int porque el PDF lo escribe en letras con LeadContractPdfService::meses_en_letras().
+        'contract_sistemas'                  => 'array',
+        'contract_permanencia_meses'         => 'integer',
+
         // Foto de la cotización del sistema hecha desde la solapa Contrato (misión
         // cotizador-lead-mercado-pago, 22/9/2026): [{key, label, precio_usd, precio_ars}].
         'contract_cotizacion_items'          => 'array',

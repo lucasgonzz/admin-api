@@ -853,6 +853,37 @@ class LeadProperties
                 'value' => 6,
                 'show' => false,
             ],
+            /*
+             * Modalidad del contrato (misión precios-dos-modalidades, 13/10/2026). Están acá para
+             * que el PUT genérico del lead (ModelPropertiesHelper) las persista cuando la pestaña
+             * Contrato las manda; una SPA vieja que no las manda no las toca.
+             *
+             * 🔴 `value` null en las tres a propósito: null en `contract_modalidad` es el contrato
+             * histórico, y el PDF sale exactamente como antes. Un default acá cambiaría el contrato
+             * de todo lead nuevo sin que nadie lo eligiera.
+             */
+            [
+                'key' => 'contract_modalidad',
+                'text' => 'Contrato — modalidad (licencia / suscripción)',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
+                // JSON de keys de CotizadorSettings::SISTEMAS, igual que contract_financiacion es JSON.
+                'key' => 'contract_sistemas',
+                'text' => 'Contrato — sistemas contratados',
+                'type' => 'text',
+                'value' => null,
+                'show' => false,
+            ],
+            [
+                'key' => 'contract_permanencia_meses',
+                'text' => 'Contrato — plazo mínimo de la suscripción (meses)',
+                'type' => 'number',
+                'value' => null,
+                'show' => false,
+            ],
         ];
     }
 }
