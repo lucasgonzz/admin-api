@@ -170,6 +170,48 @@ Route::middleware('admin.inbound.key')
 
 /*
 |--------------------------------------------------------------------------
+| Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026)
+|--------------------------------------------------------------------------
+| La API de la página pública `recursos.comerciocity.com` (contrato C2 del plan de la misión). Sin
+| sesión el video SE VE (catálogo público, decisión de Lucas); avance, votos, preguntas y encuesta
+| piden la sesión del centro.
+|
+| 🔴 La sesión del centro NO es Sanctum (`recursos.sesion`, ver App\Http\Middleware\RecursosSesion):
+| un token del centro no puede entrar a ninguna ruta del panel.
+|
+| 🔴 Sin `throttle:api` y con limitador propio (`recursos.throttle`, una cubeta por grupo): el `api`
+| es UNA cubeta por IP para todo /api, y una oficina con varios empleados mirando videos a la vez
+| (un avance cada ~10 s cada uno) se la comería entera. Topes del plan: catálogo y buscador 60/min
+| por IP, entrar 10/min por IP, lo que pide sesión 60/min por token.
+*/
+Route::prefix('recursos')
+    ->withoutMiddleware('throttle:api')
+    ->group(function () {
+        Route::get('catalogo', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'catalogo_json'])
+            ->middleware('recursos.throttle:60,1,catalogo,ip');
+        Route::get('buscar-indice', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'buscar_indice_json'])
+            ->middleware('recursos.throttle:60,1,buscar,ip');
+        Route::get('videos/{codigo}', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'video_json'])
+            ->middleware(['recursos.throttle:60,1,video,ip', 'recursos.sesion.opcional']);
+
+        Route::middleware('recursos.throttle:10,1,sesion,ip')->group(function () {
+            Route::post('sesion/pase', [\App\Http\Controllers\Api\RecursosSesionController::class, 'pase_json']);
+            Route::post('sesion/link', [\App\Http\Controllers\Api\RecursosSesionController::class, 'link_json']);
+        });
+
+        Route::middleware(['recursos.throttle:60,1,escritura,token', 'recursos.sesion'])->group(function () {
+            Route::get('yo', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'yo_json']);
+            Route::post('progreso', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'progreso_json']);
+            Route::post('votos', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'votos_json']);
+            Route::post('preguntas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'preguntas_json']);
+            Route::post('preguntas/{id}/me-gusta', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'me_gusta_json']);
+            Route::post('encuestas', [\App\Http\Controllers\Api\RecursosPaginaController::class, 'encuestas_json']);
+            Route::post('salir', [\App\Http\Controllers\Api\RecursosSesionController::class, 'salir_json']);
+        });
+    });
+
+/*
+|--------------------------------------------------------------------------
 | Ingesta y consultas de Claude (protegidas por X-Claude-Task-Key)
 |--------------------------------------------------------------------------
 | Tres grupos de rutas, todas contra el mismo middleware:
