@@ -84,11 +84,13 @@ abstract class HostingerHttpTransport
      *     exists" sino "already hosted", y por eso caía en DESCONOCIDA.
      *   - `"[Hosting:9999] Database name must be unique"` — el POST de la base, por lo mismo.
      *
-     * 🔴 La segunda va entera (`name must be unique`) y NO como `must be unique` pelado. Esta lista
-     * no es solo de Hostinger: clasificar_error() también la leen VpsDatabaseProvisioner y
-     * VpsSiteProvisioner sobre errores de `clpctl`, y una frase tan corta termina matcheando
-     * mensajes de validación que no tienen nada que ver con que el recurso exista. Ensanchar de más
-     * acá es justo lo que "nunca se adivina" prohíbe.
+     * 🔴 La segunda va entera (`database name must be unique`) y NO como `name must be unique` ni
+     * como `must be unique` pelado: lo único medido es esa frase, y las más cortas matchean cosas
+     * que no son una base existente. `name must be unique` también reconoce "Subdomain name must be
+     * unique" y "the site user name must be unique", y esta lista no es solo de Hostinger:
+     * clasificar_error() también la leen VpsDatabaseProvisioner y VpsSiteProvisioner sobre errores
+     * de `clpctl`, donde un mensaje de validación de ese estilo se daría por "el sitio ya existía"
+     * sin que exista. Ensanchar de más acá es justo lo que "nunca se adivina" prohíbe.
      *
      * Ojo: que un mensaje matchee NO alcanza para dar por buena la base. En SharedHostingProvisioning
      * un 422 de la creación de la base se verifica igual contra la lista de la cuenta antes de
@@ -104,7 +106,7 @@ abstract class HostingerHttpTransport
         'duplicate entry',
         'ya existe',
         'already hosted',
-        'name must be unique',
+        'database name must be unique',
     ];
 
     /**

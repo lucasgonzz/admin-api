@@ -29,13 +29,17 @@ namespace App\Services;
 class HostingerApiClient extends HostingerHttpTransport
 {
     /**
-     * Tope de páginas que list_databases() recorre antes de rendirse.
+     * Cuántas páginas de una lista acepta leer list_databases() cuando `meta` dice que hay más.
      *
      * Con 25 filas por página son 500 bases, contra las ~74 que tiene la cuenta hoy (13/10/2026).
-     * No es un límite "de diseño": es el freno que impide un bucle infinito si la API ignora `?page`
-     * y devuelve siempre lo mismo. Y al llegar al tope NO se devuelve lo que se juntó, se LANZA: una
-     * lista parcial haría creer que una base no existe, que es exactamente el bug que esta lectura
-     * paginada vino a cerrar.
+     *
+     * Ojo con lo que NO es: no es la defensa contra una API que se porte mal. El contador de
+     * páginas es local, y con un `meta` coherente (total 74, per_page 25) el bucle termina solo a la
+     * tercera vuelta aunque la API ignorara `?page` y devolviera siempre la página 1 (la lista
+     * saldría con filas repetidas, pero saldría). El tope corta de verdad solo cuando `meta.total`
+     * promete muchas más páginas que éste: una cuenta enorme, o un `meta` absurdo. Y en ese caso NO
+     * se devuelve lo que se juntó, se LANZA: una lista parcial haría creer que una base no existe,
+     * que es exactamente el bug que esta lectura paginada vino a cerrar.
      *
      * @var int
      */
@@ -215,6 +219,16 @@ class HostingerApiClient extends HostingerHttpTransport
      *
      * Se pagina con el tamaño por defecto y no se sube `per_page`: la API lo respeta (se midió con
      * 100), pero no hay un máximo documentado y no hace falta apostar a uno.
+     *
+     * ⚠️ Lo que esta lectura NO garantiza: si la API se contradice a sí misma —un `per_page`
+     * declarado distinto de las filas que de verdad sirve, una página intermedia vacía con `total`
+     * mayor, un `per_page` menor que 1— puede devolver una lista PARCIAL sin lanzar. Es una decisión
+     * y no un descuido: detectar eso exigiría desconfiar de `meta`, que es lo único que dice cuántas
+     * páginas hay. El único llamador, SharedHostingProvisioning::provision_db(), es fail-safe ante
+     * ese caso: un falso "la base no existe" lo lleva al POST, el POST da 422, el 422 se verifica
+     * de nuevo contra la lista y, si la base sigue sin figurar, se relanza el error ORIGINAL. No
+     * crea nada a ciegas ni da nada por bueno. Si aparece un segundo llamador, tiene que tener la
+     * misma red.
      *
      * @return array<int, mixed>  Filas de todas las páginas, en el orden en que las devolvió la API.
      * @throws \RuntimeException Si una lectura falla, o si la lista pasa del tope de páginas.

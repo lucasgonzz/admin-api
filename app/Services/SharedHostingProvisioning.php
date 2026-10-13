@@ -325,6 +325,14 @@ class SharedHostingProvisioning extends SharedHostingSubdomains
         try {
             $figura = $this->base_ya_existe($nombre);
         } catch (\Throwable $verificacion) {
+            /*
+             * 🔴 Se relanza el error ORIGINAL del POST y no $verificacion. El original es el que
+             * describe lo que pasó con la creación de la base (el 422 "Database name must be
+             * unique"); el de la verificación solo diría que falló una LECTURA —un 502, un timeout—
+             * y el operador perdería el 422 real, que es lo que tiene que mirar. Si te tienta
+             * "simplificar" dejando que se propague $verificacion, el panel va a mostrar un error
+             * que no es el de esta etapa.
+             */
             throw $excepcion;
         }
 
