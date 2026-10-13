@@ -255,7 +255,17 @@ class ConversionesMetaTest extends TestCase
         $this->assertNotNull($fila->enviado_at);
         $this->assertNull($fila->ultimo_error);
         $this->assertSame(1, $fila->intentos);
-        $this->assertSame(['events_received' => 1, 'messages' => [], 'fbtrace_id' => 'AbCdEf123'], $fila->respuesta);
+        /* Clave por clave y no el array entero: MySQL 8 reordena las claves de una columna `json`
+           al guardarla (entra events_received, messages, fbtrace_id y sale en otro orden). El
+           contenido se verifica igual de estricto: cada valor con su tipo, y ninguna clave de más. */
+        $respuesta = $fila->respuesta;
+        $this->assertIsArray($respuesta);
+        $this->assertSame(1, $respuesta['events_received']);
+        $this->assertSame('AbCdEf123', $respuesta['fbtrace_id']);
+        $this->assertSame([], $respuesta['messages']);
+        $claves = array_keys($respuesta);
+        sort($claves);
+        $this->assertSame(['events_received', 'fbtrace_id', 'messages'], $claves, 'La respuesta guardada no puede traer claves de más.');
 
         /* Correrlo otra vez no manda nada: ya salió. */
         $this->correr_job($fila);
