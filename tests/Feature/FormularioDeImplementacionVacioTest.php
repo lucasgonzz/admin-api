@@ -149,6 +149,26 @@ class FormularioDeImplementacionVacioTest extends TestCase
 
         $response->assertStatus(200);
         $this->assertInstanceOf(\stdClass::class, $this->form_data_crudo($response));
+        $this->assertSame([], (array) $this->form_data_crudo($response));
+    }
+
+    /**
+     * Stage 1 con form_responses presente pero vacío (la otra rama de read_form_responses):
+     * también devolvía stdClass y daba 500.
+     *
+     * @return void
+     */
+    public function test_con_form_responses_vacio_abre_con_form_data_vacio(): void
+    {
+        $data                   = self::DATA_CON_ACCIONES;
+        $data['form_responses'] = [];
+        $this->crear_implementacion('token-form-responses-vacio', $data);
+
+        $response = $this->getJson('/api/form/implementation/token-form-responses-vacio');
+
+        $response->assertStatus(200);
+        $this->assertInstanceOf(\stdClass::class, $this->form_data_crudo($response));
+        $this->assertSame([], (array) $this->form_data_crudo($response));
     }
 
     /**
