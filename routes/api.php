@@ -1315,6 +1315,19 @@ Route::prefix('admin')->group(function () {
 
         Route::delete('pipeline-activities/{id}', [PipelineActivityController::class, 'destroy_json'])->whereNumber('id');
 
+        /* Centro de recursos para clientes (misión centro-de-recursos-clientes, 13/10/2026): el panel. Preguntas
+           (responder, ocultar y el borrador con IA), cómo le va a cada video (peor puntuados primero) y el avance de
+           cada cliente, con el link personal del dueño. A diferencia de la página, acá sí sale el nombre completo
+           del usuario y su cliente. */
+        Route::get('recursos/preguntas', [\App\Http\Controllers\Api\RecursosPanelController::class, 'preguntas_json']);
+        Route::put('recursos/preguntas/{id}', [\App\Http\Controllers\Api\RecursosPanelController::class, 'actualizar_pregunta_json'])->whereNumber('id');
+        Route::post('recursos/preguntas/{id}/borrador', [\App\Http\Controllers\Api\RecursosPanelController::class, 'borrador_json'])->whereNumber('id');
+        Route::get('recursos/videos', [\App\Http\Controllers\Api\RecursosPanelController::class, 'videos_json']);
+        Route::get('recursos/videos/{codigo}/mejoras', [\App\Http\Controllers\Api\RecursosPanelController::class, 'mejoras_json']);
+        Route::get('recursos/clientes', [\App\Http\Controllers\Api\RecursosPanelController::class, 'clientes_json']);
+        Route::get('recursos/clientes/{client_id}', [\App\Http\Controllers\Api\RecursosPanelController::class, 'cliente_json'])->whereNumber('client_id');
+        Route::post('recursos/clientes/{client_id}/link-dueno', [\App\Http\Controllers\Api\RecursosPanelController::class, 'link_dueno_json'])->whereNumber('client_id');
+
     });
 });
 
