@@ -104,7 +104,7 @@ class CtaTextosDeLaDemoTest extends TestCase
     {
         $this->assertSame([
             'Hola Martín, quiero hacer la demo de ComercioCity',
-            'Hola Martín, vi la web de ComercioCity y quiero hacer la demo',
+            'Hola, quiero hacer la demo de ComercioCity',
             'Hola Martín, vengo de Instagram y quiero hacer la demo de ComercioCity',
         ], LeadDemoSettings::get_cta_whatsapp_textos());
 
@@ -222,7 +222,7 @@ class CtaTextosDeLaDemoTest extends TestCase
         AdminSetting::where('key', LeadDemoSettings::KEY_CTA_WHATSAPP_TEXTOS)->delete();
         $this->assertSame([
             'Martín, quiero probar el sistema',
-            'Hola Martín, vi la web de ComercioCity y quiero hacer la demo',
+            'Hola, quiero hacer la demo de ComercioCity',
             'Hola Martín, quiero hacer la demo de ComercioCity',
             'Hola Martín, vengo de Instagram y quiero hacer la demo de ComercioCity',
         ], LeadDemoSettings::get_cta_whatsapp_textos());
@@ -272,7 +272,7 @@ class CtaTextosDeLaDemoTest extends TestCase
     public function test_la_frase_con_un_saludo_delante_lleva_la_linea_del_si(): void
     {
         $lead = $this->crear_lead_para_el_prompt();
-        $this->mensaje_del_lead($lead, 'Buenas! Hola Martin, vi la web de Comerciocity y quiero hacer la demo');
+        $this->mensaje_del_lead($lead, 'Buenas! hola quiero hacer la demo de Comerciocity');
 
         $this->assertStringContainsString('es un SI a la demo', $this->contexto_de_demo_directa($lead->fresh()));
     }
@@ -300,7 +300,7 @@ class CtaTextosDeLaDemoTest extends TestCase
     public function test_la_frase_ya_respondida_no_lleva_la_linea_del_si(): void
     {
         $lead = $this->crear_lead_para_el_prompt();
-        $this->mensaje_del_lead($lead, 'Hola Martín, vi la web de ComercioCity y quiero hacer la demo');
+        $this->mensaje_del_lead($lead, 'Hola, quiero hacer la demo de ComercioCity');
 
         /* Una sugerencia pendiente no salió: la línea sigue. */
         $this->mensaje_nuestro($lead, 'sugerido', null);
@@ -320,12 +320,12 @@ class CtaTextosDeLaDemoTest extends TestCase
     {
         $frase = LeadOrigenService::FRASE_LANDING;
 
-        $this->assertTrue(LeadOrigenService::es_frase_exacta('Hola Martín, vi la web de ComercioCity y quiero hacer la demo!!', $frase));
-        $this->assertTrue(LeadOrigenService::es_frase_exacta('Buenas tardes. Hola Martin vi la web de comerciocity y quiero hacer la demo', $frase));
-        $this->assertTrue(LeadOrigenService::es_frase_exacta('buen día, hola martín, vi la web de comerciocity y quiero hacer la demo', $frase));
-        $this->assertFalse(LeadOrigenService::es_frase_exacta('Hola Martín, vi la web de ComercioCity y quiero hacer la demo el lunes', $frase));
-        $this->assertFalse(LeadOrigenService::es_frase_exacta('Che, hola Martín, vi la web de ComercioCity y quiero hacer la demo', $frase));
-        $this->assertFalse(LeadOrigenService::es_frase_exacta('Buenas! Buenas! Hola Martín, vi la web de ComercioCity y quiero hacer la demo', $frase));
+        $this->assertTrue(LeadOrigenService::es_frase_exacta('Hola, quiero hacer la demo de ComercioCity!!', $frase));
+        $this->assertTrue(LeadOrigenService::es_frase_exacta('Buenas tardes. Hola quiero hacer la demo de comerciocity', $frase));
+        $this->assertTrue(LeadOrigenService::es_frase_exacta('buen día, hola, quiero hacer la demo de comerciocity', $frase));
+        $this->assertFalse(LeadOrigenService::es_frase_exacta('Hola, quiero hacer la demo de ComercioCity el lunes', $frase));
+        $this->assertFalse(LeadOrigenService::es_frase_exacta('Che, hola, quiero hacer la demo de ComercioCity', $frase));
+        $this->assertFalse(LeadOrigenService::es_frase_exacta('Buenas! Buenas! Hola, quiero hacer la demo de ComercioCity', $frase));
     }
 
     /**

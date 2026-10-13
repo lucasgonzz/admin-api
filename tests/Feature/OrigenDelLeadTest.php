@@ -396,14 +396,14 @@ class OrigenDelLeadTest extends TestCase
     public function frases_del_primer_mensaje(): array
     {
         return [
-            'frase nueva de la web'               => ['Hola Martín, vi la web de ComercioCity y quiero hacer la demo', 'landing'],
-            'frase nueva en mayúsculas'           => ['HOLA MARTÍN, VI LA WEB DE COMERCIOCITY Y QUIERO HACER LA DEMO', 'landing'],
-            'frase nueva sin tildes'              => ['Hola Martin, vi la web de Comerciocity y quiero hacer la demo', 'landing'],
-            'frase nueva con un saludo delante'   => ['Buenas! Hola Martín, vi la web de ComercioCity y quiero hacer la demo', 'landing'],
+            'frase nueva de la web'               => ['Hola, quiero hacer la demo de ComercioCity', 'landing'],
+            'frase nueva en mayúsculas'           => ['HOLA, QUIERO HACER LA DEMO DE COMERCIOCITY', 'landing'],
+            'frase nueva sin signos'              => ['hola quiero hacer la demo de comerciocity', 'landing'],
+            'frase nueva con un saludo delante'   => ['Buenas! Hola, quiero hacer la demo de ComercioCity', 'landing'],
             'frase vieja de la web'               => ['Hola Martín, quiero hacer la demo de ComercioCity', 'landing'],
             'frase de Instagram'                  => ['Hola Martín, vengo de Instagram y quiero hacer la demo de ComercioCity', 'instagram'],
             'cualquier otro texto'                => ['Hola, quiero info del sistema para mi ferretería', 'desconocido'],
-            'la frase cortada no alcanza'         => ['Hola Martín, vi la web', 'desconocido'],
+            'la frase cortada no alcanza'         => ['Hola, quiero hacer la demo', 'desconocido'],
         ];
     }
 

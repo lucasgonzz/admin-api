@@ -60,8 +60,12 @@ class LeadOrigenService
         self::ORIGEN_DESCONOCIDO,
     ];
 
-    /** Frase del botón de la web nueva (M6a, commit 21d9e19 de comerciocity-web). */
-    const FRASE_LANDING = 'Hola Martín, vi la web de ComercioCity y quiero hacer la demo';
+    /**
+     * Frase del botón de la web nueva (comerciocity-web, commit aac5510). No saluda a Martín: pedido de
+     * Lucas del 13/10/2026, que reemplazó a «Hola Martín, vi la web de ComercioCity y quiero hacer la
+     * demo» antes de que esa se publicara.
+     */
+    const FRASE_LANDING = 'Hola, quiero hacer la demo de ComercioCity';
 
     /**
      * Frase que manda la landing publicada el 7/10/2026, hasta que se publique la de M6a. Es la
