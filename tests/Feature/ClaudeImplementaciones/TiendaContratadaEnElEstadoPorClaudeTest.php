@@ -79,6 +79,44 @@ class TiendaContratadaEnElEstadoPorClaudeTest extends BaseDeImplementaciones
     }
 
     /**
+     * 🔴 Un contrato con la lista sin `ecommerce` pero que cobra perfiles de ecommerce (el adicional de antes de
+     * la modalidad) no es un "no": es null y se pregunta.
+     *
+     * @return void
+     */
+    public function test_sin_ecommerce_pero_con_perfiles_de_ecommerce_no_se_sabe(): void
+    {
+        $cliente = $this->crear_cliente('Panchito Gómez', ['contract_sistemas' => ['gestion'], 'contract_perfiles_ecommerce' => 2]);
+        $cliente = $this->crear_las_dos_apis($cliente, 'panchito');
+        $impl    = $this->crear_implementacion($cliente);
+
+        $respuesta = $this->getJson('/api/claude/implementations/' . $impl->id, $this->headers());
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertJsonPath('cliente.contract_sistemas', ['gestion']);
+        $this->assertNull($respuesta->json('cliente.tienda_contratada'));
+    }
+
+    /**
+     * Lo que no es texto en el JSON del contrato se ignora y no rompe el estado (antes daba "Array to string
+     * conversion").
+     *
+     * @return void
+     */
+    public function test_lo_que_no_es_texto_en_la_lista_se_ignora(): void
+    {
+        $cliente = $this->cliente_con(['gestion', ['ecommerce'], 7, 'ecommerce']);
+
+        $this->assertSame(['gestion', 'ecommerce'], $cliente['contract_sistemas']);
+        $this->assertTrue($cliente['tienda_contratada']);
+
+        $cliente = $this->cliente_con([['x'], 3]);
+
+        $this->assertNull($cliente['contract_sistemas']);
+        $this->assertNull($cliente['tienda_contratada']);
+    }
+
+    /**
      * Los campos de antes siguen todos, con los mismos valores: los nuevos se suman.
      *
      * @return void

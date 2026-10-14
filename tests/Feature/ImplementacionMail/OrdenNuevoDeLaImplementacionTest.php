@@ -201,8 +201,15 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
         $this->assertStringContainsString('Ver los tutoriales', $html);
 
         // La tarjeta va después de lo cargado y antes de "lo que sigue".
-        $this->assertTrue(strpos($html, 'Lo que quedó cargado') < strpos($html, 'Cómo entrar'));
-        $this->assertTrue(strpos($html, 'Cómo entrar') < strpos($html, 'Lo que sigue'));
+        $cargado = strpos($html, 'Lo que quedó cargado');
+        $entrar  = strpos($html, 'Cómo entrar');
+        $sigue   = strpos($html, 'Lo que sigue');
+
+        $this->assertNotFalse($cargado);
+        $this->assertNotFalse($entrar);
+        $this->assertNotFalse($sigue);
+        $this->assertLessThan($entrar, $cargado);
+        $this->assertLessThan($sigue, $entrar);
 
         $texto = $mail['texto'];
         $this->assertStringContainsString('Dirección: losandes.comerciocity.com', $texto);
@@ -235,6 +242,26 @@ class OrdenNuevoDeLaImplementacionTest extends BaseDelMailDeImplementacion
         $this->assertStringNotContainsString('Cómo entrar', $previa['html']);
         $this->assertStringNotContainsString('Cuando entres, cambiá la contraseña', $previa['html']);
         $this->assertStringContainsString('Ver los tutoriales', $previa['html']);
+    }
+
+    /**
+     * El `in:` del hito que el catálogo de claude/* le muestra a la skill es exactamente `HITOS`, en el mismo
+     * orden. El controlador lo arma solo desde `HITOS`, pero el catálogo es una copia escrita a mano y ningún
+     * otro test la mira: sin esto, un hito nuevo podía quedar validado y sin documentar.
+     *
+     * @return void
+     */
+    public function test_el_catalogo_documenta_los_mismos_hitos_que_valida_el_endpoint()
+    {
+        $parametros = config('claude_catalog.endpoints')['POST api/claude/implementations/{id}/mail']['parametros'];
+        $hito       = array_values(array_filter($parametros, function ($parametro) {
+            return $parametro['nombre'] === 'hito';
+        }));
+
+        $this->assertCount(1, $hito);
+        $this->assertSame(1, preg_match('/in:([a-z_,]+)/', $hito[0]['validacion'], $encontrado));
+        $this->assertSame(ImplementacionMailService::HITOS, explode(',', $encontrado[1]));
+        $this->assertContains('instalando', ImplementacionMailService::HITOS);
     }
 
     /**
