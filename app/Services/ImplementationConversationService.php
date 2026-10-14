@@ -33,6 +33,26 @@ class ImplementationConversationService
     private const RESPONSE_ACCUMULATING = '__ACCUMULATING__';
 
     /**
+     * Las ocho etapas con el nombre que ve el cliente en la lista de progreso de WhatsApp.
+     *
+     * 🔴 La 8 se llama «Seguimos con soporte» desde el 14/10/2026 (regla de Lucas: la videollamada no se nombra salvo que el
+     * cliente la pida; es el mismo nombre que ya llevan los mails de hito, `ImplementacionMailHelper::ETAPAS`). El nombre de la
+     * etapa en `implementation_stage_configs` —lo que ve el equipo en el panel— es otro tema y no se toca acá.
+     *
+     * @var array<int, string>
+     */
+    private const ETAPAS_DEL_PROGRESO = [
+        1 => 'Información de la empresa',
+        2 => 'Instalación del sistema',
+        3 => 'Recolección de archivos',
+        4 => 'Migración de datos',
+        5 => 'Entrega del sistema',
+        6 => 'Capacitación',
+        7 => 'Vinculación con ARCA/AFIP',
+        8 => 'Seguimos con soporte',
+    ];
+
+    /**
      * @var WhatsappSendService Envío saliente vía Kapso.
      */
     private $whatsapp_send_service;
@@ -118,7 +138,7 @@ class ImplementationConversationService
         }
 
         if ($current_stage === 8) {
-            // Etapa 8: videollamada de capacitación.
+            // Etapa 8: seguimos con soporte (lo que escribe el cliente va a una persona).
             $this->handle_stage_8($implementation, $parsed);
             return;
         }
@@ -707,7 +727,7 @@ class ImplementationConversationService
         }
 
         if ($stage === 8) {
-            // Etapa 8: videollamada de capacitación.
+            // Etapa 8: seguimos con soporte (avisa al admin; al cliente no le manda nada).
             $this->send_stage_8_opening($implementation);
             return;
         }
@@ -728,7 +748,7 @@ class ImplementationConversationService
      * - Etapa 5: dispara el análisis IA en background (migración de datos).
      * - Etapa 6: envía credenciales a empleados y mensaje al dueño (capacitación).
      * - Etapa 7: envía la pregunta sobre acceso AFIP al dueño.
-     * - Etapa 8: envía la pregunta de disponibilidad para videollamada al dueño.
+     * - Etapa 8: avisa al admin asignado; al dueño no le manda nada (la videollamada no se ofrece).
      *
      * @param Implementation $implementation Implementación que acaba de avanzar de etapa.
      * @param int            $new_stage      Número de la nueva etapa activa.
@@ -817,7 +837,7 @@ class ImplementationConversationService
         }
 
         if ($new_stage === 8) {
-            // Etapa 8: videollamada de capacitación.
+            // Etapa 8: seguimos con soporte.
             $this->send_stage_opening_message($implementation, 8);
             return;
         }
@@ -1146,6 +1166,10 @@ class ImplementationConversationService
      * Usado tanto por send_stage_3_opening() (modo auto) como por ImplementationActionService
      * (modo manual, acción 'pedir_archivos').
      *
+     * 🔴 Dice que ESTAMOS instalando, nunca que el sistema quedó instalado (regla de Lucas, 14/10/2026): el pedido de archivos sale en
+     * paralelo a la instalación y que quedó instalado se le dice recién en la entrega, con su información adentro. Es el mismo
+     * criterio del mail `instalando` («ya estamos instalando tu sistema»).
+     *
      * @param Implementation $implementation
      *
      * @return string
@@ -1170,8 +1194,8 @@ class ImplementationConversationService
         $responsable_saludo = $responsable !== '' ? $responsable : 'Hola';
 
         return "{$progress_list}\n\n"
-            . "{$responsable_saludo}, ¡el sistema ya está instalado con la configuración de {$client_name}! 🎉\n\n"
-            . "Ahora necesito que nos envíes los archivos con la información del negocio:\n\n"
+            . "{$responsable_saludo}, ¡ya estamos instalando el sistema con la configuración de {$client_name}! 🎉\n\n"
+            . "Para ir ganando tiempo, necesito que nos envíes los archivos con la información del negocio:\n\n"
             . "📦 Artículos o productos (Excel)\n"
             . "👥 Clientes (Excel)\n"
             . "🏭 Proveedores (Excel)\n"
@@ -2132,14 +2156,19 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 8 — Videollamada de capacitación
+    // Etapa 8 — Seguimos con soporte
     // -------------------------------------------------------------------------
 
     /**
-     * Envía el primer mensaje de la Etapa 8 al dueño del cliente.
+     * Apertura de la Etapa 8: avisa al admin asignado y NO le manda nada al cliente.
      *
-     * Coordina disponibilidad para la videollamada de cierre de implementación.
-     * Es idempotente: si data ya tiene 'current_question', no reenvía.
+     * 🔴 Hasta el 14/10/2026 le mandaba al dueño «nos gustaría hacer una videollamada corta (20-30 minutos)…» y le preguntaba
+     * disponibilidad. Regla de Lucas (14/10/2026): la videollamada no se nombra salvo que el cliente la pida. Por eso, al entrar a la
+     * etapa 8 el cliente no recibe nada; el admin se entera de que la implementación llegó a «seguimos con soporte» y, si el cliente
+     * pide una videollamada, la coordina él.
+     *
+     * No toca el `data` de la etapa: no deja `current_question`, y justamente esa ausencia es lo que manda lo que el cliente escriba
+     * después al camino «a una persona» de handle_stage_8().
      *
      * @param Implementation $implementation
      *
@@ -2147,48 +2176,13 @@ class ImplementationConversationService
      */
     private function send_stage_8_opening(Implementation $implementation): void
     {
-        // Stage 8 (videollamada) de esta implementación.
-        $stage = ImplementationStage::where('implementation_id', $implementation->id)
-            ->where('stage_number', 8)
-            ->first();
-
-        if ($stage === null) {
-            Log::channel('daily')->warning('ImplementationConversationService: stage 8 no encontrado para apertura.', [
-                'implementation_id' => $implementation->id,
-            ]);
-            return;
-        }
-
-        // Data actual del stage.
-        $data = is_array($stage->data) ? $stage->data : [];
-
-        // Idempotente: si ya se registró current_question, no reenviar la apertura.
-        if (array_key_exists('current_question', $data)) {
-            return;
-        }
-
-        // Teléfono del dueño del negocio (cliente).
+        // Nombre del cliente para el aviso; fallback genérico si no está cargado.
         $client      = $implementation->client ?? Client::find($implementation->client_id);
-        $owner_phone = trim((string) ($client->phone ?? ''));
+        $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
-        if ($owner_phone === '') {
-            Log::channel('daily')->warning('ImplementationConversationService: cliente sin teléfono para apertura de Etapa 8.', [
-                'implementation_id' => $implementation->id,
-                'client_id'         => $implementation->client_id,
-            ]);
-            return;
-        }
-
-        // Registrar la primera pregunta pendiente y persistir.
-        $data['current_question'] = 'availability';
-        $stage->data              = $data;
-        $stage->save();
-
-        $this->send_outbound(
+        $this->notify_assigned_admin(
             $implementation,
-            8,
-            $owner_phone,
-            '¡Ya estamos en la última etapa! Para cerrar la implementación, nos gustaría hacer una videollamada corta (20-30 minutos) con vos y tu equipo para despejar cualquier duda del sistema. ¿Tenés disponibilidad esta semana? Indicame días y horarios que te vengan bien.'
+            "ℹ️ {$client_name} entró a la Etapa 8 (seguimos con soporte). No se le mandó nada al cliente: la videollamada no se ofrece. Si la pide, coordinala vos."
         );
     }
 
@@ -2375,16 +2369,7 @@ class ImplementationConversationService
     private function build_progress_list(Implementation $implementation): string
     {
         // Nombres definitivos de las 8 etapas para mostrar en la lista de progreso.
-        $etapas = [
-            1 => 'Información de la empresa',
-            2 => 'Instalación del sistema',
-            3 => 'Recolección de archivos',
-            4 => 'Migración de datos',
-            5 => 'Entrega del sistema',
-            6 => 'Capacitación',
-            7 => 'Vinculación con ARCA/AFIP',
-            8 => 'Videollamada de capacitación',
-        ];
+        $etapas = self::ETAPAS_DEL_PROGRESO;
 
         // Cargar las etapas si no están ya en memoria.
         $implementation->loadMissing('stages');
@@ -2406,17 +2391,23 @@ class ImplementationConversationService
     }
 
     // -------------------------------------------------------------------------
-    // Etapa 8 — Videollamada de capacitación
+    // Etapa 8 — Seguimos con soporte
     // -------------------------------------------------------------------------
 
     /**
-     * Maneja un mensaje entrante durante la Etapa 8 (videollamada de capacitación).
+     * Maneja un mensaje entrante durante la Etapa 8 (seguimos con soporte).
      *
-     * Secuencia en data['current_question']:
-     * 1. availability — espera texto libre con la disponibilidad del cliente.
-     *    - Si el cliente quiere omitir la videollamada (detección por frases negativas), se marca skip.
-     *    - Cualquier otro texto no vacío se acepta como disponibilidad.
-     * 2. completed — ignorar mensajes posteriores.
+     * 🔴 Desde el 14/10/2026 la videollamada no se ofrece ni se pregunta (regla de Lucas: no se nombra salvo que el cliente la pida).
+     * Lo que el cliente escribe va a una persona: el admin asignado recibe el texto y el cliente recibe el mismo acuse que en la
+     * Etapa 5. Si el cliente pide la videollamada, la coordina el admin.
+     *
+     * Compatibilidad con las implementaciones que ya estaban en curso. Según `data['current_question']`:
+     * 1. (ausente) — el camino nuevo: aviso al admin y acuse al cliente. Antes, en este caso, se mandaba la apertura con la oferta de
+     *    videollamada como fallback.
+     * 2. availability — al cliente YA se le había preguntado la disponibilidad con el texto viejo; su respuesta se sigue tomando como
+     *    antes (se guarda `availability`, o `skip_videocall` si dice que no la quiere, y se avisa al admin). Lo único que se sacó es la
+     *    repregunta «¿Cuándo tenés disponibilidad para la videollamada?» ante un mensaje sin texto: ahora se avisa al admin.
+     * 3. completed — ignorar mensajes posteriores, como siempre.
      *
      * @param Implementation       $implementation
      * @param array<string, mixed> $parsed         Mensaje entrante.
@@ -2425,7 +2416,7 @@ class ImplementationConversationService
      */
     private function handle_stage_8(Implementation $implementation, array $parsed): void
     {
-        // Stage 8 (videollamada) de esta implementación concreta.
+        // Stage 8 de esta implementación concreta.
         $stage = ImplementationStage::where('implementation_id', $implementation->id)
             ->where('stage_number', 8)
             ->first();
@@ -2447,9 +2438,9 @@ class ImplementationConversationService
         $admin_name  = $this->resolve_assigned_admin_name($implementation);
         $client_name = $client ? $client->resolve_display_name() : "Cliente #{$implementation->client_id}";
 
-        // Si no hay current_question → enviar la apertura como fallback.
+        // Sin current_question: la etapa se abrió con el camino nuevo (nada para el cliente). Lo que escriba va a una persona.
         if (! array_key_exists('current_question', $data)) {
-            $this->send_stage_8_opening($implementation);
+            $this->derivar_el_mensaje_de_la_etapa_8_a_una_persona($implementation, $phone, $body, $client_name, $admin_name, true);
             return;
         }
 
@@ -2461,8 +2452,9 @@ class ImplementationConversationService
         }
 
         if ($current_question === 'availability') {
+            // Mensaje sin texto (un audio, una imagen): ya no se repregunta por la videollamada; lo ve una persona.
             if ($body === '') {
-                $this->send_outbound($implementation, 8, $phone, '¿Cuándo tenés disponibilidad para la videollamada?');
+                $this->derivar_el_mensaje_de_la_etapa_8_a_una_persona($implementation, $phone, $body, $client_name, $admin_name, false);
                 return;
             }
 
@@ -2513,9 +2505,50 @@ class ImplementationConversationService
     }
 
     /**
+     * Pasa a una persona lo que el cliente escribió en la Etapa 8: avisa al admin asignado con el texto y, si corresponde, le contesta
+     * al cliente el mismo acuse que en la Etapa 5 («Recibí tu mensaje…»).
+     *
+     * Si el cliente pidió una videollamada, el aviso le recuerda al admin que la coordina él: el sistema no la ofrece ni la agenda.
+     *
+     * @param Implementation $implementation Implementación en la etapa 8.
+     * @param string         $phone          Teléfono del remitente (a quien se le contesta).
+     * @param string         $body           Texto del mensaje ('' si no traía: un audio, una imagen).
+     * @param string         $client_name    Nombre del cliente para el aviso.
+     * @param string         $admin_name     Nombre del admin asignado para el acuse.
+     * @param bool           $acusar_recibo  true = además se le contesta al cliente.
+     *
+     * @return void
+     */
+    private function derivar_el_mensaje_de_la_etapa_8_a_una_persona(
+        Implementation $implementation,
+        string $phone,
+        string $body,
+        string $client_name,
+        string $admin_name,
+        bool $acusar_recibo
+    ): void {
+        $texto = $body !== '' ? "\"{$body}\"" : '(sin texto: mirá el hilo, puede ser un audio o una imagen)';
+
+        $this->notify_assigned_admin(
+            $implementation,
+            "💬 {$client_name} escribió en Etapa 8 (seguimos con soporte): {$texto}\n\nSi pide una videollamada, coordinala vos con el cliente."
+        );
+
+        if ($acusar_recibo) {
+            $this->send_outbound(
+                $implementation,
+                8,
+                $phone,
+                "Recibí tu mensaje. {$admin_name} te va a responder en breve. 🙏"
+            );
+        }
+    }
+
+    /**
      * Detecta si el mensaje indica que el cliente no quiere hacer la videollamada.
      *
-     * Delega a Claude para cubrir variantes naturales como "no hace falta",
+     * Solo la usa el camino de compatibilidad de handle_stage_8() (`current_question = availability`: al cliente ya se le había
+     * preguntado con el texto viejo). Delega a Claude para cubrir variantes naturales como "no hace falta",
      * "no quiero", "no es necesario", "me la salteo", etc.
      *
      * @param string $body Texto del mensaje recibido.
@@ -2524,7 +2557,7 @@ class ImplementationConversationService
      */
     private function is_skip_videocall_response(string $body): bool
     {
-        // Texto de la pregunta enviada al cliente en la etapa 7.
+        // Texto de la pregunta que se le había enviado al cliente en la etapa 8 (el flujo viejo).
         $question_text = '¿Cuándo tenés disponibilidad para la videollamada?';
 
         // Delegar la interpretación semántica a Claude.
@@ -4185,16 +4218,7 @@ class ImplementationConversationService
     public function build_progress_body(Implementation $implementation, int $stage): string
     {
         // Nombres legibles de las 8 etapas fijas del flujo.
-        $etapas = [
-            1 => 'Información de la empresa',
-            2 => 'Instalación del sistema',
-            3 => 'Recolección de archivos',
-            4 => 'Migración de datos',
-            5 => 'Entrega del sistema',
-            6 => 'Capacitación',
-            7 => 'Vinculación con ARCA/AFIP',
-            8 => 'Videollamada de capacitación',
-        ];
+        $etapas = self::ETAPAS_DEL_PROGRESO;
 
         $implementation->loadMissing(['client', 'stages']);
 
