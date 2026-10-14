@@ -1,7 +1,7 @@
 {{--
   La tarjeta del mail de cada hito de la implementación (misión implementar-cliente, 5/10/2026).
 
-  Los seis hitos —bienvenida, instalado, acceso, imagenes, categorias, listo— comparten esta tarjeta y
+  Los siete hitos —bienvenida, instalando, instalado, acceso, imagenes, categorias, listo— comparten esta tarjeta y
   cambian solo el bloque del medio (`bloques/<hito>.blade.php`, que se incluye acá) y la línea de
   progreso (`partials/progreso.blade.php`), que es la misma en todos pero refleja el estado real de
   las ocho etapas al momento de mandar.

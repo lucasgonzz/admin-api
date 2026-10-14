@@ -62,7 +62,7 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
         $errores = $this->errores('despedida', []);
 
         $this->assertSame(['hito'], array_keys($errores));
-        $this->assertStringContainsString('bienvenida, instalado, acceso, imagenes, categorias, listo', $errores['hito']);
+        $this->assertStringContainsString('bienvenida, instalando, instalado, acceso, imagenes, categorias, listo', $errores['hito']);
     }
 
     /**
@@ -73,7 +73,7 @@ class ValidacionDeDatosTest extends BaseDelMailDeImplementacion
      */
     public function test_bienvenida_e_instalado_no_aceptan_otros_datos()
     {
-        foreach (['bienvenida', 'instalado'] as $hito) {
+        foreach (['bienvenida', 'instalando', 'instalado'] as $hito) {
             $this->assertSame([], $this->errores($hito, []), $hito);
             $this->assertSame([], $this->errores($hito, ['nota' => 'Hola']), $hito);
 

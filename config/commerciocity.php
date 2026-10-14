@@ -215,7 +215,7 @@ return [
     |--------------------------------------------------------------------------
     |
     | Lo que lee `ImplementacionMailService` para armar el mail de cada hito de la implementación
-    | (bienvenida, sistema instalado, acceso, fotos, categorías y sistema listo).
+    | (bienvenida, instalando, sistema instalado, acceso, fotos, categorías y listo, la entrega).
     |
     | OJO: los valores van ESCRITOS ACÁ y no con `env()`. El deploy del admin no toca el `.env` de
     | producción, así que una variable de entorno nueva nunca llegaría y el mail saldría con el

@@ -312,7 +312,7 @@ class AjustesDeLaRevisionTest extends BaseDelMailDeImplementacion
 
         $this->assertStringNotContainsString('ARCA', $previa_sin['html']);
         $this->assertStringContainsString('Conectamos la facturación electrónica con ARCA.', $previa_con['html']);
-        $this->assertStringContainsString('videollamada', $previa_sin['html'], 'Lo demás de "lo que sigue" no cambia.');
+        $this->assertStringContainsString('terminamos tu catálogo', $previa_sin['html'], 'Lo demás de "lo que sigue" no cambia.');
         $this->assertStringContainsString('Soporte por WhatsApp', $previa_sin['html']);
 
         ImplementacionMailService::enviar($impl, 'listo', $sin_arca, null, false);
@@ -320,7 +320,7 @@ class AjustesDeLaRevisionTest extends BaseDelMailDeImplementacion
         Mail::assertSent(ImplementacionMail::class, function ($mail) {
             $mail->build();
 
-            return strpos((string) $mail->textView, 'ARCA') === false && strpos((string) $mail->textView, 'videollamada') !== false;
+            return strpos((string) $mail->textView, 'ARCA') === false && strpos((string) $mail->textView, 'terminamos tu catálogo') !== false;
         });
     }
 

@@ -25,15 +25,24 @@ use Illuminate\Support\Facades\Mail;
  *   - `previa()`        — el mail armado, sin mandar ni escribir NADA. Es el dry-run.
  *   - `enviar()`        — lo manda de verdad, síncrono, y lo registra.
  *
- * Los hitos son seis, en el orden en que pasan en una implementación:
+ * Los hitos son siete, en el orden en que pasan en una implementación:
  *
  *   bienvenida — arrancamos; lleva el link del formulario.
- *   instalado  — el sistema ya está instalado; pide los archivos.
- *   acceso     — la primera tanda de artículos ya está cargada; lleva el link para entrar.
+ *   instalando — recibimos el formulario y ya estamos instalando; pide los archivos.
+ *   instalado  — el sistema ya está instalado; pide los archivos. La skill ya no lo usa (ver abajo).
+ *   acceso     — la primera tanda de artículos ya está cargada; lleva el link para entrar. La skill ya no lo usa.
  *   imagenes   — cuántos artículos ya tienen foto y cuántas esperan el visto bueno del cliente.
  *   categorias — las opciones de categorías (una, dos o tres): con varias elige una, y con una sola
  *                (la lista que pasó el dueño) la confirma.
- *   listo      — el sistema está listo para operar.
+ *   listo      — la entrega: el sistema con sus artículos y sus fotos, cómo entrar y los tutoriales.
+ *
+ * El orden nuevo de `/implementar` (Lucas, 14/10/2026): al cliente no se le dice que su sistema quedó
+ * instalado hasta la entrega, que va con sus artículos y sus fotos ya cargados; el centro de recursos
+ * sale recién en la entrega; y la videollamada no se nombra salvo que el cliente la pida. Por eso, al
+ * completar el formulario sale `instalando` («ya estamos instalando») y la entrega es `listo`, que suma
+ * la tarjeta de acceso que antes llevaba `acceso`. `instalado` y `acceso` siguen aceptados a propósito:
+ * ya salieron mails con ellos (sus filas siguen en `implementation_mails`) y sacarlos rompería a quien
+ * todavía los pida.
  *
  * OJO: todo mail lleva además la línea de progreso con el estado real de las ocho etapas al momento
  * de mandarlo (`ImplementacionMailHelper::progreso()`): el mail no inventa en qué etapa está la
@@ -63,9 +72,10 @@ use Illuminate\Support\Facades\Mail;
 class ImplementacionMailService
 {
     /**
-     * Los seis hitos, en el orden en que pasan en una implementación.
+     * Los siete hitos, en el orden en que pasan en una implementación. `instalando` va antes que
+     * `instalado` porque lo reemplaza en el mismo momento (ver el docblock de la clase).
      */
-    const HITOS = ['bienvenida', 'instalado', 'acceso', 'imagenes', 'categorias', 'listo'];
+    const HITOS = ['bienvenida', 'instalando', 'instalado', 'acceso', 'imagenes', 'categorias', 'listo'];
 
     /**
      * El mailer por el que salen: el de `admin@comerciocity.com`. El mismo que el aviso de
@@ -110,6 +120,7 @@ class ImplementacionMailService
      */
     const CLAVES_POR_HITO = [
         'bienvenida' => [],
+        'instalando' => [],
         'instalado'  => [],
         'acceso'     => ['articulos'],
         'imagenes'   => ['con_foto', 'total', 'a_revisar', 'fuentes'],
@@ -794,7 +805,7 @@ class ImplementacionMailService
                 break;
 
             default:
-                // bienvenida e instalado no llevan datos propios.
+                // bienvenida, instalando e instalado no llevan datos propios.
                 break;
         }
 
